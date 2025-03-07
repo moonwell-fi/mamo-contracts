@@ -14,15 +14,17 @@ This contract is responsible for deploying user wallet contracts, tracking user 
 
 ### Functions
 
-- `function deployUserWallet(address user) returns (address)`: Deploys a new User Wallet for the given user using CREATE2. The address is deterministic based on the user's address. After deployment, the wallet address is added to the userWallets set using `userWallets.add(walletAddress)`.
+- `function deposit(address asset, address strategy, uint256 amount) returns (address)`: User deposits funds. If the user has not granted permission to the strategy, it will revert. User must pre-approve the contract with the asset token. 
+  - If the user doesn't have a wallet yet, this function will automatically deploy one using CREATE2. The address is deterministic based on the user's address. After deployment, the wallet address is added to the userWallets set using `userWallets.add(walletAddress)`.
+  - The function transfers the funds to the user wallet. 
+  - The next time Mamo calls `updateUsersStrategies` this amount will be considered and added to the yield contracts.
+  - Returns the address of the user's wallet (either existing or newly created).
 
 - `function updateUsersStrategies(address strategy, address[] wallets, uint256 splitA, uint256 splitB) returns (bool)`: Updates a single strategy for multiple users at once. Only callable by the owner. This function allows Mamo to efficiently update the same strategy for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
   - Validate that the strategy address exists in the strategies set
   - Validate that all provided wallet addresses exist in the userWallets set
   - Validate that the user has approved the strategy in the wallet contract
   - For each user wallet in the array: Call the wallet's updatePosition function with specified split parameters 
-
-- `function deposit(address asset, address strategy, uint256 amount)`: User deposits funds. If the user has not granted permission to the strategy, it will revert. User must pre-approve the contract with the asset token. It should transfer the funds to the user wallet. The next time Mamo call `updateUsersStrategies` this amount will be considered and added to the yield contracts.
 
 - `function addStrategy(address strategy)`: Adds a new strategy. Only callable by the owner.
 
