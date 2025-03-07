@@ -4,36 +4,33 @@ This document outlines the specification for the Mamo contracts, which enable us
 
 ## Main Contract 
 
-This contract is responsible for deploying user wallet contracts, tracking user wallet contracts, tracking wallet balances, moving funds/positions, and interacting with strategies. It inherits from the Ownable contract from OpenZeppelin and uses the EnumerableSet library for efficient set operations.
+This contract is responsible for deploying user wallet contracts, tracking user wallet contracts, moving funds/positions, and interacting with strategies. It inherits from the Ownable contract from OpenZeppelin and uses the EnumerableSet library for efficient set operations.
 
 ### Storage
 
 - `address owner`: The owner of this contract (the Mamo server)
 - `EnumerableSet.AddressSet userWallets`: A set of user wallet contracts that Mamo will be responsible for managing the strategies.
-- `mapping(address token => EnumerableSet.AddressSet strategies) strategies`: The strategies contract addresses for a given token
-- `mapping(address userWallet => mapping(address strategy => mapping(address token => uint256))) balances`: A nested mapping that tracks the balance of each token for each user wallet and strategy combination. This allows tracking multiple token balances (e.g., USDC, mUSDC, mwUSDC).
+- `EnumerableSet.AddressSet strategies`: A set of all strategy contract addresses
 
 ### Functions
 
 - `function deployUserWallet(address user) returns (address)`: Deploys a new User Wallet for the given user using CREATE2. The address is deterministic based on the user's address. After deployment, the wallet address is added to the userWallets set using `userWallets.add(walletAddress)`.
 
 - `function updateUsersStrategies(address strategy, address[] wallets, uint256 splitA, uint256 splitB) returns (bool)`: Updates a single strategy for multiple users at once. Only callable by the owner. This function allows Mamo to efficiently update the same strategy for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
+  - Validate that the strategy address exists in the strategies set
   - Validate that all provided wallet addresses exist in the userWallets set
-  - Validate that the strategy address is valid and exists in the strategies mapping for its token
   - Validate that the user has approved the strategy in the wallet contract
   - For each user wallet in the array: Call the wallet's updatePosition function with specified split parameters 
 
-- `function updateUserPosition(address user, address strategy, uint256 amountA, uint256 amountB, uint256 amountUnderlying)`: Updates a user's position. Only callable by the user wallet address. This is a callback function that will be called by the strategy contract to update user balances.
+- `function deposit(address asset, address strategy, uint256 amount)`: User deposits funds. If the user has not granted permission to the strategy, it will revert. User must pre-approve the contract with the asset token. It should transfer the funds to the user wallet. The next time Mamo call `updateUsersStrategies` this amount will be considered and added to the yield contracts.
 
-- `function deposit(address asset, address strategy, uint256 amount)`: User deposits funds. If the user has not granted permission to the strategy, it will revert. User must pre-approve the contract with the asset token. It should transfer the funds to the user wallet and update the balance of the underlying amount in the `balances` mapping. The next time Mamo call `updateUsersStrategies` this amount will be considered and added to the yield contracts.
+- `function addStrategy(address strategy)`: Adds a new strategy. Only callable by the owner.
 
-- `function addStrategy(address token, address strategy)`: Adds a new strategy. Only callable by the owner.
-
-- `function removeStrategy(address token, address strategy)`: Removes a strategy. Only callable by the owner.
+- `function removeStrategy(address strategy)`: Removes a strategy. Only callable by the owner.
 
 - `function claimRewardsForUsers(address strategy, address[] wallets)`: Claims rewards from the specified strategy for multiple users at once. Only callable by the owner. This function allows Mamo to efficiently claim rewards for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
+  - Validate that the strategy address exists in the strategies set
   - Validate that all provided wallet addresses exist in the userWallets set
-  - Validate that the strategy address is valid and exists in the strategies mapping for its token
   - For each user wallet in the array: Call the wallet's claimRewards function with the specified strategy
 
 
@@ -46,6 +43,7 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 - `address owner`: The owner of this contract (the user)
 - `address mainContract`: The main contract address (we need to figure out a better name for this contract)
 - `mapping(address strategy => bool approved) approvedStrategies`: Mapping of strategies that the user has approved
+- `mapping(address strategy => mapping(address token => uint256)) balances`: A mapping that tracks the balance of each token for each strategy. This allows tracking multiple token balances (e.g., USDC, mUSDC, mwUSDC).
 
 ### Functions
 
@@ -53,9 +51,9 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 
 - `function withdrawFunds(address token, uint256 amount) external`: Withdraws funds from the contract to the owner. Only callable by the owner. Makes a delegateCall to the strategy contract's `withdrawFunds` function.
 
-- `function updatePosition(address strategy, uint256 splitA, uint256 splitB) external`: Updates the position in a strategy with specified split parameters. Only callable by the Main Contract. Makes a delegateCall to the strategy contract to execute the actual position update logic.
+- `function updatePosition(address strategy, uint256 splitA, uint256 splitB) external`: Updates the position in a strategy with specified split parameters. Only callable by the Main Contract. Makes a delegateCall to the strategy contract to execute the actual position update logic. Updates the token balances in the wallet contract.
 
-- `function claimRewards(address strategy) external`: Claims all available rewards from the strategy for both Moonwell and Morpho protocols. Only callable by the main contract or the owner. Makes a delegateCall to the strategy contract's claimRewards function.
+- `function claimRewards(address strategy) external`: Claims all available rewards from the strategy for both Moonwell and Morpho protocols. Only callable by the main contract or the owner. Makes a delegateCall to the strategy contract's claimRewards function. Updates the token balances in the wallet contract.
 
 ## USDC Strategy
 
