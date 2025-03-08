@@ -49,7 +49,9 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 
 ### Functions
 
-- `function approveStrategy(address strategy) external`: Approves a strategy to manage funds. Only callable by the owner ontract
+- `function approveStrategy(address strategy) external`: Approves a strategy to manage funds. Only callable by the owner.
+
+- `function disapproveStrategy(address strategy) external`: Disapproves a strategy to prevent it from managing funds. Only callable by the owner.
 
 - `function withdrawFunds(address token, uint256 amount) external`: Withdraws funds from the contract to the owner. Only callable by the owner. Makes a delegateCall to the strategy contract's `withdrawFunds` function.
 
@@ -66,15 +68,16 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 - `address moonwellComptroller`: The address of the Moonwell Comptroller contract
 - `address moonwellUSDC`: The address of the Moonwell USDC mToken contract
 - `address metaMorphoVault`: The address of the MetaMorpho Vault contract
-- `address dexRouter`: The address of the DEX router for swapping reward tokens to USDC
+- `address dexRouter`: The address of the DEX router for swapping reward tokens to USDC (can be updated by MamoCore)
+- `address mamoCore`: The address of the MamoCore contract
 - `address[] rewardTokens`: An array of reward token addresses (e.g., WELL, OP, MORPHO, etc.)
 - `IERC20 usdc`: The USDC token interface
 - `uint256 constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
 
 ### Constructor
 
-- `constructor(address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address[] memory _rewardTokens)`: Initializes the strategy with the necessary contract addresses. The constructor should:
-  - Set the moonwellComptroller, moonwellUSDC, metaMorphoVault, and dexRouter addresses
+- `constructor(address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address _mamoCore, address[] memory _rewardTokens)`: Initializes the strategy with the necessary contract addresses. The constructor should:
+  - Set the moonwellComptroller, moonwellUSDC, metaMorphoVault, dexRouter, and mamoCore addresses
   - Store the array of reward token addresses
   - Initialize the USDC token interface by getting the underlying asset from the moonwellUSDC contract
   - Verify that the MetaMorpho Vault's asset matches the USDC token address
@@ -140,6 +143,13 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
   - Update the user's position in both protocols by calling updateUserPosition in the main contract.
   - Emit a FundsWithdrawn event with the user address and amount
   - Only callable by a User Wallet through delegateCall
+
+- `function setDexRouter(address _newDexRouter) external`: Sets a new DEX router address for swapping reward tokens to USDC. The function should:
+  - Verify that the caller is the MamoCore contract
+  - Validate that the new DEX router address is not the zero address
+  - Update the dexRouter address
+  - Emit a DexRouterUpdated event with the old and new router addresses
+  - Only callable by the MamoCore contract
 
 ## System Flow
 

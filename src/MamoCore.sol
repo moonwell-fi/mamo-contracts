@@ -12,6 +12,7 @@ import {UserWallet} from "./UserWallet.sol";
 // Interface for the UserWallet contract
 interface IUserWallet {
     function approveStrategy(address strategy) external;
+    function disapproveStrategy(address strategy) external;
     function isStrategyApproved(address strategy) external view returns (bool);
     function updatePosition(address strategy, uint256 splitA, uint256 splitB) external;
     function claimRewards(address strategy) external;
