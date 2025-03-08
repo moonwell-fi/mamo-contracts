@@ -4,7 +4,7 @@ This document outlines the specification for the Mamo contracts, which enable us
 
 ## Mamo Core
 
-This contract is responsible for deploying user wallet contracts, tracking user wallet contracts, moving funds/positions, and interacting with strategies. It inherits from the Ownable contract from OpenZeppelin and uses the EnumerableSet library for efficient set operations. The contract is upgradeable through a transparent proxy pattern, with only the owner able to perform upgrades.
+This contract is responsible for deploying user wallet contracts, tracking user wallet contracts, moving funds/positions, and interacting with strategies. It inherits from the Ownable contract from OpenZeppelin and uses the EnumerableSet library for efficient set operations. The contract is upgradeable through a UUPS (Universal Upgradeable Proxy Standard) pattern, with only the owner able to perform upgrades.
 
 ### Storage
 
@@ -38,7 +38,7 @@ This contract is responsible for deploying user wallet contracts, tracking user 
 
 ## User Wallet
 
-This contract holds user funds and interacts with strategies. It's deployed by the Mamo Core using CREATE2 and it's upgradeable through a transparent proxy pattern. Only the owner can upgrade. 
+This contract holds user funds and interacts with strategies. It's deployed by the Mamo Core using CREATE2 and it's upgradeable through a UUPS (Universal Upgradeable Proxy Standard) pattern. Only the owner can upgrade. 
 
 ### Storage
 
@@ -161,3 +161,4 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 3. Delegate calls should be carefully managed to prevent potential security vulnerabilities.
 4. The CREATE2 deployment mechanism should be properly implemented to ensure deterministic addresses.
 5. Token approvals should be managed carefully to prevent excessive permissions.
+6. The UUPS (Universal Upgradeable Proxy Standard) pattern places the upgrade logic in the implementation contract itself, rather than in the proxy. This means that the implementation contract must include the `_authorizeUpgrade` function that controls who can upgrade the contract. This function should be properly secured with access controls to ensure only authorized addresses can upgrade the contract.
