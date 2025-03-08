@@ -22,8 +22,7 @@ contract UserWallet is Ownable, UUPSUpgradeable {
     mapping(address => mapping(address => uint256)) public balances;
     
     // Events
-    event StrategyApproved(address indexed strategy);
-    event StrategyDisapproved(address indexed strategy);
+    event StrategyApprovalChanged(address indexed strategy, bool approved);
     event FundsWithdrawn(address indexed token, uint256 amount);
     event PositionUpdated(address indexed strategy, uint256 splitA, uint256 splitB);
     event RewardsClaimed(address indexed strategy);
@@ -46,22 +45,18 @@ contract UserWallet is Ownable, UUPSUpgradeable {
     }
     
     /**
-     * @notice Approves a strategy to manage funds
-     * @param strategy The address of the strategy to approve
+     * @notice Sets the approval status of a strategy
+     * @param strategy The address of the strategy
+     * @param approved True to approve the strategy, false to disapprove
      */
-    function approveStrategy(address strategy) external onlyOwner {
-        approvedStrategies[strategy] = true;
-        emit StrategyApproved(strategy);
-    }
-    
-    /**
-     * @notice Disapproves a strategy to prevent it from managing funds
-     * @param strategy The address of the strategy to disapprove
-     */
-    function disapproveStrategy(address strategy) external onlyOwner {
-        require(approvedStrategies[strategy], "Strategy not approved");
-        approvedStrategies[strategy] = false;
-        emit StrategyDisapproved(strategy);
+    function setStrategyApproval(address strategy, bool approved) external onlyOwner {
+        // If disapproving, check that the strategy was previously approved
+        if (!approved && !approvedStrategies[strategy]) {
+            revert("Strategy not approved");
+        }
+        
+        approvedStrategies[strategy] = approved;
+        emit StrategyApprovalChanged(strategy, approved);
     }
     
     /**

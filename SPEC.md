@@ -49,9 +49,7 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 
 ### Functions
 
-- `function approveStrategy(address strategy) external`: Approves a strategy to manage funds. Only callable by the owner.
-
-- `function disapproveStrategy(address strategy) external`: Disapproves a strategy to prevent it from managing funds. Only callable by the owner.
+- `function setStrategyApproval(address strategy, bool approved) external`: Sets the approval status of a strategy. If approved is true, the strategy is approved to manage funds. If approved is false, the strategy is disapproved and can no longer manage funds. Only callable by the owner.
 
 - `function withdrawFunds(address token, uint256 amount) external`: Withdraws funds from the contract to the owner. Only callable by the owner. Makes a delegateCall to the strategy contract's `withdrawFunds` function.
 
