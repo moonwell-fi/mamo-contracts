@@ -107,6 +107,8 @@ A storage contract for the USDCStrategy that holds all state variables.
 
 - `function updateRewardToken(address token, bool add) external onlyAdmin returns (bool)`: Updates the reward tokens set by adding or removing a token. Only callable by the admin.
 
+- `function recoverERC20(address token, address to, uint256 amount) external onlyAdmin`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the admin.
+
 ### Constructor
 
 - `constructor(address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address _mamoCore, address _admin, address[] memory _rewardTokens)`: Initializes the strategy with the necessary contract addresses. The constructor should:
@@ -160,7 +162,10 @@ A storage contract for the USDCStrategy that holds all state variables.
   
   - For the MetaMorpho Vault portion (amountB):
     - Approve the metaMorphoVault to spend amountB of USDC
-    - Call the deposit function on the metaMorphoVault (using IERC4626 interface) to deposit USDC and receive vault shares
+    - Call the deposit function on the metaMorphoVault (using IERC4626 interface) to deposit USDC and receive vault shares:
+      ```solidity
+      IERC4626(metaMorphoVault).deposit(amountB, address(this));
+      ```
   
   - Emit a StrategyUpdated event with the user address, total amount, and split details
   - Only callable by the User Wallet through delegateCall
@@ -170,7 +175,16 @@ A storage contract for the USDCStrategy that holds all state variables.
   - For the Moonwell core market portion:
     - Call the redeem function on the moonwellUSDC contract to burn mUSDC tokens and receive USDC
   - For the MetaMorpho Vault portion:
-    - Call the withdraw function on the metaMorphoVault (using IERC4626 interface) to burn vault shares and receive USDC
+    - Calculate how many shares we need to withdraw to get the desired amount of USDC
+    - Make sure we have enough shares
+    - Call the withdraw function on the metaMorphoVault (using IERC4626 interface) to burn vault shares and receive USDC:
+      ```solidity
+      IERC4626(metaMorphoVault).withdraw(
+          amountFromMorpho,  // amount of assets (USDC) to withdraw
+          address(this),     // receiver of the assets (this wallet)
+          address(this)      // owner of the shares (this wallet)
+      );
+      ```
   - Transfer the withdrawn USDC to the user (the wallet contract owner) 
   - Emit a FundsWithdrawn event with the user address and amount
   - Only callable by a User Wallet through delegateCall

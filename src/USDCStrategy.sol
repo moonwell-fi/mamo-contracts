@@ -134,9 +134,12 @@ contract USDCStrategy {
         // Withdraw from MetaMorpho Vault
         uint256 vaultShares = IERC20(store.metaMorphoVault()).balanceOf(address(this));
         if (vaultShares > 0) {
-            // In a real implementation, you would call the redeem function on the MetaMorpho Vault
-            // For simplicity, we'll just simulate it here
-            // IERC4626(store.metaMorphoVault()).redeem(vaultShares, address(this), address(this));
+            // Redeem all vault shares for USDC
+            IERC4626(store.metaMorphoVault()).redeem(
+                vaultShares,      // amount of shares to redeem
+                address(this),    // receiver of the assets (this wallet)
+                address(this)     // owner of the shares (this wallet)
+            );
         }
         
         // Calculate the total available USDC
@@ -161,9 +164,10 @@ contract USDCStrategy {
             store.usdc().approve(store.metaMorphoVault(), amountB);
             
             // Deposit USDC and receive vault shares
-            // In a real implementation, you would call the deposit function on the MetaMorpho Vault
-            // For simplicity, we'll just simulate it here
-            // IERC4626(store.metaMorphoVault()).deposit(amountB, address(this));
+            IERC4626(store.metaMorphoVault()).deposit(
+                amountB,         // amount of assets (USDC) to deposit
+                address(this)    // receiver of the shares (this wallet)
+            );
         }
         
         emit USDCStrategyStorage.StrategyUpdated(address(this), totalUSDC, splitA, splitB);
@@ -189,13 +193,13 @@ contract USDCStrategy {
         uint256 vaultShares = IERC20(store.metaMorphoVault()).balanceOf(address(this));
         
         // Calculate the USDC value of the vault shares
-        uint256 vaultUSDC = IERC4626(store.metaMorphoVault()).previewRedeem(vaultShares);
+        uint256 morphoUSDCBalance = IERC4626(store.metaMorphoVault()).previewRedeem(vaultShares);
         
         // Calculate the USDC value of the mTokens (simplified)
         uint256 mTokenUSDC = mTokenBalance; // In a real implementation, this would be calculated based on the exchange rate
         
         // Calculate the proportion to withdraw from each protocol
-        uint256 amountFromMoonwell = (amount * mTokenUSDC) / totalBalance;
+        uint256 amountFromMoonwell = (amount * mTokenUSDC) / (mTokenUSDC + morphoUSDCBalance);
         uint256 amountFromMorpho = amount - amountFromMoonwell;
         
         // Withdraw from Moonwell core market
@@ -206,9 +210,19 @@ contract USDCStrategy {
         
         // Withdraw from MetaMorpho Vault
         if (amountFromMorpho > 0) {
-            // In a real implementation, you would call the withdraw function on the MetaMorpho Vault
-            // For simplicity, we'll just simulate it here
-            // IERC4626(store.metaMorphoVault()).withdraw(amountFromMorpho, address(this), address(this));
+            // Calculate how many shares we need to withdraw to get the desired amount of USDC
+            uint256 sharesToWithdraw = IERC4626(store.metaMorphoVault()).previewWithdraw(amountFromMorpho);
+            
+            // Make sure we have enough shares
+            uint256 availableShares = IERC20(store.metaMorphoVault()).balanceOf(address(this));
+            require(availableShares >= sharesToWithdraw, "Not enough vault shares");
+            
+            // Withdraw USDC from the vault
+            IERC4626(store.metaMorphoVault()).withdraw(
+                amountFromMorpho,  // amount of assets (USDC) to withdraw
+                address(this),     // receiver of the assets (this wallet)
+                address(this)      // owner of the shares (this wallet)
+            );
         }
         
         // Transfer the withdrawn USDC to the user (the wallet contract owner)

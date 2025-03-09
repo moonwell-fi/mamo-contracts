@@ -195,4 +195,19 @@ contract USDCStrategyStorage {
             return removed;
         }
     }
+    
+    /**
+     * @notice Recovers ERC20 tokens accidentally sent to this contract
+     * @param token The address of the token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount of tokens to recover
+     */
+    function recoverERC20(address token, address to, uint256 amount) external onlyAdmin {
+        require(to != address(0), "Cannot send to zero address");
+        require(amount > 0, "Amount must be greater than 0");
+        
+        IERC20(token).transfer(to, amount);
+        
+        emit TokenRecovered(token, to, amount);
+    }
 }
