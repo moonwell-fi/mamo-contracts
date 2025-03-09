@@ -96,7 +96,7 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         
         // Make a delegateCall to the strategy contract to execute the withdrawal
         (bool success, bytes memory result) = strategy.delegatecall(
-            abi.encodeWithSignature("withdrawFunds(address,address,uint256)", storage_, owner(), amount)
+            abi.encodeWithSignature("withdrawFunds(address,uint256)", storage_, amount)
         );
         
         require(success, "Withdrawal failed");

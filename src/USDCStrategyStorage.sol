@@ -25,12 +25,12 @@ contract USDCStrategyStorage {
    
     // MamoCore contract address
     address public immutable mamoCore;
-    
-    // Admin address that can recover tokens and set DEX router
-    address public admin;
 
     // USDC token interface
     IERC20 public immutable usdc;
+    
+    // Admin address that can recover tokens and set DEX router
+    address public admin;
 
     // DEX router for swapping reward tokens to USDC
     address public dexRouter;
@@ -210,4 +210,6 @@ contract USDCStrategyStorage {
         
         emit TokenRecovered(token, to, amount);
     }
+
+    // TODO add recoverETH
 }

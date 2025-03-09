@@ -13,6 +13,8 @@ import {USDCStrategyStorage} from "./USDCStrategyStorage.sol";
  * @title USDCStrategy
  * @notice A specific implementation of a Strategy Contract for USDC that splits deposits between Moonwell core market and Moonwell Vaults
  * @dev This contract is stateless and is designed to be called via delegatecall from a UserWallet
+ * @dev WARNING: This contract MUST ONLY be used with delegatecall. Direct calls will result in unexpected behavior
+ * as the contract assumes it's being executed in the context of a UserWallet.
  */
 contract USDCStrategy {
     using SafeERC20 for IERC20;
@@ -176,10 +178,9 @@ contract USDCStrategy {
     /**
      * @notice Withdraws USDC from both Moonwell core market and MetaMorpho Vault
      * @param storage_ The address of the storage contract
-     * @param user The address of the user to withdraw funds for
      * @param amount The amount of USDC to withdraw
      */
-    function withdrawFunds(address storage_, address user, uint256 amount) external {
+    function withdrawFunds(address storage_, uint256 amount) external {
         // This function is called via delegatecall from the UserWallet contract
         // So 'address(this)' refers to the UserWallet contract
         USDCStrategyStorage store = USDCStrategyStorage(storage_);
@@ -226,11 +227,9 @@ contract USDCStrategy {
         }
         
         // Transfer the withdrawn USDC to the user (the wallet contract owner)
-        // In a real implementation, you would get the owner from the UserWallet contract
-        address owner = user; // Placeholder
-        store.usdc().transfer(owner, amount);
+        store.usdc().transfer(msg.sender, amount);
         
-        emit USDCStrategyStorage.FundsWithdrawn(user, amount);
+        emit USDCStrategyStorage.FundsWithdrawn(msg.sender, amount);
     }
     
     /**

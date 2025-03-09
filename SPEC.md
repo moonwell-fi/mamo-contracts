@@ -78,7 +78,7 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 
 - `function updateStrategy(address storage_, uint256 splitA, uint256 splitB) external`: Updates the position in the USDC strategy by depositing funds with a specified split between Moonwell core market and MetaMorpho Vault. The function accesses state through the storage contract passed as a parameter.
 
-- `function withdrawFunds(address storage_, address user, uint256 amount) external`: Withdraws USDC from both Moonwell core market and MetaMorpho Vault based on the user's current position. The function accesses state through the storage contract passed as a parameter.
+- `function withdrawFunds(address storage_, uint256 amount) external`: Withdraws USDC from both Moonwell core market and MetaMorpho Vault and sends it to the caller. The function accesses state through the storage contract passed as a parameter.
 
 - `function recoverERC20(address storage_, address token, address to, uint256 amount) external`: Recovers ERC20 tokens accidentally sent to this contract. The function accesses state through the storage contract passed as a parameter.
 
@@ -181,7 +181,7 @@ A storage contract for the USDCStrategy that holds all state variables.
   - Emit a StrategyUpdated event with the user address, total amount, and split details
   - Only callable by the User Wallet through delegateCall
 
-- `function withdrawFunds(address user, uint256 amount) external`: Withdraws USDC from both Moonwell core market and MetaMorpho Vault based on the user's current position. The function should:
+- `function withdrawFunds(uint256 amount) external`: Withdraws USDC from both Moonwell core market and MetaMorpho Vault based on the user's current position. The function should:
   - Calculate the proportional amount to withdraw from each protocol based on the current balances
   - For the Moonwell core market portion:
     - Call the redeem function on the moonwellUSDC contract to burn mUSDC tokens and receive USDC
@@ -196,8 +196,8 @@ A storage contract for the USDCStrategy that holds all state variables.
           address(this)      // owner of the shares (this wallet)
       );
       ```
-  - Transfer the withdrawn USDC to the user (the wallet contract owner) 
-  - Emit a FundsWithdrawn event with the user address and amount
+  - Transfer the withdrawn USDC to msg.sender (the wallet contract owner when called via delegatecall)
+  - Emit a FundsWithdrawn event with msg.sender and amount
   - Only callable by a User Wallet through delegateCall
 
 - `function setDexRouter(address _newDexRouter) external`: Sets a new DEX router address for swapping reward tokens to USDC. The function should:
