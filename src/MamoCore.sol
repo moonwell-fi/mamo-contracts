@@ -8,14 +8,7 @@ import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {UserWallet} from "./UserWallet.sol";
-
-// Interface for the UserWallet contract
-interface IUserWallet {
-    function setStrategyApproval(address strategy, bool approved) external;
-    function isStrategyApproved(address strategy) external view returns (bool);
-    function updatePosition(address strategy, uint256 splitA, uint256 splitB) external;
-    function claimRewards(address strategy) external;
-}
+import {IUserWallet} from "./interfaces/IUserWallet.sol";
 
 /**
  * @title MamoCore

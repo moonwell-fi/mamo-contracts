@@ -13,7 +13,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
  */
 contract UserWallet is Ownable, UUPSUpgradeable {
     // The Mamo Core contract address
-    address public mamoCore;
+    address public immutable mamoCore;
     
     // Mapping of strategies that the user has approved
     mapping(address => bool) public approvedStrategies;
@@ -92,7 +92,7 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         
         // Make a delegateCall to the strategy contract to execute the actual position update logic
         (bool success, bytes memory result) = strategy.delegatecall(
-            abi.encodeWithSignature("updateStrategy(address,uint256,uint256)", address(this), splitA, splitB)
+            abi.encodeWithSignature("updateStrategy(uint256,uint256)", splitA, splitB)
         );
         
         require(success, "Strategy update failed");
@@ -111,7 +111,7 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         
         // Make a delegateCall to the strategy contract to execute the actual reward claiming logic
         (bool success, bytes memory result) = strategy.delegatecall(
-            abi.encodeWithSignature("claimRewards(address)", address(this))
+            abi.encodeWithSignature("claimRewards()")
         );
         
         require(success, "Reward claiming failed");

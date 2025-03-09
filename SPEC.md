@@ -65,23 +65,24 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 - `address moonwellComptroller`: The address of the Moonwell Comptroller contract
 - `address moonwellUSDC`: The address of the Moonwell USDC mToken contract
 - `address metaMorphoVault`: The address of the MetaMorpho Vault contract
-- `address dexRouter`: The address of the DEX router for swapping reward tokens to USDC (can be updated by MamoCore)
+- `address dexRouter`: The address of the DEX router for swapping reward tokens to USDC (can be updated by MamoCore or admin)
 - `address mamoCore`: The address of the MamoCore contract
+- `address admin`: The address of the admin who can recover tokens and set DEX router
 - `address[] rewardTokens`: An array of reward token addresses (e.g., WELL, OP, MORPHO, etc.)
 - `IERC20 usdc`: The USDC token interface
 - `uint256 constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
 
 ### Constructor
 
-- `constructor(address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address _mamoCore, address[] memory _rewardTokens)`: Initializes the strategy with the necessary contract addresses. The constructor should:
-  - Set the moonwellComptroller, moonwellUSDC, metaMorphoVault, dexRouter, and mamoCore addresses
+- `constructor(address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address _mamoCore, address _admin, address[] memory _rewardTokens)`: Initializes the strategy with the necessary contract addresses. The constructor should:
+  - Set the moonwellComptroller, moonwellUSDC, metaMorphoVault, dexRouter, mamoCore, and admin addresses
   - Store the array of reward token addresses
   - Initialize the USDC token interface by getting the underlying asset from the moonwellUSDC contract
   - Verify that the MetaMorpho Vault's asset matches the USDC token address
 
 ### Functions
 
-- `function claimRewards(address user) external`: Claims all available rewards from both Moonwell Comptroller and Morpho for the user and immediately converts them to USDC. The function should:
+- `function claimRewards() external`: Claims all available rewards from both Moonwell Comptroller and Morpho and immediately converts them to USDC. The function should:
   - Initialize a total converted amount variable to 0
   
   - **Moonwell Rewards:**
@@ -106,7 +107,8 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
   - Emit a RewardsHarvested event with the total converted USDC amount
   - Only callable by the User Wallet through delegateCall
 
-- `function updateStrategy(address user, uint256 splitA, uint256 splitB) external`: Updates a user's position in the USDC strategy by depositing funds with a specified split between Moonwell core market and MetaMorpho Vault. The function should:
+- `function updateStrategy(uint256 splitA, uint256 splitB) external`: Updates the position in the USDC strategy by depositing funds with a specified split between Moonwell core market and MetaMorpho Vault. The function should:
+  - Verify that the wallet is managed by MamoCore
   - Validate that splitA + splitB equals SPLIT_TOTAL (10,000 basis points)
   
   - Withdraw all existing funds from both the Moonwell core market and MetaMorpho Vault contracts
@@ -139,11 +141,26 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
   - Only callable by a User Wallet through delegateCall
 
 - `function setDexRouter(address _newDexRouter) external`: Sets a new DEX router address for swapping reward tokens to USDC. The function should:
-  - Verify that the caller is the MamoCore contract
+  - Verify that the caller is the MamoCore contract or the admin
   - Validate that the new DEX router address is not the zero address
   - Update the dexRouter address
   - Emit a DexRouterUpdated event with the old and new router addresses
-  - Only callable by the MamoCore contract
+  - Only callable by the MamoCore contract or the admin
+
+- `function recoverERC20(address token, address to, uint256 amount) external`: Recovers ERC20 tokens accidentally sent to this contract. The function should:
+  - Verify that the caller is the admin
+  - Validate that the recipient address is not the zero address
+  - Validate that the amount is greater than zero
+  - Transfer the specified amount of tokens to the recipient
+  - Emit a TokenRecovered event with the token address, recipient address, and amount
+  - Only callable by the admin
+
+- `function setAdmin(address _newAdmin) external`: Sets a new admin address. The function should:
+  - Verify that the caller is the current admin
+  - Validate that the new admin address is not the zero address
+  - Update the admin address
+  - Emit an AdminChanged event with the old and new admin addresses
+  - Only callable by the current admin
 
 ## System Flow
 
