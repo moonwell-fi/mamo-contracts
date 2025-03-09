@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
@@ -14,10 +15,14 @@ import {IUserWallet} from "./interfaces/IUserWallet.sol";
  * @title MamoCore
  * @notice This contract is responsible for deploying user wallet contracts, tracking user wallet contracts,
  * moving funds/positions, and interacting with strategies
- * @dev It's upgradeable through a UUPS pattern, with only the owner able to perform upgrades.
+ * @dev It's upgradeable through a UUPS pattern, with role-based access control.
  */
-contract MamoCore is Ownable, UUPSUpgradeable {
+contract MamoCore is AccessControlEnumerable, Pausable, UUPSUpgradeable {
     using EnumerableSet for EnumerableSet.AddressSet;
+
+    // Role definitions
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    bytes32 public constant MAMO_SERVICE_ROLE = keccak256("MAMO_SERVICE_ROLE");
 
     // Private state variables using the EnumerableSet library
     EnumerableSet.AddressSet private _userWallets;
@@ -32,7 +37,27 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     event StrategiesUpdated(address indexed strategy, address[] wallets, uint256 splitA, uint256 splitB);
     event RewardsClaimed(address indexed strategy, address[] wallets);
 
-    constructor() Ownable(msg.sender) {
+    constructor() {
+        // Set up roles
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(MAMO_SERVICE_ROLE, msg.sender);
+        _grantRole(GUARDIAN_ROLE, msg.sender);
+    }
+    
+    /**
+     * @notice Pauses the contract
+     * @dev Only callable by accounts with the GUARDIAN_ROLE
+     */
+    function pause() external onlyRole(GUARDIAN_ROLE) {
+        _pause();
+    }
+    
+    /**
+     * @notice Unpauses the contract
+     * @dev Only callable by accounts with the GUARDIAN_ROLE
+     */
+    function unpause() external onlyRole(GUARDIAN_ROLE) {
+        _unpause();
     }
 
     /**
@@ -43,7 +68,7 @@ contract MamoCore is Ownable, UUPSUpgradeable {
      * @param amount The amount of tokens to deposit
      * @return The address of the user's wallet (either existing or newly created)
      */
-    function deposit(address asset, address strategy, uint256 amount) external returns (address) {
+    function deposit(address asset, address strategy, uint256 amount) external whenNotPaused returns (address) {
         // Check if the strategy is valid
         require(_strategies.contains(strategy), "Strategy not found");
         
@@ -66,7 +91,7 @@ contract MamoCore is Ownable, UUPSUpgradeable {
      * @param user The address of the user
      * @return The address of the user's wallet
      */
-    function getUserWallet(address user) public returns (address) {
+    function getUserWallet(address user) internal returns (address) {
         // Check if user already has a wallet
         address userWallet = computeWalletAddress(user);
         
@@ -122,24 +147,12 @@ contract MamoCore is Ownable, UUPSUpgradeable {
      * @param strategy The address of the strategy to add
      * @param storage_ The address of the strategy's storage contract
      */
-    function addStrategy(address strategy, address storage_) external onlyOwner {
+    function addStrategy(address strategy, address storage_) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
         require(strategy != address(0), "Invalid strategy address");
         require(storage_ != address(0), "Invalid storage address");
         require(_strategies.add(strategy), "Strategy already exists");
         
         // Set the strategy storage
-        _strategyStorage[strategy] = storage_;
-    }
-    
-    /**
-     * @notice Sets the storage address for a strategy
-     * @param strategy The address of the strategy
-     * @param storage_ The address of the strategy's storage contract
-     */
-    function setStrategyStorage(address strategy, address storage_) external onlyOwner {
-        require(_strategies.contains(strategy), "Strategy not found");
-        require(storage_ != address(0), "Invalid storage address");
-        
         _strategyStorage[strategy] = storage_;
     }
     
@@ -157,7 +170,7 @@ contract MamoCore is Ownable, UUPSUpgradeable {
      * @notice Removes a strategy
      * @param strategy The address of the strategy to remove
      */
-    function removeStrategy(address strategy) external onlyOwner {
+    function removeStrategy(address strategy) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
         require(_strategies.contains(strategy), "Strategy not found");
         require(_strategies.remove(strategy), "Failed to remove strategy");
     }
@@ -182,7 +195,7 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     
     /**
      * @notice Updates a single strategy for multiple users at once
-     * @dev Only callable by the owner
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
      * @param strategy The address of the strategy to update
      * @param wallets Array of wallet addresses to update
      * @param splitA The first split parameter (basis points)
@@ -194,7 +207,7 @@ contract MamoCore is Ownable, UUPSUpgradeable {
         address[] calldata wallets,
         uint256 splitA,
         uint256 splitB
-    ) external onlyOwner returns (bool) {
+    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) returns (bool) {
         // Validate strategy exists
         require(_strategies.contains(strategy), "Strategy not found");
         
@@ -223,14 +236,14 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     
     /**
      * @notice Claims rewards from the specified strategy for multiple users at once
-     * @dev Only callable by the owner
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
      * @param strategy The address of the strategy to claim rewards from
      * @param wallets Array of wallet addresses to claim rewards for
      */
     function claimRewardsForUsers(
         address strategy,
         address[] calldata wallets
-    ) external onlyOwner {
+    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
         // Validate strategy exists
         require(_strategies.contains(strategy), "Strategy not found");
         
@@ -254,10 +267,12 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     
     /**
      * @notice Authorizes an upgrade to a new implementation
-     * @dev Only callable by the owner
+     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE
      * @param newImplementation The address of the new implementation
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {
-        // Additional validation could be added here if needed
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Caller must have DEFAULT_ADMIN_ROLE");
+        // Silence unused parameter warning
+        newImplementation;
     }
 }

@@ -4,34 +4,45 @@ This document outlines the specification for the Mamo contracts, which enable us
 
 ## Mamo Core
 
-This contract is responsible for deploying user wallet contracts, tracking user wallet contracts, moving funds/positions, and interacting with strategies. It inherits from the Ownable contract from OpenZeppelin and uses the EnumerableSet library for efficient set operations. The contract is upgradeable through a UUPS (Universal Upgradeable Proxy Standard) pattern, with only the owner able to perform upgrades.
+This contract is responsible for deploying user wallet contracts, tracking user wallet contracts, moving funds/positions, and interacting with strategies. It inherits from the AccessControlEnumerable and Pausable contracts from OpenZeppelin and uses the EnumerableSet library for efficient set operations. The contract is upgradeable through a UUPS (Universal Upgradeable Proxy Standard) pattern, with role-based access control.
+
+### Roles
+
+- `DEFAULT_ADMIN_ROLE`: The default admin role that can grant and revoke other roles, and is responsible for contract upgrades
+- `MAMO_SERVICE_ROLE`: The role that can manage strategies, update user strategies, and claim rewards for users
+- `GUARDIAN_ROLE`: The role that can pause and unpause the contract in case of emergencies
 
 ### Storage
 
-- `address owner`: The owner of this contract (the Mamo server)
-- `EnumerableSet.AddressSet userWallets`: A set of user wallet contracts that Mamo will be responsible for managing the strategies.
-- `EnumerableSet.AddressSet strategies`: A set of all strategy contract addresses
-- `mapping(address => address) strategyStorage`: A mapping of strategy addresses to their storage addresses
+- `EnumerableSet.AddressSet _userWallets`: A set of user wallet contracts that Mamo will be responsible for managing the strategies.
+- `EnumerableSet.AddressSet _strategies`: A set of all strategy contract addresses
+- `mapping(address => address) _strategyStorage`: A mapping of strategy addresses to their storage addresses
 
 ### Functions
 
-- `function deposit(address asset, address strategy, uint256 amount) returns (address)`: User deposits funds. If the user has not granted permission to the strategy, it will revert. User must pre-approve the contract with the asset token. 
+- `function pause() external`: Pauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
+
+- `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
+
+- `function deposit(address asset, address strategy, uint256 amount) returns (address)`: User deposits funds. If the user has not granted permission to the strategy, it will revert. User must pre-approve the contract with the asset token. This function is pausable.
   - If the user doesn't have a wallet yet, this function will automatically deploy one using CREATE2. The address is deterministic based on the user's address. After deployment, the wallet address is added to the userWallets set using `userWallets.add(walletAddress)`.
   - The function transfers the funds to the user wallet. 
   - The next time Mamo calls `updateUsersStrategies` this amount will be considered and added to the yield contracts.
   - Returns the address of the user's wallet (either existing or newly created).
 
-- `function updateUsersStrategies(address strategy, address[] wallets, uint256 splitA, uint256 splitB) returns (bool)`: Updates a single strategy for multiple users at once. Only callable by the owner. This function allows Mamo to efficiently update the same strategy for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
+- `function updateUsersStrategies(address strategy, address[] wallets, uint256 splitA, uint256 splitB) returns (bool)`: Updates a single strategy for multiple users at once. Only callable by accounts with the MAMO_SERVICE_ROLE. This function is pausable. This function allows Mamo to efficiently update the same strategy for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
   - Validate that the strategy address exists in the strategies set
   - Validate that all provided wallet addresses exist in the userWallets set
   - Validate that the user has approved the strategy in the wallet contract
   - For each user wallet in the array: Call the wallet's updatePosition function with specified split parameters 
 
-- `function addStrategy(address strategy)`: Adds a new strategy. Only callable by the owner.
+- `function addStrategy(address strategy, address storage_) external`: Adds a new strategy with its storage contract. Only callable by accounts with the MAMO_SERVICE_ROLE. This function is pausable.
 
-- `function removeStrategy(address strategy)`: Removes a strategy. Only callable by the owner.
+- `function setStrategyStorage(address strategy, address storage_) external`: Sets the storage address for a strategy. Only callable by accounts with the MAMO_SERVICE_ROLE. This function is pausable.
 
-- `function claimRewardsForUsers(address strategy, address[] wallets)`: Claims rewards from the specified strategy for multiple users at once. Only callable by the owner. This function allows Mamo to efficiently claim rewards for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
+- `function removeStrategy(address strategy) external`: Removes a strategy. Only callable by accounts with the MAMO_SERVICE_ROLE. This function is pausable.
+
+- `function claimRewardsForUsers(address strategy, address[] wallets)`: Claims rewards from the specified strategy for multiple users at once. Only callable by accounts with the MAMO_SERVICE_ROLE. This function is pausable. This function allows Mamo to efficiently claim rewards for multiple users in a single transaction, reducing gas costs and simplifying management. The function should:
   - Validate that the strategy address exists in the strategies set
   - Validate that all provided wallet addresses exist in the userWallets set
   - For each user wallet in the array: Call the wallet's claimRewards function with the specified strategy
