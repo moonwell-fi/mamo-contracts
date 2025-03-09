@@ -45,7 +45,6 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 - `address owner`: The owner of this contract (the user)
 - `address mamoCore`: The Mamo Core contract address
 - `mapping(address strategy => bool approved) approvedStrategies`: Mapping of strategies that the user has approved
-- `mapping(address strategy => mapping(address token => uint256)) balances`: A mapping that tracks the balance of each token for each strategy. This allows tracking multiple token balances (e.g., USDC, mUSDC, mwUSDC).
 
 ### Functions
 
@@ -53,9 +52,9 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 
 - `function withdrawFunds(address token, uint256 amount) external`: Withdraws funds from the contract to the owner. Only callable by the owner. Makes a delegateCall to the strategy contract's `withdrawFunds` function.
 
-- `function updatePosition(address strategy, uint256 splitA, uint256 splitB) external`: Updates the position in a strategy with specified split parameters. Only callable by the Mamo Core. Makes a delegateCall to the strategy contract to execute the actual position update logic. Updates the token balances in the wallet contract.
+- `function updatePosition(address strategy, uint256 splitA, uint256 splitB) external`: Updates the position in a strategy with specified split parameters. Only callable by the Mamo Core. Makes a delegateCall to the strategy contract to execute the actual position update logic.
 
-- `function claimRewards(address strategy) external`: Claims all available rewards from the strategy for both Moonwell and Morpho protocols. Only callable by the Mamo Core or the owner. Makes a delegateCall to the strategy contract's claimRewards function. Updates the token balances in the wallet contract.
+- `function claimRewards(address strategy) external`: Claims all available rewards from the strategy for both Moonwell and Morpho protocols. Only callable by the Mamo Core or the owner. Makes a delegateCall to the strategy contract's claimRewards function.
 
 ## USDC Strategy
 
@@ -105,7 +104,6 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
       - Add the received USDC to the total converted amount
 
   - Emit a RewardsHarvested event with the total converted USDC amount
-  - Call the updateUserPosition in the main contract to update the USDC balance
   - Only callable by the User Wallet through delegateCall
 
 - `function updateStrategy(address user, uint256 splitA, uint256 splitB) external`: Updates a user's position in the USDC strategy by depositing funds with a specified split between Moonwell core market and MetaMorpho Vault. The function should:
@@ -129,7 +127,6 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
   
   - Emit a StrategyUpdated event with the user address, total amount, and split details
   - Only callable by the User Wallet through delegateCall
-  - Has a callback to the main contract to update user balances
 
 - `function withdrawFunds(address user, uint256 amount) external`: Withdraws USDC from both Moonwell core market and MetaMorpho Vault based on the user's current position. The function should:
   - Calculate the proportional amount to withdraw from each protocol based on the current balances
@@ -138,7 +135,6 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
   - For the MetaMorpho Vault portion:
     - Call the withdraw function on the metaMorphoVault (using IERC4626 interface) to burn vault shares and receive USDC
   - Transfer the withdrawn USDC to the user (the wallet contract owner) 
-  - Update the user's position in both protocols by calling updateUserPosition in the main contract.
   - Emit a FundsWithdrawn event with the user address and amount
   - Only callable by a User Wallet through delegateCall
 

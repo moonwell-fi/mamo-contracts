@@ -18,9 +18,6 @@ contract UserWallet is Ownable, UUPSUpgradeable {
     // Mapping of strategies that the user has approved
     mapping(address => bool) public approvedStrategies;
     
-    // A mapping that tracks the balance of each token for each strategy
-    mapping(address => mapping(address => uint256)) public balances;
-    
     // Events
     event StrategyApprovalChanged(address indexed strategy, bool approved);
     event FundsWithdrawn(address indexed token, uint256 amount);
@@ -100,10 +97,6 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         
         require(success, "Strategy update failed");
         
-        // Update token balances based on the result
-        // This is a simplified implementation - in a real contract, you would parse the result
-        // to update the balances mapping
-        
         emit PositionUpdated(strategy, splitA, splitB);
     }
     
@@ -122,10 +115,6 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         );
         
         require(success, "Reward claiming failed");
-        
-        // Update token balances based on the result
-        // This is a simplified implementation - in a real contract, you would parse the result
-        // to update the balances mapping
         
         emit RewardsClaimed(strategy);
     }
