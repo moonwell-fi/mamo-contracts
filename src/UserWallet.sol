@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IMamoCore} from "./interfaces/IMamoCore.sol";
 
 /**
  * @title UserWallet
@@ -56,6 +57,7 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         emit StrategyApprovalChanged(strategy, approved);
     }
     
+    
     /**
      * @notice Checks if a strategy is approved
      * @param strategy The address of the strategy to check
@@ -66,7 +68,7 @@ contract UserWallet is Ownable, UUPSUpgradeable {
     }
     
     /**
-     * @notice Withdraws funds from the contract to the owner
+     * @notice Withdraws funds directly from the contract to the owner
      * @param token The address of the token to withdraw
      * @param amount The amount of tokens to withdraw
      */
@@ -81,6 +83,26 @@ contract UserWallet is Ownable, UUPSUpgradeable {
     }
     
     /**
+     * @notice Withdraws funds using a strategy
+     * @param strategy The address of the strategy to use for withdrawal
+     * @param amount The amount to withdraw
+     */
+    function withdrawStrategyFunds(address strategy, uint256 amount) external onlyOwner {
+        require(approvedStrategies[strategy], "Strategy not approved");
+        
+        // Get the strategy storage address from MamoCore
+        address storage_ = IMamoCore(mamoCore).getStrategyStorage(strategy);
+        require(storage_ != address(0), "Strategy storage not set");
+        
+        // Make a delegateCall to the strategy contract to execute the withdrawal
+        (bool success, bytes memory result) = strategy.delegatecall(
+            abi.encodeWithSignature("withdrawFunds(address,address,uint256)", storage_, owner(), amount)
+        );
+        
+        require(success, "Withdrawal failed");
+    }
+    
+    /**
      * @notice Updates the position in a strategy with specified split parameters
      * @dev Only callable by the Mamo Core
      * @param strategy The address of the strategy to update
@@ -90,9 +112,13 @@ contract UserWallet is Ownable, UUPSUpgradeable {
     function updatePosition(address strategy, uint256 splitA, uint256 splitB) external onlyMamoCore {
         require(approvedStrategies[strategy], "Strategy not approved");
         
+        // Get the strategy storage address from MamoCore
+        address storage_ = IMamoCore(mamoCore).getStrategyStorage(strategy);
+        require(storage_ != address(0), "Strategy storage not set");
+        
         // Make a delegateCall to the strategy contract to execute the actual position update logic
         (bool success, bytes memory result) = strategy.delegatecall(
-            abi.encodeWithSignature("updateStrategy(uint256,uint256)", splitA, splitB)
+            abi.encodeWithSignature("updateStrategy(address,uint256,uint256)", storage_, splitA, splitB)
         );
         
         require(success, "Strategy update failed");
@@ -109,9 +135,13 @@ contract UserWallet is Ownable, UUPSUpgradeable {
         require(msg.sender == mamoCore || msg.sender == owner(), "Only Mamo Core or owner can call this function");
         require(approvedStrategies[strategy], "Strategy not approved");
         
+        // Get the strategy storage address from MamoCore
+        address storage_ = IMamoCore(mamoCore).getStrategyStorage(strategy);
+        require(storage_ != address(0), "Strategy storage not set");
+        
         // Make a delegateCall to the strategy contract to execute the actual reward claiming logic
         (bool success, bytes memory result) = strategy.delegatecall(
-            abi.encodeWithSignature("claimRewards()")
+            abi.encodeWithSignature("claimRewards(address)", storage_)
         );
         
         require(success, "Reward claiming failed");

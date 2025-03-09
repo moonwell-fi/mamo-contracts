@@ -11,6 +11,7 @@ This contract is responsible for deploying user wallet contracts, tracking user 
 - `address owner`: The owner of this contract (the Mamo server)
 - `EnumerableSet.AddressSet userWallets`: A set of user wallet contracts that Mamo will be responsible for managing the strategies.
 - `EnumerableSet.AddressSet strategies`: A set of all strategy contract addresses
+- `mapping(address => address) strategyStorage`: A mapping of strategy addresses to their storage addresses
 
 ### Functions
 
@@ -58,19 +59,53 @@ This contract holds user funds and interacts with strategies. It's deployed by t
 
 ## USDC Strategy
 
-A specific implementation of a Strategy Contract for USDC that splits deposits between Moonwell core market and Moonwell Vaults.
+A specific implementation of a Strategy Contract for USDC that splits deposits between Moonwell core market and Moonwell Vaults. This contract is stateless and is designed to be called via delegatecall from a UserWallet. All state is stored in the USDCStrategyStorage contract.
+
+### Functions
+
+- `function claimRewards(address storage_) external`: Claims all available rewards from both Moonwell Comptroller and Morpho and immediately converts them to USDC. The function accesses state through the storage contract passed as a parameter.
+
+- `function updateStrategy(address storage_, uint256 splitA, uint256 splitB) external`: Updates the position in the USDC strategy by depositing funds with a specified split between Moonwell core market and MetaMorpho Vault. The function accesses state through the storage contract passed as a parameter.
+
+- `function withdrawFunds(address storage_, address user, uint256 amount) external`: Withdraws USDC from both Moonwell core market and MetaMorpho Vault based on the user's current position. The function accesses state through the storage contract passed as a parameter.
+
+- `function recoverERC20(address storage_, address token, address to, uint256 amount) external`: Recovers ERC20 tokens accidentally sent to this contract. The function accesses state through the storage contract passed as a parameter.
+
+- `function getTotalBalance(address storage_) public view returns (uint256)`: Gets the total balance of USDC across both protocols. The function accesses state through the storage contract passed as a parameter.
+
+## USDC Strategy Storage
+
+A storage contract for the USDCStrategy that holds all state variables.
 
 ### Storage
 
-- `address moonwellComptroller`: The address of the Moonwell Comptroller contract
-- `address moonwellUSDC`: The address of the Moonwell USDC mToken contract
-- `address metaMorphoVault`: The address of the MetaMorpho Vault contract
-- `address dexRouter`: The address of the DEX router for swapping reward tokens to USDC (can be updated by MamoCore or admin)
-- `address mamoCore`: The address of the MamoCore contract
+- `address immutable moonwellComptroller`: The address of the Moonwell Comptroller contract
+- `address immutable moonwellUSDC`: The address of the Moonwell USDC mToken contract
+- `address immutable metaMorphoVault`: The address of the MetaMorpho Vault contract
+- `address dexRouter`: The address of the DEX router for swapping reward tokens to USDC (can be updated by admin)
+- `address immutable mamoCore`: The address of the MamoCore contract
 - `address admin`: The address of the admin who can recover tokens and set DEX router
-- `address[] rewardTokens`: An array of reward token addresses (e.g., WELL, OP, MORPHO, etc.)
-- `IERC20 usdc`: The USDC token interface
+- `EnumerableSet.AddressSet _rewardTokens`: A set of reward token addresses (e.g., WELL, OP, MORPHO, etc.)
+- `IERC20 immutable usdc`: The USDC token interface
 - `uint256 constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
+
+### Functions
+
+- `constructor(address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address _mamoCore, address _admin, address _usdc, address[] memory _initialRewardTokens)`: Initializes the storage contract with the necessary values.
+
+- `function getRewardToken(uint256 index) external view returns (address)`: Gets a reward token at a specific index.
+
+- `function getRewardTokensLength() external view returns (uint256)`: Gets the number of reward tokens.
+
+- `function isRewardToken(address token) external view returns (bool)`: Checks if a token is in the reward tokens set.
+
+- `function getAllRewardTokens() external view returns (address[] memory)`: Gets all reward tokens.
+
+- `function setDexRouter(address _newDexRouter) external onlyAdmin`: Sets a new DEX router address. Only callable by the admin.
+
+- `function setAdmin(address _newAdmin) external onlyAdmin`: Sets a new admin address. Only callable by the admin.
+
+- `function updateRewardToken(address token, bool add) external onlyAdmin returns (bool)`: Updates the reward tokens set by adding or removing a token. Only callable by the admin.
 
 ### Constructor
 

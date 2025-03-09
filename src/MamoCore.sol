@@ -22,6 +22,9 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     // Private state variables using the EnumerableSet library
     EnumerableSet.AddressSet private _userWallets;
     EnumerableSet.AddressSet private _strategies;
+    
+    // Mapping of strategy addresses to their storage addresses
+    mapping(address => address) private _strategyStorage;
 
     // Events
     event WalletCreated(address indexed user, address wallet);
@@ -117,10 +120,37 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     /**
      * @notice Adds a new strategy
      * @param strategy The address of the strategy to add
+     * @param storage_ The address of the strategy's storage contract
      */
-    function addStrategy(address strategy) external onlyOwner {
+    function addStrategy(address strategy, address storage_) external onlyOwner {
         require(strategy != address(0), "Invalid strategy address");
+        require(storage_ != address(0), "Invalid storage address");
         require(_strategies.add(strategy), "Strategy already exists");
+        
+        // Set the strategy storage
+        _strategyStorage[strategy] = storage_;
+    }
+    
+    /**
+     * @notice Sets the storage address for a strategy
+     * @param strategy The address of the strategy
+     * @param storage_ The address of the strategy's storage contract
+     */
+    function setStrategyStorage(address strategy, address storage_) external onlyOwner {
+        require(_strategies.contains(strategy), "Strategy not found");
+        require(storage_ != address(0), "Invalid storage address");
+        
+        _strategyStorage[strategy] = storage_;
+    }
+    
+    /**
+     * @notice Gets the storage address for a strategy
+     * @param strategy The address of the strategy
+     * @return The address of the strategy's storage contract
+     */
+    function getStrategyStorage(address strategy) external view returns (address) {
+        require(_strategies.contains(strategy), "Strategy not found");
+        return _strategyStorage[strategy];
     }
     
     /**
@@ -168,6 +198,10 @@ contract MamoCore is Ownable, UUPSUpgradeable {
         // Validate strategy exists
         require(_strategies.contains(strategy), "Strategy not found");
         
+        // Get the strategy storage
+        address storage_ = _strategyStorage[strategy];
+        require(storage_ != address(0), "Strategy storage not set");
+        
         // Validate wallets and update positions
         for (uint256 i = 0; i < wallets.length; i++) {
             address wallet = wallets[i];
@@ -199,6 +233,10 @@ contract MamoCore is Ownable, UUPSUpgradeable {
     ) external onlyOwner {
         // Validate strategy exists
         require(_strategies.contains(strategy), "Strategy not found");
+        
+        // Get the strategy storage
+        address storage_ = _strategyStorage[strategy];
+        require(storage_ != address(0), "Strategy storage not set");
         
         // Validate wallets and claim rewards
         for (uint256 i = 0; i < wallets.length; i++) {

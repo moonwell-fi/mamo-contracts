@@ -19,4 +19,11 @@ interface IMamoCore {
      * @return True if the strategy is valid, false otherwise
      */
     function isValidStrategy(address strategy) external view returns (bool);
+    
+    /**
+     * @notice Gets the storage address for a strategy
+     * @param strategy The address of the strategy
+     * @return The address of the strategy's storage contract
+     */
+    function getStrategyStorage(address strategy) external view returns (address);
 }
