@@ -15,10 +15,25 @@ This contract is responsible for tracking user strategies, deploying new strateg
 ### Storage
 
 - `mapping(address => EnumerableSet.AddressSet) _userStrategies`: Set of all strategy addresses for each user
-- `EnumerableSet.AddressSet _allUsers`: Set of all users
 - `mapping(address => bool) public whitelistedImplementations`: Mapping of whitelisted implementation addresses
 - `mapping(bytes32 => address) public latestImplementationByType`: Maps strategy types to their latest implementation
 - `mapping(address => bytes32) public implementationToStrategyType`: Maps implementations to their strategy type
+
+### Strategy Type ID
+
+The strategy type ID is a bytes32 value that uniquely identifies a type of strategy based on the tokens it interacts with. It is structured as follows:
+
+1. The first element contains the number of addresses in the array
+2. The subsequent elements contain the actual token addresses
+
+This structure allows for easy decoding of the strategy type ID, as the first element indicates exactly how many addresses need to be extracted.
+
+Examples:
+- USDC strategy that interacts with USDC, mUSDC, and mxUSDC: `abi.encodePacked(uint8(3), usdc, musdc, mxusdc)`
+- LP strategy that interacts with WETH, USDC, and Aerodrome LP: `abi.encodePacked(uint8(3), weth, usdc, lpAero)`
+- Simple USDC strategy that interacts with USDC and mUSDC: `abi.encodePacked(uint8(2), usdc, musdc)`
+
+This approach ensures that strategies with the same token interactions are grouped together, allowing for type-safe upgrades while maintaining flexibility and easy decoding.
 
 ### Functions
 
@@ -32,7 +47,7 @@ This contract is responsible for tracking user strategies, deploying new strateg
 
 - `function getLatestImplementation(bytes32 strategyType) external view returns (address)`: Gets the latest implementation for a strategy type.
 
-- `function deployStrategy(address user, bytes32 strategyType) external returns (address)`: Deploys a new strategy for a user using the Proxy UUPS pattern. Permissionless function, it deploys the strategy for the caller. Uses the latest implementation for the strategy type. This function is pausable. The proxy admin is the Mamo Strategy Registry contract (address(this)).
+- `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function is pausable.
 
 - `function upgradeStrategy(address strategy, address newImplementation) external`: Updates the implementation of a strategy. Only callable by the user. The new implementation must be whitelisted and of the same strategy type as the current implementation.
 
@@ -80,13 +95,13 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 
 ## System Flow
 
-1. User calls Mamo Strategy Registry deployStrategy with an implementation address to enter a new strategy.
-2. Mamo Strategy Registry checks if the implementation is whitelisted and deploys the strategy for the user, saving both the user address and strategy address in the Mamo Strategy Registry storage.
+1. Mamo Backend deploys a strategy for a user using the latest implementation for the desired strategy type.
+2. Mamo Backend calls Mamo Strategy Registry addStrategy to register the strategy for the user.
 3. User deposits funds into their strategy.
 4. Mamo Backend reads Deposit events and calls updateUserPosition to manage the strategy.
 5. User or Mamo Backend can call claimRewards to harvest rewards from the strategy.
 6. When USDC balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
-7. If the user wants to move funds to a new strategy, they call withdrawFunds, deploy the new strategy by calling Mamo Strategy Registry contract, and then deposit into the new strategy.
+7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
 8. If Mamo wants to upgrade a strategy (example, deposit USDC into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to implementations of the same strategy type.
 
 ## Security Considerations
