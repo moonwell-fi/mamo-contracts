@@ -138,27 +138,7 @@ contract MamoCore is AccessControlEnumerable, Pausable, UUPSUpgradeable {
         revert("Not implemented");
     }
     
-    /**
-     * @notice Removes a strategy for a user
-     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
-     * @param user The address of the user
-     * @param strategy The address of the strategy to remove
-     */
-    function removeStrategy(address user, address strategy) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
-        // Check if the strategy exists for the user
-        require(_userStrategies[user].contains(strategy), "Strategy not found for user");
-        
-        // Get the implementation address
-        address implementation = getStrategyImplementation(strategy);
-        
-        // Remove the strategy
-        _userStrategies[user].remove(strategy);
-        _allStrategies.remove(strategy);
-        _implementationStrategies[implementation].remove(strategy);
-        
-        emit StrategyRemoved(user, strategy);
-    }
-    
+
     /**
      * @notice Updates the implementation of a strategy
      * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
@@ -253,87 +233,7 @@ contract MamoCore is AccessControlEnumerable, Pausable, UUPSUpgradeable {
     function isStrategy(address strategy) external view returns (bool) {
         return _allStrategies.contains(strategy);
     }
-    
-    /**
-     * @notice Updates positions for strategies with a specific implementation
-     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
-     * @param implementation The address of the implementation
-     * @param strategies Array of strategy addresses to update
-     * @param splitA The first split parameter (basis points)
-     * @param splitB The second split parameter (basis points)
-     */
-    function updateStrategiesPositions(
-        address implementation,
-        address[] calldata strategies,
-        uint256 splitA,
-        uint256 splitB
-    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
-        for (uint256 i = 0; i < strategies.length; i++) {
-            address strategy = strategies[i];
-            
-            // Verify the strategy is registered
-            if (!_allStrategies.contains(strategy)) {
-                emit StrategyUpdateFailed(strategy, "Strategy not registered");
-                continue;
-            }
-            
-            // Verify the strategy has the correct implementation
-            if (getStrategyImplementation(strategy) != implementation) {
-                emit StrategyUpdateFailed(strategy, "Implementation mismatch");
-                continue;
-            }
-            
-            // Update the strategy position
-            try IStrategy(strategy).updatePosition(splitA, splitB) {
-                // Success, do nothing
-            } catch Error(string memory reason) {
-                emit StrategyUpdateFailed(strategy, reason);
-            } catch {
-                emit StrategyUpdateFailed(strategy, "Unknown error");
-            }
-        }
-        
-        emit StrategiesUpdated(implementation, strategies, splitA, splitB);
-    }
-    
-    /**
-     * @notice Claims rewards for strategies with a specific implementation
-     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
-     * @param implementation The address of the implementation
-     * @param strategies Array of strategy addresses to claim rewards for
-     */
-    function claimStrategiesRewards(
-        address implementation,
-        address[] calldata strategies
-    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
-        for (uint256 i = 0; i < strategies.length; i++) {
-            address strategy = strategies[i];
-            
-            // Verify the strategy is registered
-            if (!_allStrategies.contains(strategy)) {
-                emit StrategyUpdateFailed(strategy, "Strategy not registered");
-                continue;
-            }
-            
-            // Verify the strategy has the correct implementation
-            if (getStrategyImplementation(strategy) != implementation) {
-                emit StrategyUpdateFailed(strategy, "Implementation mismatch");
-                continue;
-            }
-            
-            // Claim rewards
-            try IStrategy(strategy).claimRewards() {
-                // Success, do nothing
-            } catch Error(string memory reason) {
-                emit StrategyUpdateFailed(strategy, reason);
-            } catch {
-                emit StrategyUpdateFailed(strategy, "Unknown error");
-            }
-        }
-        
-        emit RewardsClaimed(implementation, strategies);
-    }
-    
+
     /**
      * @notice Authorizes an upgrade to a new implementation
      * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE

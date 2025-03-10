@@ -157,13 +157,4 @@ contract USDCStrategy is Initializable {
         emit RewardsClaimed(0); // Replace with actual amount
     }
 
-    /**
-     * @notice Gets the total balance of USDC across both protocols
-     * @return The total balance in USDC
-     */
-    function getTotalBalance() public view returns (uint256) {
-        // Get balances from Moonwell and MetaMorpho
-        // This is a simplified implementation
-        return 0; // Replace with actual calculation
-    }
 }
