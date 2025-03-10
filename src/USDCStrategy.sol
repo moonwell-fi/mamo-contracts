@@ -8,6 +8,10 @@ import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {IMToken} from "./interfaces/IMToken.sol";
+import {IERC4626} from "./interfaces/IERC4626.sol";
+import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
+import {IComptroller} from "./interfaces/IComptroller.sol";
+import {IDEXRouter} from "./interfaces/IDEXRouter.sol";
 
 /**
  * @title USDCStrategy
@@ -27,12 +31,12 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
     // State variables
-    address public mamoStrategyRegistry;
-    address public moonwellComptroller;
-    address public moonwellUSDC;
-    address public metaMorphoVault;
-    address public dexRouter;
-    address public usdc;
+    IMamoStrategyRegistry public mamoStrategyRegistry;
+    IComptroller public moonwellComptroller;
+    IMToken public moonwellUSDC;
+    IERC4626 public metaMorphoVault;
+    IDEXRouter public dexRouter;
+    IERC20 public usdc;
     
     // Reward tokens
     EnumerableSet.AddressSet private _rewardTokens;
@@ -83,12 +87,12 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         _grantRole(BACKEND_ROLE, _mamoBackend);
         
         // Set state variables
-        mamoStrategyRegistry = _mamoStrategyRegistry;
-        moonwellComptroller = _moonwellComptroller;
-        moonwellUSDC = _moonwellUSDC;
-        metaMorphoVault = _metaMorphoVault;
-        dexRouter = _dexRouter;
-        usdc = _usdc;
+        mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
+        moonwellComptroller = IComptroller(_moonwellComptroller);
+        moonwellUSDC = IMToken(_moonwellUSDC);
+        metaMorphoVault = IERC4626(_metaMorphoVault);
+        dexRouter = IDEXRouter(_dexRouter);
+        usdc = IERC20(_usdc);
     }
 
     /**
@@ -99,8 +103,8 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     function setDexRouter(address _newDexRouter) external onlyRole(BACKEND_ROLE) {
         require(_newDexRouter != address(0), "Invalid dexRouter address");
         
-        address oldDexRouter = dexRouter;
-        dexRouter = _newDexRouter;
+        address oldDexRouter = address(dexRouter);
+        dexRouter = IDEXRouter(_newDexRouter);
         
         emit DexRouterUpdated(oldDexRouter, _newDexRouter);
     }
@@ -112,15 +116,12 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
      * @param amount The amount to deposit
      */
     function deposit(address asset, uint256 amount) external onlyRole(OWNER_ROLE) {
-        require(asset == usdc, "Only USDC deposits are supported");
+        require(asset == address(usdc), "Only USDC deposits are supported");
         require(amount > 0, "Amount must be greater than 0");
 
         // Transfer USDC from the owner to this contract
-        IERC20(usdc).safeTransferFrom(msg.sender, address(this), amount);
+        usdc.safeTransferFrom(msg.sender, address(this), amount);
 
-        // Approve and deposit into Moonwell and MetaMorpho based on the current split
-        // This is a simplified implementation
-        
         emit Deposit(asset, amount);
     }
 
@@ -131,14 +132,14 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
      * @param amount The amount to withdraw
      */
     function withdraw(address asset, uint256 amount) external onlyRole(OWNER_ROLE) {
-        require(asset == usdc, "Only USDC withdrawals are supported");
+        require(asset == address(usdc), "Only USDC withdrawals are supported");
         require(amount > 0, "Amount must be greater than 0");
 
         // Withdraw from Moonwell and MetaMorpho based on the current balances
         // This is a simplified implementation
         
         // Transfer USDC to the owner
-        IERC20(usdc).safeTransfer(msg.sender, amount);
+        usdc.safeTransfer(msg.sender, amount);
         
         emit Withdraw(asset, amount);
     }
@@ -146,14 +147,59 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     /**
      * @notice Updates the position in the strategy
      * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param splitA The first split parameter (basis points)
-     * @param splitB The second split parameter (basis points)
+     * @param splitA The first split parameter (basis points) for Moonwell
+     * @param splitB The second split parameter (basis points) for MetaMorpho
      */
     function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE) {
         require(splitA + splitB == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
 
-        // Rebalance between Moonwell and MetaMorpho based on the new split
-        // This is a simplified implementation
+        // Step 1: Withdraw everything from both protocols
+        
+        // Withdraw from Moonwell
+        uint256 moonwellBalance = getMoonwellBalance();
+        if (moonwellBalance > 0) {
+            // Get the mToken balance
+            uint256 mTokenBalance = IERC20(address(moonwellUSDC)).balanceOf(address(this));
+            if (mTokenBalance > 0) {
+                // Redeem all mTokens for USDC
+                moonwellUSDC.redeem(mTokenBalance);
+            }
+        }
+        
+        // Withdraw from MetaMorpho
+        uint256 metaMorphoBalance = getMetaMorphoBalance();
+        if (metaMorphoBalance > 0) {
+            // Get the vault share balance
+            uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
+            if (shareBalance > 0) {
+                // Redeem all shares for USDC
+                metaMorphoVault.redeem(shareBalance, address(this), address(this));
+            }
+        }
+        
+        // Step 2: Get the total USDC balance now in the contract
+        uint256 totalUSDCBalance = usdc.balanceOf(address(this));
+        
+        require(totalUSDCBalance > 0, "Nothing to rebalance");
+        
+        // Step 3: Calculate target amounts for each protocol
+        uint256 targetMoonwell = (totalUSDCBalance * splitA) / SPLIT_TOTAL;
+        uint256 targetMetaMorpho = totalUSDCBalance - targetMoonwell; // Use subtraction to avoid rounding errors
+        
+        // Step 4: Deposit into each protocol according to the split
+        if (targetMoonwell > 0) {
+            usdc.approve(address(moonwellUSDC), targetMoonwell);
+            
+            // Mint mUSDC with USDC
+            moonwellUSDC.mint(targetMoonwell);
+        }
+        
+        if (targetMetaMorpho > 0) {
+            usdc.approve(address(metaMorphoVault), targetMetaMorpho);
+            
+            // Deposit USDC into MetaMorpho
+            metaMorphoVault.deposit(targetMetaMorpho, address(this));
+        }
         
         emit PositionUpdated(splitA, splitB);
     }
@@ -168,13 +214,62 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
             "Only owner or backend can claim rewards"
         );
 
-        // Claim rewards from Moonwell and MetaMorpho
-        // This is a simplified implementation
+        // Get initial USDC balance
+        uint256 initialUSDCBalance = usdc.balanceOf(address(this));
+        
+        // Claim rewards from Moonwell
+        moonwellComptroller.claimReward();
+        
+        // MetaMorpho rewards claiming would go here if applicable
         
         // Convert rewards to USDC using the DEX router
-        // This is a simplified implementation
+        _swapRewardsToUSDC();
         
-        emit RewardsClaimed(0); // Replace with actual amount
+        // Calculate the amount of USDC gained from rewards
+        uint256 finalUSDCBalance = usdc.balanceOf(address(this));
+        uint256 rewardsAmount = finalUSDCBalance > initialUSDCBalance ? 
+                               finalUSDCBalance - initialUSDCBalance : 0;
+        
+        emit RewardsClaimed(rewardsAmount);
+    }
+    
+    /**
+     * @notice Swaps reward tokens to USDC
+     * @dev Internal function to convert reward tokens to USDC
+     */
+    function _swapRewardsToUSDC() internal {
+        // Get all reward tokens
+        address[] memory rewardTokens = new address[](_rewardTokens.length());
+        for (uint256 i = 0; i < _rewardTokens.length(); i++) {
+            rewardTokens[i] = _rewardTokens.at(i);
+        }
+        
+        // Swap each reward token for USDC
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            address token = rewardTokens[i];
+            if (token == address(usdc)) continue; // Skip if token is already USDC
+            
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance > 0) {
+                // Approve DEX router to spend the token
+                IERC20(token).approve(address(dexRouter), balance);
+                
+                // Create the swap path: token -> USDC
+                address[] memory path = new address[](2);
+                path[0] = token;
+                path[1] = address(usdc);
+                
+                // Swap tokens for USDC
+                // Note: This is a simplified implementation - in a real contract, you would handle slippage, etc.
+                dexRouter.swapExactTokensForTokens(
+                    balance,
+                    0, // Accept any amount of USDC
+                    path,
+                    address(this),
+                    block.timestamp
+                );
+            }
+        }
     }
     
     /**
@@ -217,5 +312,34 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
      * @dev Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry)
      */
     function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE) {
+    }
+    
+    /**
+     * @notice Gets the total balance of USDC across both protocols
+     * @return The total balance in USDC
+     */
+    function getTotalBalance() public returns (uint256) {
+        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
+        uint256 vaultBalance = metaMorphoVault.convertToAssets(shareBalance);
+
+        // TODO check vault balance decimals 
+        return vaultBalance + moonwellUSDC.balanceOfUnderlying(address(this)) + usdc.balanceOf(address(this));
+    }
+    
+    /**
+     * @notice Gets the balance of USDC in Moonwell
+     * @return The balance in USDC
+     */
+    function getMoonwellBalance() public returns (uint256) {
+        return moonwellUSDC.balanceOfUnderlying(address(this));
+    }
+    
+    /**
+     * @notice Gets the balance of USDC in MetaMorpho
+     * @return The balance in USDC
+     */
+    function getMetaMorphoBalance() public view returns (uint256) {
+        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
+        return metaMorphoVault.convertToAssets(shareBalance);
     }
 }

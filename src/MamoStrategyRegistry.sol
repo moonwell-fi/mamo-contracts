@@ -55,7 +55,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @notice Pauses the contract
      * @dev Only callable by accounts with the GUARDIAN_ROLE
      */
-    function pause() external onlyRole(GUARDIAN_ROLE) {
+    function pause() external onlyRole(GUARDIAN_ROLE) whenNotPaused {
         _pause();
     }
     
@@ -63,7 +63,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @notice Unpauses the contract
      * @dev Only callable by accounts with the GUARDIAN_ROLE
      */
-    function unpause() external onlyRole(GUARDIAN_ROLE) {
+    function unpause() external onlyRole(GUARDIAN_ROLE) whenPaused {
         _unpause();
     }
     
