@@ -90,7 +90,9 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 
 - `function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE)`: Updates the position in the strategy. Only callable by accounts with the BACKEND_ROLE.
 
-- `function updateRewardToken(address token, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. Only callable by accounts with the BACKEND_ROLE.
+- `function updateRewardToken(address token, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. USDC cannot be added as a reward token. Only callable by accounts with the BACKEND_ROLE.
+
+- `function harvestRewards() external onlyRole(BACKEND_ROLE)`: Harvests reward tokens by swapping them to USDC and depositing according to the current split. Emits a RewardsHarvested event. Only callable by accounts with the BACKEND_ROLE.
 
 - `function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE)`: Internal function that authorizes an upgrade to a new implementation. Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry). This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 

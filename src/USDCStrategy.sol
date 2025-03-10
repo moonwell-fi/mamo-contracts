@@ -74,8 +74,8 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     // @notice Emitted when the position split is updated
     event PositionUpdated(uint256 splitA, uint256 splitB);
     
-    // @notice Emitted when rewards are claimed
-    event RewardsClaimed(uint256 amount);
+    // @notice Emitted when rewards are harvested
+    event RewardsHarvested(uint256 amount);
     
     // @notice Emitted when the DEX router is updated
     event DexRouterUpdated(address indexed oldDexRouter, address indexed newDexRouter);
@@ -254,6 +254,7 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
      */
     function updateRewardToken(address token, bool add) external onlyRole(BACKEND_ROLE) {
         require(token != address(0), "Invalid token address");
+        require(token != address(usdc), "USDC cannot be a reward token");
 
         if (add) {
             require(_rewardTokens.add(token), "Token already exists in reward tokens");
@@ -276,6 +277,53 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         dexRouter = IDEXRouter(_newDexRouter);
 
         emit DexRouterUpdated(oldDexRouter, _newDexRouter);
+    }
+
+    /**
+     * @notice Harvests reward tokens by swapping them to USDC and depositing according to the current split
+     * @dev Only callable by accounts with the BACKEND_ROLE
+     */
+    function harvestRewards() external onlyRole(BACKEND_ROLE) {
+        uint256 totalUsdcHarvested = 0;
+        uint256 rewardTokenCount = _rewardTokens.length();
+        
+        // Iterate through all reward tokens
+        for (uint256 i = 0; i < rewardTokenCount; i++) {
+            address rewardToken = _rewardTokens.at(i);
+            
+            uint256 rewardBalance = IERC20(rewardToken).balanceOf(address(this));
+            
+            // Skip if no balance
+            if (rewardBalance == 0) {
+                continue;
+            }
+            
+            // Approve DEX router to spend reward tokens
+            IERC20(rewardToken).approve(address(dexRouter), rewardBalance);
+            
+            // Set up the swap path: reward token -> USDC
+            address[] memory path = new address[](2);
+            path[0] = rewardToken;
+            path[1] = address(usdc);
+            
+            // Swap reward tokens for USDC
+            uint256[] memory amounts = dexRouter.swapExactTokensForTokens(
+                rewardBalance,
+                0, // Accept any amount of USDC (we can add a minimum later if needed)
+                path,
+                address(this),
+                block.timestamp + 1800 // 30 minute deadline
+            );
+            
+            // Add the USDC received to our total
+            totalUsdcHarvested += amounts[amounts.length - 1];
+        }
+        
+        // If we harvested any USDC, deposit it according to the current split
+        if (totalUsdcHarvested > 0) {
+            depositInternal(totalUsdcHarvested);
+            emit RewardsHarvested(totalUsdcHarvested);
+        }
     }
 
     // ==================== INTERNAL FUNCTIONS ====================
