@@ -65,33 +65,38 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 - `bytes32 public constant OWNER_ROLE`: Role for the strategy owner (the user)
 - `bytes32 public constant UPGRADER_ROLE`: Role for the Mamo Strategy Registry contract that can upgrade the strategy
 - `bytes32 public constant BACKEND_ROLE`: Role for the Mamo Backend that can update positions
-- `address moonwellComptroller`: The Moonwell Comptroller contract address
-- `address moonwellUSDC`: The Moonwell USDC mToken contract address
-- `address metaMorphoVault`: The MetaMorpho Vault contract address
-- `address dexRouter`: The DEX router for swapping reward tokens
-- `address usdc`: The USDC token address
-- `uint256 constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
+- `IMamoStrategyRegistry public mamoStrategyRegistry`: Reference to the Mamo Strategy Registry contract
+- `IComptroller public moonwellComptroller`: The Moonwell Comptroller contract
+- `IMToken public moonwellUSDC`: The Moonwell USDC mToken contract
+- `IERC4626 public metaMorphoVault`: The MetaMorpho Vault contract
+- `IDEXRouter public dexRouter`: The DEX router for swapping reward tokens
+- `IERC20 public usdc`: The USDC token
+- `uint256 public constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
+- `uint256 public splitMToken`: Percentage of funds allocated to Moonwell mToken in basis points
+- `uint256 public splitVault`: Percentage of funds allocated to MetaMorpho Vault in basis points
 - `EnumerableSet.AddressSet private _rewardTokens`: Set of reward token addresses
 
 ### Functions
 
-- `function initialize(address _owner, address _mamoStrategyRegistry, address _mamoBackend, address _moonwellComptroller, address _moonwellUSDC, address _metaMorphoVault, address _dexRouter, address _usdc) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies.
+- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors.
+
+- `function initialize(InitParams calldata params) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies.
 
 - `function setDexRouter(address _newDexRouter) external onlyRole(BACKEND_ROLE)`: Updates the DEX router address. Only callable by accounts with the BACKEND_ROLE.
 
-- `function deposit(address asset, uint256 amount) external onlyRole(OWNER_ROLE)`: Deposits funds into the strategy. Only callable by accounts with the OWNER_ROLE.
+- `function deposit(uint256 amount) external onlyRole(OWNER_ROLE)`: Deposits funds into the strategy. Only callable by accounts with the OWNER_ROLE.
 
-- `function withdraw(address asset, uint256 amount) external onlyRole(OWNER_ROLE)`: Withdraws funds from the strategy. Only callable by accounts with the OWNER_ROLE.
+- `function withdraw(uint256 amount) external onlyRole(OWNER_ROLE)`: Withdraws funds from the strategy. Only callable by accounts with the OWNER_ROLE.
 
 - `function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE)`: Updates the position in the strategy. Only callable by accounts with the BACKEND_ROLE.
 
-- `function claimRewards() external`: Claims all available rewards from both Moonwell and Morpho and converts them to USDC. Only callable by accounts with either OWNER_ROLE or BACKEND_ROLE.
+- `function updateRewardToken(address token, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. Only callable by accounts with the BACKEND_ROLE.
 
-- `function updateRewardToken(address token, bool add) external onlyRole(BACKEND_ROLE) returns (bool)`: Updates the reward tokens set by adding or removing a token. Only callable by accounts with the BACKEND_ROLE. Returns true if the operation was successful.
+- `function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE)`: Internal function that authorizes an upgrade to a new implementation. Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry). This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 
-- `function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE)`: Internal function that authorizes an upgrade to a new implementation. Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry). This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
+- `function recoverERC20(address token, address to, uint256 amount) external onlyRole(OWNER_ROLE)`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the OWNER_ROLE.
 
-- `function recoverERC20(address token, address to, uint256 amount) external`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the OWNER_ROLE.
+- `function getTotalBalance() public returns (uint256)`: Gets the total balance of USDC across both protocols.
 
 ## System Flow
 
