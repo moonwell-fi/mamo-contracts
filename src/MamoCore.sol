@@ -5,37 +5,46 @@ import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {UserWallet} from "./UserWallet.sol";
-import {IUserWallet} from "./interfaces/IUserWallet.sol";
+import {IStrategy} from "./interfaces/IStrategy.sol";
 
 /**
  * @title MamoCore
- * @notice This contract is responsible for deploying user wallet contracts, tracking user wallet contracts,
- * moving funds/positions, and interacting with strategies
+ * @notice This contract is responsible for tracking user strategies and coordinating operations across strategies
  * @dev It's upgradeable through a UUPS pattern, with role-based access control.
  */
 contract MamoCore is AccessControlEnumerable, Pausable, UUPSUpgradeable {
     using EnumerableSet for EnumerableSet.AddressSet;
 
+    // EIP-1967 implementation slot
+    bytes32 private constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+    
     // Role definitions
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
     bytes32 public constant MAMO_SERVICE_ROLE = keccak256("MAMO_SERVICE_ROLE");
-
-    // Private state variables using the EnumerableSet library
-    EnumerableSet.AddressSet private _userWallets;
-    EnumerableSet.AddressSet private _strategies;
     
-    // Mapping of strategy addresses to their storage addresses
-    mapping(address => address) private _strategyStorage;
+    // Set of all strategy addresses for a user
+    mapping(address => EnumerableSet.AddressSet) private _userStrategies;
+    
+    // Total strategies registered
+    EnumerableSet.AddressSet private _allStrategies;
+    
+    // Whitelisted implementations
+    mapping(address => bool) private _whitelistedImplementations;
+    
+    // Mapping from implementation to strategies using it
+    mapping(address => EnumerableSet.AddressSet) private _implementationStrategies;
 
     // Events
-    event WalletCreated(address indexed user, address wallet);
-    event Deposited(address indexed user, address indexed wallet, address asset, address strategy, uint256 amount);
-    event StrategiesUpdated(address indexed strategy, address[] wallets, uint256 splitA, uint256 splitB);
-    event RewardsClaimed(address indexed strategy, address[] wallets);
+    event StrategyAdded(address indexed user, address strategy, address implementation);
+    event StrategyRemoved(address indexed user, address strategy);
+    event StrategyImplementationUpdated(address indexed strategy, address indexed oldImplementation, address indexed newImplementation);
+    event ImplementationWhitelisted(address indexed implementation);
+    event ImplementationRemovedFromWhitelist(address indexed implementation);
+    event StrategiesUpdated(address indexed implementation, address[] strategies, uint256 splitA, uint256 splitB);
+    event RewardsClaimed(address indexed implementation, address[] strategies);
+    event StrategyUpdateFailed(address indexed strategy, string reason);
+    event StrategyDeployed(address indexed user, address strategy, address implementation);
 
     constructor() {
         // Set up roles
@@ -59,210 +68,270 @@ contract MamoCore is AccessControlEnumerable, Pausable, UUPSUpgradeable {
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
     }
-
+    
     /**
-     * @notice User deposits funds. If the user has not granted permission to the strategy, it will revert.
-     * @dev User must pre-approve the contract with the asset token.
-     * @param asset The address of the token being deposited
-     * @param strategy The address of the strategy to use
-     * @param amount The amount of tokens to deposit
-     * @return The address of the user's wallet (either existing or newly created)
+     * @notice Adds an implementation to the whitelist
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
+     * @param implementation The address of the implementation to whitelist
      */
-    function deposit(address asset, address strategy, uint256 amount) external whenNotPaused returns (address) {
-        // Check if the strategy is valid
-        require(_strategies.contains(strategy), "Strategy not found");
+    function whitelistImplementation(address implementation) external onlyRole(MAMO_SERVICE_ROLE) {
+        require(implementation != address(0), "Invalid implementation address");
+        require(!_whitelistedImplementations[implementation], "Implementation already whitelisted");
         
-        // Get or create user wallet
-        address userWallet = getUserWallet(msg.sender);
-        
-        // Check if the user has granted permission to the strategy
-        require(IUserWallet(userWallet).isStrategyApproved(strategy), "Strategy not approved");
-        
-        // Transfer tokens from user to their wallet
-        require(IERC20(asset).transferFrom(msg.sender, userWallet, amount), "Transfer failed");
-        
-        emit Deposited(msg.sender, userWallet, asset, strategy, amount);
-        
-        return userWallet;
+        _whitelistedImplementations[implementation] = true;
+        emit ImplementationWhitelisted(implementation);
     }
     
     /**
-     * @notice Gets the user's wallet address or creates a new one if it doesn't exist
+     * @notice Removes an implementation from the whitelist
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
+     * @param implementation The address of the implementation to remove from the whitelist
+     */
+    function removeImplementationFromWhitelist(address implementation) external onlyRole(MAMO_SERVICE_ROLE) {
+        require(_whitelistedImplementations[implementation], "Implementation not whitelisted");
+        
+        _whitelistedImplementations[implementation] = false;
+        emit ImplementationRemovedFromWhitelist(implementation);
+    }
+    
+    /**
+     * @notice Deploys a new strategy for a user
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
      * @param user The address of the user
-     * @return The address of the user's wallet
+     * @param implementation The address of the implementation
+     * @return The address of the deployed strategy
      */
-    function getUserWallet(address user) internal returns (address) {
-        // Check if user already has a wallet
-        address userWallet = computeWalletAddress(user);
+    function deployStrategy(address user, address implementation) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) returns (address) {
+        // Verify the implementation is whitelisted
+        require(user != address(0), "Invalid user address");
+        require(implementation != address(0), "Invalid implementation address");
+        require(_whitelistedImplementations[implementation], "Implementation not whitelisted");
         
-        // If wallet doesn't exist in our set, deploy it
-        if (!_userWallets.contains(userWallet)) {
-            // Deploy wallet using CREATE2
-            bytes memory bytecode = getWalletBytecode(user);
-            bytes32 salt = keccak256(abi.encodePacked(user));
-            
-            userWallet = Create2.deploy(0, salt, bytecode);
-            
-            // Add wallet to our set
-            _userWallets.add(userWallet);
-            
-            emit WalletCreated(user, userWallet);
-        }
+        // Deploy a new strategy contract
+        // This is a simplified example and would need to be adapted to the actual deployment mechanism
+        // In a real implementation, you would need to use the correct method to deploy a proxy
+        // pointing to the implementation
         
-        return userWallet;
+        // Example (commented out as it depends on the actual deployment mechanism):
+        // bytes memory initData = abi.encodeWithSelector(
+        //     IStrategy(implementation).initialize.selector,
+        //     user,
+        //     address(this),
+        //     otherParams...
+        // );
+        // address strategy = address(new ERC1967Proxy(implementation, initData));
+        
+        // For now, we'll just emit an event and return a placeholder
+        // In a real implementation, you would deploy the strategy and return its address
+        
+        // Register the strategy
+        // _userStrategies[user].add(strategy);
+        // _allStrategies.add(strategy);
+        // _implementationStrategies[implementation].add(strategy);
+        
+        // emit StrategyDeployed(user, strategy, implementation);
+        
+        // Return the strategy address
+        // return strategy;
+        
+        // This is a placeholder implementation
+        revert("Not implemented");
     }
     
     /**
-     * @notice Computes the deterministic address for a user's wallet
+     * @notice Removes a strategy for a user
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
      * @param user The address of the user
-     * @return The computed address of the user's wallet
-     */
-    function computeWalletAddress(address user) public view returns (address) {
-        bytes memory bytecode = getWalletBytecode(user);
-        bytes32 salt = keccak256(abi.encodePacked(user));
-        return Create2.computeAddress(salt, keccak256(bytecode));
-    }
-    
-    /**
-     * @notice Gets the bytecode for a new user wallet
-     * @param user The address of the user (wallet owner)
-     * @return The bytecode for the wallet contract
-     */
-    function getWalletBytecode(address user) internal view returns (bytes memory) {
-        // In a real implementation, we would create the bytecode for the UserWallet contract
-        // including constructor parameters for the user (owner) and this contract (mamoCore)
-        
-        // Get the bytecode of the UserWallet contract
-        bytes memory bytecode = type(UserWallet).creationCode;
-        
-        // Encode the constructor parameters
-        bytes memory constructorArgs = abi.encode(user, address(this));
-        
-        // Combine the bytecode and constructor arguments
-        return abi.encodePacked(bytecode, constructorArgs);
-    }
-    
-    /**
-     * @notice Adds a new strategy
-     * @param strategy The address of the strategy to add
-     * @param storage_ The address of the strategy's storage contract
-     */
-    function addStrategy(address strategy, address storage_) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
-        require(strategy != address(0), "Invalid strategy address");
-        require(storage_ != address(0), "Invalid storage address");
-        require(_strategies.add(strategy), "Strategy already exists");
-        
-        // Set the strategy storage
-        _strategyStorage[strategy] = storage_;
-    }
-    
-    /**
-     * @notice Gets the storage address for a strategy
-     * @param strategy The address of the strategy
-     * @return The address of the strategy's storage contract
-     */
-    function getStrategyStorage(address strategy) external view returns (address) {
-        require(_strategies.contains(strategy), "Strategy not found");
-        return _strategyStorage[strategy];
-    }
-    
-    /**
-     * @notice Removes a strategy
      * @param strategy The address of the strategy to remove
      */
-    function removeStrategy(address strategy) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
-        require(_strategies.contains(strategy), "Strategy not found");
-        require(_strategies.remove(strategy), "Failed to remove strategy");
+    function removeStrategy(address user, address strategy) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
+        // Check if the strategy exists for the user
+        require(_userStrategies[user].contains(strategy), "Strategy not found for user");
+        
+        // Get the implementation address
+        address implementation = getStrategyImplementation(strategy);
+        
+        // Remove the strategy
+        _userStrategies[user].remove(strategy);
+        _allStrategies.remove(strategy);
+        _implementationStrategies[implementation].remove(strategy);
+        
+        emit StrategyRemoved(user, strategy);
     }
     
     /**
-     * @notice Checks if a wallet is managed by Mamo
-     * @param wallet The address of the wallet to check
-     * @return True if the wallet is managed by Mamo, false otherwise
-     */
-    function isUserWallet(address wallet) external view returns (bool) {
-        return _userWallets.contains(wallet);
-    }
-    
-    /**
-     * @notice Checks if a strategy is valid
-     * @param strategy The address of the strategy to check
-     * @return True if the strategy is valid, false otherwise
-     */
-    function isValidStrategy(address strategy) external view returns (bool) {
-        return _strategies.contains(strategy);
-    }
-    
-    /**
-     * @notice Updates a single strategy for multiple users at once
+     * @notice Updates the implementation of a strategy
      * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
      * @param strategy The address of the strategy to update
-     * @param wallets Array of wallet addresses to update
-     * @param splitA The first split parameter (basis points)
-     * @param splitB The second split parameter (basis points)
-     * @return True if the update was successful
+     * @param newImplementation The address of the new implementation
      */
-    function updateUsersStrategies(
-        address strategy,
-        address[] calldata wallets,
-        uint256 splitA,
-        uint256 splitB
-    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) returns (bool) {
-        // Validate strategy exists
-        require(_strategies.contains(strategy), "Strategy not found");
+    function updateStrategyImplementation(address strategy, address newImplementation) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
+        // Check if the strategy exists
+        require(_allStrategies.contains(strategy), "Strategy not registered");
         
-        // Get the strategy storage
-        address storage_ = _strategyStorage[strategy];
-        require(storage_ != address(0), "Strategy storage not set");
+        // Check if the new implementation is whitelisted
+        require(_whitelistedImplementations[newImplementation], "New implementation not whitelisted");
         
-        // Validate wallets and update positions
-        for (uint256 i = 0; i < wallets.length; i++) {
-            address wallet = wallets[i];
-            
-            // Validate wallet is managed by Mamo
-            require(_userWallets.contains(wallet), "Wallet not managed by Mamo");
-            
-            // Validate strategy is approved by the wallet
-            require(IUserWallet(wallet).isStrategyApproved(strategy), "Strategy not approved by wallet");
-            
-            // Update position
-            IUserWallet(wallet).updatePosition(strategy, splitA, splitB);
-        }
+        // Get the old implementation address
+        address oldImplementation = getStrategyImplementation(strategy);
         
-        emit StrategiesUpdated(strategy, wallets, splitA, splitB);
+        // Update the implementation through the proxy's upgrade mechanism
+        // For UUPS proxies, this would typically be a call to the proxy's upgradeTo function
+        // This is a simplified example and would need to be adapted to the actual proxy implementation
+        // In a real implementation, you would need to use the correct interface or method to upgrade the proxy
         
-        return true;
+        // Example (commented out as it depends on the actual proxy implementation):
+        // IProxyAdmin(proxyAdmin).upgrade(strategy, newImplementation);
+        // or
+        // ITransparentUpgradeableProxy(strategy).upgradeTo(newImplementation);
+        
+        // Update our tracking
+        _implementationStrategies[oldImplementation].remove(strategy);
+        _implementationStrategies[newImplementation].add(strategy);
+        
+        emit StrategyImplementationUpdated(strategy, oldImplementation, newImplementation);
     }
     
     /**
-     * @notice Claims rewards from the specified strategy for multiple users at once
-     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
-     * @param strategy The address of the strategy to claim rewards from
-     * @param wallets Array of wallet addresses to claim rewards for
+     * @notice Gets all strategies for a user
+     * @param user The address of the user
+     * @return An array of strategy addresses
      */
-    function claimRewardsForUsers(
-        address strategy,
-        address[] calldata wallets
-    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
-        // Validate strategy exists
-        require(_strategies.contains(strategy), "Strategy not found");
+    function getUserStrategies(address user) external view returns (address[] memory) {
+        uint256 length = _userStrategies[user].length();
+        address[] memory strategies = new address[](length);
         
-        // Get the strategy storage
-        address storage_ = _strategyStorage[strategy];
-        require(storage_ != address(0), "Strategy storage not set");
-        
-        // Validate wallets and claim rewards
-        for (uint256 i = 0; i < wallets.length; i++) {
-            address wallet = wallets[i];
-            
-            // Validate wallet is managed by Mamo
-            require(_userWallets.contains(wallet), "Wallet not managed by Mamo");
-            
-            // Claim rewards
-            IUserWallet(wallet).claimRewards(strategy);
+        for (uint256 i = 0; i < length; i++) {
+            strategies[i] = _userStrategies[user].at(i);
         }
         
-        emit RewardsClaimed(strategy, wallets);
+        return strategies;
+    }
+    
+    /**
+     * @notice Gets the implementation address for a strategy
+     * @param strategy The address of the strategy (proxy)
+     * @return implementation The address of the implementation
+     */
+    function getStrategyImplementation(address strategy) public view returns (address implementation) {
+        // Read the implementation address from the EIP-1967 storage slot
+        assembly {
+            implementation := sload(add(strategy, _IMPLEMENTATION_SLOT))
+        }
+    }
+    
+    /**
+     * @notice Gets all strategies with a specific implementation
+     * @param implementation The address of the implementation
+     * @return An array of strategy addresses
+     */
+    function getStrategiesByImplementation(address implementation) external view returns (address[] memory) {
+        uint256 length = _implementationStrategies[implementation].length();
+        address[] memory strategies = new address[](length);
+        
+        for (uint256 i = 0; i < length; i++) {
+            strategies[i] = _implementationStrategies[implementation].at(i);
+        }
+        
+        return strategies;
+    }
+    
+    /**
+     * @notice Checks if an implementation is whitelisted
+     * @param implementation The address of the implementation to check
+     * @return True if the implementation is whitelisted, false otherwise
+     */
+    function isImplementationWhitelisted(address implementation) public view returns (bool) {
+        return _whitelistedImplementations[implementation];
+    }
+    
+    /**
+     * @notice Checks if an address is a registered strategy
+     * @param strategy The address to check
+     * @return True if the address is a registered strategy, false otherwise
+     */
+    function isStrategy(address strategy) external view returns (bool) {
+        return _allStrategies.contains(strategy);
+    }
+    
+    /**
+     * @notice Updates positions for strategies with a specific implementation
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
+     * @param implementation The address of the implementation
+     * @param strategies Array of strategy addresses to update
+     * @param splitA The first split parameter (basis points)
+     * @param splitB The second split parameter (basis points)
+     */
+    function updateStrategiesPositions(
+        address implementation,
+        address[] calldata strategies,
+        uint256 splitA,
+        uint256 splitB
+    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
+        for (uint256 i = 0; i < strategies.length; i++) {
+            address strategy = strategies[i];
+            
+            // Verify the strategy is registered
+            if (!_allStrategies.contains(strategy)) {
+                emit StrategyUpdateFailed(strategy, "Strategy not registered");
+                continue;
+            }
+            
+            // Verify the strategy has the correct implementation
+            if (getStrategyImplementation(strategy) != implementation) {
+                emit StrategyUpdateFailed(strategy, "Implementation mismatch");
+                continue;
+            }
+            
+            // Update the strategy position
+            try IStrategy(strategy).updatePosition(splitA, splitB) {
+                // Success, do nothing
+            } catch Error(string memory reason) {
+                emit StrategyUpdateFailed(strategy, reason);
+            } catch {
+                emit StrategyUpdateFailed(strategy, "Unknown error");
+            }
+        }
+        
+        emit StrategiesUpdated(implementation, strategies, splitA, splitB);
+    }
+    
+    /**
+     * @notice Claims rewards for strategies with a specific implementation
+     * @dev Only callable by accounts with the MAMO_SERVICE_ROLE
+     * @param implementation The address of the implementation
+     * @param strategies Array of strategy addresses to claim rewards for
+     */
+    function claimStrategiesRewards(
+        address implementation,
+        address[] calldata strategies
+    ) external whenNotPaused onlyRole(MAMO_SERVICE_ROLE) {
+        for (uint256 i = 0; i < strategies.length; i++) {
+            address strategy = strategies[i];
+            
+            // Verify the strategy is registered
+            if (!_allStrategies.contains(strategy)) {
+                emit StrategyUpdateFailed(strategy, "Strategy not registered");
+                continue;
+            }
+            
+            // Verify the strategy has the correct implementation
+            if (getStrategyImplementation(strategy) != implementation) {
+                emit StrategyUpdateFailed(strategy, "Implementation mismatch");
+                continue;
+            }
+            
+            // Claim rewards
+            try IStrategy(strategy).claimRewards() {
+                // Success, do nothing
+            } catch Error(string memory reason) {
+                emit StrategyUpdateFailed(strategy, reason);
+            } catch {
+                emit StrategyUpdateFailed(strategy, "Unknown error");
+            }
+        }
+        
+        emit RewardsClaimed(implementation, strategies);
     }
     
     /**
