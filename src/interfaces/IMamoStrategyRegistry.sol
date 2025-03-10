@@ -7,6 +7,26 @@ pragma solidity 0.8.28;
  */
 interface IMamoStrategyRegistry {
     /**
+     * @notice Pauses the contract
+     * @dev Only callable by accounts with the GUARDIAN_ROLE
+     */
+    function pause() external;
+    
+    /**
+     * @notice Unpauses the contract
+     * @dev Only callable by accounts with the GUARDIAN_ROLE
+     */
+    function unpause() external;
+    
+    /**
+     * @notice Adds an implementation to the whitelist with its strategy type
+     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @param implementation The address of the implementation to whitelist
+     * @param strategyTypeId The bytes32 representation of the strategy type
+     */
+    function whitelistImplementation(address implementation, bytes32 strategyTypeId) external;
+    
+    /**
      * @notice Checks if an implementation is whitelisted
      * @param implementation The address of the implementation to check
      * @return True if the implementation is whitelisted, false otherwise
@@ -28,6 +48,37 @@ interface IMamoStrategyRegistry {
     function getLatestImplementation(bytes32 strategyType) external view returns (address);
     
     /**
+     * @notice Adds a strategy for a user
+     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @param user The address of the user
+     * @param strategy The address of the strategy to add
+     */
+    function addStrategy(address user, address strategy) external;
+    
+    /**
+     * @notice Removes a strategy for a user
+     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @param user The address of the user
+     * @param strategy The address of the strategy to remove
+     */
+    function removeStrategy(address user, address strategy) external;
+    
+    /**
+     * @notice Updates the implementation of a strategy
+     * @dev Only callable by the user who owns the strategy
+     * @param strategy The address of the strategy to update
+     * @param newImplementation The address of the new implementation
+     */
+    function upgradeStrategy(address strategy, address newImplementation) external;
+    
+    /**
+     * @notice Gets all strategies for a user
+     * @param user The address of the user
+     * @return An array of strategy addresses
+     */
+    function getUserStrategies(address user) external view returns (address[] memory);
+    
+    /**
      * @notice Checks if a strategy belongs to a user
      * @param user The address of the user
      * @param strategy The address of the strategy
@@ -41,11 +92,4 @@ interface IMamoStrategyRegistry {
      * @return implementation The address of the implementation
      */
     function getStrategyImplementation(address strategy) external view returns (address);
-    
-    /**
-     * @notice Checks if an address is a registered strategy
-     * @param strategy The address to check
-     * @return True if the address is a registered strategy, false otherwise
-     */
-    function isStrategy(address strategy) external view returns (bool);
 }
