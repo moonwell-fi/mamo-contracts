@@ -41,7 +41,7 @@ This approach ensures that strategies with the same token interactions are group
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation, string memory strategyTypeString) external`: Adds an implementation to the whitelist with its strategy type and sets it as the latest implementation for that type. Only callable by accounts with the BACKEND_ROLE.
+- `function whitelistImplementation(address implementation, bytes32 strategyTypeId) external`: Adds an implementation to the whitelist with its strategy type and sets it as the latest implementation for that type. Only callable by accounts with the BACKEND_ROLE.
 
 - `function getImplementationType(address implementation) external view returns (bytes32)`: Gets the strategy type for a implementation.
 
