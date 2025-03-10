@@ -7,4 +7,5 @@ interface IMToken {
     function redeem(uint256 amount) external returns(uint256);
     function mint(uint256 amount) external returns(uint256);
     function balanceOfUnderlying(address owner) external returns(uint256);
+    function balanceOf(address owner) external returns(uint256);
 }

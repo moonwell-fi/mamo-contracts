@@ -37,6 +37,9 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     IERC4626 public metaMorphoVault;
     IDEXRouter public dexRouter;
     IERC20 public usdc;
+
+    uint256 public splitMToken;
+    uint256 public splitVault;
     
     // Reward tokens
     EnumerableSet.AddressSet private _rewardTokens;
@@ -156,30 +159,21 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         // Step 1: Withdraw everything from both protocols
         
         // Withdraw from Moonwell
-        uint256 moonwellBalance = getMoonwellBalance();
-        if (moonwellBalance > 0) {
-            // Get the mToken balance
-            uint256 mTokenBalance = IERC20(address(moonwellUSDC)).balanceOf(address(this));
-            if (mTokenBalance > 0) {
-                // Redeem all mTokens for USDC
-                moonwellUSDC.redeem(mTokenBalance);
-            }
+        uint256 mTokenBalance = IERC20(address(moonwellUSDC)).balanceOf(address(this));
+        if (mTokenBalance > 0) {
+            require(moonwellUSDC.redeem(mTokenBalance) == 0, "Failed to redeem mUSDC");
         }
         
         // Withdraw from MetaMorpho
-        uint256 metaMorphoBalance = getMetaMorphoBalance();
-        if (metaMorphoBalance > 0) {
-            // Get the vault share balance
-            uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
-            if (shareBalance > 0) {
-                // Redeem all shares for USDC
-                metaMorphoVault.redeem(shareBalance, address(this), address(this));
-            }
+        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
+        if (vaultBalance > 0) {
+            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
         }
         
         // Step 2: Get the total USDC balance now in the contract
         uint256 totalUSDCBalance = usdc.balanceOf(address(this));
         
+        // If there's no balance, nothing to rebalance
         require(totalUSDCBalance > 0, "Nothing to rebalance");
         
         // Step 3: Calculate target amounts for each protocol
@@ -204,35 +198,7 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         emit PositionUpdated(splitA, splitB);
     }
 
-    /**
-     * @notice Claims all available rewards from both Moonwell and Morpho and converts them to USDC
-     * @dev Callable by accounts with either OWNER_ROLE or BACKEND_ROLE
-     */
-    function claimRewards() external {
-        require(
-            hasRole(OWNER_ROLE, msg.sender) || hasRole(BACKEND_ROLE, msg.sender),
-            "Only owner or backend can claim rewards"
-        );
 
-        // Get initial USDC balance
-        uint256 initialUSDCBalance = usdc.balanceOf(address(this));
-        
-        // Claim rewards from Moonwell
-        moonwellComptroller.claimReward();
-        
-        // MetaMorpho rewards claiming would go here if applicable
-        
-        // Convert rewards to USDC using the DEX router
-        _swapRewardsToUSDC();
-        
-        // Calculate the amount of USDC gained from rewards
-        uint256 finalUSDCBalance = usdc.balanceOf(address(this));
-        uint256 rewardsAmount = finalUSDCBalance > initialUSDCBalance ? 
-                               finalUSDCBalance - initialUSDCBalance : 0;
-        
-        emit RewardsClaimed(rewardsAmount);
-    }
-    
     /**
      * @notice Swaps reward tokens to USDC
      * @dev Internal function to convert reward tokens to USDC
@@ -324,22 +290,5 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
 
         // TODO check vault balance decimals 
         return vaultBalance + moonwellUSDC.balanceOfUnderlying(address(this)) + usdc.balanceOf(address(this));
-    }
-    
-    /**
-     * @notice Gets the balance of USDC in Moonwell
-     * @return The balance in USDC
-     */
-    function getMoonwellBalance() public returns (uint256) {
-        return moonwellUSDC.balanceOfUnderlying(address(this));
-    }
-    
-    /**
-     * @notice Gets the balance of USDC in MetaMorpho
-     * @return The balance in USDC
-     */
-    function getMetaMorphoBalance() public view returns (uint256) {
-        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
-        return metaMorphoVault.convertToAssets(shareBalance);
     }
 }
