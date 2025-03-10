@@ -12,14 +12,14 @@ interface IMamoCore {
      * @return True if the wallet is managed by Mamo, false otherwise
      */
     function isUserWallet(address wallet) external view returns (bool);
-    
+
     /**
      * @notice Checks if a strategy is valid
      * @param strategy The address of the strategy to check
      * @return True if the strategy is valid, false otherwise
      */
     function isValidStrategy(address strategy) external view returns (bool);
-    
+
     /**
      * @notice Gets the storage address for a strategy
      * @param strategy The address of the strategy
