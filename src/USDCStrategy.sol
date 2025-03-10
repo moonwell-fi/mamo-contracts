@@ -281,9 +281,14 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
 
     /**
      * @notice Harvests reward tokens by swapping them to USDC and depositing according to the current split
-     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @dev Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE
      */
-    function harvestRewards() external onlyRole(BACKEND_ROLE) {
+    function harvestRewards() external {
+        require(
+            hasRole(BACKEND_ROLE, msg.sender) || hasRole(OWNER_ROLE, msg.sender),
+            "Caller must have BACKEND_ROLE or OWNER_ROLE"
+        );
+        
         uint256 totalUsdcHarvested = 0;
         uint256 rewardTokenCount = _rewardTokens.length();
         
