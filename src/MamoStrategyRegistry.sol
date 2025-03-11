@@ -79,6 +79,39 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         _grantRole(GUARDIAN_ROLE, msg.sender);
     }
 
+    // ==================== PERMISSIONLESS FUNCTIONS ====================
+
+    /**
+     * @notice Updates the implementation of a strategy
+     * @dev Only callable by the user who owns the strategy
+     * @param strategy The address of the strategy to update
+     * @param newImplementation The address of the new implementation
+     */
+    function upgradeStrategy(address strategy, address newImplementation) external whenNotPaused {
+        // Check if the caller is the owner of the strategy
+        require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
+
+        // Check if the new implementation is whitelisted
+        require(whitelistedImplementations[newImplementation], "New implementation not whitelisted");
+
+        // Get the old implementation address
+        address oldImplementation = getStrategyImplementation(strategy);
+
+        // Check if the new implementation has the same strategy type
+        require(
+            implementationToStrategyType[oldImplementation] == implementationToStrategyType[newImplementation],
+            "New implementation has different strategy type"
+        );
+
+        // Update the implementation through the proxy's upgrade mechanism
+        // Call upgradeToAndCall with empty data to just upgrade the implementation
+        IUUPSUpgradeable(strategy).upgradeToAndCall(newImplementation, new bytes(0));
+
+        emit StrategyImplementationUpdated(strategy, oldImplementation, newImplementation);
+    }
+
+    // ==================== ROLE-RESTRICTED FUNCTIONS ====================
+
     /**
      * @notice Pauses the contract in case of emergency
      * @dev Only callable by accounts with the GUARDIAN_ROLE
@@ -112,24 +145,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         latestImplementationByType[strategyTypeId] = implementation;
 
         emit ImplementationWhitelisted(implementation, strategyTypeId);
-    }
-
-    /**
-     * @notice Gets the strategy type for an implementation
-     * @param implementation The address of the implementation
-     * @return The strategy type as a bytes32 value
-     */
-    function getImplementationType(address implementation) external view returns (bytes32) {
-        return implementationToStrategyType[implementation];
-    }
-
-    /**
-     * @notice Gets the latest implementation for a strategy type
-     * @param strategyType The strategy type as a bytes32 value
-     * @return The address of the latest implementation for the strategy type
-     */
-    function getLatestImplementation(bytes32 strategyType) external view returns (address) {
-        return latestImplementationByType[strategyType];
     }
 
     /**
@@ -168,32 +183,39 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Updates the implementation of a strategy
-     * @dev Only callable by the user who owns the strategy
-     * @param strategy The address of the strategy to update
-     * @param newImplementation The address of the new implementation
+     * @notice Removes a strategy for a user
+     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @param user The address of the user
+     * @param strategy The address of the strategy to remove
      */
-    function upgradeStrategy(address strategy, address newImplementation) external whenNotPaused {
-        // Check if the caller is the owner of the strategy
-        require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
+    function removeStrategy(address user, address strategy) external whenNotPaused onlyRole(BACKEND_ROLE) {
+        // Check if the strategy exists for the user
+        require(_userStrategies[user].contains(strategy), "Strategy not found for user");
 
-        // Check if the new implementation is whitelisted
-        require(whitelistedImplementations[newImplementation], "New implementation not whitelisted");
+        // Remove the strategy
+        _userStrategies[user].remove(strategy);
 
-        // Get the old implementation address
-        address oldImplementation = getStrategyImplementation(strategy);
+        emit StrategyRemoved(user, strategy);
+    }
 
-        // Check if the new implementation has the same strategy type
-        require(
-            implementationToStrategyType[oldImplementation] == implementationToStrategyType[newImplementation],
-            "New implementation has different strategy type"
-        );
+    // ==================== GETTER FUNCTIONS ====================
 
-        // Update the implementation through the proxy's upgrade mechanism
-        // Call upgradeToAndCall with empty data to just upgrade the implementation
-        IUUPSUpgradeable(strategy).upgradeToAndCall(newImplementation, new bytes(0));
+    /**
+     * @notice Gets the strategy type for an implementation
+     * @param implementation The address of the implementation
+     * @return The strategy type as a bytes32 value
+     */
+    function getImplementationType(address implementation) external view returns (bytes32) {
+        return implementationToStrategyType[implementation];
+    }
 
-        emit StrategyImplementationUpdated(strategy, oldImplementation, newImplementation);
+    /**
+     * @notice Gets the latest implementation for a strategy type
+     * @param strategyType The strategy type as a bytes32 value
+     * @return The address of the latest implementation for the strategy type
+     */
+    function getLatestImplementation(bytes32 strategyType) external view returns (address) {
+        return latestImplementationByType[strategyType];
     }
 
     /**
