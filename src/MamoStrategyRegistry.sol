@@ -24,7 +24,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     // Role definitions
     /// @notice Role identifier for guardians who can pause/unpause the contract
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
-    
+
     /// @notice Role identifier for the backend that can manage strategies
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
@@ -44,27 +44,27 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     // Events
     /// @notice Emitted when a strategy is added for a user
     event StrategyAdded(address indexed user, address strategy, address implementation);
-    
+
     /// @notice Emitted when a strategy is removed for a user
     event StrategyRemoved(address indexed user, address strategy);
-    
+
     /// @notice Emitted when a strategy's implementation is updated
     event StrategyImplementationUpdated(
         address indexed strategy, address indexed oldImplementation, address indexed newImplementation
     );
-    
+
     /// @notice Emitted when an implementation is whitelisted
     event ImplementationWhitelisted(address indexed implementation, bytes32 indexed strategyType);
-    
+
     /// @notice Emitted when an implementation is removed from the whitelist
     event ImplementationRemovedFromWhitelist(address indexed implementation);
-    
+
     /// @notice Emitted when strategies are updated
     event StrategiesUpdated(address indexed implementation, address[] strategies, uint256 splitA, uint256 splitB);
-    
+
     /// @notice Emitted when rewards are claimed
     event RewardsClaimed(address indexed implementation, address[] strategies);
-    
+
     /// @notice Emitted when a strategy update fails
     event StrategyUpdateFailed(address indexed strategy, string reason);
 
@@ -166,15 +166,18 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Check the strategy roles are correct
         // Check that the strategy has the correct roles set up
         IAccessControlEnumerable strategyContract = IAccessControlEnumerable(strategy);
-        
+
         // Check owner role is set to user
         require(strategyContract.hasRole(keccak256("OWNER_ROLE"), user), "Owner role not set correctly");
-        
+
         // Check upgrader role is set to this registry
         require(strategyContract.hasRole(keccak256("UPGRADER_ROLE"), address(this)), "Upgrader role not set correctly");
-        
+
         // Check backend role is set to our backend
-        require(strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember("BACKEND_ROLE", 0)), "Backend role not set correctly");
+        require(
+            strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember("BACKEND_ROLE", 0)),
+            "Backend role not set correctly"
+        );
 
         // Add the strategy to the user's strategies
         _userStrategies[user].add(strategy);

@@ -29,35 +29,35 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     // Role definitions
     // @notice Role identifier for the strategy owner (the user)
     bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
-    
+
     // @notice Role identifier for the upgrader (Mamo Strategy Registry)
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
-    
+
     // @notice Role identifier for the backend role
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
     // State variables
     // @notice Reference to the Mamo Strategy Registry contract
     IMamoStrategyRegistry public mamoStrategyRegistry;
-    
+
     // @notice Reference to the Moonwell Comptroller contract
     IComptroller public moonwellComptroller;
-    
+
     // @notice Reference to the Moonwell USDC mToken contract
     IMToken public moonwellUSDC;
-    
+
     // @notice Reference to the MetaMorpho Vault contract
     IERC4626 public metaMorphoVault;
-    
+
     // @notice Reference to the DEX router contract
     IDEXRouter public dexRouter;
-    
+
     // @notice Reference to the USDC token contract
     IERC20 public usdc;
 
     // @notice Percentage of funds allocated to Moonwell mToken in basis points
     uint256 public splitMToken;
-    
+
     // @notice Percentage of funds allocated to MetaMorpho Vault in basis points
     uint256 public splitVault;
 
@@ -67,22 +67,22 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
     // Events
     // @notice Emitted when funds are deposited into the strategy
     event Deposit(address indexed asset, uint256 amount);
-    
+
     // @notice Emitted when funds are withdrawn from the strategy
     event Withdraw(address indexed asset, uint256 amount);
-    
+
     // @notice Emitted when the position split is updated
     event PositionUpdated(uint256 splitA, uint256 splitB);
-    
+
     // @notice Emitted when rewards are harvested
     event RewardsHarvested(uint256 amount);
-    
+
     // @notice Emitted when the DEX router is updated
     event DexRouterUpdated(address indexed oldDexRouter, address indexed newDexRouter);
-    
+
     // @notice Emitted when a reward token is added or removed
     event RewardTokenUpdated(address indexed token, bool added);
-    
+
     // @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
@@ -242,7 +242,7 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         splitMToken = splitA;
         splitVault = splitB;
 
-        // Deposit into MetaMorpho Vault and Moonwell MToken after update split parameters 
+        // Deposit into MetaMorpho Vault and Moonwell MToken after update split parameters
         depositInternal(totalUSDCBalance);
 
         emit PositionUpdated(splitA, splitB);
@@ -290,29 +290,29 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
             hasRole(BACKEND_ROLE, msg.sender) || hasRole(OWNER_ROLE, msg.sender),
             "Caller must have BACKEND_ROLE or OWNER_ROLE"
         );
-        
+
         uint256 totalUsdcHarvested = 0;
         uint256 rewardTokenCount = _rewardTokens.length();
-        
+
         // Iterate through all reward tokens
         for (uint256 i = 0; i < rewardTokenCount; i++) {
             address rewardToken = _rewardTokens.at(i);
-            
+
             uint256 rewardBalance = IERC20(rewardToken).balanceOf(address(this));
-            
+
             // Skip if no balance
             if (rewardBalance == 0) {
                 continue;
             }
-            
+
             // Approve DEX router to spend reward tokens
             IERC20(rewardToken).approve(address(dexRouter), rewardBalance);
-            
+
             // Set up the swap path: reward token -> USDC
             address[] memory path = new address[](2);
             path[0] = rewardToken;
             path[1] = address(usdc);
-            
+
             // Swap reward tokens for USDC
             uint256[] memory amounts = dexRouter.swapExactTokensForTokens(
                 rewardBalance,
@@ -321,11 +321,11 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
                 address(this),
                 block.timestamp + 1800 // 30 minute deadline
             );
-            
+
             // Add the USDC received to our total
             totalUsdcHarvested += amounts[amounts.length - 1];
         }
-        
+
         // If we harvested any USDC, deposit it according to the current split
         if (totalUsdcHarvested > 0) {
             depositInternal(totalUsdcHarvested);
