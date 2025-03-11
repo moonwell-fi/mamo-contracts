@@ -12,41 +12,66 @@ import {IUUPSUpgradeable} from "./interfaces/IUUPSUpgradeable.sol";
 /**
  * @title MamoStrategyRegistry
  * @notice This contract is responsible for tracking user strategies, deploying new strategies, and coordinating operations across strategies
+ * @dev Uses AccessControlEnumerable for role-based access control and Pausable for emergency stops
  */
 contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     using EnumerableSet for EnumerableSet.AddressSet;
 
-    // EIP-1967 implementation slot
+    // Constants
+    /// @notice EIP-1967 implementation slot for accessing the implementation address of a proxy
     bytes32 private constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
     // Role definitions
+    /// @notice Role identifier for guardians who can pause/unpause the contract
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    
+    /// @notice Role identifier for the backend that can manage strategies
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
-    // Set of all strategy addresses for each user
+    // State variables
+    /// @notice Set of all strategy addresses for each user
     mapping(address => EnumerableSet.AddressSet) private _userStrategies;
 
-    // Whitelisted implementations
+    /// @notice Mapping of whitelisted implementation addresses
     mapping(address => bool) public whitelistedImplementations;
 
-    // Maps strategy types to their latest implementation
+    /// @notice Maps strategy types to their latest implementation
     mapping(bytes32 => address) public latestImplementationByType;
 
-    // Maps implementations to their strategy type
+    /// @notice Maps implementations to their strategy type
     mapping(address => bytes32) public implementationToStrategyType;
 
     // Events
+    /// @notice Emitted when a strategy is added for a user
     event StrategyAdded(address indexed user, address strategy, address implementation);
+    
+    /// @notice Emitted when a strategy is removed for a user
     event StrategyRemoved(address indexed user, address strategy);
+    
+    /// @notice Emitted when a strategy's implementation is updated
     event StrategyImplementationUpdated(
         address indexed strategy, address indexed oldImplementation, address indexed newImplementation
     );
+    
+    /// @notice Emitted when an implementation is whitelisted
     event ImplementationWhitelisted(address indexed implementation, bytes32 indexed strategyType);
+    
+    /// @notice Emitted when an implementation is removed from the whitelist
     event ImplementationRemovedFromWhitelist(address indexed implementation);
+    
+    /// @notice Emitted when strategies are updated
     event StrategiesUpdated(address indexed implementation, address[] strategies, uint256 splitA, uint256 splitB);
+    
+    /// @notice Emitted when rewards are claimed
     event RewardsClaimed(address indexed implementation, address[] strategies);
+    
+    /// @notice Emitted when a strategy update fails
     event StrategyUpdateFailed(address indexed strategy, string reason);
 
+    /**
+     * @notice Constructor that sets up initial roles
+     * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the deployer
+     */
     constructor() {
         // Set up roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -55,16 +80,18 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Pauses the contract
+     * @notice Pauses the contract in case of emergency
      * @dev Only callable by accounts with the GUARDIAN_ROLE
+     * @dev When paused, most functions that modify state will revert
      */
     function pause() external onlyRole(GUARDIAN_ROLE) whenNotPaused {
         _pause();
     }
 
     /**
-     * @notice Unpauses the contract
+     * @notice Unpauses the contract after an emergency is resolved
      * @dev Only callable by accounts with the GUARDIAN_ROLE
+     * @dev Allows normal operation to resume after the contract was paused
      */
     function unpause() external onlyRole(GUARDIAN_ROLE) whenPaused {
         _unpause();
