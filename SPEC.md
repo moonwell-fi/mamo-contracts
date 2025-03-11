@@ -49,11 +49,19 @@ This approach ensures that strategies with the same token interactions are group
 
 - `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function is pausable.
 
-- `function upgradeStrategy(address strategy, address newImplementation) external`: Updates the implementation of a strategy. Only callable by the user. The new implementation must be whitelisted and of the same strategy type as the current implementation.
+- `function upgradeStrategy(address strategy, address newImplementation) external`: Updates the implementation of a strategy. Only callable by the user. The new implementation must be whitelisted and of the same strategy type as the current implementation. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
 
 - `function getUserStrategies(address user) external view returns (address[] memory)`: Gets all strategies for a user.
 
 - `function isUserStrategy(address user, address strategy) external view returns (bool)`: Checks if a strategy belongs to a user.
+
+## Interfaces
+
+### IUUPSUpgradeable
+
+This interface defines the methods that a UUPS (Universal Upgradeable Proxy Standard) proxy implementation should expose.
+
+- `function upgradeToAndCall(address newImplementation, bytes memory data) external payable`: Upgrades the implementation to `newImplementation` and calls a function on the new implementation. This function is only callable through the proxy, not through the implementation.
 
 ## USDC Strategy
 

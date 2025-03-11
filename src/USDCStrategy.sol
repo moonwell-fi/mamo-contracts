@@ -210,6 +210,8 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         emit TokenRecovered(token, to, amount);
     }
 
+    // add recover ETH
+
     // ==================== BACKEND FUNCTIONS ====================
 
     /**
@@ -240,7 +242,7 @@ contract USDCStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable
         splitMToken = splitA;
         splitVault = splitB;
 
-        // Step 3: Deposit according to the new split
+        // Deposit into MetaMorpho Vault and Moonwell MToken after update split parameters 
         depositInternal(totalUSDCBalance);
 
         emit PositionUpdated(splitA, splitB);

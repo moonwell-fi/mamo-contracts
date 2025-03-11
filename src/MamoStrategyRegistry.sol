@@ -2,11 +2,12 @@
 pragma solidity 0.8.28;
 
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
+import {IUUPSUpgradeable} from "./interfaces/IUUPSUpgradeable.sol";
 
 /**
  * @title MamoStrategyRegistry
@@ -120,26 +121,23 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(implementation != address(0), "Invalid implementation");
         require(whitelistedImplementations[implementation], "Implementation not whitelisted");
 
+        // Check the strategy roles are correct
+        // Check that the strategy has the correct roles set up
+        IAccessControlEnumerable strategyContract = IAccessControlEnumerable(strategy);
+        
+        // Check owner role is set to user
+        require(strategyContract.hasRole(keccak256("OWNER_ROLE"), user), "Owner role not set correctly");
+        
+        // Check upgrader role is set to this registry
+        require(strategyContract.hasRole(keccak256("UPGRADER_ROLE"), address(this)), "Upgrader role not set correctly");
+        
+        // Check backend role is set to our backend
+        require(strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember("BACKEND_ROLE", 0)), "Backend role not set correctly");
+
         // Add the strategy to the user's strategies
         _userStrategies[user].add(strategy);
 
         emit StrategyAdded(user, strategy, implementation);
-    }
-
-    /**
-     * @notice Removes a strategy for a user
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param user The address of the user
-     * @param strategy The address of the strategy to remove
-     */
-    function removeStrategy(address user, address strategy) external whenNotPaused onlyRole(BACKEND_ROLE) {
-        // Check if the strategy exists for the user
-        require(_userStrategies[user].contains(strategy), "Strategy not found for user");
-
-        // Remove the strategy
-        _userStrategies[user].remove(strategy);
-
-        emit StrategyRemoved(user, strategy);
     }
 
     /**
@@ -165,12 +163,8 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         );
 
         // Update the implementation through the proxy's upgrade mechanism
-        // For UUPS proxies, this would typically be a call to the proxy's upgradeTo function
-        // This is a simplified example and would need to be adapted to the actual proxy implementation
-        // In a real implementation, you would need to use the correct interface or method to upgrade the proxy
-
-        // Example (commented out as it depends on the actual proxy implementation):
-        // IUUPSUpgradeable(strategy).upgradeTo(newImplementation);
+        // Call upgradeToAndCall with empty data to just upgrade the implementation
+        IUUPSUpgradeable(strategy).upgradeToAndCall(newImplementation, new bytes(0));
 
         emit StrategyImplementationUpdated(strategy, oldImplementation, newImplementation);
     }
