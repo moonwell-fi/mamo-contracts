@@ -63,9 +63,9 @@ This interface defines the methods that a UUPS (Universal Upgradeable Proxy Stan
 
 - `function upgradeToAndCall(address newImplementation, bytes memory data) external payable`: Upgrades the implementation to `newImplementation` and calls a function on the new implementation. This function is only callable through the proxy, not through the implementation.
 
-## USDC Strategy
+## ERC20MoonwellMorphoStrategy
 
-A specific implementation of a Strategy Contract for USDC that splits deposits between Moonwell core market and Moonwell Vaults. This contract is designed to be used as an implementation for proxies.
+A generic implementation of a Strategy Contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults. This contract is designed to be used as an implementation for proxies.
 
 ### Storage
 
@@ -75,10 +75,10 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 - `bytes32 public constant BACKEND_ROLE`: Role for the Mamo Backend that can update positions
 - `IMamoStrategyRegistry public mamoStrategyRegistry`: Reference to the Mamo Strategy Registry contract
 - `IComptroller public moonwellComptroller`: The Moonwell Comptroller contract
-- `IMToken public moonwellUSDC`: The Moonwell USDC mToken contract
+- `IMToken public mToken`: The Moonwell mToken contract
 - `IERC4626 public metaMorphoVault`: The MetaMorpho Vault contract
 - `IDEXRouter public dexRouter`: The DEX router for swapping reward tokens
-- `IERC20 public usdc`: The USDC token
+- `IERC20 public token`: The ERC20 token
 - `uint256 public constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
 - `uint256 public splitMToken`: Percentage of funds allocated to Moonwell mToken in basis points
 - `uint256 public splitVault`: Percentage of funds allocated to MetaMorpho Vault in basis points
@@ -98,15 +98,15 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 
 - `function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE)`: Updates the position in the strategy. Only callable by accounts with the BACKEND_ROLE.
 
-- `function updateRewardToken(address token, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. USDC cannot be added as a reward token. Only callable by accounts with the BACKEND_ROLE.
+- `function updateRewardToken(address rewardToken, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. The strategy token cannot be added as a reward token. Only callable by accounts with the BACKEND_ROLE.
 
-- `function harvestRewards() external`: Harvests reward tokens by swapping them to USDC and depositing according to the current split. Emits a RewardsHarvested event. Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE.
+- `function harvestRewards() external`: Harvests reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsHarvested event. Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE.
 
 - `function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE)`: Internal function that authorizes an upgrade to a new implementation. Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry). This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 
 - `function recoverERC20(address token, address to, uint256 amount) external onlyRole(OWNER_ROLE)`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the OWNER_ROLE.
 
-- `function getTotalBalance() public returns (uint256)`: Gets the total balance of USDC across both protocols.
+- `function getTotalBalance() public returns (uint256)`: Gets the total balance of tokens across both protocols.
 
 ## System Flow
 
@@ -115,9 +115,9 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 3. User deposits funds into their strategy.
 4. Mamo Backend reads Deposit events and calls updateUserPosition to manage the strategy.
 5. User or Mamo Backend can call claimRewards to harvest rewards from the strategy.
-6. When USDC balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
+6. When token balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
 7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
-8. If Mamo wants to upgrade a strategy (example, deposit USDC into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
+8. If Mamo wants to upgrade a strategy (example, deposit tokens into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
 
 ## Security Considerations
 
