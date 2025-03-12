@@ -6,6 +6,11 @@ This document outlines the specification for the Mamo contracts, which enable us
 
 This contract is responsible for tracking user strategies, deploying new strategies, and coordinating operations across strategies. It inherits from the AccessControlEnumerable and Pausable contracts from OpenZeppelin and uses the EnumerableSet library for efficient set operations. The contract is upgradeable through a UUPS (Universal Upgradeable Proxy Standard) pattern, with role-based access control.
 
+The contract is initialized with three distinct roles that are passed as constructor parameters:
+- `admin`: Granted the DEFAULT_ADMIN_ROLE, which can grant and revoke other roles
+- `backend`: Granted the BACKEND_ROLE, which can manage strategies
+- `guardian`: Granted the GUARDIAN_ROLE, which can pause and unpause the contract
+
 ### Roles
 
 - `DEFAULT_ADMIN_ROLE`: The default admin role that can grant and revoke other roles, and is responsible for contract upgrades

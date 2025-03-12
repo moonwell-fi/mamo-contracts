@@ -70,13 +70,20 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
     /**
      * @notice Constructor that sets up initial roles
-     * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the deployer
+     * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the specified addresses
+     * @param admin The address to grant the DEFAULT_ADMIN_ROLE to
+     * @param backend The address to grant the BACKEND_ROLE to
+     * @param guardian The address to grant the GUARDIAN_ROLE to
      */
-    constructor() {
+    constructor(address admin, address backend, address guardian) {
+        require(admin != address(0), "Invalid admin address");
+        require(backend != address(0), "Invalid backend address");
+        require(guardian != address(0), "Invalid guardian address");
+        
         // Set up roles
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(BACKEND_ROLE, msg.sender);
-        _grantRole(GUARDIAN_ROLE, msg.sender);
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(BACKEND_ROLE, backend);
+        _grantRole(GUARDIAN_ROLE, guardian);
     }
 
     // ==================== PERMISSIONLESS FUNCTIONS ====================
