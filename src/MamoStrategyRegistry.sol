@@ -82,32 +82,34 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     // ==================== PERMISSIONLESS FUNCTIONS ====================
 
     /**
-     * @notice Updates the implementation of a strategy
+     * @notice Updates the implementation of a strategy to the latest implementation of the same type
      * @dev Only callable by the user who owns the strategy
      * @param strategy The address of the strategy to update
-     * @param newImplementation The address of the new implementation
      */
-    function upgradeStrategy(address strategy, address newImplementation) external whenNotPaused {
+    function upgradeStrategy(address strategy) external whenNotPaused {
         // Check if the caller is the owner of the strategy
         require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
-
-        // Check if the new implementation is whitelisted
-        require(whitelistedImplementations[newImplementation], "New implementation not whitelisted");
 
         // Get the old implementation address
         address oldImplementation = getStrategyImplementation(strategy);
 
-        // Check if the new implementation has the same strategy type
-        require(
-            implementationToStrategyType[oldImplementation] == implementationToStrategyType[newImplementation],
-            "New implementation has different strategy type"
-        );
+        // Get the strategy type
+        bytes32 strategyType = implementationToStrategyType[oldImplementation];
+
+        // Get the latest implementation for this strategy type
+        address latestImplementation = latestImplementationByType[strategyType];
+
+        // Ensure we're not already on the latest implementation
+        require(oldImplementation != latestImplementation, "Already on latest implementation");
+
+        // Check if the latest implementation is whitelisted (should always be true, but checking for safety)
+        require(whitelistedImplementations[latestImplementation], "Latest implementation not whitelisted");
 
         // Update the implementation through the proxy's upgrade mechanism
         // Call upgradeToAndCall with empty data to just upgrade the implementation
-        IUUPSUpgradeable(strategy).upgradeToAndCall(newImplementation, new bytes(0));
+        IUUPSUpgradeable(strategy).upgradeToAndCall(latestImplementation, new bytes(0));
 
-        emit StrategyImplementationUpdated(strategy, oldImplementation, newImplementation);
+        emit StrategyImplementationUpdated(strategy, oldImplementation, latestImplementation);
     }
 
     // ==================== ROLE-RESTRICTED FUNCTIONS ====================
@@ -173,7 +175,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Check upgrader role is set to this registry
         require(strategyContract.hasRole(keccak256("UPGRADER_ROLE"), address(this)), "Upgrader role not set correctly");
 
-        // Check backend role is set to our backend
+        // Check backend role is set to Mamo backend
         require(
             strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember("BACKEND_ROLE", 0)),
             "Backend role not set correctly"

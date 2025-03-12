@@ -49,7 +49,7 @@ This approach ensures that strategies with the same token interactions are group
 
 - `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function is pausable.
 
-- `function upgradeStrategy(address strategy, address newImplementation) external`: Updates the implementation of a strategy. Only callable by the user. The new implementation must be whitelisted and of the same strategy type as the current implementation. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
+- `function upgradeStrategy(address strategy) external`: Updates the implementation of a strategy to the latest implementation of the same type. Only callable by the user. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
 
 - `function getUserStrategies(address user) external view returns (address[] memory)`: Gets all strategies for a user.
 
@@ -117,7 +117,7 @@ A specific implementation of a Strategy Contract for USDC that splits deposits b
 5. User or Mamo Backend can call claimRewards to harvest rewards from the strategy.
 6. When USDC balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
 7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
-8. If Mamo wants to upgrade a strategy (example, deposit USDC into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to implementations of the same strategy type.
+8. If Mamo wants to upgrade a strategy (example, deposit USDC into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
 
 ## Security Considerations
 
