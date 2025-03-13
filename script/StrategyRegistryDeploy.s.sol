@@ -37,18 +37,17 @@ contract StrategyRegistryDeploy is Script {
 
         // Update the JSON file with the new address
         addresses.updateJson();
-    }
-
-    function deployStrategyRegistry(address admin, address backend, address guardian)
-        public
-        returns (MamoStrategyRegistry)
-    {
-        // Deploy the MamoStrategyRegistry with the specified roles
-        MamoStrategyRegistry registry = new MamoStrategyRegistry(admin, backend, guardian);
 
         // Log the deployed contract address
         console.log("MamoStrategyRegistry deployed at:", address(registry));
 
-        return registry;
+    }
+
+    function deployStrategyRegistry(address admin, address backend, address guardian)
+        public
+        returns (MamoStrategyRegistry registry)
+    {
+        // Deploy the MamoStrategyRegistry with the specified roles
+        registry = new MamoStrategyRegistry(admin, backend, guardian);
     }
 }
