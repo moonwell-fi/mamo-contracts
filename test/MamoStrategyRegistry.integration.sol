@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
+import {Addresses} from "@addresses/Addresses.sol";
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
-import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
-import {Addresses} from "@addresses/Addresses.sol";
 
 contract MamoStrategyRegistryIntegrationTest is Test {
     MamoStrategyRegistry public registry;
