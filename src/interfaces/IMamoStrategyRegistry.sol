@@ -38,14 +38,14 @@ interface IMamoStrategyRegistry {
      * @param implementation The address of the implementation
      * @return The strategy ID as a uint256 value
      */
-    function getImplementationType(address implementation) external view returns (uint256);
+    function getImplementationId(address implementation) external view returns (uint256);
 
     /**
      * @notice Gets the latest implementation for a strategy ID
-     * @param strategyType The strategy ID as a uint256 value
+     * @param strategyId The strategy ID as a uint256 value
      * @return The address of the latest implementation for the strategy ID
      */
-    function getLatestImplementation(uint256 strategyType) external view returns (address);
+    function getLatestImplementation(uint256 strategyId) external view returns (address);
 
     /**
      * @notice Adds a strategy for a user

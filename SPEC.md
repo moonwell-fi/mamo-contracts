@@ -21,8 +21,8 @@ The contract is initialized with three distinct roles that are passed as constru
 
 - `mapping(address => EnumerableSet.AddressSet) _userStrategies`: Set of all strategy addresses for each user
 - `mapping(address => bool) public whitelistedImplementations`: Mapping of whitelisted implementation addresses
-- `mapping(uint256 => address) public latestImplementationByType`: Maps strategy types to their latest implementation
-- `mapping(address => uint256) public implementationToStrategyType`: Maps implementations to their strategy type
+- `mapping(uint256 => address) public latestImplementationById`: Maps strategy IDs to their latest implementation
+- `mapping(address => uint256) public implementationToId`: Maps implementations to their strategy IDt co
 - `uint256 private _nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
 
 ### Strategy Type ID
@@ -39,9 +39,9 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function whitelistImplementation(address implementation) external returns (uint256 strategyTypeId)`: Adds an implementation to the whitelist with a new strategy type ID and sets it as the latest implementation for that type. Returns the assigned strategy type ID. Only callable by accounts with the BACKEND_ROLE.
 
-- `function getImplementationType(address implementation) external view returns (uint256)`: Gets the strategy type for an implementation.
+- `function getImplementationId(address implementation) external view returns (uint256)`: Gets the strategy ID for an implementation.
 
-- `function getLatestImplementation(uint256 strategyType) external view returns (address)`: Gets the latest implementation for a strategy type.
+- `function getLatestImplementation(uint256 strategyId) external view returns (address)`: Gets the latest implementation for a strategy ID.
 
 - `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function is pausable.
 

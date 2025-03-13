@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
-import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IUUPSUpgradeable} from "./interfaces/IUUPSUpgradeable.sol";
+import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /**
  * @title MamoStrategyRegistry
@@ -28,6 +28,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Role identifier for the backend that can manage strategies
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
+    /// @notice Counter for strategy type IDs
+    uint256 private _nextStrategyTypeId = 1;
+
     // State variables
     /// @notice Set of all strategy addresses for each user
     mapping(address => EnumerableSet.AddressSet) private _userStrategies;
@@ -40,9 +43,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
     /// @notice Maps implementations to their strategy ID
     mapping(address => uint256) public implementationToId;
-
-    /// @notice Counter for strategy type IDs
-    uint256 private _nextStrategyTypeId = 1;
 
     // Events
     /// @notice Emitted when a strategy is added for a user
@@ -82,7 +82,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
         require(guardian != address(0), "Invalid guardian address");
-        
+
         // Set up roles
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -103,11 +103,11 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Get the old implementation address
         address oldImplementation = getStrategyImplementation(strategy);
 
-        // Get the strategy type
-        uint256 strategyType = implementationToId[oldImplementation];
+        // Get the strategy ID
+        uint256 strategyId = implementationToId[oldImplementation];
 
-        // Get the latest implementation for this strategy type
-        address latestImplementation = latestImplementationById[strategyType];
+        // Get the latest implementation for this strategy ID
+        address latestImplementation = latestImplementationById[strategyId];
 
         // Ensure we're not already on the latest implementation
         require(oldImplementation != latestImplementation, "Already on latest implementation");
@@ -148,7 +148,11 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @param implementation The address of the implementation to whitelist
      * @return strategyTypeId The assigned strategy type ID
      */
-    function whitelistImplementation(address implementation) external onlyRole(BACKEND_ROLE) returns (uint256 strategyTypeId) {
+    function whitelistImplementation(address implementation)
+        external
+        onlyRole(BACKEND_ROLE)
+        returns (uint256 strategyTypeId)
+    {
         require(implementation != address(0), "Invalid implementation address");
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
@@ -219,21 +223,21 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     // ==================== GETTER FUNCTIONS ====================
 
     /**
-     * @notice Gets the strategy type for an implementation
+     * @notice Gets the strategy ID for an implementation
      * @param implementation The address of the implementation
-     * @return The strategy type as a uint256 value
+     * @return The strategy ID as a uint256 value
      */
-    function getImplementationType(address implementation) external view returns (uint256) {
+    function getImplementationId(address implementation) external view returns (uint256) {
         return implementationToId[implementation];
     }
 
     /**
-     * @notice Gets the latest implementation for a strategy type
-     * @param strategyType The strategy type as a uint256 value
-     * @return The address of the latest implementation for the strategy type
+     * @notice Gets the latest implementation for a strategy ID
+     * @param strategyId The strategy ID as a uint256 value
+     * @return The address of the latest implementation for the strategy ID
      */
-    function getLatestImplementation(uint256 strategyType) external view returns (address) {
-        return latestImplementationById[strategyType];
+    function getLatestImplementation(uint256 strategyId) external view returns (address) {
+        return latestImplementationById[strategyId];
     }
 
     /**
