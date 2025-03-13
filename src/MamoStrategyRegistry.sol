@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {IStrategy} from "./interfaces/IStrategy.sol";
-import {IUUPSUpgradeable} from "./interfaces/IUUPSUpgradeable.sol";
+import {IStrategy} from "@interfaces/IStrategy.sol";
+import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
