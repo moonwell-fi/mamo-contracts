@@ -30,19 +30,10 @@ contract WhitelistUSDCStrategy is Script {
         // Get the addresses
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address usdcStrategyImplementation = addresses.getAddress("USDC_STRATEGY_IMPLEMENTATION");
-        address usdc = addresses.getAddress("USDC");
-        address mUSDC = addresses.getAddress("MUSDC");
-        address metaMorphoVault = addresses.getAddress("META_MORPHO_VAULT");
-        
-        // Create the strategy type ID for USDC strategy
-        // The strategy type ID is structured as follows:
-        // 1. The first element contains the number of addresses in the array (3 in this case)
-        // 2. The subsequent elements contain the actual token addresses
-        bytes32 strategyTypeId = bytes32(abi.encodePacked(uint8(3), usdc, mUSDC, metaMorphoVault));
         
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);
-        registry.whitelistImplementation(usdcStrategyImplementation, strategyTypeId);
+        uint256 strategyTypeId = registry.whitelistImplementation(usdcStrategyImplementation);
         
         // Stop broadcasting transactions
         vm.stopBroadcast();
@@ -50,6 +41,6 @@ contract WhitelistUSDCStrategy is Script {
         // Log the whitelisted implementation
         console.log("USDC Strategy implementation whitelisted in the registry");
         console.log("Implementation address:", usdcStrategyImplementation);
-        console.log("Strategy type ID:", vm.toString(strategyTypeId));
+        console.log("Strategy type ID:", strategyTypeId);
     }
 }

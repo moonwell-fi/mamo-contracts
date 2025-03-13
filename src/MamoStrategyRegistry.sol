@@ -35,11 +35,14 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Mapping of whitelisted implementation addresses
     mapping(address => bool) public whitelistedImplementations;
 
-    /// @notice Maps strategy types to their latest implementation
-    mapping(bytes32 => address) public latestImplementationByType;
+    /// @notice Maps strategy IDs to their latest implementation
+    mapping(uint256 => address) public latestImplementationById;
 
-    /// @notice Maps implementations to their strategy type
-    mapping(address => bytes32) public implementationToStrategyType;
+    /// @notice Maps implementations to their strategy ID
+    mapping(address => uint256) public implementationToId;
+
+    /// @notice Counter for strategy type IDs
+    uint256 private _nextStrategyTypeId = 1;
 
     // Events
     /// @notice Emitted when a strategy is added for a user
@@ -54,7 +57,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     );
 
     /// @notice Emitted when an implementation is whitelisted
-    event ImplementationWhitelisted(address indexed implementation, bytes32 indexed strategyType);
+    event ImplementationWhitelisted(address indexed implementation, uint256 indexed strategyType);
 
     /// @notice Emitted when an implementation is removed from the whitelist
     event ImplementationRemovedFromWhitelist(address indexed implementation);
@@ -101,10 +104,10 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         address oldImplementation = getStrategyImplementation(strategy);
 
         // Get the strategy type
-        bytes32 strategyType = implementationToStrategyType[oldImplementation];
+        uint256 strategyType = implementationToId[oldImplementation];
 
         // Get the latest implementation for this strategy type
-        address latestImplementation = latestImplementationByType[strategyType];
+        address latestImplementation = latestImplementationById[strategyType];
 
         // Ensure we're not already on the latest implementation
         require(oldImplementation != latestImplementation, "Already on latest implementation");
@@ -140,18 +143,21 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Adds an implementation to the whitelist with its strategy type
+     * @notice Adds an implementation to the whitelist with a new strategy type ID
      * @dev Only callable by accounts with the BACKEND_ROLE
      * @param implementation The address of the implementation to whitelist
-     * @param strategyTypeId The bytes32 representation of the strategy type
+     * @return strategyTypeId The assigned strategy type ID
      */
-    function whitelistImplementation(address implementation, bytes32 strategyTypeId) external onlyRole(BACKEND_ROLE) {
+    function whitelistImplementation(address implementation) external onlyRole(BACKEND_ROLE) returns (uint256 strategyTypeId) {
         require(implementation != address(0), "Invalid implementation address");
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
+        // Assign a new strategy type ID
+        strategyTypeId = _nextStrategyTypeId++;
+
         whitelistedImplementations[implementation] = true;
-        implementationToStrategyType[implementation] = strategyTypeId;
-        latestImplementationByType[strategyTypeId] = implementation;
+        implementationToId[implementation] = strategyTypeId;
+        latestImplementationById[strategyTypeId] = implementation;
 
         emit ImplementationWhitelisted(implementation, strategyTypeId);
     }
@@ -215,19 +221,19 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /**
      * @notice Gets the strategy type for an implementation
      * @param implementation The address of the implementation
-     * @return The strategy type as a bytes32 value
+     * @return The strategy type as a uint256 value
      */
-    function getImplementationType(address implementation) external view returns (bytes32) {
-        return implementationToStrategyType[implementation];
+    function getImplementationType(address implementation) external view returns (uint256) {
+        return implementationToId[implementation];
     }
 
     /**
      * @notice Gets the latest implementation for a strategy type
-     * @param strategyType The strategy type as a bytes32 value
+     * @param strategyType The strategy type as a uint256 value
      * @return The address of the latest implementation for the strategy type
      */
-    function getLatestImplementation(bytes32 strategyType) external view returns (address) {
-        return latestImplementationByType[strategyType];
+    function getLatestImplementation(uint256 strategyType) external view returns (address) {
+        return latestImplementationById[strategyType];
     }
 
     /**

@@ -21,24 +21,15 @@ The contract is initialized with three distinct roles that are passed as constru
 
 - `mapping(address => EnumerableSet.AddressSet) _userStrategies`: Set of all strategy addresses for each user
 - `mapping(address => bool) public whitelistedImplementations`: Mapping of whitelisted implementation addresses
-- `mapping(bytes32 => address) public latestImplementationByType`: Maps strategy types to their latest implementation
-- `mapping(address => bytes32) public implementationToStrategyType`: Maps implementations to their strategy type
+- `mapping(uint256 => address) public latestImplementationByType`: Maps strategy types to their latest implementation
+- `mapping(address => uint256) public implementationToStrategyType`: Maps implementations to their strategy type
+- `uint256 private _nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
 
 ### Strategy Type ID
 
-The strategy type ID is a bytes32 value that uniquely identifies a type of strategy based on the tokens it interacts with. It is structured as follows:
+The strategy type ID is a simple incremental uint256 value that uniquely identifies a type of strategy. Each new strategy type receives the next available ID from the counter, which starts at 1 and increments by 1 for each new strategy type.
 
-1. The first element contains the number of addresses in the array
-2. The subsequent elements contain the actual token addresses
-
-This structure allows for easy decoding of the strategy type ID, as the first element indicates exactly how many addresses need to be extracted.
-
-Examples:
-- USDC strategy that interacts with USDC, mUSDC, and mxUSDC: `abi.encodePacked(uint8(3), usdc, musdc, mxusdc)`
-- LP strategy that interacts with WETH, USDC, and Aerodrome LP: `abi.encodePacked(uint8(3), weth, usdc, lpAero)`
-- Simple USDC strategy that interacts with USDC and mUSDC: `abi.encodePacked(uint8(2), usdc, musdc)`
-
-This approach ensures that strategies with the same token interactions are grouped together, allowing for type-safe upgrades while maintaining flexibility and easy decoding.
+This approach simplifies the ID system while still allowing for type-safe upgrades. Implementations of the same strategy type (e.g., different versions of a USDC strategy) will share the same ID, ensuring that users can only upgrade to the latest implementation of the same strategy type.
 
 ### Functions
 
@@ -46,11 +37,11 @@ This approach ensures that strategies with the same token interactions are group
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation, bytes32 strategyTypeId) external`: Adds an implementation to the whitelist with its strategy type and sets it as the latest implementation for that type. Only callable by accounts with the BACKEND_ROLE.
+- `function whitelistImplementation(address implementation) external returns (uint256 strategyTypeId)`: Adds an implementation to the whitelist with a new strategy type ID and sets it as the latest implementation for that type. Returns the assigned strategy type ID. Only callable by accounts with the BACKEND_ROLE.
 
-- `function getImplementationType(address implementation) external view returns (bytes32)`: Gets the strategy type for a implementation.
+- `function getImplementationType(address implementation) external view returns (uint256)`: Gets the strategy type for an implementation.
 
-- `function getLatestImplementation(bytes32 strategyType) external view returns (address)`: Gets the latest implementation for a strategy type.
+- `function getLatestImplementation(uint256 strategyType) external view returns (address)`: Gets the latest implementation for a strategy type.
 
 - `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function is pausable.
 

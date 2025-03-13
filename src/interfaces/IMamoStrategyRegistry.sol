@@ -19,12 +19,12 @@ interface IMamoStrategyRegistry {
     function unpause() external;
 
     /**
-     * @notice Adds an implementation to the whitelist with its strategy type
+     * @notice Adds an implementation to the whitelist with a new strategy type ID
      * @dev Only callable by accounts with the BACKEND_ROLE
      * @param implementation The address of the implementation to whitelist
-     * @param strategyTypeId The bytes32 representation of the strategy type
+     * @return strategyTypeId The assigned strategy type ID
      */
-    function whitelistImplementation(address implementation, bytes32 strategyTypeId) external;
+    function whitelistImplementation(address implementation) external returns (uint256 strategyTypeId);
 
     /**
      * @notice Checks if an implementation is whitelisted
@@ -34,18 +34,18 @@ interface IMamoStrategyRegistry {
     function isImplementationWhitelisted(address implementation) external view returns (bool);
 
     /**
-     * @notice Gets the strategy type for an implementation
+     * @notice Gets the strategy ID for an implementation
      * @param implementation The address of the implementation
-     * @return The strategy type as a bytes32 value
+     * @return The strategy ID as a uint256 value
      */
-    function getImplementationType(address implementation) external view returns (bytes32);
+    function getImplementationType(address implementation) external view returns (uint256);
 
     /**
-     * @notice Gets the latest implementation for a strategy type
-     * @param strategyType The strategy type as a bytes32 value
-     * @return The address of the latest implementation for the strategy type
+     * @notice Gets the latest implementation for a strategy ID
+     * @param strategyType The strategy ID as a uint256 value
+     * @return The address of the latest implementation for the strategy ID
      */
-    function getLatestImplementation(bytes32 strategyType) external view returns (address);
+    function getLatestImplementation(uint256 strategyType) external view returns (address);
 
     /**
      * @notice Adds a strategy for a user
@@ -67,9 +67,8 @@ interface IMamoStrategyRegistry {
      * @notice Updates the implementation of a strategy
      * @dev Only callable by the user who owns the strategy
      * @param strategy The address of the strategy to update
-     * @param newImplementation The address of the new implementation
      */
-    function upgradeStrategy(address strategy, address newImplementation) external;
+    function upgradeStrategy(address strategy) external;
 
     /**
      * @notice Gets all strategies for a user
