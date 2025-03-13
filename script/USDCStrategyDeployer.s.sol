@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {Script} from "forge-std/Script.sol";
+import {Script} from "@forge-std/Script.sol";
 
-import {Test} from "forge-std/Test.sol";
-import {console} from "forge-std/console.sol";
+import {Test} from "@forge-std/Test.sol";
+import {console} from "@forge-std/console.sol";
 
-import {Addresses} from "../addresses/Addresses.sol";
-import {ERC20MoonwellMorphoStrategy} from "../src/ERC20MoonwellMorphoStrategy.sol";
+import {Addresses} from "@addresses/Addresses.sol";
+import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract USDCStrategyDeployer is Script {

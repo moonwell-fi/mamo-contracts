@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {IComptroller} from "./interfaces/IComptroller.sol";
-import {IDEXRouter} from "./interfaces/IDEXRouter.sol";
-import {IERC4626} from "./interfaces/IERC4626.sol";
-import {IMToken} from "./interfaces/IMToken.sol";
-import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
+import {IComptroller} from "@interfaces/IComptroller.sol";
+import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
+import {IERC4626} from "@interfaces/IERC4626.sol";
+import {IMToken} from "@interfaces/IMToken.sol";
+import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
