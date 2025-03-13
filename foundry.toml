@@ -8,7 +8,7 @@ remappings = [
     "@addresses/=addresses/",
     "@contracts/=src/", 
     "@interfaces/=src/interfaces/",
-    "@scripts/=scripts/"
+    "@script/=script/"
 ]
 
 [fmt]

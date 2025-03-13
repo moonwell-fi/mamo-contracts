@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {Script} from "forge-std/Script.sol";
-
-import {Test} from "forge-std/Test.sol";
-import {console} from "forge-std/console.sol";
-
-import {Addresses} from "../addresses/Addresses.sol";
-import {MamoStrategyRegistry} from "../src/MamoStrategyRegistry.sol";
+import {Script} from "@forge-std/Script.sol";
+import {Test} from "@forge-std/Test.sol";
+import {console} from "@forge-std/console.sol";
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {Addresses} from "@addresses/Addresses.sol";
 
 contract StrategyRegistryDeploy is Script {
     Addresses public addresses;
