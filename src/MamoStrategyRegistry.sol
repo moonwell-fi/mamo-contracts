@@ -195,7 +195,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         // Check backend role is set to Mamo backend
         require(
-            strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember("BACKEND_ROLE", 0)),
+            strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember(BACKEND_ROLE, 0)),
             "Backend role not set correctly"
         );
 
