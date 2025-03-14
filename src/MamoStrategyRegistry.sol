@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {IStrategy} from "@interfaces/IStrategy.sol";
 import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -101,7 +102,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
 
         // Get the old implementation address
-        address oldImplementation = getStrategyImplementation(strategy);
+        address oldImplementation = ERC1967Proxy(payable(strategy)).getImplementation();
 
         // Get the strategy ID
         uint256 strategyId = implementationToId[oldImplementation];
@@ -178,7 +179,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(!_userStrategies[user].contains(strategy), "Strategy already added for user");
 
         // Get the implementation address
-        address implementation = getStrategyImplementation(strategy);
+        address implementation = ERC1967Proxy(payable(strategy)).getImplementation();
         require(implementation != address(0), "Invalid implementation");
         require(whitelistedImplementations[implementation], "Implementation not whitelisted");
 
@@ -264,17 +265,5 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      */
     function isUserStrategy(address user, address strategy) public view returns (bool) {
         return _userStrategies[user].contains(strategy);
-    }
-
-    /**
-     * @notice Gets the implementation address for a strategy
-     * @param strategy The address of the strategy (proxy)
-     * @return implementation The address of the implementation
-     */
-    function getStrategyImplementation(address strategy) public view returns (address implementation) {
-        // Read the implementation address from the EIP-1967 storage slot
-        assembly {
-            implementation := sload(add(strategy, _IMPLEMENTATION_SLOT))
-        }
     }
 }

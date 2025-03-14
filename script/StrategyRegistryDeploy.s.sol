@@ -40,7 +40,6 @@ contract StrategyRegistryDeploy is Script {
 
         // Log the deployed contract address
         console.log("MamoStrategyRegistry deployed at:", address(registry));
-
     }
 
     function deployStrategyRegistry(address admin, address backend, address guardian)
