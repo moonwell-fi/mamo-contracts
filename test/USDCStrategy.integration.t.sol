@@ -178,90 +178,95 @@ contract USDCStrategyTest is Test {
         // Verify the non-owner's USDC balance remains unchanged
         assertEq(usdc.balanceOf(nonOwner), depositAmount, "Non-owner's USDC balance should remain unchanged");
     }
-    
+
     function testOwnerCanWithdrawFunds() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
         deal(address(usdc), owner, depositAmount);
-        
+
         vm.startPrank(owner);
         usdc.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
-        
+
         // Verify initial balances
         assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
         uint256 strategyBalance = strategy.getTotalBalance();
         assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
-        
+
         // Withdraw half of the funds
         uint256 withdrawAmount = depositAmount / 2;
         strategy.withdraw(withdrawAmount);
         vm.stopPrank();
-        
+
         // Verify the owner received the withdrawn funds
         assertApproxEqAbs(usdc.balanceOf(owner), withdrawAmount, 1e3, "Owner should have received the withdrawn amount");
-        
+
         // Verify the strategy's balance decreased
         uint256 newStrategyBalance = strategy.getTotalBalance();
-        assertApproxEqAbs(newStrategyBalance, strategyBalance - withdrawAmount, 1e3, "Strategy balance should decrease by withdrawn amount");
-        
+        assertApproxEqAbs(
+            newStrategyBalance,
+            strategyBalance - withdrawAmount,
+            1e3,
+            "Strategy balance should decrease by withdrawn amount"
+        );
+
         // Verify the protocol balances reflect the withdrawal
         uint256 expectedMTokenAmount = ((depositAmount - withdrawAmount) * splitMToken) / 10000;
         uint256 expectedVaultAmount = ((depositAmount - withdrawAmount) * splitVault) / 10000;
-        
+
         // Verify mToken balance
         uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
         assertApproxEqAbs(mTokenBalance, expectedMTokenAmount, 1e3, "mToken balance should be updated after withdrawal");
-        
+
         // Verify vault balance
         uint256 vaultShares = metaMorphoVault.balanceOf(address(strategy));
         uint256 vaultBalance = metaMorphoVault.convertToAssets(vaultShares);
         assertApproxEqAbs(vaultBalance, expectedVaultAmount, 1e3, "Vault balance should be updated after withdrawal");
     }
-    
+
     function testRevertIfNonOwnerWithdraw() public {
         // First deposit funds as the owner
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
         deal(address(usdc), owner, depositAmount);
-        
+
         vm.startPrank(owner);
         usdc.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
-        
+
         // Create a non-owner address
         address nonOwner = makeAddr("nonOwner");
-        
+
         // Attempt to withdraw as non-owner
         vm.startPrank(nonOwner);
         uint256 withdrawAmount = depositAmount / 2;
-        
+
         // Attempt to withdraw should revert with "Not strategy owner"
         vm.expectRevert("Not strategy owner");
         strategy.withdraw(withdrawAmount);
         vm.stopPrank();
-        
+
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
     }
-    
+
     function testRevertIfWithdrawAmountTooLarge() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
         deal(address(usdc), owner, depositAmount);
-        
+
         vm.startPrank(owner);
         usdc.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
-        
+
         // Attempt to withdraw more than deposited
         uint256 withdrawAmount = depositAmount * 2;
-        
+
         // Attempt to withdraw should revert with the updated error message
         vm.expectRevert("Withdrawal amount exceeds available balance in strategy");
         strategy.withdraw(withdrawAmount);
         vm.stopPrank();
-        
+
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
     }

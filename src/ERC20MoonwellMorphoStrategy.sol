@@ -70,8 +70,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     // @notice Emitted when the DEX router is updated
     event DexRouterUpdated(address indexed oldDexRouter, address indexed newDexRouter);
 
-    // @notice Emitted when a reward token is added or removed
-    event RewardTokenUpdated(address indexed token, bool added);
+    // @notice Emitted when a reward token is added
+    event RewardTokenAdded(address indexed token);
+
+    // @notice Emitted when a reward token is removed
+    event RewardTokenRemoved(address indexed token);
 
     // @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
@@ -257,22 +260,28 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     }
 
     /**
-     * @notice Updates the reward tokens set by adding or removing a token
+     * @notice Adds a token to the reward tokens set
      * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param rewardToken The address of the token to add or remove
-     * @param add True to add the token, false to remove it
+     * @param rewardToken The address of the token to add
      */
-    function updateRewardToken(address rewardToken, bool add) external onlyBackend {
+    function addRewardToken(address rewardToken) external onlyBackend {
         require(rewardToken != address(0), "Invalid token address");
         require(rewardToken != address(token), "Strategy token cannot be a reward token");
+        require(_rewardTokens.add(rewardToken), "Token already exists in reward tokens");
 
-        if (add) {
-            require(_rewardTokens.add(rewardToken), "Token already exists in reward tokens");
-        } else {
-            require(_rewardTokens.remove(rewardToken), "Token does not exist in reward tokens");
-        }
+        emit RewardTokenAdded(rewardToken);
+    }
 
-        emit RewardTokenUpdated(rewardToken, add);
+    /**
+     * @notice Removes a token from the reward tokens set
+     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @param rewardToken The address of the token to remove
+     */
+    function removeRewardToken(address rewardToken) external onlyBackend {
+        require(rewardToken != address(0), "Invalid token address");
+        require(_rewardTokens.remove(rewardToken), "Token does not exist in reward tokens");
+
+        emit RewardTokenRemoved(rewardToken);
     }
 
     /**

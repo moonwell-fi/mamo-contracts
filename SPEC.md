@@ -109,7 +109,9 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function updatePosition(uint256 splitA, uint256 splitB) external`: Updates the position in the strategy. Only callable by the backend address from the Mamo Strategy Registry.
 
-- `function updateRewardToken(address rewardToken, bool add) external`: Updates the reward tokens set by adding or removing a token. The strategy token cannot be added as a reward token. Only callable by the backend address from the Mamo Strategy Registry.
+- `function addRewardToken(address rewardToken) external`: Adds a token to the reward tokens set. The strategy token cannot be added as a reward token. Only callable by the backend address from the Mamo Strategy Registry.
+
+- `function removeRewardToken(address rewardToken) external`: Removes a token from the reward tokens set. Only callable by the backend address from the Mamo Strategy Registry.
 
 - `function compoundRewards() external`: Compounds reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsCompounded event. Callable by the backend address from the Mamo Strategy Registry or the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
@@ -124,17 +126,15 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 1. Mamo Backend deploys a strategy for a user using the latest implementation for the desired strategy type.
 2. Mamo Backend calls Mamo Strategy Registry addStrategy to register the strategy for the user.
 3. User deposits funds into their strategy.
-4. Mamo Backend reads Deposit events and calls updateUserPosition to manage the strategy.
+4. Mamo Backend call updatePosition to manage the strategy.
 5. User or Mamo Backend can call compoundRewards to compound rewards from the strategy.
 6. When token balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
 7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
 8. If Mamo wants to upgrade a strategy (example, deposit tokens into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
 
-## Security Considerations
+## Security Considerations & Assumptions
 
-1. Each user has their own dedicated strategy contract, eliminating the need for delegatecall and its associated security risks.
-2. Implementation whitelist ensures that only trusted and audited implementations can be used.
-3. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type, providing flexibility while maintaining security.
-4. The Mamo Strategy Registry contract has proper access controls to ensure only authorized addresses can call sensitive functions.
-5. Strategy contracts have clear ownership semantics, with only the user registered in the Mamo Strategy Registry able to deposit and withdraw funds, while only the backend address from the Mamo Strategy Registry can update positions.
-6. The Mamo Strategy Registry contract maintains a registry of all deployed strategies, allowing for efficient coordination and verification.
+1. Implementation whitelist ensures that only trusted and audited implementations can be used.
+2. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type.
+3. The Mamo Strategy Registry is not upgradeable and the backend can't remove a user strategy. This ensure strategies can always call the Registry to find it's owner.
+4. Strategy contracts have clear ownership semantics, with only the user registered in the Mamo Strategy Registry able to deposit and withdraw funds, while only the backend address from the Mamo Strategy Registry can update positions.
