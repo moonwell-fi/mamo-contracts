@@ -66,6 +66,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 ### Storage
 
 - `AccessControlEnumerable`: Inherits from OpenZeppelin's AccessControlEnumerable for role-based access control
+- `bool private _initialized`: Flag to track if the contract has been initialized
 - `bytes32 public constant OWNER_ROLE`: Role for the strategy owner (the user)
 - `bytes32 public constant UPGRADER_ROLE`: Role for the Mamo Strategy Registry contract that can upgrade the strategy
 - `bytes32 public constant BACKEND_ROLE`: Role for the Mamo Backend that can update positions
@@ -84,25 +85,27 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors.
 
-- `function initialize(InitParams calldata params) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies.
+- `modifier whenInitialized()`: Modifier to ensure the contract has been initialized before executing a function.
 
-- `function setDexRouter(address _newDexRouter) external onlyRole(BACKEND_ROLE)`: Updates the DEX router address. Only callable by accounts with the BACKEND_ROLE.
+- `function initialize(InitParams calldata params) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies. Only callable by accounts with the BACKEND_ROLE.
 
-- `function deposit(uint256 amount) external onlyRole(OWNER_ROLE)`: Deposits funds into the strategy. Only callable by accounts with the OWNER_ROLE.
+- `function setDexRouter(address _newDexRouter) external onlyRole(BACKEND_ROLE) whenInitialized`: Updates the DEX router address. Only callable by accounts with the BACKEND_ROLE after the contract has been initialized.
 
-- `function withdraw(uint256 amount) external onlyRole(OWNER_ROLE)`: Withdraws funds from the strategy. Only callable by accounts with the OWNER_ROLE.
+- `function deposit(uint256 amount) external onlyRole(OWNER_ROLE) whenInitialized`: Deposits funds into the strategy. Only callable by accounts with the OWNER_ROLE after the contract has been initialized.
 
-- `function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE)`: Updates the position in the strategy. Only callable by accounts with the BACKEND_ROLE.
+- `function withdraw(uint256 amount) external onlyRole(OWNER_ROLE) whenInitialized`: Withdraws funds from the strategy. Only callable by accounts with the OWNER_ROLE after the contract has been initialized.
 
-- `function updateRewardToken(address rewardToken, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. The strategy token cannot be added as a reward token. Only callable by accounts with the BACKEND_ROLE.
+- `function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE) whenInitialized`: Updates the position in the strategy. Only callable by accounts with the BACKEND_ROLE after the contract has been initialized.
 
-- `function harvestRewards() external`: Harvests reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsHarvested event. Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE.
+- `function updateRewardToken(address rewardToken, bool add) external onlyRole(BACKEND_ROLE) whenInitialized`: Updates the reward tokens set by adding or removing a token. The strategy token cannot be added as a reward token. Only callable by accounts with the BACKEND_ROLE after the contract has been initialized.
+
+- `function harvestRewards() external whenInitialized`: Harvests reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsHarvested event. Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE after the contract has been initialized.
 
 - `function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE)`: Internal function that authorizes an upgrade to a new implementation. Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry). This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 
-- `function recoverERC20(address token, address to, uint256 amount) external onlyRole(OWNER_ROLE)`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the OWNER_ROLE.
+- `function recoverERC20(address token, address to, uint256 amount) external onlyRole(OWNER_ROLE) whenInitialized`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the OWNER_ROLE after the contract has been initialized.
 
-- `function getTotalBalance() public returns (uint256)`: Gets the total balance of tokens across both protocols.
+- `function getTotalBalance() public whenInitialized returns (uint256)`: Gets the total balance of tokens across both protocols. Only callable after the contract has been initialized.
 
 ## System Flow
 

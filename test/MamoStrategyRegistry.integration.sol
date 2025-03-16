@@ -6,6 +6,7 @@ import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
@@ -14,7 +15,6 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
-import {ERC1967Proxy } from "@contracts/ERC1967Proxy.sol";
 
 // Mock strategy contract for testing
 contract MockStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable {

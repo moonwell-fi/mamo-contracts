@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Proxy} from "@openzeppelin/contracts/proxy/Proxy.sol";
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
+import {Proxy} from "@openzeppelin/contracts/proxy/Proxy.sol";
 
 /**
  * @dev This contract implements an upgradeable proxy. It is upgradeable because calls are delegated to an
@@ -46,7 +46,7 @@ contract ERC1967Proxy is Proxy {
      * contracts to read the implementation address directly from the proxy.
      * @return The address of the current implementation contract.
      */
-    function getImplementation() external view returns(address) {
+    function getImplementation() external view returns (address) {
         return _implementation();
     }
 }
