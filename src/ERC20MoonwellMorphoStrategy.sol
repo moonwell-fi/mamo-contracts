@@ -78,10 +78,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
-        address owner;
         address mamoStrategyRegistry;
         address mamoBackend;
-        address admin;
         address moonwellComptroller;
         address mToken;
         address metaMorphoVault;
@@ -109,10 +107,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
      * @param params The initialization parameters struct
      */
     function initialize(InitParams calldata params) external initializer {
-        require(params.owner != address(0), "Invalid owner address");
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(params.mamoBackend != address(0), "Invalid mamoBackend address");
-        require(params.admin != address(0), "Invalid admin address");
         require(params.moonwellComptroller != address(0), "Invalid moonwellComptroller address");
         require(params.mToken != address(0), "Invalid mToken address");
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
