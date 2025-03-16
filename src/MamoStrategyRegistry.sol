@@ -56,18 +56,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Emitted when an implementation is whitelisted
     event ImplementationWhitelisted(address indexed implementation, uint256 indexed strategyType);
 
-    /// @notice Emitted when an implementation is removed from the whitelist
-    event ImplementationRemovedFromWhitelist(address indexed implementation);
-
-    /// @notice Emitted when strategies are updated
-    event StrategiesUpdated(address indexed implementation, address[] strategies, uint256 splitA, uint256 splitB);
-
-    /// @notice Emitted when rewards are claimed
-    event RewardsClaimed(address indexed implementation, address[] strategies);
-
-    /// @notice Emitted when a strategy update fails
-    event StrategyUpdateFailed(address indexed strategy, string reason);
-
     /**
      * @notice Constructor that sets up initial roles
      * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the specified addresses
