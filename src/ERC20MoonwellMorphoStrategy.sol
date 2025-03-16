@@ -108,8 +108,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
      * @param params The initialization parameters struct
      */
     function initialize(InitParams calldata params) external initializer {
-        __AccessControlEnumerable_init();
-
         require(params.owner != address(0), "Invalid owner address");
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(params.mamoBackend != address(0), "Invalid mamoBackend address");
@@ -119,9 +117,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.dexRouter != address(0), "Invalid dexRouter address");
         require(params.token != address(0), "Invalid token address");
-
-        // Grant admin role to the admin address
-        _grantRole(DEFAULT_ADMIN_ROLE, params.admin);
 
         // Set state variables
         mamoStrategyRegistry = IMamoStrategyRegistry(params.mamoStrategyRegistry);
@@ -366,7 +361,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
      * @notice Internal function that authorizes an upgrade to a new implementation
      * @dev Only callable by Mamo Strategy Registry contract
      */
-    function _authorizeUpgrade(address) internal view override onlyStrategyRegistry(){
+    function _authorizeUpgrade(address) internal view override{
         require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
     }
 
