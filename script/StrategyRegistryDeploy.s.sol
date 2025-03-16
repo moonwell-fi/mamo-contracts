@@ -17,14 +17,8 @@ contract StrategyRegistryDeploy is Script {
         chainIds[0] = block.chainid; // Use the current chain ID
 
         addresses = new Addresses(addressesFolderPath, chainIds);
-
-        // Get the addresses for the roles
-        address admin = addresses.getAddress("ADMIN");
-        address backend = addresses.getAddress("BACKEND");
-        address guardian = addresses.getAddress("GUARDIAN");
-
         // Deploy the strategy registry
-        MamoStrategyRegistry registry = deployStrategyRegistry(admin, backend, guardian);
+        MamoStrategyRegistry registry = deployStrategyRegistry(addresses);
 
         // Update the JSON file with the new address
         addresses.updateJson();
@@ -33,10 +27,16 @@ contract StrategyRegistryDeploy is Script {
         console.log("MamoStrategyRegistry deployed at:", address(registry));
     }
 
-    function deployStrategyRegistry(address admin, address backend, address guardian)
+    function deployStrategyRegistry(Addresses addresses)
         public
         returns (MamoStrategyRegistry registry)
     {
+
+        // Get the addresses for the roles
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+
         vm.startBroadcast();
         // Deploy the MamoStrategyRegistry with the specified roles
         registry = new MamoStrategyRegistry(admin, backend, guardian);

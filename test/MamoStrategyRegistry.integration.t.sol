@@ -40,22 +40,23 @@ contract MamoStrategyRegistryIntegrationTest is Test {
     address public guardian;
 
     function setUp() public {
-        // Create test addresses
-        admin = makeAddr("admin");
-        backend = makeAddr("backend");
-        guardian = makeAddr("guardian");
-
         // Create a new addresses instance for testing
-        // We'll create it with an empty array of chainIds to avoid file reading issues
         string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](0);
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+        
         addresses = new Addresses(addressesFolderPath, chainIds);
+
+        // Get the addresses for the roles
+        admin = addresses.getAddress("MAMO_MULTISIG");
+        backend = addresses.getAddress("MAMO_BACKEND");
+        guardian = addresses.getAddress("MAMO_MULTISIG");
 
         // Deploy the MamoStrategyRegistry using the script
         StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
 
         // Call the deployStrategyRegistry function with the addresses
-        registry = deployScript.deployStrategyRegistry(admin, backend, guardian);
+        registry = deployScript.deployStrategyRegistry(addresses);
     }
 
     function testRegistryDeployment() public view {

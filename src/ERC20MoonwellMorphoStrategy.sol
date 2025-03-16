@@ -210,15 +210,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
      * @notice Recovers ETH accidentally sent to this contract
      * @dev Only callable by the user who owns this strategy
      * @param to The address to send the ETH to
-     * @param amount The amount of ETH to recover
      */
-    function recoverETH(address payable to, uint256 amount) external onlyStrategyOwner {
+    function recoverETH(address payable to) external onlyStrategyOwner {
         require(to != address(0), "Cannot send to zero address");
-        require(amount > 0, "Amount must be greater than 0");
-        require(amount <= address(this).balance, "Insufficient ETH balance");
-
-        (bool success,) = to.call{value: amount}("");
-        require(success, "ETH transfer failed");
+        uint256 amount = address(this).balance;
+        to.transfer(amount);
 
         emit TokenRecovered(address(0), to, amount);
     }

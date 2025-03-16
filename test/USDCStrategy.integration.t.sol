@@ -91,7 +91,7 @@ contract USDCStrategyTest is Test {
         vm.prank(backend);
         registry.whitelistImplementation(address(implementation));
 
-        splitMToken = splitVault = 5000; // 50$ in basis points each
+        splitMToken = splitVault = 5000; // 50% in basis points each
 
         // Encode initialization data for the strategy
         bytes memory initData = abi.encodeWithSelector(
@@ -427,7 +427,7 @@ contract USDCStrategyTest is Test {
         
         // Owner recovers the ETH
         vm.startPrank(owner);
-        strategy.recoverETH(recipient, ethAmount);
+        strategy.recoverETH(recipient);
         vm.stopPrank();
         
         // Verify the ETH was transferred to the recipient
@@ -449,7 +449,7 @@ contract USDCStrategyTest is Test {
         // Non-owner attempts to recover the ETH
         vm.startPrank(nonOwner);
         vm.expectRevert("Not strategy owner");
-        strategy.recoverETH(recipient, ethAmount);
+        strategy.recoverETH(recipient);
         vm.stopPrank();
         
         // Verify the ETH remains in the strategy
@@ -465,49 +465,11 @@ contract USDCStrategyTest is Test {
         // Owner attempts to recover the ETH to the zero address
         vm.startPrank(owner);
         vm.expectRevert("Cannot send to zero address");
-        strategy.recoverETH(payable(address(0)), ethAmount);
+        strategy.recoverETH(payable(address(0)));
         vm.stopPrank();
         
         // Verify the ETH remains in the strategy
         assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
-    }
-    
-    function testRevertIfRecoverETHZeroAmount() public {
-        // Send some ETH to the strategy contract
-        uint256 ethAmount = 1 ether;
-        vm.deal(address(strategy), ethAmount);
-        
-        // Create a recipient address
-        address payable recipient = payable(makeAddr("recipient"));
-        
-        // Owner attempts to recover zero ETH
-        vm.startPrank(owner);
-        vm.expectRevert("Amount must be greater than 0");
-        strategy.recoverETH(recipient, 0);
-        vm.stopPrank();
-        
-        // Verify the ETH remains in the strategy
-        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
-        assertEq(recipient.balance, 0, "Recipient should not have received any ETH");
-    }
-    
-    function testRevertIfRecoverETHInsufficientBalance() public {
-        // Send some ETH to the strategy contract
-        uint256 ethAmount = 1 ether;
-        vm.deal(address(strategy), ethAmount);
-        
-        // Create a recipient address
-        address payable recipient = payable(makeAddr("recipient"));
-        
-        // Owner attempts to recover more ETH than the strategy has
-        vm.startPrank(owner);
-        vm.expectRevert("Insufficient ETH balance");
-        strategy.recoverETH(recipient, ethAmount + 1);
-        vm.stopPrank();
-        
-        // Verify the ETH remains in the strategy
-        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
-        assertEq(recipient.balance, 0, "Recipient should not have received any ETH");
     }
     
     function testRevertIfAddStrategyTokenAsRewardToken() public {
@@ -518,5 +480,139 @@ contract USDCStrategyTest is Test {
         vm.expectRevert("Strategy token cannot be a reward token");
         strategy.addRewardToken(address(usdc));
         vm.stopPrank();
+    }
+    
+    function testBackendCanUpdatePosition() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+        
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+        
+        // Verify initial split
+        assertEq(strategy.splitMToken(), 5000, "Initial mToken split should be 5000 (50%)");
+        assertEq(strategy.splitVault(), 5000, "Initial vault split should be 5000 (50%)");
+        
+        // Verify initial balances match the expected split
+        uint256 totalBalance = strategy.getTotalBalance();
+        uint256 expectedInitialMTokenBalance = (totalBalance * splitMToken) / 10000;
+        uint256 expectedInitialVaultBalance = (totalBalance * splitVault) / 10000;
+        
+        uint256 initialMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        uint256 initialVaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 initialVaultBalance = metaMorphoVault.convertToAssets(initialVaultShares);
+        
+        assertApproxEqAbs(
+            initialMTokenBalance, 
+            expectedInitialMTokenBalance, 
+            1e3, 
+            "Initial mToken balance should match expected amount based on split"
+        );
+        
+        assertApproxEqAbs(
+            initialVaultBalance, 
+            expectedInitialVaultBalance, 
+            1e3, 
+            "Initial vault balance should match expected amount based on split"
+        );
+        
+        // Update position to 70% mToken, 30% vault
+        uint256 newSplitMToken = 7000; // 70%
+        uint256 newSplitVault = 3000; // 30%
+        
+        vm.startPrank(backend);
+        strategy.updatePosition(newSplitMToken, newSplitVault);
+        vm.stopPrank();
+        
+        // Verify the split was updated
+        assertEq(strategy.splitMToken(), newSplitMToken, "mToken split should be updated to 7000 (70%)");
+        assertEq(strategy.splitVault(), newSplitVault, "Vault split should be updated to 3000 (30%)");
+        
+        // Calculate new balances based on updated split
+        uint256 newMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        uint256 newVaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 newVaultBalance = metaMorphoVault.convertToAssets(newVaultShares);
+        
+        // Verify the balances reflect the new split
+        // Get the updated total balance
+        totalBalance = strategy.getTotalBalance();
+        uint256 expectedMTokenBalance = (totalBalance * newSplitMToken) / 10000;
+        uint256 expectedVaultBalance = (totalBalance * newSplitVault) / 10000;
+        
+        assertApproxEqAbs(
+            newMTokenBalance, 
+            expectedMTokenBalance, 
+            1e3, 
+            "mToken balance should reflect the new split"
+        );
+        
+        assertApproxEqAbs(
+            newVaultBalance, 
+            expectedVaultBalance, 
+            1e3, 
+            "Vault balance should reflect the new split"
+        );
+    }
+    
+    function testRevertIfNonBackendUpdatePosition() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+        
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+        
+        // Create a non-backend address
+        address nonBackend = makeAddr("nonBackend");
+        
+        // Non-backend attempts to update position
+        vm.startPrank(nonBackend);
+        vm.expectRevert("Not backend");
+        strategy.updatePosition(6000, 4000);
+        vm.stopPrank();
+        
+        // Verify the split remains unchanged
+        assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
+    }
+    
+    function testRevertIfInvalidSplitParameters() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+        
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+        
+        // Backend attempts to update position with invalid split parameters
+        vm.startPrank(backend);
+        vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
+        strategy.updatePosition(6000, 5000); // 60% + 50% = 110%
+        vm.stopPrank();
+        
+        // Verify the split remains unchanged
+        assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
+    }
+    
+    function testRevertIfNoFundsToRebalance() public {
+        // No funds deposited
+        
+        // Backend attempts to update position
+        vm.startPrank(backend);
+        vm.expectRevert("Nothing to rebalance");
+        strategy.updatePosition(6000, 4000);
+        vm.stopPrank();
+        
+        // Verify the split remains unchanged
+        assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
     }
 }

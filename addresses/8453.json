@@ -18,5 +18,15 @@
     "addr": "0x73D8A3bF62aACa6690791E57EBaEE4e1d875d8Fe",
     "name": "MOONWELL_COMPTROLLER",
     "isContract": true
+  },
+  {
+    "addr": "0x26c158A4CD56d148c554190A95A921d90F00C160",
+    "name": "MAMO_MULTISIG",
+    "isContract": true
+  },
+  {
+    "addr": "0x10b83c88e88910Cd5293324800d1a6e751004bE5",
+    "name": "MAMO_BACKEND",
+    "isContract": false
   }
 ]
