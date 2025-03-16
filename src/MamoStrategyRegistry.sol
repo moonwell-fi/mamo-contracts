@@ -217,4 +217,21 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     function getBackendAddress() external view returns (address) {
         return getRoleMember(BACKEND_ROLE, 0);
     }
+
+    // ==================== ADMIN FUNCTIONS ====================
+
+    /**
+     * @notice Recovers ERC20 tokens accidentally sent to this contract
+     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE
+     * @param tokenAddress The address of the token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount of tokens to recover
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(to != address(0), "Cannot send to zero address");
+        require(amount > 0, "Amount must be greater than 0");
+
+        IERC20(tokenAddress).transfer(to, amount);
+    }
+
 }

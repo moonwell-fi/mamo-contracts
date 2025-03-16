@@ -101,11 +101,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         _;
     }
 
-    modifier onlyStrategyRegistry() {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-        _;
-    }
-
     // ==================== INITIALIZER ====================
 
     /**
@@ -212,7 +207,22 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         emit TokenRecovered(tokenAddress, to, amount);
     }
 
-    // add recover ETH
+    /**
+     * @notice Recovers ETH accidentally sent to this contract
+     * @dev Only callable by the user who owns this strategy
+     * @param to The address to send the ETH to
+     * @param amount The amount of ETH to recover
+     */
+    function recoverETH(address payable to, uint256 amount) external onlyStrategyOwner {
+        require(to != address(0), "Cannot send to zero address");
+        require(amount > 0, "Amount must be greater than 0");
+        require(amount <= address(this).balance, "Insufficient ETH balance");
+
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "ETH transfer failed");
+
+        emit TokenRecovered(address(0), to, amount);
+    }
 
     // ==================== BACKEND FUNCTIONS ====================
 
@@ -367,7 +377,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
      * @notice Internal function that authorizes an upgrade to a new implementation
      * @dev Only callable by Mamo Strategy Registry contract
      */
-    function _authorizeUpgrade(address) internal view override onlyStrategyRegistry {}
+    function _authorizeUpgrade(address) internal view override{
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
+    }
 
     // ==================== VIEW FUNCTIONS ====================
 
@@ -382,4 +394,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         // TODO check vault balance decimals
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
+
+    /**
+     * @notice Allows the contract to receive ETH
+     */
+    receive() external payable {}
 }

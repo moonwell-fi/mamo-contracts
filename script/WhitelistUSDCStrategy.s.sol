@@ -29,7 +29,7 @@ contract WhitelistUSDCStrategy is Script {
         vm.startBroadcast();
 
         // Get the addresses
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
+        address payable mamoStrategyRegistry = payable(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         address usdcStrategyImplementation = addresses.getAddress("USDC_STRATEGY_IMPLEMENTATION");
 
         // Whitelist the implementation in the registry

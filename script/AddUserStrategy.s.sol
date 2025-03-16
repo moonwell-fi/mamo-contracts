@@ -32,7 +32,7 @@ contract AddUserStrategy is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         // Get the addresses
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
+        address payable mamoStrategyRegistry = payable(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         address userStrategy = addresses.getAddress("USER_STRATEGY_PROXY");
         address user = addresses.getAddress("USER");
 
