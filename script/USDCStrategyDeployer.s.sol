@@ -25,23 +25,23 @@ contract USDCStrategyDeployer is Script {
         deployImplementation();
     }
 
-     function deployImplementation() public returns(address) {
+    function deployImplementation() public returns (address) {
         vm.startBroadcast();
         // Deploy the implementation contract
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
 
         vm.stopBroadcast();
-        
+
         // Add implementation address to addresses
         addresses.addAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL", address(implementation), true);
-        
+
         // Log the deployed contract address
         console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));
-        
-        return address(implementation);
-     }
 
-     function deployUSDCStrategy() public returns(address strategyProxy){
+        return address(implementation);
+    }
+
+    function deployUSDCStrategy() public returns (address strategyProxy) {
         vm.startBroadcast();
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
@@ -82,6 +82,5 @@ contract USDCStrategyDeployer is Script {
         console.log("USDC Strategy proxy deployed at:", address(proxy));
 
         return address(proxy);
-
     }
 }

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
+import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IComptroller} from "@interfaces/IComptroller.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
-import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -214,7 +214,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         require(amount > 0, "Amount must be greater than 0");
         require(amount <= address(this).balance, "Insufficient ETH balance");
 
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         require(success, "ETH transfer failed");
 
         emit TokenRecovered(address(0), to, amount);
@@ -295,8 +295,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
      */
     function harvestRewards() external {
         require(
-            msg.sender == mamoStrategyRegistry.getBackendAddress() || 
-            mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)),
+            msg.sender == mamoStrategyRegistry.getBackendAddress()
+                || mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)),
             "Caller must be backend or strategy owner"
         );
 
@@ -373,7 +373,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
      * @notice Internal function that authorizes an upgrade to a new implementation
      * @dev Only callable by Mamo Strategy Registry contract
      */
-    function _authorizeUpgrade(address) internal view override{
+    function _authorizeUpgrade(address) internal view override {
         require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
     }
 
@@ -382,10 +382,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     /**
      * @notice Gets the total balance of tokens across both protocols
      * @return The total balance in tokens
-    i */
+     * i
+     */
     function getTotalBalance() public returns (uint256) {
         uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
-        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance): 0;
+        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
 
         // TODO check vault balance decimals
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));

@@ -37,7 +37,6 @@ contract StrategyRegistryDeploy is Script {
         public
         returns (MamoStrategyRegistry registry)
     {
-
         vm.startBroadcast();
         // Deploy the MamoStrategyRegistry with the specified roles
         registry = new MamoStrategyRegistry(admin, backend, guardian);
@@ -46,7 +45,5 @@ contract StrategyRegistryDeploy is Script {
 
         // Add the registry address to the addresses contract
         addresses.addAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
-
-
     }
 }

@@ -58,7 +58,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         registry = deployScript.deployStrategyRegistry(admin, backend, guardian);
     }
 
-    function testRegistryDeployment() view public {
+    function testRegistryDeployment() public view {
         // Test that the registry was deployed correctly
         assertTrue(address(registry) != address(0), "Registry not deployed");
 
