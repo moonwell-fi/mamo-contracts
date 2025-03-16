@@ -1,0 +1,22 @@
+[
+  {
+    "addr": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "name": "USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0xEdc817A28E8B93B03976FBd4a3dDBc9f7D176c22",
+    "name": "MOONWELL_USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",
+    "isContract": true,
+    "name": "USDC_METAMORPHO_VAULT"
+  },
+  {
+    "addr": "0x73D8A3bF62aACa6690791E57EBaEE4e1d875d8Fe",
+    "name": "MOONWELL_COMPTROLLER",
+    "isContract": true
+  }
+]

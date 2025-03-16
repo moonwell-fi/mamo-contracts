@@ -47,8 +47,8 @@ contract USDCStrategyDeployer is Script {
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("BACKEND");
         address moonwellComptroller = addresses.getAddress("MOONWELL_COMPTROLLER");
-        address mUSDC = addresses.getAddress("MUSDC");
-        address metaMorphoVault = addresses.getAddress("META_MORPHO_VAULT");
+        address mUSDC = addresses.getAddress("MOONWELL_USDC");
+        address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
         address dexRouter = addresses.getAddress("DEX_ROUTER");
         address usdc = addresses.getAddress("USDC");
 
