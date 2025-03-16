@@ -351,6 +351,22 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         }
     }
 
+    // ==================== VIEW FUNCTIONS ====================
+
+    /**
+     * @notice Gets the total balance of tokens across both protocols
+     * @return The total balance in tokens
+     * i
+     */
+    function getTotalBalance() public returns (uint256) {
+        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
+        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
+
+        // TODO check vault balance decimals
+        return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
+    }
+
+
     // ==================== INTERNAL FUNCTIONS ====================
 
     /**
@@ -384,21 +400,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
      */
     function _authorizeUpgrade(address) internal view override {
         require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-    }
-
-    // ==================== VIEW FUNCTIONS ====================
-
-    /**
-     * @notice Gets the total balance of tokens across both protocols
-     * @return The total balance in tokens
-     * i
-     */
-    function getTotalBalance() public returns (uint256) {
-        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
-        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
-
-        // TODO check vault balance decimals
-        return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
 
     /**

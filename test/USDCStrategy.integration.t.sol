@@ -509,4 +509,14 @@ contract USDCStrategyTest is Test {
         assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
         assertEq(recipient.balance, 0, "Recipient should not have received any ETH");
     }
+    
+    function testRevertIfAddStrategyTokenAsRewardToken() public {
+        // Attempt to add the strategy token (USDC) as a reward token
+        vm.startPrank(backend);
+        
+        // Attempt should revert with "Strategy token cannot be a reward token"
+        vm.expectRevert("Strategy token cannot be a reward token");
+        strategy.addRewardToken(address(usdc));
+        vm.stopPrank();
+    }
 }
