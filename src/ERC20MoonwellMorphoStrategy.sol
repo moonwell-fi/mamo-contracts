@@ -64,8 +64,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     // @notice Emitted when the position split is updated
     event PositionUpdated(uint256 splitA, uint256 splitB);
 
-    // @notice Emitted when rewards are harvested
-    event RewardsHarvested(uint256 amount);
+    // @notice Emitted when rewards are compounded
+    event RewardsCompounded(uint256 amount);
 
     // @notice Emitted when the DEX router is updated
     event DexRouterUpdated(address indexed oldDexRouter, address indexed newDexRouter);
@@ -154,7 +154,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     function withdraw(uint256 amount) external onlyStrategyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
-        require(getTotalBalance() > amount, "Amount greater than liquidity");
+        require(getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
 
         // Check if we have enough tokens in the contract
         uint256 tokenBalance = token.balanceOf(address(this));
@@ -290,17 +290,17 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     }
 
     /**
-     * @notice Harvests reward tokens by swapping them to the strategy token and depositing according to the current split
+     * @notice Compounds reward tokens by swapping them to the strategy token and depositing according to the current split
      * @dev Callable by the Mamo backend or strategy owner
      */
-    function harvestRewards() external {
+    function compoundRewards() external {
         require(
             msg.sender == mamoStrategyRegistry.getBackendAddress()
                 || mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)),
             "Caller must be backend or strategy owner"
         );
 
-        uint256 totalTokenHarvested = 0;
+        uint256 totalTokenCompounded = 0;
         uint256 rewardTokenCount = _rewardTokens.length();
 
         // Iterate through all reward tokens
@@ -332,13 +332,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
             );
 
             // Add the tokens received to our total
-            totalTokenHarvested += amounts[amounts.length - 1];
+            totalTokenCompounded += amounts[amounts.length - 1];
         }
 
-        // If we harvested any tokens, deposit them according to the current split
-        if (totalTokenHarvested > 0) {
-            depositInternal(totalTokenHarvested);
-            emit RewardsHarvested(totalTokenHarvested);
+        // If we compounded any tokens, deposit them according to the current split
+        if (totalTokenCompounded > 0) {
+            depositInternal(totalTokenCompounded);
+            emit RewardsCompounded(totalTokenCompounded);
         }
     }
 

@@ -111,7 +111,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function updateRewardToken(address rewardToken, bool add) external`: Updates the reward tokens set by adding or removing a token. The strategy token cannot be added as a reward token. Only callable by the backend address from the Mamo Strategy Registry.
 
-- `function harvestRewards() external`: Harvests reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsHarvested event. Callable by the backend address from the Mamo Strategy Registry or the user who owns this strategy, as verified by the Mamo Strategy Registry.
+- `function compoundRewards() external`: Compounds reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsCompounded event. Callable by the backend address from the Mamo Strategy Registry or the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
 - `function _authorizeUpgrade(address) internal view override onlyStrategyRegistry()`: Internal function that authorizes an upgrade to a new implementation. Only callable by the Mamo Strategy Registry contract. This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 
@@ -125,7 +125,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 2. Mamo Backend calls Mamo Strategy Registry addStrategy to register the strategy for the user.
 3. User deposits funds into their strategy.
 4. Mamo Backend reads Deposit events and calls updateUserPosition to manage the strategy.
-5. User or Mamo Backend can call claimRewards to harvest rewards from the strategy.
+5. User or Mamo Backend can call compoundRewards to compound rewards from the strategy.
 6. When token balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
 7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
 8. If Mamo wants to upgrade a strategy (example, deposit tokens into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
