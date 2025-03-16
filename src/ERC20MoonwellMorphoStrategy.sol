@@ -6,6 +6,7 @@ import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -17,7 +18,7 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
  * @dev This contract is designed to be used as an implementation for proxies
  */
-contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
+contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
 
@@ -97,6 +98,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
 
     modifier onlyBackend() {
         require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        _;
+    }
+
+    modifier onlyStrategyRegistry() {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
         _;
     }
 
@@ -281,7 +287,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
      * @notice Harvests reward tokens by swapping them to the strategy token and depositing according to the current split
      * @dev Callable by the Mamo backend or strategy owner
      */
-    function harvestRewards() external  {
+    function harvestRewards() external {
         require(
             msg.sender == mamoStrategyRegistry.getBackendAddress() || 
             mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)),
@@ -361,9 +367,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
      * @notice Internal function that authorizes an upgrade to a new implementation
      * @dev Only callable by Mamo Strategy Registry contract
      */
-    function _authorizeUpgrade(address) internal view override{
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-    }
+    function _authorizeUpgrade(address) internal view override onlyStrategyRegistry {}
 
     // ==================== VIEW FUNCTIONS ====================
 

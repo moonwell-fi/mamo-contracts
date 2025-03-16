@@ -43,7 +43,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function getLatestImplementation(uint256 strategyId) external view returns (address)`: Gets the latest implementation for a strategy ID.
 
-- `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function checks that the strategy has the correct roles set up (UPGRADER_ROLE for the registry and BACKEND_ROLE for the Mamo backend, but no longer checks for OWNER_ROLE). This function is pausable.
+- `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function checks that the strategy has the correct registry address set up. This function is pausable.
 
 - `function upgradeStrategy(address strategy) external`: Updates the implementation of a strategy to the latest implementation of the same type. Only callable by the user. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
 
@@ -54,6 +54,12 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 - `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
 
 ## Interfaces
+
+### IBaseStrategy
+
+This interface defines the methods that a strategy contract should expose.
+
+- `function mamoStrategyRegistry() external view returns (IMamoStrategyRegistry)`: Gets the Mamo Strategy Registry contract.
 
 ### IUUPSUpgradeable
 

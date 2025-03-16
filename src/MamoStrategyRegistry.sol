@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {IStrategy} from "@interfaces/IStrategy.sol";
 import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
+import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -169,39 +170,16 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(implementation != address(0), "Invalid implementation");
         require(whitelistedImplementations[implementation], "Implementation not whitelisted");
 
-        // Check the strategy roles are correct
-        // Check that the strategy has the correct roles set up
-        IAccessControlEnumerable strategyContract = IAccessControlEnumerable(strategy);
+        // Check the strategy addresses are correct
+        IBaseStrategy strategyContract = IBaseStrategy(strategy);
 
-        // Check upgrader role is set to this registry
-        require(strategyContract.hasRole(keccak256("UPGRADER_ROLE"), address(this)), "Upgrader role not set correctly");
-
-        // Check backend role is set to Mamo backend
-        require(
-            strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember(BACKEND_ROLE, 0)),
-            "Backend role not set correctly"
-        );
+        // Check strategy registry address is set to this registry
+        require(address(strategyContract.mamoStrategyRegistry()) == address(this), "Strategy registry not set correctly");
 
         // Add the strategy to the user's strategies
         _userStrategies[user].add(strategy);
 
         emit StrategyAdded(user, strategy, implementation);
-    }
-
-    /**
-     * @notice Removes a strategy for a user
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param user The address of the user
-     * @param strategy The address of the strategy to remove
-     */
-    function removeStrategy(address user, address strategy) external whenNotPaused onlyRole(BACKEND_ROLE) {
-        // Check if the strategy exists for the user
-        require(_userStrategies[user].contains(strategy), "Strategy not found for user");
-
-        // Remove the strategy
-        _userStrategies[user].remove(strategy);
-
-        emit StrategyRemoved(user, strategy);
     }
 
     // ==================== GETTER FUNCTIONS ====================
