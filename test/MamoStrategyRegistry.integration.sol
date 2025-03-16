@@ -98,14 +98,14 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Verify the implementation has been assigned the correct strategy type ID
         assertEq(
-            registry.getImplementationId(mockImplementation),
+            registry.implementationToId(mockImplementation),
             strategyTypeId,
             "Implementation should have the correct strategy type ID"
         );
 
         // Verify the implementation is set as the latest implementation for that strategy type ID
         assertEq(
-            registry.getLatestImplementation(strategyTypeId),
+            registry.latestImplementationById(strategyTypeId),
             mockImplementation,
             "Implementation should be set as the latest for its strategy type ID"
         );
@@ -658,4 +658,189 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    // ==================== TESTS FOR GETTER FUNCTIONS ====================
+
+    function testNextStrategyTypeId() public {
+        // Verify the initial value of nextStrategyTypeId is 1
+        assertEq(registry.nextStrategyTypeId(), 1, "nextStrategyTypeId should be initialized to 1");
+
+        // Whitelist an implementation and verify nextStrategyTypeId increments
+        address mockImplementation = makeAddr("mockImplementation");
+        vm.startPrank(backend);
+        registry.whitelistImplementation(mockImplementation);
+        vm.stopPrank();
+
+        // Verify nextStrategyTypeId is now 2
+        assertEq(registry.nextStrategyTypeId(), 2, "nextStrategyTypeId should be incremented to 2");
+
+        // Whitelist another implementation and verify nextStrategyTypeId increments again
+        address mockImplementation2 = makeAddr("mockImplementation2");
+        vm.startPrank(backend);
+        registry.whitelistImplementation(mockImplementation2);
+        vm.stopPrank();
+
+        // Verify nextStrategyTypeId is now 3
+        assertEq(registry.nextStrategyTypeId(), 3, "nextStrategyTypeId should be incremented to 3");
+    }
+
+    function testImplementationToId() public {
+        // Create a mock implementation address
+        address mockImplementation = makeAddr("mockImplementation");
+
+        // Whitelist the implementation
+        vm.startPrank(backend);
+        uint256 strategyTypeId = registry.whitelistImplementation(mockImplementation);
+        vm.stopPrank();
+
+        // Verify implementationToId returns the correct ID
+        assertEq(
+            registry.implementationToId(mockImplementation),
+            strategyTypeId,
+            "implementationToId should return the correct strategy type ID"
+        );
+
+        // Verify implementationToId returns 0 for non-whitelisted implementation
+        address nonWhitelistedImpl = makeAddr("nonWhitelistedImpl");
+        assertEq(
+            registry.implementationToId(nonWhitelistedImpl),
+            0,
+            "implementationToId should return 0 for non-whitelisted implementation"
+        );
+    }
+
+    function testLatestImplementationById() public {
+        // Create mock implementation addresses
+        address mockImplementation1 = makeAddr("mockImplementation1");
+        address mockImplementation2 = makeAddr("mockImplementation2");
+
+        // Whitelist the implementations
+        vm.startPrank(backend);
+        uint256 strategyTypeId1 = registry.whitelistImplementation(mockImplementation1);
+        uint256 strategyTypeId2 = registry.whitelistImplementation(mockImplementation2);
+        vm.stopPrank();
+
+        // Verify latestImplementationById returns the correct implementation for each strategy type ID
+        assertEq(
+            registry.latestImplementationById(strategyTypeId1),
+            mockImplementation1,
+            "latestImplementationById should return the correct implementation for strategy type ID 1"
+        );
+        assertEq(
+            registry.latestImplementationById(strategyTypeId2),
+            mockImplementation2,
+            "latestImplementationById should return the correct implementation for strategy type ID 2"
+        );
+
+        // Verify latestImplementationById returns address(0) for non-existent strategy type ID
+        uint256 nonExistentId = 999;
+        assertEq(
+            registry.latestImplementationById(nonExistentId),
+            address(0),
+            "latestImplementationById should return address(0) for non-existent strategy type ID"
+        );
+    }
+
+    function testGetUserStrategies() public {
+        // Deploy mock strategy implementations
+        MockStrategy strategyImpl1 = new MockStrategy();
+        MockStrategy strategyImpl2 = new MockStrategy();
+
+        // Whitelist the implementations
+        vm.startPrank(backend);
+        registry.whitelistImplementation(address(strategyImpl1));
+        registry.whitelistImplementation(address(strategyImpl2));
+        vm.stopPrank();
+
+        // Create user addresses
+        address user1 = makeAddr("user1");
+        address user2 = makeAddr("user2");
+
+        // Create proxies with the mock strategy implementations
+        ERC1967Proxy strategy1 = new ERC1967Proxy(
+            address(strategyImpl1), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+        );
+        ERC1967Proxy strategy2 = new ERC1967Proxy(
+            address(strategyImpl2), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+        );
+        ERC1967Proxy strategy3 = new ERC1967Proxy(
+            address(strategyImpl1), abi.encodeCall(MockStrategy.initialize, (user2, address(registry), backend))
+        );
+
+        // Add strategies for users
+        vm.startPrank(backend);
+        registry.addStrategy(user1, address(strategy1));
+        registry.addStrategy(user1, address(strategy2));
+        registry.addStrategy(user2, address(strategy3));
+        vm.stopPrank();
+
+        // Verify getUserStrategies returns the correct strategies for user1
+        address[] memory user1Strategies = registry.getUserStrategies(user1);
+        assertEq(user1Strategies.length, 2, "User1 should have 2 strategies");
+        assertTrue(
+            user1Strategies[0] == address(strategy1) || user1Strategies[1] == address(strategy1),
+            "User1 strategies should include strategy1"
+        );
+        assertTrue(
+            user1Strategies[0] == address(strategy2) || user1Strategies[1] == address(strategy2),
+            "User1 strategies should include strategy2"
+        );
+
+        // Verify getUserStrategies returns the correct strategies for user2
+        address[] memory user2Strategies = registry.getUserStrategies(user2);
+        assertEq(user2Strategies.length, 1, "User2 should have 1 strategy");
+        assertEq(user2Strategies[0], address(strategy3), "User2 strategies should include strategy3");
+
+        // Verify getUserStrategies returns an empty array for a user with no strategies
+        address userWithNoStrategies = makeAddr("userWithNoStrategies");
+        address[] memory noStrategies = registry.getUserStrategies(userWithNoStrategies);
+        assertEq(noStrategies.length, 0, "User with no strategies should have an empty array");
+    }
+
+    function testIsUserStrategy() public {
+        // Deploy a mock strategy implementation
+        MockStrategy strategyImpl = new MockStrategy();
+
+        // Whitelist the implementation
+        vm.startPrank(backend);
+        registry.whitelistImplementation(address(strategyImpl));
+        vm.stopPrank();
+
+        // Create user addresses
+        address user1 = makeAddr("user1");
+        address user2 = makeAddr("user2");
+
+        // Create a proxy with the mock strategy implementation
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+        );
+
+        // Add the strategy for user1
+        vm.startPrank(backend);
+        registry.addStrategy(user1, address(strategy));
+        vm.stopPrank();
+
+        // Verify isUserStrategy returns true for user1 and the strategy
+        assertTrue(
+            registry.isUserStrategy(user1, address(strategy)),
+            "isUserStrategy should return true for user1 and the strategy"
+        );
+
+        // Verify isUserStrategy returns false for user2 and the strategy
+        assertFalse(
+            registry.isUserStrategy(user2, address(strategy)),
+            "isUserStrategy should return false for user2 and the strategy"
+        );
+
+        // Verify isUserStrategy returns false for user1 and a non-existent strategy
+        address nonExistentStrategy = makeAddr("nonExistentStrategy");
+        assertFalse(
+            registry.isUserStrategy(user1, nonExistentStrategy),
+            "isUserStrategy should return false for user1 and a non-existent strategy"
+        );
+    }
+
+    function getImplementationAddress(address proxy) public view returns (address) {
+        bytes32 slot = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+        return address(uint160(uint256(vm.load(proxy, slot))));
+    }
 }

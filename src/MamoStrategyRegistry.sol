@@ -18,10 +18,6 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
 contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     using EnumerableSet for EnumerableSet.AddressSet;
 
-    // Constants
-    /// @notice EIP-1967 implementation slot for accessing the implementation address of a proxy
-    bytes32 private constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
-
     // Role definitions
     /// @notice Role identifier for guardians who can pause/unpause the contract
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
@@ -30,7 +26,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
     /// @notice Counter for strategy type IDs
-    uint256 private _nextStrategyTypeId = 1;
+    uint256 public nextStrategyTypeId;
 
     // State variables
     /// @notice Set of all strategy addresses for each user
@@ -88,6 +84,8 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
         _grantRole(GUARDIAN_ROLE, guardian);
+
+        nextStrategyTypeId = 1;
     }
 
     // ==================== PERMISSIONLESS FUNCTIONS ====================
@@ -158,7 +156,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
         // Assign a new strategy type ID
-        strategyTypeId = _nextStrategyTypeId++;
+        strategyTypeId = nextStrategyTypeId++;
 
         whitelistedImplementations[implementation] = true;
         implementationToId[implementation] = strategyTypeId;
@@ -222,24 +220,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     // ==================== GETTER FUNCTIONS ====================
-
-    /**
-     * @notice Gets the strategy ID for an implementation
-     * @param implementation The address of the implementation
-     * @return The strategy ID as a uint256 value
-     */
-    function getImplementationId(address implementation) external view returns (uint256) {
-        return implementationToId[implementation];
-    }
-
-    /**
-     * @notice Gets the latest implementation for a strategy ID
-     * @param strategyId The strategy ID as a uint256 value
-     * @return The address of the latest implementation for the strategy ID
-     */
-    function getLatestImplementation(uint256 strategyId) external view returns (address) {
-        return latestImplementationById[strategyId];
-    }
 
     /**
      * @notice Gets all strategies for a user
