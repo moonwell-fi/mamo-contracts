@@ -14,17 +14,27 @@ contract MamoStrategyRegistryIntegrationTest is Test {
     ERC20MoonwellMorphoStrategy strategy;
     Addresses public addresses;
 
-    function setUp() public {
-        // Create test addresses
-        address admin = makeAddr("admin");
-        address backend = makeAddr("backend");
-        address guardian = makeAddr("guardian");
+    address owner;
 
+    function setUp() public {
         // Create a new addresses instance for testing
         // We'll create it with an empty array of chainIds to avoid file reading issues
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](0);
         addresses = new Addresses(addressesFolderPath, chainIds);
+
+        owner = makeAddr("owner");
+        address backend;
+
+        // Create test addresses
+        if(addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
+            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY")); 
+            backend = addresses.getAddress("BACKEND");
+        } else {
+
+        address admin = makeAddr("admin");
+        backend = makeAddr("backend");
+        address guardian = makeAddr("guardian");
 
         // Deploy the MamoStrategyRegistry using the script
         StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
@@ -34,13 +44,23 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         
         // Call the deployStrategyRegistry function with the addresses
         registry = deployScript.deployStrategyRegistry(admin, backend, guardian);
-
+        }
         // Test USDC strategy deployment using the deployer script
         USDCStrategyDeployer strategyDeployer = new USDCStrategyDeployer();
 
+        address implementation = strategyDeployer.deployImplementation();
+
+        vm.prank(backend);
+        registry.whitelistImplementation(implementation);
+
         strategy = ERC20MoonwellMorphoStrategy(payable(strategyDeployer.deployUSDCStrategy()));
 
+        vm.prank(backend);
+        registry.addStrategy(owner, address(strategy));
+
     }
+
+
     
 
 }

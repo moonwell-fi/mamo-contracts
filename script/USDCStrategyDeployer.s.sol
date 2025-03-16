@@ -22,15 +22,27 @@ contract USDCStrategyDeployer is Script {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Deploy the strategy implementation and proxy
-        deployUSDCStrategy();
+        deployImplementation();
     }
 
-    function deployUSDCStrategy() public returns(address strategyProxy){
+     function deployImplementation() public returns(address) {
         vm.startBroadcast();
-
         // Deploy the implementation contract
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
 
+        vm.stopBroadcast();
+        
+        // Add implementation address to addresses
+        addresses.addAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL", address(implementation), true);
+        
+        // Log the deployed contract address
+        console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));
+        
+        return address(implementation);
+     }
+
+     function deployUSDCStrategy() public returns(address strategyProxy){
+        vm.startBroadcast();
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("BACKEND");
@@ -61,15 +73,12 @@ contract USDCStrategyDeployer is Script {
         );
 
         // Deploy the proxy with the implementation and initialization data
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+        ERC1967Proxy proxy = new ERC1967Proxy(addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL"), initData);
 
         // Stop broadcasting transactions
         vm.stopBroadcast();
-        addresses.addAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL", address(implementation), true);
-        addresses.addAddress("USDC_MOONWELL_MORPHO_STRATEGY_PROXY", address(proxy), true);
 
-        // Log the deployed contract addresses
-        console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));
+        // Log the deployed proxy address
         console.log("USDC Strategy proxy deployed at:", address(proxy));
 
         return address(proxy);

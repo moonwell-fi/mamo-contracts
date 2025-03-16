@@ -23,17 +23,8 @@ contract StrategyRegistryDeploy is Script {
         address backend = addresses.getAddress("BACKEND");
         address guardian = addresses.getAddress("GUARDIAN");
 
-        // Start broadcasting transactions
-        vm.startBroadcast();
-
         // Deploy the strategy registry
         MamoStrategyRegistry registry = deployStrategyRegistry(admin, backend, guardian);
-
-        // Stop broadcasting transactions
-        vm.stopBroadcast();
-
-        // Add the registry address to the addresses contract
-        addresses.addAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
 
         // Update the JSON file with the new address
         addresses.updateJson();
@@ -46,7 +37,16 @@ contract StrategyRegistryDeploy is Script {
         public
         returns (MamoStrategyRegistry registry)
     {
+
+        vm.startBroadcast();
         // Deploy the MamoStrategyRegistry with the specified roles
         registry = new MamoStrategyRegistry(admin, backend, guardian);
+
+        vm.stopBroadcast();
+
+        // Add the registry address to the addresses contract
+        addresses.addAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
+
+
     }
 }
