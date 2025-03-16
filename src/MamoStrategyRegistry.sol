@@ -173,9 +173,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Check that the strategy has the correct roles set up
         IAccessControlEnumerable strategyContract = IAccessControlEnumerable(strategy);
 
-        // Check owner role is set to user
-        require(strategyContract.hasRole(keccak256("OWNER_ROLE"), user), "Owner role not set correctly");
-
         // Check upgrader role is set to this registry
         require(strategyContract.hasRole(keccak256("UPGRADER_ROLE"), address(this)), "Upgrader role not set correctly");
 
@@ -233,5 +230,13 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      */
     function isUserStrategy(address user, address strategy) public view returns (bool) {
         return _userStrategies[user].contains(strategy);
+    }
+
+    /**
+     * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @return The address of the backend
+     */
+    function getBackendAddress() external view returns (address) {
+        return getRoleMember(BACKEND_ROLE, 0);
     }
 }

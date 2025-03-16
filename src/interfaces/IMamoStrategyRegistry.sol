@@ -91,4 +91,10 @@ interface IMamoStrategyRegistry {
      * @return implementation The address of the implementation
      */
     function getStrategyImplementation(address strategy) external view returns (address);
+
+    /**
+     * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @return The address of the backend
+     */
+    function getBackendAddress() external view returns (address);
 }

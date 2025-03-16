@@ -6,9 +6,8 @@ import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
-import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
@@ -18,23 +17,13 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
  * @dev This contract is designed to be used as an implementation for proxies
  */
-contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable {
+contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
 
     // Constants
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
-
-    // Role definitions
-    // @notice Role identifier for the strategy owner (the user)
-    bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
-
-    // @notice Role identifier for the upgrader (Mamo Strategy Registry)
-    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
-
-    // @notice Role identifier for the backend role
-    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
     // State variables
     // @notice Reference to the Mamo Strategy Registry contract
@@ -91,6 +80,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
         address owner;
         address mamoStrategyRegistry;
         address mamoBackend;
+        address admin;
         address moonwellComptroller;
         address mToken;
         address metaMorphoVault;
@@ -98,6 +88,16 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
         address token;
         uint256 splitMToken;
         uint256 splitVault;
+    }
+
+    modifier onlyStrategyOwner() {
+        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Not strategy owner");
+        _;
+    }
+
+    modifier onlyBackend() {
+        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        _;
     }
 
     // ==================== INITIALIZER ====================
@@ -108,19 +108,20 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
      * @param params The initialization parameters struct
      */
     function initialize(InitParams calldata params) external initializer {
+        __AccessControlEnumerable_init();
+
         require(params.owner != address(0), "Invalid owner address");
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(params.mamoBackend != address(0), "Invalid mamoBackend address");
+        require(params.admin != address(0), "Invalid admin address");
         require(params.moonwellComptroller != address(0), "Invalid moonwellComptroller address");
         require(params.mToken != address(0), "Invalid mToken address");
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.dexRouter != address(0), "Invalid dexRouter address");
         require(params.token != address(0), "Invalid token address");
 
-        // Set up roles
-        _grantRole(OWNER_ROLE, params.owner);
-        _grantRole(UPGRADER_ROLE, params.mamoStrategyRegistry);
-        _grantRole(BACKEND_ROLE, params.mamoBackend);
+        // Grant admin role to the admin address
+        _grantRole(DEFAULT_ADMIN_ROLE, params.admin);
 
         // Set state variables
         mamoStrategyRegistry = IMamoStrategyRegistry(params.mamoStrategyRegistry);
@@ -138,10 +139,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
 
     /**
      * @notice Deposits funds into the strategy
-     * @dev Only callable by accounts with the OWNER_ROLE
+     * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
-    function deposit(uint256 amount) external onlyRole(OWNER_ROLE) {
+    function deposit(uint256 amount) external onlyStrategyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
         // Transfer tokens from the owner to this contract
@@ -155,10 +156,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
 
     /**
      * @notice Withdraws funds from the strategy
-     * @dev Only callable by accounts with the OWNER_ROLE
+     * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
      */
-    function withdraw(uint256 amount) external onlyRole(OWNER_ROLE) {
+    function withdraw(uint256 amount) external onlyStrategyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
         require(getTotalBalance() > amount, "Amount greater than liquidity");
@@ -196,12 +197,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
 
     /**
      * @notice Recovers ERC20 tokens accidentally sent to this contract
-     * @dev Only callable by accounts with the OWNER_ROLE
+     * @dev Only callable by the user who owns this strategy
      * @param tokenAddress The address of the token to recover
      * @param to The address to send the tokens to
      * @param amount The amount of tokens to recover
      */
-    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyRole(OWNER_ROLE) {
+    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyStrategyOwner {
         require(to != address(0), "Cannot send to zero address");
         require(amount > 0, "Amount must be greater than 0");
 
@@ -220,7 +221,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
      * @param splitA The first split parameter (basis points) for Moonwell
      * @param splitB The second split parameter (basis points) for MetaMorpho
      */
-    function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE) {
+    function updatePosition(uint256 splitA, uint256 splitB) external onlyBackend {
         require(splitA + splitB == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
 
         // Withdraw from Moonwell
@@ -254,7 +255,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
      * @param rewardToken The address of the token to add or remove
      * @param add True to add the token, false to remove it
      */
-    function updateRewardToken(address rewardToken, bool add) external onlyRole(BACKEND_ROLE) {
+    function updateRewardToken(address rewardToken, bool add) external onlyBackend {
         require(rewardToken != address(0), "Invalid token address");
         require(rewardToken != address(token), "Strategy token cannot be a reward token");
 
@@ -272,7 +273,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
      * @dev Only callable by accounts with the BACKEND_ROLE
      * @param _newDexRouter The new DEX router address
      */
-    function setDexRouter(address _newDexRouter) external onlyRole(BACKEND_ROLE) {
+    function setDexRouter(address _newDexRouter) external onlyBackend {
         require(_newDexRouter != address(0), "Invalid dexRouter address");
 
         address oldDexRouter = address(dexRouter);
@@ -283,12 +284,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
 
     /**
      * @notice Harvests reward tokens by swapping them to the strategy token and depositing according to the current split
-     * @dev Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE
+     * @dev Callable by the Mamo backend or strategy owner
      */
-    function harvestRewards() external {
+    function harvestRewards() external  {
         require(
-            hasRole(BACKEND_ROLE, msg.sender) || hasRole(OWNER_ROLE, msg.sender),
-            "Caller must have BACKEND_ROLE or OWNER_ROLE"
+            msg.sender == mamoStrategyRegistry.getBackendAddress() || 
+            mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)),
+            "Caller must be backend or strategy owner"
         );
 
         uint256 totalTokenHarvested = 0;
@@ -362,9 +364,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, AccessControlEnumerable, 
 
     /**
      * @notice Internal function that authorizes an upgrade to a new implementation
-     * @dev Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry)
+     * @dev Only callable by Mamo Strategy Registry contract
      */
-    function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE) {}
+    function _authorizeUpgrade(address) internal view override onlyStrategyRegistry(){
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
+    }
 
     // ==================== VIEW FUNCTIONS ====================
 

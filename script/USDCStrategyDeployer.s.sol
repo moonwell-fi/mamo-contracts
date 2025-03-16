@@ -39,6 +39,7 @@ contract USDCStrategyDeployer is Script {
         address owner = addresses.getAddress("OWNER");
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("BACKEND");
+        address admin = addresses.getAddress("ADMIN"); // Admin for role management
         address moonwellComptroller = addresses.getAddress("MOONWELL_COMPTROLLER");
         address mUSDC = addresses.getAddress("MUSDC");
         address metaMorphoVault = addresses.getAddress("META_MORPHO_VAULT");
@@ -56,6 +57,7 @@ contract USDCStrategyDeployer is Script {
                 owner: owner,
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
+                admin: admin,
                 moonwellComptroller: moonwellComptroller,
                 mToken: mUSDC,
                 metaMorphoVault: metaMorphoVault,
