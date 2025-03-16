@@ -14,6 +14,15 @@ import {IMToken} from "@interfaces/IMToken.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+// Mock ERC20 Token
+contract MockERC20 is ERC20 {
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
+    
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
 // Mock DEX Router
 contract MockDEXRouter {
     function swapExactTokensForTokens(
@@ -254,20 +263,250 @@ contract USDCStrategyTest is Test {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
         deal(address(usdc), owner, depositAmount);
-
+        
         vm.startPrank(owner);
         usdc.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
-
+        
         // Attempt to withdraw more than deposited
         uint256 withdrawAmount = depositAmount * 2;
-
+        
         // Attempt to withdraw should revert with the updated error message
         vm.expectRevert("Withdrawal amount exceeds available balance in strategy");
         strategy.withdraw(withdrawAmount);
         vm.stopPrank();
-
+        
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+    }
+    
+    function testRevertIfWithdrawAmountIsZero() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+        
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        
+        // Attempt to withdraw zero amount
+        uint256 withdrawAmount = 0;
+        
+        // Attempt to withdraw should revert with "Amount must be greater than 0"
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.withdraw(withdrawAmount);
+        vm.stopPrank();
+        
+        // Verify the strategy balance remains unchanged
+        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+    }
+    
+    function testRevertIfDepositAmountIsZero() public {
+        // Mint USDC to the owner
+        uint256 initialBalance = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, initialBalance);
+        
+        // Attempt to deposit zero amount
+        uint256 depositAmount = 0;
+        
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        
+        // Attempt to deposit should revert with "Amount must be greater than 0"
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+        
+        // Verify the owner's balance remains unchanged
+        assertEq(usdc.balanceOf(owner), initialBalance, "Owner's USDC balance should remain unchanged");
+        
+        // Verify the strategy balance remains unchanged
+        assertApproxEqAbs(strategy.getTotalBalance(), 0, 1e3, "Strategy balance should remain unchanged");
+    }
+    
+    function testOwnerCanRecoverERC20() public {
+        // Create a mock ERC20 token
+        MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
+        
+        // Mint some tokens to the strategy contract
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens with 18 decimals
+        deal(address(mockToken), address(strategy), tokenAmount);
+        
+        // Verify the strategy has the tokens
+        assertEq(mockToken.balanceOf(address(strategy)), tokenAmount, "Strategy should have the mock tokens");
+        
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+        
+        // Owner recovers the tokens
+        vm.startPrank(owner);
+        strategy.recoverERC20(address(mockToken), recipient, tokenAmount);
+        vm.stopPrank();
+        
+        // Verify the tokens were transferred to the recipient
+        assertEq(mockToken.balanceOf(recipient), tokenAmount, "Recipient should have received the tokens");
+        assertEq(mockToken.balanceOf(address(strategy)), 0, "Strategy should have no tokens left");
+    }
+    
+    function testRevertIfNonOwnerRecoverERC20() public {
+        // Create a mock ERC20 token
+        MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
+        
+        // Mint some tokens to the strategy contract
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens with 18 decimals
+        deal(address(mockToken), address(strategy), tokenAmount);
+        
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+        
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+        
+        // Non-owner attempts to recover the tokens
+        vm.startPrank(nonOwner);
+        vm.expectRevert("Not strategy owner");
+        strategy.recoverERC20(address(mockToken), recipient, tokenAmount);
+        vm.stopPrank();
+        
+        // Verify the tokens remain in the strategy
+        assertEq(mockToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
+        assertEq(mockToken.balanceOf(recipient), 0, "Recipient should not have received any tokens");
+    }
+    
+    function testRevertIfRecoverERC20ToZeroAddress() public {
+        // Create a mock ERC20 token
+        MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
+        
+        // Mint some tokens to the strategy contract
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens with 18 decimals
+        deal(address(mockToken), address(strategy), tokenAmount);
+        
+        // Owner attempts to recover the tokens to the zero address
+        vm.startPrank(owner);
+        vm.expectRevert("Cannot send to zero address");
+        strategy.recoverERC20(address(mockToken), address(0), tokenAmount);
+        vm.stopPrank();
+        
+        // Verify the tokens remain in the strategy
+        assertEq(mockToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
+    }
+    
+    function testRevertIfRecoverERC20ZeroAmount() public {
+        // Create a mock ERC20 token
+        MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
+        
+        // Mint some tokens to the strategy contract
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens with 18 decimals
+        deal(address(mockToken), address(strategy), tokenAmount);
+        
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+        
+        // Owner attempts to recover zero tokens
+        vm.startPrank(owner);
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.recoverERC20(address(mockToken), recipient, 0);
+        vm.stopPrank();
+        
+        // Verify the tokens remain in the strategy
+        assertEq(mockToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
+        assertEq(mockToken.balanceOf(recipient), 0, "Recipient should not have received any tokens");
+    }
+    
+    function testOwnerCanRecoverETH() public {
+        // Send some ETH to the strategy contract
+        uint256 ethAmount = 1 ether;
+        vm.deal(address(strategy), ethAmount);
+        
+        // Verify the strategy has the ETH
+        assertEq(address(strategy).balance, ethAmount, "Strategy should have the ETH");
+        
+        // Create a recipient address
+        address payable recipient = payable(makeAddr("recipient"));
+        uint256 initialRecipientBalance = recipient.balance;
+        
+        // Owner recovers the ETH
+        vm.startPrank(owner);
+        strategy.recoverETH(recipient, ethAmount);
+        vm.stopPrank();
+        
+        // Verify the ETH was transferred to the recipient
+        assertEq(recipient.balance, initialRecipientBalance + ethAmount, "Recipient should have received the ETH");
+        assertEq(address(strategy).balance, 0, "Strategy should have no ETH left");
+    }
+    
+    function testRevertIfNonOwnerRecoverETH() public {
+        // Send some ETH to the strategy contract
+        uint256 ethAmount = 1 ether;
+        vm.deal(address(strategy), ethAmount);
+        
+        // Create a recipient address
+        address payable recipient = payable(makeAddr("recipient"));
+        
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+        
+        // Non-owner attempts to recover the ETH
+        vm.startPrank(nonOwner);
+        vm.expectRevert("Not strategy owner");
+        strategy.recoverETH(recipient, ethAmount);
+        vm.stopPrank();
+        
+        // Verify the ETH remains in the strategy
+        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
+        assertEq(recipient.balance, 0, "Recipient should not have received any ETH");
+    }
+    
+    function testRevertIfRecoverETHToZeroAddress() public {
+        // Send some ETH to the strategy contract
+        uint256 ethAmount = 1 ether;
+        vm.deal(address(strategy), ethAmount);
+        
+        // Owner attempts to recover the ETH to the zero address
+        vm.startPrank(owner);
+        vm.expectRevert("Cannot send to zero address");
+        strategy.recoverETH(payable(address(0)), ethAmount);
+        vm.stopPrank();
+        
+        // Verify the ETH remains in the strategy
+        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
+    }
+    
+    function testRevertIfRecoverETHZeroAmount() public {
+        // Send some ETH to the strategy contract
+        uint256 ethAmount = 1 ether;
+        vm.deal(address(strategy), ethAmount);
+        
+        // Create a recipient address
+        address payable recipient = payable(makeAddr("recipient"));
+        
+        // Owner attempts to recover zero ETH
+        vm.startPrank(owner);
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.recoverETH(recipient, 0);
+        vm.stopPrank();
+        
+        // Verify the ETH remains in the strategy
+        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
+        assertEq(recipient.balance, 0, "Recipient should not have received any ETH");
+    }
+    
+    function testRevertIfRecoverETHInsufficientBalance() public {
+        // Send some ETH to the strategy contract
+        uint256 ethAmount = 1 ether;
+        vm.deal(address(strategy), ethAmount);
+        
+        // Create a recipient address
+        address payable recipient = payable(makeAddr("recipient"));
+        
+        // Owner attempts to recover more ETH than the strategy has
+        vm.startPrank(owner);
+        vm.expectRevert("Insufficient ETH balance");
+        strategy.recoverETH(recipient, ethAmount + 1);
+        vm.stopPrank();
+        
+        // Verify the ETH remains in the strategy
+        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
+        assertEq(recipient.balance, 0, "Recipient should not have received any ETH");
     }
 }

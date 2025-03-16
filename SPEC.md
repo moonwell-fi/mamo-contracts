@@ -136,5 +136,5 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 1. Implementation whitelist ensures that only trusted and audited implementations can be used.
 2. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type.
-3. The Mamo Strategy Registry is not upgradeable and the backend can't remove a user strategy. This ensure strategies can always call the Registry to find it's owner.
+3. The Mamo Strategy Registry is not upgradeable and the backend can't remove a user strategy. This ensure strategies can always call the Registry to find it's owner and the owner will always be the only address allowed to upgrade a strategy.
 4. Strategy contracts have clear ownership semantics, with only the user registered in the Mamo Strategy Registry able to deposit and withdraw funds, while only the backend address from the Mamo Strategy Registry can update positions.
