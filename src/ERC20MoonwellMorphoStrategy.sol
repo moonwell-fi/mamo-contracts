@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
+import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IComptroller} from "@interfaces/IComptroller.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
@@ -18,7 +19,7 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
  * @dev This contract is designed to be used as an implementation for proxies
  */
-contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
+contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
 
@@ -27,9 +28,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
     // State variables
-    // @notice Reference to the Mamo Strategy Registry contract
-    IMamoStrategyRegistry public mamoStrategyRegistry;
-
     // @notice Reference to the Moonwell Comptroller contract
     IComptroller public moonwellComptroller;
 
@@ -76,8 +74,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
     // @notice Emitted when a reward token is removed
     event RewardTokenRemoved(address indexed token);
 
-    // @notice Emitted when tokens are recovered from the contract
-    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -90,11 +86,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         address token;
         uint256 splitMToken;
         uint256 splitVault;
-    }
-
-    modifier onlyStrategyOwner() {
-        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Not strategy owner");
-        _;
     }
 
     modifier onlyBackend() {
@@ -119,7 +110,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         require(params.token != address(0), "Invalid token address");
 
         // Set state variables
-        mamoStrategyRegistry = IMamoStrategyRegistry(params.mamoStrategyRegistry);
+        __BaseStrategy_init(params.mamoStrategyRegistry);
+
         moonwellComptroller = IComptroller(params.moonwellComptroller);
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
@@ -190,34 +182,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         emit Withdraw(address(token), amount);
     }
 
-    /**
-     * @notice Recovers ERC20 tokens accidentally sent to this contract
-     * @dev Only callable by the user who owns this strategy
-     * @param tokenAddress The address of the token to recover
-     * @param to The address to send the tokens to
-     * @param amount The amount of tokens to recover
-     */
-    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyStrategyOwner {
-        require(to != address(0), "Cannot send to zero address");
-        require(amount > 0, "Amount must be greater than 0");
-
-        IERC20(tokenAddress).safeTransfer(to, amount);
-
-        emit TokenRecovered(tokenAddress, to, amount);
-    }
-
-    /**
-     * @notice Recovers ETH accidentally sent to this contract
-     * @dev Only callable by the user who owns this strategy
-     * @param to The address to send the ETH to
-     */
-    function recoverETH(address payable to) external onlyStrategyOwner {
-        require(to != address(0), "Cannot send to zero address");
-        uint256 amount = address(this).balance;
-        to.transfer(amount);
-
-        emit TokenRecovered(address(0), to, amount);
-    }
 
     // ==================== BACKEND FUNCTIONS ====================
 
@@ -389,16 +353,4 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         }
     }
 
-    /**
-     * @notice Internal function that authorizes an upgrade to a new implementation
-     * @dev Only callable by Mamo Strategy Registry contract
-     */
-    function _authorizeUpgrade(address) internal view override {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-    }
-
-    /**
-     * @notice Allows the contract to receive ETH
-     */
-    receive() external payable {}
 }

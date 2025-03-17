@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.28;
+
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
+import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+
+contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
+    using SafeERC20 for IERC20;
+
+    // @notice Reference to the Mamo Strategy Registry contract
+    IMamoStrategyRegistry public mamoStrategyRegistry;
+
+    // @notice Emitted when tokens are recovered from the contract
+    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
+
+    modifier onlyStrategyOwner() {
+        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Not strategy owner");
+        _;
+    }
+
+     function __BaseStrategy_init(address _mamoStrategyRegistry) internal onlyInitializing {
+        mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
+    }
+
+    /**
+     * @notice Internal function that authorizes an upgrade to a new implementation
+     * @dev Only callable by Mamo Strategy Registry contract
+     */
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
+    }
+
+    /**
+     * @notice Recovers ERC20 tokens accidentally sent to this contract
+     * @dev Only callable by the user who owns this strategy
+     * @param tokenAddress The address of the token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount of tokens to recover
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyStrategyOwner {
+        require(to != address(0), "Cannot send to zero address");
+        require(amount > 0, "Amount must be greater than 0");
+
+        IERC20(tokenAddress).safeTransfer(to, amount);
+
+        emit TokenRecovered(tokenAddress, to, amount);
+    }
+
+    /**
+     * @notice Recovers ETH accidentally sent to this contract
+     * @dev Only callable by the user who owns this strategy
+     * @param to The address to send the ETH to
+     */
+    function recoverETH(address payable to) external onlyStrategyOwner {
+        require(to != address(0), "Cannot send to zero address");
+        uint256 amount = address(this).balance;
+        to.transfer(amount);
+
+        emit TokenRecovered(address(0), to, amount);
+    }
+
+    /**
+     * @notice Allows the contract to receive ETH
+     */
+    receive() external payable {}
+}
