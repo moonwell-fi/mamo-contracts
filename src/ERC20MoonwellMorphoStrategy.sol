@@ -88,8 +88,21 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256 splitVault;
     }
 
+    /**
+     * @notice Restricts function access to the backend address only
+     * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
+     */
     modifier onlyBackend() {
         require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        _;
+    }
+
+    /**
+     * @notice Restricts function access to the MamoStrategyRegistry contract only
+     * @dev Used for functions that should only be called by the registry, such as upgrades
+     */
+    modifier onlyStrategyRegistry() {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
         _;
     }
 

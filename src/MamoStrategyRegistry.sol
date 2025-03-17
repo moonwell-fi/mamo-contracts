@@ -158,6 +158,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /**
      * @notice Adds a strategy for a user
      * @dev Only callable by accounts with the BACKEND_ROLE
+     * @dev Validates that the strategy has the correct registry address set up
      * @param user The address of the user
      * @param strategy The address of the strategy to add
      */

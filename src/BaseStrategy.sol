@@ -8,6 +8,12 @@ import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 
+/**
+ * @title BaseStrategy
+ * @notice Base contract for all strategy implementations
+ * @dev Provides common functionality for all strategy contracts including
+ *      registry reference, upgrade authorization, and token recovery
+ */
 contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
     using SafeERC20 for IERC20;
 
@@ -17,12 +23,21 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
     // @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
+    /**
+     * @notice Restricts function access to the strategy owner only
+     * @dev Uses the MamoStrategyRegistry to verify ownership
+     */
     modifier onlyStrategyOwner() {
         require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Not strategy owner");
         _;
     }
 
-     function __BaseStrategy_init(address _mamoStrategyRegistry) internal onlyInitializing {
+    /**
+     * @notice Initializes the BaseStrategy contract
+     * @dev Sets the MamoStrategyRegistry reference
+     * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
+     */
+    function __BaseStrategy_init(address _mamoStrategyRegistry) internal onlyInitializing {
         mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
     }
 
