@@ -27,11 +27,7 @@ contract StrategyRegistryDeploy is Script {
         console.log("MamoStrategyRegistry deployed at:", address(registry));
     }
 
-    function deployStrategyRegistry(Addresses addresses)
-        public
-        returns (MamoStrategyRegistry registry)
-    {
-
+    function deployStrategyRegistry(Addresses addresses) public returns (MamoStrategyRegistry registry) {
         // Get the addresses for the roles
         address admin = addresses.getAddress("MAMO_MULTISIG");
         address backend = addresses.getAddress("MAMO_BACKEND");

@@ -362,7 +362,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, IBaseStr
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
 
-
     // ==================== INTERNAL FUNCTIONS ====================
 
     /**

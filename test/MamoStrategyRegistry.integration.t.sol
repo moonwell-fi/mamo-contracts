@@ -7,6 +7,8 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
+
+import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IAccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/IAccessControlEnumerable.sol";
@@ -17,18 +19,31 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
 
 // Mock strategy contract for testing
-contract MockStrategy is Initializable, AccessControlEnumerable, UUPSUpgradeable {
-    bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
-    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
-    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
+contract MockStrategy is Initializable, UUPSUpgradeable {
+    // Reference to the Mamo Strategy Registry contract
+    IMamoStrategyRegistry public mamoStrategyRegistry;
 
     function initialize(address owner, address upgrader, address backend) external initializer {
-        _grantRole(OWNER_ROLE, owner);
-        _grantRole(UPGRADER_ROLE, upgrader);
-        _grantRole(BACKEND_ROLE, backend);
+        // Store reference to the registry
+        mamoStrategyRegistry = IMamoStrategyRegistry(upgrader);
     }
 
-    function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE) {}
+    modifier onlyStrategyOwner() {
+        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Not strategy owner");
+        _;
+    }
+
+    modifier onlyBackend() {
+        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        _;
+    }
+
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
+    }
+
+    // Add a receive function to allow receiving ETH
+    receive() external payable {}
 }
 
 contract MamoStrategyRegistryIntegrationTest is Test {
@@ -44,7 +59,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
-        
+
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the addresses for the roles
@@ -413,7 +428,10 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.stopPrank();
     }
 
-    function testRevertIfAddStrategyWithIncorrectOwnerRole() public {
+    // Since the MockStrategy no longer uses roles, we need to update these tests
+    // The registry still checks that the strategy is properly initialized
+
+    function testRevertIfAddStrategyWithIncorrectRegistry() public {
         // Deploy a mock strategy implementation
         MockStrategy strategyImpl = new MockStrategy();
 
@@ -422,82 +440,23 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         registry.whitelistImplementation(address(strategyImpl));
         vm.stopPrank();
 
-        // Create a user address and a wrong user address
+        // Create a user address
         address user = makeAddr("user");
-        address wrongUser = makeAddr("wrongUser");
 
-        // Create a proxy with the mock strategy implementation but with wrong owner role
+        // Create a wrong registry address
+        address wrongRegistry = makeAddr("wrongRegistry");
+
+        // Create a proxy with the mock strategy implementation but with wrong registry
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (wrongUser, address(registry), backend))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, wrongRegistry, backend))
         );
 
         // Switch to the backend role
         vm.startPrank(backend);
 
-        // Expect the call to revert with "Owner role not set correctly"
-        vm.expectRevert("Owner role not set correctly");
-
-        // Call the addStrategy function
-        registry.addStrategy(user, address(strategy));
-
-        // Stop impersonating the backend
-        vm.stopPrank();
-    }
-
-    function testRevertIfAddStrategyWithIncorrectUpgraderRole() public {
-        // Deploy a mock strategy implementation
-        MockStrategy strategyImpl = new MockStrategy();
-
-        // Whitelist the implementation
-        vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
-        vm.stopPrank();
-
-        // Create a user address and a wrong upgrader address
-        address user = makeAddr("user");
-        address wrongUpgrader = makeAddr("wrongUpgrader");
-
-        // Create a proxy with the mock strategy implementation but with wrong upgrader role
-        ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, wrongUpgrader, backend))
-        );
-
-        // Switch to the backend role
-        vm.startPrank(backend);
-
-        // Expect the call to revert with "Upgrader role not set correctly"
-        vm.expectRevert("Upgrader role not set correctly");
-
-        // Call the addStrategy function
-        registry.addStrategy(user, address(strategy));
-
-        // Stop impersonating the backend
-        vm.stopPrank();
-    }
-
-    function testRevertIfAddStrategyWithIncorrectBackendRole() public {
-        // Deploy a mock strategy implementation
-        MockStrategy strategyImpl = new MockStrategy();
-
-        // Whitelist the implementation
-        vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
-        vm.stopPrank();
-
-        // Create a user address and a wrong backend address
-        address user = makeAddr("user");
-        address wrongBackend = makeAddr("wrongBackend");
-
-        // Create a proxy with the mock strategy implementation but with wrong backend role
-        ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), wrongBackend))
-        );
-
-        // Switch to the backend role
-        vm.startPrank(backend);
-
-        // Expect the call to revert with "Backend role not set correctly"
-        vm.expectRevert("Backend role not set correctly");
+        // Expect the call to revert with "Strategy registry not set correctly"
+        // The registry checks that the strategy has the correct registry address
+        vm.expectRevert("Strategy registry not set correctly");
 
         // Call the addStrategy function
         registry.addStrategy(user, address(strategy));
