@@ -56,7 +56,7 @@ contract USDCStrategyTest is Test {
         guardian = makeAddr("guardian");
         moonwellComptroller = makeAddr("moonwellComptroller");
 
-              // Deploy the swap checker
+        // Deploy the swap checker
         swapChecker = new ChainlinkSwapChecker(100); // 1% slippage
 
         string memory addressesFolderPath = "./addresses";
@@ -106,7 +106,6 @@ contract USDCStrategyTest is Test {
         // Add the strategy to the registry
         vm.prank(backend);
         registry.addStrategy(owner, address(strategy));
-
     }
 
     function testOwnerCanDepositFunds() public {
@@ -772,13 +771,13 @@ contract USDCStrategyTest is Test {
         // First user calls depositIdleTokens
         vm.prank(randomUser1);
         uint256 depositedAmount = strategy.depositIdleTokens();
-        
+
         // Verify the returned amount matches the idle amount
         assertEq(depositedAmount, idleAmount, "Returned amount should match idle amount");
-        
+
         // Verify the strategy's token balance is now 0
         assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
-        
+
         // Second user tries to call depositIdleTokens but it should revert
         vm.prank(randomUser2);
         vm.expectRevert("No tokens to deposit");

@@ -27,7 +27,6 @@ contract USDCStrategyDeployer is Script {
         addresses.updateJson();
 
         addresses.printJSONChanges();
-
     }
 
     function deployImplementation() public returns (address) {

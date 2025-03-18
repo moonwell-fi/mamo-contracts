@@ -237,7 +237,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         depositInternal(tokenBalance);
 
         emit Deposit(address(token), tokenBalance);
-        
+
         return tokenBalance;
     }
 
@@ -284,10 +284,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(
             swapChecker.checkPrice(
-                _order.sellAmount,
-                address(_order.sellToken),
-                address(_order.buyToken),
-                _order.buyAmount
+                _order.sellAmount, address(_order.sellToken), address(_order.buyToken), _order.buyAmount
             ),
             "Price check failed - output amount too low"
         );
