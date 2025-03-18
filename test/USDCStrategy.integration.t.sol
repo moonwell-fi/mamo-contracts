@@ -12,7 +12,6 @@ import {console} from "@forge-std/console.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
 
-import {IExpectedOutCalculator} from "@interfaces/IExpectedOutCalculator.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -57,15 +56,7 @@ contract USDCStrategyTest is Test {
         guardian = makeAddr("guardian");
         moonwellComptroller = makeAddr("moonwellComptroller");
 
-        // Create a mock expected out calculator
-        address mockExpectedOutCalculator = makeAddr("mockExpectedOutCalculator");
-        vm.mockCall(
-            mockExpectedOutCalculator,
-            abi.encodeWithSelector(IExpectedOutCalculator.getExpectedOut.selector),
-            abi.encode(1000 * 10 ** 6) // Mock return value
-        );
-
-        // Deploy the swap checker
+              // Deploy the swap checker
         swapChecker = new ChainlinkSwapChecker(100); // 1% slippage
 
         string memory addressesFolderPath = "./addresses";
@@ -100,6 +91,7 @@ contract USDCStrategyTest is Test {
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
+                swapChecker: makeAddr("checker"),
                 splitMToken: splitMToken,
                 splitVault: splitVault
             })
@@ -115,9 +107,6 @@ contract USDCStrategyTest is Test {
         vm.prank(backend);
         registry.addStrategy(owner, address(strategy));
 
-        // Set the swap checker in the strategy
-        vm.prank(backend);
-        strategy.setSwapChecker(address(swapChecker));
     }
 
     function testOwnerCanDepositFunds() public {

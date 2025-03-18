@@ -76,6 +76,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address mToken;
         address metaMorphoVault;
         address token;
+        address swapChecker;
         uint256 splitMToken;
         uint256 splitVault;
     }
@@ -112,6 +113,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.mToken != address(0), "Invalid mToken address");
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.token != address(0), "Invalid token address");
+        require(params.swapChecker != address(0), "Invalid swapChecker address");
 
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry);
@@ -120,6 +122,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
         token = IERC20(params.token);
+        swapChecker = ISwapChecker(params.swapChecker);
 
         splitMToken = params.splitMToken;
         splitVault = params.splitVault;
@@ -222,13 +225,20 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
-     * @notice Sets the swap checker contract
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param _swapChecker The address of the swap checker contract
+     * @notice Deposits any token funds currently in the contract into the strategies based on the split
+     * @dev This function is permissionless and can be called by anyone
+     * @return amount The amount of tokens deposited
      */
-    function setSwapChecker(address _swapChecker) external onlyBackend {
-        require(_swapChecker != address(0), "Invalid swap checker address");
-        swapChecker = ISwapChecker(_swapChecker);
+    function depositIdleTokens() external returns (uint256) {
+        uint256 tokenBalance = token.balanceOf(address(this));
+        require(tokenBalance > 0, "No tokens to deposit");
+
+        // Deposit the funds according to the current split
+        depositInternal(tokenBalance);
+
+        emit Deposit(address(token), tokenBalance);
+        
+        return tokenBalance;
     }
 
     // ==================== VIEW FUNCTIONS ====================
