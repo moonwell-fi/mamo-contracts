@@ -2,16 +2,14 @@
 pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
-
 import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
+import {DeployChainlinkSwapChecker} from "../script/DeployChainlinkSwapChecker.s.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
-
 import {IERC4626} from "@interfaces/IERC4626.sol";
-
 import {IMToken} from "@interfaces/IMToken.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -56,13 +54,17 @@ contract USDCStrategyTest is Test {
         guardian = makeAddr("guardian");
         moonwellComptroller = makeAddr("moonwellComptroller");
 
-        // Deploy the swap checker
-        swapChecker = new ChainlinkSwapChecker(100); // 1% slippage
-
+        // Initialize addresses
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
+        
+        // Create an instance of the DeployChainlinkSwapChecker script
+        DeployChainlinkSwapChecker deployScript = new DeployChainlinkSwapChecker();
+        
+        // Deploy the swap checker using the script
+        swapChecker = deployScript.deployChainlinkSwapChecker(addresses);
 
         // Deploy mock tokens and contracts
         usdc = ERC20(addresses.getAddress("USDC"));

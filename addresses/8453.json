@@ -11,8 +11,8 @@
   },
   {
     "addr": "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",
-    "isContract": true,
-    "name": "USDC_METAMORPHO_VAULT"
+    "name": "USDC_METAMORPHO_VAULT",
+    "isContract": true
   },
   {
     "addr": "0x73D8A3bF62aACa6690791E57EBaEE4e1d875d8Fe",
@@ -28,5 +28,10 @@
     "addr": "0x10b83c88e88910Cd5293324800d1a6e751004bE5",
     "name": "MAMO_BACKEND",
     "isContract": false
+  },
+  {
+    "addr": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
+    "isContract": true,
+    "name": "CHAINLINK_USDC_USD"
   }
 ]

@@ -37,7 +37,7 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
     // Events
     event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse);
 
-    constructor(uint256 _allowedSlippageInBps) Ownable(msg.sender) {
+    constructor(uint256 _allowedSlippageInBps, address _owner) Ownable(_owner) {
         require(_allowedSlippageInBps <= MAX_BPS);
         ALLOWED_SLIPPAGE_IN_BPS = _allowedSlippageInBps;
     }
