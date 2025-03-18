@@ -274,7 +274,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
                 _order.sellAmount,
                 address(_order.sellToken),
                 address(_order.buyToken),
-                0, // feeAmount
                 _order.buyAmount,
                 abi.encode(_order.sellToken) // data parameter is ignored by ChainlinkSwapChecker
             ),

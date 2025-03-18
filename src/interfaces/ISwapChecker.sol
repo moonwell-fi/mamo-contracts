@@ -12,7 +12,6 @@ interface ISwapChecker {
      * @param _amountIn The input amount
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
-     * @param _feeAmount The fee amount
      * @param _minOut The minimum output amount
      * @param _data Additional data for the price check
      * @return Whether the swap meets the price requirements
@@ -21,7 +20,6 @@ interface ISwapChecker {
         uint256 _amountIn,
         address _fromToken,
         address _toToken,
-        uint256 _feeAmount,
         uint256 _minOut,
         bytes calldata _data
     ) external view returns (bool);
