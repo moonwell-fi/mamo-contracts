@@ -8,6 +8,9 @@ import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {IPriceChecker} from "@interfaces/IPriceChecker.sol";
+
+import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -20,10 +23,16 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  * @dev This contract is designed to be used as an implementation for proxies
  */
 contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
+    using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
 
     // Constants
+    /// @dev The settlement contract's EIP-712 domain separator. Strategy uses this to verify that a provided UID matches provided order parameters.
+    bytes32 public constant DOMAIN_SEPARATOR = 0xc078f884a2676e1345748b1feace7b0abee5d00ecadb6e574dcdd109a63e8943;
+
+    bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
+
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
@@ -37,11 +46,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Reference to the MetaMorpho Vault contract
     IERC4626 public metaMorphoVault;
 
-    // @notice Reference to the DEX router contract
-    IDEXRouter public dexRouter;
-
     // @notice Reference to the ERC20 token contract
     IERC20 public token;
+
+    IPriceChecker priceChecker;
 
     // @notice Percentage of funds allocated to Moonwell mToken in basis points
     uint256 public splitMToken;
@@ -51,6 +59,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // @notice Set of reward token addresses
     EnumerableSet.AddressSet private _rewardTokens;
+
+    mapping(address rewardToken => bytes priceCheckerData) rewardTokenPriceCheckerData;
 
     // Events
     // @notice Emitted when funds are deposited into the strategy
@@ -65,15 +75,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when rewards are compounded
     event RewardsCompounded(uint256 amount);
 
-    // @notice Emitted when the DEX router is updated
-    event DexRouterUpdated(address indexed oldDexRouter, address indexed newDexRouter);
-
     // @notice Emitted when a reward token is added
     event RewardTokenAdded(address indexed token);
 
     // @notice Emitted when a reward token is removed
     event RewardTokenRemoved(address indexed token);
-
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -82,7 +88,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address moonwellComptroller;
         address mToken;
         address metaMorphoVault;
-        address dexRouter;
         address token;
         uint256 splitMToken;
         uint256 splitVault;
@@ -119,7 +124,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.moonwellComptroller != address(0), "Invalid moonwellComptroller address");
         require(params.mToken != address(0), "Invalid mToken address");
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
-        require(params.dexRouter != address(0), "Invalid dexRouter address");
         require(params.token != address(0), "Invalid token address");
 
         // Set state variables
@@ -128,7 +132,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         moonwellComptroller = IComptroller(params.moonwellComptroller);
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
-        dexRouter = IDEXRouter(params.dexRouter);
         token = IERC20(params.token);
 
         splitMToken = params.splitMToken;
@@ -195,7 +198,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         emit Withdraw(address(token), amount);
     }
 
-
     // ==================== BACKEND FUNCTIONS ====================
 
     /**
@@ -257,73 +259,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         emit RewardTokenRemoved(rewardToken);
     }
 
-    /**
-     * @notice Updates the DEX router address
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param _newDexRouter The new DEX router address
-     */
-    function setDexRouter(address _newDexRouter) external onlyBackend {
-        require(_newDexRouter != address(0), "Invalid dexRouter address");
-
-        address oldDexRouter = address(dexRouter);
-        dexRouter = IDEXRouter(_newDexRouter);
-
-        emit DexRouterUpdated(oldDexRouter, _newDexRouter);
-    }
-
-    /**
-     * @notice Compounds reward tokens by swapping them to the strategy token and depositing according to the current split
-     * @dev Callable by the Mamo backend or strategy owner
-     */
-    function compoundRewards() external {
-        require(
-            msg.sender == mamoStrategyRegistry.getBackendAddress()
-                || mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)),
-            "Caller must be backend or strategy owner"
-        );
-
-        uint256 totalTokenCompounded = 0;
-        uint256 rewardTokenCount = _rewardTokens.length();
-
-        // Iterate through all reward tokens
-        for (uint256 i = 0; i < rewardTokenCount; i++) {
-            address rewardToken = _rewardTokens.at(i);
-
-            uint256 rewardBalance = IERC20(rewardToken).balanceOf(address(this));
-
-            // Skip if no balance
-            if (rewardBalance == 0) {
-                continue;
-            }
-
-            // Approve DEX router to spend reward tokens
-            IERC20(rewardToken).approve(address(dexRouter), rewardBalance);
-
-            // Set up the swap path: reward token -> strategy token
-            address[] memory path = new address[](2);
-            path[0] = rewardToken;
-            path[1] = address(token);
-
-            // Swap reward tokens for strategy tokens
-            uint256[] memory amounts = dexRouter.swapExactTokensForTokens(
-                rewardBalance,
-                0, // Accept any amount of tokens (we can add a minimum later if needed)
-                path,
-                address(this),
-                block.timestamp + 1800 // 30 minute deadline
-            );
-
-            // Add the tokens received to our total
-            totalTokenCompounded += amounts[amounts.length - 1];
-        }
-
-        // If we compounded any tokens, deposit them according to the current split
-        if (totalTokenCompounded > 0) {
-            depositInternal(totalTokenCompounded);
-            emit RewardsCompounded(totalTokenCompounded);
-        }
-    }
-
     // ==================== VIEW FUNCTIONS ====================
 
     /**
@@ -339,7 +274,48 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
 
+    /// @param orderDigest The EIP-712 signing digest derived from the order
+    /// @param encodedOrder Bytes-encoded order information, originally created by an off-chain bot. Created by concatening the order data (in the form of GPv2Order.Data), the price checker address, and price checker data.
+    function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
+        GPv2Order.Data memory _order = abi.decode(encodedOrder, (GPv2Order.Data));
+
+        require(_order.hash(DOMAIN_SEPARATOR) == orderDigest, "Order hash does not match the provided digest");
+
+        require(_order.kind == GPv2Order.KIND_SELL, "Order must be a sell order");
+
+        require(_order.validTo >= block.timestamp + 5 minutes, "Order expires too soon - must be valid for at least 5 minutes");
+
+        require(!_order.partiallyFillable, "Order must be fill-or-kill, partial fills not allowed");
+
+        require(_order.sellTokenBalance == GPv2Order.BALANCE_ERC20, "Sell token must be an ERC20 token");
+
+        require(_order.buyTokenBalance == GPv2Order.BALANCE_ERC20, "Buy token must be an ERC20 token");
+
+        bytes memory _priceCheckerData = rewardTokenPriceCheckerData[address(_order.sellToken)];
+
+        require(_priceCheckerData.length > 0, "Price checker data not found for the sell token");
+
+        require(_order.buyToken == token, "Buy token must match the strategy token");
+
+        require(_order.receiver == address(this), "Order receiver must be this strategy contract");
+
+        require(
+            priceChecker.checkPrice(
+                _order.sellAmount + _order.feeAmount,
+                address(_order.sellToken),
+                address(_order.buyToken),
+                _order.feeAmount,
+                _order.buyAmount,
+                _priceCheckerData
+            ),
+            "Price check failed - output amount too low"
+        );
+
+        return MAGIC_VALUE;
+    }
+
     // ==================== INTERNAL FUNCTIONS ====================
+
 
     /**
      * @notice Internal function to deposit tokens according to the current split
@@ -365,5 +341,4 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
             metaMorphoVault.deposit(targetMetaMorpho, address(this));
         }
     }
-
 }

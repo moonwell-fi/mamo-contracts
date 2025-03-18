@@ -4,6 +4,7 @@
 @addresses/=addresses/
 @contracts/=src/
 @interfaces/=src/interfaces/
+@libraries/=src/libraries/
 @script/=script/
 @openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/
 @openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/

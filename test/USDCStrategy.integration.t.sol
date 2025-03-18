@@ -23,22 +23,6 @@ contract MockERC20 is ERC20 {
     }
 }
 
-// Mock DEX Router
-contract MockDEXRouter {
-    function swapExactTokensForTokens(
-        uint256 amountIn,
-        uint256, // amountOutMin (unused)
-        address[] calldata path,
-        address, // to (unused)
-        uint256 // deadline (unused)
-    ) external pure returns (uint256[] memory amounts) {
-        amounts = new uint256[](path.length);
-        amounts[0] = amountIn;
-        amounts[path.length - 1] = amountIn; // 1:1 swap for simplicity
-        return amounts;
-    }
-}
-
 contract USDCStrategyTest is Test {
     Addresses public addresses;
 
@@ -50,7 +34,6 @@ contract USDCStrategyTest is Test {
     ERC20 usdc;
     IMToken mToken;
     IERC4626 metaMorphoVault;
-    MockDEXRouter dexRouter;
 
     // Addresses
     address owner;
@@ -79,7 +62,6 @@ contract USDCStrategyTest is Test {
         usdc = ERC20(addresses.getAddress("USDC"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
-        dexRouter = new MockDEXRouter();
 
         // Deploy the registry with admin, backend, and guardian addresses
         registry = new MamoStrategyRegistry(admin, backend, guardian);
@@ -102,7 +84,6 @@ contract USDCStrategyTest is Test {
                 moonwellComptroller: moonwellComptroller,
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
-                dexRouter: address(dexRouter),
                 token: address(usdc),
                 splitMToken: splitMToken,
                 splitVault: splitVault

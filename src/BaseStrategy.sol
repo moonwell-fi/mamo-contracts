@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title BaseStrategy
@@ -32,22 +32,10 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
         _;
     }
 
-    /**
-     * @notice Initializes the BaseStrategy contract
-     * @dev Sets the MamoStrategyRegistry reference
-     * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
+   /**
+     * @notice Allows the contract to receive ETH
      */
-    function __BaseStrategy_init(address _mamoStrategyRegistry) internal onlyInitializing {
-        mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
-    }
-
-    /**
-     * @notice Internal function that authorizes an upgrade to a new implementation
-     * @dev Only callable by Mamo Strategy Registry contract
-     */
-    function _authorizeUpgrade(address) internal view override {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-    }
+    receive() external payable {}
 
     /**
      * @notice Recovers ERC20 tokens accidentally sent to this contract
@@ -79,7 +67,19 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
     }
 
     /**
-     * @notice Allows the contract to receive ETH
+     * @notice Internal function that authorizes an upgrade to a new implementation
+     * @dev Only callable by Mamo Strategy Registry contract
      */
-    receive() external payable {}
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
+    }
+
+    /**
+     * @notice Initializes the BaseStrategy contract
+     * @dev Sets the MamoStrategyRegistry reference
+     * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
+     */
+    function __BaseStrategy_init(address _mamoStrategyRegistry) internal onlyInitializing {
+        mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
+    }
 }

@@ -49,7 +49,6 @@ contract USDCStrategyDeployer is Script {
         address moonwellComptroller = addresses.getAddress("MOONWELL_COMPTROLLER");
         address mUSDC = addresses.getAddress("MOONWELL_USDC");
         address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
-        address dexRouter = addresses.getAddress("DEX_ROUTER");
         address usdc = addresses.getAddress("USDC");
 
         // Define the split parameters (50/50 by default)
@@ -65,7 +64,6 @@ contract USDCStrategyDeployer is Script {
                 moonwellComptroller: moonwellComptroller,
                 mToken: mUSDC,
                 metaMorphoVault: metaMorphoVault,
-                dexRouter: dexRouter,
                 token: usdc,
                 splitMToken: splitMToken,
                 splitVault: splitVault
