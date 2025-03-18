@@ -55,11 +55,7 @@ contract ChainlinkExpectedOutCalculator is IExpectedOutCalculator {
         uint256 _amountIn,
         address _fromToken,
         address _toToken
-    )
-        internal
-        view
-        returns (uint256 _expectedOutFromChainlink)
-    {
+    ) internal view returns (uint256 _expectedOutFromChainlink) {
         uint256 _priceFeedsLen = _priceFeeds.length;
 
         require(_priceFeedsLen > 0); // dev: need to pass at least one price feed
@@ -80,8 +76,7 @@ contract ChainlinkExpectedOutCalculator is IExpectedOutCalculator {
 
             // Without a reverse, we multiply amount * price
             // With a reverse, we divide amount / price
-            _expectedOutFromChainlink =
-                _reverses[_i]
+            _expectedOutFromChainlink = _reverses[_i]
                 ? (_amountIntoThisIteration * _scaleAnswerBy) / uint256(_latestAnswer)
                 : (_amountIntoThisIteration * uint256(_latestAnswer)) / _scaleAnswerBy;
         }

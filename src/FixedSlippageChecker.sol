@@ -3,8 +3,8 @@ pragma solidity 0.8.28;
 
 pragma abicoder v2;
 
-import {IPriceChecker} from "@interfaces/IPriceChecker.sol";
 import {IExpectedOutCalculator} from "@interfaces/IExpectedOutCalculator.sol";
+import {IPriceChecker} from "@interfaces/IPriceChecker.sol";
 
 // Very basic slippage checker that checks that minOut is at least 100 - x% of
 // expected out, where x is set at deployment time. E.g., could check that minOut
@@ -29,12 +29,7 @@ contract FixedSlippageChecker is IPriceChecker {
         uint256,
         uint256 _minOut,
         bytes calldata _data
-    )
-        external
-        view
-        override
-        returns (bool)
-    {
+    ) external view override returns (bool) {
         uint256 _expectedOut = EXPECTED_OUT_CALCULATOR.getExpectedOut(_amountIn, _fromToken, _toToken, _data);
 
         return _minOut > (_expectedOut * (MAX_BPS - ALLOWED_SLIPPAGE_IN_BPS)) / MAX_BPS;

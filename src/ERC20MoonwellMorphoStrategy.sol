@@ -283,7 +283,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.kind == GPv2Order.KIND_SELL, "Order must be a sell order");
 
-        require(_order.validTo >= block.timestamp + 5 minutes, "Order expires too soon - must be valid for at least 5 minutes");
+        require(
+            _order.validTo >= block.timestamp + 5 minutes,
+            "Order expires too soon - must be valid for at least 5 minutes"
+        );
 
         require(!_order.partiallyFillable, "Order must be fill-or-kill, partial fills not allowed");
 
@@ -315,7 +318,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     // ==================== INTERNAL FUNCTIONS ====================
-
 
     /**
      * @notice Internal function to deposit tokens according to the current split

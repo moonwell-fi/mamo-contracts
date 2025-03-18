@@ -32,7 +32,7 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
         _;
     }
 
-   /**
+    /**
      * @notice Allows the contract to receive ETH
      */
     receive() external payable {}
