@@ -50,7 +50,6 @@ contract USDCStrategyDeployer is Script {
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("BACKEND");
-        address moonwellComptroller = addresses.getAddress("MOONWELL_COMPTROLLER");
         address mUSDC = addresses.getAddress("MOONWELL_USDC");
         address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
         address usdc = addresses.getAddress("USDC");
@@ -66,7 +65,6 @@ contract USDCStrategyDeployer is Script {
             ERC20MoonwellMorphoStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
-                moonwellComptroller: moonwellComptroller,
                 mToken: mUSDC,
                 metaMorphoVault: metaMorphoVault,
                 token: usdc,

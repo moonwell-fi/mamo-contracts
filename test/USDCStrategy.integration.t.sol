@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {DeployChainlinkSwapChecker} from "../script/DeployChainlinkSwapChecker.s.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
-import {DeployChainlinkSwapChecker} from "../script/DeployChainlinkSwapChecker.s.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -41,35 +41,42 @@ contract USDCStrategyTest is Test {
     address backend;
     address admin;
     address guardian;
-    address moonwellComptroller;
 
     uint256 splitMToken;
     uint256 splitVault;
 
     function setUp() public {
-        // Create test addresses
-        owner = makeAddr("owner");
-        backend = makeAddr("backend");
-        admin = makeAddr("admin");
-        guardian = makeAddr("guardian");
-        moonwellComptroller = makeAddr("moonwellComptroller");
-
         // Initialize addresses
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
-        
-        // Create an instance of the DeployChainlinkSwapChecker script
-        DeployChainlinkSwapChecker deployScript = new DeployChainlinkSwapChecker();
-        
-        // Deploy the swap checker using the script
-        swapChecker = deployScript.deployChainlinkSwapChecker(addresses);
 
-        // Deploy mock tokens and contracts
+        // Get the addresses for the roles
+        admin = addresses.getAddress("MAMO_MULTISIG");
+        backend = addresses.getAddress("MAMO_BACKEND");
+        guardian = addresses.getAddress("MAMO_MULTISIG");
+        owner = makeAddr("owner");
+
         usdc = ERC20(addresses.getAddress("USDC"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
+
+        // Create an instance of the DeployChainlinkSwapChecker script
+        DeployChainlinkSwapChecker deployScript = new DeployChainlinkSwapChecker();
+
+        // Deploy the swap checker using the script
+        swapChecker = deployScript.deployChainlinkSwapChecker(addresses);
+
+        ChainlinkSwapChecker.TokenFeedConfiguration[] memory configs =
+            new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
+        configs[0] = ChainlinkSwapChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"),
+            reverse: false
+        });
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        swapChecker.configureToken(address(usdc), configs);
 
         // Deploy the registry with admin, backend, and guardian addresses
         registry = new MamoStrategyRegistry(admin, backend, guardian);
@@ -89,11 +96,10 @@ contract USDCStrategyTest is Test {
             ERC20MoonwellMorphoStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
-                moonwellComptroller: moonwellComptroller,
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
-                swapChecker: makeAddr("checker"),
+                swapChecker: address(swapChecker),
                 splitMToken: splitMToken,
                 splitVault: splitVault
             })

@@ -23,7 +23,7 @@ contract DeployChainlinkSwapChecker is Script {
         chainIds[0] = block.chainid; // Use the current chain ID
 
         addresses = new Addresses(addressesFolderPath, chainIds);
-        
+
         // Deploy the ChainlinkSwapChecker
         ChainlinkSwapChecker swapChecker = deployChainlinkSwapChecker(addresses);
 
@@ -40,19 +40,18 @@ contract DeployChainlinkSwapChecker is Script {
     function deployChainlinkSwapChecker(Addresses addresses) public returns (ChainlinkSwapChecker swapChecker) {
         // Default slippage tolerance of 1% (100 basis points)
         uint256 allowedSlippageInBps = 100;
-        
+
         vm.startBroadcast();
-        
+
         // Get the MAMO_MULTISIG address from the addresses contract
         address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
-        
+
         // Deploy the ChainlinkSwapChecker with the specified slippage and owner
         swapChecker = new ChainlinkSwapChecker(allowedSlippageInBps, mamoMultisig);
-        
+
         vm.stopBroadcast();
 
         // Add the swapChecker address to the addresses contract
         addresses.addAddress("CHAINLINK_SWAP_CHECKER", address(swapChecker), true);
-
     }
 }

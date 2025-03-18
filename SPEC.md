@@ -77,7 +77,6 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 - `bool private _initialized`: Flag to track if the contract has been initialized
 - `bytes32 public constant BACKEND_ROLE`: Role identifier for the backend role in the registry
 - `IMamoStrategyRegistry public mamoStrategyRegistry`: Reference to the Mamo Strategy Registry contract
-- `IComptroller public moonwellComptroller`: The Moonwell Comptroller contract
 - `IMToken public mToken`: The Moonwell mToken contract
 - `IERC4626 public metaMorphoVault`: The MetaMorpho Vault contract
 - `IDEXRouter public dexRouter`: The DEX router for swapping reward tokens
@@ -89,7 +88,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 ### Functions
 
-- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes owner, mamoStrategyRegistry, mamoBackend, admin, moonwellComptroller, mToken, metaMorphoVault, dexRouter, token, splitMToken, and splitVault.
+- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes owner, mamoStrategyRegistry, mamoBackend, admin, mToken, metaMorphoVault, dexRouter, token, splitMToken, and splitVault.
 
 - `modifier onlyStrategyRegistry()`: Modifier to ensure the caller is the Mamo Strategy Registry contract.
 

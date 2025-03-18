@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
-import {IComptroller} from "@interfaces/IComptroller.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
@@ -37,9 +36,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
     // State variables
-    // @notice Reference to the Moonwell Comptroller contract
-    IComptroller public moonwellComptroller;
-
     // @notice Reference to the Moonwell mToken contract
     IMToken public mToken;
 
@@ -72,7 +68,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     struct InitParams {
         address mamoStrategyRegistry;
         address mamoBackend;
-        address moonwellComptroller;
         address mToken;
         address metaMorphoVault;
         address token;
@@ -109,7 +104,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     function initialize(InitParams calldata params) external initializer {
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(params.mamoBackend != address(0), "Invalid mamoBackend address");
-        require(params.moonwellComptroller != address(0), "Invalid moonwellComptroller address");
         require(params.mToken != address(0), "Invalid mToken address");
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.token != address(0), "Invalid token address");
@@ -118,7 +112,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry);
 
-        moonwellComptroller = IComptroller(params.moonwellComptroller);
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
         token = IERC20(params.token);
