@@ -43,7 +43,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function getLatestImplementation(uint256 strategyId) external view returns (address)`: Gets the latest implementation for a strategy ID.
 
-- `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function is pausable.
+- `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function checks that the strategy has the correct registry address set up. This function is pausable.
 
 - `function upgradeStrategy(address strategy) external`: Updates the implementation of a strategy to the latest implementation of the same type. Only callable by the user. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
 
@@ -51,7 +51,15 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function isUserStrategy(address user, address strategy) external view returns (bool)`: Checks if a strategy belongs to a user.
 
+- `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
+
 ## Interfaces
+
+### IBaseStrategy
+
+This interface defines the methods that a strategy contract should expose.
+
+- `function mamoStrategyRegistry() external view returns (IMamoStrategyRegistry)`: Gets the Mamo Strategy Registry contract.
 
 ### IUUPSUpgradeable
 
@@ -66,9 +74,8 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 ### Storage
 
 - `AccessControlEnumerable`: Inherits from OpenZeppelin's AccessControlEnumerable for role-based access control
-- `bytes32 public constant OWNER_ROLE`: Role for the strategy owner (the user)
-- `bytes32 public constant UPGRADER_ROLE`: Role for the Mamo Strategy Registry contract that can upgrade the strategy
-- `bytes32 public constant BACKEND_ROLE`: Role for the Mamo Backend that can update positions
+- `bool private _initialized`: Flag to track if the contract has been initialized
+- `bytes32 public constant BACKEND_ROLE`: Role identifier for the backend role in the registry
 - `IMamoStrategyRegistry public mamoStrategyRegistry`: Reference to the Mamo Strategy Registry contract
 - `IComptroller public moonwellComptroller`: The Moonwell Comptroller contract
 - `IMToken public mToken`: The Moonwell mToken contract
@@ -82,25 +89,35 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 ### Functions
 
-- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors.
+- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes owner, mamoStrategyRegistry, mamoBackend, admin, moonwellComptroller, mToken, metaMorphoVault, dexRouter, token, splitMToken, and splitVault.
 
-- `function initialize(InitParams calldata params) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies.
+- `modifier onlyStrategyRegistry()`: Modifier to ensure the caller is the Mamo Strategy Registry contract.
 
-- `function setDexRouter(address _newDexRouter) external onlyRole(BACKEND_ROLE)`: Updates the DEX router address. Only callable by accounts with the BACKEND_ROLE.
+- `modifier onlyStrategyOwner()`: Modifier to ensure the caller is the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
-- `function deposit(uint256 amount) external onlyRole(OWNER_ROLE)`: Deposits funds into the strategy. Only callable by accounts with the OWNER_ROLE.
+- `modifier onlyBackend()`: Modifier to ensure the caller is the backend address from the Mamo Strategy Registry.
 
-- `function withdraw(uint256 amount) external onlyRole(OWNER_ROLE)`: Withdraws funds from the strategy. Only callable by accounts with the OWNER_ROLE.
+- `modifier onlyBackendOrStrategyOwner()`: Modifier to ensure the caller is either the backend address from the Mamo Strategy Registry or the user who owns this strategy.
 
-- `function updatePosition(uint256 splitA, uint256 splitB) external onlyRole(BACKEND_ROLE)`: Updates the position in the strategy. Only callable by accounts with the BACKEND_ROLE.
+- `function initialize(InitParams calldata params) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies. The function sets up the admin role for the specified admin address.
 
-- `function updateRewardToken(address rewardToken, bool add) external onlyRole(BACKEND_ROLE)`: Updates the reward tokens set by adding or removing a token. The strategy token cannot be added as a reward token. Only callable by accounts with the BACKEND_ROLE.
+- `function setDexRouter(address _newDexRouter) external`: Updates the DEX router address. Only callable by the backend address from the Mamo Strategy Registry.
 
-- `function harvestRewards() external`: Harvests reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsHarvested event. Callable by accounts with either the BACKEND_ROLE or OWNER_ROLE.
+- `function deposit(uint256 amount) external`: Deposits funds into the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
-- `function _authorizeUpgrade(address) internal view override onlyRole(UPGRADER_ROLE)`: Internal function that authorizes an upgrade to a new implementation. Only callable by accounts with the UPGRADER_ROLE (Mamo Strategy Registry). This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
+- `function withdraw(uint256 amount) external`: Withdraws funds from the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
-- `function recoverERC20(address token, address to, uint256 amount) external onlyRole(OWNER_ROLE)`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the OWNER_ROLE.
+- `function updatePosition(uint256 splitA, uint256 splitB) external`: Updates the position in the strategy. Only callable by the backend address from the Mamo Strategy Registry.
+
+- `function addRewardToken(address rewardToken) external`: Adds a token to the reward tokens set. The strategy token cannot be added as a reward token. Only callable by the backend address from the Mamo Strategy Registry.
+
+- `function removeRewardToken(address rewardToken) external`: Removes a token from the reward tokens set. Only callable by the backend address from the Mamo Strategy Registry.
+
+- `function compoundRewards() external`: Compounds reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsCompounded event. Callable by the backend address from the Mamo Strategy Registry or the user who owns this strategy, as verified by the Mamo Strategy Registry.
+
+- `function _authorizeUpgrade(address) internal view override onlyStrategyRegistry()`: Internal function that authorizes an upgrade to a new implementation. Only callable by the Mamo Strategy Registry contract. This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
+
+- `function recoverERC20(address token, address to, uint256 amount) external`: Recovers ERC20 tokens accidentally sent to this contract. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
 - `function getTotalBalance() public returns (uint256)`: Gets the total balance of tokens across both protocols.
 
@@ -109,17 +126,18 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 1. Mamo Backend deploys a strategy for a user using the latest implementation for the desired strategy type.
 2. Mamo Backend calls Mamo Strategy Registry addStrategy to register the strategy for the user.
 3. User deposits funds into their strategy.
-4. Mamo Backend reads Deposit events and calls updateUserPosition to manage the strategy.
-5. User or Mamo Backend can call claimRewards to harvest rewards from the strategy.
+4. Mamo Backend call updatePosition to manage the strategy.
+5. User or Mamo Backend can call compoundRewards to compound rewards from the strategy.
 6. When token balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
 7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
 8. If Mamo wants to upgrade a strategy (example, deposit tokens into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
 
-## Security Considerations
+## Security Considerations & Assumptions
 
-1. Each user has their own dedicated strategy contract, eliminating the need for delegatecall and its associated security risks.
-2. Implementation whitelist ensures that only trusted and audited implementations can be used.
-3. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type, providing flexibility while maintaining security.
-4. The Mamo Strategy Registry contract has proper access controls to ensure only authorized addresses can call sensitive functions.
-5. Strategy contracts have clear ownership semantics, with only the owner able to deposit and withdraw funds, while only the Mamo Backend can update positions.
-6. The Mamo Strategy Registry contract maintains a registry of all deployed strategies, allowing for efficient coordination and verification.
+1. Implementation whitelist ensures that only trusted and audited implementations can be used.
+2. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type.
+3. The Mamo Strategy Registry is not upgradeable and the backend can't remove a user strategy. This ensure strategies can always call the Registry to find it's owner and the owner will always be the only address allowed to upgrade a strategy.
+4. Strategy contracts have clear ownership semantics, with only the user registered in the Mamo Strategy Registry able to deposit and withdraw funds, while only the backend address from the Mamo Strategy Registry can update positions.
+5. Reward token can't be the strategy token
+6. Mamo Registry admim role is a multisig with a timelock
+7. Guardian is a multisig without a timelock

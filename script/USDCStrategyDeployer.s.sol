@@ -22,27 +22,33 @@ contract USDCStrategyDeployer is Script {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Deploy the strategy implementation and proxy
-        deployUSDCStrategy();
+        deployImplementation();
     }
 
-    function deployUSDCStrategy() public {
-        // Get the private key for deployment
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-
-        // Start broadcasting transactions
-        vm.startBroadcast(deployerPrivateKey);
-
+    function deployImplementation() public returns (address) {
+        vm.startBroadcast();
         // Deploy the implementation contract
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
 
+        vm.stopBroadcast();
+
+        // Add implementation address to addresses
+        addresses.addAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL", address(implementation), true);
+
+        // Log the deployed contract address
+        console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));
+
+        return address(implementation);
+    }
+
+    function deployUSDCStrategy() public returns (address strategyProxy) {
+        vm.startBroadcast();
         // Get the addresses for the initialization parameters
-        address owner = addresses.getAddress("OWNER");
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("BACKEND");
         address moonwellComptroller = addresses.getAddress("MOONWELL_COMPTROLLER");
-        address mUSDC = addresses.getAddress("MUSDC");
-        address metaMorphoVault = addresses.getAddress("META_MORPHO_VAULT");
-        address dexRouter = addresses.getAddress("DEX_ROUTER");
+        address mUSDC = addresses.getAddress("MOONWELL_USDC");
+        address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
         address usdc = addresses.getAddress("USDC");
 
         // Define the split parameters (50/50 by default)
@@ -53,13 +59,11 @@ contract USDCStrategyDeployer is Script {
         bytes memory initData = abi.encodeWithSelector(
             ERC20MoonwellMorphoStrategy.initialize.selector,
             ERC20MoonwellMorphoStrategy.InitParams({
-                owner: owner,
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
                 moonwellComptroller: moonwellComptroller,
                 mToken: mUSDC,
                 metaMorphoVault: metaMorphoVault,
-                dexRouter: dexRouter,
                 token: usdc,
                 splitMToken: splitMToken,
                 splitVault: splitVault
@@ -67,16 +71,14 @@ contract USDCStrategyDeployer is Script {
         );
 
         // Deploy the proxy with the implementation and initialization data
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+        ERC1967Proxy proxy = new ERC1967Proxy(addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL"), initData);
 
         // Stop broadcasting transactions
         vm.stopBroadcast();
 
-        // Log the deployed contract addresses
-        console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));
+        // Log the deployed proxy address
         console.log("USDC Strategy proxy deployed at:", address(proxy));
 
-        // Add the implementation to the whitelist in the registry (this would be done separately)
-        console.log("Don't forget to whitelist the implementation in the MamoStrategyRegistry!");
+        return address(proxy);
     }
 }

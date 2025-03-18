@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
+
+import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IStrategy} from "@interfaces/IStrategy.sol";
 import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
@@ -17,10 +20,6 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
 contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     using EnumerableSet for EnumerableSet.AddressSet;
 
-    // Constants
-    /// @notice EIP-1967 implementation slot for accessing the implementation address of a proxy
-    bytes32 private constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
-
     // Role definitions
     /// @notice Role identifier for guardians who can pause/unpause the contract
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
@@ -29,7 +28,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
     /// @notice Counter for strategy type IDs
-    uint256 private _nextStrategyTypeId = 1;
+    uint256 public nextStrategyTypeId;
 
     // State variables
     /// @notice Set of all strategy addresses for each user
@@ -59,18 +58,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Emitted when an implementation is whitelisted
     event ImplementationWhitelisted(address indexed implementation, uint256 indexed strategyType);
 
-    /// @notice Emitted when an implementation is removed from the whitelist
-    event ImplementationRemovedFromWhitelist(address indexed implementation);
-
-    /// @notice Emitted when strategies are updated
-    event StrategiesUpdated(address indexed implementation, address[] strategies, uint256 splitA, uint256 splitB);
-
-    /// @notice Emitted when rewards are claimed
-    event RewardsClaimed(address indexed implementation, address[] strategies);
-
-    /// @notice Emitted when a strategy update fails
-    event StrategyUpdateFailed(address indexed strategy, string reason);
-
     /**
      * @notice Constructor that sets up initial roles
      * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the specified addresses
@@ -87,6 +74,8 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
         _grantRole(GUARDIAN_ROLE, guardian);
+
+        nextStrategyTypeId = 1;
     }
 
     // ==================== PERMISSIONLESS FUNCTIONS ====================
@@ -101,7 +90,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
 
         // Get the old implementation address
-        address oldImplementation = getStrategyImplementation(strategy);
+        address oldImplementation = ERC1967Proxy(payable(strategy)).getImplementation();
 
         // Get the strategy ID
         uint256 strategyId = implementationToId[oldImplementation];
@@ -157,7 +146,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
         // Assign a new strategy type ID
-        strategyTypeId = _nextStrategyTypeId++;
+        strategyTypeId = nextStrategyTypeId++;
 
         whitelistedImplementations[implementation] = true;
         implementationToId[implementation] = strategyTypeId;
@@ -169,6 +158,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /**
      * @notice Adds a strategy for a user
      * @dev Only callable by accounts with the BACKEND_ROLE
+     * @dev Validates that the strategy has the correct registry address set up
      * @param user The address of the user
      * @param strategy The address of the strategy to add
      */
@@ -178,24 +168,16 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(!_userStrategies[user].contains(strategy), "Strategy already added for user");
 
         // Get the implementation address
-        address implementation = getStrategyImplementation(strategy);
+        address implementation = ERC1967Proxy(payable(strategy)).getImplementation();
         require(implementation != address(0), "Invalid implementation");
         require(whitelistedImplementations[implementation], "Implementation not whitelisted");
 
-        // Check the strategy roles are correct
-        // Check that the strategy has the correct roles set up
-        IAccessControlEnumerable strategyContract = IAccessControlEnumerable(strategy);
+        // Check the strategy addresses are correct
+        IBaseStrategy strategyContract = IBaseStrategy(strategy);
 
-        // Check owner role is set to user
-        require(strategyContract.hasRole(keccak256("OWNER_ROLE"), user), "Owner role not set correctly");
-
-        // Check upgrader role is set to this registry
-        require(strategyContract.hasRole(keccak256("UPGRADER_ROLE"), address(this)), "Upgrader role not set correctly");
-
-        // Check backend role is set to Mamo backend
+        // Check strategy registry address is set to this registry
         require(
-            strategyContract.hasRole(keccak256("BACKEND_ROLE"), getRoleMember("BACKEND_ROLE", 0)),
-            "Backend role not set correctly"
+            address(strategyContract.mamoStrategyRegistry()) == address(this), "Strategy registry not set correctly"
         );
 
         // Add the strategy to the user's strategies
@@ -204,41 +186,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         emit StrategyAdded(user, strategy, implementation);
     }
 
-    /**
-     * @notice Removes a strategy for a user
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param user The address of the user
-     * @param strategy The address of the strategy to remove
-     */
-    function removeStrategy(address user, address strategy) external whenNotPaused onlyRole(BACKEND_ROLE) {
-        // Check if the strategy exists for the user
-        require(_userStrategies[user].contains(strategy), "Strategy not found for user");
-
-        // Remove the strategy
-        _userStrategies[user].remove(strategy);
-
-        emit StrategyRemoved(user, strategy);
-    }
-
     // ==================== GETTER FUNCTIONS ====================
-
-    /**
-     * @notice Gets the strategy ID for an implementation
-     * @param implementation The address of the implementation
-     * @return The strategy ID as a uint256 value
-     */
-    function getImplementationId(address implementation) external view returns (uint256) {
-        return implementationToId[implementation];
-    }
-
-    /**
-     * @notice Gets the latest implementation for a strategy ID
-     * @param strategyId The strategy ID as a uint256 value
-     * @return The address of the latest implementation for the strategy ID
-     */
-    function getLatestImplementation(uint256 strategyId) external view returns (address) {
-        return latestImplementationById[strategyId];
-    }
 
     /**
      * @notice Gets all strategies for a user
@@ -267,14 +215,26 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Gets the implementation address for a strategy
-     * @param strategy The address of the strategy (proxy)
-     * @return implementation The address of the implementation
+     * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @return The address of the backend
      */
-    function getStrategyImplementation(address strategy) public view returns (address implementation) {
-        // Read the implementation address from the EIP-1967 storage slot
-        assembly {
-            implementation := sload(add(strategy, _IMPLEMENTATION_SLOT))
-        }
+    function getBackendAddress() external view returns (address) {
+        return getRoleMember(BACKEND_ROLE, 0);
+    }
+
+    // ==================== ADMIN FUNCTIONS ====================
+
+    /**
+     * @notice Recovers ERC20 tokens accidentally sent to this contract
+     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE
+     * @param tokenAddress The address of the token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount of tokens to recover
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(to != address(0), "Cannot send to zero address");
+        require(amount > 0, "Amount must be greater than 0");
+
+        IERC20(tokenAddress).transfer(to, amount);
     }
 }

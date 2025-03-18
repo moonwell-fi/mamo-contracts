@@ -2,16 +2,13 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-remappings = [
-    "@openzeppelin/=lib/openzeppelin-contracts/",
-    "@forge-std/=lib/forge-std/src/",
-    "@addresses/=addresses/",
-    "@contracts/=src/", 
-    "@interfaces/=src/interfaces/",
-    "@script/=script/"
-]
+fs_permissions = [{ access = "read", path = "./addresses"}]
 
 [fmt]
 sort_imports = true
+
+[rpc_endpoints]
+localhost = "http://127.0.0.1:8545"
+base = { endpoint= "${BASE_RPC_URL}", retries = 3, retry_backoff = 1000 }
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
