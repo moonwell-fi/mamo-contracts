@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
@@ -22,9 +22,7 @@ contract StrategyRegistryDeploy is Script {
 
         // Update the JSON file with the new address
         addresses.updateJson();
-
-        // Log the deployed contract address
-        console.log("MamoStrategyRegistry deployed at:", address(registry));
+        addresses.printJSONChanges();
     }
 
     function deployStrategyRegistry(Addresses addresses) public returns (MamoStrategyRegistry registry) {
