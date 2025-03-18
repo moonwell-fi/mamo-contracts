@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
 
+import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -10,6 +11,8 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
+
+import {IExpectedOutCalculator} from "@interfaces/IExpectedOutCalculator.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -29,6 +32,7 @@ contract USDCStrategyTest is Test {
     // Contracts
     ERC20MoonwellMorphoStrategy strategy;
     MamoStrategyRegistry registry;
+    ChainlinkSwapChecker swapChecker;
 
     // Mock tokens and contracts
     ERC20 usdc;
@@ -52,6 +56,17 @@ contract USDCStrategyTest is Test {
         admin = makeAddr("admin");
         guardian = makeAddr("guardian");
         moonwellComptroller = makeAddr("moonwellComptroller");
+
+        // Create a mock expected out calculator
+        address mockExpectedOutCalculator = makeAddr("mockExpectedOutCalculator");
+        vm.mockCall(
+            mockExpectedOutCalculator,
+            abi.encodeWithSelector(IExpectedOutCalculator.getExpectedOut.selector),
+            abi.encode(1000 * 10 ** 6) // Mock return value
+        );
+
+        // Deploy the swap checker
+        swapChecker = new ChainlinkSwapChecker(100); // 1% slippage
 
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -99,6 +114,10 @@ contract USDCStrategyTest is Test {
         // Add the strategy to the registry
         vm.prank(backend);
         registry.addStrategy(owner, address(strategy));
+
+        // Set the swap checker in the strategy
+        vm.prank(backend);
+        strategy.setSwapChecker(address(swapChecker));
     }
 
     function testOwnerCanDepositFunds() public {
@@ -455,14 +474,67 @@ contract USDCStrategyTest is Test {
         assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
     }
 
-    function testRevertIfAddStrategyTokenAsRewardToken() public {
-        // Attempt to add the strategy token (USDC) as a reward token
-        vm.startPrank(backend);
+    function testTokenConfiguration() public {
+        // Create a mock chainlink feed address
+        address mockChainlinkFeed = makeAddr("mockChainlinkFeed");
 
-        // Attempt should revert with "Strategy token cannot be a reward token"
-        vm.expectRevert("Strategy token cannot be a reward token");
-        strategy.addRewardToken(address(usdc));
-        vm.stopPrank();
+        // Create token feed configurations
+        ChainlinkSwapChecker.TokenFeedConfiguration[] memory configs =
+            new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
+        configs[0] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed, reverse: false});
+
+        // Configure a token in the swap checker
+        vm.prank(swapChecker.owner());
+        swapChecker.configureToken(address(usdc), configs);
+
+        // Verify the token is configured - we need to check each element individually
+        // since the mapping getter returns individual elements, not the whole array
+        (address feed, bool reverse) = swapChecker.tokenPriceCheckerData(address(usdc), 0);
+        assertEq(feed, mockChainlinkFeed, "Chainlink feed should match");
+        assertEq(reverse, false, "Reverse flag should match");
+
+        // Configure a different token with multiple configurations
+        address mockToken = makeAddr("mockToken");
+        address mockChainlinkFeed2 = makeAddr("mockChainlinkFeed2");
+
+        ChainlinkSwapChecker.TokenFeedConfiguration[] memory configs2 =
+            new ChainlinkSwapChecker.TokenFeedConfiguration[](2);
+        configs2[0] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed, reverse: true});
+        configs2[1] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed2, reverse: false});
+
+        vm.prank(swapChecker.owner());
+        swapChecker.configureToken(mockToken, configs2);
+
+        // Verify the new token is configured - we need to check each element individually
+        (address feed1, bool reverse1) = swapChecker.tokenPriceCheckerData(mockToken, 0);
+        (address feed2, bool reverse2) = swapChecker.tokenPriceCheckerData(mockToken, 1);
+
+        assertEq(feed1, mockChainlinkFeed, "First chainlink feed should match");
+        assertEq(reverse1, true, "First reverse flag should match");
+        assertEq(feed2, mockChainlinkFeed2, "Second chainlink feed should match");
+        assertEq(reverse2, false, "Second reverse flag should match");
+
+        // Reconfigure the first token with empty configuration (effectively removing the old data)
+        ChainlinkSwapChecker.TokenFeedConfiguration[] memory emptyConfigs =
+            new ChainlinkSwapChecker.TokenFeedConfiguration[](0);
+
+        // This should revert because we require at least one configuration
+        vm.prank(swapChecker.owner());
+        vm.expectRevert("Empty configuration array");
+        swapChecker.configureToken(address(usdc), emptyConfigs);
+
+        // Instead, configure with a different feed
+        ChainlinkSwapChecker.TokenFeedConfiguration[] memory newConfigs =
+            new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
+        newConfigs[0] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed2, reverse: true});
+
+        vm.prank(swapChecker.owner());
+        swapChecker.configureToken(address(usdc), newConfigs);
+
+        // Verify the token data was updated
+        (address updatedFeed, bool updatedReverse) = swapChecker.tokenPriceCheckerData(address(usdc), 0);
+        assertEq(updatedFeed, mockChainlinkFeed2, "Chainlink feed should be updated");
+        assertEq(updatedReverse, true, "Reverse flag should be updated");
     }
 
     function testBackendCanUpdatePosition() public {

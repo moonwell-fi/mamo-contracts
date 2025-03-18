@@ -8,14 +8,13 @@ import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
-import {IPriceChecker} from "@interfaces/IPriceChecker.sol";
+import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /**
  * @title ERC20MoonwellMorphoStrategy
@@ -25,7 +24,6 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
 contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
-    using EnumerableSet for EnumerableSet.AddressSet;
 
     // Constants
     /// @dev The settlement contract's EIP-712 domain separator. Strategy uses this to verify that a provided UID matches provided order parameters.
@@ -49,18 +47,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Reference to the ERC20 token contract
     IERC20 public token;
 
-    IPriceChecker priceChecker;
+    ISwapChecker public swapChecker;
 
     // @notice Percentage of funds allocated to Moonwell mToken in basis points
     uint256 public splitMToken;
 
     // @notice Percentage of funds allocated to MetaMorpho Vault in basis points
     uint256 public splitVault;
-
-    // @notice Set of reward token addresses
-    EnumerableSet.AddressSet private _rewardTokens;
-
-    mapping(address rewardToken => bytes priceCheckerData) rewardTokenPriceCheckerData;
 
     // Events
     // @notice Emitted when funds are deposited into the strategy
@@ -71,15 +64,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // @notice Emitted when the position split is updated
     event PositionUpdated(uint256 splitA, uint256 splitB);
-
-    // @notice Emitted when rewards are compounded
-    event RewardsCompounded(uint256 amount);
-
-    // @notice Emitted when a reward token is added
-    event RewardTokenAdded(address indexed token);
-
-    // @notice Emitted when a reward token is removed
-    event RewardTokenRemoved(address indexed token);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -235,28 +219,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
-     * @notice Adds a token to the reward tokens set
+     * @notice Sets the swap checker contract
      * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param rewardToken The address of the token to add
+     * @param _swapChecker The address of the swap checker contract
      */
-    function addRewardToken(address rewardToken) external onlyBackend {
-        require(rewardToken != address(0), "Invalid token address");
-        require(rewardToken != address(token), "Strategy token cannot be a reward token");
-        require(_rewardTokens.add(rewardToken), "Token already exists in reward tokens");
-
-        emit RewardTokenAdded(rewardToken);
-    }
-
-    /**
-     * @notice Removes a token from the reward tokens set
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param rewardToken The address of the token to remove
-     */
-    function removeRewardToken(address rewardToken) external onlyBackend {
-        require(rewardToken != address(0), "Invalid token address");
-        require(_rewardTokens.remove(rewardToken), "Token does not exist in reward tokens");
-
-        emit RewardTokenRemoved(rewardToken);
+    function setSwapChecker(address _swapChecker) external onlyBackend {
+        require(_swapChecker != address(0), "Invalid swap checker address");
+        swapChecker = ISwapChecker(_swapChecker);
     }
 
     // ==================== VIEW FUNCTIONS ====================
@@ -294,10 +263,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.buyTokenBalance == GPv2Order.BALANCE_ERC20, "Buy token must be an ERC20 token");
 
-        bytes memory _priceCheckerData = rewardTokenPriceCheckerData[address(_order.sellToken)];
-
-        require(_priceCheckerData.length > 0, "Price checker data not found for the sell token");
-
         require(_order.buyToken == token, "Buy token must match the strategy token");
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
@@ -305,13 +270,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(_order.feeAmount == 0, "Fee amount must be zero");
 
         require(
-            priceChecker.checkPrice(
-                _order.sellAmount ,
+            swapChecker.checkPrice(
+                _order.sellAmount,
                 address(_order.sellToken),
                 address(_order.buyToken),
-                0,
+                0, // feeAmount
                 _order.buyAmount,
-                _priceCheckerData
+                abi.encode(_order.sellToken) // data parameter is ignored by ChainlinkSwapChecker
             ),
             "Price check failed - output amount too low"
         );
