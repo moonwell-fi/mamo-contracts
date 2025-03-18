@@ -649,4 +649,139 @@ contract USDCStrategyTest is Test {
         assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
         assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
     }
+
+    function testDepositIdleTokens() public {
+        // Mint USDC directly to the strategy contract (simulating tokens received from elsewhere)
+        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC (6 decimals)
+        deal(address(usdc), address(strategy), idleAmount);
+
+        // Verify the strategy has the idle tokens
+        assertEq(usdc.balanceOf(address(strategy)), idleAmount, "Strategy should have idle USDC");
+
+        // Check initial balances in protocols
+        uint256 initialMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        uint256 initialVaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 initialVaultBalance = metaMorphoVault.convertToAssets(initialVaultShares);
+
+        // Call depositIdleTokens (can be called by anyone)
+        address caller = makeAddr("caller");
+        vm.prank(caller);
+        uint256 depositedAmount = strategy.depositIdleTokens();
+
+        // Verify the returned amount matches the idle amount
+        assertEq(depositedAmount, idleAmount, "Returned amount should match idle amount");
+
+        // Verify the strategy's token balance is now 0
+        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
+
+        // Calculate expected balances based on split
+        uint256 expectedMTokenAmount = (idleAmount * splitMToken) / 10000;
+        uint256 expectedVaultAmount = (idleAmount * splitVault) / 10000;
+
+        // Verify mToken balance increased
+        uint256 newMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(
+            newMTokenBalance - initialMTokenBalance,
+            expectedMTokenAmount,
+            1e3,
+            "mToken balance should increase by expected amount"
+        );
+
+        // Verify vault balance increased
+        uint256 newVaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 newVaultBalance = metaMorphoVault.convertToAssets(newVaultShares);
+        assertApproxEqAbs(
+            newVaultBalance - initialVaultBalance,
+            expectedVaultAmount,
+            1e3,
+            "Vault balance should increase by expected amount"
+        );
+    }
+
+    function testRevertIfNoIdleTokensToDeposit() public {
+        // Ensure the strategy has no idle tokens
+        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC");
+
+        // Call depositIdleTokens should revert
+        vm.expectRevert("No tokens to deposit");
+        strategy.depositIdleTokens();
+    }
+
+    function testDepositIdleTokensWithDifferentSplit() public {
+        // First deposit some funds to have a non-zero balance
+        uint256 initialDeposit = 1000 * 10 ** 6; // 1000 USDC
+        deal(address(usdc), owner, initialDeposit);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), initialDeposit);
+        strategy.deposit(initialDeposit);
+        vm.stopPrank();
+
+        // Update position to 70% mToken, 30% vault
+        uint256 newSplitMToken = 7000; // 70%
+        uint256 newSplitVault = 3000; // 30%
+
+        vm.prank(backend);
+        strategy.updatePosition(newSplitMToken, newSplitVault);
+
+        // Mint USDC directly to the strategy contract
+        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
+        deal(address(usdc), address(strategy), idleAmount);
+
+        // Check balances before depositing idle tokens
+        uint256 initialMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        uint256 initialVaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 initialVaultBalance = metaMorphoVault.convertToAssets(initialVaultShares);
+
+        // Call depositIdleTokens
+        strategy.depositIdleTokens();
+
+        // Calculate expected balances based on new split
+        uint256 expectedMTokenAmount = (idleAmount * newSplitMToken) / 10000;
+        uint256 expectedVaultAmount = (idleAmount * newSplitVault) / 10000;
+
+        // Verify mToken balance increased according to new split
+        uint256 newMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(
+            newMTokenBalance - initialMTokenBalance,
+            expectedMTokenAmount,
+            1e3,
+            "mToken balance should increase by expected amount with new split"
+        );
+
+        // Verify vault balance increased according to new split
+        uint256 newVaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 newVaultBalance = metaMorphoVault.convertToAssets(newVaultShares);
+        assertApproxEqAbs(
+            newVaultBalance - initialVaultBalance,
+            expectedVaultAmount,
+            1e3,
+            "Vault balance should increase by expected amount with new split"
+        );
+    }
+
+    function testAnyoneCanCallDepositIdleTokens() public {
+        // Mint USDC directly to the strategy contract
+        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
+        deal(address(usdc), address(strategy), idleAmount);
+
+        // Create various addresses to test
+        address randomUser1 = makeAddr("randomUser1");
+        address randomUser2 = makeAddr("randomUser2");
+
+        // First user calls depositIdleTokens
+        vm.prank(randomUser1);
+        uint256 depositedAmount = strategy.depositIdleTokens();
+        
+        // Verify the returned amount matches the idle amount
+        assertEq(depositedAmount, idleAmount, "Returned amount should match idle amount");
+        
+        // Verify the strategy's token balance is now 0
+        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
+        
+        // Second user tries to call depositIdleTokens but it should revert
+        vm.prank(randomUser2);
+        vm.expectRevert("No tokens to deposit");
+        strategy.depositIdleTokens();
+    }
 }

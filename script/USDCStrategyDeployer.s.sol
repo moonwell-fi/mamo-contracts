@@ -23,6 +23,11 @@ contract USDCStrategyDeployer is Script {
 
         // Deploy the strategy implementation and proxy
         deployImplementation();
+
+        addresses.updateJson();
+
+        addresses.printJSONChanges();
+
     }
 
     function deployImplementation() public returns (address) {
@@ -77,9 +82,6 @@ contract USDCStrategyDeployer is Script {
 
         // Stop broadcasting transactions
         vm.stopBroadcast();
-
-        // Log the deployed proxy address
-        console.log("USDC Strategy proxy deployed at:", address(proxy));
 
         return address(proxy);
     }
