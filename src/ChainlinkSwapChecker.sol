@@ -47,18 +47,15 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      * @param _amountIn The input amount
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
-     * @param _unused Unused parameter (for interface compatibility)
      * @param _minOut The minimum output amount
-     * @param _unusedData Unused data parameter (for interface compatibility)
      * @return Whether the swap meets the price requirements
      */
-    function checkPrice(
-        uint256 _amountIn,
-        address _fromToken,
-        address _toToken,
-        uint256 _minOut,
-        bytes calldata _unusedData
-    ) external view override returns (bool) {
+    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut)
+        external
+        view
+        override
+        returns (bool)
+    {
         // Check that the sell token exists in the mapping
         require(tokenPriceCheckerData[_fromToken].length > 0, "Token not configured");
 

@@ -29,6 +29,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /// @dev The settlement contract's EIP-712 domain separator. Strategy uses this to verify that a provided UID matches provided order parameters.
     bytes32 public constant DOMAIN_SEPARATOR = 0xc078f884a2676e1345748b1feace7b0abee5d00ecadb6e574dcdd109a63e8943;
 
+    /// @dev Magic value returned by isValidSignature for valid orders
+    /// @dev See https://eips.ethereum.org/EIPS/eip-1271
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
 
     // @notice Total basis points used for split calculations (100%)
@@ -47,6 +49,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Reference to the ERC20 token contract
     IERC20 public token;
 
+    /// @notice Reference to the swap checker contract used to validate swap prices
     ISwapChecker public swapChecker;
 
     // @notice Percentage of funds allocated to Moonwell mToken in basis points
@@ -274,8 +277,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
                 _order.sellAmount,
                 address(_order.sellToken),
                 address(_order.buyToken),
-                _order.buyAmount,
-                abi.encode(_order.sellToken) // data parameter is ignored by ChainlinkSwapChecker
+                _order.buyAmount
             ),
             "Price check failed - output amount too low"
         );

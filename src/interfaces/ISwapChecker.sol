@@ -13,16 +13,12 @@ interface ISwapChecker {
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
      * @param _minOut The minimum output amount
-     * @param _data Additional data for the price check
      * @return Whether the swap meets the price requirements
      */
-    function checkPrice(
-        uint256 _amountIn,
-        address _fromToken,
-        address _toToken,
-        uint256 _minOut,
-        bytes calldata _data
-    ) external view returns (bool);
+    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut)
+        external
+        view
+        returns (bool);
 
     /**
      * @notice Gets the expected output amount for a swap
