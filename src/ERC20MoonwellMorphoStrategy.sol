@@ -302,12 +302,14 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
 
+        require(_order.feeAmount == 0, "Fee amount must be zero");
+
         require(
             priceChecker.checkPrice(
-                _order.sellAmount + _order.feeAmount,
+                _order.sellAmount ,
                 address(_order.sellToken),
                 address(_order.buyToken),
-                _order.feeAmount,
+                0,
                 _order.buyAmount,
                 _priceCheckerData
             ),
