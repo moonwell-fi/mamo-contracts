@@ -42,5 +42,5 @@ jobs:
 
       - name: Run Forge tests
         run: |
-          forge test --fork-url base -vvv
+          forge test --fork-url base -vvv --ffi
         id: test
