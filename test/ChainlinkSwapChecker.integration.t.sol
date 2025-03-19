@@ -69,7 +69,7 @@ contract ChainlinkSwapCheckerTest is Test {
         swapChecker.configureToken(address(usdc), usdcConfigs);
     }
 
-    function testInitialState() public {
+    function testInitialState() public view {
         // Check initial slippage
         assertEq(swapChecker.ALLOWED_SLIPPAGE_IN_BPS(), INITIAL_SLIPPAGE, "Initial slippage should be set correctly");
 
@@ -77,7 +77,7 @@ contract ChainlinkSwapCheckerTest is Test {
         assertEq(swapChecker.owner(), owner, "Owner should be set correctly");
     }
 
-    function testTokenConfiguration() public {
+    function testTokenConfiguration() public view {
         // Verify WELL token configuration
         ISwapChecker.TokenFeedConfiguration[] memory wellConfigs = swapChecker.tokenOracleInformation(address(well));
         assertEq(wellConfigs.length, 1, "WELL should have 1 configuration");
@@ -118,19 +118,16 @@ contract ChainlinkSwapCheckerTest is Test {
         assertEq(swapChecker.ALLOWED_SLIPPAGE_IN_BPS(), newSlippage, "Slippage should be updated");
     }
 
-    function testGetExpectedOut() public {
+    function testGetExpectedOut() public view {
         // Get the expected output from the swap checker
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
         uint256 swapCheckerOut = swapChecker.getExpectedOut(amountIn, address(well), address(usdc));
 
         // Verify the output is non-zero
         assertTrue(swapCheckerOut > 0, "Expected output should be greater than zero");
-
-        // Log the actual output for reference
-        console.log("Expected output for 1 WELL to USDC:", swapCheckerOut);
     }
 
-    function testCheckPrice() public {
+    function testCheckPrice() public view {
         // Get the expected output for 1 WELL to USDC
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
         uint256 expectedOut = swapChecker.getExpectedOut(amountIn, address(well), address(usdc));
@@ -146,7 +143,7 @@ contract ChainlinkSwapCheckerTest is Test {
         assertTrue(result, "Price check should pass with acceptable slippage");
     }
 
-    function testCheckPriceFail() public {
+    function testCheckPriceFail() public view {
         // Get the expected output for 1 WELL to USDC
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
         uint256 expectedOut = swapChecker.getExpectedOut(amountIn, address(well), address(usdc));

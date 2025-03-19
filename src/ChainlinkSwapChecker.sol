@@ -107,7 +107,6 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
     function configureToken(address token, TokenFeedConfiguration[] calldata configurations) external onlyOwner {
         require(token != address(0), "Invalid token address");
 
-        // TODO review this logic
         // Clear any existing configurations
         delete tokenOracleData[token];
 

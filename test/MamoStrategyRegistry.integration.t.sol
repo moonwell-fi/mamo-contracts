@@ -8,6 +8,7 @@ import {console} from "@forge-std/console.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 
+import {MockERC20} from "./MockERC20.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
@@ -651,6 +652,231 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         return address(uint160(uint256(vm.load(proxy, slot))));
     }
 
-    // TODO add onlyGuardian checks
-    // TODO add withdrawn ERC20 tests
+    // ==================== TESTS FOR GUARDIAN ROLE FUNCTIONS ====================
+
+    function testPauseSucceed() public {
+        // Verify the registry is not paused initially
+        assertFalse(registry.paused(), "Registry should not be paused initially");
+
+        // Switch to the guardian role
+        vm.startPrank(guardian);
+
+        // Call the pause function
+        registry.pause();
+
+        // Stop impersonating the guardian
+        vm.stopPrank();
+
+        // Verify the registry is now paused
+        assertTrue(registry.paused(), "Registry should be paused");
+    }
+
+    function testUnpauseSucceed() public {
+        // First pause the registry
+        vm.startPrank(guardian);
+        registry.pause();
+        vm.stopPrank();
+
+        // Verify the registry is paused
+        assertTrue(registry.paused(), "Registry should be paused");
+
+        // Switch to the guardian role again
+        vm.startPrank(guardian);
+
+        // Call the unpause function
+        registry.unpause();
+
+        // Stop impersonating the guardian
+        vm.stopPrank();
+
+        // Verify the registry is now unpaused
+        assertFalse(registry.paused(), "Registry should not be paused");
+    }
+
+    function testRevertIfNonGuardianCallPause() public {
+        // Create a non-guardian address
+        address nonGuardian = makeAddr("nonGuardian");
+
+        // Verify the non-guardian address doesn't have the GUARDIAN_ROLE
+        assertFalse(
+            registry.hasRole(registry.GUARDIAN_ROLE(), nonGuardian), "Non-guardian should not have GUARDIAN_ROLE"
+        );
+
+        // Switch to the non-guardian address
+        vm.startPrank(nonGuardian);
+
+        // Expect the call to revert with AccessControlUnauthorizedAccount error
+        bytes32 role = registry.GUARDIAN_ROLE();
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", nonGuardian, role));
+
+        // Call the pause function
+        registry.pause();
+
+        // Stop impersonating the non-guardian address
+        vm.stopPrank();
+    }
+
+    function testRevertIfNonGuardianCallUnpause() public {
+        // First pause the registry
+        vm.startPrank(guardian);
+        registry.pause();
+        vm.stopPrank();
+
+        // Create a non-guardian address
+        address nonGuardian = makeAddr("nonGuardian");
+
+        // Verify the non-guardian address doesn't have the GUARDIAN_ROLE
+        assertFalse(
+            registry.hasRole(registry.GUARDIAN_ROLE(), nonGuardian), "Non-guardian should not have GUARDIAN_ROLE"
+        );
+
+        // Switch to the non-guardian address
+        vm.startPrank(nonGuardian);
+
+        // Expect the call to revert with AccessControlUnauthorizedAccount error
+        bytes32 role = registry.GUARDIAN_ROLE();
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", nonGuardian, role));
+
+        // Call the unpause function
+        registry.unpause();
+
+        // Stop impersonating the non-guardian address
+        vm.stopPrank();
+    }
+
+    function testRevertIfPauseWhenAlreadyPaused() public {
+        // First pause the registry
+        vm.startPrank(guardian);
+        registry.pause();
+
+        // Expect the call to revert
+        vm.expectRevert();
+
+        // Call the pause function again
+        registry.pause();
+
+        // Stop impersonating the guardian
+        vm.stopPrank();
+    }
+
+    function testRevertIfUnpauseWhenNotPaused() public {
+        // Verify the registry is not paused initially
+        assertFalse(registry.paused(), "Registry should not be paused initially");
+
+        // Switch to the guardian role
+        vm.startPrank(guardian);
+
+        // Expect the call to revert
+        vm.expectRevert();
+
+        // Call the unpause function
+        registry.unpause();
+
+        // Stop impersonating the guardian
+        vm.stopPrank();
+    }
+
+    // ==================== TESTS FOR ERC20 RECOVERY FUNCTIONS ====================
+
+    function testRecoverERC20Succeed() public {
+        // Create a mock ERC20 token
+        MockERC20 token = new MockERC20("Mock Token", "MTK");
+
+        // Mint some tokens to the registry
+        uint256 amount = 1000 * 10 ** 18;
+        token.mint(address(registry), amount);
+
+        // Verify the registry has the tokens
+        assertEq(token.balanceOf(address(registry)), amount, "Registry should have the tokens");
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Switch to the admin role
+        vm.startPrank(admin);
+
+        // Call the recoverERC20 function
+        registry.recoverERC20(address(token), recipient, amount);
+
+        // Stop impersonating the admin
+        vm.stopPrank();
+
+        // Verify the tokens were transferred to the recipient
+        assertEq(token.balanceOf(address(registry)), 0, "Registry should have no tokens left");
+        assertEq(token.balanceOf(recipient), amount, "Recipient should have received the tokens");
+    }
+
+    function testRevertIfNonAdminCallRecoverERC20() public {
+        // Create a mock ERC20 token
+        MockERC20 token = new MockERC20("Mock Token", "MTK");
+
+        // Mint some tokens to the registry
+        uint256 amount = 1000 * 10 ** 18;
+        token.mint(address(registry), amount);
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Create a non-admin address
+        address nonAdmin = makeAddr("nonAdmin");
+
+        // Verify the non-admin address doesn't have the DEFAULT_ADMIN_ROLE
+        assertFalse(
+            registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), nonAdmin), "Non-admin should not have DEFAULT_ADMIN_ROLE"
+        );
+
+        // Switch to the non-admin address
+        vm.startPrank(nonAdmin);
+
+        // Expect the call to revert with AccessControlUnauthorizedAccount error
+        bytes32 role = registry.DEFAULT_ADMIN_ROLE();
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", nonAdmin, role));
+
+        // Call the recoverERC20 function
+        registry.recoverERC20(address(token), recipient, amount);
+
+        // Stop impersonating the non-admin address
+        vm.stopPrank();
+    }
+
+    function testRevertIfRecoverERC20WithZeroAddress() public {
+        // Create a mock ERC20 token
+        MockERC20 token = new MockERC20("Mock Token", "MTK");
+
+        // Mint some tokens to the registry
+        uint256 amount = 1000 * 10 ** 18;
+        token.mint(address(registry), amount);
+
+        // Switch to the admin role
+        vm.startPrank(admin);
+
+        // Expect the call to revert with "Cannot send to zero address"
+        vm.expectRevert("Cannot send to zero address");
+
+        // Call the recoverERC20 function with zero address as recipient
+        registry.recoverERC20(address(token), address(0), amount);
+
+        // Stop impersonating the admin
+        vm.stopPrank();
+    }
+
+    function testRevertIfRecoverERC20WithZeroAmount() public {
+        // Create a mock ERC20 token
+        MockERC20 token = new MockERC20("Mock Token", "MTK");
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Switch to the admin role
+        vm.startPrank(admin);
+
+        // Expect the call to revert with "Amount must be greater than 0"
+        vm.expectRevert("Amount must be greater than 0");
+
+        // Call the recoverERC20 function with zero amount
+        registry.recoverERC20(address(token), recipient, 0);
+
+        // Stop impersonating the admin
+        vm.stopPrank();
+    }
 }

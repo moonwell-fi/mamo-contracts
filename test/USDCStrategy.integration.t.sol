@@ -16,17 +16,9 @@ import {stdJson} from "forge-std/StdJson.sol";
 
 import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-// Mock ERC20 Token
-contract MockERC20 is ERC20 {
-    constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
-
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
-}
+import {MockERC20} from "./MockERC20.sol";
 
 contract USDCStrategyTest is Test {
     using GPv2Order for GPv2Order.Data;
@@ -41,8 +33,8 @@ contract USDCStrategyTest is Test {
     ERC20MoonwellMorphoStrategy strategy;
     MamoStrategyRegistry registry;
     ChainlinkSwapChecker swapChecker;
-    ERC20 usdc;
-    ERC20 well;
+    IERC20 usdc;
+    IERC20 well;
     IMToken mToken;
     IERC4626 metaMorphoVault;
 
@@ -68,8 +60,8 @@ contract USDCStrategyTest is Test {
         guardian = addresses.getAddress("MAMO_MULTISIG");
         owner = makeAddr("owner");
 
-        usdc = ERC20(addresses.getAddress("USDC"));
-        well = ERC20(addresses.getAddress("xWELL_PROXY"));
+        usdc = IERC20(addresses.getAddress("USDC"));
+        well = IERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
 
