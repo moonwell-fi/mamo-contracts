@@ -90,6 +90,9 @@ contract USDCStrategyTest is Test {
 
         splitMToken = splitVault = 5000; // 50% in basis points each
 
+        // Create a mock vault relayer address
+        address vaultRelayer = makeAddr("vaultRelayer");
+
         // Encode initialization data for the strategy
         bytes memory initData = abi.encodeWithSelector(
             ERC20MoonwellMorphoStrategy.initialize.selector,
@@ -100,6 +103,7 @@ contract USDCStrategyTest is Test {
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
                 swapChecker: address(swapChecker),
+                vaultRelayer: vaultRelayer,
                 splitMToken: splitMToken,
                 splitVault: splitVault
             })

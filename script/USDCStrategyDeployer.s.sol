@@ -54,6 +54,7 @@ contract USDCStrategyDeployer is Script {
         address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
         address usdc = addresses.getAddress("USDC");
         address swapChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER");
+        address vaultRelayer = addresses.getAddress("VAULT_RELAYER");
 
         // Define the split parameters (50/50 by default)
         uint256 splitMToken = 5000; // 50% in basis points
@@ -69,6 +70,7 @@ contract USDCStrategyDeployer is Script {
                 metaMorphoVault: metaMorphoVault,
                 token: usdc,
                 swapChecker: swapChecker,
+                vaultRelayer: vaultRelayer,
                 splitMToken: splitMToken,
                 splitVault: splitVault
             })

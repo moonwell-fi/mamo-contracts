@@ -22,20 +22,49 @@ interface IERC20MetaData {
  * @dev Implements the ISwapChecker interface
  */
 contract ChainlinkSwapChecker is ISwapChecker, Ownable {
-    uint256 public immutable ALLOWED_SLIPPAGE_IN_BPS;
+    /**
+     * @notice The allowed slippage in basis points (e.g., 100 = 1%)
+     * @dev Used to calculate the minimum acceptable output amount for swaps
+     */
+    uint256 public ALLOWED_SLIPPAGE_IN_BPS;
 
+    /**
+     * @notice The maximum basis points value (10,000 = 100%)
+     * @dev Used for percentage calculations and as an upper bound for slippage
+     */
     uint256 internal constant MAX_BPS = 10_000;
 
+    /**
+     * @notice Configuration for a token's price feed
+     * @dev Stores the Chainlink feed address and whether to reverse the price calculation
+     * @param chainlinkFeed The address of the Chainlink price feed
+     * @param reverse Whether to reverse the price calculation (divide instead of multiply)
+     */
     struct TokenFeedConfiguration {
         address chainlinkFeed;
         bool reverse;
     }
 
-    // Maps token addresses to their price checker data
+    /**
+     * @notice Maps token addresses to their price checker configurations
+     * @dev Each token can have multiple price feed configurations in sequence
+     */
     mapping(address token => TokenFeedConfiguration[]) public tokenPriceCheckerData;
 
-    // Events
+    /**
+     * @notice Emitted when a token's price feed configuration is updated
+     * @param token The address of the configured token
+     * @param chainlinkFeed The address of the Chainlink price feed
+     * @param reverse Whether to reverse the price calculation
+     */
     event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse);
+    
+    /**
+     * @notice Emitted when the slippage tolerance is updated
+     * @param oldSlippage The previous slippage value in basis points
+     * @param newSlippage The new slippage value in basis points
+     */
+    event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
 
     constructor(uint256 _allowedSlippageInBps, address _owner) Ownable(_owner) {
         require(_allowedSlippageInBps <= MAX_BPS);
@@ -63,6 +92,20 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
         uint256 _expectedOut = getExpectedOut(_amountIn, _fromToken, _toToken);
 
         return _minOut > (_expectedOut * (MAX_BPS - ALLOWED_SLIPPAGE_IN_BPS)) / MAX_BPS;
+    }
+
+    /**
+     * @notice Sets a new slippage tolerance value
+     * @dev Only callable by the owner
+     * @param _newSlippageInBps The new slippage tolerance in basis points (e.g., 100 = 1%)
+     */
+    function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
+        require(_newSlippageInBps <= MAX_BPS, "Slippage exceeds maximum");
+        
+        uint256 oldSlippage = ALLOWED_SLIPPAGE_IN_BPS;
+        ALLOWED_SLIPPAGE_IN_BPS = _newSlippageInBps;
+        
+        emit SlippageUpdated(oldSlippage, _newSlippageInBps);
     }
 
     /**
