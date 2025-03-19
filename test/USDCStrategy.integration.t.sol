@@ -863,7 +863,7 @@ contract USDCStrategyTest is Test {
 
         bytes4 isValidSignature = strategy.isValidSignature(digest, encodedOrder);
 
-        assertEq(isValidSignature,MAGIC_VALUE, "Signature invalid");
+        assertEq(isValidSignature, MAGIC_VALUE, "Signature invalid");
     }
 
     function testRevertIfOrderHashDoesNotMatch() public {
@@ -892,10 +892,10 @@ contract USDCStrategyTest is Test {
         });
 
         bytes memory encodedOrder = abi.encode(order);
-        
+
         // Create an incorrect digest
         bytes32 incorrectDigest = bytes32(uint256(order.hash(strategy.DOMAIN_SEPARATOR())) + 1);
-        
+
         vm.expectRevert("Order hash does not match the provided digest");
         strategy.isValidSignature(incorrectDigest, encodedOrder);
     }
@@ -927,7 +927,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Order must be a sell order");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -960,7 +960,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Order expires too soon - must be valid for at least 5 minutes");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -992,7 +992,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Order must be fill-or-kill, partial fills not allowed");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1024,7 +1024,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Sell token must be an ERC20 token");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1056,7 +1056,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Buy token must be an ERC20 token");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1070,7 +1070,7 @@ contract USDCStrategyTest is Test {
 
         // Create a mock token that is different from the strategy token
         MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
-        
+
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 18; // Using 18 decimals for mock token
 
@@ -1091,7 +1091,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Buy token must match the strategy token");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1126,7 +1126,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Order receiver must be this strategy contract");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1158,7 +1158,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Fee amount must be zero");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1190,7 +1190,7 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("App data must be zero");
         strategy.isValidSignature(digest, encodedOrder);
     }
@@ -1203,7 +1203,7 @@ contract USDCStrategyTest is Test {
         strategy.approveVaultRelayer(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
-        
+
         // Set a very low buy amount that will fail the price check
         uint256 buyAmount = 1; // Extremely low amount
 
@@ -1224,9 +1224,73 @@ contract USDCStrategyTest is Test {
 
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
-        
+
         vm.expectRevert("Price check failed - output amount too low");
         strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    // Tests for approveVaultRelayer function
+
+    function testOwnerCanApproveVaultRelayer() public {
+        // Verify the token is configured in the swap checker
+        ISwapChecker.TokenFeedConfiguration[] memory configs = new ISwapChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISwapChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
+            reverse: false
+        });
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        swapChecker.configureToken(address(well), configs);
+
+        // Check initial approval
+        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        assertEq(initialAllowance, 0, "Initial allowance should be zero");
+
+        // Owner approves the vault relayer
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        // Verify the approval was successful
+        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        assertEq(finalAllowance, type(uint256).max, "Allowance should be set to maximum");
+    }
+
+    function testRevertIfNonOwnerApproveVaultRelayer() public {
+        // Configure the token in the swap checker
+        ISwapChecker.TokenFeedConfiguration[] memory configs = new ISwapChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISwapChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
+            reverse: false
+        });
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        swapChecker.configureToken(address(well), configs);
+
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+
+        // Non-owner attempts to approve the vault relayer
+        vm.prank(nonOwner);
+        vm.expectRevert("Not strategy owner");
+        strategy.approveVaultRelayer(address(well));
+
+        // Verify the approval was not granted
+        uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        assertEq(allowance, 0, "Allowance should remain zero");
+    }
+
+    function testRevertIfTokenNotConfiguredInSwapChecker() public {
+        // Create a mock token that is not configured in the swap checker
+        MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
+
+        // Owner attempts to approve the vault relayer for an unconfigured token
+        vm.prank(owner);
+        vm.expectRevert("Token not configured in swap checker");
+        strategy.approveVaultRelayer(address(mockToken));
+
+        // Verify the approval was not granted
+        uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.vaultRelayer());
+        assertEq(allowance, 0, "Allowance should remain zero");
     }
 
     function parseUint(string memory json, string memory key) internal pure returns (uint256) {

@@ -14,18 +14,15 @@ import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
  * @dev Deploys the ChainlinkSwapChecker contract and updates the addresses JSON file
  */
 contract DeployChainlinkSwapChecker is Script {
-    Addresses public addresses;
-
     function run() external {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid; // Use the current chain ID
 
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
-        // Deploy the ChainlinkSwapChecker
-        ChainlinkSwapChecker swapChecker = deployChainlinkSwapChecker(addresses);
+        deployChainlinkSwapChecker(addresses);
 
         // Update the JSON file with the new address
         addresses.updateJson();
