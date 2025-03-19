@@ -35,17 +35,6 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
     uint256 internal constant MAX_BPS = 10_000;
 
     /**
-     * @notice Configuration for a token's price feed
-     * @dev Stores the Chainlink feed address and whether to reverse the price calculation
-     * @param chainlinkFeed The address of the Chainlink price feed
-     * @param reverse Whether to reverse the price calculation (divide instead of multiply)
-     */
-    struct TokenFeedConfiguration {
-        address chainlinkFeed;
-        bool reverse;
-    }
-
-    /**
      * @notice Maps token addresses to their oracle configurations
      * @dev Each token can have multiple price feed configurations in sequence
      */
@@ -58,7 +47,7 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      * @param reverse Whether to reverse the price calculation
      */
     event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse);
-    
+
     /**
      * @notice Emitted when the slippage tolerance is updated
      * @param oldSlippage The previous slippage value in basis points
@@ -101,10 +90,10 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      */
     function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
         require(_newSlippageInBps <= MAX_BPS, "Slippage exceeds maximum");
-        
+
         uint256 oldSlippage = ALLOWED_SLIPPAGE_IN_BPS;
         ALLOWED_SLIPPAGE_IN_BPS = _newSlippageInBps;
-        
+
         emit SlippageUpdated(oldSlippage, _newSlippageInBps);
     }
 

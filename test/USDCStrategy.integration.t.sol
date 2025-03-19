@@ -11,6 +11,8 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
+
+import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -68,9 +70,9 @@ contract USDCStrategyTest is Test {
         // Deploy the swap checker using the script
         swapChecker = deployScript.deployChainlinkSwapChecker(addresses);
 
-        ChainlinkSwapChecker.TokenFeedConfiguration[] memory configs =
-            new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
-        configs[0] = ChainlinkSwapChecker.TokenFeedConfiguration({
+        ISwapChecker.TokenFeedConfiguration[] memory configs = new ISwapChecker.TokenFeedConfiguration[](1);
+
+        configs[0] = ISwapChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"),
             reverse: false
         });
@@ -90,9 +92,6 @@ contract USDCStrategyTest is Test {
 
         splitMToken = splitVault = 5000; // 50% in basis points each
 
-        // Create a mock vault relayer address
-        address vaultRelayer = makeAddr("vaultRelayer");
-
         // Encode initialization data for the strategy
         bytes memory initData = abi.encodeWithSelector(
             ERC20MoonwellMorphoStrategy.initialize.selector,
@@ -103,7 +102,7 @@ contract USDCStrategyTest is Test {
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
                 swapChecker: address(swapChecker),
-                vaultRelayer: vaultRelayer,
+                vaultRelayer: addresses.getAddress("COWSWAP_VAULT_RELAYER"),
                 splitMToken: splitMToken,
                 splitVault: splitVault
             })
@@ -474,6 +473,7 @@ contract USDCStrategyTest is Test {
         assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
     }
 
+    // TODO move this to ChainlinkSwapChecker test file
     function testTokenConfiguration() public {
         // Create a mock chainlink feed address
         address mockChainlinkFeed = makeAddr("mockChainlinkFeed");
@@ -481,7 +481,7 @@ contract USDCStrategyTest is Test {
         // Create token feed configurations
         ChainlinkSwapChecker.TokenFeedConfiguration[] memory configs =
             new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
-        configs[0] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed, reverse: false});
+        configs[0] = ISwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed, reverse: false});
 
         // Configure a token in the swap checker
         vm.prank(swapChecker.owner());
@@ -489,7 +489,7 @@ contract USDCStrategyTest is Test {
 
         // Verify the token is configured - we need to check each element individually
         // since the mapping getter returns individual elements, not the whole array
-        (address feed, bool reverse) = swapChecker.tokenPriceCheckerData(address(usdc), 0);
+        (address feed, bool reverse) = swapChecker.tokenOracleData(address(usdc), 0);
         assertEq(feed, mockChainlinkFeed, "Chainlink feed should match");
         assertEq(reverse, false, "Reverse flag should match");
 
@@ -499,15 +499,15 @@ contract USDCStrategyTest is Test {
 
         ChainlinkSwapChecker.TokenFeedConfiguration[] memory configs2 =
             new ChainlinkSwapChecker.TokenFeedConfiguration[](2);
-        configs2[0] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed, reverse: true});
-        configs2[1] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed2, reverse: false});
+        configs2[0] = ISwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed, reverse: true});
+        configs2[1] = ISwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed2, reverse: false});
 
         vm.prank(swapChecker.owner());
         swapChecker.configureToken(mockToken, configs2);
 
         // Verify the new token is configured - we need to check each element individually
-        (address feed1, bool reverse1) = swapChecker.tokenPriceCheckerData(mockToken, 0);
-        (address feed2, bool reverse2) = swapChecker.tokenPriceCheckerData(mockToken, 1);
+        (address feed1, bool reverse1) = swapChecker.tokenOracleData(mockToken, 0);
+        (address feed2, bool reverse2) = swapChecker.tokenOracleData(mockToken, 1);
 
         assertEq(feed1, mockChainlinkFeed, "First chainlink feed should match");
         assertEq(reverse1, true, "First reverse flag should match");
@@ -517,13 +517,13 @@ contract USDCStrategyTest is Test {
         // Instead, configure with a different feed
         ChainlinkSwapChecker.TokenFeedConfiguration[] memory newConfigs =
             new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
-        newConfigs[0] = ChainlinkSwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed2, reverse: true});
+        newConfigs[0] = ISwapChecker.TokenFeedConfiguration({chainlinkFeed: mockChainlinkFeed2, reverse: true});
 
         vm.prank(swapChecker.owner());
         swapChecker.configureToken(address(usdc), newConfigs);
 
         // Verify the token data was updated
-        (address updatedFeed, bool updatedReverse) = swapChecker.tokenPriceCheckerData(address(usdc), 0);
+        (address updatedFeed, bool updatedReverse) = swapChecker.tokenOracleData(address(usdc), 0);
         assertEq(updatedFeed, mockChainlinkFeed2, "Chainlink feed should be updated");
         assertEq(updatedReverse, true, "Reverse flag should be updated");
     }
