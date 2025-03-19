@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {stdJson} from "forge-std/StdJson.sol";
-import {Surl} from "@surl/Surl.sol";
 import {DeployChainlinkSwapChecker} from "../script/DeployChainlinkSwapChecker.s.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
@@ -13,6 +11,8 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
+import {Surl} from "@surl/Surl.sol";
+import {stdJson} from "forge-std/StdJson.sol";
 
 import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
@@ -866,7 +866,370 @@ contract USDCStrategyTest is Test {
         assertEq(isValidSignature,MAGIC_VALUE, "Signature invalid");
     }
 
-      function parseUint(string memory json, string memory key) internal pure returns (uint256) {
+    function testRevertIfOrderHashDoesNotMatch() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
+        uint256 buyAmount = 1000 * 10 ** 6; // Mock buy amount
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        
+        // Create an incorrect digest
+        bytes32 incorrectDigest = bytes32(uint256(order.hash(strategy.DOMAIN_SEPARATOR())) + 1);
+        
+        vm.expectRevert("Order hash does not match the provided digest");
+        strategy.isValidSignature(incorrectDigest, encodedOrder);
+    }
+
+    function testRevertIfNotSellOrder() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_BUY, // Using buy order instead of sell
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Order must be a sell order");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfOrderExpiresTooSoon() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        // Set validTo to less than 5 minutes in the future
+        uint32 validTo = uint32(block.timestamp) + 4 minutes;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Order expires too soon - must be valid for at least 5 minutes");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfOrderIsPartiallyFillable() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: true, // Setting to true to trigger revert
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Order must be fill-or-kill, partial fills not allowed");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfSellTokenBalanceNotERC20() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_INTERNAL, // Using internal balance instead of ERC20
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Sell token must be an ERC20 token");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfBuyTokenBalanceNotERC20() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_EXTERNAL // Using external balance instead of ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Buy token must be an ERC20 token");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfBuyTokenDoesNotMatchStrategyToken() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        // Create a mock token that is different from the strategy token
+        MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
+        
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 18; // Using 18 decimals for mock token
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(mockToken)), // Using a different token than USDC
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Buy token must match the strategy token");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfReceiverIsNotStrategy() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        // Create a different receiver address
+        address differentReceiver = makeAddr("differentReceiver");
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: differentReceiver, // Using a different receiver
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Order receiver must be this strategy contract");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfFeeAmountNotZero() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 1000, // Setting a non-zero fee amount
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Fee amount must be zero");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfAppDataNotZero() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(uint256(1)), // Setting a non-zero app data
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("App data must be zero");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfPriceCheckFails() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        
+        // Set a very low buy amount that will fail the price check
+        uint256 buyAmount = 1; // Extremely low amount
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+        
+        vm.expectRevert("Price check failed - output amount too low");
+        strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function parseUint(string memory json, string memory key) internal pure returns (uint256) {
         bytes memory valueBytes = vm.parseJson(json, key);
         string memory valueString = abi.decode(valueBytes, (string));
         return vm.parseUint(valueString);
