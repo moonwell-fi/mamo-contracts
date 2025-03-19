@@ -4,7 +4,7 @@ This document outlines the specification for the Mamo contracts, which enable us
 
 ## Mamo Strategy Registry
 
-This contract is responsible for tracking user strategies, deploying new strategies, and coordinating operations across strategies. It inherits from the AccessControlEnumerable and Pausable contracts from OpenZeppelin and uses the EnumerableSet library for efficient set operations. The contract is upgradeable through a UUPS (Universal Upgradeable Proxy Standard) pattern, with role-based access control.
+This contract is responsible for tracking user strategies, whitelisting strategy implementations, and coordinating operations across strategies. It inherits from the AccessControlEnumerable and Pausable contracts from OpenZeppelin and uses the EnumerableSet library for efficient set operations. 
 
 The contract is initialized with three distinct roles that are passed as constructor parameters:
 - `admin`: Granted the DEFAULT_ADMIN_ROLE, which can grant and revoke other roles
@@ -22,7 +22,7 @@ The contract is initialized with three distinct roles that are passed as constru
 - `mapping(address => EnumerableSet.AddressSet) _userStrategies`: Set of all strategy addresses for each user
 - `mapping(address => bool) public whitelistedImplementations`: Mapping of whitelisted implementation addresses
 - `mapping(uint256 => address) public latestImplementationById`: Maps strategy IDs to their latest implementation
-- `mapping(address => uint256) public implementationToId`: Maps implementations to their strategy IDt co
+- `mapping(address => uint256) public implementationToId`: Maps implementations to their strategy ID
 - `uint256 private _nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
 
 ### Strategy Type ID
@@ -53,42 +53,27 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
 
-## Interfaces
-
-### IBaseStrategy
-
-This interface defines the methods that a strategy contract should expose.
-
-- `function mamoStrategyRegistry() external view returns (IMamoStrategyRegistry)`: Gets the Mamo Strategy Registry contract.
-
-### IUUPSUpgradeable
-
-This interface defines the methods that a UUPS (Universal Upgradeable Proxy Standard) proxy implementation should expose.
-
-- `function upgradeToAndCall(address newImplementation, bytes memory data) external payable`: Upgrades the implementation to `newImplementation` and calls a function on the new implementation. This function is only callable through the proxy, not through the implementation.
-
 ## ERC20MoonwellMorphoStrategy
 
-A generic implementation of a Strategy Contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults. This contract is designed to be used as an implementation for proxies.
+A generic implementation of a Strategy Contract for ERC20 tokens that splits deposits between Moonwell core market and Morpho Vaults. This contract is designed to be used as an implementation for proxies.
 
 ### Storage
 
-- `AccessControlEnumerable`: Inherits from OpenZeppelin's AccessControlEnumerable for role-based access control
-- `bool private _initialized`: Flag to track if the contract has been initialized
-- `bytes32 public constant BACKEND_ROLE`: Role identifier for the backend role in the registry
+
+- `bytes32 public constant DOMAIN_SEPARATOR`: The settlement contract's EIP-712 domain separator for Cow Swap
+- `uint256 public constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
 - `IMamoStrategyRegistry public mamoStrategyRegistry`: Reference to the Mamo Strategy Registry contract
 - `IMToken public mToken`: The Moonwell mToken contract
 - `IERC4626 public metaMorphoVault`: The MetaMorpho Vault contract
-- `IDEXRouter public dexRouter`: The DEX router for swapping reward tokens
 - `IERC20 public token`: The ERC20 token
-- `uint256 public constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
+- `ISwapChecker public swapChecker`: Reference to the swap checker contract used to validate swap prices
+- `address public vaultRelayer`: The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
 - `uint256 public splitMToken`: Percentage of funds allocated to Moonwell mToken in basis points
 - `uint256 public splitVault`: Percentage of funds allocated to MetaMorpho Vault in basis points
-- `EnumerableSet.AddressSet private _rewardTokens`: Set of reward token addresses
 
 ### Functions
 
-- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes owner, mamoStrategyRegistry, mamoBackend, admin, mToken, metaMorphoVault, dexRouter, token, splitMToken, and splitVault.
+- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes mamoStrategyRegistry, mamoBackend, mToken, metaMorphoVault, token, swapChecker, vaultRelayer, splitMToken, and splitVault.
 
 - `modifier onlyStrategyRegistry()`: Modifier to ensure the caller is the Mamo Strategy Registry contract.
 
@@ -100,7 +85,6 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function initialize(InitParams calldata params) external`: Initializer function that sets all the parameters and grants appropriate roles. This is used instead of a constructor since the contract is designed to be used with proxies. The function sets up the admin role for the specified admin address.
 
-- `function setDexRouter(address _newDexRouter) external`: Updates the DEX router address. Only callable by the backend address from the Mamo Strategy Registry.
 
 - `function deposit(uint256 amount) external`: Deposits funds into the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
@@ -112,7 +96,9 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function removeRewardToken(address rewardToken) external`: Removes a token from the reward tokens set. Only callable by the backend address from the Mamo Strategy Registry.
 
-- `function compoundRewards() external`: Compounds reward tokens by swapping them to the strategy token and depositing according to the current split. Emits a RewardsCompounded event. Callable by the backend address from the Mamo Strategy Registry or the user who owns this strategy, as verified by the Mamo Strategy Registry.
+- `function depositIdleTokens() external returns (uint256)`: Deposits any token funds currently in the contract into the strategies based on the split. This function is permissionless and can be called by anyone.
+
+- `function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4)`: A function that Cow Swap will call to validate orders. This function verifies that the order parameters are valid and that the price matches the Chainlink price with the set slippage tolerance. Any bot can fulfill the order as long as the price is valid according to the swapChecker. The function returns a magic value (0x1626ba7e) if the signature is valid, as per EIP-1271.
 
 - `function _authorizeUpgrade(address) internal view override onlyStrategyRegistry()`: Internal function that authorizes an upgrade to a new implementation. Only callable by the Mamo Strategy Registry contract. This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 
@@ -122,21 +108,27 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 ## System Flow
 
-1. Mamo Backend deploys a strategy for a user using the latest implementation for the desired strategy type.
-2. Mamo Backend calls Mamo Strategy Registry addStrategy to register the strategy for the user.
-3. User deposits funds into their strategy.
-4. Mamo Backend call updatePosition to manage the strategy.
-5. User or Mamo Backend can call compoundRewards to compound rewards from the strategy.
-6. When token balance for a user strategy changes, Mamo Backend notes that and calls updateUserStrategy to rebalance the position.
-7. If the user wants to move funds to a new strategy, they call withdrawFunds, and the Mamo Backend deploys a new strategy and calls addStrategy to register it, then the user deposits into the new strategy.
-8. If Mamo wants to upgrade a strategy (example, deposit tokens into a new protocol) it can whitelist the new implementation and ask users to upgrade. Users can only upgrade to the latest implementation of the same strategy type.
+1. Mamo Backend whitelists a strategy implementation.
+2. User requests Mamo to deploy a strategy for them.
+3. Mamo deploys a strategy and calls `addStrategy` to register the strategy for the user.
+4. User deposits funds directly into their strategy.
+5. Mamo Backend calls updatePosition if it identifies a better yield in a determined market/vault.
+6. Mamo Backend (or anyone) claims rewards on behalf of the strategy.
+7. When rewards are claimed, the reward token balance for the strategy contract increases, so bots can swap rewards for the underlying token on behalf of the user using CowSwap:
+   - Cow Swap calls the isValidSignature function on the strategy contract to validate orders
+   - The strategy verifies the order parameters and checks that the price matches the Chainlink price within the set slippage tolerance using the swapChecker
+   - Any bot can fulfill the order as long as the price is valid according to the swapChecker
+8. Backend (or anyone) can call depositIdleTokens to deposit any underlying funds currently in the contract into the strategies based on the split.
+9. Users can withdraw funds directly from the strategy whenever they want.
+10. If Mamo wants to upgrade a strategy (for example, to deposit tokens into a new protocol), it can whitelist the new implementation and ask users to upgrade through the MamoStrategyRegistry contract. Users can only upgrade to the latest implementation of the same strategy type.
 
 ## Security Considerations & Assumptions
 
 1. Implementation whitelist ensures that only trusted and audited implementations can be used.
-2. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type.
-3. The Mamo Strategy Registry is not upgradeable and the backend can't remove a user strategy. This ensure strategies can always call the Registry to find it's owner and the owner will always be the only address allowed to upgrade a strategy.
+2. Strategy implementations can be upgraded, but only to whitelisted implementations of the same strategy type and the upgrade must be initiated by the user.
+3. The Mamo Strategy Registry is not upgradeable and the backend can't remove a user strategy. This ensures strategies can always call the Registry to find its owner, and the owner will always be the only address allowed to upgrade a strategy.
 4. Strategy contracts have clear ownership semantics, with only the user registered in the Mamo Strategy Registry able to deposit and withdraw funds, while only the backend address from the Mamo Strategy Registry can update positions.
-5. Reward token can't be the strategy token
-6. Mamo Registry admim role is a multisig with a timelock
-7. Guardian is a multisig without a timelock
+5. Reward token can't be the strategy token.
+6. Mamo Registry admin role is a multisig with a timelock.
+7. Guardian is a multisig without a timelock.
+8. The strategy integrates with Cow Swap through the isValidSignature function, which validates orders according to EIP-1271. Any bot can fulfill orders as long as the price matches the Chainlink price within the set slippage tolerance, as verified by the swapChecker contract.

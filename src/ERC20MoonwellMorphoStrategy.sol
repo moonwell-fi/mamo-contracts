@@ -48,6 +48,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /// @notice Reference to the swap checker contract used to validate swap prices
     ISwapChecker public swapChecker;
 
+    /// @notice The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
+    address public vaultRelayer;
+
     // @notice Percentage of funds allocated to Moonwell mToken in basis points
     uint256 public splitMToken;
 
@@ -72,6 +75,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address metaMorphoVault;
         address token;
         address swapChecker;
+        address vaultRelayer;
         uint256 splitMToken;
         uint256 splitVault;
     }
@@ -108,6 +112,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.token != address(0), "Invalid token address");
         require(params.swapChecker != address(0), "Invalid swapChecker address");
+        require(params.vaultRelayer != address(0), "Invalid vaultRelayer address");
 
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry);
@@ -116,6 +121,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         metaMorphoVault = IERC4626(params.metaMorphoVault);
         token = IERC20(params.token);
         swapChecker = ISwapChecker(params.swapChecker);
+        vaultRelayer = params.vaultRelayer;
 
         splitMToken = params.splitMToken;
         splitVault = params.splitVault;

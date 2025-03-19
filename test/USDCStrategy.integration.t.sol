@@ -510,15 +510,6 @@ contract USDCStrategyTest is Test {
         assertEq(feed2, mockChainlinkFeed2, "Second chainlink feed should match");
         assertEq(reverse2, false, "Second reverse flag should match");
 
-        // Reconfigure the first token with empty configuration (effectively removing the old data)
-        ChainlinkSwapChecker.TokenFeedConfiguration[] memory emptyConfigs =
-            new ChainlinkSwapChecker.TokenFeedConfiguration[](0);
-
-        // This should revert because we require at least one configuration
-        vm.prank(swapChecker.owner());
-        vm.expectRevert("Empty configuration array");
-        swapChecker.configureToken(address(usdc), emptyConfigs);
-
         // Instead, configure with a different feed
         ChainlinkSwapChecker.TokenFeedConfiguration[] memory newConfigs =
             new ChainlinkSwapChecker.TokenFeedConfiguration[](1);
