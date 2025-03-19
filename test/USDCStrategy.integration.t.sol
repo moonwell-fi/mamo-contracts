@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {stdJson} from "forge-std/StdJson.sol";
+
 import {DeployChainlinkSwapChecker} from "../script/DeployChainlinkSwapChecker.s.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
@@ -13,6 +15,7 @@ import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 
 import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
+import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -26,15 +29,18 @@ contract MockERC20 is ERC20 {
 }
 
 contract USDCStrategyTest is Test {
+    using stdJson for string;
+
+    // Magic value returned by isValidSignature for valid orders
+    bytes4 private constant MAGIC_VALUE = 0x1626ba7e;
     Addresses public addresses;
 
     // Contracts
     ERC20MoonwellMorphoStrategy strategy;
     MamoStrategyRegistry registry;
     ChainlinkSwapChecker swapChecker;
-
-    // Mock tokens and contracts
     ERC20 usdc;
+    ERC20 well;
     IMToken mToken;
     IERC4626 metaMorphoVault;
 
@@ -61,6 +67,7 @@ contract USDCStrategyTest is Test {
         owner = makeAddr("owner");
 
         usdc = ERC20(addresses.getAddress("USDC"));
+        well = ERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
 
@@ -73,12 +80,12 @@ contract USDCStrategyTest is Test {
         ISwapChecker.TokenFeedConfiguration[] memory configs = new ISwapChecker.TokenFeedConfiguration[](1);
 
         configs[0] = ISwapChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"),
+            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
             reverse: false
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        swapChecker.configureToken(address(usdc), configs);
+        swapChecker.configureToken(address(well), configs);
 
         // Deploy the registry with admin, backend, and guardian addresses
         registry = new MamoStrategyRegistry(admin, backend, guardian);
@@ -785,5 +792,73 @@ contract USDCStrategyTest is Test {
         vm.prank(randomUser2);
         vm.expectRevert("No tokens to deposit");
         strategy.depositIdleTokens();
+    }
+
+    function testIsValidSignature() public {
+        uint256 wellAmount = 100e18;
+        // mock claimRewards simulation strategy has well
+        deal(address(well), address(strategy), wellAmount);
+
+        // Approve the vault relayer to spend the well token
+        vm.prank(owner);
+        strategy.approveVaultRelayer(address(well));
+
+        // Set up parameters for the order
+        uint256 buyAmount;
+        uint256 feeAmount;
+        {
+            string[] memory headers = new string[](1);
+            headers[0] = "Content-Type: application/json";
+
+            (uint256 status, bytes memory data) = "https://api.cow.fi/mainnet/api/v1/quote".post(
+                headers,
+                string(
+                    abi.encodePacked(
+                        '{"sellToken": "',
+                        vm.toString(address(well)),
+                        '", "buyToken": "',
+                        vm.toString(address(usdc)),
+                        '", "from": "',
+                        vm.toString(address(strategy)),
+                        '", "kind": "sell", "sellAmountBeforeFee": "',
+                        vm.toString(wellAmount),
+                        '", "priceQuality": "fast", "signingScheme": "eip1271", "verificationGasLimit": 30000',
+                        "}"
+                    )
+                )
+            );
+
+            assertEq(status, 200);
+
+            string memory json = string(data);
+
+            buyAmount = parseUint(json, ".quote.buyAmount");
+            console.log("buyAmount", buyAmount);
+            feeAmount = parseUint(json, ".quote.feeAmount");
+            console.log("feeAmount", feeAmount);
+        }
+        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
+
+        // Create a valid order that meets all requirements
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+    }
+
+      function parseUint(string memory json, string memory key) internal pure returns (uint256) {
+        bytes memory valueBytes = vm.parseJson(json, key);
+        string memory valueString = abi.decode(valueBytes, (string));
+        return vm.parseUint(valueString);
     }
 }

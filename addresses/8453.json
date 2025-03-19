@@ -35,8 +35,18 @@
     "name": "CHAINLINK_USDC_USD"
   },
   {
+    "addr": "0xc15d9944dAefE2dB03e53bef8DDA25a56832C5fe",
+    "isContract": true,
+    "name": "CHAINLINK_WELL_USD"
+  },
+  {
     "addr": "0xc92e8bdf79f0507f65a392b0ab4667716bfe0110",
     "isContract": true,
     "name": "COWSWAP_VAULT_RELAYER"
+  },
+  {
+    "addr": "0xA88594D404727625A9437C3f886C7643872296AE",
+    "isContract": true,
+    "name": "xWELL_PROXY"
   }
 ]
