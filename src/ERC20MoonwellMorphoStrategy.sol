@@ -264,7 +264,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
         uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
 
-        // TODO check vault balance decimals
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
 
