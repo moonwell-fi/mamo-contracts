@@ -8,6 +8,24 @@ pragma solidity 0.8.28;
  */
 interface ISwapChecker {
     /**
+     * @notice Configuration for a token's price feed
+     * @dev Stores the Chainlink feed address and whether to reverse the price calculation
+     * @param chainlinkFeed The address of the Chainlink price feed
+     * @param reverse Whether to reverse the price calculation (divide instead of multiply)
+     */
+    struct TokenFeedConfiguration {
+        address chainlinkFeed;
+        bool reverse;
+    }
+
+    /**
+     * @notice Maps token addresses to their oracle configurations
+     * @dev Each token can have multiple price feed configurations in sequence
+     * @param token The token address to get oracle information for
+     * @return Array of TokenFeedConfiguration for the token
+     */
+    function tokenOracleInformation(address token) external view returns (TokenFeedConfiguration[] memory);
+    /**
      * @notice Checks if a swap meets the price requirements
      * @param _amountIn The input amount
      * @param _fromToken The token to swap from

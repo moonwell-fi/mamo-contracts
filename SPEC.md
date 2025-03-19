@@ -53,6 +53,24 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
 
+## ChainlinkSwapChecker
+
+This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISwapChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders.
+
+### Storage
+
+- `uint256 public ALLOWED_SLIPPAGE_IN_BPS`: The allowed slippage in basis points (e.g., 100 = 1%)
+- `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
+- `mapping(address token => TokenFeedConfiguration[]) public tokenPriceCheckerData`: Maps token addresses to their price checker configurations
+
+### Functions
+
+- `constructor(uint256 _allowedSlippageInBps, address _owner)`: Sets the initial slippage tolerance and owner
+- `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut) external view returns (bool)`: Checks if a swap meets the price requirements
+- `function setSlippage(uint256 _newSlippageInBps) external`: Sets a new slippage tolerance value. Only callable by the owner.
+- `function configureToken(address token, TokenFeedConfiguration[] calldata configurations) external`: Configures a token with price checker data. Only callable by the owner.
+- `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap
+
 ## ERC20MoonwellMorphoStrategy
 
 A generic implementation of a Strategy Contract for ERC20 tokens that splits deposits between Moonwell core market and Morpho Vaults. This contract is designed to be used as an implementation for proxies.
@@ -88,6 +106,8 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function deposit(uint256 amount) external`: Deposits funds into the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
+- `function approveVaultRelayer(address tokenAddress) external`: Approves the vault relayer to spend a specific token. Only callable by the user who owns this strategy. The function checks if the token has a configuration in the swap checker before approving.
+
 - `function withdraw(uint256 amount) external`: Withdraws funds from the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
 - `function updatePosition(uint256 splitA, uint256 splitB) external`: Updates the position in the strategy. Only callable by the backend address from the Mamo Strategy Registry.
@@ -115,6 +135,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 5. Mamo Backend calls updatePosition if it identifies a better yield in a determined market/vault.
 6. Mamo Backend (or anyone) claims rewards on behalf of the strategy.
 7. When rewards are claimed, the reward token balance for the strategy contract increases, so bots can swap rewards for the underlying token on behalf of the user using CowSwap:
+   - The user must first call `approveVaultRelayer` to approve the reward token for the vault relayer
    - Cow Swap calls the isValidSignature function on the strategy contract to validate orders
    - The strategy verifies the order parameters and checks that the price matches the Chainlink price within the set slippage tolerance using the swapChecker
    - Any bot can fulfill the order as long as the price is valid according to the swapChecker

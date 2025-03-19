@@ -46,10 +46,10 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
     }
 
     /**
-     * @notice Maps token addresses to their price checker configurations
+     * @notice Maps token addresses to their oracle configurations
      * @dev Each token can have multiple price feed configurations in sequence
      */
-    mapping(address token => TokenFeedConfiguration[]) public tokenPriceCheckerData;
+    mapping(address token => TokenFeedConfiguration[]) public tokenOracleData;
 
     /**
      * @notice Emitted when a token's price feed configuration is updated
@@ -86,7 +86,7 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
         returns (bool)
     {
         // Check that the sell token exists in the mapping
-        require(tokenPriceCheckerData[_fromToken].length > 0, "Token not configured");
+        require(tokenOracleData[_fromToken].length > 0, "Token not configured");
 
         // Get expected out using the token configuration from storage
         uint256 _expectedOut = getExpectedOut(_amountIn, _fromToken, _toToken);
@@ -120,16 +120,26 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
 
         // TODO review this logic
         // Clear any existing configurations
-        delete tokenPriceCheckerData[token];
+        delete tokenOracleData[token];
 
         // Add new configurations
         for (uint256 i = 0; i < configurations.length; i++) {
             require(configurations[i].chainlinkFeed != address(0), "Invalid chainlink feed address");
-            tokenPriceCheckerData[token].push(configurations[i]);
+            tokenOracleData[token].push(configurations[i]);
 
             // Emit event for each configuration
             emit TokenConfigured(token, configurations[i].chainlinkFeed, configurations[i].reverse);
         }
+    }
+
+    /**
+     * @notice Gets the oracle information for a token
+     * @dev Implements the interface function to access the token oracle configurations
+     * @param token The token address to get oracle information for
+     * @return Array of TokenFeedConfiguration for the token
+     */
+    function tokenOracleInformation(address token) external view override returns (TokenFeedConfiguration[] memory) {
+        return tokenOracleData[token];
     }
 
     /**
@@ -146,10 +156,10 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
         returns (uint256)
     {
         // Check that the sell token exists in the mapping
-        require(tokenPriceCheckerData[_fromToken].length > 0, "Token not configured");
+        require(tokenOracleData[_fromToken].length > 0, "Token not configured");
 
         // Get the token configuration from storage
-        TokenFeedConfiguration[] storage configs = tokenPriceCheckerData[_fromToken];
+        TokenFeedConfiguration[] storage configs = tokenOracleData[_fromToken];
 
         // Convert to memory arrays for the getExpectedOutFromChainlink function
         address[] memory priceFeeds = new address[](configs.length);

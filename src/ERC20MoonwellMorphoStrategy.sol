@@ -147,6 +147,19 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
+     * @notice Approves the vault relayer to spend a specific token
+     * @dev Only callable by the user who owns this strategy
+     * @param tokenAddress The address of the token to approve
+     */
+    function approveVaultRelayer(address tokenAddress) external onlyStrategyOwner {
+        // Check if the token has a configuration in the swap checker
+        require(swapChecker.tokenOracleInformation(tokenAddress).length > 0, "Token not configured in swap checker");
+        
+        // Approve the vault relayer to spend the maximum amount of tokens
+        IERC20(tokenAddress).safeApprove(vaultRelayer, type(uint256).max);
+    }
+
+    /**
      * @notice Withdraws funds from the strategy
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
