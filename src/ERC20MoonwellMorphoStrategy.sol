@@ -154,7 +154,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     function approveVaultRelayer(address tokenAddress) external onlyStrategyOwner {
         // Check if the token has a configuration in the swap checker
         require(swapChecker.tokenOracleInformation(tokenAddress).length > 0, "Token not configured in swap checker");
-
+        
         // Approve the vault relayer to spend the maximum amount of tokens
         IERC20(tokenAddress).forceApprove(vaultRelayer, type(uint256).max);
     }
@@ -294,7 +294,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.feeAmount == 0, "Fee amount must be zero");
 
-        require(_order.appData.length == 0, "App data length must be zero");
+        require(_order.appData == bytes32(0), "App data must be zero");
 
         require(
             swapChecker.checkPrice(

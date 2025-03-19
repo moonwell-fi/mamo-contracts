@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {stdJson} from "forge-std/StdJson.sol";
-
+import {Surl} from "@surl/Surl.sol";
 import {DeployChainlinkSwapChecker} from "../script/DeployChainlinkSwapChecker.s.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {ChainlinkSwapChecker} from "@contracts/ChainlinkSwapChecker.sol";
@@ -29,6 +29,8 @@ contract MockERC20 is ERC20 {
 }
 
 contract USDCStrategyTest is Test {
+    using GPv2Order for GPv2Order.Data;
+    using Surl for *;
     using stdJson for string;
 
     // Magic value returned by isValidSignature for valid orders
@@ -810,7 +812,7 @@ contract USDCStrategyTest is Test {
             string[] memory headers = new string[](1);
             headers[0] = "Content-Type: application/json";
 
-            (uint256 status, bytes memory data) = "https://api.cow.fi/mainnet/api/v1/quote".post(
+            (uint256 status, bytes memory data) = "https://api.cow.fi/base/api/v1/quote".post(
                 headers,
                 string(
                     abi.encodePacked(
@@ -822,7 +824,7 @@ contract USDCStrategyTest is Test {
                         vm.toString(address(strategy)),
                         '", "kind": "sell", "sellAmountBeforeFee": "',
                         vm.toString(wellAmount),
-                        '", "priceQuality": "fast", "signingScheme": "eip1271", "verificationGasLimit": 30000',
+                        '", "priceQuality": "fast", "signingScheme": "eip1271"',
                         "}"
                     )
                 )
@@ -854,6 +856,14 @@ contract USDCStrategyTest is Test {
             sellTokenBalance: GPv2Order.BALANCE_ERC20,
             buyTokenBalance: GPv2Order.BALANCE_ERC20
         });
+
+        bytes memory encodedOrder = abi.encode(order);
+
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+
+        bytes4 isValidSignature = strategy.isValidSignature(digest, encodedOrder);
+
+        assertEq(isValidSignature,MAGIC_VALUE, "Signature invalid");
     }
 
       function parseUint(string memory json, string memory key) internal pure returns (uint256) {
