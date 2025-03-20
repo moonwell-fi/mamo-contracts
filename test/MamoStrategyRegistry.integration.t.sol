@@ -105,7 +105,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         emit MamoStrategyRegistry.ImplementationWhitelisted(mockImplementation, 1);
 
         // Call the whitelistImplementation function and capture the returned strategy type ID
-        uint256 strategyTypeId = registry.whitelistImplementation(mockImplementation);
+        uint256 strategyTypeId = registry.whitelistImplementation(mockImplementation, 0);
 
         // Stop impersonating the backend
         vm.stopPrank();
@@ -139,7 +139,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.expectEmit(address(registry));
         emit MamoStrategyRegistry.ImplementationWhitelisted(mockImplementation2, 2);
 
-        uint256 strategyTypeId2 = registry.whitelistImplementation(mockImplementation2);
+        uint256 strategyTypeId2 = registry.whitelistImplementation(mockImplementation2, 0);
         vm.stopPrank();
 
         // Verify the second implementation has ID 2
@@ -172,7 +172,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", nonBackend, role));
 
         // Call the whitelistImplementation function
-        registry.whitelistImplementation(mockImplementation);
+        registry.whitelistImplementation(mockImplementation, 0);
 
         // Stop impersonating the non-backend address
         vm.stopPrank();
@@ -186,7 +186,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.expectRevert("Invalid implementation address");
 
         // Call the whitelistImplementation function with the zero address
-        registry.whitelistImplementation(address(0));
+        registry.whitelistImplementation(address(0), 0);
 
         // Stop impersonating the backend
         vm.stopPrank();
@@ -200,7 +200,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.startPrank(backend);
 
         // First call should succeed
-        registry.whitelistImplementation(mockImplementation);
+        registry.whitelistImplementation(mockImplementation, 0);
 
         // Verify the implementation is now whitelisted
         assertTrue(registry.whitelistedImplementations(mockImplementation), "Implementation should be whitelisted");
@@ -209,7 +209,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.expectRevert("Implementation already whitelisted");
 
         // Call the whitelistImplementation function again with the same implementation
-        registry.whitelistImplementation(mockImplementation);
+        registry.whitelistImplementation(mockImplementation, 0);
 
         // Stop impersonating the backend
         vm.stopPrank();
@@ -222,7 +222,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         MockStrategy strategyImpl = new MockStrategy();
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
+        registry.whitelistImplementation(address(strategyImpl), 0);
 
         vm.stopPrank();
         // Create a user address
@@ -262,7 +262,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address implementation = makeAddr("implementation");
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(implementation);
+        registry.whitelistImplementation(implementation, 0);
         vm.stopPrank();
 
         // Create a user address
@@ -294,7 +294,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
+        registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create a user address
@@ -331,7 +331,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address implementation = makeAddr("implementation");
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(implementation);
+        registry.whitelistImplementation(implementation, 0);
         vm.stopPrank();
 
         // Create a user address (zero address)
@@ -377,7 +377,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
+        registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create a user address
@@ -438,7 +438,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
+        registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create a user address
@@ -475,7 +475,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Whitelist an implementation and verify nextStrategyTypeId increments
         address mockImplementation = makeAddr("mockImplementation");
         vm.startPrank(backend);
-        registry.whitelistImplementation(mockImplementation);
+        registry.whitelistImplementation(mockImplementation, 0);
         vm.stopPrank();
 
         // Verify nextStrategyTypeId is now 2
@@ -484,7 +484,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Whitelist another implementation and verify nextStrategyTypeId increments again
         address mockImplementation2 = makeAddr("mockImplementation2");
         vm.startPrank(backend);
-        registry.whitelistImplementation(mockImplementation2);
+        registry.whitelistImplementation(mockImplementation2, 0);
         vm.stopPrank();
 
         // Verify nextStrategyTypeId is now 3
@@ -497,7 +497,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        uint256 strategyTypeId = registry.whitelistImplementation(mockImplementation);
+        uint256 strategyTypeId = registry.whitelistImplementation(mockImplementation, 0);
         vm.stopPrank();
 
         // Verify implementationToId returns the correct ID
@@ -523,8 +523,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementations
         vm.startPrank(backend);
-        uint256 strategyTypeId1 = registry.whitelistImplementation(mockImplementation1);
-        uint256 strategyTypeId2 = registry.whitelistImplementation(mockImplementation2);
+        uint256 strategyTypeId1 = registry.whitelistImplementation(mockImplementation1, 0);
+        uint256 strategyTypeId2 = registry.whitelistImplementation(mockImplementation2, 0);
         vm.stopPrank();
 
         // Verify latestImplementationById returns the correct implementation for each strategy type ID
@@ -555,8 +555,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementations
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl1));
-        registry.whitelistImplementation(address(strategyImpl2));
+        registry.whitelistImplementation(address(strategyImpl1), 0);
+        registry.whitelistImplementation(address(strategyImpl2), 0);
         vm.stopPrank();
 
         // Create user addresses
@@ -610,7 +610,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl));
+        registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create user addresses

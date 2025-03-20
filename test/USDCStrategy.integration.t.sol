@@ -93,7 +93,7 @@ contract USDCStrategyTest is Test {
 
         // Whitelist the implementation
         vm.prank(backend);
-        registry.whitelistImplementation(address(implementation));
+        registry.whitelistImplementation(address(implementation), 0);
 
         splitMToken = splitVault = 5000; // 50% in basis points each
 

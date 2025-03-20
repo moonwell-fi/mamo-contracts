@@ -34,7 +34,7 @@ contract WhitelistUSDCStrategy is Script {
 
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);
-        uint256 strategyTypeId = registry.whitelistImplementation(usdcStrategyImplementation);
+        uint256 strategyTypeId = registry.whitelistImplementation(usdcStrategyImplementation, 0);
 
         // Stop broadcasting transactions
         vm.stopBroadcast();

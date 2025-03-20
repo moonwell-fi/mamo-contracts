@@ -130,27 +130,33 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Adds an implementation to the whitelist with a new strategy type ID
+     * @notice Adds an implementation to the whitelist with a strategy type ID
      * @dev Only callable by accounts with the BACKEND_ROLE
      * @param implementation The address of the implementation to whitelist
-     * @return strategyTypeId The assigned strategy type ID
+     * @param strategyTypeId The strategy type ID to assign. If 0, a new ID will be assigned
+     * @return assignedStrategyTypeId The assigned strategy type ID
      */
-    function whitelistImplementation(address implementation)
+    function whitelistImplementation(address implementation, uint256 strategyTypeId)
         external
         onlyRole(BACKEND_ROLE)
-        returns (uint256 strategyTypeId)
+        returns (uint256 assignedStrategyTypeId)
     {
         require(implementation != address(0), "Invalid implementation address");
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
-        // Assign a new strategy type ID
-        strategyTypeId = nextStrategyTypeId++;
+        // If strategyTypeId is 0, assign a new strategy type ID
+        if (strategyTypeId == 0) {
+            assignedStrategyTypeId = nextStrategyTypeId++;
+        } else {
+            // Otherwise, use the provided strategyTypeId
+            assignedStrategyTypeId = strategyTypeId;
+        }
 
         whitelistedImplementations[implementation] = true;
-        implementationToId[implementation] = strategyTypeId;
-        latestImplementationById[strategyTypeId] = implementation;
+        implementationToId[implementation] = assignedStrategyTypeId;
+        latestImplementationById[assignedStrategyTypeId] = implementation;
 
-        emit ImplementationWhitelisted(implementation, strategyTypeId);
+        emit ImplementationWhitelisted(implementation, assignedStrategyTypeId);
     }
 
     /**
