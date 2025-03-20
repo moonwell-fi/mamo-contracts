@@ -59,11 +59,15 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
      * @param to The address to send the ETH to
      */
     function recoverETH(address payable to) external onlyStrategyOwner {
-        require(to != address(0), "Cannot send to zero address");
-        uint256 amount = address(this).balance;
-        to.transfer(amount);
+        require(to != address(0), "Invalid recipient");
 
-        emit TokenRecovered(address(0), to, amount);
+        uint256 balance = address(this).balance;
+        require(balance > 0, "Empty balance");
+
+        (bool success,) = to.call{value: balance}("");
+        require(success, "Transfer failed");
+
+        emit TokenRecovered(address(0), to, balance);
     }
 
     /**
