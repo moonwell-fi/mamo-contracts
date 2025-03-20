@@ -1132,6 +1132,133 @@ contract USDCStrategyTest is Test {
         strategy.isValidSignature(digest, encodedOrder);
     }
 
+    // Tests for setSlippage function
+
+    function testOwnerCanSetSlippage() public {
+        // Check initial slippage (default is 100 basis points = 1%)
+        uint256 initialSlippage = 100;
+        assertEq(strategy.allowedSlippageInBps(), initialSlippage, "Initial slippage should be 100 basis points (1%)");
+
+        // Set a new slippage value
+        uint256 newSlippage = 200; // 2%
+        vm.prank(owner);
+        strategy.setSlippage(newSlippage);
+
+        // Verify the slippage was updated
+        assertEq(strategy.allowedSlippageInBps(), newSlippage, "Slippage should be updated to 200 basis points (2%)");
+    }
+
+    function testRevertIfNonOwnerSetSlippage() public {
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+
+        // Non-owner attempts to set slippage
+        uint256 newSlippage = 200; // 2%
+        vm.prank(nonOwner);
+        vm.expectRevert("Not strategy owner");
+        strategy.setSlippage(newSlippage);
+
+        // Verify the slippage remains unchanged
+        assertEq(strategy.allowedSlippageInBps(), 100, "Slippage should remain at default 100 basis points (1%)");
+    }
+
+    function testRevertIfSlippageExceedsMaximum() public {
+        // Attempt to set slippage higher than the maximum allowed (SPLIT_TOTAL = 10000)
+        uint256 excessiveSlippage = 10001;
+        vm.prank(owner);
+        vm.expectRevert("Slippage exceeds maximum");
+        strategy.setSlippage(excessiveSlippage);
+
+        // Verify the slippage remains unchanged
+        assertEq(strategy.allowedSlippageInBps(), 100, "Slippage should remain at default 100 basis points (1%)");
+    }
+
+    function testSlippageAffectsPriceCheck() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveCowSwap(address(well));
+
+        // First check with default slippage (1%)
+        uint256 defaultSlippage = 100; // 1%
+        assertEq(strategy.allowedSlippageInBps(), defaultSlippage, "Initial slippage should be 100 basis points (1%)");
+
+        uint32 validTo = uint32(block.timestamp) + 29 minutes;
+
+        // Set an extremely low buy amount that will definitely fail the price check
+        uint256 extremelyLowBuyAmount = 1; // Just 1 unit of USDC
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: extremelyLowBuyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+
+        // With default slippage, this should revert
+        vm.expectRevert("Price check failed - output amount too low");
+        strategy.isValidSignature(digest, encodedOrder);
+
+        // Now set a higher but still reasonable slippage (10%)
+        uint256 moderateSlippage = 1000; // 10%
+        vm.prank(owner);
+        strategy.setSlippage(moderateSlippage);
+
+        assertEq(
+            strategy.allowedSlippageInBps(), moderateSlippage, "Slippage should be updated to 1000 basis points (10%)"
+        );
+
+        // With 10% slippage, the extremely low amount should still fail
+        vm.expectRevert("Price check failed - output amount too low");
+        strategy.isValidSignature(digest, encodedOrder);
+
+        // Now create a more reasonable order with a higher buy amount
+        // This amount is still low but might pass with high slippage
+        uint256 reasonableBuyAmount = 100 * 10 ** 6; // 100 USDC
+
+        GPv2Order.Data memory betterOrder = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: reasonableBuyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedBetterOrder = abi.encode(betterOrder);
+        bytes32 betterDigest = betterOrder.hash(strategy.DOMAIN_SEPARATOR());
+
+        // Set a very high slippage (90%)
+        uint256 veryHighSlippage = 9000; // 90%
+        vm.prank(owner);
+        strategy.setSlippage(veryHighSlippage);
+
+        assertEq(
+            strategy.allowedSlippageInBps(), veryHighSlippage, "Slippage should be updated to 9000 basis points (90%)"
+        );
+
+        bytes4 result = strategy.isValidSignature(betterDigest, encodedBetterOrder);
+        assertEq(result, MAGIC_VALUE, "Order should be valid with high slippage");
+    }
+
     function testRevertIfPriceCheckFails() public {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
