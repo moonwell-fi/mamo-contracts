@@ -89,15 +89,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         _;
     }
 
-    /**
-     * @notice Restricts function access to the MamoStrategyRegistry contract only
-     * @dev Used for functions that should only be called by the registry, such as upgrades
-     */
-    modifier onlyStrategyRegistry() {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-        _;
-    }
-
     // ==================== INITIALIZER ====================
 
     /**

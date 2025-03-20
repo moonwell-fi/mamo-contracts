@@ -17,6 +17,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 
@@ -1283,6 +1284,31 @@ contract USDCStrategyTest is Test {
         // Verify the approval was not granted
         uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.vaultRelayer());
         assertEq(allowance, 0, "Allowance should remain zero");
+    }
+
+    function testAuthorizeUpgrade() public {
+        // Deploy a new implementation for upgrade
+        ERC20MoonwellMorphoStrategy newImplementation = new ERC20MoonwellMorphoStrategy();
+        
+        // Create an unauthorized address
+        address unauthorizedAddress = makeAddr("unauthorized");
+        
+        // Test case 1: Call from unauthorized address should revert
+        vm.startPrank(unauthorizedAddress);
+        vm.expectRevert("Only Mamo Strategy Registry can call");
+        UUPSUpgradeable(address(strategy)).upgradeToAndCall(
+            address(newImplementation),
+            ""
+        );
+        vm.stopPrank();
+        
+        // Test case 2: Call from Mamo Strategy Registry should succeed
+        vm.startPrank(address(registry));
+        UUPSUpgradeable(address(strategy)).upgradeToAndCall(
+            address(newImplementation),
+            ""
+        );
+        vm.stopPrank();
     }
 
     function parseUint(string memory json, string memory key) internal pure returns (uint256) {

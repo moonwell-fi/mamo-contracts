@@ -24,7 +24,7 @@ contract MockStrategy is Initializable, UUPSUpgradeable {
     // Reference to the Mamo Strategy Registry contract
     IMamoStrategyRegistry public mamoStrategyRegistry;
 
-    function initialize(address owner, address upgrader, address backend) external initializer {
+    function initialize(address, address upgrader, address) external initializer {
         // Store reference to the registry
         mamoStrategyRegistry = IMamoStrategyRegistry(upgrader);
     }
