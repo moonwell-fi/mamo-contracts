@@ -776,7 +776,7 @@ contract USDCStrategyTest is Test {
 
             buyAmount = parseUint(json, ".quote.buyAmount");
         }
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
+        uint32 validTo = uint32(block.timestamp) + 30 minutes; // 24 hours from now
 
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -810,7 +810,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
+        uint32 validTo = uint32(block.timestamp) + 30 minutes; // 24 hours from now
         uint256 buyAmount = 1000 * 10 ** 6; // Mock buy amount
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -844,7 +844,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -909,7 +909,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -941,7 +941,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -973,7 +973,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1008,7 +1008,7 @@ contract USDCStrategyTest is Test {
         // Create a mock token that is different from the strategy token
         MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 18; // Using 18 decimals for mock token
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1040,7 +1040,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         // Create a different receiver address
@@ -1075,7 +1075,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1107,7 +1107,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1139,7 +1139,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
+        uint32 validTo = uint32(block.timestamp) + 30 minutes;
 
         // Set a very low buy amount that will fail the price check
         uint256 buyAmount = 1; // Extremely low amount
