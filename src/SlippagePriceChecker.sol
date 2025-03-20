@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 pragma abicoder v2;
 
-import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -17,12 +17,11 @@ interface IERC20MetaData {
 }
 
 /**
- * @title ChainlinkSwapChecker
+ * @title PriceChecker
  * @notice Checks swap prices using Chainlink price feeds and applies slippage tolerance
- * @dev Implements the ISwapChecker interface
+ * @dev Implements the ISlippagePriceChecker interface
  */
-contract ChainlinkSwapChecker is ISwapChecker, Ownable {
-
+contract SlippagePriceChecker is ISlippagePriceChecker, Ownable {
     /**
      * @notice The maximum basis points value (10,000 = 100%)
      * @dev Used for percentage calculations and as an upper bound for slippage
@@ -43,11 +42,9 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      */
     event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse);
 
-    constructor(address _owner) Ownable(_owner) {
-    }
+    constructor(address _owner) Ownable(_owner) {}
 
     // ==================== External Functions ====================
-
 
     /**
      * @notice Configures a token with price checker data
@@ -83,12 +80,13 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      * @param _slippageInBps The allowed slippage in basis points (e.g., 100 = 1%)
      * @return Whether the swap meets the price requirements
      */
-    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps)
-        external
-        view
-        override
-        returns (bool)
-    {
+    function checkPrice(
+        uint256 _amountIn,
+        address _fromToken,
+        address _toToken,
+        uint256 _minOut,
+        uint256 _slippageInBps
+    ) external view override returns (bool) {
         // Check that the sell token exists in the mapping
         require(tokenOracleData[_fromToken].length > 0, "Token not configured");
         require(_slippageInBps <= MAX_BPS, "Slippage exceeds maximum");

@@ -53,9 +53,9 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
 
-## ChainlinkSwapChecker
+## SlippagePriceChecker
 
-This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISwapChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders.
+This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISlippagePriceChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders.
 
 ### Storage
 
@@ -82,7 +82,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 - `IMToken public mToken`: The Moonwell mToken contract
 - `IERC4626 public metaMorphoVault`: The MetaMorpho Vault contract
 - `IERC20 public token`: The ERC20 token
-- `ISwapChecker public swapChecker`: Reference to the swap checker contract used to validate swap prices
+- `ISlippagePriceChecker public SlippagePriceChecker`: Reference to the swap checker contract used to validate swap prices
 - `address public vaultRelayer`: The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
 - `uint256 public splitMToken`: Percentage of funds allocated to Moonwell mToken in basis points
 - `uint256 public splitVault`: Percentage of funds allocated to MetaMorpho Vault in basis points
@@ -90,7 +90,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 ### Functions
 
-- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes mamoStrategyRegistry, mamoBackend, mToken, metaMorphoVault, token, swapChecker, vaultRelayer, splitMToken, and splitVault.
+- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes mamoStrategyRegistry, mamoBackend, mToken, metaMorphoVault, token, SlippagePriceChecker, vaultRelayer, splitMToken, and splitVault.
 
 - `modifier onlyStrategyRegistry()`: Modifier to ensure the caller is the Mamo Strategy Registry contract.
 
@@ -119,7 +119,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function depositIdleTokens() external returns (uint256)`: Deposits any token funds currently in the contract into the strategies based on the split. This function is permissionless and can be called by anyone.
 
-- `function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4)`: A function that Cow Swap will call to validate orders. This function verifies that the order parameters are valid and that the price matches the Chainlink price with the set slippage tolerance. Any bot can fulfill the order as long as the price is valid according to the swapChecker. The function returns a magic value (0x1626ba7e) if the signature is valid, as per EIP-1271.
+- `function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4)`: A function that Cow Swap will call to validate orders. This function verifies that the order parameters are valid and that the price matches the Chainlink price with the set slippage tolerance. Any bot can fulfill the order as long as the price is valid according to the SlippagePriceChecker. The function returns a magic value (0x1626ba7e) if the signature is valid, as per EIP-1271.
 
 - `function _authorizeUpgrade(address) internal view override onlyStrategyRegistry()`: Internal function that authorizes an upgrade to a new implementation. Only callable by the Mamo Strategy Registry contract. This ensures that only the Mamo Strategy Registry contract can upgrade the strategy implementation.
 
@@ -138,8 +138,8 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 7. When rewards are claimed, the reward token balance for the strategy contract increases, so bots can swap rewards for the underlying token on behalf of the user using CowSwap:
    - The user must first call `approveVaultRelayer` to approve the reward token for the vault relayer
    - Cow Swap calls the isValidSignature function on the strategy contract to validate orders
-   - The strategy verifies the order parameters and checks that the price matches the Chainlink price within the set slippage tolerance using the swapChecker
-   - Any bot can fulfill the order as long as the price is valid according to the swapChecker
+   - The strategy verifies the order parameters and checks that the price matches the Chainlink price within the set slippage tolerance using the SlippagePriceChecker
+   - Any bot can fulfill the order as long as the price is valid according to the SlippagePriceChecker
 8. Backend (or anyone) can call depositIdleTokens to deposit any underlying funds currently in the contract into the strategies based on the split.
 9. Users can withdraw funds directly from the strategy whenever they want.
 10. If Mamo wants to upgrade a strategy (for example, to deposit tokens into a new protocol), it can whitelist the new implementation and ask users to upgrade through the MamoStrategyRegistry contract. Users can only upgrade to the latest implementation of the same strategy type.
@@ -153,4 +153,4 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 5. Reward token can't be the strategy token.
 6. Mamo Registry admin role is a multisig with a timelock.
 7. Guardian is a multisig without a timelock.
-8. The strategy integrates with Cow Swap through the isValidSignature function, which validates orders according to EIP-1271. Any bot can fulfill orders as long as the price matches the Chainlink price within the set slippage tolerance, as verified by the swapChecker contract.
+8. The strategy integrates with Cow Swap through the isValidSignature function, which validates orders according to EIP-1271. Any bot can fulfill orders as long as the price matches the Chainlink price within the set slippage tolerance, as verified by the SlippagePriceChecker contract.

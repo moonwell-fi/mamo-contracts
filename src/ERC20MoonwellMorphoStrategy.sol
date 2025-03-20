@@ -7,7 +7,7 @@ import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
-import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -46,7 +46,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     IERC20 public token;
 
     /// @notice Reference to the swap checker contract used to validate swap prices
-    ISwapChecker public swapChecker;
+    ISlippagePriceChecker public slippagePriceChecker;
 
     /// @notice The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
     address public vaultRelayer;
@@ -81,7 +81,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address mToken;
         address metaMorphoVault;
         address token;
-        address swapChecker;
+        address slippagePriceChecker;
         address vaultRelayer;
         uint256 splitMToken;
         uint256 splitVault;
@@ -109,7 +109,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.mToken != address(0), "Invalid mToken address");
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.token != address(0), "Invalid token address");
-        require(params.swapChecker != address(0), "Invalid swapChecker address");
+        require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
         require(params.vaultRelayer != address(0), "Invalid vaultRelayer address");
 
         // Set state variables
@@ -118,12 +118,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
         token = IERC20(params.token);
-        swapChecker = ISwapChecker(params.swapChecker);
+        slippagePriceChecker = ISlippagePriceChecker(params.slippagePriceChecker);
         vaultRelayer = params.vaultRelayer;
 
         splitMToken = params.splitMToken;
         splitVault = params.splitVault;
-        
+
         // Set default slippage to 1% (100 basis points)
         allowedSlippageInBps = 100;
     }
@@ -154,7 +154,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      */
     function approveVaultRelayer(address tokenAddress) external onlyStrategyOwner {
         // Check if the token has a configuration in the swap checker
-        require(swapChecker.tokenOracleInformation(tokenAddress).length > 0, "Token not configured in swap checker");
+        require(
+            slippagePriceChecker.tokenOracleInformation(tokenAddress).length > 0, "Token not configured in swap checker"
+        );
 
         // Approve the vault relayer to spend the maximum amount of tokens
         IERC20(tokenAddress).forceApprove(vaultRelayer, type(uint256).max);
@@ -311,8 +313,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(_order.appData == bytes32(0), "App data must be zero");
 
         require(
-            swapChecker.checkPrice(
-                _order.sellAmount, address(_order.sellToken), address(_order.buyToken), _order.buyAmount, allowedSlippageInBps
+            slippagePriceChecker.checkPrice(
+                _order.sellAmount,
+                address(_order.sellToken),
+                address(_order.buyToken),
+                _order.buyAmount,
+                allowedSlippageInBps
             ),
             "Price check failed - output amount too low"
         );

@@ -2,11 +2,11 @@
 pragma solidity 0.8.28;
 
 /**
- * @title ISwapChecker
+ * @title ISlippagePriceChecker
  * @notice Interface for swap checking functionality
  * @dev Combines price checking and expected output calculation
  */
-interface ISwapChecker {
+interface ISlippagePriceChecker {
     /**
      * @notice Configuration for a token's price feed
      * @dev Stores the Chainlink feed address and whether to reverse the price calculation
@@ -34,10 +34,13 @@ interface ISwapChecker {
      * @param _slippageInBps The allowed slippage in basis points (e.g., 100 = 1%)
      * @return Whether the swap meets the price requirements
      */
-    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps)
-        external
-        view
-        returns (bool);
+    function checkPrice(
+        uint256 _amountIn,
+        address _fromToken,
+        address _toToken,
+        uint256 _minOut,
+        uint256 _slippageInBps
+    ) external view returns (bool);
 
     /**
      * @notice Gets the expected output amount for a swap
