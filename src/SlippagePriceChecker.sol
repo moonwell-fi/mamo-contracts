@@ -47,7 +47,9 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @param reverse Whether to reverse the price calculation
      * @param maxTimePriceValid Maximum time in seconds that a price is considered valid
      */
-    event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse, uint256 maxTimePriceValid);
+    event TokenConfigured(
+        address indexed token, address indexed chainlinkFeed, bool reverse, uint256 maxTimePriceValid
+    );
 
     /**
      * @dev Initializes the contract with the given owner
@@ -61,19 +63,20 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     // ==================== External Functions ====================
 
     /**
-     * @notice Configures a token with price checker data
+     * @notice Adds a configuration for a token
      * @dev Only callable by the owner
-     *         Allows configurations array to be empty in case the owner wants to delist a configuration
      * @param token The address of the token to configure
      * @param configurations Array of TokenFeedConfiguration for the token
      * @param _maxTimePriceValid Maximum time in seconds that a price is considered valid
      */
-    function configureToken(address token, TokenFeedConfiguration[] calldata configurations, uint256 _maxTimePriceValid) external onlyOwner {
+    function addTokenConfiguration(
+        address token,
+        TokenFeedConfiguration[] calldata configurations,
+        uint256 _maxTimePriceValid
+    ) external onlyOwner {
         require(token != address(0), "Invalid token address");
+        require(configurations.length > 0, "Empty configurations array");
 
-        // Clear any existing configurations
-        delete tokenOracleData[token];
-        
         // Set the maxTimePriceValid for the token
         maxTimePriceValid[token] = _maxTimePriceValid;
 
@@ -83,13 +86,24 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
             tokenOracleData[token].push(configurations[i]);
 
             // Emit event for each configuration
-            emit TokenConfigured(
-                token, 
-                configurations[i].chainlinkFeed, 
-                configurations[i].reverse,
-                _maxTimePriceValid
-            );
+            emit TokenConfigured(token, configurations[i].chainlinkFeed, configurations[i].reverse, _maxTimePriceValid);
         }
+    }
+
+    /**
+     * @notice Removes all configurations for a token
+     * @dev Only callable by the owner
+     * @param token The address of the token to remove configuration for
+     */
+    function removeTokenConfiguration(address token) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(tokenOracleData[token].length > 0, "Token not configured");
+
+        // Clear any existing configurations
+        delete tokenOracleData[token];
+
+        // Reset the maxTimePriceValid for the token
+        delete maxTimePriceValid[token];
     }
 
     // ==================== External View Functions ====================
@@ -139,7 +153,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     function isRewardToken(address token) external view override returns (bool) {
         return tokenOracleData[token].length > 0;
     }
-    
+
     /**
      * @notice Gets the expected output amount for a swap
      * @param _amountIn The input amount
@@ -200,7 +214,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
             int256 _latestAnswer = _priceFeed.latestAnswer();
             {
                 require(_latestAnswer > 0, "Latest answer must be positive");
-                
+
                 // Check if the price is still valid based on maxTimePriceValid
                 // Note: This would require additional Chainlink interface methods to get the timestamp
                 // For now, we'll assume the price is valid as this would require a more complex implementation

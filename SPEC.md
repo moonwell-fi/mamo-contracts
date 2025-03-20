@@ -72,7 +72,8 @@ This contract is responsible for validating swap prices using Chainlink price fe
 - `function initialize(address _owner) external initializer`: Initializes the contract with the given owner
 - `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Function that authorizes an upgrade to a new implementation, only callable by the owner
 - `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks if a swap meets the price requirements with the provided slippage
-- `function configureToken(address token, TokenFeedConfiguration[] calldata configurations, uint256 maxTimePriceValid) external`: Configures a token with price checker data and sets the maximum time a price is considered valid. Only callable by the owner.
+- `function addTokenConfiguration(address token, TokenFeedConfiguration[] calldata configurations, uint256 maxTimePriceValid) external`: Adds a configuration for a token with price checker data and sets the maximum time a price is considered valid. Only callable by the owner.
+- `function removeTokenConfiguration(address token) external`: Removes all configurations for a token. Only callable by the owner.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap
 - `function maxTimePriceValid(address token) external view returns (uint256)`: Gets the maximum time a price is considered valid for a token.
 

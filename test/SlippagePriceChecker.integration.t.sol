@@ -51,17 +51,17 @@ contract SlippagePriceCheckerTest is Test {
         slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
 
         // Configure tokens with their respective price feeds
-        configureTokens();
+        addTokenConfigurations();
     }
 
-    function configureTokens() internal {
+    function addTokenConfigurations() internal {
         // Configure WELL token with WELL/USD price feed
         ISlippagePriceChecker.TokenFeedConfiguration[] memory wellConfigs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         wellConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
 
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(well), wellConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), wellConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
 
         // Configure USDC token with USDC/USD price feed
         ISlippagePriceChecker.TokenFeedConfiguration[] memory usdcConfigs =
@@ -69,7 +69,7 @@ contract SlippagePriceCheckerTest is Test {
         usdcConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkUsdcUsd, reverse: false});
 
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(usdc), usdcConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(usdc), usdcConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
     }
 
     function testInitialState() public view {
@@ -84,7 +84,11 @@ contract SlippagePriceCheckerTest is Test {
         assertEq(wellConfigs.length, 1, "WELL should have 1 configuration");
         assertEq(wellConfigs[0].chainlinkFeed, chainlinkWellUsd, "WELL price feed should match");
         assertEq(wellConfigs[0].reverse, false, "WELL reverse flag should match");
-        assertEq(slippagePriceChecker.maxTimePriceValid(address(well)), DEFAULT_MAX_TIME_PRICE_VALID, "WELL maxTimePriceValid should match");
+        assertEq(
+            slippagePriceChecker.maxTimePriceValid(address(well)),
+            DEFAULT_MAX_TIME_PRICE_VALID,
+            "WELL maxTimePriceValid should match"
+        );
 
         // Verify USDC token configuration
         ISlippagePriceChecker.TokenFeedConfiguration[] memory usdcConfigs =
@@ -92,28 +96,38 @@ contract SlippagePriceCheckerTest is Test {
         assertEq(usdcConfigs.length, 1, "USDC should have 1 configuration");
         assertEq(usdcConfigs[0].chainlinkFeed, chainlinkUsdcUsd, "USDC price feed should match");
         assertEq(usdcConfigs[0].reverse, false, "USDC reverse flag should match");
-        assertEq(slippagePriceChecker.maxTimePriceValid(address(usdc)), DEFAULT_MAX_TIME_PRICE_VALID, "USDC maxTimePriceValid should match");
+        assertEq(
+            slippagePriceChecker.maxTimePriceValid(address(usdc)),
+            DEFAULT_MAX_TIME_PRICE_VALID,
+            "USDC maxTimePriceValid should match"
+        );
     }
-    
+
     function testUpdateMaxTimePriceValid() public {
         // Create a new configuration for WELL token with a different maxTimePriceValid
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd,
-            reverse: false
-        });
-        
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+
         uint256 newMaxTimePriceValid = 7200; // 2 hours in seconds
-        
+
+        // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(well), configs, newMaxTimePriceValid);
-        
+        slippagePriceChecker.removeTokenConfiguration(address(well));
+
+        // Then add the new configuration with updated maxTimePriceValid
+        vm.prank(owner);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, newMaxTimePriceValid);
+
         // Verify the maxTimePriceValid was updated
-        assertEq(slippagePriceChecker.maxTimePriceValid(address(well)), newMaxTimePriceValid, "WELL maxTimePriceValid should be updated");
+        assertEq(
+            slippagePriceChecker.maxTimePriceValid(address(well)),
+            newMaxTimePriceValid,
+            "WELL maxTimePriceValid should be updated"
+        );
     }
 
-    function testReconfigureToken() public {
+    function testReaddTokenConfiguration() public {
         // Create a new configuration for WELL token
         ISlippagePriceChecker.TokenFeedConfiguration[] memory newConfigs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
@@ -122,8 +136,13 @@ contract SlippagePriceCheckerTest is Test {
             reverse: true // Change the reverse flag
         });
 
+        // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(well), newConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.removeTokenConfiguration(address(well));
+
+        // Then add the new configuration
+        vm.prank(owner);
+        slippagePriceChecker.addTokenConfiguration(address(well), newConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
 
         // Verify the token configuration was updated
         ISlippagePriceChecker.TokenFeedConfiguration[] memory updatedConfigs =
@@ -174,7 +193,7 @@ contract SlippagePriceCheckerTest is Test {
         assertFalse(result, "Price check should fail with too much slippage");
     }
 
-    function testRevertIfNonOwnerConfigureToken() public {
+    function testRevertIfNonOwnerAddTokenConfiguration() public {
         address nonOwner = makeAddr("nonOwner");
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
@@ -183,7 +202,15 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
-        slippagePriceChecker.configureToken(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+    }
+
+    function testRevertIfNonOwnerRemoveTokenConfiguration() public {
+        address nonOwner = makeAddr("nonOwner");
+
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        slippagePriceChecker.removeTokenConfiguration(address(well));
     }
 
     function testRevertIfZeroTokenAddress() public {
@@ -193,7 +220,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Invalid token address");
-        slippagePriceChecker.configureToken(address(0), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(0), configs, DEFAULT_MAX_TIME_PRICE_VALID);
     }
 
     function testRevertIfZeroPriceFeedAddress() public {
@@ -203,21 +230,18 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Invalid chainlink feed address");
-        slippagePriceChecker.configureToken(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
     }
 
-    function testConfigureTokenWithEmptyArrayRemovesConfiguration() public {
+    function testRemoveTokenConfiguration() public {
         // First, verify that the token is configured
         ISlippagePriceChecker.TokenFeedConfiguration[] memory initialConfigs =
             slippagePriceChecker.tokenOracleInformation(address(well));
         assertEq(initialConfigs.length, 1, "WELL should have 1 configuration initially");
 
-        // Call configureToken with an empty array
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory emptyConfigs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](0);
-
+        // Call removeTokenConfiguration
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(well), emptyConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.removeTokenConfiguration(address(well));
 
         // Verify that the token configuration has been removed
         vm.expectRevert("Token not configured");
@@ -227,6 +251,16 @@ contract SlippagePriceCheckerTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory finalConfigs =
             slippagePriceChecker.tokenOracleInformation(address(well));
         assertEq(finalConfigs.length, 0, "WELL should have no configurations after removal");
+    }
+
+    function testRevertIfEmptyConfigurationsArray() public {
+        // Create an empty configurations array
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory emptyConfigs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](0);
+
+        vm.prank(owner);
+        vm.expectRevert("Empty configurations array");
+        slippagePriceChecker.addTokenConfiguration(address(well), emptyConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
     }
 
     function testRevertIfTokenNotConfigured() public {
@@ -240,7 +274,7 @@ contract SlippagePriceCheckerTest is Test {
         slippagePriceChecker.checkPrice(1 * 10 ** 18, unconfiguredToken, address(usdc), 1 * 10 ** 6, INITIAL_SLIPPAGE);
     }
 
-    function testConfigureTokenWithMultipleFeeds() public {
+    function testAddTokenConfigurationWithMultipleFeeds() public {
         // Configure WELL token with multiple price feeds (WELL/USD and then USD/USDC)
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
@@ -250,8 +284,13 @@ contract SlippagePriceCheckerTest is Test {
             reverse: true // Reverse to get USD/USDC
         });
 
+        // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.removeTokenConfiguration(address(well));
+
+        // Then add the new configuration
+        vm.prank(owner);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
 
         // Verify the token configuration
         ISlippagePriceChecker.TokenFeedConfiguration[] memory storedConfigs =
@@ -276,8 +315,13 @@ contract SlippagePriceCheckerTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: true});
 
+        // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.configureToken(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.removeTokenConfiguration(address(well));
+
+        // Then add the new configuration
+        vm.prank(owner);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
 
         // Get the expected output from the swap checker
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL

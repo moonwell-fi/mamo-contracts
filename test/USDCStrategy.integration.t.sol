@@ -83,7 +83,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.configureToken(address(well), configs, 30 minutes);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
 
         // Deploy the registry with admin, backend, and guardian addresses
         registry = new MamoStrategyRegistry(admin, backend, guardian);
@@ -1178,7 +1178,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.configureToken(address(well), configs, 30 minutes);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
 
         // Check initial approval
         uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
@@ -1203,7 +1203,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.configureToken(address(well), configs, 30 minutes);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
 
         // Create a non-owner address
         address nonOwner = makeAddr("nonOwner");

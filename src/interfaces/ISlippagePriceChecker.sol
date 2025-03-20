@@ -10,7 +10,7 @@ interface ISlippagePriceChecker {
     /**
      * @notice Configuration for a token's price feed
      * @dev Stores the Chainlink feed address and whether to reverse the price calculation
-     * @param chainlinkFeed The address of the Chainlink price feed 
+     * @param chainlinkFeed The address of the Chainlink price feed
      * @param reverse Whether to reverse the price calculation (divide instead of multiply)
      */
     struct TokenFeedConfiguration {
