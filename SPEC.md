@@ -59,15 +59,13 @@ This contract is responsible for validating swap prices using Chainlink price fe
 
 ### Storage
 
-- `uint256 public ALLOWED_SLIPPAGE_IN_BPS`: The allowed slippage in basis points (e.g., 100 = 1%)
 - `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
 - `mapping(address token => TokenFeedConfiguration[]) public tokenPriceCheckerData`: Maps token addresses to their price checker configurations
 
 ### Functions
 
-- `constructor(uint256 _allowedSlippageInBps, address _owner)`: Sets the initial slippage tolerance and owner
-- `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut) external view returns (bool)`: Checks if a swap meets the price requirements
-- `function setSlippage(uint256 _newSlippageInBps) external`: Sets a new slippage tolerance value. Only callable by the owner.
+- `constructor(address _owner)`: Sets the owner
+- `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks if a swap meets the price requirements with the provided slippage
 - `function configureToken(address token, TokenFeedConfiguration[] calldata configurations) external`: Configures a token with price checker data. Only callable by the owner.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap
 
@@ -88,6 +86,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 - `address public vaultRelayer`: The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
 - `uint256 public splitMToken`: Percentage of funds allocated to Moonwell mToken in basis points
 - `uint256 public splitVault`: Percentage of funds allocated to MetaMorpho Vault in basis points
+- `uint256 public allowedSlippageInBps`: The allowed slippage in basis points (e.g., 100 = 1%) used for swap price validation
 
 ### Functions
 
@@ -107,6 +106,8 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 - `function deposit(uint256 amount) external`: Deposits funds into the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
 - `function approveVaultRelayer(address tokenAddress) external`: Approves the vault relayer to spend a specific token. Only callable by the user who owns this strategy. The function checks if the token has a configuration in the swap checker before approving.
+
+- `function setSlippage(uint256 _newSlippageInBps) external`: Sets a new slippage tolerance value. Only callable by the strategy owner. The slippage is used when validating swap prices.
 
 - `function withdraw(uint256 amount) external`: Withdraws funds from the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 

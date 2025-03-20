@@ -70,9 +70,6 @@ contract ChainlinkSwapCheckerTest is Test {
     }
 
     function testInitialState() public view {
-        // Check initial slippage
-        assertEq(swapChecker.ALLOWED_SLIPPAGE_IN_BPS(), INITIAL_SLIPPAGE, "Initial slippage should be set correctly");
-
         // Check owner
         assertEq(swapChecker.owner(), owner, "Owner should be set correctly");
     }
@@ -109,14 +106,6 @@ contract ChainlinkSwapCheckerTest is Test {
         assertEq(updatedConfigs[0].reverse, true, "WELL reverse flag should be updated");
     }
 
-    function testSetSlippage() public {
-        uint256 newSlippage = 200; // 2%
-
-        vm.prank(owner);
-        swapChecker.setSlippage(newSlippage);
-
-        assertEq(swapChecker.ALLOWED_SLIPPAGE_IN_BPS(), newSlippage, "Slippage should be updated");
-    }
 
     function testGetExpectedOut() public view {
         // Get the expected output from the swap checker
@@ -133,12 +122,12 @@ contract ChainlinkSwapCheckerTest is Test {
         uint256 expectedOut = swapChecker.getExpectedOut(amountIn, address(well), address(usdc));
 
         // Calculate the minimum acceptable output with slippage
-        // The contract checks if minOut > (expectedOut * (MAX_BPS - ALLOWED_SLIPPAGE_IN_BPS)) / MAX_BPS
+        // The contract checks if minOut > (expectedOut * (MAX_BPS - slippage)) / MAX_BPS
         // So we need to set minOut to a value that is less than expectedOut but greater than the minimum
         uint256 minOut = (expectedOut * (MAX_BPS - INITIAL_SLIPPAGE + 10)) / MAX_BPS;
 
         // Check if the price is acceptable
-        bool result = swapChecker.checkPrice(amountIn, address(well), address(usdc), minOut);
+        bool result = swapChecker.checkPrice(amountIn, address(well), address(usdc), minOut, INITIAL_SLIPPAGE);
 
         assertTrue(result, "Price check should pass with acceptable slippage");
     }
@@ -149,12 +138,12 @@ contract ChainlinkSwapCheckerTest is Test {
         uint256 expectedOut = swapChecker.getExpectedOut(amountIn, address(well), address(usdc));
 
         // Calculate a minimum output that's too low (below allowed slippage)
-        // The contract checks if minOut > (expectedOut * (MAX_BPS - ALLOWED_SLIPPAGE_IN_BPS)) / MAX_BPS
+        // The contract checks if minOut > (expectedOut * (MAX_BPS - slippage)) / MAX_BPS
         // So we need to set minOut to a value that is less than the minimum
         uint256 minOut = (expectedOut * (MAX_BPS - INITIAL_SLIPPAGE - 10)) / MAX_BPS;
 
         // Check if the price is acceptable (should fail)
-        bool result = swapChecker.checkPrice(amountIn, address(well), address(usdc), minOut);
+        bool result = swapChecker.checkPrice(amountIn, address(well), address(usdc), minOut, INITIAL_SLIPPAGE);
 
         assertFalse(result, "Price check should fail with too much slippage");
     }
@@ -170,21 +159,6 @@ contract ChainlinkSwapCheckerTest is Test {
         swapChecker.configureToken(address(well), configs);
     }
 
-    function testRevertIfNonOwnerSetSlippage() public {
-        address nonOwner = makeAddr("nonOwner");
-
-        vm.prank(nonOwner);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
-        swapChecker.setSlippage(200);
-    }
-
-    function testRevertIfInvalidSlippage() public {
-        uint256 invalidSlippage = 10001; // > 100%
-
-        vm.prank(owner);
-        vm.expectRevert("Slippage exceeds maximum");
-        swapChecker.setSlippage(invalidSlippage);
-    }
 
     function testRevertIfZeroTokenAddress() public {
         ISwapChecker.TokenFeedConfiguration[] memory configs = new ISwapChecker.TokenFeedConfiguration[](1);
@@ -232,7 +206,7 @@ contract ChainlinkSwapCheckerTest is Test {
         swapChecker.getExpectedOut(1 * 10 ** 18, unconfiguredToken, address(usdc));
 
         vm.expectRevert("Token not configured");
-        swapChecker.checkPrice(1 * 10 ** 18, unconfiguredToken, address(usdc), 1 * 10 ** 6);
+        swapChecker.checkPrice(1 * 10 ** 18, unconfiguredToken, address(usdc), 1 * 10 ** 6, INITIAL_SLIPPAGE);
     }
 
     function testConfigureTokenWithMultipleFeeds() public {

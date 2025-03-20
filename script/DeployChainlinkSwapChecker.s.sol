@@ -31,20 +31,16 @@ contract DeployChainlinkSwapChecker is Script {
 
     /**
      * @notice Deploys the ChainlinkSwapChecker contract
-     * @dev Uses a default slippage of 50 basis points (0.5%)
      * @return swapChecker The deployed ChainlinkSwapChecker contract
      */
     function deployChainlinkSwapChecker(Addresses addresses) public returns (ChainlinkSwapChecker swapChecker) {
-        // Default slippage tolerance of 1% (100 basis points)
-        uint256 allowedSlippageInBps = 100;
-
         vm.startBroadcast();
 
         // Get the MAMO_MULTISIG address from the addresses contract
         address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
 
-        // Deploy the ChainlinkSwapChecker with the specified slippage and owner
-        swapChecker = new ChainlinkSwapChecker(allowedSlippageInBps, mamoMultisig);
+        // Deploy the ChainlinkSwapChecker with the owner
+        swapChecker = new ChainlinkSwapChecker(mamoMultisig);
 
         vm.stopBroadcast();
 

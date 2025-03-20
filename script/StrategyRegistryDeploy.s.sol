@@ -8,15 +8,13 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
 contract StrategyRegistryDeploy is Script {
-
     function run() external {
-
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid; // Use the current chain ID
 
-       Addresses addresses = new Addresses(addressesFolderPath, chainIds);
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         deployStrategyRegistry(addresses);
 

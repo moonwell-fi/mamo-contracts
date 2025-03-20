@@ -31,9 +31,10 @@ interface ISwapChecker {
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
      * @param _minOut The minimum output amount
+     * @param _slippageInBps The allowed slippage in basis points (e.g., 100 = 1%)
      * @return Whether the swap meets the price requirements
      */
-    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut)
+    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps)
         external
         view
         returns (bool);

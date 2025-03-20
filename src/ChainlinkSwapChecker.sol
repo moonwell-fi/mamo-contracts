@@ -22,11 +22,6 @@ interface IERC20MetaData {
  * @dev Implements the ISwapChecker interface
  */
 contract ChainlinkSwapChecker is ISwapChecker, Ownable {
-    /**
-     * @notice The allowed slippage in basis points (e.g., 100 = 1%)
-     * @dev Used to calculate the minimum acceptable output amount for swaps
-     */
-    uint256 public ALLOWED_SLIPPAGE_IN_BPS;
 
     /**
      * @notice The maximum basis points value (10,000 = 100%)
@@ -48,33 +43,11 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      */
     event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse);
 
-    /**
-     * @notice Emitted when the slippage tolerance is updated
-     * @param oldSlippage The previous slippage value in basis points
-     * @param newSlippage The new slippage value in basis points
-     */
-    event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
-
-    constructor(uint256 _allowedSlippageInBps, address _owner) Ownable(_owner) {
-        require(_allowedSlippageInBps <= MAX_BPS);
-        ALLOWED_SLIPPAGE_IN_BPS = _allowedSlippageInBps;
+    constructor(address _owner) Ownable(_owner) {
     }
 
     // ==================== External Functions ====================
 
-    /**
-     * @notice Sets a new slippage tolerance value
-     * @dev Only callable by the owner
-     * @param _newSlippageInBps The new slippage tolerance in basis points (e.g., 100 = 1%)
-     */
-    function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
-        require(_newSlippageInBps <= MAX_BPS, "Slippage exceeds maximum");
-
-        uint256 oldSlippage = ALLOWED_SLIPPAGE_IN_BPS;
-        ALLOWED_SLIPPAGE_IN_BPS = _newSlippageInBps;
-
-        emit SlippageUpdated(oldSlippage, _newSlippageInBps);
-    }
 
     /**
      * @notice Configures a token with price checker data
@@ -107,9 +80,10 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
      * @param _minOut The minimum output amount
+     * @param _slippageInBps The allowed slippage in basis points (e.g., 100 = 1%)
      * @return Whether the swap meets the price requirements
      */
-    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut)
+    function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps)
         external
         view
         override
@@ -117,11 +91,12 @@ contract ChainlinkSwapChecker is ISwapChecker, Ownable {
     {
         // Check that the sell token exists in the mapping
         require(tokenOracleData[_fromToken].length > 0, "Token not configured");
+        require(_slippageInBps <= MAX_BPS, "Slippage exceeds maximum");
 
         // Get expected out using the token configuration from storage
         uint256 _expectedOut = getExpectedOut(_amountIn, _fromToken, _toToken);
 
-        return _minOut > (_expectedOut * (MAX_BPS - ALLOWED_SLIPPAGE_IN_BPS)) / MAX_BPS;
+        return _minOut > (_expectedOut * (MAX_BPS - _slippageInBps)) / MAX_BPS;
     }
 
     /**

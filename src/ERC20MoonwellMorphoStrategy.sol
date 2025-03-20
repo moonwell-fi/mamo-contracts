@@ -57,6 +57,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Percentage of funds allocated to MetaMorpho Vault in basis points
     uint256 public splitVault;
 
+    // @notice The allowed slippage in basis points (e.g., 100 = 1%)
+    // @dev Used to calculate the minimum acceptable output amount for swaps
+    uint256 public allowedSlippageInBps;
+
     // Events
     // @notice Emitted when funds are deposited into the strategy
     event Deposit(address indexed asset, uint256 amount);
@@ -66,6 +70,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // @notice Emitted when the position split is updated
     event PositionUpdated(uint256 splitA, uint256 splitB);
+
+    // @notice Emitted when the slippage tolerance is updated
+    event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -116,6 +123,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         splitMToken = params.splitMToken;
         splitVault = params.splitVault;
+        
+        // Set default slippage to 1% (100 basis points)
+        allowedSlippageInBps = 100;
     }
 
     // ==================== OWNER FUNCTIONS ====================
@@ -148,6 +158,20 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Approve the vault relayer to spend the maximum amount of tokens
         IERC20(tokenAddress).forceApprove(vaultRelayer, type(uint256).max);
+    }
+
+    /**
+     * @notice Sets a new slippage tolerance value
+     * @dev Only callable by the strategy owner
+     * @param _newSlippageInBps The new slippage tolerance in basis points (e.g., 100 = 1%)
+     */
+    function setSlippage(uint256 _newSlippageInBps) external onlyStrategyOwner {
+        require(_newSlippageInBps <= SPLIT_TOTAL, "Slippage exceeds maximum");
+
+        uint256 oldSlippage = allowedSlippageInBps;
+        allowedSlippageInBps = _newSlippageInBps;
+
+        emit SlippageUpdated(oldSlippage, _newSlippageInBps);
     }
 
     /**
@@ -278,17 +302,17 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.buyTokenBalance == GPv2Order.BALANCE_ERC20, "Buy token must be an ERC20 token");
 
+        require(_order.sellToken != token, "Sell token can't be strategy token");
+
         require(_order.buyToken == token, "Buy token must match the strategy token");
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
-
-        require(_order.feeAmount == 0, "Fee amount must be zero");
 
         require(_order.appData == bytes32(0), "App data must be zero");
 
         require(
             swapChecker.checkPrice(
-                _order.sellAmount, address(_order.sellToken), address(_order.buyToken), _order.buyAmount
+                _order.sellAmount, address(_order.sellToken), address(_order.buyToken), _order.buyAmount, allowedSlippageInBps
             ),
             "Price check failed - output amount too low"
         );

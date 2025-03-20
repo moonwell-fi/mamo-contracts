@@ -16,8 +16,9 @@ import {stdJson} from "forge-std/StdJson.sol";
 
 import {ISwapChecker} from "@interfaces/ISwapChecker.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 
@@ -828,9 +829,7 @@ contract USDCStrategyTest is Test {
             string memory json = string(data);
 
             buyAmount = parseUint(json, ".quote.buyAmount");
-            console.log("buyAmount", buyAmount);
             feeAmount = parseUint(json, ".quote.feeAmount");
-            console.log("feeAmount", feeAmount);
         }
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
 
@@ -843,7 +842,7 @@ contract USDCStrategyTest is Test {
             buyAmount: buyAmount,
             validTo: validTo,
             appData: bytes32(0),
-            feeAmount: 0,
+            feeAmount: feeAmount,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,
             sellTokenBalance: GPv2Order.BALANCE_ERC20,
@@ -1289,25 +1288,19 @@ contract USDCStrategyTest is Test {
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
         ERC20MoonwellMorphoStrategy newImplementation = new ERC20MoonwellMorphoStrategy();
-        
+
         // Create an unauthorized address
         address unauthorizedAddress = makeAddr("unauthorized");
-        
+
         // Test case 1: Call from unauthorized address should revert
         vm.startPrank(unauthorizedAddress);
         vm.expectRevert("Only Mamo Strategy Registry can call");
-        UUPSUpgradeable(address(strategy)).upgradeToAndCall(
-            address(newImplementation),
-            ""
-        );
+        UUPSUpgradeable(address(strategy)).upgradeToAndCall(address(newImplementation), "");
         vm.stopPrank();
-        
+
         // Test case 2: Call from Mamo Strategy Registry should succeed
         vm.startPrank(address(registry));
-        UUPSUpgradeable(address(strategy)).upgradeToAndCall(
-            address(newImplementation),
-            ""
-        );
+        UUPSUpgradeable(address(strategy)).upgradeToAndCall(address(newImplementation), "");
         vm.stopPrank();
     }
 
