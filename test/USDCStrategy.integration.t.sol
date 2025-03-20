@@ -776,7 +776,7 @@ contract USDCStrategyTest is Test {
 
             buyAmount = parseUint(json, ".quote.buyAmount");
         }
-        uint32 validTo = uint32(block.timestamp) + 29 minutes; 
+        uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1178,7 +1178,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
 
         // Check initial approval
         uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());

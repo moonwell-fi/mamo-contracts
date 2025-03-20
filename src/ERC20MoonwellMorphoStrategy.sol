@@ -297,7 +297,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         );
 
         require(
-            _order.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(token)),
+            _order.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(_order.sellToken)),
             "Order expires too far in the future"
         );
 
