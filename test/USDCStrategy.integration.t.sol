@@ -114,6 +114,8 @@ contract USDCStrategyTest is Test {
         );
 
         // Deploy the proxy with the implementation and initialization data
+        // Use the backend address as the caller to pass the "Only backend can initialize" check
+        vm.prank(backend);
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
         vm.label(address(proxy), "USER_USDC_STRATEGY_PROXY");
 

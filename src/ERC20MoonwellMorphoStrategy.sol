@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
-import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
@@ -101,6 +100,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /**
      * @notice Initializer function that sets all the parameters and grants appropriate roles
      * @dev This is used instead of a constructor since the contract is designed to be used with proxies
+     * @dev Only the backend address specified in params can call this function
      * @param params The initialization parameters struct
      */
     function initialize(InitParams calldata params) external initializer {
@@ -111,6 +111,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.token != address(0), "Invalid token address");
         require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
         require(params.vaultRelayer != address(0), "Invalid vaultRelayer address");
+
+        // Ensure only the backend can initialize this contract
+        require(msg.sender == params.mamoBackend, "Only backend can initialize");
 
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry);

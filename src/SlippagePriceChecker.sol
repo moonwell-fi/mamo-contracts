@@ -4,7 +4,6 @@ pragma solidity 0.8.28;
 pragma abicoder v2;
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
-import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
