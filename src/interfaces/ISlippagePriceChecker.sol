@@ -50,4 +50,12 @@ interface ISlippagePriceChecker {
      * @return The expected output amount
      */
     function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) external view returns (uint256);
+
+    /**
+     * @notice Checks if a token is configured as a reward token
+     * @dev A token is considered a reward token if it has at least one oracle configuration
+     * @param token The address of the token to check
+     * @return Whether the token is configured as a reward token
+     */
+    function isRewardToken(address token) external view returns (bool);
 }

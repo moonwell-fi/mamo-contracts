@@ -55,16 +55,17 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 ## SlippagePriceChecker
 
-This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISlippagePriceChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders.
+This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISlippagePriceChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders. The contract is upgradeable using the UUPS (Universal Upgradeable Proxy Standard) pattern.
 
 ### Storage
 
 - `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
-- `mapping(address token => TokenFeedConfiguration[]) public tokenPriceCheckerData`: Maps token addresses to their price checker configurations
+- `mapping(address token => TokenFeedConfiguration[]) public tokenOracleData`: Maps token addresses to their oracle configurations
 
 ### Functions
 
-- `constructor(address _owner)`: Sets the owner
+- `function initialize(address _owner) external initializer`: Initializes the contract with the given owner
+- `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Function that authorizes an upgrade to a new implementation, only callable by the owner
 - `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks if a swap meets the price requirements with the provided slippage
 - `function configureToken(address token, TokenFeedConfiguration[] calldata configurations) external`: Configures a token with price checker data. Only callable by the owner.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap

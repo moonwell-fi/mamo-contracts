@@ -747,7 +747,6 @@ contract USDCStrategyTest is Test {
         strategy.approveVaultRelayer(address(well));
 
         // Set up parameters for the order
-        uint256 buyAmount;
         uint256 feeAmount;
         {
             string[] memory headers = new string[](1);
@@ -776,7 +775,6 @@ contract USDCStrategyTest is Test {
             string memory json = string(data);
 
             buyAmount = parseUint(json, ".quote.buyAmount");
-            feeAmount = parseUint(json, ".quote.feeAmount");
         }
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
 
@@ -789,7 +787,7 @@ contract USDCStrategyTest is Test {
             buyAmount: buyAmount,
             validTo: validTo,
             appData: bytes32(0),
-            feeAmount: feeAmount,
+            feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,
             sellTokenBalance: GPv2Order.BALANCE_ERC20,
@@ -1226,7 +1224,7 @@ contract USDCStrategyTest is Test {
 
         // Owner attempts to approve the vault relayer for an unconfigured token
         vm.prank(owner);
-        vm.expectRevert("Token not configured in swap checker");
+        vm.expectRevert("Token not allowed");
         strategy.approveVaultRelayer(address(mockToken));
 
         // Verify the approval was not granted

@@ -154,9 +154,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      */
     function approveVaultRelayer(address tokenAddress) external onlyStrategyOwner {
         // Check if the token has a configuration in the swap checker
-        require(
-            slippagePriceChecker.tokenOracleInformation(tokenAddress).length > 0, "Token not configured in swap checker"
-        );
+        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
 
         // Approve the vault relayer to spend the maximum amount of tokens
         IERC20(tokenAddress).forceApprove(vaultRelayer, type(uint256).max);
@@ -307,6 +305,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(_order.sellToken != token, "Sell token can't be strategy token");
 
         require(_order.buyToken == token, "Buy token must match the strategy token");
+
+        require(_order.feeAmount == 0, "Fee amount must be zero");
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
 

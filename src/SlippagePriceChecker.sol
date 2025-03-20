@@ -4,7 +4,11 @@ pragma solidity 0.8.28;
 pragma abicoder v2;
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
+
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IPriceFeed {
@@ -19,9 +23,9 @@ interface IERC20MetaData {
 /**
  * @title PriceChecker
  * @notice Checks swap prices using Chainlink price feeds and applies slippage tolerance
- * @dev Implements the ISlippagePriceChecker interface
+ * @dev Implements the ISlippagePriceChecker interface with UUPS upgradeability
  */
-contract SlippagePriceChecker is ISlippagePriceChecker, Ownable {
+contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgradeable, OwnableUpgradeable {
     /**
      * @notice The maximum basis points value (10,000 = 100%)
      * @dev Used for percentage calculations and as an upper bound for slippage
@@ -42,7 +46,14 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Ownable {
      */
     event TokenConfigured(address indexed token, address indexed chainlinkFeed, bool reverse);
 
-    constructor(address _owner) Ownable(_owner) {}
+    /**
+     * @dev Initializes the contract with the given owner
+     * @param _owner The address that will own the contract
+     */
+    function initialize(address _owner) external initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+    }
 
     // ==================== External Functions ====================
 
@@ -105,6 +116,16 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Ownable {
      */
     function tokenOracleInformation(address token) external view override returns (TokenFeedConfiguration[] memory) {
         return tokenOracleData[token];
+    }
+
+    /**
+     * @notice Checks if a token is configured as a reward token
+     * @dev A token is considered a reward token if it has at least one oracle configuration
+     * @param token The address of the token to check
+     * @return Whether the token is configured as a reward token
+     */
+    function isRewardToken(address token) external view override returns (bool) {
+        return tokenOracleData[token].length > 0;
     }
 
     /**
@@ -191,4 +212,10 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Ownable {
             _expectedOutFromChainlink = _expectedOutFromChainlink * (10 ** (_toTokenDecimals - _fromTokenDecimals));
         }
     }
+
+    /**
+     * @dev Function that authorizes an upgrade to a new implementation
+     * @param newImplementation The address of the new implementation
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 }
