@@ -296,6 +296,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
             "Order expires too soon - must be valid for at least 5 minutes"
         );
 
+        require(
+            _order.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(token)),
+            "Order expires too far in the future"
+        );
+
         require(!_order.partiallyFillable, "Order must be fill-or-kill, partial fills not allowed");
 
         require(_order.sellTokenBalance == GPv2Order.BALANCE_ERC20, "Sell token must be an ERC20 token");

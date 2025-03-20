@@ -10,7 +10,7 @@ interface ISlippagePriceChecker {
     /**
      * @notice Configuration for a token's price feed
      * @dev Stores the Chainlink feed address and whether to reverse the price calculation
-     * @param chainlinkFeed The address of the Chainlink price feed
+     * @param chainlinkFeed The address of the Chainlink price feed 
      * @param reverse Whether to reverse the price calculation (divide instead of multiply)
      */
     struct TokenFeedConfiguration {
@@ -25,6 +25,7 @@ interface ISlippagePriceChecker {
      * @return Array of TokenFeedConfiguration for the token
      */
     function tokenOracleInformation(address token) external view returns (TokenFeedConfiguration[] memory);
+
     /**
      * @notice Checks if a swap meets the price requirements
      * @param _amountIn The input amount
@@ -58,4 +59,11 @@ interface ISlippagePriceChecker {
      * @return Whether the token is configured as a reward token
      */
     function isRewardToken(address token) external view returns (bool);
+
+    /**
+     * @notice Gets the maximum time a price is considered valid for a token
+     * @param token The address of the token to check
+     * @return The maximum time in seconds that a price is considered valid
+     */
+    function maxTimePriceValid(address token) external view returns (uint256);
 }

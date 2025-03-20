@@ -83,7 +83,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.configureToken(address(well), configs);
+        slippagePriceChecker.configureToken(address(well), configs, 30 minutes);
 
         // Deploy the registry with admin, backend, and guardian addresses
         registry = new MamoStrategyRegistry(admin, backend, guardian);
@@ -747,7 +747,7 @@ contract USDCStrategyTest is Test {
         strategy.approveCowSwap(address(well));
 
         // Set up parameters for the order
-        uint256 feeAmount;
+        uint256 buyAmount;
         {
             string[] memory headers = new string[](1);
             headers[0] = "Content-Type: application/json";
@@ -1178,7 +1178,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.configureToken(address(well), configs);
+        slippagePriceChecker.configureToken(address(well), configs, 30 minutes);
 
         // Check initial approval
         uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
@@ -1193,7 +1193,7 @@ contract USDCStrategyTest is Test {
         assertEq(finalAllowance, type(uint256).max, "Allowance should be set to maximum");
     }
 
-    function testRevertIfNonOwnerapproveCowSwap() public {
+    function testRevertIfNonOwnerApproveCowSwap() public {
         // Configure the token in the swap checker
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
@@ -1203,7 +1203,7 @@ contract USDCStrategyTest is Test {
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
-        slippagePriceChecker.configureToken(address(well), configs);
+        slippagePriceChecker.configureToken(address(well), configs, 30 minutes);
 
         // Create a non-owner address
         address nonOwner = makeAddr("nonOwner");
