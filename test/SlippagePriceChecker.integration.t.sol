@@ -330,4 +330,36 @@ contract SlippagePriceCheckerTest is Test {
         // Verify the output is non-zero
         assertTrue(expectedOut > 0, "Expected output should be greater than zero");
     }
+
+    function testAuthorizeUpgrade() public {
+        // Deploy a new implementation
+        SlippagePriceChecker newImplementation = new SlippagePriceChecker();
+        
+        // Get the proxy address
+        address proxyAddress = address(slippagePriceChecker);
+        
+        // Try to upgrade as non-owner (should fail)
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        SlippagePriceChecker(proxyAddress).upgradeToAndCall(
+            address(newImplementation),
+            ""
+        );
+        
+        // Upgrade as owner (should succeed)
+        vm.prank(owner);
+        SlippagePriceChecker(proxyAddress).upgradeToAndCall(
+            address(newImplementation),
+            ""
+        );
+        
+        // Verify the implementation was upgraded
+        // We can check this by verifying the implementation address in the proxy's storage
+        // The implementation slot is defined in ERC1967Utils
+        bytes32 implementationSlot = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+        address storedImplementation = address(uint160(uint256(vm.load(proxyAddress, implementationSlot))));
+        
+        assertEq(storedImplementation, address(newImplementation), "Implementation should be upgraded");
+    }
 }
