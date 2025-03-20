@@ -23,6 +23,21 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 
+/**
+ * @title MockRejectETH
+ * @notice A mock contract that rejects all ETH transfers
+ * @dev Used for testing the failure case in recoverETH function
+ */
+contract MockRejectETH {
+// This contract has no receive or fallback function,
+// so it will reject all ETH transfers
+
+// Alternatively, we could have a receive function that explicitly reverts
+// receive() external payable {
+//     revert("ETH transfer rejected");
+// }
+}
+
 contract USDCStrategyTest is Test {
     using GPv2Order for GPv2Order.Data;
     using Surl for *;
@@ -477,6 +492,45 @@ contract USDCStrategyTest is Test {
 
         // Verify the ETH remains in the strategy
         assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
+    }
+
+    function testRevertIfRecoverETHNoBalance() public {
+        // Ensure the strategy has no ETH balance
+        assertEq(address(strategy).balance, 0, "Strategy should have no ETH balance initially");
+
+        // Create a valid recipient address
+        address payable recipient = payable(makeAddr("recipient"));
+        uint256 initialRecipientBalance = recipient.balance;
+
+        // Owner attempts to recover ETH when there is none
+        vm.startPrank(owner);
+        vm.expectRevert("Empty balance");
+        strategy.recoverETH(recipient);
+        vm.stopPrank();
+
+        // Verify the recipient's balance remains unchanged
+        assertEq(recipient.balance, initialRecipientBalance, "Recipient's balance should remain unchanged");
+        assertEq(address(strategy).balance, 0, "Strategy should still have no ETH balance");
+    }
+
+    function testRevertIfRecoverETHTransferFails() public {
+        // Send some ETH to the strategy contract
+        uint256 ethAmount = 1 ether;
+        vm.deal(address(strategy), ethAmount);
+
+        // Create a contract that rejects ETH transfers
+        MockRejectETH rejectContract = new MockRejectETH();
+        address payable rejectAddress = payable(address(rejectContract));
+
+        // Owner attempts to recover ETH to the rejecting contract
+        vm.startPrank(owner);
+        vm.expectRevert("Transfer failed");
+        strategy.recoverETH(rejectAddress);
+        vm.stopPrank();
+
+        // Verify the ETH remains in the strategy
+        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
+        assertEq(rejectAddress.balance, 0, "Reject contract should not have received any ETH");
     }
 
     function testBackendCanUpdatePosition() public {
@@ -1377,6 +1431,39 @@ contract USDCStrategyTest is Test {
         vm.startPrank(address(registry));
         UUPSUpgradeable(address(strategy)).upgradeToAndCall(address(newImplementation), "");
         vm.stopPrank();
+    }
+
+    function testRevertIfOrderExpiresTooFarInFuture() public {
+        uint256 wellAmount = 100e18;
+        deal(address(well), address(strategy), wellAmount);
+
+        vm.prank(owner);
+        strategy.approveCowSwap(address(well));
+
+        // Set validTo to more than 24 hours in the future
+        uint32 validTo = uint32(block.timestamp) + 25 hours; // 25 hours from now
+        uint256 buyAmount = 1000 * 10 ** 6;
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(address(well)),
+            buyToken: IERC20(address(usdc)),
+            receiver: address(strategy),
+            sellAmount: wellAmount,
+            buyAmount: buyAmount,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        bytes memory encodedOrder = abi.encode(order);
+        bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
+
+        vm.expectRevert("Order expires too far in the future");
+        strategy.isValidSignature(digest, encodedOrder);
     }
 
     function parseUint(string memory json, string memory key) internal pure returns (uint256) {

@@ -19,6 +19,14 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeab
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
 
+// Mock proxy that returns address(0) for implementation
+contract MockZeroImplProxy {
+    // Mock implementation of getImplementation that returns address(0)
+    function getImplementation() external pure returns (address) {
+        return address(0);
+    }
+}
+
 // Mock strategy contract for testing
 contract MockStrategy is Initializable, UUPSUpgradeable {
     // Reference to the Mamo Strategy Registry contract
@@ -366,6 +374,26 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Call the addStrategy function with zero strategy address
         registry.addStrategy(user, address(0));
+
+        // Stop impersonating the backend
+        vm.stopPrank();
+    }
+
+    function testRevertIfAddStrategyWithImplAddressZero() public {
+        // Create a mock proxy that returns address(0) for implementation
+        MockZeroImplProxy mockProxy = new MockZeroImplProxy();
+
+        // Create a user address
+        address user = makeAddr("user");
+
+        // Switch to the backend role
+        vm.startPrank(backend);
+
+        // Expect the call to revert with "Invalid implementation"
+        vm.expectRevert("Invalid implementation");
+
+        // Call the addStrategy function with the mock proxy
+        registry.addStrategy(user, address(mockProxy));
 
         // Stop impersonating the backend
         vm.stopPrank();
@@ -880,6 +908,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    // ==================== TESTS FOR upgradeStrategy METHOD ====================
+
     function testOwnerCanUpgrade() public {
         // 1. Deploy a first implementation and whitelist it
         MockStrategy strategyImpl = new MockStrategy();
@@ -938,5 +968,53 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Verify the implementation was updated
         address newImplementation = getImplementationAddress(address(strategy));
         assertEq(newImplementation, address(newStrategyImpl), "Implementation should be updated to the new one");
+    }
+
+    function testRevertIfNonOwnerCallUpgradeStrategy() public {
+        // 1. Deploy a first implementation and whitelist it
+        MockStrategy strategyImpl = new MockStrategy();
+
+        vm.startPrank(backend);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // 2. Deploy a strategy for user1 using that implementation
+        address user1 = makeAddr("user1");
+
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+        );
+
+        // Add the strategy to the registry for user1
+        vm.startPrank(backend);
+        registry.addStrategy(user1, address(strategy));
+        vm.stopPrank();
+
+        // Verify the strategy was added for user1
+        assertTrue(registry.isUserStrategy(user1, address(strategy)), "Strategy should be added for user1");
+
+        // 3. Deploy a new implementation
+        MockStrategy newStrategyImpl = new MockStrategy();
+
+        // 4. Whitelist the new implementation using the same strategy ID
+        vm.startPrank(backend);
+        registry.whitelistImplementation(address(newStrategyImpl), strategyTypeId);
+        vm.stopPrank();
+
+        // 5. Create a different user (non-owner of the strategy)
+        address user2 = makeAddr("user2");
+
+        // Verify user2 is not the owner of the strategy
+        assertFalse(registry.isUserStrategy(user2, address(strategy)), "User2 should not be the owner of the strategy");
+
+        // 6. Try to upgrade the strategy as user2 (non-owner)
+        vm.startPrank(user2);
+
+        // Expect the call to revert with "Caller is not the owner of the strategy"
+        vm.expectRevert("Caller is not the owner of the strategy");
+
+        // Call the upgradeStrategy function
+        registry.upgradeStrategy(address(strategy));
+        vm.stopPrank();
     }
 }

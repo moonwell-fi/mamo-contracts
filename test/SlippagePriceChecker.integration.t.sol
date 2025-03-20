@@ -274,6 +274,41 @@ contract SlippagePriceCheckerTest is Test {
         slippagePriceChecker.checkPrice(1 * 10 ** 18, unconfiguredToken, address(usdc), 1 * 10 ** 6, INITIAL_SLIPPAGE);
     }
 
+    function testRevertIfZeroTokenAddressInRemoveTokenConfiguration() public {
+        vm.prank(owner);
+        vm.expectRevert("Invalid token address");
+        slippagePriceChecker.removeTokenConfiguration(address(0));
+    }
+
+    function testRevertIfSlippageExceedsMaximum() public {
+        uint256 amountIn = 1 * 10 ** 18; // 1 WELL
+        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        uint256 minOut = expectedOut / 2; // Some arbitrary minOut value
+        uint256 excessiveSlippage = MAX_BPS + 1; // Exceeds maximum BPS
+
+        vm.expectRevert("Slippage exceeds maximum");
+        slippagePriceChecker.checkPrice(amountIn, address(well), address(usdc), minOut, excessiveSlippage);
+    }
+
+    function testRevertIfZeroMaxTimePriceValid() public {
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+
+        vm.prank(owner);
+        vm.expectRevert("Max time price valid can't be zero");
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 0);
+    }
+
+    function testRevertIfTokenNotConfiguredInRemoveTokenConfiguration() public {
+        // Create a new token address that hasn't been configured
+        address unconfiguredToken = makeAddr("unconfiguredToken");
+
+        vm.prank(owner);
+        vm.expectRevert("Token not configured");
+        slippagePriceChecker.removeTokenConfiguration(unconfiguredToken);
+    }
+
     function testAddTokenConfigurationWithMultipleFeeds() public {
         // Configure WELL token with multiple price feeds (WELL/USD and then USD/USDC)
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
