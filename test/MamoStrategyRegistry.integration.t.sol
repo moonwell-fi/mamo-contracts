@@ -879,4 +879,71 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Stop impersonating the admin
         vm.stopPrank();
     }
+
+    function testOwnerCanUpgrade() public {
+        // 1. Deploy a first implementation and whitelist it
+        MockStrategy strategyImpl = new MockStrategy();
+        
+        vm.startPrank(backend);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+        
+        // 2. Deploy a strategy for a user using that implementation
+        address user = makeAddr("user");
+        
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl), 
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+        );
+        
+        // Add the strategy to the registry
+        vm.startPrank(backend);
+        registry.addStrategy(user, address(strategy));
+        vm.stopPrank();
+        
+        // Verify the strategy was added for the user
+        assertTrue(registry.isUserStrategy(user, address(strategy)), "Strategy should be added for user");
+        
+        // Get the current implementation address
+        address oldImplementation = getImplementationAddress(address(strategy));
+        assertEq(oldImplementation, address(strategyImpl), "Initial implementation should match");
+        
+        // 3. Deploy a new implementation
+        MockStrategy newStrategyImpl = new MockStrategy();
+        
+        // 4. Whitelist the new implementation using the same strategy ID
+        vm.startPrank(backend);
+        registry.whitelistImplementation(address(newStrategyImpl), strategyTypeId);
+        vm.stopPrank();
+        
+        // Verify the new implementation is now the latest for this strategy type
+        assertEq(
+            registry.latestImplementationById(strategyTypeId), 
+            address(newStrategyImpl), 
+            "New implementation should be set as latest"
+        );
+        
+        // 5. Make the owner call to upgrade the strategy
+        vm.startPrank(user);
+        
+        // Expect the StrategyImplementationUpdated event to be emitted
+        vm.expectEmit(address(registry));
+        emit MamoStrategyRegistry.StrategyImplementationUpdated(
+            address(strategy), 
+            address(strategyImpl), 
+            address(newStrategyImpl)
+        );
+        
+        // Call the upgradeStrategy function
+        registry.upgradeStrategy(address(strategy));
+        vm.stopPrank();
+        
+        // Verify the implementation was updated
+        address newImplementation = getImplementationAddress(address(strategy));
+        assertEq(
+            newImplementation, 
+            address(newStrategyImpl), 
+            "Implementation should be updated to the new one"
+        );
+    }
 }
