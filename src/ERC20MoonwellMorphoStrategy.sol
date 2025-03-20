@@ -152,7 +152,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      * @param tokenAddress The address of the token to approve
      */
-    function approveVaultRelayer(address tokenAddress) external onlyStrategyOwner {
+    function approveCowSwap(address tokenAddress) external onlyStrategyOwner {
         // Check if the token has a configuration in the swap checker
         require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
 

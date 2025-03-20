@@ -744,7 +744,7 @@ contract USDCStrategyTest is Test {
 
         // Approve the vault relayer to spend the well token
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         // Set up parameters for the order
         uint256 feeAmount;
@@ -808,7 +808,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24; // 24 hours from now
         uint256 buyAmount = 1000 * 10 ** 6; // Mock buy amount
@@ -842,7 +842,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -874,7 +874,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         // Set validTo to less than 5 minutes in the future
         uint32 validTo = uint32(block.timestamp) + 4 minutes;
@@ -907,7 +907,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -939,7 +939,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -971,7 +971,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1003,7 +1003,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         // Create a mock token that is different from the strategy token
         MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
@@ -1038,7 +1038,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1073,7 +1073,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1105,7 +1105,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1137,7 +1137,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 60 * 60 * 24;
 
@@ -1166,9 +1166,9 @@ contract USDCStrategyTest is Test {
         strategy.isValidSignature(digest, encodedOrder);
     }
 
-    // Tests for approveVaultRelayer function
+    // Tests for approveCowSwap function
 
-    function testOwnerCanApproveVaultRelayer() public {
+    function testOwnerCanapproveCowSwap() public {
         // Verify the token is configured in the swap checker
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
@@ -1186,14 +1186,14 @@ contract USDCStrategyTest is Test {
 
         // Owner approves the vault relayer
         vm.prank(owner);
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         // Verify the approval was successful
         uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
         assertEq(finalAllowance, type(uint256).max, "Allowance should be set to maximum");
     }
 
-    function testRevertIfNonOwnerApproveVaultRelayer() public {
+    function testRevertIfNonOwnerapproveCowSwap() public {
         // Configure the token in the swap checker
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
@@ -1211,7 +1211,7 @@ contract USDCStrategyTest is Test {
         // Non-owner attempts to approve the vault relayer
         vm.prank(nonOwner);
         vm.expectRevert("Not strategy owner");
-        strategy.approveVaultRelayer(address(well));
+        strategy.approveCowSwap(address(well));
 
         // Verify the approval was not granted
         uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
@@ -1225,7 +1225,7 @@ contract USDCStrategyTest is Test {
         // Owner attempts to approve the vault relayer for an unconfigured token
         vm.prank(owner);
         vm.expectRevert("Token not allowed");
-        strategy.approveVaultRelayer(address(mockToken));
+        strategy.approveCowSwap(address(mockToken));
 
         // Verify the approval was not granted
         uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.vaultRelayer());

@@ -106,7 +106,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 
 - `function deposit(uint256 amount) external`: Deposits funds into the strategy. Only callable by the user who owns this strategy, as verified by the Mamo Strategy Registry.
 
-- `function approveVaultRelayer(address tokenAddress) external`: Approves the vault relayer to spend a specific token. Only callable by the user who owns this strategy. The function checks if the token has a configuration in the swap checker before approving.
+- `function approveCowSwap(address tokenAddress) external`: Approves the vault relayer to spend a specific token. Only callable by the user who owns this strategy. The function checks if the token has a configuration in the swap checker before approving.
 
 - `function setSlippage(uint256 _newSlippageInBps) external`: Sets a new slippage tolerance value. Only callable by the strategy owner. The slippage is used when validating swap prices.
 
@@ -137,7 +137,7 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 5. Mamo Backend calls updatePosition if it identifies a better yield in a determined market/vault.
 6. Mamo Backend (or anyone) claims rewards on behalf of the strategy.
 7. When rewards are claimed, the reward token balance for the strategy contract increases, so bots can swap rewards for the underlying token on behalf of the user using CowSwap:
-   - The user must first call `approveVaultRelayer` to approve the reward token for the vault relayer
+   - The user must first call `approveCowSwap` to approve the reward token for the vault relayer
    - Cow Swap calls the isValidSignature function on the strategy contract to validate orders
    - The strategy verifies the order parameters and checks that the price matches the Chainlink price within the set slippage tolerance using the SlippagePriceChecker
    - Any bot can fulfill the order as long as the price is valid according to the SlippagePriceChecker
