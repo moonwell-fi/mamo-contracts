@@ -776,7 +776,7 @@ contract USDCStrategyTest is Test {
 
             buyAmount = parseUint(json, ".quote.buyAmount");
         }
-        uint32 validTo = uint32(block.timestamp) + 30 minutes; // 24 hours from now
+        uint32 validTo = uint32(block.timestamp) + 29 minutes; 
 
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1139,7 +1139,7 @@ contract USDCStrategyTest is Test {
         vm.prank(owner);
         strategy.approveCowSwap(address(well));
 
-        uint32 validTo = uint32(block.timestamp) + 30 minutes;
+        uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
         // Set a very low buy amount that will fail the price check
         uint256 buyAmount = 1; // Extremely low amount

@@ -156,7 +156,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         // Check if the token has a configuration in the swap checker
         require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
 
-        // Approve the vault relayer to spend the maximum amount of tokens
+        // Approve the vault relayer unlimited
         IERC20(tokenAddress).forceApprove(vaultRelayer, type(uint256).max);
     }
 

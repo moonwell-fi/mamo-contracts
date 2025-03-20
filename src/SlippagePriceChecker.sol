@@ -76,6 +76,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     ) external onlyOwner {
         require(token != address(0), "Invalid token address");
         require(configurations.length > 0, "Empty configurations array");
+        require(_maxTimePriceValid > 0, "Max time price valid can't be zero");
 
         // Set the maxTimePriceValid for the token
         maxTimePriceValid[token] = _maxTimePriceValid;
@@ -151,7 +152,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @return Whether the token is configured as a reward token
      */
     function isRewardToken(address token) external view override returns (bool) {
-        return tokenOracleData[token].length > 0;
+        return tokenOracleData[token].length > 0 && maxTimePriceValid[token] > 0;
     }
 
     /**
@@ -212,13 +213,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
             IPriceFeed _priceFeed = IPriceFeed(_priceFeeds[_i]);
 
             int256 _latestAnswer = _priceFeed.latestAnswer();
-            {
-                require(_latestAnswer > 0, "Latest answer must be positive");
-
-                // Check if the price is still valid based on maxTimePriceValid
-                // Note: This would require additional Chainlink interface methods to get the timestamp
-                // For now, we'll assume the price is valid as this would require a more complex implementation
-            }
+            require(_latestAnswer > 0, "Latest answer must be positive");
 
             uint256 _scaleAnswerBy = 10 ** uint256(_priceFeed.decimals());
 
