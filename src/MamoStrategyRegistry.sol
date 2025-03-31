@@ -82,13 +82,16 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @notice Updates the implementation of a strategy to the latest implementation of the same type
      * @dev Only callable by the user who owns the strategy
      * @param strategy The address of the strategy to update
+     * @param newImplementation The new implementation address
      */
-    function upgradeStrategy(address strategy) external whenNotPaused {
+    function upgradeStrategy(address strategy, address newImplementation) external whenNotPaused {
         // Check if the caller is the owner of the strategy
         require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
 
         // Get the old implementation address
         address oldImplementation = ERC1967Proxy(payable(strategy)).getImplementation();
+
+        require(oldImplementation != newImplementation, "Already using implementation");
 
         // Get the strategy ID
         uint256 strategyId = implementationToId[oldImplementation];
@@ -96,11 +99,12 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Get the latest implementation for this strategy ID
         address latestImplementation = latestImplementationById[strategyId];
 
-        // Ensure we're not already on the latest implementation
-        require(oldImplementation != latestImplementation, "Already on latest implementation");
+        require(
+            latestImplementation == newImplementation, "Implementation is not the latest whitelisted implementation"
+        );
 
         // Check if the latest implementation is whitelisted (should always be true, but checking for safety)
-        require(whitelistedImplementations[latestImplementation], "Latest implementation not whitelisted");
+        require(whitelistedImplementations[latestImplementation], "Implementation not whitelisted");
 
         // Update the implementation through the proxy's upgrade mechanism
         // Call upgradeToAndCall with empty data to just upgrade the implementation

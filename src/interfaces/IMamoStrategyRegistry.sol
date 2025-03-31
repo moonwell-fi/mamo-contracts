@@ -70,8 +70,9 @@ interface IMamoStrategyRegistry {
      * @notice Updates the implementation of a strategy
      * @dev Only callable by the user who owns the strategy
      * @param strategy The address of the strategy to update
+     * @param newImplementation The new implementation address
      */
-    function upgradeStrategy(address strategy) external;
+    function upgradeStrategy(address strategy, address newImplementation) external;
 
     /**
      * @notice Gets all strategies for a user

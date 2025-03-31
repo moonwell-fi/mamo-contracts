@@ -962,7 +962,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         );
 
         // Call the upgradeStrategy function
-        registry.upgradeStrategy(address(strategy));
+        registry.upgradeStrategy(address(strategy), address(newStrategyImpl));
         vm.stopPrank();
 
         // Verify the implementation was updated
@@ -1014,7 +1014,42 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.expectRevert("Caller is not the owner of the strategy");
 
         // Call the upgradeStrategy function
-        registry.upgradeStrategy(address(strategy));
+        registry.upgradeStrategy(address(strategy), address(newStrategyImpl));
+        vm.stopPrank();
+    }
+
+    function testRevertIfUpgradeToSameImplementation() public {
+        // 1. Deploy an implementation and whitelist it
+        MockStrategy strategyImpl = new MockStrategy();
+
+        vm.startPrank(backend);
+        registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // 2. Deploy a strategy for a user using that implementation
+        address user = makeAddr("user");
+
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+        );
+
+        // Add the strategy to the registry
+        vm.startPrank(backend);
+        registry.addStrategy(user, address(strategy));
+        vm.stopPrank();
+
+        // Verify the current implementation
+        address currentImplementation = getImplementationAddress(address(strategy));
+        assertEq(currentImplementation, address(strategyImpl), "Initial implementation should match");
+
+        // 3. Try to upgrade to the same implementation
+        vm.startPrank(user);
+
+        // Expect the call to revert with "Already using implementation"
+        vm.expectRevert("Already using implementation");
+
+        // Call the upgradeStrategy function with the same implementation
+        registry.upgradeStrategy(address(strategy), address(strategyImpl));
         vm.stopPrank();
     }
 }
