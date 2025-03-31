@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-pragma abicoder v2;
-
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
-interface IPriceFeed {
-    function latestAnswer() external view returns (int256);
-    function decimals() external view returns (uint8);
-}
 
 interface IERC20MetaData {
     function decimals() external view returns (uint8);
@@ -211,8 +205,12 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         for (uint256 _i = 0; _i < _priceFeedsLen; _i++) {
             IPriceFeed _priceFeed = IPriceFeed(_priceFeeds[_i]);
 
-            int256 _latestAnswer = _priceFeed.latestAnswer();
-            require(_latestAnswer > 0, "Latest answer must be positive");
+            (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = _priceFeed.latestRoundData();
+            require(answer > 0, "Latest answer must be positive");
+
+            require(answer > 0, "Chainlink price cannot be lower or equal to 0");
+            require(updatedAt != 0, "Round is in incompleted state");
+            require(answeredInRound >= roundId, "Stale price");
 
             uint256 _scaleAnswerBy = 10 ** uint256(_priceFeed.decimals());
 
@@ -222,8 +220,8 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
             // Without a reverse, we multiply amount * price
             // With a reverse, we divide amount / price
             _expectedOutFromChainlink = _reverses[_i]
-                ? (_amountIntoThisIteration * _scaleAnswerBy) / uint256(_latestAnswer)
-                : (_amountIntoThisIteration * uint256(_latestAnswer)) / _scaleAnswerBy;
+                ? (_amountIntoThisIteration * _scaleAnswerBy) / uint256(answer)
+                : (_amountIntoThisIteration * uint256(answer)) / _scaleAnswerBy;
         }
 
         uint256 _fromTokenDecimals = uint256(IERC20MetaData(_fromToken).decimals());

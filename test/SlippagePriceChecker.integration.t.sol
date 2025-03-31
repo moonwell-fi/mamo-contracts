@@ -6,15 +6,12 @@ import {Addresses} from "@addresses/Addresses.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
+
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
-interface IPriceFeed {
-    function latestAnswer() external view returns (int256);
-    function decimals() external view returns (uint8);
-}
 
 contract SlippagePriceCheckerTest is Test {
     SlippagePriceChecker public slippagePriceChecker;
@@ -390,5 +387,62 @@ contract SlippagePriceCheckerTest is Test {
         address storedImplementation = address(uint160(uint256(vm.load(proxyAddress, implementationSlot))));
 
         assertEq(storedImplementation, address(newImplementation), "Implementation should be upgraded");
+    }
+
+    function testRevertIfChainlinkPriceIsZero() public {
+        // Mock the latestRoundData call to return zero price
+        vm.mockCall(
+            chainlinkWellUsd,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(
+                uint80(1), // roundId
+                int256(0), // answer (price)
+                uint256(0), // startedAt
+                block.timestamp, // updatedAt
+                uint80(1) // answeredInRound
+            )
+        );
+
+        // Try to get expected output - should revert
+        vm.expectRevert("Latest answer must be positive");
+        slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
+    }
+
+    function testRevertIfChainlinkRoundIncomplete() public {
+        // Mock the latestRoundData call to return incomplete round (updatedAt = 0)
+        vm.mockCall(
+            chainlinkWellUsd,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(
+                uint80(1), // roundId
+                int256(1e8), // answer (price)
+                uint256(0), // startedAt
+                uint256(0), // updatedAt (incomplete round)
+                uint80(1) // answeredInRound
+            )
+        );
+
+        // Try to get expected output - should revert
+        vm.expectRevert("Round is in incompleted state");
+        slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
+    }
+
+    function testRevertIfChainlinkPriceStale() public {
+        // Mock the latestRoundData call to return stale price (answeredInRound < roundId)
+        vm.mockCall(
+            chainlinkWellUsd,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(
+                uint80(2), // roundId
+                int256(1e8), // answer (price)
+                uint256(0), // startedAt
+                block.timestamp, // updatedAt
+                uint80(1) // answeredInRound (stale)
+            )
+        );
+
+        // Try to get expected output - should revert
+        vm.expectRevert("Stale price");
+        slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
     }
 }
