@@ -244,6 +244,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(to != address(0), "Cannot send to zero address");
         require(amount > 0, "Amount must be greater than 0");
 
-        IERC20(tokenAddress).transfer(to, amount);
+        bool result = IERC20(tokenAddress).transfer(to, amount);
+        require(result == true, "Token transfer failed");
     }
 }

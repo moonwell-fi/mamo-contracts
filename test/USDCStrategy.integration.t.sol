@@ -2,6 +2,8 @@
 pragma solidity 0.8.28;
 
 import {DeploySlippagePriceChecker} from "../script/DeploySlippagePriceChecker.s.sol";
+
+import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -1465,6 +1467,30 @@ contract USDCStrategyTest is Test {
 
         vm.expectRevert("Order expires too far in the future");
         strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfRecoverERC20TransferFails() public {
+        // Deploy the failing token
+        MockFailingERC20 failingToken = new MockFailingERC20();
+
+        // Set some balance for the strategy in the failing token
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens
+        failingToken.setBalance(address(strategy), tokenAmount);
+
+        // Verify the strategy has the tokens
+        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should have the failing tokens");
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Owner attempts to recover the tokens - should fail
+        vm.startPrank(owner);
+        vm.expectRevert("Transfer failed");
+        strategy.recoverERC20(address(failingToken), recipient, tokenAmount);
+        vm.stopPrank();
+
+        // Verify the tokens remain in the strategy
+        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
     }
 
     function parseUint(string memory json, string memory key) internal pure returns (uint256) {

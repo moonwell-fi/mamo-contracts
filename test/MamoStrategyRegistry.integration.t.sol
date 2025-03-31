@@ -9,6 +9,7 @@ import {console} from "@forge-std/console.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 
 import {MockERC20} from "./MockERC20.sol";
+import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
@@ -919,6 +920,30 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Stop impersonating the admin
         vm.stopPrank();
+    }
+
+    function testRevertIfRecoverERC20TransferFails() public {
+        // Deploy the failing token
+        MockFailingERC20 failingToken = new MockFailingERC20();
+
+        // Set some balance for the registry in the failing token
+        uint256 amount = 1000 * 10 ** 18; // 1000 tokens
+        failingToken.setBalance(address(registry), amount);
+
+        // Verify the registry has the tokens
+        assertEq(failingToken.balanceOf(address(registry)), amount, "Registry should have the failing tokens");
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Admin attempts to recover the tokens - should fail
+        vm.startPrank(admin);
+        vm.expectRevert("Transfer failed");
+        registry.recoverERC20(address(failingToken), recipient, amount);
+        vm.stopPrank();
+
+        // Verify the tokens remain in the registry
+        assertEq(failingToken.balanceOf(address(registry)), amount, "Registry should still have the tokens");
     }
 
     // ==================== TESTS FOR upgradeStrategy METHOD ====================

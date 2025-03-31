@@ -112,7 +112,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.token != address(0), "Invalid token address");
         require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
         require(params.vaultRelayer != address(0), "Invalid vaultRelayer address");
-        require(strategyTypeId != 0, "Strategy type id not set");
+        require(params.strategyTypeId != 0, "Strategy type id not set");
 
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId);
