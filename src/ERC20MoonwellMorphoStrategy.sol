@@ -346,14 +346,14 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Deposit into each protocol according to the split
         if (targetMoonwell > 0) {
-            token.approve(address(mToken), targetMoonwell);
+            token.forceApprove(address(mToken), targetMoonwell);
 
             // Mint mToken with token
             require(mToken.mint(targetMoonwell) == 0, "MToken mint failed");
         }
 
         if (targetMetaMorpho > 0) {
-            token.approve(address(metaMorphoVault), targetMetaMorpho);
+            token.forceApprove(address(metaMorphoVault), targetMetaMorpho);
 
             // Deposit token into MetaMorpho
             metaMorphoVault.deposit(targetMetaMorpho, address(this));
