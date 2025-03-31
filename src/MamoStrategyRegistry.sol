@@ -99,9 +99,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Get the latest implementation for this strategy ID
         address latestImplementation = latestImplementationById[strategyId];
 
-        require(
-            latestImplementation == newImplementation, "Implementation is not the latest whitelisted implementation"
-        );
+        require(latestImplementation == newImplementation, "Not latest implementation");
 
         // Check if the latest implementation is whitelisted (should always be true, but checking for safety)
         require(whitelistedImplementations[latestImplementation], "Implementation not whitelisted");
@@ -186,6 +184,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         // Check strategy registry address is set to this registry
         require(
             address(strategyContract.mamoStrategyRegistry()) == address(this), "Strategy registry not set correctly"
+        );
+        require(
+            implementation == latestImplementationById[strategyContract.strategyTypeId()], "Not latest implementation"
         );
 
         // Add the strategy to the user's strategies

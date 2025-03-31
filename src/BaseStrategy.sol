@@ -17,10 +17,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
     using SafeERC20 for IERC20;
 
-    // @notice Reference to the Mamo Strategy Registry contract
+    /// @notice Reference to the Mamo Strategy Registry contract
     IMamoStrategyRegistry public mamoStrategyRegistry;
 
-    // @notice Emitted when tokens are recovered from the contract
+    /// @notice The strategy type ID that identifies this strategy's implementation
+    uint256 public strategyTypeId;
+
+    /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     /**
@@ -80,10 +83,11 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
 
     /**
      * @notice Initializes the BaseStrategy contract
-     * @dev Sets the MamoStrategyRegistry reference
      * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
+     * @param _strategyTypeId The unique identifier for this strategy type
      */
-    function __BaseStrategy_init(address _mamoStrategyRegistry) internal onlyInitializing {
+    function __BaseStrategy_init(address _mamoStrategyRegistry, uint256 _strategyTypeId) internal onlyInitializing {
         mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
+        strategyTypeId = _strategyTypeId;
     }
 }

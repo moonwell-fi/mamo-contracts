@@ -32,9 +32,13 @@ contract MockStrategy is Initializable, UUPSUpgradeable {
     // Reference to the Mamo Strategy Registry contract
     IMamoStrategyRegistry public mamoStrategyRegistry;
 
-    function initialize(address, address upgrader, address) external initializer {
+    uint256 public strategyTypeId;
+
+    function initialize(address, address upgrader, address, uint256 _strategyTypeId) external initializer {
         // Store reference to the registry
         mamoStrategyRegistry = IMamoStrategyRegistry(upgrader);
+
+        strategyTypeId = _strategyTypeId;
     }
 
     modifier onlyStrategyOwner() {
@@ -230,14 +234,15 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         MockStrategy strategyImpl = new MockStrategy();
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl), 0);
-
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
+
         // Create a user address
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
         );
 
         // Switch to the backend role to call addStrategy
@@ -270,14 +275,14 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address implementation = makeAddr("implementation");
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(implementation, 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(implementation, 0);
         vm.stopPrank();
 
         // Create a user address
         address user = makeAddr("user");
 
         // Initialize the strategy with the correct roles
-        strategy.initialize(user, address(registry), backend);
+        strategy.initialize(user, address(registry), backend, strategyTypeId);
 
         // Create a non-backend address
         address nonBackend = makeAddr("nonBackend");
@@ -302,7 +307,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl), 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create a user address
@@ -310,7 +315,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
         );
 
         // Pause the registry
@@ -339,7 +345,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address implementation = makeAddr("implementation");
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(implementation, 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(implementation, 0);
         vm.stopPrank();
 
         // Create a user address (zero address)
@@ -347,7 +353,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address someUser = makeAddr("someUser");
 
         // Initialize the strategy with the correct roles
-        strategy.initialize(someUser, address(registry), backend);
+        strategy.initialize(someUser, address(registry), backend, strategyTypeId);
 
         // Switch to the backend role
         vm.startPrank(backend);
@@ -405,7 +411,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl), 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create a user address
@@ -413,7 +419,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
         );
 
         // Switch to the backend role
@@ -441,7 +448,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, 0)) // This case is testing non-whitelisted impl
         );
 
         // Switch to the backend role
@@ -466,7 +474,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl), 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create a user address
@@ -477,7 +485,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation but with wrong registry
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, wrongRegistry, backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, wrongRegistry, backend, strategyTypeId))
         );
 
         // Switch to the backend role
@@ -583,8 +592,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementations
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl1), 0);
-        registry.whitelistImplementation(address(strategyImpl2), 0);
+        uint256 strategyTypeId1 = registry.whitelistImplementation(address(strategyImpl1), 0);
+        uint256 strategyTypeId2 = registry.whitelistImplementation(address(strategyImpl2), 0);
         vm.stopPrank();
 
         // Create user addresses
@@ -593,13 +602,16 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create proxies with the mock strategy implementations
         ERC1967Proxy strategy1 = new ERC1967Proxy(
-            address(strategyImpl1), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+            address(strategyImpl1),
+            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId1))
         );
         ERC1967Proxy strategy2 = new ERC1967Proxy(
-            address(strategyImpl2), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+            address(strategyImpl2),
+            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId2))
         );
         ERC1967Proxy strategy3 = new ERC1967Proxy(
-            address(strategyImpl1), abi.encodeCall(MockStrategy.initialize, (user2, address(registry), backend))
+            address(strategyImpl2),
+            abi.encodeCall(MockStrategy.initialize, (user2, address(registry), backend, strategyTypeId2))
         );
 
         // Add strategies for users
@@ -638,7 +650,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Whitelist the implementation
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl), 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // Create user addresses
@@ -647,7 +659,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId))
         );
 
         // Add the strategy for user1
@@ -922,7 +935,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
         );
 
         // Add the strategy to the registry
@@ -982,7 +996,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user1 = makeAddr("user1");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId))
         );
 
         // Add the strategy to the registry for user1
@@ -1023,14 +1038,15 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         MockStrategy strategyImpl = new MockStrategy();
 
         vm.startPrank(backend);
-        registry.whitelistImplementation(address(strategyImpl), 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
         // 2. Deploy a strategy for a user using that implementation
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend))
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
         );
 
         // Add the strategy to the registry
@@ -1050,6 +1066,45 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Call the upgradeStrategy function with the same implementation
         registry.upgradeStrategy(address(strategy), address(strategyImpl));
+        vm.stopPrank();
+    }
+
+    function testRevertIfUpgradeToNonLatestImplementation() public {
+        // 1. Deploy a first implementation and whitelist it
+        MockStrategy strategyImpl = new MockStrategy();
+
+        vm.startPrank(backend);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // 2. Deploy a strategy for a user using that implementation
+        address user = makeAddr("user");
+
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+        );
+
+        // 3. Deploy a new implementation and whitelist it (becomes latest)
+        MockStrategy newStrategyImpl = new MockStrategy();
+
+        vm.startPrank(backend);
+        registry.whitelistImplementation(address(newStrategyImpl), strategyTypeId);
+        vm.stopPrank();
+
+        // Verify the latest implementation
+        assertEq(
+            registry.latestImplementationById(strategyTypeId),
+            address(newStrategyImpl),
+            "Latest implementation should be the newest one"
+        );
+
+        // Expect the call to revert with "Not latest implementation"
+        vm.expectRevert("Not latest implementation");
+
+        // Try to add strategy using newStrategyImpl (which is not the latest)
+        vm.prank(backend);
+        registry.addStrategy(user, address(strategy));
         vm.stopPrank();
     }
 }

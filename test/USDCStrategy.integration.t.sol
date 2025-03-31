@@ -108,7 +108,7 @@ contract USDCStrategyTest is Test {
 
         // Whitelist the implementation
         vm.prank(backend);
-        registry.whitelistImplementation(address(implementation), 0);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
         splitMToken = splitVault = 5000; // 50% in basis points each
 
@@ -124,7 +124,8 @@ contract USDCStrategyTest is Test {
                 slippagePriceChecker: address(slippagePriceChecker),
                 vaultRelayer: addresses.getAddress("COWSWAP_VAULT_RELAYER"),
                 splitMToken: splitMToken,
-                splitVault: splitVault
+                splitVault: splitVault,
+                strategyTypeId: strategyTypeId
             })
         );
 
