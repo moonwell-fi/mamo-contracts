@@ -23,6 +23,9 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
     /// @notice The strategy type ID that identifies this strategy's implementation
     uint256 public strategyTypeId;
 
+    /// @notice Reserved storage slots for future upgrades
+    uint256[48] __gap;
+
     /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
