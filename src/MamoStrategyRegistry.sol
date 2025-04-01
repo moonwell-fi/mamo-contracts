@@ -130,14 +130,14 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
     /**
      * @notice Adds an implementation to the whitelist with a strategy type ID
-     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @dev Only callable by accounts with the ADMIN_ROLE
      * @param implementation The address of the implementation to whitelist
      * @param strategyTypeId The strategy type ID to assign. If 0, a new ID will be assigned
      * @return assignedStrategyTypeId The assigned strategy type ID
      */
     function whitelistImplementation(address implementation, uint256 strategyTypeId)
         external
-        onlyRole(BACKEND_ROLE)
+        onlyRole(DEFAULT_ADMIN_ROLE)
         returns (uint256 assignedStrategyTypeId)
     {
         require(implementation != address(0), "Invalid implementation address");
