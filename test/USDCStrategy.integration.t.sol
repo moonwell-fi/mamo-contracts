@@ -1416,6 +1416,35 @@ contract USDCStrategyTest is Test {
         assertEq(allowance, 0, "Allowance should remain zero");
     }
 
+    function testApproveCowSwapZeroAmountRemovesApproval() public {
+        // Verify the token is configured in the swap checker
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
+            reverse: false
+        });
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
+
+        // First set a non-zero approval
+        vm.startPrank(owner);
+        strategy.approveCowSwap(address(well), type(uint256).max);
+
+        // Verify the initial approval was set
+        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
+        assertEq(initialAllowance, type(uint256).max, "Initial allowance should be maximum");
+
+        // Now set approval to zero
+        strategy.approveCowSwap(address(well), 0);
+        vm.stopPrank();
+
+        // Verify the approval was removed
+        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
+        assertEq(finalAllowance, 0, "Allowance should be set to zero");
+    }
+
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
         ERC20MoonwellMorphoStrategy newImplementation = new ERC20MoonwellMorphoStrategy();
