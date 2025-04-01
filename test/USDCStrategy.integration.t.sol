@@ -124,7 +124,6 @@ contract USDCStrategyTest is Test {
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
                 slippagePriceChecker: address(slippagePriceChecker),
-                vaultRelayer: addresses.getAddress("COWSWAP_VAULT_RELAYER"),
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId
@@ -1366,7 +1365,7 @@ contract USDCStrategyTest is Test {
         slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
 
         // Check initial approval
-        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(initialAllowance, 0, "Initial allowance should be zero");
 
         // Owner approves the vault relayer
@@ -1374,7 +1373,7 @@ contract USDCStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Verify the approval was successful
-        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(finalAllowance, type(uint256).max, "Allowance should be set to maximum");
     }
 
@@ -1399,7 +1398,7 @@ contract USDCStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Verify the approval was not granted
-        uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(allowance, 0, "Allowance should remain zero");
     }
 
@@ -1413,7 +1412,7 @@ contract USDCStrategyTest is Test {
         strategy.approveCowSwap(address(mockToken), type(uint256).max);
 
         // Verify the approval was not granted
-        uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(allowance, 0, "Allowance should remain zero");
     }
 
