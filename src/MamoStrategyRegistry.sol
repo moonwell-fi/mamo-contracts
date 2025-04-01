@@ -45,9 +45,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Emitted when a strategy is added for a user
     event StrategyAdded(address indexed user, address strategy, address implementation);
 
-    /// @notice Emitted when a strategy is removed for a user
-    event StrategyRemoved(address indexed user, address strategy);
-
     /// @notice Emitted when a strategy's implementation is updated
     event StrategyImplementationUpdated(
         address indexed strategy, address indexed oldImplementation, address indexed newImplementation
@@ -118,7 +115,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @dev Only callable by accounts with the GUARDIAN_ROLE
      * @dev When paused, most functions that modify state will revert
      */
-    function pause() external onlyRole(GUARDIAN_ROLE) whenNotPaused {
+    function pause() external onlyRole(GUARDIAN_ROLE) {
         _pause();
     }
 
@@ -127,7 +124,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @dev Only callable by accounts with the GUARDIAN_ROLE
      * @dev Allows normal operation to resume after the contract was paused
      */
-    function unpause() external onlyRole(GUARDIAN_ROLE) whenPaused {
+    function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
     }
 

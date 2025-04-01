@@ -45,6 +45,12 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     );
 
     /**
+     * @notice Emitted when all price feed configurations for a token are removed
+     * @param token The address of the token whose configurations were removed
+     */
+    event TokenConfigurationRemoved(address indexed token);
+
+    /**
      * @dev Initializes the contract with the given owner
      * @param _owner The address that will own the contract
      */
@@ -98,6 +104,8 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         // Reset the maxTimePriceValid for the token
         delete maxTimePriceValid[token];
+
+        emit TokenConfigurationRemoved(token);
     }
 
     // ==================== External View Functions ====================
@@ -171,7 +179,8 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         address[] memory priceFeeds = new address[](configs.length);
         bool[] memory reverses = new bool[](configs.length);
 
-        for (uint256 i = 0; i < configs.length; i++) {
+        uint256 configsLen = configs.length;
+        for (uint256 i = 0; i < configsLen; i++) {
             priceFeeds[i] = configs[i].chainlinkFeed;
             reverses[i] = configs[i].reverse;
         }
