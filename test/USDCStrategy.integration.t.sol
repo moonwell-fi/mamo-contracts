@@ -109,7 +109,7 @@ contract USDCStrategyTest is Test {
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
 
         // Whitelist the implementation
-        vm.prank(backend);
+        vm.prank(admin);
         uint256 strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
         splitMToken = splitVault = 5000; // 50% in basis points each

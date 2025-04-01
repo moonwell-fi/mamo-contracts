@@ -108,7 +108,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
             "Implementation should not be whitelisted initially"
         );
 
-        // Switch to the backend role to call the whitelistImplementation function
+        // Switch to the admin role to call the whitelistImplementation function
         vm.startPrank(admin);
 
         // Expect the ImplementationWhitelisted event to be emitted
@@ -146,7 +146,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Test whitelisting a second implementation
         address mockImplementation2 = makeAddr("mockImplementation2");
 
-        vm.startPrank(backend);
+        vm.startPrank(admin);
 
         // Expect the ImplementationWhitelisted event to be emitted for the second implementation
         vm.expectEmit(address(registry));
@@ -181,7 +181,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.startPrank(nonBackend);
 
         // Expect the call to revert with AccessControlUnauthorizedAccount error
-        bytes32 role = registry.BACKEND_ROLE();
+        bytes32 role = registry.DEFAULT_ADMIN_ROLE();
         vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", nonBackend, role));
 
         // Call the whitelistImplementation function
@@ -664,7 +664,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         );
 
         // Add the strategy for user1
-        vm.startPrank(admin);
+        vm.startPrank(backend);
         registry.addStrategy(user1, address(strategy));
         vm.stopPrank();
 
@@ -951,7 +951,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // 1. Deploy a first implementation and whitelist it
         MockStrategy strategyImpl = new MockStrategy();
 
-        vm.startPrank(backend);
+        vm.startPrank(admin);
         uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
         vm.stopPrank();
 
