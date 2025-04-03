@@ -9,13 +9,15 @@ pragma solidity 0.8.28;
 interface ISlippagePriceChecker {
     /**
      * @notice Configuration for a token's price feed
-     * @dev Stores the Chainlink feed address and whether to reverse the price calculation
+     * @dev Stores the Chainlink feed address, whether to reverse the price calculation, and heartbeat
      * @param chainlinkFeed The address of the Chainlink price feed
      * @param reverse Whether to reverse the price calculation (divide instead of multiply)
+     * @param heartbeat Maximum time in seconds between price feed updates before considering price stale
      */
     struct TokenFeedConfiguration {
         address chainlinkFeed;
         bool reverse;
+        uint256 heartbeat;
     }
 
     /**

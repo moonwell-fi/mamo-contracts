@@ -55,7 +55,11 @@ contract SlippagePriceCheckerTest is Test {
         // Configure WELL token with WELL/USD price feed
         ISlippagePriceChecker.TokenFeedConfiguration[] memory wellConfigs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        wellConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+        wellConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
+        });
 
         vm.prank(owner);
         slippagePriceChecker.addTokenConfiguration(address(well), wellConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
@@ -63,7 +67,11 @@ contract SlippagePriceCheckerTest is Test {
         // Configure USDC token with USDC/USD price feed
         ISlippagePriceChecker.TokenFeedConfiguration[] memory usdcConfigs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        usdcConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkUsdcUsd, reverse: false});
+        usdcConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkUsdcUsd,
+            reverse: false,
+            heartbeat: 1800
+        });
 
         vm.prank(owner);
         slippagePriceChecker.addTokenConfiguration(address(usdc), usdcConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
@@ -104,7 +112,11 @@ contract SlippagePriceCheckerTest is Test {
         // Create a new configuration for WELL token with a different maxTimePriceValid
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
+        });
 
         uint256 newMaxTimePriceValid = 7200; // 2 hours in seconds
 
@@ -130,7 +142,8 @@ contract SlippagePriceCheckerTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         newConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: chainlinkWellUsd,
-            reverse: true // Change the reverse flag
+            reverse: true, // Change the reverse flag
+            heartbeat: 1800
         });
 
         // First remove the existing configuration
@@ -195,7 +208,11 @@ contract SlippagePriceCheckerTest is Test {
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
+        });
 
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
@@ -213,7 +230,11 @@ contract SlippagePriceCheckerTest is Test {
     function testRevertIfZeroTokenAddress() public {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
+        });
 
         vm.prank(owner);
         vm.expectRevert("Invalid token address");
@@ -223,7 +244,8 @@ contract SlippagePriceCheckerTest is Test {
     function testRevertIfZeroPriceFeedAddress() public {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: address(0), reverse: false});
+        configs[0] =
+            ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: address(0), reverse: false, heartbeat: 1800});
 
         vm.prank(owner);
         vm.expectRevert("Invalid chainlink feed address");
@@ -290,7 +312,11 @@ contract SlippagePriceCheckerTest is Test {
     function testRevertIfZeroMaxTimePriceValid() public {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
+        });
 
         vm.prank(owner);
         vm.expectRevert("Max time price valid can't be zero");
@@ -310,10 +336,15 @@ contract SlippagePriceCheckerTest is Test {
         // Configure WELL token with multiple price feeds (WELL/USD and then USD/USDC)
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: false});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 30 minutes
+        });
         configs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: chainlinkUsdcUsd,
-            reverse: true // Reverse to get USD/USDC
+            reverse: true, // Reverse to get USD/USDC
+            heartbeat: 1 days
         });
 
         // First remove the existing configuration
@@ -345,7 +376,11 @@ contract SlippagePriceCheckerTest is Test {
         // Configure WELL token with reverse flag
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: chainlinkWellUsd, reverse: true});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: true,
+            heartbeat: 1800
+        });
 
         // First remove the existing configuration
         vm.prank(owner);
@@ -404,7 +439,7 @@ contract SlippagePriceCheckerTest is Test {
         );
 
         // Try to get expected output - should revert
-        vm.expectRevert("Latest answer must be positive");
+        vm.expectRevert("Chainlink price cannot be lower or equal to 0");
         slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
     }
 
@@ -428,21 +463,21 @@ contract SlippagePriceCheckerTest is Test {
     }
 
     function testRevertIfChainlinkPriceStale() public {
-        // Mock the latestRoundData call to return stale price (answeredInRound < roundId)
+        // Mock the latestRoundData call to return stale price (updatedAt is too old)
         vm.mockCall(
             chainlinkWellUsd,
             abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
             abi.encode(
-                uint80(2), // roundId
+                uint80(1), // roundId
                 int256(1e8), // answer (price)
                 uint256(0), // startedAt
-                block.timestamp, // updatedAt
-                uint80(1) // answeredInRound (stale)
+                block.timestamp - 3600, // updatedAt (1 hour ago, exceeds heartbeat of 1800 seconds)
+                uint80(1) // answeredInRound
             )
         );
 
         // Try to get expected output - should revert
-        vm.expectRevert("Stale price");
+        vm.expectRevert("Price feed update time exceeds heartbeat");
         slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
     }
 }

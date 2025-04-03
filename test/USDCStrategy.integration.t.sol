@@ -93,10 +93,10 @@ contract USDCStrategyTest is Test {
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -515,24 +515,121 @@ contract USDCStrategyTest is Test {
         assertEq(address(strategy).balance, 0, "Strategy should still have no ETH balance");
     }
 
-    function testRevertIfRecoverETHTransferFails() public {
-        // Send some ETH to the strategy contract
-        uint256 ethAmount = 1 ether;
-        vm.deal(address(strategy), ethAmount);
+    function testRevertIfRecoverERC20TransferFails() public {
+        // Deploy the failing token
+        MockFailingERC20 failingToken = new MockFailingERC20();
 
-        // Create a contract that rejects ETH transfers
-        MockRejectETH rejectContract = new MockRejectETH();
-        address payable rejectAddress = payable(address(rejectContract));
+        // Set some balance for the strategy in the failing token
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens
+        failingToken.setBalance(address(strategy), tokenAmount);
 
-        // Owner attempts to recover ETH to the rejecting contract
+        // Verify the strategy has the tokens
+        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should have the failing tokens");
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Owner attempts to recover the tokens - should fail
         vm.startPrank(owner);
         vm.expectRevert("Transfer failed");
-        strategy.recoverETH(rejectAddress);
+        strategy.recoverERC20(address(failingToken), recipient, tokenAmount);
         vm.stopPrank();
 
-        // Verify the ETH remains in the strategy
-        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
-        assertEq(rejectAddress.balance, 0, "Reject contract should not have received any ETH");
+        // Verify the tokens remain in the strategy
+        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
+    }
+
+    function testOwnerCanWithdrawAll() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+
+        // Verify initial balances
+        assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
+        uint256 strategyBalance = strategy.getTotalBalance();
+        assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
+
+        // Call withdrawAll
+        strategy.withdrawAll();
+        vm.stopPrank();
+
+        // Verify the owner received all funds
+        assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+
+        // Verify the strategy's balance is now 0
+        assertEq(strategy.getTotalBalance(), 0, "Strategy balance should be 0");
+
+        // Verify protocol balances are 0
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "mToken balance should be 0");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "Vault balance should be 0");
+    }
+
+    function testRevertIfNonOwnerWithdrawAll() public {
+        // First deposit funds as the owner
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+
+        // Attempt to withdraw all as non-owner
+        vm.startPrank(nonOwner);
+        vm.expectRevert("Not strategy owner");
+        strategy.withdrawAll();
+        vm.stopPrank();
+
+        // Verify the strategy balance remains unchanged
+        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+    }
+
+    function testRevertIfNoTokensToWithdrawAll() public {
+        // Ensure the strategy has no tokens
+        assertEq(strategy.getTotalBalance(), 0, "Strategy should have no initial balance");
+
+        // Attempt to withdraw all
+        vm.startPrank(owner);
+        vm.expectRevert("No tokens to withdraw");
+        strategy.withdrawAll();
+        vm.stopPrank();
+    }
+
+    function testWithdrawAllWithDifferentSplits() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+
+        // Update position to 70% mToken, 30% vault
+        vm.stopPrank();
+        vm.prank(backend);
+        strategy.updatePosition(7000, 3000); // 70% - 30% split
+
+        // Withdraw all as owner
+        vm.startPrank(owner);
+        strategy.withdrawAll();
+        vm.stopPrank();
+
+        // Verify the owner received all funds
+        assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+
+        // Verify the strategy's balance is now 0
+        assertEq(strategy.getTotalBalance(), 0, "Strategy balance should be 0");
+
+        // Verify protocol balances are 0
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "mToken balance should be 0");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "Vault balance should be 0");
     }
 
     function testBackendCanUpdatePosition() public {
@@ -1358,7 +1455,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1383,7 +1481,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1422,7 +1521,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1495,30 +1595,6 @@ contract USDCStrategyTest is Test {
 
         vm.expectRevert("Order expires too far in the future");
         strategy.isValidSignature(digest, encodedOrder);
-    }
-
-    function testRevertIfRecoverERC20TransferFails() public {
-        // Deploy the failing token
-        MockFailingERC20 failingToken = new MockFailingERC20();
-
-        // Set some balance for the strategy in the failing token
-        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens
-        failingToken.setBalance(address(strategy), tokenAmount);
-
-        // Verify the strategy has the tokens
-        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should have the failing tokens");
-
-        // Create a recipient address
-        address recipient = makeAddr("recipient");
-
-        // Owner attempts to recover the tokens - should fail
-        vm.startPrank(owner);
-        vm.expectRevert("Transfer failed");
-        strategy.recoverERC20(address(failingToken), recipient, tokenAmount);
-        vm.stopPrank();
-
-        // Verify the tokens remain in the strategy
-        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
     }
 
     function parseUint(string memory json, string memory key) internal pure returns (uint256) {

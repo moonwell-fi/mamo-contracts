@@ -7,6 +7,8 @@ import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
@@ -16,6 +18,7 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  * @dev Uses AccessControlEnumerable for role-based access control and Pausable for emergency stops
  */
 contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
+    using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
 
     // Role definitions
@@ -52,6 +55,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
     /// @notice Emitted when an implementation is whitelisted
     event ImplementationWhitelisted(address indexed implementation, uint256 indexed strategyType);
+
+    /// @notice Emitted when tokens are recovered from the contract
+    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     /**
      * @notice Constructor that sets up initial roles
@@ -232,7 +238,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
     /**
      * @notice Recovers ERC20 tokens accidentally sent to this contract
-     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE
+     * @dev Only callable by the user who owns this strategy
      * @param tokenAddress The address of the token to recover
      * @param to The address to send the tokens to
      * @param amount The amount of tokens to recover
@@ -241,7 +247,8 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(to != address(0), "Cannot send to zero address");
         require(amount > 0, "Amount must be greater than 0");
 
-        bool result = IERC20(tokenAddress).transfer(to, amount);
-        require(result == true, "Token transfer failed");
+        IERC20(tokenAddress).safeTransfer(to, amount);
+
+        emit TokenRecovered(tokenAddress, to, amount);
     }
 }

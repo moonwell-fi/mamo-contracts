@@ -17,6 +17,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title ERC20MoonwellMorphoStrategy
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
+ * @notice IMPORTANT: This contract does not support fee-on-transfer tokens. Using such tokens will result in
+ *         unexpected behavior and potential loss of funds.
  * @dev This contract is designed to be used as an implementation for proxies
  */
 contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
@@ -132,6 +134,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Deposits funds into the strategy
+     * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
@@ -175,6 +179,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Withdraws funds from the strategy
+     * @notice This function assumes that the exact `amount` of tokens is transferred to the user.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
      */
@@ -212,6 +218,35 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         token.safeTransfer(msg.sender, amount);
 
         emit Withdraw(address(token), amount);
+    }
+
+    /**
+     * @notice Withdraws all funds from the strategy
+     * @dev Only callable by the user who owns this strategy
+     */
+    function withdrawAll() external onlyStrategyOwner {
+        // Get current balances
+        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
+        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
+
+        // Withdraw from Moonwell if needed
+        if (mTokenBalance > 0) {
+            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
+        }
+
+        // Withdraw from MetaMorpho if needed
+        if (vaultBalance > 0) {
+            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
+        }
+
+        // Get final token balance
+        uint256 finalBalance = token.balanceOf(address(this));
+        require(finalBalance > 0, "No tokens to withdraw");
+
+        // Transfer all tokens to the owner
+        token.safeTransfer(msg.sender, finalBalance);
+
+        emit Withdraw(address(token), finalBalance);
     }
 
     // ==================== BACKEND FUNCTIONS ====================

@@ -38,10 +38,11 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @param token The address of the configured token
      * @param chainlinkFeed The address of the Chainlink price feed
      * @param reverse Whether to reverse the price calculation
+     * @param heartbeat Maximum time between price feed updates
      * @param maxTimePriceValid Maximum time in seconds that a price is considered valid
      */
     event TokenConfigured(
-        address indexed token, address indexed chainlinkFeed, bool reverse, uint256 maxTimePriceValid
+        address indexed token, address indexed chainlinkFeed, bool reverse, uint256 heartbeat, uint256 maxTimePriceValid
     );
 
     /**
@@ -83,10 +84,17 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         // Add new configurations
         for (uint256 i = 0; i < configurations.length; i++) {
             require(configurations[i].chainlinkFeed != address(0), "Invalid chainlink feed address");
+            require(configurations[i].heartbeat > 0, "Heartbeat must be greater than 0");
             tokenOracleData[token].push(configurations[i]);
 
             // Emit event for each configuration
-            emit TokenConfigured(token, configurations[i].chainlinkFeed, configurations[i].reverse, _maxTimePriceValid);
+            emit TokenConfigured(
+                token,
+                configurations[i].chainlinkFeed,
+                configurations[i].reverse,
+                configurations[i].heartbeat,
+                _maxTimePriceValid
+            );
         }
     }
 
@@ -178,14 +186,16 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         // Convert to memory arrays for the getExpectedOutFromChainlink function
         address[] memory priceFeeds = new address[](configs.length);
         bool[] memory reverses = new bool[](configs.length);
+        uint256[] memory heartbeats = new uint256[](configs.length);
 
         uint256 configsLen = configs.length;
         for (uint256 i = 0; i < configsLen; i++) {
             priceFeeds[i] = configs[i].chainlinkFeed;
             reverses[i] = configs[i].reverse;
+            heartbeats[i] = configs[i].heartbeat;
         }
 
-        return getExpectedOutFromChainlink(priceFeeds, reverses, _amountIn, _fromToken, _toToken);
+        return getExpectedOutFromChainlink(priceFeeds, reverses, heartbeats, _amountIn, _fromToken, _toToken);
     }
 
     // ==================== Internal Functions ====================
@@ -194,6 +204,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @notice Calculates the expected output amount using Chainlink price feeds
      * @param _priceFeeds The price feeds to use
      * @param _reverses Whether to reverse each price feed
+     * @param _heartbeats The heartbeats for each price feed
      * @param _amountIn The input amount
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
@@ -202,6 +213,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     function getExpectedOutFromChainlink(
         address[] memory _priceFeeds,
         bool[] memory _reverses,
+        uint256[] memory _heartbeats,
         uint256 _amountIn,
         address _fromToken,
         address _toToken
@@ -210,16 +222,17 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         require(_priceFeedsLen > 0, "Need at least one price feed");
         require(_priceFeedsLen == _reverses.length, "Price feeds and reverses must have same length");
+        require(_priceFeedsLen == _heartbeats.length, "Price feeds and heartbeats must have same length");
 
         for (uint256 _i = 0; _i < _priceFeedsLen; _i++) {
             IPriceFeed _priceFeed = IPriceFeed(_priceFeeds[_i]);
 
-            (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = _priceFeed.latestRoundData();
-            require(answer > 0, "Latest answer must be positive");
+            (, int256 answer,, uint256 updatedAt,) = _priceFeed.latestRoundData();
 
             require(answer > 0, "Chainlink price cannot be lower or equal to 0");
             require(updatedAt != 0, "Round is in incompleted state");
-            require(answeredInRound >= roundId, "Stale price");
+
+            require(block.timestamp <= updatedAt + _heartbeats[_i], "Price feed update time exceeds heartbeat");
 
             uint256 _scaleAnswerBy = 10 ** uint256(_priceFeed.decimals());
 
