@@ -93,10 +93,10 @@ contract USDCStrategyTest is Test {
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1455,7 +1455,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1480,7 +1481,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1519,7 +1521,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
