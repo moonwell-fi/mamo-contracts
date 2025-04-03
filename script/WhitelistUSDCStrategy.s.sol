@@ -30,7 +30,7 @@ contract WhitelistUSDCStrategy is Script {
 
         // Get the addresses
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address usdcStrategyImplementation = addresses.getAddress("USDC_STRATEGY_IMPLEMENTATION");
+        address usdcStrategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
 
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);

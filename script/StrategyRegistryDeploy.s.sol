@@ -25,9 +25,9 @@ contract StrategyRegistryDeploy is Script {
 
     function deployStrategyRegistry(Addresses addresses) public returns (MamoStrategyRegistry registry) {
         // Get the addresses for the roles
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        address admin = addresses.getAddress("TESTING_EOA");
+        address backend = addresses.getAddress("TESTING_EOA");
+        address guardian = addresses.getAddress("TESTING_EOA");
 
         vm.startBroadcast();
         // Deploy the MamoStrategyRegistry with the specified roles

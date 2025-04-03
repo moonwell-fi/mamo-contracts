@@ -42,7 +42,7 @@ contract DeploySlippagePriceChecker is Script {
         vm.startBroadcast();
 
         // Get the MAMO_MULTISIG address from the addresses contract
-        address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
+        address mamoMultisig = addresses.getAddress("TESTING_EOA");
 
         // Deploy the SlippagePriceChecker implementation
         SlippagePriceChecker implementation = new SlippagePriceChecker();
