@@ -17,6 +17,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title ERC20MoonwellMorphoStrategy
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
+ * @notice IMPORTANT: This contract does not support fee-on-transfer tokens. Using such tokens will result in
+ *         unexpected behavior and potential loss of funds.
  * @dev This contract is designed to be used as an implementation for proxies
  */
 contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
@@ -132,6 +134,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Deposits funds into the strategy
+     * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
@@ -175,6 +179,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Withdraws funds from the strategy
+     * @notice This function assumes that the exact `amount` of tokens is transferred to the user.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
      */

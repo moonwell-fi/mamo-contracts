@@ -384,3 +384,4 @@ A generic implementation of a Strategy Contract for ERC20 tokens that splits dep
 6. Mamo Registry admin role is a multisig with a timelock.
 7. Guardian is a multisig without a timelock.
 8. The strategy integrates with Cow Swap through the isValidSignature function, which validates orders according to EIP-1271. Any bot can fulfill orders as long as the price matches the Chainlink price within the set slippage tolerance, as verified by the SlippagePriceChecker contract.
+9. The system does not support fee-on-transfer tokens. Using such tokens would result in deposit and withdrawal failures due to balance discrepancies, as the contracts assume that the exact amount of tokens specified is transferred.
