@@ -214,6 +214,35 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         emit Withdraw(address(token), amount);
     }
 
+    /**
+     * @notice Withdraws all funds from the strategy
+     * @dev Only callable by the user who owns this strategy
+     */
+    function withdrawAll() external onlyStrategyOwner {
+        // Get current balances
+        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
+        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
+
+        // Withdraw from Moonwell if needed
+        if (mTokenBalance > 0) {
+            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
+        }
+
+        // Withdraw from MetaMorpho if needed
+        if (vaultBalance > 0) {
+            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
+        }
+
+        // Get final token balance
+        uint256 finalBalance = token.balanceOf(address(this));
+        require(finalBalance > 0, "No tokens to withdraw");
+
+        // Transfer all tokens to the owner
+        token.safeTransfer(msg.sender, finalBalance);
+
+        emit Withdraw(address(token), finalBalance);
+    }
+
     // ==================== BACKEND FUNCTIONS ====================
 
     /**
