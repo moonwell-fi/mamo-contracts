@@ -42,7 +42,8 @@ contract DeploySlippagePriceChecker is Script {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         wellConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 1 hours
         });
 
         vm.startBroadcast();
