@@ -20,7 +20,7 @@ interface IMamoStrategyRegistry {
 
     /**
      * @notice Adds an implementation to the whitelist with a strategy type ID
-     * @dev Only callable by accounts with the BACKEND_ROLE
+     * @dev Only callable by accounts with the ADMIN_ROLE
      * @param implementation The address of the implementation to whitelist
      * @param strategyTypeId The strategy type ID to assign. If 0, a new ID will be assigned
      * @return assignedStrategyTypeId The assigned strategy type ID
@@ -70,8 +70,9 @@ interface IMamoStrategyRegistry {
      * @notice Updates the implementation of a strategy
      * @dev Only callable by the user who owns the strategy
      * @param strategy The address of the strategy to update
+     * @param newImplementation The new implementation address
      */
-    function upgradeStrategy(address strategy) external;
+    function upgradeStrategy(address strategy, address newImplementation) external;
 
     /**
      * @notice Gets all strategies for a user

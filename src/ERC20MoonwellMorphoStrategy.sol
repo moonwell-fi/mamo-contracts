@@ -17,6 +17,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title ERC20MoonwellMorphoStrategy
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
+ * @notice IMPORTANT: This contract does not support fee-on-transfer tokens. Using such tokens will result in
+ *         unexpected behavior and potential loss of funds.
  * @dev This contract is designed to be used as an implementation for proxies
  */
 contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
@@ -34,6 +36,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
+    /// @notice The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
+    address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
+
     // State variables
     // @notice Reference to the Moonwell mToken contract
     IMToken public mToken;
@@ -46,9 +51,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /// @notice Reference to the swap checker contract used to validate swap prices
     ISlippagePriceChecker public slippagePriceChecker;
-
-    /// @notice The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
-    address public vaultRelayer;
 
     // @notice Percentage of funds allocated to Moonwell mToken in basis points
     uint256 public splitMToken;
@@ -81,9 +83,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address metaMorphoVault;
         address token;
         address slippagePriceChecker;
-        address vaultRelayer;
         uint256 splitMToken;
         uint256 splitVault;
+        uint256 strategyTypeId;
     }
 
     /**
@@ -110,16 +112,16 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
         require(params.token != address(0), "Invalid token address");
         require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
-        require(params.vaultRelayer != address(0), "Invalid vaultRelayer address");
+        require(params.strategyTypeId != 0, "Strategy type id not set");
+        require(params.splitMToken + params.splitVault == 10000, "Split parameters must add up to 10000");
 
         // Set state variables
-        __BaseStrategy_init(params.mamoStrategyRegistry);
+        __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId);
 
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
         token = IERC20(params.token);
         slippagePriceChecker = ISlippagePriceChecker(params.slippagePriceChecker);
-        vaultRelayer = params.vaultRelayer;
 
         splitMToken = params.splitMToken;
         splitVault = params.splitVault;
@@ -132,6 +134,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Deposits funds into the strategy
+     * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
@@ -151,13 +155,14 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @notice Approves the vault relayer to spend a specific token
      * @dev Only callable by the user who owns this strategy
      * @param tokenAddress The address of the token to approve
+     * @param amount The amount of tokens to approve
      */
-    function approveCowSwap(address tokenAddress) external onlyStrategyOwner {
+    function approveCowSwap(address tokenAddress, uint256 amount) external onlyStrategyOwner {
         // Check if the token has a configuration in the swap checker
         require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
 
         // Approve the vault relayer unlimited
-        IERC20(tokenAddress).forceApprove(vaultRelayer, type(uint256).max);
+        IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
     }
 
     /**
@@ -168,14 +173,14 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     function setSlippage(uint256 _newSlippageInBps) external onlyStrategyOwner {
         require(_newSlippageInBps <= SPLIT_TOTAL, "Slippage exceeds maximum");
 
-        uint256 oldSlippage = allowedSlippageInBps;
+        emit SlippageUpdated(allowedSlippageInBps, _newSlippageInBps);
         allowedSlippageInBps = _newSlippageInBps;
-
-        emit SlippageUpdated(oldSlippage, _newSlippageInBps);
     }
 
     /**
      * @notice Withdraws funds from the strategy
+     * @notice This function assumes that the exact `amount` of tokens is transferred to the user.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
      */
@@ -213,6 +218,35 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         token.safeTransfer(msg.sender, amount);
 
         emit Withdraw(address(token), amount);
+    }
+
+    /**
+     * @notice Withdraws all funds from the strategy
+     * @dev Only callable by the user who owns this strategy
+     */
+    function withdrawAll() external onlyStrategyOwner {
+        // Get current balances
+        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
+        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
+
+        // Withdraw from Moonwell if needed
+        if (mTokenBalance > 0) {
+            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
+        }
+
+        // Withdraw from MetaMorpho if needed
+        if (vaultBalance > 0) {
+            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
+        }
+
+        // Get final token balance
+        uint256 finalBalance = token.balanceOf(address(this));
+        require(finalBalance > 0, "No tokens to withdraw");
+
+        // Transfer all tokens to the owner
+        token.safeTransfer(msg.sender, finalBalance);
+
+        emit Withdraw(address(token), finalBalance);
     }
 
     // ==================== BACKEND FUNCTIONS ====================
@@ -344,14 +378,14 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Deposit into each protocol according to the split
         if (targetMoonwell > 0) {
-            token.approve(address(mToken), targetMoonwell);
+            token.forceApprove(address(mToken), targetMoonwell);
 
             // Mint mToken with token
             require(mToken.mint(targetMoonwell) == 0, "MToken mint failed");
         }
 
         if (targetMetaMorpho > 0) {
-            token.approve(address(metaMorphoVault), targetMetaMorpho);
+            token.forceApprove(address(metaMorphoVault), targetMetaMorpho);
 
             // Deposit token into MetaMorpho
             metaMorphoVault.deposit(targetMetaMorpho, address(this));

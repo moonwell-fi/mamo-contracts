@@ -13,4 +13,10 @@ interface IBaseStrategy {
      * @return The Mamo Strategy Registry contract
      */
     function mamoStrategyRegistry() external view returns (IMamoStrategyRegistry);
+
+    /**
+     * @notice Gets the strategy type ID
+     * @return The strategy type ID
+     */
+    function strategyTypeId() external view returns (uint256);
 }

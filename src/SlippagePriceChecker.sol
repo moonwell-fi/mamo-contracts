@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-pragma abicoder v2;
-
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
-interface IPriceFeed {
-    function latestAnswer() external view returns (int256);
-    function decimals() external view returns (uint8);
-}
 
 interface IERC20MetaData {
     function decimals() external view returns (uint8);
@@ -44,11 +38,18 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @param token The address of the configured token
      * @param chainlinkFeed The address of the Chainlink price feed
      * @param reverse Whether to reverse the price calculation
+     * @param heartbeat Maximum time between price feed updates
      * @param maxTimePriceValid Maximum time in seconds that a price is considered valid
      */
     event TokenConfigured(
-        address indexed token, address indexed chainlinkFeed, bool reverse, uint256 maxTimePriceValid
+        address indexed token, address indexed chainlinkFeed, bool reverse, uint256 heartbeat, uint256 maxTimePriceValid
     );
+
+    /**
+     * @notice Emitted when all price feed configurations for a token are removed
+     * @param token The address of the token whose configurations were removed
+     */
+    event TokenConfigurationRemoved(address indexed token);
 
     /**
      * @dev Initializes the contract with the given owner
@@ -83,10 +84,17 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         // Add new configurations
         for (uint256 i = 0; i < configurations.length; i++) {
             require(configurations[i].chainlinkFeed != address(0), "Invalid chainlink feed address");
+            require(configurations[i].heartbeat > 0, "Heartbeat must be greater than 0");
             tokenOracleData[token].push(configurations[i]);
 
             // Emit event for each configuration
-            emit TokenConfigured(token, configurations[i].chainlinkFeed, configurations[i].reverse, _maxTimePriceValid);
+            emit TokenConfigured(
+                token,
+                configurations[i].chainlinkFeed,
+                configurations[i].reverse,
+                configurations[i].heartbeat,
+                _maxTimePriceValid
+            );
         }
     }
 
@@ -104,6 +112,8 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         // Reset the maxTimePriceValid for the token
         delete maxTimePriceValid[token];
+
+        emit TokenConfigurationRemoved(token);
     }
 
     // ==================== External View Functions ====================
@@ -176,13 +186,16 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         // Convert to memory arrays for the getExpectedOutFromChainlink function
         address[] memory priceFeeds = new address[](configs.length);
         bool[] memory reverses = new bool[](configs.length);
+        uint256[] memory heartbeats = new uint256[](configs.length);
 
-        for (uint256 i = 0; i < configs.length; i++) {
+        uint256 configsLen = configs.length;
+        for (uint256 i = 0; i < configsLen; i++) {
             priceFeeds[i] = configs[i].chainlinkFeed;
             reverses[i] = configs[i].reverse;
+            heartbeats[i] = configs[i].heartbeat;
         }
 
-        return getExpectedOutFromChainlink(priceFeeds, reverses, _amountIn, _fromToken, _toToken);
+        return getExpectedOutFromChainlink(priceFeeds, reverses, heartbeats, _amountIn, _fromToken, _toToken);
     }
 
     // ==================== Internal Functions ====================
@@ -191,6 +204,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @notice Calculates the expected output amount using Chainlink price feeds
      * @param _priceFeeds The price feeds to use
      * @param _reverses Whether to reverse each price feed
+     * @param _heartbeats The heartbeats for each price feed
      * @param _amountIn The input amount
      * @param _fromToken The token to swap from
      * @param _toToken The token to swap to
@@ -199,6 +213,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     function getExpectedOutFromChainlink(
         address[] memory _priceFeeds,
         bool[] memory _reverses,
+        uint256[] memory _heartbeats,
         uint256 _amountIn,
         address _fromToken,
         address _toToken
@@ -207,12 +222,17 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         require(_priceFeedsLen > 0, "Need at least one price feed");
         require(_priceFeedsLen == _reverses.length, "Price feeds and reverses must have same length");
+        require(_priceFeedsLen == _heartbeats.length, "Price feeds and heartbeats must have same length");
 
         for (uint256 _i = 0; _i < _priceFeedsLen; _i++) {
             IPriceFeed _priceFeed = IPriceFeed(_priceFeeds[_i]);
 
-            int256 _latestAnswer = _priceFeed.latestAnswer();
-            require(_latestAnswer > 0, "Latest answer must be positive");
+            (, int256 answer,, uint256 updatedAt,) = _priceFeed.latestRoundData();
+
+            require(answer > 0, "Chainlink price cannot be lower or equal to 0");
+            require(updatedAt != 0, "Round is in incompleted state");
+
+            require(block.timestamp <= updatedAt + _heartbeats[_i], "Price feed update time exceeds heartbeat");
 
             uint256 _scaleAnswerBy = 10 ** uint256(_priceFeed.decimals());
 
@@ -222,8 +242,8 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
             // Without a reverse, we multiply amount * price
             // With a reverse, we divide amount / price
             _expectedOutFromChainlink = _reverses[_i]
-                ? (_amountIntoThisIteration * _scaleAnswerBy) / uint256(_latestAnswer)
-                : (_amountIntoThisIteration * uint256(_latestAnswer)) / _scaleAnswerBy;
+                ? (_amountIntoThisIteration * _scaleAnswerBy) / uint256(answer)
+                : (_amountIntoThisIteration * uint256(answer)) / _scaleAnswerBy;
         }
 
         uint256 _fromTokenDecimals = uint256(IERC20MetaData(_fromToken).decimals());

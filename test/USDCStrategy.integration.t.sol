@@ -2,6 +2,8 @@
 pragma solidity 0.8.28;
 
 import {DeploySlippagePriceChecker} from "../script/DeploySlippagePriceChecker.s.sol";
+
+import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -91,10 +93,10 @@ contract USDCStrategyTest is Test {
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -107,8 +109,8 @@ contract USDCStrategyTest is Test {
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
 
         // Whitelist the implementation
-        vm.prank(backend);
-        registry.whitelistImplementation(address(implementation), 0);
+        vm.prank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
         splitMToken = splitVault = 5000; // 50% in basis points each
 
@@ -122,9 +124,9 @@ contract USDCStrategyTest is Test {
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
                 slippagePriceChecker: address(slippagePriceChecker),
-                vaultRelayer: addresses.getAddress("COWSWAP_VAULT_RELAYER"),
                 splitMToken: splitMToken,
-                splitVault: splitVault
+                splitVault: splitVault,
+                strategyTypeId: strategyTypeId
             })
         );
 
@@ -513,24 +515,121 @@ contract USDCStrategyTest is Test {
         assertEq(address(strategy).balance, 0, "Strategy should still have no ETH balance");
     }
 
-    function testRevertIfRecoverETHTransferFails() public {
-        // Send some ETH to the strategy contract
-        uint256 ethAmount = 1 ether;
-        vm.deal(address(strategy), ethAmount);
+    function testRevertIfRecoverERC20TransferFails() public {
+        // Deploy the failing token
+        MockFailingERC20 failingToken = new MockFailingERC20();
 
-        // Create a contract that rejects ETH transfers
-        MockRejectETH rejectContract = new MockRejectETH();
-        address payable rejectAddress = payable(address(rejectContract));
+        // Set some balance for the strategy in the failing token
+        uint256 tokenAmount = 1000 * 10 ** 18; // 1000 tokens
+        failingToken.setBalance(address(strategy), tokenAmount);
 
-        // Owner attempts to recover ETH to the rejecting contract
+        // Verify the strategy has the tokens
+        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should have the failing tokens");
+
+        // Create a recipient address
+        address recipient = makeAddr("recipient");
+
+        // Owner attempts to recover the tokens - should fail
         vm.startPrank(owner);
         vm.expectRevert("Transfer failed");
-        strategy.recoverETH(rejectAddress);
+        strategy.recoverERC20(address(failingToken), recipient, tokenAmount);
         vm.stopPrank();
 
-        // Verify the ETH remains in the strategy
-        assertEq(address(strategy).balance, ethAmount, "Strategy should still have the ETH");
-        assertEq(rejectAddress.balance, 0, "Reject contract should not have received any ETH");
+        // Verify the tokens remain in the strategy
+        assertEq(failingToken.balanceOf(address(strategy)), tokenAmount, "Strategy should still have the tokens");
+    }
+
+    function testOwnerCanWithdrawAll() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+
+        // Verify initial balances
+        assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
+        uint256 strategyBalance = strategy.getTotalBalance();
+        assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
+
+        // Call withdrawAll
+        strategy.withdrawAll();
+        vm.stopPrank();
+
+        // Verify the owner received all funds
+        assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+
+        // Verify the strategy's balance is now 0
+        assertEq(strategy.getTotalBalance(), 0, "Strategy balance should be 0");
+
+        // Verify protocol balances are 0
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "mToken balance should be 0");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "Vault balance should be 0");
+    }
+
+    function testRevertIfNonOwnerWithdrawAll() public {
+        // First deposit funds as the owner
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+
+        // Attempt to withdraw all as non-owner
+        vm.startPrank(nonOwner);
+        vm.expectRevert("Not strategy owner");
+        strategy.withdrawAll();
+        vm.stopPrank();
+
+        // Verify the strategy balance remains unchanged
+        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+    }
+
+    function testRevertIfNoTokensToWithdrawAll() public {
+        // Ensure the strategy has no tokens
+        assertEq(strategy.getTotalBalance(), 0, "Strategy should have no initial balance");
+
+        // Attempt to withdraw all
+        vm.startPrank(owner);
+        vm.expectRevert("No tokens to withdraw");
+        strategy.withdrawAll();
+        vm.stopPrank();
+    }
+
+    function testWithdrawAllWithDifferentSplits() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+
+        // Update position to 70% mToken, 30% vault
+        vm.stopPrank();
+        vm.prank(backend);
+        strategy.updatePosition(7000, 3000); // 70% - 30% split
+
+        // Withdraw all as owner
+        vm.startPrank(owner);
+        strategy.withdrawAll();
+        vm.stopPrank();
+
+        // Verify the owner received all funds
+        assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+
+        // Verify the strategy's balance is now 0
+        assertEq(strategy.getTotalBalance(), 0, "Strategy balance should be 0");
+
+        // Verify protocol balances are 0
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "mToken balance should be 0");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "Vault balance should be 0");
     }
 
     function testBackendCanUpdatePosition() public {
@@ -799,7 +898,7 @@ contract USDCStrategyTest is Test {
 
         // Approve the vault relayer to spend the well token
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Set up parameters for the order
         uint256 buyAmount;
@@ -863,7 +962,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes; // 24 hours from now
         uint256 buyAmount = 1000 * 10 ** 6; // Mock buy amount
@@ -897,7 +996,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -929,7 +1028,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Set validTo to less than 5 minutes in the future
         uint32 validTo = uint32(block.timestamp) + 4 minutes;
@@ -962,7 +1061,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -994,7 +1093,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1026,7 +1125,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1058,7 +1157,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Create a mock token that is different from the strategy token
         MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
@@ -1093,7 +1192,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1128,7 +1227,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1160,7 +1259,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** 6;
@@ -1233,7 +1332,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // First check with default slippage (1%)
         uint256 defaultSlippage = 100; // 1%
@@ -1319,7 +1418,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
@@ -1356,22 +1455,23 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
         slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
 
         // Check initial approval
-        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(initialAllowance, 0, "Initial allowance should be zero");
 
         // Owner approves the vault relayer
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Verify the approval was successful
-        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(finalAllowance, type(uint256).max, "Allowance should be set to maximum");
     }
 
@@ -1381,7 +1481,8 @@ contract USDCStrategyTest is Test {
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false
+            reverse: false,
+            heartbeat: 30 minutes
         });
 
         vm.prank(addresses.getAddress("MAMO_MULTISIG"));
@@ -1393,10 +1494,10 @@ contract USDCStrategyTest is Test {
         // Non-owner attempts to approve the vault relayer
         vm.prank(nonOwner);
         vm.expectRevert("Not strategy owner");
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Verify the approval was not granted
-        uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(allowance, 0, "Allowance should remain zero");
     }
 
@@ -1407,11 +1508,41 @@ contract USDCStrategyTest is Test {
         // Owner attempts to approve the vault relayer for an unconfigured token
         vm.prank(owner);
         vm.expectRevert("Token not allowed");
-        strategy.approveCowSwap(address(mockToken));
+        strategy.approveCowSwap(address(mockToken), type(uint256).max);
 
         // Verify the approval was not granted
-        uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.vaultRelayer());
+        uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(allowance, 0, "Allowance should remain zero");
+    }
+
+    function testApproveCowSwapZeroAmountRemovesApproval() public {
+        // Verify the token is configured in the swap checker
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
+            reverse: false,
+            heartbeat: 30 minutes
+        });
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
+
+        // First set a non-zero approval
+        vm.startPrank(owner);
+        strategy.approveCowSwap(address(well), type(uint256).max);
+
+        // Verify the initial approval was set
+        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
+        assertEq(initialAllowance, type(uint256).max, "Initial allowance should be maximum");
+
+        // Now set approval to zero
+        strategy.approveCowSwap(address(well), 0);
+        vm.stopPrank();
+
+        // Verify the approval was removed
+        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
+        assertEq(finalAllowance, 0, "Allowance should be set to zero");
     }
 
     function testAuthorizeUpgrade() public {
@@ -1438,7 +1569,7 @@ contract USDCStrategyTest is Test {
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
-        strategy.approveCowSwap(address(well));
+        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Set validTo to more than 24 hours in the future
         uint32 validTo = uint32(block.timestamp) + 25 hours; // 25 hours from now
