@@ -81,11 +81,15 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         backend = addresses.getAddress("MAMO_BACKEND");
         guardian = addresses.getAddress("MAMO_MULTISIG");
 
-        // Deploy the MamoStrategyRegistry using the script
-        StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
+        if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
+            // Deploy the MamoStrategyRegistry using the script
+            StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
 
-        // Call the deployStrategyRegistry function with the addresses
-        registry = deployScript.deployStrategyRegistry(addresses);
+            // Call the deployStrategyRegistry function with the addresses
+            registry = deployScript.deployStrategyRegistry(addresses);
+        } else {
+            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        }
     }
 
     function testRegistryDeployment() public view {

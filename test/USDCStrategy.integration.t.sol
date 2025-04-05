@@ -52,7 +52,7 @@ contract USDCStrategyTest is Test {
     // Contracts
     ERC20MoonwellMorphoStrategy strategy;
     MamoStrategyRegistry registry;
-    SlippagePriceChecker slippagePriceChecker;
+    ISlippagePriceChecker slippagePriceChecker;
     IERC20 usdc;
     IERC20 well;
     IMToken mToken;
@@ -85,11 +85,13 @@ contract USDCStrategyTest is Test {
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
 
-        // Create an instance of the DeploySlippagePriceChecker script
-        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-
-        // Deploy the swap checker using the script
-        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
+        if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
+            // Deploy the SlippagePriceChecker using the script
+            DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
+        } else {
+            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        }
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);

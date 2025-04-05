@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
+
 import {DeploySlippagePriceChecker} from "../script/DeploySlippagePriceChecker.s.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
@@ -14,7 +16,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract SlippagePriceCheckerTest is Test {
-    SlippagePriceChecker public slippagePriceChecker;
+    ISlippagePriceChecker public slippagePriceChecker;
     Addresses public addresses;
 
     // Contracts from Base network
@@ -43,9 +45,13 @@ contract SlippagePriceCheckerTest is Test {
         chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
         chainlinkUsdcUsd = addresses.getAddress("CHAINLINK_USDC_USD");
 
-        // Deploy the SlippagePriceChecker using the script
-        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
+        if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
+            // Deploy the SlippagePriceChecker using the script
+            DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
+        } else {
+            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        }
 
         // Configure tokens with their respective price feeds
         addTokenConfigurations();
@@ -79,7 +85,7 @@ contract SlippagePriceCheckerTest is Test {
 
     function testInitialState() public view {
         // Check owner
-        assertEq(slippagePriceChecker.owner(), owner, "Owner should be set correctly");
+        assertEq(OwnableUpgradeable(address(slippagePriceChecker)).owner(), owner, "Owner should be set correctly");
     }
 
     function testTokenConfiguration() public view {
