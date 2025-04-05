@@ -10,7 +10,7 @@ import {Addresses} from "@addresses/Addresses.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-contract USDCStrategyUserDeployer is Script {
+contract USDCStrategyImplDeployer is Script {
     Addresses public addresses;
 
     function run() external {
@@ -22,14 +22,14 @@ contract USDCStrategyUserDeployer is Script {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Deploy the strategy implementation and proxy
-        deployImplementation();
+        deployImplementation(addresses);
 
         addresses.updateJson();
 
         addresses.printJSONChanges();
     }
 
-    function deployImplementation() public returns (address) {
+    function deployImplementation(Addresses addresses) public returns (address) {
         vm.startBroadcast();
         // Deploy the implementation contract
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();

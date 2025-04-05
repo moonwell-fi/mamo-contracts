@@ -11,7 +11,7 @@ import {Addresses} from "@addresses/Addresses.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 
-contract USDCStrategyImplDeployer is Script {
+contract USDCStrategyUserDeployer is Script {
     function run() external {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
