@@ -43,14 +43,27 @@ contract DeploySlippagePriceChecker is Script {
         wellConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
             reverse: false,
-            heartbeat: 1 hours
+            heartbeat: 24 hours
+        });
+
+        // Configure MORPHO token with MORPHO/USD price feed
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory morphoConfigs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        morphoConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_MORPHO_USD"),
+            reverse: false,
+            heartbeat: 24 hours
         });
 
         vm.startBroadcast();
 
+        // Add configuration for WELL token
         priceChecker.addTokenConfiguration(
             addresses.getAddress("xWELL_PROXY"), wellConfigs, DEFAULT_MAX_TIME_PRICE_VALID
         );
+
+        // Add configuration for MORPHO token
+        priceChecker.addTokenConfiguration(addresses.getAddress("MORPHO"), morphoConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
 
         vm.stopBroadcast();
     }

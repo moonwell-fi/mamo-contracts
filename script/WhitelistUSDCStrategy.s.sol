@@ -10,21 +10,19 @@ import {Addresses} from "../addresses/Addresses.sol";
 import {MamoStrategyRegistry} from "../src/MamoStrategyRegistry.sol";
 
 contract WhitelistUSDCStrategy is Script {
-    Addresses public addresses;
-
     function run() external {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid; // Use the current chain ID
 
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Whitelist the USDC strategy implementation
-        whitelistUSDCStrategy();
+        whitelistUSDCStrategy(addresses);
     }
 
-    function whitelistUSDCStrategy() public {
+    function whitelistUSDCStrategy(Addresses addresses) public {
         // Start broadcasting transactions
         vm.startBroadcast();
 

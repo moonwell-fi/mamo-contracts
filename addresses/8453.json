@@ -73,5 +73,10 @@
     "addr": "0xd646263aF8967CdfcE2caA5F8901e93783E4e059",
     "name": "CHAINLINK_SWAP_CHECKER_PROXY",
     "isContract": true
+  },
+  {
+    "addr": "0xe95e258bb6615d47515Fc849f8542dA651f12bF6",
+    "name": "CHAINLINK_MORPHO_USD",
+    "isContract": true
   }
 ]

@@ -62,7 +62,7 @@ contract DeploySystem is Script {
 
         // Step 5: Whitelist the USDC strategy implementation
         console.log("Step 5: Whitelisting USDC strategy implementation...");
-        whitelistUSDCStrategy.whitelistUSDCStrategy();
+        whitelistUSDCStrategy.whitelistUSDCStrategy(addresses);
         console.log("USDC strategy implementation whitelisted successfully");
 
         // Step 6: Deploy the USDCStrategyFactory
