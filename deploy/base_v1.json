@@ -1,0 +1,23 @@
+{
+  "admin": "TESTING_EOA",
+  "backend": "TESTING_EOA",
+  "chainId": 8453,
+  "guardian": "TESTING_EOA",
+  "maxPriceValidTime": 3600,
+  "maxSlippageBps": 50,
+  "rewardTokens": [
+    {
+      "heartbeat": 86400,
+      "priceFeed": "CHAINLINK_MORPHO_USD",
+      "reverse": false,
+      "token": "MORPHO"
+    },
+    {
+      "heartbeat": 86400,
+      "priceFeed": "CHAINLINK_WELL_USD",
+      "reverse": false,
+      "token": "xWELL_PROXY"
+    }
+  ],
+  "version": "v1"
+}

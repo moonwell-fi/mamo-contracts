@@ -11,15 +11,13 @@ import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrateg
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract USDCStrategyImplDeployer is Script {
-    Addresses public addresses;
-
     function run() external {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid; // Use the current chain ID
 
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Deploy the strategy implementation and proxy
         deployImplementation(addresses);
