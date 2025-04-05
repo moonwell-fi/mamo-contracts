@@ -5,6 +5,7 @@ import {Script} from "@forge-std/Script.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 
+import {DeployConfig} from "./DeployConfig.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -16,39 +17,24 @@ import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
  * @dev Deploys the SlippagePriceChecker implementation and proxy, then updates the addresses JSON file
  */
 contract DeploySlippagePriceChecker is Script {
-    function run() external {
-        // Load the addresses from the JSON file
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid; // Use the current chain ID
-
-        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
-
-        deploySlippagePriceChecker(addresses);
-
-        // Update the JSON file with the new address
-        addresses.updateJson();
-        addresses.printJSONChanges();
-    }
-
     /**
      * @notice Deploys the SlippagePriceChecker implementation and proxy
      * @return slippagePriceCheckerProxy The deployed SlippagePriceChecker proxy contract
      */
-    function deploySlippagePriceChecker(Addresses addresses)
+    function deploySlippagePriceChecker(Addresses addresses, DeployConfig.DeploymentConfig memory config)
         public
         returns (SlippagePriceChecker slippagePriceCheckerProxy)
     {
         vm.startBroadcast();
 
-        // Get the MAMO_MULTISIG address from the addresses contract
-        address mamoMultisig = addresses.getAddress("TESTING_EOA");
+        // Get the admin address from the addresses contract
+        address admin = addresses.getAddress(config.admin);
 
         // Deploy the SlippagePriceChecker implementation
         SlippagePriceChecker implementation = new SlippagePriceChecker();
 
         // Prepare initialization data for the proxy
-        bytes memory initData = abi.encodeWithSelector(SlippagePriceChecker.initialize.selector, mamoMultisig);
+        bytes memory initData = abi.encodeWithSelector(SlippagePriceChecker.initialize.selector, admin);
 
         // Deploy the proxy with the implementation and initialization data
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);

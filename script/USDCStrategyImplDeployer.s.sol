@@ -6,28 +6,16 @@ import {Script} from "@forge-std/Script.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
+import {DeployConfig} from "./DeployConfig.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract USDCStrategyImplDeployer is Script {
-    function run() external {
-        // Load the addresses from the JSON file
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid; // Use the current chain ID
-
-        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
-
-        // Deploy the strategy implementation and proxy
-        deployImplementation(addresses);
-
-        addresses.updateJson();
-
-        addresses.printJSONChanges();
-    }
-
-    function deployImplementation(Addresses addresses) public returns (address) {
+    function deployImplementation(Addresses addresses, DeployConfig.DeploymentConfig memory config)
+        public
+        returns (address)
+    {
         vm.startBroadcast();
         // Deploy the implementation contract
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();

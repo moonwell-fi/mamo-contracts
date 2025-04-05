@@ -5,6 +5,7 @@ import {Script} from "@forge-std/Script.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
+import {DeployConfig} from "./DeployConfig.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {USDCStrategyFactory} from "@contracts/USDCStrategyFactory.sol";
 
@@ -13,22 +14,10 @@ import {USDCStrategyFactory} from "@contracts/USDCStrategyFactory.sol";
  * @notice Script to deploy the USDCStrategyFactory contract
  */
 contract USDCStrategyFactoryDeployer is Script {
-    function run() external {
-        // Load the addresses from the JSON file
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid; // Use the current chain ID
-
-        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
-
-        // Deploy the USDCStrategyFactory
-        deployUSDCStrategyFactory(addresses);
-
-        addresses.updateJson();
-        addresses.printJSONChanges();
-    }
-
-    function deployUSDCStrategyFactory(Addresses addresses) public returns (address) {
+    function deployUSDCStrategyFactory(Addresses addresses, DeployConfig.DeploymentConfig memory config)
+        public
+        returns (address)
+    {
         vm.startBroadcast();
 
         // Get the addresses for the initialization parameters

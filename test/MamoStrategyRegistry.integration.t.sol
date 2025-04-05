@@ -18,6 +18,7 @@ import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.s
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {DeployConfig} from "@script/DeployConfig.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
 
 // Mock proxy that returns address(0) for implementation
@@ -76,17 +77,23 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         addresses = new Addresses(addressesFolderPath, chainIds);
 
+        // Get the environment from command line arguments or use default
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING.json"));
+        string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
+
+        DeployConfig config = new DeployConfig(configPath);
+
         // Get the addresses for the roles
-        admin = addresses.getAddress("TESTING_EOA");
-        backend = addresses.getAddress("TESTING_EOA");
-        guardian = addresses.getAddress("TESTING_EOA");
+        admin = addresses.getAddress(config.getConfig().admin);
+        backend = addresses.getAddress(config.getConfig().backend);
+        guardian = addresses.getAddress(config.getConfig().guardian);
 
         if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
             // Deploy the MamoStrategyRegistry using the script
             StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
 
             // Call the deployStrategyRegistry function with the addresses
-            registry = deployScript.deployStrategyRegistry(addresses);
+            registry = deployScript.deployStrategyRegistry(addresses, config.getConfig());
         } else {
             registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         }

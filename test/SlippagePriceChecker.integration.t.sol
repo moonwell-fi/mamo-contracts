@@ -3,11 +3,12 @@ pragma solidity 0.8.28;
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 
-import {DeploySlippagePriceChecker} from "../script/DeploySlippagePriceChecker.s.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
+import {DeployConfig} from "@script/DeployConfig.sol";
+import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
@@ -38,6 +39,12 @@ contract SlippagePriceCheckerTest is Test {
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
 
+        // Get the environment from command line arguments or use default
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING.json"));
+        string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
+
+        DeployConfig config = new DeployConfig(configPath);
+
         // Get the addresses from the addresses contract
         owner = addresses.getAddress("MAMO_MULTISIG");
         usdc = ERC20(addresses.getAddress("USDC"));
@@ -48,7 +55,7 @@ contract SlippagePriceCheckerTest is Test {
         if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
             // Deploy the SlippagePriceChecker using the script
             DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config.getConfig());
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }

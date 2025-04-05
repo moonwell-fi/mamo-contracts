@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {DeploySlippagePriceChecker} from "../script/DeploySlippagePriceChecker.s.sol";
+import {DeployConfig} from "@script/DeployConfig.sol";
+import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@addresses/Addresses.sol";
@@ -74,10 +75,16 @@ contract USDCStrategyTest is Test {
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
 
+        // Get the environment from command line arguments or use default
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING.json"));
+        string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
+
+        DeployConfig config = new DeployConfig(configPath);
+
         // Get the addresses for the roles
-        admin = addresses.getAddress("TESTING_EOA");
-        backend = addresses.getAddress("TESTING_EOA");
-        guardian = addresses.getAddress("TESTING_EOA");
+        admin = addresses.getAddress(config.getConfig().admin);
+        backend = addresses.getAddress(config.getConfig().backend);
+        guardian = addresses.getAddress(config.getConfig().guardian);
         owner = makeAddr("owner");
 
         usdc = IERC20(addresses.getAddress("USDC"));
@@ -88,7 +95,7 @@ contract USDCStrategyTest is Test {
         if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
             // Deploy the SlippagePriceChecker using the script
             DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config.getConfig());
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }

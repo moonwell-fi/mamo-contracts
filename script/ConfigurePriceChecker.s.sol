@@ -5,6 +5,7 @@ import {Script} from "@forge-std/Script.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 
+import {DeployConfig} from "./DeployConfig.sol";
 import {Addresses} from "@addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -19,21 +20,10 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 contract DeploySlippagePriceChecker is Script {
     uint256 public constant DEFAULT_MAX_TIME_PRICE_VALID = 3600; // 1 hour in seconds
 
-    function run() external {
-        // Load the addresses from the JSON file
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid; // Use the current chain ID
-
-        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
-
-        configureSlippageForToken(addresses);
-    }
-
     /**
      * @notice Configure price checker for a token
      */
-    function configureSlippageForToken(Addresses addresses) public {
+    function configureSlippageForToken(Addresses addresses, DeployConfig.DeploymentConfig memory config) public {
         // Deploy the SlippagePriceChecker implementation
         SlippagePriceChecker priceChecker = SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
 
@@ -58,12 +48,10 @@ contract DeploySlippagePriceChecker is Script {
         vm.startBroadcast();
 
         // Add configuration for WELL token
-        priceChecker.addTokenConfiguration(
-            addresses.getAddress("xWELL_PROXY"), wellConfigs, DEFAULT_MAX_TIME_PRICE_VALID
-        );
+        priceChecker.addTokenConfiguration(addresses.getAddress("xWELL_PROXY"), wellConfigs, config.maxPriceValidTime);
 
         // Add configuration for MORPHO token
-        priceChecker.addTokenConfiguration(addresses.getAddress("MORPHO"), morphoConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        priceChecker.addTokenConfiguration(addresses.getAddress("MORPHO"), morphoConfigs, config.maxPriceValidTime);
 
         vm.stopBroadcast();
     }
