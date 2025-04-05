@@ -75,9 +75,9 @@ contract USDCStrategyTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the addresses for the roles
-        admin = addresses.getAddress("MAMO_MULTISIG");
-        backend = addresses.getAddress("MAMO_BACKEND");
-        guardian = addresses.getAddress("MAMO_MULTISIG");
+        admin = addresses.getAddress("TESTING_EOA");
+        backend = addresses.getAddress("TESTING_EOA");
+        guardian = addresses.getAddress("TESTING_EOA");
         owner = makeAddr("owner");
 
         usdc = IERC20(addresses.getAddress("USDC"));
