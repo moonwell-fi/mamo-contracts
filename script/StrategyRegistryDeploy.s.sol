@@ -35,7 +35,14 @@ contract StrategyRegistryDeploy is Script {
 
         vm.stopBroadcast();
 
-        // Add the registry address to the addresses contract
-        addresses.addAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
+        // Check if the address already exists
+        string memory registryName = "MAMO_STRATEGY_REGISTRY";
+        if (addresses.isAddressSet(registryName)) {
+            // Update the existing address
+            addresses.changeAddress(registryName, address(registry), true);
+        } else {
+            // Add the registry address to the addresses contract
+            addresses.addAddress(registryName, address(registry), true);
+        }
     }
 }

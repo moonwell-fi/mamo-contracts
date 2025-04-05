@@ -77,9 +77,9 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the addresses for the roles
-        admin = addresses.getAddress("MAMO_MULTISIG");
-        backend = addresses.getAddress("MAMO_BACKEND");
-        guardian = addresses.getAddress("MAMO_MULTISIG");
+        admin = addresses.getAddress("TESTING_EOA");
+        backend = addresses.getAddress("TESTING_EOA");
+        guardian = addresses.getAddress("TESTING_EOA");
 
         if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
             // Deploy the MamoStrategyRegistry using the script
@@ -112,6 +112,8 @@ contract MamoStrategyRegistryIntegrationTest is Test {
             "Implementation should not be whitelisted initially"
         );
 
+        uint256 nextId = registry.nextStrategyTypeId();
+
         // Switch to the admin role to call the whitelistImplementation function
         vm.startPrank(admin);
 
@@ -119,7 +121,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // We check that the registry is the event emitter by passing its address
         vm.expectEmit(address(registry));
         // We emit the event we expect to see with the correct parameters
-        emit MamoStrategyRegistry.ImplementationWhitelisted(mockImplementation, 1);
+        emit MamoStrategyRegistry.ImplementationWhitelisted(mockImplementation, nextId);
 
         // Call the whitelistImplementation function and capture the returned strategy type ID
         uint256 strategyTypeId = registry.whitelistImplementation(mockImplementation, 0);
@@ -144,9 +146,6 @@ contract MamoStrategyRegistryIntegrationTest is Test {
             "Implementation should be set as the latest for its strategy type ID"
         );
 
-        // Verify the strategy type ID is 1 (first implementation)
-        assertEq(strategyTypeId, 1, "First strategy type ID should be 1");
-
         // Test whitelisting a second implementation
         address mockImplementation2 = makeAddr("mockImplementation2");
 
@@ -154,13 +153,10 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Expect the ImplementationWhitelisted event to be emitted for the second implementation
         vm.expectEmit(address(registry));
-        emit MamoStrategyRegistry.ImplementationWhitelisted(mockImplementation2, 2);
+        emit MamoStrategyRegistry.ImplementationWhitelisted(mockImplementation2, ++nextId);
 
-        uint256 strategyTypeId2 = registry.whitelistImplementation(mockImplementation2, 0);
+        registry.whitelistImplementation(mockImplementation2, 0);
         vm.stopPrank();
-
-        // Verify the second implementation has ID 2
-        assertEq(strategyTypeId2, 2, "Second strategy type ID should be 2");
 
         // Verify both implementations are whitelisted
         assertTrue(
@@ -510,17 +506,17 @@ contract MamoStrategyRegistryIntegrationTest is Test {
     // ==================== TESTS FOR GETTER FUNCTIONS ====================
 
     function testNextStrategyTypeId() public {
-        // Verify the initial value of nextStrategyTypeId is 1
-        assertEq(registry.nextStrategyTypeId(), 1, "nextStrategyTypeId should be initialized to 1");
+        uint256 next = registry.nextStrategyTypeId();
 
         // Whitelist an implementation and verify nextStrategyTypeId increments
         address mockImplementation = makeAddr("mockImplementation");
         vm.startPrank(admin);
-        registry.whitelistImplementation(mockImplementation, 0);
+        uint256 assignedId = registry.whitelistImplementation(mockImplementation, 0);
         vm.stopPrank();
 
         // Verify nextStrategyTypeId is now 2
-        assertEq(registry.nextStrategyTypeId(), 2, "nextStrategyTypeId should be incremented to 2");
+        assertEq(registry.nextStrategyTypeId(), next + 1, "nextStrategyTypeId should be incremented by 1");
+        assertEq(assignedId, next, "assigned id should be next");
 
         // Whitelist another implementation and verify nextStrategyTypeId increments again
         address mockImplementation2 = makeAddr("mockImplementation2");
@@ -529,7 +525,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.stopPrank();
 
         // Verify nextStrategyTypeId is now 3
-        assertEq(registry.nextStrategyTypeId(), 3, "nextStrategyTypeId should be incremented to 3");
+        assertEq(registry.nextStrategyTypeId(), next + 2, "nextStrategyTypeId should be incremented by 2");
     }
 
     function testImplementationToId() public {
@@ -1134,5 +1130,42 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         vm.prank(backend);
         registry.addStrategy(user, address(strategy));
         vm.stopPrank();
+    }
+
+    function testStrategyOwnerIsSetCorrectly() public {
+        // Deploy a mock strategy implementation
+        MockStrategy strategyImpl = new MockStrategy();
+
+        // Whitelist the implementation
+        vm.startPrank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // Create a user address
+        address user = makeAddr("user");
+
+        // Create a proxy with the mock strategy implementation
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+        );
+
+        // Verify owner is not set before adding strategy
+        assertEq(registry.strategyOwner(address(strategy)), address(0), "Strategy owner should not be set initially");
+
+        // Add strategy for user
+        vm.startPrank(backend);
+        registry.addStrategy(user, address(strategy));
+        vm.stopPrank();
+
+        // Verify the strategy owner was set correctly
+        assertEq(registry.strategyOwner(address(strategy)), user, "Strategy owner should be set to user");
+
+        // Verify isUserStrategy matches the owner mapping
+        assertTrue(registry.isUserStrategy(user, address(strategy)), "isUserStrategy should return true for owner");
+        assertFalse(
+            registry.isUserStrategy(makeAddr("notOwner"), address(strategy)),
+            "isUserStrategy should return false for non-owner"
+        );
     }
 }

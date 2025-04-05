@@ -12,21 +12,19 @@ import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 
 contract USDCStrategyImplDeployer is Script {
-    Addresses public addresses;
-
     function run() external {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid; // Use the current chain ID
 
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Deploy the strategy implementation and proxy
-        deployUSDCStrategy();
+        deployUSDCStrategy(addresses);
     }
 
-    function deployUSDCStrategy() public returns (address strategyProxy) {
+    function deployUSDCStrategy(Addresses addresses) public returns (address strategyProxy) {
         vm.startBroadcast();
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
@@ -61,6 +59,16 @@ contract USDCStrategyImplDeployer is Script {
 
         // Stop broadcasting transactions
         vm.stopBroadcast();
+
+        // Check if the proxy address already exists
+        string memory proxyName = "USER_USDC_STRATEGY_PROXY";
+        if (addresses.isAddressSet(proxyName)) {
+            // Update the existing address
+            addresses.changeAddress(proxyName, address(proxy), true);
+        } else {
+            // Add the proxy address to the addresses contract
+            addresses.addAddress(proxyName, address(proxy), true);
+        }
 
         return address(proxy);
     }

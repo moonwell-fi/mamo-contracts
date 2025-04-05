@@ -36,8 +36,15 @@ contract USDCStrategyUserDeployer is Script {
 
         vm.stopBroadcast();
 
-        // Add implementation address to addresses
-        addresses.addAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL", address(implementation), true);
+        // Check if the implementation address already exists
+        string memory implName = "USDC_MOONWELL_MORPHO_STRATEGY_IMPL";
+        if (addresses.isAddressSet(implName)) {
+            // Update the existing address
+            addresses.changeAddress(implName, address(implementation), true);
+        } else {
+            // Add the implementation address to the addresses contract
+            addresses.addAddress(implName, address(implementation), true);
+        }
 
         // Log the deployed contract address
         console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));

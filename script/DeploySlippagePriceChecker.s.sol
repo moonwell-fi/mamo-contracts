@@ -58,8 +58,24 @@ contract DeploySlippagePriceChecker is Script {
 
         vm.stopBroadcast();
 
-        // Add the implementation and proxy addresses to the addresses contract
-        addresses.addAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION", address(implementation), true);
-        addresses.addAddress("CHAINLINK_SWAP_CHECKER_PROXY", address(slippagePriceCheckerProxy), true);
+        // Check if the implementation address already exists
+        string memory implName = "CHAINLINK_SWAP_CHECKER_IMPLEMENTATION";
+        if (addresses.isAddressSet(implName)) {
+            // Update the existing address
+            addresses.changeAddress(implName, address(implementation), true);
+        } else {
+            // Add the implementation address to the addresses contract
+            addresses.addAddress(implName, address(implementation), true);
+        }
+
+        // Check if the proxy address already exists
+        string memory proxyName = "CHAINLINK_SWAP_CHECKER_PROXY";
+        if (addresses.isAddressSet(proxyName)) {
+            // Update the existing address
+            addresses.changeAddress(proxyName, address(slippagePriceCheckerProxy), true);
+        } else {
+            // Add the proxy address to the addresses contract
+            addresses.addAddress(proxyName, address(slippagePriceCheckerProxy), true);
+        }
     }
 }
