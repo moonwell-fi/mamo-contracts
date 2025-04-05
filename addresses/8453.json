@@ -55,26 +55,6 @@
     "isContract": false
   },
   {
-    "addr": "0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519",
-    "name": "MAMO_STRATEGY_REGISTRY",
-    "isContract": true
-  },
-  {
-    "addr": "0xc5DBF8f2b2E8f091A00Ee26F041301bD0C81Be51",
-    "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
-    "isContract": true
-  },
-  {
-    "addr": "0x5612E3942202d7Aaf40Da84454ee64914b4e942c",
-    "name": "CHAINLINK_SWAP_CHECKER_IMPLEMENTATION",
-    "isContract": true
-  },
-  {
-    "addr": "0xd646263aF8967CdfcE2caA5F8901e93783E4e059",
-    "name": "CHAINLINK_SWAP_CHECKER_PROXY",
-    "isContract": true
-  },
-  {
     "addr": "0xe95e258bb6615d47515Fc849f8542dA651f12bF6",
     "name": "CHAINLINK_MORPHO_USD",
     "isContract": true
@@ -82,6 +62,31 @@
   {
     "addr": "0xBAa5CC21fd487B8Fcc2F632f3F4E8D37262a0842",
     "name": "MORPHO",
+    "isContract": true
+  },
+  {
+    "addr": "0xE659D7C07A50E90F1276Fd885F04f16440d54710",
+    "name": "MAMO_STRATEGY_REGISTRY",
+    "isContract": true
+  },
+  {
+    "addr": "0x1D1a3C6420D949249b7e663a39800649B2014ee2",
+    "name": "CHAINLINK_SWAP_CHECKER_IMPLEMENTATION",
+    "isContract": true
+  },
+  {
+    "addr": "0x1e297b2bCFAeB73dCd5CFE37B1C91b504dc32909",
+    "name": "CHAINLINK_SWAP_CHECKER_PROXY",
+    "isContract": true
+  },
+  {
+    "addr": "0x17882A8aeF089d7eF59E79Bd3731901aF5f6f3bd",
+    "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
+    "isContract": true
+  },
+  {
+    "addr": "0x4417b1F0e50Af737ab04B109dee4041d108dFc00",
+    "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
   }
 ]

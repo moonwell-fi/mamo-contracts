@@ -27,6 +27,8 @@ contract DeployConfig is Test {
         uint256 maxPriceValidTime;
         uint256 maxSlippageBps;
         RewardToken[] rewardTokens;
+        uint256 splitMToken;
+        uint256 splitVault;
         string version;
     }
 
@@ -113,43 +115,6 @@ contract DeployConfig is Test {
      */
     function getChainId() public view returns (uint256) {
         return getNumber("chainId");
-    }
-
-    /**
-     * @notice Get the number of reward tokens in the configuration
-     * @return The number of reward tokens
-     */
-    function getRewardTokenCount() public view returns (uint256) {
-        uint256 i = 0;
-        while (true) {
-            string memory tokenKey = string(abi.encodePacked("rewardTokens.", vm.toString(i), ".token"));
-            if (!configData.keyExists(tokenKey)) {
-                break;
-            }
-            i++;
-        }
-        return i;
-    }
-
-    /**
-     * @notice Get a reward token configuration
-     * @param index The index of the reward token
-     * @return token The token name
-     * @return priceFeed The price feed name
-     * @return reverse Whether the price feed is reversed
-     * @return heartbeat The heartbeat duration
-     */
-    function getRewardToken(uint256 index)
-        public
-        view
-        returns (string memory token, string memory priceFeed, bool reverse, uint256 heartbeat)
-    {
-        string memory baseKey = string(abi.encodePacked("rewardTokens.", vm.toString(index)));
-
-        token = configData.readString(string(abi.encodePacked(baseKey, ".token")));
-        priceFeed = configData.readString(string(abi.encodePacked(baseKey, ".priceFeed")));
-        reverse = configData.readBool(string(abi.encodePacked(baseKey, ".reverse")));
-        heartbeat = configData.readUint(string(abi.encodePacked(baseKey, ".heartbeat")));
     }
 
     /**

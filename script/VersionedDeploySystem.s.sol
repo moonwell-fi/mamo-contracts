@@ -26,7 +26,7 @@ import {USDCStrategyImplDeployer} from "./USDCStrategyImplDeployer.s.sol";
 contract VersionedDeploySystem is Script {
     function run() external {
         // Get the environment from command line arguments or use default
-        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING.json"));
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== MAMO SYSTEM DEPLOYMENT ===")));
@@ -74,13 +74,14 @@ contract VersionedDeploySystem is Script {
 
         // Step 5: Whitelist the USDC strategy implementation
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 5: Whitelisting USDC strategy implementation...")));
-        whitelistUSDCStrategy(addresses);
+        uint256 strategyTypeId = _whitelistUSDCStrategy(addresses);
         console.log("%s", StdStyle.italic("USDC strategy implementation whitelisted successfully"));
 
         // Step 6: Deploy the USDCStrategyFactory
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 6: Deploying USDCStrategyFactory...")));
         USDCStrategyFactoryDeployer factoryDeployer = new USDCStrategyFactoryDeployer();
-        address factoryAddress = factoryDeployer.deployUSDCStrategyFactory(addresses, config.getConfig());
+        address factoryAddress =
+            factoryDeployer.deployUSDCStrategyFactory(addresses, config.getConfig(), strategyTypeId);
         console.log("USDCStrategyFactory deployed at: %s", StdStyle.yellow(vm.toString(factoryAddress)));
 
         // Update the JSON file with all the new addresses
@@ -103,60 +104,29 @@ contract VersionedDeploySystem is Script {
         SlippagePriceChecker priceChecker,
         DeployConfig.DeploymentConfig memory deployConfig
     ) private {
-        // Get the number of reward tokens from the config
-        uint256 rewardTokenCount = config.getRewardTokenCount();
-        console.log("Configuring %d reward tokens", rewardTokenCount);
+        for (uint256 i = 0; i < deployConfig.rewardTokens.length; i++) {
+            string memory tokenName = deployConfig.rewardTokens[i].token;
+            address token = addresses.getAddress(tokenName);
+            address priceFeed = addresses.getAddress(deployConfig.rewardTokens[i].priceFeed);
 
-        for (uint256 i = 0; i < rewardTokenCount; i++) {
-            _configureRewardToken(i, config, addresses, priceChecker, deployConfig);
+            // Create token configuration
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory tokenConfigs =
+                new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+
+            tokenConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+                chainlinkFeed: priceFeed,
+                reverse: deployConfig.rewardTokens[i].reverse,
+                heartbeat: deployConfig.rewardTokens[i].heartbeat
+            });
+
+            // Add token configuration
+            vm.startBroadcast();
+            priceChecker.addTokenConfiguration(token, tokenConfigs, deployConfig.maxPriceValidTime);
+            vm.stopBroadcast();
         }
     }
 
-    /**
-     * @notice Helper function to configure a single reward token
-     * @param index The index of the reward token in the config
-     * @param config The deployment configuration
-     * @param addresses The addresses contract
-     * @param priceChecker The SlippagePriceChecker contract
-     */
-    function _configureRewardToken(
-        uint256 index,
-        DeployConfig config,
-        Addresses addresses,
-        SlippagePriceChecker priceChecker,
-        DeployConfig.DeploymentConfig memory deployConfig
-    ) private {
-        // Get reward token configuration
-        (string memory tokenName, string memory priceFeedName, bool reverse, uint256 heartbeat) =
-            config.getRewardToken(index);
-
-        address token = addresses.getAddress(tokenName);
-        address priceFeed = addresses.getAddress(priceFeedName);
-
-        console.log("Configuring token: %s", StdStyle.yellow(tokenName));
-        console.log("  Price feed: %s", StdStyle.yellow(priceFeedName));
-        console.log("  Reverse: %s", StdStyle.yellow(reverse ? "true" : "false"));
-        console.log("  Heartbeat: %s seconds", StdStyle.yellow(vm.toString(heartbeat)));
-
-        // Create token configuration
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory tokenConfigs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
-        tokenConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: priceFeed,
-            reverse: reverse,
-            heartbeat: heartbeat
-        });
-
-        // Add token configuration
-        vm.startBroadcast();
-        priceChecker.addTokenConfiguration(token, tokenConfigs, deployConfig.maxPriceValidTime);
-        vm.stopBroadcast();
-
-        console.log("Token %s configured successfully", StdStyle.yellow(tokenName));
-    }
-
-    function whitelistUSDCStrategy(Addresses addresses) public {
+    function _whitelistUSDCStrategy(Addresses addresses) private returns (uint256 strategyTypeId) {
         // Start broadcasting transactions
         vm.startBroadcast();
 
@@ -166,7 +136,7 @@ contract VersionedDeploySystem is Script {
 
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);
-        registry.whitelistImplementation(usdcStrategyImplementation, 0);
+        strategyTypeId = registry.whitelistImplementation(usdcStrategyImplementation, 0);
 
         // Stop broadcasting transactions
         vm.stopBroadcast();

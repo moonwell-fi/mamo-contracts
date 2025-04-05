@@ -14,10 +14,11 @@ import {USDCStrategyFactory} from "@contracts/USDCStrategyFactory.sol";
  * @notice Script to deploy the USDCStrategyFactory contract
  */
 contract USDCStrategyFactoryDeployer is Script {
-    function deployUSDCStrategyFactory(Addresses addresses, DeployConfig.DeploymentConfig memory config)
-        public
-        returns (address)
-    {
+    function deployUSDCStrategyFactory(
+        Addresses addresses,
+        DeployConfig.DeploymentConfig memory config,
+        uint256 strategyTypeId
+    ) public returns (address) {
         vm.startBroadcast();
 
         // Get the addresses for the initialization parameters
@@ -29,11 +30,6 @@ contract USDCStrategyFactoryDeployer is Script {
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address strategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
 
-        // Define the split parameters (50/50 by default)
-        uint256 splitMToken = 5000; // 50% in basis points
-        uint256 splitVault = 5000; // 50% in basis points
-        uint256 strategyTypeId = 1;
-
         // Deploy the USDCStrategyFactory
         USDCStrategyFactory factory = new USDCStrategyFactory(
             mamoStrategyRegistry,
@@ -43,8 +39,8 @@ contract USDCStrategyFactoryDeployer is Script {
             usdc,
             slippagePriceChecker,
             strategyImplementation,
-            splitMToken,
-            splitVault,
+            config.splitMToken,
+            config.splitVault,
             strategyTypeId
         );
 
