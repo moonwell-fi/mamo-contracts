@@ -76,7 +76,7 @@ contract USDCStrategyTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the environment from command line arguments or use default
-        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING.json"));
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         DeployConfig config = new DeployConfig(configPath);
