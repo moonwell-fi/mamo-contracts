@@ -78,5 +78,10 @@
     "addr": "0xe95e258bb6615d47515Fc849f8542dA651f12bF6",
     "name": "CHAINLINK_MORPHO_USD",
     "isContract": true
+  },
+  {
+    "addr": "0xBAa5CC21fd487B8Fcc2F632f3F4E8D37262a0842",
+    "name": "MORPHO",
+    "isContract": true
   }
 ]

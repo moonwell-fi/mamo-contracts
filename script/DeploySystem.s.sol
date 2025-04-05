@@ -5,6 +5,9 @@ import {Addresses} from "@addresses/Addresses.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Script} from "@forge-std/Script.sol";
+
+import {StdStyle} from "@forge-std/StdStyle.sol";
+import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
 
 // Import all the necessary deployment scripts
@@ -24,7 +27,8 @@ import {WhitelistUSDCStrategy} from "./WhitelistUSDCStrategy.s.sol";
  */
 contract DeploySystem is Script {
     function run() external {
-        console.log("Starting full system deployment...");
+        console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== MAMO SYSTEM DEPLOYMENT ===")));
+        console.log("%s\n", StdStyle.bold("Starting full system deployment..."));
 
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -34,47 +38,48 @@ contract DeploySystem is Script {
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Step 1: Deploy the MamoStrategyRegistry
-        console.log("Step 1: Deploying MamoStrategyRegistry...");
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying MamoStrategyRegistry...")));
         StrategyRegistryDeploy strategyRegistryDeploy = new StrategyRegistryDeploy();
         MamoStrategyRegistry registry = strategyRegistryDeploy.deployStrategyRegistry(addresses);
-        console.log("MamoStrategyRegistry deployed at:", address(registry));
+        console.log("MamoStrategyRegistry deployed at: %s", StdStyle.yellow(vm.toString(address(registry))));
 
         // Step 2: Deploy the SlippagePriceChecker
-        console.log("Step 2: Deploying SlippagePriceChecker...");
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 2: Deploying SlippagePriceChecker...")));
         DeploySlippagePriceChecker deploySlippagePriceChecker = new DeploySlippagePriceChecker();
         SlippagePriceChecker priceChecker = deploySlippagePriceChecker.deploySlippagePriceChecker(addresses);
-        console.log("SlippagePriceChecker deployed at:", address(priceChecker));
+        console.log("SlippagePriceChecker deployed at: %s", StdStyle.yellow(vm.toString(address(priceChecker))));
 
         // Step 3: Configure the SlippagePriceChecker
-        console.log("Step 3: Configuring SlippagePriceChecker...");
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 3: Configuring SlippagePriceChecker...")));
         ConfigurePriceChecker configurePriceChecker = new ConfigurePriceChecker();
         configurePriceChecker.configureSlippageForToken(addresses);
-        console.log("SlippagePriceChecker configured successfully");
+        console.log("%s", StdStyle.italic("SlippagePriceChecker configured successfully"));
 
         // Create instances of the deployment scripts
         WhitelistUSDCStrategy whitelistUSDCStrategy = new WhitelistUSDCStrategy();
         USDCStrategyImplDeployer usdcStrategyImplDeployer = new USDCStrategyImplDeployer();
 
         // Step 4: Deploy the USDC strategy implementation
-        console.log("Step 4: Deploying USDC strategy implementation...");
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 4: Deploying USDC strategy implementation...")));
         address strategyImpl = usdcStrategyImplDeployer.deployImplementation(addresses);
-        console.log("USDC strategy implementation deployed at:", strategyImpl);
+        console.log("USDC strategy implementation deployed at: %s", StdStyle.yellow(vm.toString(strategyImpl)));
 
         // Step 5: Whitelist the USDC strategy implementation
-        console.log("Step 5: Whitelisting USDC strategy implementation...");
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 5: Whitelisting USDC strategy implementation...")));
         whitelistUSDCStrategy.whitelistUSDCStrategy(addresses);
-        console.log("USDC strategy implementation whitelisted successfully");
+        console.log("%s", StdStyle.italic("USDC strategy implementation whitelisted successfully"));
 
         // Step 6: Deploy the USDCStrategyFactory
-        console.log("Step 6: Deploying USDCStrategyFactory...");
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 6: Deploying USDCStrategyFactory...")));
         USDCStrategyFactoryDeployer factoryDeployer = new USDCStrategyFactoryDeployer();
         address factoryAddress = factoryDeployer.deployUSDCStrategyFactory(addresses);
-        console.log("USDCStrategyFactory deployed at:", factoryAddress);
+        console.log("USDCStrategyFactory deployed at: %s", StdStyle.yellow(vm.toString(factoryAddress)));
 
         // Update the JSON file with all the new addresses
         addresses.updateJson();
         addresses.printJSONChanges();
 
-        console.log("System deployment completed successfully!");
+        console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== DEPLOYMENT COMPLETE ===")));
+        console.log("%s", StdStyle.bold(StdStyle.green("System deployment completed successfully!")));
     }
 }
