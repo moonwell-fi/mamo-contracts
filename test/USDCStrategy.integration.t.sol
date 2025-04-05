@@ -68,6 +68,8 @@ contract USDCStrategyTest is Test {
     uint256 splitMToken;
     uint256 splitVault;
 
+    DeployConfig.DeploymentConfig public config;
+
     function setUp() public {
         // Initialize addresses
         string memory addressesFolderPath = "./addresses";
@@ -79,12 +81,13 @@ contract USDCStrategyTest is Test {
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
-        DeployConfig config = new DeployConfig(configPath);
+        DeployConfig configDeploy = new DeployConfig(configPath);
+        config = configDeploy.getConfig();
 
         // Get the addresses for the roles
-        admin = addresses.getAddress(config.getConfig().admin);
-        backend = addresses.getAddress(config.getConfig().backend);
-        guardian = addresses.getAddress(config.getConfig().guardian);
+        admin = addresses.getAddress(config.admin);
+        backend = addresses.getAddress(config.backend);
+        guardian = addresses.getAddress(config.guardian);
         owner = makeAddr("owner");
 
         usdc = IERC20(addresses.getAddress("USDC"));
@@ -95,7 +98,7 @@ contract USDCStrategyTest is Test {
         if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
             // Deploy the SlippagePriceChecker using the script
             DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config.getConfig());
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
@@ -108,7 +111,7 @@ contract USDCStrategyTest is Test {
             heartbeat: 30 minutes
         });
 
-        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        vm.prank(addresses.getAddress(config.admin));
         slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
 
         // Deploy the registry with admin, backend, and guardian addresses
@@ -1468,7 +1471,7 @@ contract USDCStrategyTest is Test {
             heartbeat: 30 minutes
         });
 
-        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        vm.prank(addresses.getAddress(config.admin));
         slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
 
         // Check initial approval
@@ -1494,7 +1497,7 @@ contract USDCStrategyTest is Test {
             heartbeat: 30 minutes
         });
 
-        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        vm.prank(addresses.getAddress(config.admin));
         slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
 
         // Create a non-owner address
@@ -1534,7 +1537,7 @@ contract USDCStrategyTest is Test {
             heartbeat: 30 minutes
         });
 
-        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        vm.prank(addresses.getAddress(config.admin));
         slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
 
         // First set a non-zero approval

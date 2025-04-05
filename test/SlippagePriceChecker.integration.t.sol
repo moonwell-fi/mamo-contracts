@@ -32,6 +32,8 @@ contract SlippagePriceCheckerTest is Test {
     uint256 public constant MAX_BPS = 10_000;
     uint256 public constant DEFAULT_MAX_TIME_PRICE_VALID = 3600; // 1 hour in seconds
 
+    DeployConfig.DeploymentConfig public config;
+
     function setUp() public {
         // Initialize addresses
         string memory addressesFolderPath = "./addresses";
@@ -43,10 +45,11 @@ contract SlippagePriceCheckerTest is Test {
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
-        DeployConfig config = new DeployConfig(configPath);
+        DeployConfig configDeploy = new DeployConfig(configPath);
+        config = configDeploy.getConfig();
 
         // Get the addresses from the addresses contract
-        owner = addresses.getAddress("MAMO_MULTISIG");
+        owner = addresses.getAddress(config.admin);
         usdc = ERC20(addresses.getAddress("USDC"));
         well = ERC20(addresses.getAddress("xWELL_PROXY"));
         chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
@@ -55,7 +58,7 @@ contract SlippagePriceCheckerTest is Test {
         if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
             // Deploy the SlippagePriceChecker using the script
             DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config.getConfig());
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
