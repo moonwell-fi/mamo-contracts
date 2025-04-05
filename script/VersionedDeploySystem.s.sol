@@ -69,12 +69,12 @@ contract VersionedDeploySystem is Script {
         // Step 4: Deploy the USDC strategy implementation
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 4: Deploying USDC strategy implementation...")));
         USDCStrategyImplDeployer usdcStrategyImplDeployer = new USDCStrategyImplDeployer();
-        address strategyImpl = usdcStrategyImplDeployer.deployImplementation(addresses, config.getConfig());
+        address strategyImpl = usdcStrategyImplDeployer.deployImplementation(addresses);
         console.log("USDC strategy implementation deployed at: %s", StdStyle.yellow(vm.toString(strategyImpl)));
 
         // Step 5: Whitelist the USDC strategy implementation
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 5: Whitelisting USDC strategy implementation...")));
-        whitelistUSDCStrategy(addresses, config.getConfig());
+        whitelistUSDCStrategy(addresses);
         console.log("%s", StdStyle.italic("USDC strategy implementation whitelisted successfully"));
 
         // Step 6: Deploy the USDCStrategyFactory
@@ -89,16 +89,6 @@ contract VersionedDeploySystem is Script {
 
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== DEPLOYMENT COMPLETE ===")));
         console.log("%s", StdStyle.bold(StdStyle.green("System deployment completed successfully!")));
-    }
-
-    /**
-     * @notice Helper function to parse a boolean from the JSON config
-     * @param config The deployment configuration
-     * @param key The key to parse
-     * @return The boolean value
-     */
-    function _parseJsonBool(DeployConfig config, string memory key) private view returns (bool) {
-        return config.getBool(key);
     }
 
     /**
@@ -166,7 +156,7 @@ contract VersionedDeploySystem is Script {
         console.log("Token %s configured successfully", StdStyle.yellow(tokenName));
     }
 
-    function whitelistUSDCStrategy(Addresses addresses, DeployConfig.DeploymentConfig memory config) public {
+    function whitelistUSDCStrategy(Addresses addresses) public {
         // Start broadcasting transactions
         vm.startBroadcast();
 
@@ -176,7 +166,7 @@ contract VersionedDeploySystem is Script {
 
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);
-        uint256 strategyTypeId = registry.whitelistImplementation(usdcStrategyImplementation, 0);
+        registry.whitelistImplementation(usdcStrategyImplementation, 0);
 
         // Stop broadcasting transactions
         vm.stopBroadcast();

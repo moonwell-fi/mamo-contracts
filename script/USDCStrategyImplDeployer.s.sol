@@ -12,10 +12,7 @@ import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrateg
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract USDCStrategyImplDeployer is Script {
-    function deployImplementation(Addresses addresses, DeployConfig.DeploymentConfig memory config)
-        public
-        returns (address)
-    {
+    function deployImplementation(Addresses addresses) public returns (address) {
         vm.startBroadcast();
         // Deploy the implementation contract
         ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
