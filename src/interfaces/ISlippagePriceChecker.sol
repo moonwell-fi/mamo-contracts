@@ -68,4 +68,24 @@ interface ISlippagePriceChecker {
      * @return The maximum time in seconds that a price is considered valid
      */
     function maxTimePriceValid(address token) external view returns (uint256);
+
+    /**
+     * @notice Adds a configuration for a token
+     * @dev Only callable by the owner
+     * @param token The address of the token to configure
+     * @param configurations Array of TokenFeedConfiguration for the token
+     * @param _maxTimePriceValid Maximum time in seconds that a price is considered valid
+     */
+    function addTokenConfiguration(
+        address token,
+        TokenFeedConfiguration[] calldata configurations,
+        uint256 _maxTimePriceValid
+    ) external;
+
+    /**
+     * @notice Removes all configurations for a token
+     * @dev Only callable by the owner
+     * @param token The address of the token to remove configuration for
+     */
+    function removeTokenConfiguration(address token) external;
 }

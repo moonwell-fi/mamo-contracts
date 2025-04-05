@@ -93,4 +93,13 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, IBaseStrategy {
         mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
         strategyTypeId = _strategyTypeId;
     }
+
+    /**
+     * @notice Returns the owner address of this strategy
+     * @dev Queries the MamoStrategyRegistry to get the owner
+     * @return The address of the strategy owner
+     */
+    function getOwner() external view returns (address) {
+        return mamoStrategyRegistry.strategyOwner(address(this));
+    }
 }

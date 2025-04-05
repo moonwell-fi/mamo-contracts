@@ -2,8 +2,11 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-fs_permissions = [{ access = "read-write", path = "./addresses"}]
+fs_permissions = [{ access = "read-write", path = "./addresses"}, { access = "read-write", path = "./deploy"}]
 evm_version = "cancun"
+via_ir = true
+optimizer = true
+optimizer_runs = 200
 
 [fmt]
 sort_imports = true
@@ -13,3 +16,6 @@ localhost = "http://127.0.0.1:8545"
 base = { endpoint= "${BASE_RPC_URL}", retries = 3, retry_backoff = 1000 }
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[etherscan]
+base = { key = "${BASESCAN_API_KEY}", url= "https://api.basescan.org/api" }

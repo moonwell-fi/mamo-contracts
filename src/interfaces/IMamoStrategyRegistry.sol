@@ -34,7 +34,7 @@ interface IMamoStrategyRegistry {
      * @param implementation The address of the implementation to check
      * @return True if the implementation is whitelisted, false otherwise
      */
-    function isImplementationWhitelisted(address implementation) external view returns (bool);
+    function whitelistedImplementations(address implementation) external view returns (bool);
 
     /**
      * @notice Gets the strategy ID for an implementation
@@ -101,4 +101,11 @@ interface IMamoStrategyRegistry {
      * @return The address of the backend
      */
     function getBackendAddress() external view returns (address);
+
+    /**
+     * @notice Gets the owner of a strategy
+     * @param strategy The address of the strategy
+     * @return The address of the strategy owner
+     */
+    function strategyOwner(address strategy) external view returns (address);
 }

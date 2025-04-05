@@ -70,7 +70,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     event Withdraw(address indexed asset, uint256 amount);
 
     // @notice Emitted when the position split is updated
-    event PositionUpdated(uint256 splitA, uint256 splitB);
+    event PositionUpdated(uint256 splitMoonwell, uint256 splitMorpho);
 
     // @notice Emitted when the slippage tolerance is updated
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
@@ -254,11 +254,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /**
      * @notice Updates the position in the strategy
      * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param splitA The first split parameter (basis points) for Moonwell
-     * @param splitB The second split parameter (basis points) for MetaMorpho
+     * @param splitMoonwell The first split parameter (basis points) for Moonwell
+     * @param splitMorpho The second split parameter (basis points) for MetaMorpho
      */
-    function updatePosition(uint256 splitA, uint256 splitB) external onlyBackend {
-        require(splitA + splitB == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
+    function updatePosition(uint256 splitMoonwell, uint256 splitMorpho) external onlyBackend {
+        require(splitMoonwell + splitMorpho == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
 
         // Withdraw from Moonwell
         uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
@@ -276,13 +276,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(totalTokenBalance > 0, "Nothing to rebalance");
 
         // Update the split parameters
-        splitMToken = splitA;
-        splitVault = splitB;
+        splitMToken = splitMoonwell;
+        splitVault = splitMorpho;
 
         // Deposit into MetaMorpho Vault and Moonwell MToken after update split parameters
         depositInternal(totalTokenBalance);
 
-        emit PositionUpdated(splitA, splitB);
+        emit PositionUpdated(splitMoonwell, splitMorpho);
     }
 
     /**

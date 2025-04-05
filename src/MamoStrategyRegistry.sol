@@ -44,6 +44,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Maps implementations to their strategy ID
     mapping(address => uint256) public implementationToId;
 
+    /// @notice Maps strategy addresses to their owner addresses
+    mapping(address => address) public strategyOwner;
+
     // Events
     /// @notice Emitted when a strategy is added for a user
     event StrategyAdded(address indexed user, address strategy, address implementation);
@@ -194,6 +197,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         // Add the strategy to the user's strategies
         _userStrategies[user].add(strategy);
+        strategyOwner[strategy] = user;
 
         emit StrategyAdded(user, strategy, implementation);
     }
