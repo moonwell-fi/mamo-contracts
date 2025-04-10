@@ -489,7 +489,7 @@ contract SlippagePriceCheckerTest is Test {
                 uint80(1), // roundId
                 int256(1e8), // answer (price)
                 uint256(0), // startedAt
-                block.timestamp - 86400, // updatedAt (1 hour ago, exceeds heartbeat of 1800 seconds)
+                block.timestamp - 86401, // updatedAt
                 uint80(1) // answeredInRound
             )
         );
