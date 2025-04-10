@@ -62,9 +62,6 @@ contract SlippagePriceCheckerTest is Test {
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
-
-        // Configure tokens with their respective price feeds
-        addTokenConfigurations();
     }
 
     function addTokenConfigurations() internal {
@@ -111,16 +108,21 @@ contract SlippagePriceCheckerTest is Test {
             "WELL maxTimePriceValid should match"
         );
 
+        address morpho = addresses.getAddress("MORPHO");
         // Verify USDC token configuration
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory usdcConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(usdc));
-        assertEq(usdcConfigs.length, 1, "USDC should have 1 configuration");
-        assertEq(usdcConfigs[0].chainlinkFeed, chainlinkUsdcUsd, "USDC price feed should match");
-        assertEq(usdcConfigs[0].reverse, false, "USDC reverse flag should match");
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory morphoConfigs =
+            slippagePriceChecker.tokenOracleInformation(morpho);
+        assertEq(morphoConfigs.length, 1, "Morpho should have 1 configuration");
         assertEq(
-            slippagePriceChecker.maxTimePriceValid(address(usdc)),
-            DEFAULT_MAX_TIME_PRICE_VALID,
-            "USDC maxTimePriceValid should match"
+            morphoConfigs[0].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_MORPHO_USD"),
+            "Morpho price feed should match"
+        );
+        assertEq(morphoConfigs[0].reverse, false, "Morpho reverse flag should match");
+        assertEq(
+            slippagePriceChecker.maxTimePriceValid(address(morpho)),
+            config.maxPriceValidTime,
+            "MORPHO maxTimePriceValid should match"
         );
     }
 
@@ -487,7 +489,7 @@ contract SlippagePriceCheckerTest is Test {
                 uint80(1), // roundId
                 int256(1e8), // answer (price)
                 uint256(0), // startedAt
-                block.timestamp - 3600, // updatedAt (1 hour ago, exceeds heartbeat of 1800 seconds)
+                block.timestamp - 86400, // updatedAt (1 hour ago, exceeds heartbeat of 1800 seconds)
                 uint80(1) // answeredInRound
             )
         );
