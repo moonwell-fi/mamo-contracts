@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {DeploySlippagePriceChecker} from "../script/DeploySlippagePriceChecker.s.sol";
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
+
 import {Addresses} from "@addresses/Addresses.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
+import {DeployConfig} from "@script/DeployConfig.sol";
+import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
@@ -14,7 +17,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract SlippagePriceCheckerTest is Test {
-    SlippagePriceChecker public slippagePriceChecker;
+    ISlippagePriceChecker public slippagePriceChecker;
     Addresses public addresses;
 
     // Contracts from Base network
@@ -29,6 +32,8 @@ contract SlippagePriceCheckerTest is Test {
     uint256 public constant MAX_BPS = 10_000;
     uint256 public constant DEFAULT_MAX_TIME_PRICE_VALID = 3600; // 1 hour in seconds
 
+    DeployConfig.DeploymentConfig public config;
+
     function setUp() public {
         // Initialize addresses
         string memory addressesFolderPath = "./addresses";
@@ -36,19 +41,27 @@ contract SlippagePriceCheckerTest is Test {
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
 
+        // Get the environment from command line arguments or use default
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
+        string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
+
+        DeployConfig configDeploy = new DeployConfig(configPath);
+        config = configDeploy.getConfig();
+
         // Get the addresses from the addresses contract
-        owner = addresses.getAddress("MAMO_MULTISIG");
+        owner = addresses.getAddress(config.admin);
         usdc = ERC20(addresses.getAddress("USDC"));
         well = ERC20(addresses.getAddress("xWELL_PROXY"));
         chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
         chainlinkUsdcUsd = addresses.getAddress("CHAINLINK_USDC_USD");
 
-        // Deploy the SlippagePriceChecker using the script
-        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses);
-
-        // Configure tokens with their respective price feeds
-        addTokenConfigurations();
+        if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
+            // Deploy the SlippagePriceChecker using the script
+            DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
+            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
+        } else {
+            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        }
     }
 
     function addTokenConfigurations() internal {
@@ -79,7 +92,7 @@ contract SlippagePriceCheckerTest is Test {
 
     function testInitialState() public view {
         // Check owner
-        assertEq(slippagePriceChecker.owner(), owner, "Owner should be set correctly");
+        assertEq(OwnableUpgradeable(address(slippagePriceChecker)).owner(), owner, "Owner should be set correctly");
     }
 
     function testTokenConfiguration() public view {
@@ -95,16 +108,21 @@ contract SlippagePriceCheckerTest is Test {
             "WELL maxTimePriceValid should match"
         );
 
+        address morpho = addresses.getAddress("MORPHO");
         // Verify USDC token configuration
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory usdcConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(usdc));
-        assertEq(usdcConfigs.length, 1, "USDC should have 1 configuration");
-        assertEq(usdcConfigs[0].chainlinkFeed, chainlinkUsdcUsd, "USDC price feed should match");
-        assertEq(usdcConfigs[0].reverse, false, "USDC reverse flag should match");
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory morphoConfigs =
+            slippagePriceChecker.tokenOracleInformation(morpho);
+        assertEq(morphoConfigs.length, 1, "Morpho should have 1 configuration");
         assertEq(
-            slippagePriceChecker.maxTimePriceValid(address(usdc)),
-            DEFAULT_MAX_TIME_PRICE_VALID,
-            "USDC maxTimePriceValid should match"
+            morphoConfigs[0].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_MORPHO_USD"),
+            "Morpho price feed should match"
+        );
+        assertEq(morphoConfigs[0].reverse, false, "Morpho reverse flag should match");
+        assertEq(
+            slippagePriceChecker.maxTimePriceValid(address(morpho)),
+            config.maxPriceValidTime,
+            "MORPHO maxTimePriceValid should match"
         );
     }
 
@@ -471,7 +489,7 @@ contract SlippagePriceCheckerTest is Test {
                 uint80(1), // roundId
                 int256(1e8), // answer (price)
                 uint256(0), // startedAt
-                block.timestamp - 3600, // updatedAt (1 hour ago, exceeds heartbeat of 1800 seconds)
+                block.timestamp - 86401, // updatedAt
                 uint80(1) // answeredInRound
             )
         );

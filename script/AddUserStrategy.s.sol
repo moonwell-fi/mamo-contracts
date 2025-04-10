@@ -25,16 +25,12 @@ contract AddUserStrategy is Script {
     }
 
     function addUserStrategy() public {
-        // Get the private key for deployment
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-
-        // Start broadcasting transactions
-        vm.startBroadcast(deployerPrivateKey);
+        vm.startBroadcast();
 
         // Get the addresses
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address userStrategy = addresses.getAddress("USER_STRATEGY_PROXY");
-        address user = addresses.getAddress("USER");
+        address userStrategy = 0x3eFC7C5717627Cc05538B2bd8EbE7C494Bd20D1d;
+        address user = 0x10b83c88e88910Cd5293324800d1a6e751004bE5;
 
         // Add the strategy for the user
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);
