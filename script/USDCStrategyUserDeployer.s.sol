@@ -50,7 +50,8 @@ contract USDCStrategyUserDeployer is Script {
                 slippagePriceChecker: SlippagePriceChecker,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
-                strategyTypeId: 1
+                strategyTypeId: 1,
+                rewardTokens: new address[](0)
             })
         );
 

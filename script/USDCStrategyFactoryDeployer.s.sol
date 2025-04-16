@@ -30,6 +30,15 @@ contract USDCStrategyFactoryDeployer is Script {
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address strategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
 
+        // Get reward token addresses
+        address well = addresses.getAddress("xWELL_PROXY");
+        address morpho = addresses.getAddress("MORPHO");
+        
+        // Create reward tokens array
+        address[] memory rewardTokens = new address[](2);
+        rewardTokens[0] = well;
+        rewardTokens[1] = morpho;
+
         // Deploy the USDCStrategyFactory
         USDCStrategyFactory factory = new USDCStrategyFactory(
             mamoStrategyRegistry,
@@ -41,7 +50,8 @@ contract USDCStrategyFactoryDeployer is Script {
             strategyImplementation,
             config.splitMToken,
             config.splitVault,
-            strategyTypeId
+            strategyTypeId,
+            rewardTokens
         );
 
         vm.stopBroadcast();
@@ -56,8 +66,6 @@ contract USDCStrategyFactoryDeployer is Script {
             addresses.addAddress(factoryName, address(factory), true);
         }
 
-        // Log the deployed contract address
-        console.log("USDCStrategyFactory deployed at:", address(factory));
 
         return address(factory);
     }
