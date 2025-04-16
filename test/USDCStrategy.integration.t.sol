@@ -138,7 +138,8 @@ contract USDCStrategyTest is Test {
                 slippagePriceChecker: address(slippagePriceChecker),
                 splitMToken: splitMToken,
                 splitVault: splitVault,
-                strategyTypeId: strategyTypeId
+                strategyTypeId: strategyTypeId,
+                rewardTokens: new address[](0)
             })
         );
 

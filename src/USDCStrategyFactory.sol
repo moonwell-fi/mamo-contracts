@@ -22,6 +22,7 @@ contract USDCStrategyFactory {
     uint256 public immutable splitMToken;
     uint256 public immutable splitVault;
     uint256 public immutable strategyTypeId;
+    address[] public rewardTokens;
 
     // Reference to the MamoStrategyRegistry
     IMamoStrategyRegistry public immutable mamoStrategyRegistryInterface;
@@ -41,6 +42,7 @@ contract USDCStrategyFactory {
      * @param _splitMToken Percentage of funds allocated to Moonwell mToken in basis points
      * @param _splitVault Percentage of funds allocated to MetaMorpho Vault in basis points
      * @param _strategyTypeId The strategy type ID
+     * @param _rewardTokens Array of reward token addresses to be approved for CowSwap
      */
     constructor(
         address _mamoStrategyRegistry,
@@ -52,7 +54,8 @@ contract USDCStrategyFactory {
         address _strategyImplementation,
         uint256 _splitMToken,
         uint256 _splitVault,
-        uint256 _strategyTypeId
+        uint256 _strategyTypeId,
+        address[] memory _rewardTokens
     ) {
         require(_mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(_mamoBackend != address(0), "Invalid mamoBackend address");
@@ -74,6 +77,13 @@ contract USDCStrategyFactory {
         splitMToken = _splitMToken;
         splitVault = _splitVault;
         strategyTypeId = _strategyTypeId;
+        
+        // Store the reward tokens
+        if (_rewardTokens.length > 0) {
+            for (uint256 i = 0; i < _rewardTokens.length; i++) {
+                rewardTokens.push(_rewardTokens[i]);
+            }
+        }
 
         // Initialize the MamoStrategyRegistry reference
         mamoStrategyRegistryInterface = IMamoStrategyRegistry(_mamoStrategyRegistry);
@@ -104,7 +114,8 @@ contract USDCStrategyFactory {
                 slippagePriceChecker: slippagePriceChecker,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
-                strategyTypeId: strategyTypeId
+                strategyTypeId: strategyTypeId,
+                rewardTokens: rewardTokens
             })
         );
 

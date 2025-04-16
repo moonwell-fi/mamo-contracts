@@ -80,12 +80,12 @@
     "isContract": true
   },
   {
-    "addr": "0x17882A8aeF089d7eF59E79Bd3731901aF5f6f3bd",
+    "addr": "0xCB285Ef2143b2FBB4E75eE9046fe42a72E51Cf8E",
     "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
   {
-    "addr": "0x4417b1F0e50Af737ab04B109dee4041d108dFc00",
+    "addr": "0xf976a682B5Cd205C7BDABfdc1254d6d071F14086",
     "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
   }
