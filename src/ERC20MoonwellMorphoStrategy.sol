@@ -304,18 +304,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // ==================== VIEW FUNCTIONS ====================
 
-    /**
-     * @notice Gets the total balance of tokens across both protocols
-     * @return The total balance in tokens
-     * i
-     */
-    function getTotalBalance() public returns (uint256) {
-        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
-        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
-
-        return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
-    }
-
     /// @param orderDigest The EIP-712 signing digest derived from the order
     /// @param encodedOrder Bytes-encoded order information, originally created by an off-chain bot. Created by concatening the order data (in the form of GPv2Order.Data), the price checker address, and price checker data.
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
@@ -390,5 +378,17 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
             // Deposit token into MetaMorpho
             metaMorphoVault.deposit(targetMetaMorpho, address(this));
         }
+    }
+
+    /**
+     * @notice Gets the total balance of tokens across both protocols
+     * @return The total balance in tokens
+     * i
+     */
+    function getTotalBalance() internal returns (uint256) {
+        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
+        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
+
+        return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
 }
