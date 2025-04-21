@@ -77,7 +77,7 @@ contract USDCStrategyFactory {
         splitMToken = _splitMToken;
         splitVault = _splitVault;
         strategyTypeId = _strategyTypeId;
-        
+
         // Store the reward tokens
         if (_rewardTokens.length > 0) {
             for (uint256 i = 0; i < _rewardTokens.length; i++) {

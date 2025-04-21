@@ -133,11 +133,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Set default slippage to 1% (100 basis points)
         allowedSlippageInBps = 100;
-        
+
         // Approve CowSwap for each reward token
         if (params.rewardTokens.length > 0) {
             for (uint256 i = 0; i < params.rewardTokens.length; i++) {
-                approveCowSwap(params.rewardTokens[i], type(uint256).max);
+                _approveCowSwap(params.rewardTokens[i], type(uint256).max);
             }
         }
     }
@@ -170,6 +170,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @param amount The amount of tokens to approve
      */
     function approveCowSwap(address tokenAddress, uint256 amount) public onlyStrategyOwner {
+        _approveCowSwap(tokenAddress, amount);
+    }
+
+    /**
+     * @notice Internal function to approve the vault relayer to spend a specific token
+     * @param tokenAddress The address of the token to approve
+     * @param amount The amount of tokens to approve
+     */
+    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
         // Check if the token has a configuration in the swap checker
         require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
 

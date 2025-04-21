@@ -33,7 +33,7 @@ contract USDCStrategyFactoryDeployer is Script {
         // Get reward token addresses
         address well = addresses.getAddress("xWELL_PROXY");
         address morpho = addresses.getAddress("MORPHO");
-        
+
         // Create reward tokens array
         address[] memory rewardTokens = new address[](2);
         rewardTokens[0] = well;
@@ -65,7 +65,6 @@ contract USDCStrategyFactoryDeployer is Script {
             // Add the factory address to the addresses contract
             addresses.addAddress(factoryName, address(factory), true);
         }
-
 
         return address(factory);
     }
