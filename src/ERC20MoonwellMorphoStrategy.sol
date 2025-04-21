@@ -66,6 +66,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when funds are deposited into the strategy
     event Deposit(address indexed asset, uint256 amount);
 
+    // Events
+    // @notice Emitted when funds are deposited into the strategy
+    event DepositIdle(address indexed asset, uint256 amount);
+
     // @notice Emitted when funds are withdrawn from the strategy
     event Withdraw(address indexed asset, uint256 amount);
 
@@ -86,6 +90,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256 splitMToken;
         uint256 splitVault;
         uint256 strategyTypeId;
+        address[] rewardTokens;
     }
 
     /**
@@ -128,6 +133,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Set default slippage to 1% (100 basis points)
         allowedSlippageInBps = 100;
+
+        // Approve CowSwap for each reward token
+        if (params.rewardTokens.length > 0) {
+            for (uint256 i = 0; i < params.rewardTokens.length; i++) {
+                _approveCowSwap(params.rewardTokens[i], type(uint256).max);
+            }
+        }
     }
 
     // ==================== OWNER FUNCTIONS ====================
@@ -157,7 +169,16 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @param tokenAddress The address of the token to approve
      * @param amount The amount of tokens to approve
      */
-    function approveCowSwap(address tokenAddress, uint256 amount) external onlyStrategyOwner {
+    function approveCowSwap(address tokenAddress, uint256 amount) public onlyStrategyOwner {
+        _approveCowSwap(tokenAddress, amount);
+    }
+
+    /**
+     * @notice Internal function to approve the vault relayer to spend a specific token
+     * @param tokenAddress The address of the token to approve
+     * @param amount The amount of tokens to approve
+     */
+    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
         // Check if the token has a configuration in the swap checker
         require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
 
@@ -297,7 +318,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         // Deposit the funds according to the current split
         depositInternal(tokenBalance);
 
-        emit Deposit(address(token), tokenBalance);
+        emit DepositIdle(address(token), tokenBalance);
 
         return tokenBalance;
     }
@@ -383,9 +404,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /**
      * @notice Gets the total balance of tokens across both protocols
      * @return The total balance in tokens
-     * i
      */
-    function getTotalBalance() internal returns (uint256) {
+    function getTotalBalance() public returns (uint256) {
         uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
         uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
 
