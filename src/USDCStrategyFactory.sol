@@ -115,7 +115,8 @@ contract USDCStrategyFactory {
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId,
-                rewardTokens: rewardTokens
+                rewardTokens: rewardTokens,
+                owner: user
             })
         );
 

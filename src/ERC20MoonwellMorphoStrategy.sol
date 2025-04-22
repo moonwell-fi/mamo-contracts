@@ -11,6 +11,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -21,7 +22,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *         unexpected behavior and potential loss of funds.
  * @dev This contract is designed to be used as an implementation for proxies
  */
-contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
+contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy, OwnableUpgradeable {
     using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
 
@@ -91,6 +92,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256 splitVault;
         uint256 strategyTypeId;
         address[] rewardTokens;
+        address owner;
     }
 
     /**
@@ -122,6 +124,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId);
+        
+        // Initialize Ownable with the provided owner address
+        require(params.owner != address(0), "Invalid owner address");
+        __Ownable_init(params.owner);
 
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
@@ -410,5 +416,35 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
 
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
+    }
+    
+    /**
+     * @dev Override the owner() function from OwnableUpgradeable to get the owner from MamoStrategyRegistry
+     * @return The address of the strategy owner from the registry
+     */
+    function owner() public view virtual override returns (address) {
+        return mamoStrategyRegistry.strategyOwner(address(this));
+    }
+    
+    /**
+     * @dev Override the _checkOwner function to use the MamoStrategyRegistry's ownership check
+     * This ensures that onlyOwner modifier works with the registry's ownership model
+     */
+    function _checkOwner() internal view virtual override {
+        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Caller is not the owner");
+    }
+    
+    /**
+     * @dev Disable the transferOwnership function since ownership is managed by the registry
+     */
+    function transferOwnership(address) public virtual override onlyOwner {
+        revert("Ownership transfers must be done through the MamoStrategyRegistry");
+    }
+    
+    /**
+     * @dev Disable the renounceOwnership function since ownership is managed by the registry
+     */
+    function renounceOwnership() public virtual override onlyOwner {
+        revert("Ownership cannot be renounced in this contract");
     }
 }

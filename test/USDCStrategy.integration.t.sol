@@ -139,7 +139,8 @@ contract USDCStrategyTest is Test {
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId,
-                rewardTokens: new address[](0)
+                rewardTokens: new address[](0),
+                owner: owner
             })
         );
 
