@@ -108,4 +108,12 @@ interface IMamoStrategyRegistry {
      * @return The address of the strategy owner
      */
     function strategyOwner(address strategy) external view returns (address);
+
+    /**
+     * @notice Updates the owner of a strategy
+     * @dev Only callable by the current owner of the strategy
+     * @param strategy The address of the strategy
+     * @param newOwner The address of the new owner
+     */
+    function updateStrategyOwner(address strategy, address newOwner) external;
 }

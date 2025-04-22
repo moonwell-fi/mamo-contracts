@@ -11,7 +11,6 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
-import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -22,7 +21,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *         unexpected behavior and potential loss of funds.
  * @dev This contract is designed to be used as an implementation for proxies
  */
-contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy, OwnableUpgradeable {
+contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
 
@@ -123,11 +122,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.splitMToken + params.splitVault == 10000, "Split parameters must add up to 10000");
 
         // Set state variables
-        __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId);
-        
-        // Initialize Ownable with the provided owner address
-        require(params.owner != address(0), "Invalid owner address");
-        __Ownable_init(params.owner);
+        __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
@@ -157,7 +152,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
-    function deposit(uint256 amount) external onlyStrategyOwner {
+    function deposit(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
         // Transfer tokens from the owner to this contract
@@ -175,7 +170,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @param tokenAddress The address of the token to approve
      * @param amount The amount of tokens to approve
      */
-    function approveCowSwap(address tokenAddress, uint256 amount) public onlyStrategyOwner {
+    function approveCowSwap(address tokenAddress, uint256 amount) public onlyOwner {
         _approveCowSwap(tokenAddress, amount);
     }
 
@@ -197,7 +192,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the strategy owner
      * @param _newSlippageInBps The new slippage tolerance in basis points (e.g., 100 = 1%)
      */
-    function setSlippage(uint256 _newSlippageInBps) external onlyStrategyOwner {
+    function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
         require(_newSlippageInBps <= SPLIT_TOTAL, "Slippage exceeds maximum");
 
         emit SlippageUpdated(allowedSlippageInBps, _newSlippageInBps);
@@ -211,7 +206,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
      */
-    function withdraw(uint256 amount) external onlyStrategyOwner {
+    function withdraw(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
         require(getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
@@ -251,7 +246,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @notice Withdraws all funds from the strategy
      * @dev Only callable by the user who owns this strategy
      */
-    function withdrawAll() external onlyStrategyOwner {
+    function withdrawAll() external onlyOwner {
         // Get current balances
         uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
         uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
@@ -418,33 +413,5 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
     }
     
-    /**
-     * @dev Override the owner() function from OwnableUpgradeable to get the owner from MamoStrategyRegistry
-     * @return The address of the strategy owner from the registry
-     */
-    function owner() public view virtual override returns (address) {
-        return mamoStrategyRegistry.strategyOwner(address(this));
-    }
-    
-    /**
-     * @dev Override the _checkOwner function to use the MamoStrategyRegistry's ownership check
-     * This ensures that onlyOwner modifier works with the registry's ownership model
-     */
-    function _checkOwner() internal view virtual override {
-        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Caller is not the owner");
-    }
-    
-    /**
-     * @dev Disable the transferOwnership function since ownership is managed by the registry
-     */
-    function transferOwnership(address) public virtual override onlyOwner {
-        revert("Ownership transfers must be done through the MamoStrategyRegistry");
-    }
-    
-    /**
-     * @dev Disable the renounceOwnership function since ownership is managed by the registry
-     */
-    function renounceOwnership() public virtual override onlyOwner {
-        revert("Ownership cannot be renounced in this contract");
-    }
 }
+
