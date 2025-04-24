@@ -5,7 +5,8 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IWormholeRelayer} from "@contracts/interfaces/IWormholeRelayer.sol";
 import {IWormholeReceiver} from "@contracts/interfaces/IWormholeReceiver.sol";
 import {xERC20BridgeAdapter} from "@contracts/token/xERC20BridgeAdapter.sol";
-import {WormholeTrustedSender} from "@contracts/interfaces/IWormholeTrustedSender.sol";
+import {IWormholeTrustedSender} from "@contracts/interfaces/IWormholeTrustedSender.sol";
+import {WormholeTrustedSender} from "@contracts/token/WormholeTrustedSender.sol";
 
 /// @notice Wormhole xERC20 Token Bridge adapter
 contract WormholeBridgeAdapter is
@@ -93,8 +94,7 @@ contract WormholeBridgeAdapter is
         uint16[] memory targetChains,
         address[] memory targetAddresses
     ) public initializer {
-        __Ownable_init();
-        _transferOwnership(newOwner);
+        __Ownable_init(newOwner);
         _setxERC20(newxerc20);
 
         wormholeRelayer = IWormholeRelayer(wormholeRelayerAddress);

@@ -1,7 +1,7 @@
 pragma solidity 0.8.28;
 
-import {RateLimitedMidpointLibrary} from "@zelt/src/lib/RateLimitedMidpointLibrary.sol";
-import {RateLimitMidPoint, RateLimitMidpointCommonLibrary} from "@zelt/src/lib/RateLimitMidpointCommonLibrary.sol";
+import {RateLimitedMidpointLibrary} from "@contracts/libraries/RateLimitedMidpointLibrary.sol";
+import {RateLimitMidPoint, RateLimitMidpointCommonLibrary} from "@contracts/libraries/RateLimitMidpointCommonLibrary.sol";
 
 abstract contract MintLimits {
     using RateLimitMidpointCommonLibrary for RateLimitMidPoint;

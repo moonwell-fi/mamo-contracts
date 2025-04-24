@@ -1,8 +1,8 @@
 pragma solidity 0.8.28;
 
-import {Ownable2StepUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/access/Ownable2StepUpgradeable.sol";
-import {ERC20VotesUpgradeable} from "@openzeppelin-contracts-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
-import {ERC20Upgradeable} from "@openzeppelin-contracts-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/contracts/access/Ownable2StepUpgradeable.sol";
+import {ERC20VotesUpgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
+import {ERC20Upgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {xERC20} from "@contracts/token/xERC20.sol";
@@ -53,9 +53,9 @@ contract MAMO is
             "xWELL: pause duration too long"
         );
         __ERC20_init(tokenName, tokenSymbol);
-        __ERC20Permit_init(tokenName);
+        // TODO maybe add permit here
 
-        __Ownable_init();
+        __Ownable_init(tokenOwner);
         _addLimits(newRateLimits);
 
         /// pausing
@@ -63,7 +63,6 @@ contract MAMO is
         _grantGuardian(newPauseGuardian); /// set the pause guardian
         _updatePauseDuration(newPauseDuration);
 
-        _transferOwnership(tokenOwner); /// directly set the new owner without waiting for pending owner to accept
     }
 
     /// --------------------------------------------------------
@@ -258,12 +257,12 @@ contract MAMO is
     /// @param from the address to transfer from
     /// @param to the address to transfer to
     /// @param amount the amount to transfer
-    function _beforeTokenTransfer(
+    function _update(
         address from,
         address to,
         uint256 amount
     ) internal override {
-        super._beforeTokenTransfer(from, to, amount);
+        super._update(from, to, amount);
 
         require(
             to != address(this),
