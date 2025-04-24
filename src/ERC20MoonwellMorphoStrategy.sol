@@ -36,7 +36,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
-    /// @notice The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
+    /// @notice The address of the Cow contracts Vault Relayer contract that needs token approval for executing trades
     address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
 
     // State variables
@@ -214,7 +214,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         // Check if we have enough tokens in the contract
         uint256 tokenBalance = token.balanceOf(address(this));
 
-        // If we don't have enough tokens, withdraw from protocols
+        // If we don't have enough tokens, withdraw from contractss
         if (tokenBalance < amount) {
             uint256 amountNeeded = amount - tokenBalance;
 
@@ -382,11 +382,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @param amount The amount of tokens to deposit
      */
     function depositInternal(uint256 amount) internal {
-        // Calculate target amounts for each protocol
+        // Calculate target amounts for each contracts
         uint256 targetMoonwell = (amount * splitMToken) / SPLIT_TOTAL;
         uint256 targetMetaMorpho = (amount * splitVault) / SPLIT_TOTAL;
 
-        // Deposit into each protocol according to the split
+        // Deposit into each contracts according to the split
         if (targetMoonwell > 0) {
             token.forceApprove(address(mToken), targetMoonwell);
 
@@ -403,7 +403,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
-     * @notice Gets the total balance of tokens across both protocols
+     * @notice Gets the total balance of tokens across both contractss
      * @return The total balance in tokens
      */
     function getTotalBalance() public returns (uint256) {
