@@ -3,9 +3,10 @@ pragma solidity 0.8.28;
 
 import {IBaseStrategy} from "@interfaces/IBaseStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
-import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -29,7 +30,6 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
 
     /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
-
 
     /**
      * @notice Allows the contract to receive ETH
@@ -82,7 +82,10 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
      * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
      * @param _strategyTypeId The unique identifier for this strategy type
      */
-    function __BaseStrategy_init(address _mamoStrategyRegistry, uint256 _strategyTypeId, address initialOwner) internal onlyInitializing {
+    function __BaseStrategy_init(address _mamoStrategyRegistry, uint256 _strategyTypeId, address initialOwner)
+        internal
+        onlyInitializing
+    {
         mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
         strategyTypeId = _strategyTypeId;
         __Ownable_init(initialOwner);
@@ -96,8 +99,7 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     function getOwner() external view returns (address) {
         return mamoStrategyRegistry.strategyOwner(address(this));
     }
-    
-    
+
     /**
      * @dev Override the transferOwnership function to update the owner in MamoStrategyRegistry
      * @param newOwner The address to transfer ownership to
@@ -106,7 +108,7 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
         super.transferOwnership(newOwner);
         mamoStrategyRegistry.updateStrategyOwner(address(this), newOwner);
     }
-    
+
     /**
      * @dev Disable the renounceOwnership function since ownership is managed by the registry
      */

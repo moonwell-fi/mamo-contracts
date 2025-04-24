@@ -217,8 +217,8 @@ contract USDCStrategyTest is Test {
         vm.startPrank(nonOwner);
         usdc.approve(address(strategy), depositAmount);
 
-        // Attempt to deposit should revert with "Not strategy owner"
-        vm.expectRevert("Not strategy owner");
+        // Attempt to deposit should revert with OwnableUnauthorizedAccount error
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -288,8 +288,8 @@ contract USDCStrategyTest is Test {
         vm.startPrank(nonOwner);
         uint256 withdrawAmount = depositAmount / 2;
 
-        // Attempt to withdraw should revert with "Not strategy owner"
-        vm.expectRevert("Not strategy owner");
+        // Attempt to withdraw should revert with OwnableUnauthorizedAccount error
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.withdraw(withdrawAmount);
         vm.stopPrank();
 
@@ -402,7 +402,7 @@ contract USDCStrategyTest is Test {
 
         // Non-owner attempts to recover the tokens
         vm.startPrank(nonOwner);
-        vm.expectRevert("Not strategy owner");
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.recoverERC20(address(mockToken), recipient, tokenAmount);
         vm.stopPrank();
 
@@ -486,7 +486,7 @@ contract USDCStrategyTest is Test {
 
         // Non-owner attempts to recover the ETH
         vm.startPrank(nonOwner);
-        vm.expectRevert("Not strategy owner");
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.recoverETH(recipient);
         vm.stopPrank();
 
@@ -597,7 +597,7 @@ contract USDCStrategyTest is Test {
 
         // Attempt to withdraw all as non-owner
         vm.startPrank(nonOwner);
-        vm.expectRevert("Not strategy owner");
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.withdrawAll();
         vm.stopPrank();
 
@@ -1323,7 +1323,7 @@ contract USDCStrategyTest is Test {
         // Non-owner attempts to set slippage
         uint256 newSlippage = 200; // 2%
         vm.prank(nonOwner);
-        vm.expectRevert("Not strategy owner");
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.setSlippage(newSlippage);
 
         // Verify the slippage remains unchanged
@@ -1507,7 +1507,7 @@ contract USDCStrategyTest is Test {
 
         // Non-owner attempts to approve the vault relayer
         vm.prank(nonOwner);
-        vm.expectRevert("Not strategy owner");
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         // Verify the approval was not granted

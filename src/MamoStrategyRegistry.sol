@@ -265,20 +265,20 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     function updateStrategyOwner(address strategy, address newOwner) external {
         require(strategy != address(0), "Invalid strategy address");
         require(newOwner != address(0), "Invalid owner address");
-        
+
         // Check if the caller is the current owner of the strategy
         require(isUserStrategy(msg.sender, strategy), "Caller is not the owner of the strategy");
-        
+
         // Remove the strategy from the current owner's list
         address currentOwner = strategyOwner[strategy];
         _userStrategies[currentOwner].remove(strategy);
-        
+
         // Add the strategy to the new owner's list
         _userStrategies[newOwner].add(strategy);
-        
+
         // Update the strategy owner mapping
         strategyOwner[strategy] = newOwner;
-        
+
         emit StrategyAdded(newOwner, strategy, ERC1967Proxy(payable(strategy)).getImplementation());
     }
 }
