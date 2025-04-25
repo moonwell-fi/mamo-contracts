@@ -4,24 +4,21 @@ import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/contracts/acces
 import {ERC20Upgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
-import {xERC20} from "@contracts/token/xERC20.sol";
-import {MintLimits} from "@contracts/token/MintLimits.sol";
-import {ConfigurablePauseGuardian} from "@contracts/token/ConfigurablePauseGuardian.sol";
-import {IERC7802, IERC165} from "@contracts/interfaces/IERC7802.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC165, IERC7802} from "@contracts/interfaces/IERC7802.sol";
+
 import {IXERC20} from "@contracts/interfaces/IXERC20.sol";
+import {ConfigurablePauseGuardian} from "@contracts/token/ConfigurablePauseGuardian.sol";
+import {MintLimits} from "@contracts/token/MintLimits.sol";
+import {xERC20} from "@contracts/token/xERC20.sol";
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title MAMO
 /// @notice The MAMO token is xERC20 and SuperERC20 compatible
-contract MAMO is
-    xERC20,
-    Ownable2StepUpgradeable,
-    ConfigurablePauseGuardian,
-    IERC7802
-{
+contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IERC7802 {
     using SafeCast for uint256;
 
-    /// @notice maximum supply is 1 billion tokens 
+    /// @notice maximum supply is 1 billion tokens
     uint256 public constant MAX_SUPPLY = 1_000_000_000 * 1e18;
 
     /// @notice maximum rate limit per second is 25k
@@ -33,7 +30,7 @@ contract MAMO is
     /// @notice the maximum time the token can be paused for
     uint256 public constant MAX_PAUSE_DURATION = 30 days;
 
-       /// @notice Address of the SuperchainTokenBridge predeploy.
+    /// @notice Address of the SuperchainTokenBridge predeploy.
     address internal constant SUPERCHAIN_TOKEN_BRIDGE = 0x4200000000000000000000000000000000000028;
 
     /// @notice logic contract cannot be initialized
@@ -55,10 +52,7 @@ contract MAMO is
         uint128 newPauseDuration,
         address newPauseGuardian
     ) external initializer {
-        require(
-            newPauseDuration <= MAX_PAUSE_DURATION,
-            "xWELL: pause duration too long"
-        );
+        require(newPauseDuration <= MAX_PAUSE_DURATION, "xWELL: pause duration too long");
         __ERC20_init(tokenName, tokenSymbol);
         // TODO maybe add permit here
 
@@ -66,13 +60,12 @@ contract MAMO is
         _addLimits(newRateLimits);
 
         /// pausing
-        __Pausable_init(); /// not really needed, but seems like good form
-        _grantGuardian(newPauseGuardian); /// set the pause guardian
+        __Pausable_init();
+        /// not really needed, but seems like good form
+        _grantGuardian(newPauseGuardian);
+        /// set the pause guardian
         _updatePauseDuration(newPauseDuration);
-
     }
-
-
 
     ///  ------------------------------------------------------------
     ///  ------------------------------------------------------------
@@ -98,8 +91,6 @@ contract MAMO is
     function minBufferCap() public pure override returns (uint112) {
         return MIN_BUFFER_CAP;
     }
-
-
 
     /// -------------------------------------------------------------
     /// -------------------------------------------------------------
@@ -156,10 +147,7 @@ contract MAMO is
     /// @notice conform to the xERC20 setLimits interface
     /// @param bridge the bridge we are setting the limits of
     /// @param newBufferCap the new buffer cap, uint112 max for unlimited
-    function setBufferCap(
-        address bridge,
-        uint256 newBufferCap
-    ) public onlyOwner {
+    function setBufferCap(address bridge, uint256 newBufferCap) public onlyOwner {
         _setBufferCap(bridge, newBufferCap.toUint112());
 
         emit BridgeLimitsSet(bridge, newBufferCap);
@@ -169,10 +157,7 @@ contract MAMO is
     /// @notice set rate limit per second for a bridge
     /// @param bridge the bridge we are setting the limits of
     /// @param newRateLimitPerSecond the new rate limit per second
-    function setRateLimitPerSecond(
-        address bridge,
-        uint128 newRateLimitPerSecond
-    ) external onlyOwner {
+    function setRateLimitPerSecond(address bridge, uint128 newRateLimitPerSecond) external onlyOwner {
         _setRateLimitPerSecond(bridge, newRateLimitPerSecond);
     }
 
@@ -180,9 +165,7 @@ contract MAMO is
     /// @dev can only be called when unpaused, otherwise the
     /// contract can be paused again
     /// @param newPauseGuardian the new pause guardian
-    function grantPauseGuardian(
-        address newPauseGuardian
-    ) external onlyOwner whenNotPaused {
+    function grantPauseGuardian(address newPauseGuardian) external onlyOwner whenNotPaused {
         _grantGuardian(newPauseGuardian);
     }
 
@@ -200,26 +183,19 @@ contract MAMO is
     /// before an upgrade.
     /// @param newPauseDuration the new pause duration
     function setPauseDuration(uint128 newPauseDuration) external onlyOwner {
-        require(
-            newPauseDuration <= MAX_PAUSE_DURATION,
-            "xWELL: pause duration too long"
-        );
+        require(newPauseDuration <= MAX_PAUSE_DURATION, "xWELL: pause duration too long");
         _updatePauseDuration(newPauseDuration);
     }
 
     /// @notice add a new bridge to the currently active bridges
     /// @param newBridge the bridge to add
-    function addBridge(
-        RateLimitMidPointInfo memory newBridge
-    ) external onlyOwner {
+    function addBridge(RateLimitMidPointInfo memory newBridge) external onlyOwner {
         _addLimit(newBridge);
     }
 
     /// @notice add new bridges to the currently active bridges
     /// @param newBridges the bridges to add
-    function addBridges(
-        RateLimitMidPointInfo[] memory newBridges
-    ) external onlyOwner {
+    function addBridges(RateLimitMidPointInfo[] memory newBridges) external onlyOwner {
         _addLimits(newBridges);
     }
 
@@ -239,10 +215,9 @@ contract MAMO is
         _removeLimits(bridges);
     }
 
-   /// @inheritdoc IERC165
+    /// @inheritdoc IERC165
     function supportsInterface(bytes4 _interfaceId) public view virtual returns (bool) {
         return _interfaceId == type(IERC7802).interfaceId || _interfaceId == type(IERC20).interfaceId
             || _interfaceId == type(IERC165).interfaceId || _interfaceId == type(IXERC20).interfaceId;
     }
-  
 }
