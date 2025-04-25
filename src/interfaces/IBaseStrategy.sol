@@ -19,10 +19,4 @@ interface IBaseStrategy {
      * @return The strategy type ID
      */
     function strategyTypeId() external view returns (uint256);
-
-    /**
-     * @notice Returns the owner address of this strategy
-     * @return The address of the strategy owner
-     */
-    function getOwner() external view returns (address);
 }

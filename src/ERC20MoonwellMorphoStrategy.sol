@@ -406,19 +406,21 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         // and the callData is a transferFrom call that transfers the fee from the contract
         // to the desired recipient (in our case a multisig).
 
-        /// TODO: review this logic
         uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
 
-        string memory preHookCalldata =
+        // Convert bytes to hex string
+        bytes memory preHookCalldata =
             abi.encodeWithSelector(IERC20.transferFrom.selector, address(this), feeRecipient, feeAmount);
+
+        string memory preHookCalldataStr = _bytesToHexString(preHookCalldata);
 
         string memory expectedAppData = string.concat(
             '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
-            preHookCalldata,
+            preHookCalldataStr,
             '","gasLimit":"',
             Strings.toString(hookGasLimit),
             '","target":"',
-            _order.sellToken,
+            Strings.toHexString(uint160(address(_order.sellToken)), 20),
             '"}],"version":"0.1.0"}},"version":"1.3.0"}'
         );
 
@@ -489,5 +491,23 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Approve the vault relayer unlimited
         IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
+    }
+
+    /**
+     * @notice Converts bytes to a hex string
+     * @param _bytes The bytes to convert
+     * @return A string representation of the bytes in hex format
+     */
+    function _bytesToHexString(bytes memory _bytes) internal pure returns (string memory) {
+        bytes memory hexChars = "0123456789abcdef";
+        bytes memory hexString = new bytes(_bytes.length * 2);
+
+        for (uint256 i = 0; i < _bytes.length; i++) {
+            uint8 value = uint8(_bytes[i]);
+            hexString[i * 2] = hexChars[value >> 4];
+            hexString[i * 2 + 1] = hexChars[value & 0xf];
+        }
+
+        return string(hexString);
     }
 }

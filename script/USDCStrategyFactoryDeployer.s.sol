@@ -29,6 +29,11 @@ contract USDCStrategyFactoryDeployer is Script {
         address usdc = addresses.getAddress("USDC");
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address strategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        address feeRecipient = addresses.getAddress("FEE_RECIPIENT");
+
+        // Default hook gas limit
+        // TODO: add this to the deployment config
+        uint256 hookGasLimit = 100000;
 
         // Get reward token addresses
         address well = addresses.getAddress("xWELL_PROXY");
@@ -48,9 +53,11 @@ contract USDCStrategyFactoryDeployer is Script {
             usdc,
             slippagePriceChecker,
             strategyImplementation,
+            feeRecipient,
             config.splitMToken,
             config.splitVault,
             strategyTypeId,
+            hookGasLimit,
             rewardTokens
         );
 

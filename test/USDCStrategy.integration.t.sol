@@ -136,11 +136,13 @@ contract USDCStrategyTest is Test {
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
                 slippagePriceChecker: address(slippagePriceChecker),
+                feeRecipient: admin, // Using admin as fee recipient
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId,
                 rewardTokens: new address[](0),
-                owner: owner
+                owner: owner,
+                hookGasLimit: 100000 // Setting a default gas limit
             })
         );
 

@@ -19,9 +19,11 @@ contract USDCStrategyFactory {
     address public immutable token;
     address public immutable slippagePriceChecker;
     address public immutable strategyImplementation;
+    address public immutable feeRecipient;
     uint256 public immutable splitMToken;
     uint256 public immutable splitVault;
     uint256 public immutable strategyTypeId;
+    uint256 public immutable hookGasLimit;
     address[] public rewardTokens;
 
     // Reference to the MamoStrategyRegistry
@@ -52,9 +54,11 @@ contract USDCStrategyFactory {
         address _token,
         address _slippagePriceChecker,
         address _strategyImplementation,
+        address _feeRecipient,
         uint256 _splitMToken,
         uint256 _splitVault,
         uint256 _strategyTypeId,
+        uint256 _hookGasLimit,
         address[] memory _rewardTokens
     ) {
         require(_mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
@@ -64,8 +68,10 @@ contract USDCStrategyFactory {
         require(_token != address(0), "Invalid token address");
         require(_slippagePriceChecker != address(0), "Invalid slippagePriceChecker address");
         require(_strategyImplementation != address(0), "Invalid strategyImplementation address");
+        require(_feeRecipient != address(0), "Invalid feeRecipient address");
         require(_splitMToken + _splitVault == 10000, "Split parameters must add up to 10000");
         require(_strategyTypeId != 0, "Strategy type id not set");
+        require(_hookGasLimit > 0, "Invalid hook gas limit");
 
         mamoStrategyRegistry = _mamoStrategyRegistry;
         mamoBackend = _mamoBackend;
@@ -74,9 +80,11 @@ contract USDCStrategyFactory {
         token = _token;
         slippagePriceChecker = _slippagePriceChecker;
         strategyImplementation = _strategyImplementation;
+        feeRecipient = _feeRecipient;
         splitMToken = _splitMToken;
         splitVault = _splitVault;
         strategyTypeId = _strategyTypeId;
+        hookGasLimit = _hookGasLimit;
 
         // Store the reward tokens
         if (_rewardTokens.length > 0) {
@@ -112,11 +120,13 @@ contract USDCStrategyFactory {
                 metaMorphoVault: metaMorphoVault,
                 token: token,
                 slippagePriceChecker: slippagePriceChecker,
+                feeRecipient: feeRecipient,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId,
                 rewardTokens: rewardTokens,
-                owner: user
+                owner: user,
+                hookGasLimit: hookGasLimit
             })
         );
 
