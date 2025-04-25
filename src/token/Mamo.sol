@@ -1,7 +1,6 @@
 pragma solidity 0.8.28;
 
 import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/contracts/access/Ownable2StepUpgradeable.sol";
-import {ERC20VotesUpgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
 import {ERC20Upgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
@@ -11,14 +10,13 @@ import {ConfigurablePauseGuardian} from "@contracts/token/ConfigurablePauseGuard
 
 contract MAMO is
     xERC20,
-    ERC20VotesUpgradeable,
     Ownable2StepUpgradeable,
     ConfigurablePauseGuardian
 {
     using SafeCast for uint256;
 
-    /// @notice maximum supply is 5 billion tokens if all WELL holders migrate to xWELL
-    uint256 public constant MAX_SUPPLY = 5_000_000_000 * 1e18;
+    /// @notice maximum supply is 1 billion tokens 
+    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 1e18;
 
     /// @notice maximum rate limit per second is 25k
     uint128 public constant MAX_RATE_LIMIT_PER_SECOND = 25_000 * 1e18;
@@ -65,30 +63,7 @@ contract MAMO is
 
     }
 
-    /// --------------------------------------------------------
-    /// --------------------------------------------------------
-    /// -------------------- clock override --------------------
-    /// --------------------------------------------------------
-    /// --------------------------------------------------------
 
-    /// @notice override the clock in ERC20 Votes to use block timestamp
-    /// now all checkpoints use unix timestamp instead of block number
-    function clock() public view override returns (uint48) {
-        /// do not safe cast, overflow will not happen for billions of years
-        /// Given that the Unix Epoch started in 1970, adding these years to 1970 gives a theoretical year:
-        /// 1970 + 8,923,292,862.77 ≈ Year 8,923,292,883,832
-        return uint48(block.timestamp);
-    }
-
-    /// @dev Machine-readable description of the clock as specified in EIP-6372.
-    /// https://eips.ethereum.org/EIPS/eip-6372
-    // solhint-disable-next-line func-name-mixedcase
-    function CLOCK_MODE() public view override returns (string memory) {
-        // Check that the clock is correctly modified
-        require(clock() == uint48(block.timestamp), "Incorrect clock");
-
-        return "mode=timestamp";
-    }
 
     ///  ------------------------------------------------------------
     ///  ------------------------------------------------------------
@@ -115,21 +90,7 @@ contract MAMO is
         return MIN_BUFFER_CAP;
     }
 
-    /// ------------------------------------------------------------
-    /// ------------------------------------------------------------
-    /// ------------------- Overridden View Hooks ------------------
-    /// ------------------------------------------------------------
-    /// ------------------------------------------------------------
 
-    /// @notice the total supply of the token
-    function totalSupply()
-        public
-        view
-        override(ERC20Upgradeable, xERC20)
-        returns (uint256)
-    {
-        return super.totalSupply();
-    }
 
     /// -------------------------------------------------------------
     /// -------------------------------------------------------------
@@ -270,30 +231,5 @@ contract MAMO is
         );
     }
 
-    /// @notice mint tokens for a user
-    function _mint(
-        address user,
-        uint256 amount
-    ) internal override(ERC20VotesUpgradeable, xERC20) {
-        super._mint(user, amount);
-
-        xERC20._mint(user, amount);
-    }
-
-    /// @notice mint tokens for a user
-    function _burn(
-        address user,
-        uint256 amount
-    ) internal override(ERC20VotesUpgradeable, xERC20) {
-        super._burn(user, amount);
-    }
-
-    /// @notice spend allowance from a user
-    function _spendAllowance(
-        address owner,
-        address spender,
-        uint256 amount
-    ) internal virtual override(ERC20Upgradeable, xERC20) {
-        super._spendAllowance(owner, spender, amount);
-    }
+  
 }
