@@ -37,6 +37,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
+    /// @notice The maximum allowed slippage in basis points
+    uint256 public constant MAX_SLIPPAGE_IN_BPS = 1000; // 10% in basis points
+
+    /// @notice The maximum allowed compound fee in basis points
+    uint256 public constant MAX_COMPOUND_FEE = 1000; // 10% in basis points
+
     /// @notice The address of the Cow contracts Vault Relayer contract that needs token approval for executing trades
     address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
 
@@ -110,6 +116,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address[] rewardTokens;
         address owner;
         uint256 hookGasLimit;
+        uint256 allowedSlippageInBps;
+        uint256 compoundFee;
     }
 
     /**
@@ -140,6 +148,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.feeRecipient != address(0), "Invalid fee recipient address");
         require(params.splitMToken + params.splitVault == 10000, "Split parameters must add up to 10000");
         require(params.hookGasLimit > 0, "Invalid hook gas limit");
+        require(params.allowedSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
+        require(params.compoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
+
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
@@ -179,8 +190,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
-    // TODO: make permissionless
-    function deposit(uint256 amount) external onlyOwner {
+    function deposit(uint256 amount) external {
         require(amount > 0, "Amount must be greater than 0");
 
         // Transfer tokens from the owner to this contract
@@ -208,7 +218,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @param _newSlippageInBps The new slippage tolerance in basis points (e.g., 100 = 1%)
      */
     function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
-        require(_newSlippageInBps <= SPLIT_TOTAL, "Slippage exceeds maximum");
+        require(_newSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
 
         emit SlippageUpdated(allowedSlippageInBps, _newSlippageInBps);
         allowedSlippageInBps = _newSlippageInBps;
@@ -328,7 +338,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @param _newCompoundFee The new compound fee in basis points (e.g., 100 = 1%)
      */
     function setCompoundFee(uint256 _newCompoundFee) external onlyBackend {
-        require(_newCompoundFee <= SPLIT_TOTAL, "Compound fee exceeds maximum");
+        require(_newCompoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
 
         compoundFee = _newCompoundFee;
 

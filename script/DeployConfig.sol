@@ -25,11 +25,13 @@ contract DeployConfig is Test {
         uint256 chainId;
         string guardian;
         uint256 maxPriceValidTime;
-        uint256 maxSlippageBps;
         RewardToken[] rewardTokens;
         uint256 splitMToken;
         uint256 splitVault;
         string version;
+        uint256 hookGasLimit;
+        uint256 allowedSlippageInBps;
+        uint256 compoundFee;
     }
 
     /// @notice Reward token configuration struct

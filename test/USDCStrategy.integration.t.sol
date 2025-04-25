@@ -142,7 +142,9 @@ contract USDCStrategyTest is Test {
                 strategyTypeId: strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
-                hookGasLimit: 100000 // Setting a default gas limit
+                hookGasLimit: 100000, // Setting a default gas limit
+                allowedSlippageInBps: 1000, // 10% in basis points
+                compoundFee: 1000 // 10% in basis points
             })
         );
 

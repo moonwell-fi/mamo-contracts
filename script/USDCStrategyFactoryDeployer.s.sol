@@ -31,10 +31,6 @@ contract USDCStrategyFactoryDeployer is Script {
         address strategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
         address feeRecipient = addresses.getAddress("FEE_RECIPIENT");
 
-        // Default hook gas limit
-        // TODO: add this to the deployment config
-        uint256 hookGasLimit = 100000;
-
         // Get reward token addresses
         address well = addresses.getAddress("xWELL_PROXY");
         address morpho = addresses.getAddress("MORPHO");
@@ -57,7 +53,9 @@ contract USDCStrategyFactoryDeployer is Script {
             config.splitMToken,
             config.splitVault,
             strategyTypeId,
-            hookGasLimit,
+            config.hookGasLimit,
+            config.allowedSlippageInBps,
+            config.compoundFee,
             rewardTokens
         );
 
