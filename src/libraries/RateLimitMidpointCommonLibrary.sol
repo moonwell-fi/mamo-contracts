@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-3.0
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {Math} from "@contracts/libraries/Math.sol";
@@ -31,17 +31,12 @@ library RateLimitMidpointCommonLibrary {
     event BufferCapUpdate(uint256 oldBufferCap, uint256 newBufferCap);
 
     /// @notice event emitted when rate limit per second is updated
-    event RateLimitPerSecondUpdate(
-        uint256 oldRateLimitPerSecond,
-        uint256 newRateLimitPerSecond
-    );
+    event RateLimitPerSecondUpdate(uint256 oldRateLimitPerSecond, uint256 newRateLimitPerSecond);
 
     /// @notice the amount of action available before hitting the rate limit
     /// @dev replenishes at rateLimitPerSecond per second back to midPoint
     /// @param limit pointer to the rate limit object
-    function buffer(
-        RateLimitMidPoint storage limit
-    ) public view returns (uint256) {
+    function buffer(RateLimitMidPoint storage limit) public view returns (uint256) {
         uint256 elapsed;
         unchecked {
             elapsed = uint32(block.timestamp) - limit.lastBufferUsedTime;
@@ -49,19 +44,12 @@ library RateLimitMidpointCommonLibrary {
 
         uint256 accrued = uint256(limit.rateLimitPerSecond) * elapsed;
         if (limit.bufferStored < limit.midPoint) {
-            return
-                Math.min(
-                    uint256(limit.bufferStored) + accrued,
-                    uint256(limit.midPoint)
-                );
+            return Math.min(uint256(limit.bufferStored) + accrued, uint256(limit.midPoint));
         } else if (limit.bufferStored > limit.midPoint) {
             /// past midpoint so subtract accrued off bufferStored back down to midpoint
 
             /// second part of if statement will not be evaluated if first part is true
-            if (
-                accrued > limit.bufferStored ||
-                limit.bufferStored - accrued < limit.midPoint
-            ) {
+            if (accrued > limit.bufferStored || limit.bufferStored - accrued < limit.midPoint) {
                 /// if accrued is more than buffer stored, subtracting will underflow,
                 /// and we are at the midpoint, so return that
                 return limit.midPoint;
@@ -69,7 +57,8 @@ library RateLimitMidpointCommonLibrary {
                 return limit.bufferStored - accrued;
             }
         } else {
-            return limit.bufferStored; /// no change
+            return limit.bufferStored;
+            /// no change
         }
     }
 
@@ -88,27 +77,18 @@ library RateLimitMidpointCommonLibrary {
     /// @notice set the rate limit per second
     /// @param limit pointer to the rate limit object
     /// @param newRateLimitPerSecond the new rate limit per second
-    function setRateLimitPerSecond(
-        RateLimitMidPoint storage limit,
-        uint128 newRateLimitPerSecond
-    ) internal {
+    function setRateLimitPerSecond(RateLimitMidPoint storage limit, uint128 newRateLimitPerSecond) internal {
         sync(limit);
         uint256 oldRateLimitPerSecond = limit.rateLimitPerSecond;
         limit.rateLimitPerSecond = newRateLimitPerSecond;
 
-        emit RateLimitPerSecondUpdate(
-            oldRateLimitPerSecond,
-            newRateLimitPerSecond
-        );
+        emit RateLimitPerSecondUpdate(oldRateLimitPerSecond, newRateLimitPerSecond);
     }
 
     /// @notice set the buffer cap, but first sync to accrue all rate limits accrued
     /// @param limit pointer to the rate limit object
     /// @param newBufferCap the new buffer cap to set
-    function setBufferCap(
-        RateLimitMidPoint storage limit,
-        uint112 newBufferCap
-    ) internal {
+    function setBufferCap(RateLimitMidPoint storage limit, uint112 newBufferCap) internal {
         sync(limit);
 
         uint256 oldBufferCap = limit.bufferCap;

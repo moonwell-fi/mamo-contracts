@@ -1,8 +1,10 @@
-// SPDX-License-Identifier: BSD-3.0
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {Math} from "@contracts/libraries/Math.sol";
-import {RateLimitMidPoint, RateLimitMidpointCommonLibrary} from "@contracts/libraries/RateLimitMidpointCommonLibrary.sol";
+import {
+    RateLimitMidPoint, RateLimitMidpointCommonLibrary
+} from "@contracts/libraries/RateLimitMidpointCommonLibrary.sol";
 
 /// @title library for putting a rate limit on how fast a contract
 /// can perform an action e.g. Minting and Burning with a midpoint
@@ -21,11 +23,9 @@ library RateLimitedMidpointLibrary {
     /// If buffer is <= amount, revert
     /// @param limit pointer to the rate limit object
     /// @param amount to decrease buffer by
-    function depleteBuffer(
-        RateLimitMidPoint storage limit,
-        uint256 amount
-    ) internal {
-        uint256 newBuffer = limit.buffer(); /// SLOAD 2x
+    function depleteBuffer(RateLimitMidPoint storage limit, uint256 amount) internal {
+        uint256 newBuffer = limit.buffer();
+        /// SLOAD 2x
 
         require(amount <= newBuffer, "RateLimited: rate limit hit");
 
@@ -42,12 +42,11 @@ library RateLimitedMidpointLibrary {
     /// @notice function to replenish buffer
     /// @param amount to increase buffer by if under buffer cap
     /// @param limit pointer to the rate limit object
-    function replenishBuffer(
-        RateLimitMidPoint storage limit,
-        uint256 amount
-    ) internal {
-        uint256 buffer = limit.buffer(); /// SLOAD 2x
-        uint256 _bufferCap = limit.bufferCap; /// warm SLOAD
+    function replenishBuffer(RateLimitMidPoint storage limit, uint256 amount) internal {
+        uint256 buffer = limit.buffer();
+        /// SLOAD 2x
+        uint256 _bufferCap = limit.bufferCap;
+        /// warm SLOAD
         uint256 newBuffer = buffer + amount;
 
         require(newBuffer <= _bufferCap, "RateLimited: buffer cap overflow");

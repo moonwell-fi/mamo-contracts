@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 interface IXERC20 {
@@ -15,9 +16,7 @@ interface IXERC20 {
      * @param _minter The minter we are viewing the limits of
      *  @return _limit The limit the minter has
      */
-    function mintingMaxLimitOf(
-        address _minter
-    ) external view returns (uint256 _limit);
+    function mintingMaxLimitOf(address _minter) external view returns (uint256 _limit);
 
     /**
      * @notice Returns the max limit of a bridge
@@ -25,10 +24,7 @@ interface IXERC20 {
      * @param _bridge the bridge we are viewing the limits of
      * @return _limit The limit the bridge has
      */
-
-    function burningMaxLimitOf(
-        address _bridge
-    ) external view returns (uint256 _limit);
+    function burningMaxLimitOf(address _bridge) external view returns (uint256 _limit);
 
     /**
      * @notice Returns the current limit of a minter
@@ -36,10 +32,7 @@ interface IXERC20 {
      * @param _minter The minter we are viewing the limits of
      * @return _limit The limit the minter has
      */
-
-    function mintingCurrentLimitOf(
-        address _minter
-    ) external view returns (uint256 _limit);
+    function mintingCurrentLimitOf(address _minter) external view returns (uint256 _limit);
 
     /**
      * @notice Returns the current limit of a bridge
@@ -47,10 +40,7 @@ interface IXERC20 {
      * @param _bridge the bridge we are viewing the limits of
      * @return _limit The limit the bridge has
      */
-
-    function burningCurrentLimitOf(
-        address _bridge
-    ) external view returns (uint256 _limit);
+    function burningCurrentLimitOf(address _bridge) external view returns (uint256 _limit);
 
     /**
      * @notice Mints tokens for a user
@@ -58,7 +48,6 @@ interface IXERC20 {
      * @param _user The address of the user who needs tokens minted
      * @param _amount The amount of tokens being minted
      */
-
     function mint(address _user, uint256 _amount) external;
 
     /**
@@ -67,6 +56,5 @@ interface IXERC20 {
      * @param _user The address of the user who needs tokens burned
      * @param _amount The amount of tokens being burned
      */
-
     function burn(address _user, uint256 _amount) external;
 }

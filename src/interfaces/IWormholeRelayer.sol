@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: Apache 2
-
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
 /**
@@ -34,37 +33,25 @@ struct MessageKey {
 }
 
 interface IWormholeRelayerBase {
-    event SendEvent(
-        uint64 indexed sequence,
-        uint256 deliveryQuote,
-        uint256 paymentForExtraReceiverValue
-    );
+    event SendEvent(uint64 indexed sequence, uint256 deliveryQuote, uint256 paymentForExtraReceiverValue);
 
-    function getRegisteredWormholeRelayerContract(
-        uint16 chainId
-    ) external view returns (bytes32);
+    function getRegisteredWormholeRelayerContract(uint16 chainId) external view returns (bytes32);
 
     /**
      * @notice Returns true if a delivery has been attempted for the given deliveryHash
      * Note: invalid deliveries where the tx reverts are not considered attempted
      */
-    function deliveryAttempted(
-        bytes32 deliveryHash
-    ) external view returns (bool attempted);
+    function deliveryAttempted(bytes32 deliveryHash) external view returns (bool attempted);
 
     /**
      * @notice block number at which a delivery was successfully executed
      */
-    function deliverySuccessBlock(
-        bytes32 deliveryHash
-    ) external view returns (uint256 blockNumber);
+    function deliverySuccessBlock(bytes32 deliveryHash) external view returns (uint256 blockNumber);
 
     /**
      * @notice block number of the latest attempt to execute a delivery that failed
      */
-    function deliveryFailureBlock(
-        bytes32 deliveryHash
-    ) external view returns (uint256 blockNumber);
+    function deliveryFailureBlock(bytes32 deliveryHash) external view returns (uint256 blockNumber);
 }
 
 /**
@@ -439,17 +426,10 @@ interface IWormholeRelayerSend is IWormholeRelayerBase {
      *         promise by the delivery provider of the amount of refund per gas unused that will be returned to the refundAddress at the target chain.
      *         If a delivery provider decides to override, this will be visible as part of the emitted Delivery event on the target chain.
      */
-    function quoteEVMDeliveryPrice(
-        uint16 targetChain,
-        uint256 receiverValue,
-        uint256 gasLimit
-    )
+    function quoteEVMDeliveryPrice(uint16 targetChain, uint256 receiverValue, uint256 gasLimit)
         external
         view
-        returns (
-            uint256 nativePriceQuote,
-            uint256 targetChainRefundPerGasUnused
-        );
+        returns (uint256 nativePriceQuote, uint256 targetChainRefundPerGasUnused);
 
     /**
      * @notice Returns the price to request a relay to chain `targetChain`, using delivery provider `deliveryProviderAddress`
@@ -470,13 +450,7 @@ interface IWormholeRelayerSend is IWormholeRelayerBase {
         uint256 receiverValue,
         uint256 gasLimit,
         address deliveryProviderAddress
-    )
-        external
-        view
-        returns (
-            uint256 nativePriceQuote,
-            uint256 targetChainRefundPerGasUnused
-        );
+    ) external view returns (uint256 nativePriceQuote, uint256 targetChainRefundPerGasUnused);
 
     /**
      * @notice Returns the price to request a relay to chain `targetChain`, using delivery provider `deliveryProviderAddress`
@@ -497,10 +471,7 @@ interface IWormholeRelayerSend is IWormholeRelayerBase {
         uint256 receiverValue,
         bytes memory encodedExecutionParameters,
         address deliveryProviderAddress
-    )
-        external
-        view
-        returns (uint256 nativePriceQuote, bytes memory encodedExecutionInfo);
+    ) external view returns (uint256 nativePriceQuote, bytes memory encodedExecutionInfo);
 
     /**
      * @notice Returns the (extra) amount of target chain currency that `targetAddress`
@@ -512,21 +483,17 @@ interface IWormholeRelayerSend is IWormholeRelayerBase {
      * @return targetChainAmount The amount such that if `targetAddress` will be called with `msg.value` equal to
      *         receiverValue + targetChainAmount
      */
-    function quoteNativeForChain(
-        uint16 targetChain,
-        uint256 currentChainAmount,
-        address deliveryProviderAddress
-    ) external view returns (uint256 targetChainAmount);
+    function quoteNativeForChain(uint16 targetChain, uint256 currentChainAmount, address deliveryProviderAddress)
+        external
+        view
+        returns (uint256 targetChainAmount);
 
     /**
      * @notice Returns the address of the current default delivery provider
      * @return deliveryProvider The address of (the default delivery provider)'s contract on this source
      *   chain. This must be a contract that implements IDeliveryProvider.
      */
-    function getDefaultDeliveryProvider()
-        external
-        view
-        returns (address deliveryProvider);
+    function getDefaultDeliveryProvider() external view returns (address deliveryProvider);
 }
 
 /**

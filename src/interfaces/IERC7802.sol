@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { IERC165 } from "@openzeppelin/contracts/interfaces/IERC165.sol";
+import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 
 /// @title IERC7802
 /// @notice Defines the interface for crosschain ERC20 transfers.

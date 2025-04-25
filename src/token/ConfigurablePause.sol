@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {PausableUpgradeable} from "@openzeppelin-upgradeable/contracts/utils/PausableUpgradeable.sol";
@@ -30,19 +31,13 @@ contract ConfigurablePause is PausableUpgradeable {
     /// @notice event emitted when pause duration is updated
     /// @param oldPauseDuration old pause duration
     /// @param newPauseDuration new pause duration
-    event PauseDurationUpdated(
-        uint256 oldPauseDuration,
-        uint256 newPauseDuration
-    );
+    event PauseDurationUpdated(uint256 oldPauseDuration, uint256 newPauseDuration);
 
     /// @notice return the current pause status
     /// if pauseStartTime is 0, contract is not paused
     /// if pauseStartTime is not 0, contract could be paused in the pauseDuration window
     function paused() public view virtual override returns (bool) {
-        return
-            pauseStartTime == 0
-                ? false
-                : block.timestamp <= pauseStartTime + pauseDuration;
+        return pauseStartTime == 0 ? false : block.timestamp <= pauseStartTime + pauseDuration;
     }
 
     /// ------------- INTERNAL HELPERS -------------

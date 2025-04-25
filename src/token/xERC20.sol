@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IXERC20} from "@contracts/interfaces/IXERC20.sol";
 import {MintLimits} from "@contracts/token/MintLimits.sol";
-import {ERC20VotesUpgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
+import {ERC20VotesUpgradeable} from
+    "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /// @title xERC20
 /// @notice A contract that allows minting and burning of tokens for cross-chain transfers
@@ -21,36 +23,28 @@ abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
     /// @notice Returns the max limit of a minter
     /// @param minter The minter we are viewing the limits of
     /// @return limit The limit the minter has
-    function mintingMaxLimitOf(
-        address minter
-    ) external view returns (uint256 limit) {
+    function mintingMaxLimitOf(address minter) external view returns (uint256 limit) {
         return bufferCap(minter);
     }
 
     /// @notice Returns the max limit of a bridge
     /// @param bridge the bridge we are viewing the limits of
     /// @return limit The limit the bridge has
-    function burningMaxLimitOf(
-        address bridge
-    ) external view returns (uint256 limit) {
+    function burningMaxLimitOf(address bridge) external view returns (uint256 limit) {
         return bufferCap(bridge);
     }
 
     /// @notice Returns the current limit of a minter
     /// @param minter The minter we are viewing the limits of
     /// @return limit The limit the minter has
-    function mintingCurrentLimitOf(
-        address minter
-    ) external view returns (uint256 limit) {
+    function mintingCurrentLimitOf(address minter) external view returns (uint256 limit) {
         return buffer(minter);
     }
 
     /// @notice Returns the current limit of a bridge
     /// @param bridge the bridge we are viewing the limits of
     /// @return limit The limit the bridge has
-    function burningCurrentLimitOf(
-        address bridge
-    ) external view returns (uint256 limit) {
+    function burningCurrentLimitOf(address bridge) external view returns (uint256 limit) {
         /// buffer <= bufferCap, so this can never revert, just return 0
         return bufferCap(bridge) - buffer(bridge);
     }
@@ -96,10 +90,8 @@ abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
     //// ------------------------------------------------------------
     //// ------------------------------------------------------------
 
-
-    /// @notice maximum supply is 1 billion tokens 
+    /// @notice maximum supply is 1 billion tokens
     function maxSupply() public pure virtual returns (uint256);
-
 
     /// @notice the maximum amount of time the token can be paused for
     function maxPauseDuration() public pure virtual returns (uint256);
@@ -108,17 +100,10 @@ abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
     /// @param from the address to transfer from
     /// @param to the address to transfer to
     /// @param amount the amount to transfer
-    function _update(
-        address from,
-        address to,
-        uint256 amount
-    ) internal override {
+    function _update(address from, address to, uint256 amount) internal override {
         super._update(from, to, amount);
 
-        require(
-            to != address(this),
-            "xERC20: cannot transfer to token contract"
-        );
+        require(to != address(this), "xERC20: cannot transfer to token contract");
     }
 
     /// --------------------------------------------------------
@@ -145,6 +130,4 @@ abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
 
         return "mode=timestamp";
     }
-
- 
 }
