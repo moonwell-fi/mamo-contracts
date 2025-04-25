@@ -5,6 +5,10 @@ import {IXERC20} from "@contracts/interfaces/IXERC20.sol";
 import {MintLimits} from "@contracts/token/MintLimits.sol";
 import {ERC20VotesUpgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
 
+/// @title xERC20
+/// @notice A contract that allows minting and burning of tokens for cross-chain transfers
+/// @dev This contract is a xERC20 version with a rate limit buffer
+/// @dev This contract is a xERC20 version compatible with ERC20VotesUpgradeable
 abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
     using SafeCast for uint256;
 
@@ -99,6 +103,23 @@ abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
 
     /// @notice the maximum amount of time the token can be paused for
     function maxPauseDuration() public pure virtual returns (uint256);
+
+    /// @notice hook to stop users from transferring tokens to the xERC20 contract
+    /// @param from the address to transfer from
+    /// @param to the address to transfer to
+    /// @param amount the amount to transfer
+    function _update(
+        address from,
+        address to,
+        uint256 amount
+    ) internal override {
+        super._update(from, to, amount);
+
+        require(
+            to != address(this),
+            "xERC20: cannot transfer to token contract"
+        );
+    }
 
     /// --------------------------------------------------------
     /// --------------------------------------------------------

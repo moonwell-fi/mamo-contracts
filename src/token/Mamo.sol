@@ -7,11 +7,17 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {xERC20} from "@contracts/token/xERC20.sol";
 import {MintLimits} from "@contracts/token/MintLimits.sol";
 import {ConfigurablePauseGuardian} from "@contracts/token/ConfigurablePauseGuardian.sol";
+import {IERC7802, IERC165} from "@contracts/interfaces/IERC7802.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IXERC20} from "@contracts/interfaces/IXERC20.sol";
 
+/// @title MAMO
+/// @notice The MAMO token is xERC20 and SuperERC20 compatible
 contract MAMO is
     xERC20,
     Ownable2StepUpgradeable,
-    ConfigurablePauseGuardian
+    ConfigurablePauseGuardian,
+    IERC7802
 {
     using SafeCast for uint256;
 
@@ -26,6 +32,9 @@ contract MAMO is
 
     /// @notice the maximum time the token can be paused for
     uint256 public constant MAX_PAUSE_DURATION = 30 days;
+
+       /// @notice Address of the SuperchainTokenBridge predeploy.
+    address internal constant SUPERCHAIN_TOKEN_BRIDGE = 0x4200000000000000000000000000000000000028;
 
     /// @notice logic contract cannot be initialized
     constructor() {
@@ -113,6 +122,28 @@ contract MAMO is
     function burn(address user, uint256 amount) public override whenNotPaused {
         /// burn user's tokens
         super.burn(user, amount);
+    }
+
+    /// @notice Allows the SuperchainTokenBridge to mint tokens.
+    /// @param _to     Address to mint tokens to.
+    /// @param _amount Amount of tokens to mint.
+    function crosschainMint(address _to, uint256 _amount) external whenNotPaused {
+        require(msg.sender == SUPERCHAIN_TOKEN_BRIDGE, "Only SuperchainTokenBridge can call this function");
+
+        _mint(_to, _amount);
+
+        emit CrosschainMint(_to, _amount, msg.sender);
+    }
+
+    /// @notice Allows the SuperchainTokenBridge to burn tokens.
+    /// @param _from   Address to burn tokens from.
+    /// @param _amount Amount of tokens to burn.
+    function crosschainBurn(address _from, uint256 _amount) external whenNotPaused {
+        require(msg.sender == SUPERCHAIN_TOKEN_BRIDGE, "Only SuperchainTokenBridge can call this function");
+
+        _burn(_from, _amount);
+
+        emit CrosschainBurn(_from, _amount, msg.sender);
     }
 
     /// -------------------------------------------------------------
@@ -208,28 +239,10 @@ contract MAMO is
         _removeLimits(bridges);
     }
 
-    /// -------------------------------------------------------------
-    /// -------------------------------------------------------------
-    /// -------------- Internal Override Functions ------------------
-    /// -------------------------------------------------------------
-    /// -------------------------------------------------------------
-
-    /// @notice hook to stop users from transferring tokens to the xWELL contract
-    /// @param from the address to transfer from
-    /// @param to the address to transfer to
-    /// @param amount the amount to transfer
-    function _update(
-        address from,
-        address to,
-        uint256 amount
-    ) internal override {
-        super._update(from, to, amount);
-
-        require(
-            to != address(this),
-            "xERC20: cannot transfer to token contract"
-        );
+   /// @inheritdoc IERC165
+    function supportsInterface(bytes4 _interfaceId) public view virtual returns (bool) {
+        return _interfaceId == type(IERC7802).interfaceId || _interfaceId == type(IERC20).interfaceId
+            || _interfaceId == type(IERC165).interfaceId || _interfaceId == type(IXERC20).interfaceId;
     }
-
   
 }
