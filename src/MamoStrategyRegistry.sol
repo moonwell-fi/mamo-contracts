@@ -112,6 +112,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         // Update the implementation through the proxy's upgrade mechanism
         // Call upgradeToAndCall with empty data to just upgrade the implementation
+        // If any initialization is needed, it should be done in the new implementation
         IUUPSUpgradeable(strategy).upgradeToAndCall(latestImplementation, new bytes(0));
 
         emit StrategyImplementationUpdated(strategy, oldImplementation, latestImplementation);

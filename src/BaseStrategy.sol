@@ -70,12 +70,22 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     }
 
     /**
-     * @notice Internal function that authorizes an upgrade to a new implementation
-     * @dev Only callable by Mamo Strategy Registry contract
+     * @dev Override the transferOwnership function to update the owner in MamoStrategyRegistry
+     * @param newOwner The address to transfer ownership to
      */
-    function _authorizeUpgrade(address) internal view override {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
+    function transferOwnership(address newOwner) public virtual override onlyOwner {
+        super.transferOwnership(newOwner);
+        mamoStrategyRegistry.updateStrategyOwner(address(this), newOwner);
     }
+
+    /**
+     * @dev Disable the renounceOwnership function since ownership is managed by the registry
+     */
+    function renounceOwnership() public virtual override onlyOwner {
+        revert("Ownership cannot be renounced in this contract");
+    }
+
+    // ==================== INTERNAL FUNCTIONS ====================
 
     /**
      * @notice Initializes the BaseStrategy contract
@@ -92,27 +102,10 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     }
 
     /**
-     * @notice Returns the owner address of this strategy
-     * @dev Queries the MamoStrategyRegistry to get the owner
-     * @return The address of the strategy owner
+     * @notice Internal function that authorizes an upgrade to a new implementation
+     * @dev Only callable by Mamo Strategy Registry contract
      */
-    function getOwner() external view returns (address) {
-        return mamoStrategyRegistry.strategyOwner(address(this));
-    }
-
-    /**
-     * @dev Override the transferOwnership function to update the owner in MamoStrategyRegistry
-     * @param newOwner The address to transfer ownership to
-     */
-    function transferOwnership(address newOwner) public virtual override onlyOwner {
-        super.transferOwnership(newOwner);
-        mamoStrategyRegistry.updateStrategyOwner(address(this), newOwner);
-    }
-
-    /**
-     * @dev Disable the renounceOwnership function since ownership is managed by the registry
-     */
-    function renounceOwnership() public virtual override onlyOwner {
-        revert("Ownership cannot be renounced in this contract");
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
     }
 }

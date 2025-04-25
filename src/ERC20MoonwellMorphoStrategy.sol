@@ -13,6 +13,7 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /**
  * @title ERC20MoonwellMorphoStrategy
@@ -62,6 +63,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @dev Used to calculate the minimum acceptable output amount for swaps
     uint256 public allowedSlippageInBps;
 
+    // @notice The compound fee in basis points (e.g., 100 = 1%)
+    uint256 public compoundFee;
+
+    /// @notice The fee recipient address
+    address public feeRecipient;
+
+    /// @notice The hook gas limit
+    uint256 public hookGasLimit;
+
     // Events
     // @notice Emitted when funds are deposited into the strategy
     event Deposit(address indexed asset, uint256 amount);
@@ -79,6 +89,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when the slippage tolerance is updated
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
 
+    // @notice Emitted when the compound fee is updated
+    event CompoundFeeUpdated(uint256 oldCompoundFee, uint256 newCompoundFee);
+
+    // @notice Emitted when the fee recipient is updated
+    event FeeRecipientUpdated(address oldFeeRecipient, address newFeeRecipient);
+
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
@@ -87,11 +103,13 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address metaMorphoVault;
         address token;
         address slippagePriceChecker;
+        address feeRecipient;
         uint256 splitMToken;
         uint256 splitVault;
         uint256 strategyTypeId;
         address[] rewardTokens;
         address owner;
+        uint256 hookGasLimit;
     }
 
     /**
@@ -119,8 +137,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.token != address(0), "Invalid token address");
         require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
+        require(params.feeRecipient != address(0), "Invalid fee recipient address");
         require(params.splitMToken + params.splitVault == 10000, "Split parameters must add up to 10000");
-
+        require(params.hookGasLimit > 0, "Invalid hook gas limit");
         // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
@@ -133,7 +152,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         splitVault = params.splitVault;
 
         // Set default slippage to 1% (100 basis points)
+        // TODO: Make this configurable
         allowedSlippageInBps = 100;
+
+        // Set default compound fee to 1% (100 basis points)
+        // TODO: Make this configurable
+        compoundFee = 100;
+
+        feeRecipient = params.feeRecipient;
+        hookGasLimit = params.hookGasLimit;
 
         // Approve CowSwap for each reward token
         if (params.rewardTokens.length > 0) {
@@ -152,6 +179,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount of tokens to deposit
      */
+    // TODO: make permissionless
     function deposit(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
@@ -172,19 +200,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      */
     function approveCowSwap(address tokenAddress, uint256 amount) public onlyOwner {
         _approveCowSwap(tokenAddress, amount);
-    }
-
-    /**
-     * @notice Internal function to approve the vault relayer to spend a specific token
-     * @param tokenAddress The address of the token to approve
-     * @param amount The amount of tokens to approve
-     */
-    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
-        // Check if the token has a configuration in the swap checker
-        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
-
-        // Approve the vault relayer unlimited
-        IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
     }
 
     /**
@@ -308,6 +323,34 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
+     * @notice Sets a new compound fee value
+     * @dev Only callable by the strategy owner
+     * @param _newCompoundFee The new compound fee in basis points (e.g., 100 = 1%)
+     */
+    function setCompoundFee(uint256 _newCompoundFee) external onlyBackend {
+        require(_newCompoundFee <= SPLIT_TOTAL, "Compound fee exceeds maximum");
+
+        compoundFee = _newCompoundFee;
+
+        emit CompoundFeeUpdated(compoundFee, _newCompoundFee);
+    }
+
+    /**
+     * @notice Sets a new fee recipient address
+     * @dev Only callable by the strategy owner
+     * @param _newFeeRecipient The new fee recipient address
+     */
+    function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
+        require(_newFeeRecipient != address(0), "Invalid fee recipient address");
+
+        feeRecipient = _newFeeRecipient;
+
+        emit FeeRecipientUpdated(feeRecipient, _newFeeRecipient);
+    }
+
+    // ==================== PERMISSIONLESS FUNCTIONS ====================
+
+    /**
      * @notice Deposits any token funds currently in the contract into the strategies based on the split
      * @dev This function is permissionless and can be called by anyone
      * @return amount The amount of tokens deposited
@@ -324,7 +367,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         return tokenBalance;
     }
 
-    // ==================== VIEW FUNCTIONS ====================
+    // ======================= VIEW FUNCTIONS ==========================
 
     /// @param orderDigest The EIP-712 signing digest derived from the order
     /// @param encodedOrder Bytes-encoded order information, originally created by an off-chain bot. Created by concatening the order data (in the form of GPv2Order.Data), the price checker address, and price checker data.
@@ -359,7 +402,29 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
 
-        require(_order.appData == bytes32(0), "App data must be zero");
+        // the pre hook target should be the token contract (the one being sold),
+        // and the callData is a transferFrom call that transfers the fee from the contract
+        // to the desired recipient (in our case a multisig).
+
+        /// TODO: review this logic
+        uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
+
+        string memory preHookCalldata =
+            abi.encodeWithSelector(IERC20.transferFrom.selector, address(this), feeRecipient, feeAmount);
+
+        string memory expectedAppData = string.concat(
+            '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
+            preHookCalldata,
+            '","gasLimit":"',
+            Strings.toString(hookGasLimit),
+            '","target":"',
+            _order.sellToken,
+            '"}],"version":"0.1.0"}},"version":"1.3.0"}'
+        );
+
+        bytes32 expectedAppDataBytes = keccak256(abi.encode(expectedAppData));
+
+        require(_order.appData == expectedAppDataBytes, "Invalid app data");
 
         require(
             slippagePriceChecker.checkPrice(
@@ -411,5 +476,18 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
 
         return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
+    }
+
+    /**
+     * @notice Internal function to approve the vault relayer to spend a specific token
+     * @param tokenAddress The address of the token to approve
+     * @param amount The amount of tokens to approve
+     */
+    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
+        // Check if the token has a configuration in the swap checker
+        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
+
+        // Approve the vault relayer unlimited
+        IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
     }
 }
