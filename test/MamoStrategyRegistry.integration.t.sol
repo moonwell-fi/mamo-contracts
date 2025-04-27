@@ -1157,16 +1157,10 @@ contract MamoStrategyRegistryIntegrationTest is Test {
             abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
         );
 
-        // Verify owner is not set before adding strategy
-        assertEq(registry.strategyOwner(address(strategy)), address(0), "Strategy owner should not be set initially");
-
         // Add strategy for user
         vm.startPrank(backend);
         registry.addStrategy(user, address(strategy));
         vm.stopPrank();
-
-        // Verify the strategy owner was set correctly
-        assertEq(registry.strategyOwner(address(strategy)), user, "Strategy owner should be set to user");
 
         // Verify isUserStrategy matches the owner mapping
         assertTrue(registry.isUserStrategy(user, address(strategy)), "isUserStrategy should return true for owner");

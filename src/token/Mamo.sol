@@ -40,7 +40,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     }
 
     /// @dev on token's native chain, the lockbox must have its bufferCap set to uint112 max
-    /// @notice initialize the xWELL token
+    /// @notice initialize the MAMO token
     /// @param tokenName The name of the token
     /// @param tokenSymbol The symbol of the token
     /// @param tokenOwner The owner of the token, Temporal Governor on Base, Timelock on Moonbeam
@@ -53,7 +53,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
         uint128 newPauseDuration,
         address newPauseGuardian
     ) external initializer {
-        require(newPauseDuration <= MAX_PAUSE_DURATION, "xWELL: pause duration too long");
+        require(newPauseDuration <= MAX_PAUSE_DURATION, "MAMO: pause duration too long");
         __ERC20_init(tokenName, tokenSymbol);
         // TODO maybe add permit here
 
@@ -74,7 +74,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     ///  ------------------------------------------------------------
     ///  ------------------------------------------------------------
 
-    /// @notice maximum supply is 5 billion tokens if all WELL holders migrate to xWELL
+    /// @notice maximum supply is 5 billion tokens if all WELL holders migrate to MAMO
     function maxSupply() public pure override returns (uint256) {
         return MAX_SUPPLY;
     }
@@ -117,6 +117,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     }
 
     /// @notice Allows the SuperchainTokenBridge to mint tokens.
+    /// @dev Assumes the sequencer is safe and doesn't enforce the rate limit.
     /// @param _to     Address to mint tokens to.
     /// @param _amount Amount of tokens to mint.
     function crosschainMint(address _to, uint256 _amount) external whenNotPaused {
@@ -128,6 +129,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     }
 
     /// @notice Allows the SuperchainTokenBridge to burn tokens.
+    /// @dev Assumes the sequencer is safe and doesn't enforce the rate limit.
     /// @param _from   Address to burn tokens from.
     /// @param _amount Amount of tokens to burn.
     function crosschainBurn(address _from, uint256 _amount) external whenNotPaused {
@@ -184,7 +186,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     /// before an upgrade.
     /// @param newPauseDuration the new pause duration
     function setPauseDuration(uint128 newPauseDuration) external onlyOwner {
-        require(newPauseDuration <= MAX_PAUSE_DURATION, "xWELL: pause duration too long");
+        require(newPauseDuration <= MAX_PAUSE_DURATION, "MAMO: pause duration too long");
         _updatePauseDuration(newPauseDuration);
     }
 

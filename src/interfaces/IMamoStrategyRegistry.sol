@@ -41,14 +41,14 @@ interface IMamoStrategyRegistry {
      * @param implementation The address of the implementation
      * @return The strategy ID as a uint256 value
      */
-    function getImplementationId(address implementation) external view returns (uint256);
+    function implementationId(address implementation) external view returns (uint256);
 
     /**
      * @notice Gets the latest implementation for a strategy ID
      * @param strategyId The strategy ID as a uint256 value
      * @return The address of the latest implementation for the strategy ID
      */
-    function getLatestImplementation(uint256 strategyId) external view returns (address);
+    function latestImplementationById(uint256 strategyId) external view returns (address);
 
     /**
      * @notice Adds a strategy for a user
@@ -112,8 +112,7 @@ interface IMamoStrategyRegistry {
     /**
      * @notice Updates the owner of a strategy
      * @dev Only callable by the current owner of the strategy
-     * @param strategy The address of the strategy
      * @param newOwner The address of the new owner
      */
-    function updateStrategyOwner(address strategy, address newOwner) external;
+    function updateStrategyOwner(address newOwner) external;
 }

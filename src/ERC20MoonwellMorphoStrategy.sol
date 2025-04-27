@@ -95,9 +95,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when the slippage tolerance is updated
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
 
-    // @notice Emitted when the compound fee is updated
-    event CompoundFeeUpdated(uint256 oldCompoundFee, uint256 newCompoundFee);
-
     // @notice Emitted when the fee recipient is updated
     event FeeRecipientUpdated(address oldFeeRecipient, address newFeeRecipient);
 
@@ -307,19 +304,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
-     * @notice Sets a new compound fee value
-     * @dev Only callable by the strategy owner
-     * @param _newCompoundFee The new compound fee in basis points (e.g., 100 = 1%)
-     */
-    function setCompoundFee(uint256 _newCompoundFee) external onlyBackend {
-        require(_newCompoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
-
-        compoundFee = _newCompoundFee;
-
-        emit CompoundFeeUpdated(compoundFee, _newCompoundFee);
-    }
-
-    /**
      * @notice Sets a new fee recipient address
      * @dev Only callable by the strategy owner
      * @param _newFeeRecipient The new fee recipient address
@@ -432,6 +416,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         );
 
         bytes32 expectedAppDataBytes = keccak256(abi.encode(expectedAppData));
+
+        console.log("expectedAppData: %s", expectedAppData);
 
         require(_order.appData == expectedAppDataBytes, "Invalid app data");
 

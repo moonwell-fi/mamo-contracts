@@ -73,9 +73,9 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
      * @dev Override the transferOwnership function to update the owner in MamoStrategyRegistry
      * @param newOwner The address to transfer ownership to
      */
-    function transferOwnership(address newOwner) public virtual override onlyOwner {
+    function transferOwnership(address newOwner) public override onlyOwner {
         super.transferOwnership(newOwner);
-        mamoStrategyRegistry.updateStrategyOwner(address(this), newOwner);
+        mamoStrategyRegistry.updateStrategyOwner(newOwner);
     }
 
     /**

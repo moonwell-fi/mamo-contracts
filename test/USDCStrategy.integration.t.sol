@@ -965,28 +965,7 @@ contract USDCStrategyTest is Test {
         }
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
-        // Use FFI to call our generate-appdata script
-        string[] memory ffiCommand = new string[](13);
-        ffiCommand[0] = "npx";
-        ffiCommand[1] = "ts-node";
-        ffiCommand[2] = "utils/generate-appdata.ts";
-        ffiCommand[3] = "--sell-token";
-        ffiCommand[4] = vm.toString(address(well));
-        ffiCommand[5] = "--fee-recipient";
-        ffiCommand[6] = vm.toString(admin); // Using admin as fee recipient
-        ffiCommand[7] = "--sell-amount";
-        ffiCommand[8] = vm.toString(wellAmount);
-        ffiCommand[9] = "--compound-fee";
-        ffiCommand[10] = vm.toString(strategy.compoundFee());
-        ffiCommand[11] = "--from";
-        ffiCommand[12] = vm.toString(address(strategy));
-
-        // Execute the command and get the appData
-        bytes memory appDataResult = vm.ffi(ffiCommand);
-        string memory appDataJson = string(appDataResult);
-
-        // The output is the JSON document itself, we need to hash it to get the appData hash
-        bytes32 appDataHash = keccak256(abi.encode(appDataJson));
+        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
 
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
@@ -1396,6 +1375,9 @@ contract USDCStrategyTest is Test {
 
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
+        // Generate proper app data hash for this test
+        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
+
         // Set an extremely low buy amount that will definitely fail the price check
         uint256 extremelyLowBuyAmount = 1; // Just 1 unit of USDC
 
@@ -1406,7 +1388,7 @@ contract USDCStrategyTest is Test {
             sellAmount: wellAmount,
             buyAmount: extremelyLowBuyAmount,
             validTo: validTo,
-            appData: bytes32(0),
+            appData: appDataHash,
             feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,
@@ -1445,7 +1427,7 @@ contract USDCStrategyTest is Test {
             sellAmount: wellAmount,
             buyAmount: reasonableBuyAmount,
             validTo: validTo,
-            appData: bytes32(0),
+            appData: appDataHash,
             feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,
@@ -1456,14 +1438,18 @@ contract USDCStrategyTest is Test {
         bytes memory encodedBetterOrder = abi.encode(betterOrder);
         bytes32 betterDigest = betterOrder.hash(strategy.DOMAIN_SEPARATOR());
 
-        // Set a very high slippage (90%)
-        uint256 veryHighSlippage = 9000; // 90%
+        // Set a maximum slippage 25%
+        uint256 veryHighSlippage = 2500; // 25%
         vm.prank(owner);
         strategy.setSlippage(veryHighSlippage);
 
         assertEq(
             strategy.allowedSlippageInBps(), veryHighSlippage, "Slippage should be updated to 9000 basis points (90%)"
         );
+
+        // Re-encode the order and get the new digest
+        encodedBetterOrder = abi.encode(betterOrder);
+        betterDigest = betterOrder.hash(strategy.DOMAIN_SEPARATOR());
 
         bytes4 result = strategy.isValidSignature(betterDigest, encodedBetterOrder);
         assertEq(result, MAGIC_VALUE, "Order should be valid with high slippage");
@@ -1479,7 +1465,11 @@ contract USDCStrategyTest is Test {
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
         // Set a very low buy amount that will fail the price check
+
         uint256 buyAmount = 1; // Extremely low amount
+
+        // Generate proper app data hash
+        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1488,7 +1478,7 @@ contract USDCStrategyTest is Test {
             sellAmount: wellAmount,
             buyAmount: buyAmount,
             validTo: validTo,
-            appData: bytes32(0),
+            appData: appDataHash,
             feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,
@@ -1646,6 +1636,12 @@ contract USDCStrategyTest is Test {
             buyTokenBalance: GPv2Order.BALANCE_ERC20
         });
 
+        // Generate proper app data hash
+        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
+
+        // Update the order with the proper app data hash
+        order.appData = appDataHash;
+
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
@@ -1665,5 +1661,43 @@ contract USDCStrategyTest is Test {
         uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
 
         return metaMorphoBalance + mTokenBalance + tokenBalance;
+    }
+
+    /**
+     * @notice Generates app data hash for CoW Swap orders
+     * @param sellToken The address of the token being sold
+     * @param feeRecipient The address that will receive the fee
+     * @param sellAmount The amount of tokens being sold
+     * @param fromAddress The address the order is from
+     * @return bytes32 The app data hash
+     */
+    function generateAppDataHash(address sellToken, address feeRecipient, uint256 sellAmount, address fromAddress)
+        internal
+        returns (bytes32)
+    {
+        // Use FFI to call our generate-appdata script
+        string[] memory ffiCommand = new string[](13);
+        ffiCommand[0] = "npx";
+        ffiCommand[1] = "ts-node";
+        ffiCommand[2] = "utils/generate-appdata.ts";
+        ffiCommand[3] = "--sell-token";
+        ffiCommand[4] = vm.toString(sellToken);
+        ffiCommand[5] = "--fee-recipient";
+        ffiCommand[6] = vm.toString(feeRecipient); // Using admin as fee recipient
+        ffiCommand[7] = "--sell-amount";
+        ffiCommand[8] = vm.toString(sellAmount);
+        ffiCommand[9] = "--compound-fee";
+        ffiCommand[10] = vm.toString(strategy.compoundFee());
+        ffiCommand[11] = "--from";
+        ffiCommand[12] = vm.toString(fromAddress);
+
+        // Execute the command and get the appData
+        bytes memory appDataResult = vm.ffi(ffiCommand);
+        string memory appDataJson = string(appDataResult);
+
+        console.log("appDataJson: %s", appDataJson);
+
+        // The output is the JSON document itself, we need to hash it to get the appData hash
+        return keccak256(abi.encode(appDataJson));
     }
 }
