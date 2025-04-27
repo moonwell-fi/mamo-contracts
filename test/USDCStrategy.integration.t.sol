@@ -181,14 +181,14 @@ contract USDCStrategyTest is Test {
         usdc.approve(address(strategy), depositAmount);
 
         // Check initial strategy balance
-        uint256 initialBalance = strategy.getTotalBalance();
+        uint256 initialBalance = getTotalBalance(address(strategy));
 
         // Owner deposits USDC into the strategy
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
         // Verify the deposit was successful
-        uint256 finalBalance = strategy.getTotalBalance();
+        uint256 finalBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(
             finalBalance - initialBalance, depositAmount, 1e3, "Strategy balance should increase by deposit amount"
         );
@@ -249,7 +249,7 @@ contract USDCStrategyTest is Test {
 
         // Verify initial balances
         assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
-        uint256 strategyBalance = strategy.getTotalBalance();
+        uint256 strategyBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
 
         // Withdraw half of the funds
@@ -261,7 +261,7 @@ contract USDCStrategyTest is Test {
         assertApproxEqAbs(usdc.balanceOf(owner), withdrawAmount, 1e3, "Owner should have received the withdrawn amount");
 
         // Verify the strategy's balance decreased
-        uint256 newStrategyBalance = strategy.getTotalBalance();
+        uint256 newStrategyBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(
             newStrategyBalance,
             strategyBalance - withdrawAmount,
@@ -306,7 +306,9 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the strategy balance remains unchanged
-        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+        assertApproxEqAbs(
+            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+        );
     }
 
     function testRevertIfWithdrawAmountTooLarge() public {
@@ -327,7 +329,9 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the strategy balance remains unchanged
-        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+        assertApproxEqAbs(
+            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+        );
     }
 
     function testRevertIfWithdrawAmountIsZero() public {
@@ -348,7 +352,9 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the strategy balance remains unchanged
-        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+        assertApproxEqAbs(
+            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+        );
     }
 
     function testRevertIfDepositAmountIsZero() public {
@@ -371,7 +377,7 @@ contract USDCStrategyTest is Test {
         assertEq(usdc.balanceOf(owner), initialBalance, "Owner's USDC balance should remain unchanged");
 
         // Verify the strategy balance remains unchanged
-        assertApproxEqAbs(strategy.getTotalBalance(), 0, 1e3, "Strategy balance should remain unchanged");
+        assertApproxEqAbs(getTotalBalance(address(strategy)), 0, 1e3, "Strategy balance should remain unchanged");
     }
 
     function testOwnerCanRecoverERC20() public {
@@ -576,7 +582,7 @@ contract USDCStrategyTest is Test {
 
         // Verify initial balances
         assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
-        uint256 strategyBalance = strategy.getTotalBalance();
+        uint256 strategyBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
 
         // Call withdrawAll
@@ -587,7 +593,7 @@ contract USDCStrategyTest is Test {
         assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
 
         // Verify the strategy's balance is now 0
-        assertEq(strategy.getTotalBalance(), 0, "Strategy balance should be 0");
+        assertEq(getTotalBalance(address(strategy)), 0, "Strategy balance should be 0");
 
         // Verify protocol balances are 0
         assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "mToken balance should be 0");
@@ -614,12 +620,14 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the strategy balance remains unchanged
-        assertApproxEqAbs(strategy.getTotalBalance(), depositAmount, 1e3, "Strategy balance should remain unchanged");
+        assertApproxEqAbs(
+            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+        );
     }
 
     function testRevertIfNoTokensToWithdrawAll() public {
         // Ensure the strategy has no tokens
-        assertEq(strategy.getTotalBalance(), 0, "Strategy should have no initial balance");
+        assertEq(getTotalBalance(address(strategy)), 0, "Strategy should have no initial balance");
 
         // Attempt to withdraw all
         vm.startPrank(owner);
@@ -651,7 +659,7 @@ contract USDCStrategyTest is Test {
         assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
 
         // Verify the strategy's balance is now 0
-        assertEq(strategy.getTotalBalance(), 0, "Strategy balance should be 0");
+        assertEq(getTotalBalance(address(strategy)), 0, "Strategy balance should be 0");
 
         // Verify protocol balances are 0
         assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "mToken balance should be 0");
@@ -673,7 +681,7 @@ contract USDCStrategyTest is Test {
         assertEq(strategy.splitVault(), 5000, "Initial vault split should be 5000 (50%)");
 
         // Verify initial balances match the expected split
-        uint256 totalBalance = strategy.getTotalBalance();
+        uint256 totalBalance = getTotalBalance(address(strategy));
         uint256 expectedInitialMTokenBalance = (totalBalance * splitMToken) / 10000;
         uint256 expectedInitialVaultBalance = (totalBalance * splitVault) / 10000;
 
@@ -714,7 +722,7 @@ contract USDCStrategyTest is Test {
 
         // Verify the balances reflect the new split
         // Get the updated total balance
-        totalBalance = strategy.getTotalBalance();
+        totalBalance = getTotalBalance(address(strategy));
         uint256 expectedMTokenBalance = (totalBalance * newSplitMToken) / 10000;
         uint256 expectedVaultBalance = (totalBalance * newSplitVault) / 10000;
 
@@ -918,8 +926,7 @@ contract USDCStrategyTest is Test {
     }
 
     function testIsValidSignature() public {
-        uint256 wellAmount = 100e18;
-        // mock claimRewards simulation strategy has well
+        uint256 wellAmount = 1000e18;
         deal(address(well), address(strategy), wellAmount);
 
         // Approve the vault relayer to spend the well token
@@ -981,11 +988,6 @@ contract USDCStrategyTest is Test {
         // The output is the JSON document itself, we need to hash it to get the appData hash
         bytes32 appDataHash = keccak256(abi.encode(appDataJson));
 
-        console.log("Generated appData JSON:");
-        console.log(appDataJson);
-
-        console.log("Generated appData hash:", vm.toString(appDataHash));
-
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1002,8 +1004,6 @@ contract USDCStrategyTest is Test {
             buyTokenBalance: GPv2Order.BALANCE_ERC20
         });
 
-        console.log("Order sellToken:", address(order.sellToken));
-
         bytes memory encodedOrder = abi.encode(order);
 
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
@@ -1014,7 +1014,7 @@ contract USDCStrategyTest is Test {
     }
 
     function testRevertIfOrderHashDoesNotMatch() public {
-        uint256 wellAmount = 100e18;
+        uint256 wellAmount = 1000e18;
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
@@ -1048,7 +1048,7 @@ contract USDCStrategyTest is Test {
     }
 
     function testRevertIfNotSellOrder() public {
-        uint256 wellAmount = 100e18;
+        uint256 wellAmount = 1000e18;
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
@@ -1657,5 +1657,13 @@ contract USDCStrategyTest is Test {
         bytes memory valueBytes = vm.parseJson(json, key);
         string memory valueString = abi.decode(valueBytes, (string));
         return vm.parseUint(valueString);
+    }
+
+    function getTotalBalance(address _strategy) internal returns (uint256) {
+        uint256 metaMorphoBalance = metaMorphoVault.balanceOf(_strategy);
+        uint256 mTokenBalance = mToken.balanceOfUnderlying(_strategy);
+        uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
+
+        return metaMorphoBalance + mTokenBalance + tokenBalance;
     }
 }

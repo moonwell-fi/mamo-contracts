@@ -15,7 +15,6 @@ import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/U
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-import {console} from "forge-std/console.sol";
 
 /**
  * @title ERC20MoonwellMorphoStrategy
@@ -29,7 +28,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     using SafeERC20 for IERC20;
 
     // Constants
-    /// @dev The settlement contract's EIP-712 domain separator. Strategy uses this to verify that a provided UID matches provided order parameters.
+    /// @dev The settlement contract's EIP-712 domain separator. Used to verify that a provided UID matches provided order parameters.
     bytes32 public constant DOMAIN_SEPARATOR = 0xd72ffa789b6fae41254d0b5a13e6e1e92ed947ec6a251edf1cf0b6c02c257b4b;
 
     /// @dev Magic value returned by isValidSignature for valid orders
@@ -48,7 +47,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /// @notice The address of the Cow contracts Vault Relayer contract that needs token approval for executing trades
     address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
 
-    // State variables
     // @notice Reference to the Moonwell mToken contract
     IMToken public mToken;
 
@@ -161,17 +159,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         token = IERC20(params.token);
         slippagePriceChecker = ISlippagePriceChecker(params.slippagePriceChecker);
 
+        allowedSlippageInBps = params.allowedSlippageInBps;
+        compoundFee = params.compoundFee;
         splitMToken = params.splitMToken;
         splitVault = params.splitVault;
-
-        // Set default slippage to 1% (100 basis points)
-        // TODO: Make this configurable
-        allowedSlippageInBps = 100;
-
-        // Set default compound fee to 1% (100 basis points)
-        // TODO: Make this configurable
-        compoundFee = 100;
-
         feeRecipient = params.feeRecipient;
         hookGasLimit = params.hookGasLimit;
 
@@ -184,25 +175,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     // ==================== OWNER FUNCTIONS ====================
-
-    /**
-     * @notice Deposits funds into the strategy
-     * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
-     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
-     * @dev Only callable by the user who owns this strategy
-     * @param amount The amount of tokens to deposit
-     */
-    function deposit(uint256 amount) external {
-        require(amount > 0, "Amount must be greater than 0");
-
-        // Transfer tokens from the owner to this contract
-        token.safeTransferFrom(msg.sender, address(this), amount);
-
-        // Deposit the funds according to the current split
-        depositInternal(amount);
-
-        emit Deposit(address(token), amount);
-    }
 
     /**
      * @notice Approves the vault relayer to spend a specific token
@@ -236,7 +208,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     function withdraw(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
-        require(getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
+        require(_getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
 
         // Check if we have enough tokens in the contract
         uint256 tokenBalance = token.balanceOf(address(this));
@@ -363,6 +335,25 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // ==================== PERMISSIONLESS FUNCTIONS ====================
 
     /**
+     * @notice Deposits funds into the strategy
+     * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
+     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
+     * @dev Only callable by the user who owns this strategy
+     * @param amount The amount of tokens to deposit
+     */
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Amount must be greater than 0");
+
+        // Transfer tokens from the owner to this contract
+        token.safeTransferFrom(msg.sender, address(this), amount);
+
+        // Deposit the funds according to the current split
+        depositInternal(amount);
+
+        emit Deposit(address(token), amount);
+    }
+
+    /**
      * @notice Deposits any token funds currently in the contract into the strategies based on the split
      * @dev This function is permissionless and can be called by anyone
      * @return amount The amount of tokens deposited
@@ -442,17 +433,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         bytes32 expectedAppDataBytes = keccak256(abi.encode(expectedAppData));
 
-        // For debugging, emit the expected and actual appData
-        if (_order.appData != expectedAppDataBytes) {
-            // This is just for debugging and should be removed in production
-            console.log("Expected appData:");
-            console.log(expectedAppData);
-            console.log("Expected hash:");
-            console.logBytes32(expectedAppDataBytes);
-            console.log("Actual hash:");
-            console.logBytes32(_order.appData);
-        }
-
         require(_order.appData == expectedAppDataBytes, "Invalid app data");
 
         require(
@@ -500,7 +480,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @notice Gets the total balance of tokens across both contractss
      * @return The total balance in tokens
      */
-    function getTotalBalance() public returns (uint256) {
+    function _getTotalBalance() internal returns (uint256) {
         uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
         uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
 
