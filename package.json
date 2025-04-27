@@ -1,0 +1,26 @@
+{
+  "name": "mamo-contracts",
+  "version": "1.0.0",
+  "description": "Enable users to deploy personal strategy contracts and let Mamo Agent manage their funds.",
+  "main": "utils/generate-appdata.ts",
+  "directories": {
+    "doc": "docs",
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "example": "ts-node utils/example-usage.ts",
+    "generate-appdata": "ts-node utils/generate-appdata.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@cowprotocol/app-data": "^2.5.1"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.1",
+    "typescript": "^5.0.4"
+  }
+}

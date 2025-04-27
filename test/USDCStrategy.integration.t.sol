@@ -70,8 +70,7 @@ contract USDCStrategyTest is Test {
 
     DeployConfig.DeploymentConfig public config;
 
-    function setUp() public {
-        // Initialize addresses
+    function _initializeAddresses() private {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
@@ -94,27 +93,28 @@ contract USDCStrategyTest is Test {
         well = IERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
+    }
 
-        if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
-            // Deploy the SlippagePriceChecker using the script
-            DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-            slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
-        } else {
-            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
-        }
+    function _setupSlippagePriceChecker() private {
+        // Deploy the SlippagePriceChecker using the script
+        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
+        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false,
-            heartbeat: 30 minutes
-        });
+            new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+        for (uint256 i = 0; i < config.rewardTokens.length; i++) {
+            configs[i] = ISlippagePriceChecker.TokenFeedConfiguration({
+                chainlinkFeed: addresses.getAddress(config.rewardTokens[i].priceFeed),
+                reverse: config.rewardTokens[i].reverse,
+                heartbeat: config.rewardTokens[i].heartbeat
+            });
+        }
 
         vm.prank(addresses.getAddress(config.admin));
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
+        slippagePriceChecker.addTokenConfiguration(address(well), configs, config.maxPriceValidTime);
+    }
 
-        // Deploy the registry with admin, backend, and guardian addresses
+    function _deployStrategy() private {
         registry = new MamoStrategyRegistry(admin, backend, guardian);
 
         // Deploy the strategy implementation
@@ -126,8 +126,20 @@ contract USDCStrategyTest is Test {
 
         splitMToken = splitVault = 5000; // 50% in basis points each
 
-        // Encode initialization data for the strategy
-        bytes memory initData = abi.encodeWithSelector(
+        // Create and deploy the proxy
+        vm.prank(backend);
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), _getInitData(strategyTypeId));
+        vm.label(address(proxy), "USER_USDC_STRATEGY_PROXY");
+
+        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
+
+        // Add the strategy to the registry
+        vm.prank(backend);
+        registry.addStrategy(owner, address(strategy));
+    }
+
+    function _getInitData(uint256 strategyTypeId) private view returns (bytes memory) {
+        return abi.encodeWithSelector(
             ERC20MoonwellMorphoStrategy.initialize.selector,
             ERC20MoonwellMorphoStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
@@ -136,30 +148,24 @@ contract USDCStrategyTest is Test {
                 metaMorphoVault: address(metaMorphoVault),
                 token: address(usdc),
                 slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin, // Using admin as fee recipient
+                feeRecipient: admin,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
-                hookGasLimit: 100000, // Setting a default gas limit
-                allowedSlippageInBps: 1000, // 10% in basis points
-                compoundFee: 1000 // 10% in basis points
+                hookGasLimit: config.hookGasLimit,
+                allowedSlippageInBps: config.allowedSlippageInBps,
+                compoundFee: config.compoundFee
             })
         );
+    }
 
-        // Deploy the proxy with the implementation and initialization data
-        vm.prank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
-        vm.label(address(proxy), "USER_USDC_STRATEGY_PROXY");
-
-        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        // Add the strategy to the registry
-        vm.prank(backend);
-        registry.addStrategy(owner, address(strategy));
-
-        vm.warp(block.timestamp + 1 days);
+    function setUp() public {
+        _initializeAddresses();
+        _setupSlippagePriceChecker();
+        _deployStrategy();
+        vm.warp(block.timestamp + 1 hours);
     }
 
     function testOwnerCanDepositFunds() public {
@@ -952,6 +958,34 @@ contract USDCStrategyTest is Test {
         }
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
+        // Use FFI to call our generate-appdata script
+        string[] memory ffiCommand = new string[](13);
+        ffiCommand[0] = "npx";
+        ffiCommand[1] = "ts-node";
+        ffiCommand[2] = "utils/generate-appdata.ts";
+        ffiCommand[3] = "--sell-token";
+        ffiCommand[4] = vm.toString(address(well));
+        ffiCommand[5] = "--fee-recipient";
+        ffiCommand[6] = vm.toString(admin); // Using admin as fee recipient
+        ffiCommand[7] = "--sell-amount";
+        ffiCommand[8] = vm.toString(wellAmount);
+        ffiCommand[9] = "--compound-fee";
+        ffiCommand[10] = vm.toString(strategy.compoundFee());
+        ffiCommand[11] = "--from";
+        ffiCommand[12] = vm.toString(address(strategy));
+
+        // Execute the command and get the appData
+        bytes memory appDataResult = vm.ffi(ffiCommand);
+        string memory appDataJson = string(appDataResult);
+
+        // The output is the JSON document itself, we need to hash it to get the appData hash
+        bytes32 appDataHash = keccak256(abi.encode(appDataJson));
+
+        console.log("Generated appData JSON:");
+        console.log(appDataJson);
+
+        console.log("Generated appData hash:", vm.toString(appDataHash));
+
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -960,13 +994,15 @@ contract USDCStrategyTest is Test {
             sellAmount: wellAmount,
             buyAmount: buyAmount,
             validTo: validTo,
-            appData: bytes32(0),
+            appData: appDataHash,
             feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,
             sellTokenBalance: GPv2Order.BALANCE_ERC20,
             buyTokenBalance: GPv2Order.BALANCE_ERC20
         });
+
+        console.log("Order sellToken:", address(order.sellToken));
 
         bytes memory encodedOrder = abi.encode(order);
 

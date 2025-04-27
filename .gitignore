@@ -17,3 +17,5 @@ coverage/
 lcov.info
 
 broadcast/
+
+node_modules/
