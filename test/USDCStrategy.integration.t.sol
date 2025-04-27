@@ -214,7 +214,7 @@ contract USDCStrategyTest is Test {
         );
     }
 
-    function testRevertIfNonOwnerDeposit() public {
+    function testSuccessIfNonOwnerDeposit() public {
         // Create a non-owner address
         address nonOwner = makeAddr("nonOwner");
 
@@ -229,13 +229,12 @@ contract USDCStrategyTest is Test {
         vm.startPrank(nonOwner);
         usdc.approve(address(strategy), depositAmount);
 
-        // Attempt to deposit should revert with OwnableUnauthorizedAccount error
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        // Attempt to deposit should not revert
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
         // Verify the non-owner's USDC balance remains unchanged
-        assertEq(usdc.balanceOf(nonOwner), depositAmount, "Non-owner's USDC balance should remain unchanged");
+        assertEq(usdc.balanceOf(nonOwner), 0, "Non-owner's USDC balance should be 0");
     }
 
     function testOwnerCanWithdrawFunds() public {
@@ -1289,7 +1288,7 @@ contract USDCStrategyTest is Test {
         strategy.isValidSignature(digest, encodedOrder);
     }
 
-    function testRevertIfAppDataNotZero() public {
+    function testRevertIfAppDataIsWrong() public {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
@@ -1317,7 +1316,7 @@ contract USDCStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("App data must be zero");
+        vm.expectRevert("Invalid app data");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1656,7 +1655,8 @@ contract USDCStrategyTest is Test {
     }
 
     function getTotalBalance(address _strategy) internal returns (uint256) {
-        uint256 metaMorphoBalance = metaMorphoVault.balanceOf(_strategy);
+        uint256 metaMorphoShares = metaMorphoVault.balanceOf(_strategy);
+        uint256 metaMorphoBalance = metaMorphoShares > 0 ? metaMorphoVault.convertToAssets(metaMorphoShares) : 0;
         uint256 mTokenBalance = mToken.balanceOfUnderlying(_strategy);
         uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
 
