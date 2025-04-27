@@ -158,6 +158,8 @@ contract USDCStrategyTest is Test {
         // Add the strategy to the registry
         vm.prank(backend);
         registry.addStrategy(owner, address(strategy));
+
+        vm.warp(block.timestamp + 1 days);
     }
 
     function testOwnerCanDepositFunds() public {

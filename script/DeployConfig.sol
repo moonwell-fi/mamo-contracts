@@ -21,17 +21,17 @@ contract DeployConfig is Test {
     /// @notice Deployment configuration struct
     struct DeploymentConfig {
         string admin;
+        uint256 allowedSlippageInBps;
         string backend;
         uint256 chainId;
+        uint256 compoundFee;
         string guardian;
+        uint256 hookGasLimit;
         uint256 maxPriceValidTime;
         RewardToken[] rewardTokens;
         uint256 splitMToken;
         uint256 splitVault;
         string version;
-        uint256 hookGasLimit;
-        uint256 allowedSlippageInBps;
-        uint256 compoundFee;
     }
 
     /// @notice Reward token configuration struct

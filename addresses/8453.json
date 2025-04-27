@@ -88,10 +88,6 @@
     "addr": "0xf64A5c786dAEE61D9Eb20d388099e56f9270b564",
     "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
-  },
-  {
-    "addr": "0x26c158A4CD56d148c554190A95A921d90F00C160",
-    "name": "FEE_RECIPIENT",
-    "isContract": true
   }
+
 ]

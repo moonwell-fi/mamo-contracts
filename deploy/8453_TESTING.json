@@ -1,10 +1,12 @@
 {
   "admin": "TESTING_EOA",
+  "allowedSlippageInBps": 100,
   "backend": "TESTING_EOA",
   "chainId": 8453,
+  "compoundFee": 100,
   "guardian": "TESTING_EOA",
+  "hookGasLimit": 100000,
   "maxPriceValidTime": 3600,
-  "maxSlippageBps": 100,
   "rewardTokens": [
     {
       "heartbeat": 86400,
