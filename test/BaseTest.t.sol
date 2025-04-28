@@ -53,7 +53,17 @@ contract BaseTest is MAMODeployScript, Test {
         addresses = new Addresses("./addresses", chainIdArray);
 
         {
-            (mamoLogic,, proxyAdmin, mamoProxy, wormholeBridgeAdapterProxy) = deployMamo(addresses);
+            MAMO mamoLogicTemp;
+            WormholeBridgeAdapter bridgeAdapterLogic;
+            address mamoProxyTemp;
+            address bridgeAdapterProxyTemp;
+
+            (mamoLogicTemp, bridgeAdapterLogic, proxyAdmin, mamoProxyTemp, bridgeAdapterProxyTemp) =
+                deployMamo(addresses);
+
+            mamoLogic = mamoLogicTemp;
+            mamoProxy = MAMO(mamoProxyTemp);
+            wormholeBridgeAdapterProxy = WormholeBridgeAdapter(bridgeAdapterProxyTemp);
 
             vm.label(address(mamoProxy), "Mamo Proxy");
             vm.label(address(proxyAdmin), "Proxy Admin");

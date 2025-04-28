@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import "@forge-std/Test.sol";
+import {Upgrades} from "@openzeppelin-foundry-upgrades/Upgrades.sol";
 
 import {ITransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import "@test/BaseTest.t.sol";
@@ -15,6 +16,7 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testSetup() public view {
+        assertTrue(xwellProxy.DOMAIN_SEPARATOR() != bytes32(0), "domain separator not set");
         // ERC20Permit has a DOMAIN_SEPARATOR function, but it's not exposed in the MAMO contract
         // Instead, we'll check other EIP-712 related functions
         (
@@ -48,11 +50,7 @@ contract MAMOUnitTest is BaseTest {
         /// PROXY OWNERSHIP
 
         /// proxy admin starts off as this address
-        assertEq(
-            proxyAdmin.getProxyAdmin(ITransparentUpgradeableProxy(address(mamoProxy))),
-            address(proxyAdmin),
-            "incorrect proxy admin"
-        );
+        assertEq(Upgrades.getAdminAddress(address(mamoProxy)), address(proxyAdmin), "incorrect proxy admin");
 
         /// PAUSING
         assertEq(mamoProxy.pauseGuardian(), pauseGuardian, "incorrect pause guardian");
@@ -63,7 +61,7 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testInitializationFailsPauseDurationGtMax() public {
-        uint256 maxPauseDuration = mamoProxy.MAX_PAUSE_DURATION();
+        uint256 maxPauseDuration = mamoProxy.maxPauseDuration();
 
         bytes memory initData = abi.encodeWithSignature(
             "initialize(string,string,address,(uint112,uint128,address)[],uint128,address)",
@@ -231,14 +229,14 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testUpdatePauseDurationGtMaxPauseDurationFails() public {
-        uint128 newDuration = uint128(mamoProxy.MAX_PAUSE_DURATION() + 1);
+        uint128 newDuration = uint128(mamoProxy.maxPauseDuration() + 1);
         vm.expectRevert("MAMO: pause duration too long");
 
         mamoProxy.setPauseDuration(newDuration);
     }
 
     function testSetBufferCapOwnerSucceeds(uint112 bufferCap) public {
-        bufferCap = uint112(_bound(bufferCap, mamoProxy.MIN_BUFFER_CAP() + 1, type(uint112).max));
+        bufferCap = uint112(_bound(bufferCap, mamoProxy.minBufferCap() + 1, type(uint112).max));
 
         mamoProxy.setBufferCap(address(wormholeBridgeAdapterProxy), bufferCap);
         assertEq(mamoProxy.bufferCap(address(wormholeBridgeAdapterProxy)), bufferCap, "incorrect buffer cap");
@@ -252,7 +250,7 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testSetRateLimitPerSecondOwnerSucceeds(uint128 newRateLimitPerSecond) public {
-        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.MAX_RATE_LIMIT_PER_SECOND()));
+        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.maxRateLimitPerSecond()));
         mamoProxy.setRateLimitPerSecond(address(wormholeBridgeAdapterProxy), newRateLimitPerSecond);
 
         assertEq(
@@ -275,8 +273,8 @@ contract MAMOUnitTest is BaseTest {
         /// bound input so bridge is not zero address
         bridge = address(uint160(_bound(uint256(uint160(bridge)), 1, type(uint160).max)));
 
-        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.MAX_RATE_LIMIT_PER_SECOND()));
-        newBufferCap = uint112(_bound(newBufferCap, mamoProxy.MIN_BUFFER_CAP() + 1, type(uint112).max));
+        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.maxRateLimitPerSecond()));
+        newBufferCap = uint112(_bound(newBufferCap, mamoProxy.minBufferCap() + 1, type(uint112).max));
 
         MintLimits.RateLimitMidPointInfo memory newBridge = MintLimits.RateLimitMidPointInfo({
             bridge: bridge,
@@ -298,8 +296,8 @@ contract MAMOUnitTest is BaseTest {
         mamoProxy.removeBridge(address(wormholeBridgeAdapterProxy));
 
         bridge = address(uint160(_bound(uint256(uint160(bridge)), 1, type(uint160).max)));
-        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.MAX_RATE_LIMIT_PER_SECOND()));
-        newBufferCap = uint112(_bound(newBufferCap, mamoProxy.MIN_BUFFER_CAP() + 1, type(uint112).max));
+        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.maxRateLimitPerSecond()));
+        newBufferCap = uint112(_bound(newBufferCap, mamoProxy.minBufferCap() + 1, type(uint112).max));
 
         MintLimits.RateLimitMidPointInfo[] memory newBridge = new MintLimits.RateLimitMidPointInfo[](1);
 
@@ -316,7 +314,7 @@ contract MAMOUnitTest is BaseTest {
 
     function testAddNewBridgeWithExistingLimitFails() public {
         address newBridge = address(0x1111777777);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
         uint112 bufferCap = 20_000_000 * 1e18;
 
         testAddNewBridgeOwnerSucceeds(newBridge, rateLimitPerSecond, bufferCap);
@@ -333,8 +331,8 @@ contract MAMOUnitTest is BaseTest {
 
     function testAddNewBridgeWithBufferBelowMinFails() public {
         address newBridge = address(0x1111777777);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
-        uint112 bufferCap = mamoProxy.MIN_BUFFER_CAP();
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
+        uint112 bufferCap = mamoProxy.minBufferCap();
 
         MintLimits.RateLimitMidPointInfo memory bridge = MintLimits.RateLimitMidPointInfo({
             bridge: newBridge,
@@ -348,8 +346,8 @@ contract MAMOUnitTest is BaseTest {
 
     function testSetBridgeBufferBelowMinFails() public {
         address newBridge = address(0x1111777777);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
-        uint112 bufferCap = mamoProxy.MIN_BUFFER_CAP();
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
+        uint112 bufferCap = mamoProxy.minBufferCap();
         testAddNewBridgeOwnerSucceeds(newBridge, rateLimitPerSecond, bufferCap + 1);
 
         vm.expectRevert("MintLimits: buffer cap below min");
@@ -363,7 +361,7 @@ contract MAMOUnitTest is BaseTest {
         MintLimits.RateLimitMidPointInfo memory bridge = MintLimits.RateLimitMidPointInfo({
             bridge: newBridge,
             bufferCap: bufferCap,
-            rateLimitPerSecond: uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND() + 1)
+            rateLimitPerSecond: uint128(mamoProxy.maxRateLimitPerSecond() + 1)
         });
 
         vm.expectRevert("MintLimits: rateLimitPerSecond too high");
@@ -371,7 +369,7 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testSetExistingBridgeOverMaxRateLimitPerSecondFails() public {
-        uint128 maxRateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 maxRateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
 
         vm.expectRevert("MintLimits: rateLimitPerSecond too high");
         mamoProxy.setRateLimitPerSecond(address(wormholeBridgeAdapterProxy), maxRateLimitPerSecond + 1);
@@ -379,7 +377,7 @@ contract MAMOUnitTest is BaseTest {
 
     function testAddNewBridgeInvalidAddressFails() public {
         address newBridge = address(0);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
         uint112 bufferCap = 20_000_000 * 1e18;
 
         MintLimits.RateLimitMidPointInfo memory bridge = MintLimits.RateLimitMidPointInfo({
@@ -408,7 +406,7 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testSetRateLimitOnNonExistentBridgeFails(uint128 newRateLimitPerSecond) public {
-        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.MAX_RATE_LIMIT_PER_SECOND()));
+        newRateLimitPerSecond = uint128(_bound(newRateLimitPerSecond, 1, mamoProxy.maxRateLimitPerSecond()));
 
         vm.expectRevert("MintLimits: non-existent rate limit");
         mamoProxy.setRateLimitPerSecond(address(0), newRateLimitPerSecond);
@@ -489,7 +487,7 @@ contract MAMOUnitTest is BaseTest {
 
     function testDepleteBufferBridgeSucceeds() public {
         address bridge = address(0xeeeee);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
         uint112 bufferCap = 20_000_000 * 1e18;
 
         testAddNewBridgeOwnerSucceeds(bridge, rateLimitPerSecond, bufferCap);
@@ -516,7 +514,7 @@ contract MAMOUnitTest is BaseTest {
 
     function testReplenishBufferBridgeSucceeds() public {
         address bridge = address(0xeeeee);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
         uint112 bufferCap = 20_000_000 * 1e18;
 
         testAddNewBridgeOwnerSucceeds(bridge, rateLimitPerSecond, bufferCap);
@@ -537,7 +535,7 @@ contract MAMOUnitTest is BaseTest {
 
     function testReplenishBufferBridgeByZeroFails() public {
         address bridge = address(0xeeeee);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
         uint112 bufferCap = 20_000_000 * 1e18;
 
         testAddNewBridgeOwnerSucceeds(bridge, rateLimitPerSecond, bufferCap);
@@ -549,7 +547,7 @@ contract MAMOUnitTest is BaseTest {
 
     function testDepleteBufferBridgeByZeroFails() public {
         address bridge = address(0xeeeee);
-        uint128 rateLimitPerSecond = uint128(mamoProxy.MAX_RATE_LIMIT_PER_SECOND());
+        uint128 rateLimitPerSecond = uint128(mamoProxy.maxRateLimitPerSecond());
         uint112 bufferCap = 20_000_000 * 1e18;
 
         testAddNewBridgeOwnerSucceeds(bridge, rateLimitPerSecond, bufferCap);
@@ -639,28 +637,27 @@ contract MAMOUnitTest is BaseTest {
         /// let function choose amount to burn at random
     }
 
-    function testIncreaseAllowance(uint256 amount) public {
+    function testApprove(uint256 amount) public {
         address to = makeAddr("to");
         uint256 startingAllowance = mamoProxy.allowance(address(this), to);
 
-        mamoProxy.increaseAllowance(to, amount);
+        mamoProxy.approve(to, amount);
 
         assertEq(mamoProxy.allowance(address(this), to), startingAllowance + amount, "incorrect allowance");
     }
 
-    function testDecreaseAllowance(uint256 amount) public {
+    function testRemoveAllowance(uint256 amount) public {
         address to = makeAddr("to");
-        testIncreaseAllowance(amount);
+        testApprove(amount);
 
         amount /= 2;
 
-        uint256 startingAllowance = mamoProxy.allowance(address(this), to);
+        mamoProxy.approve(to, 0);
 
-        mamoProxy.decreaseAllowance(to, amount);
-
-        assertEq(mamoProxy.allowance(address(this), to), startingAllowance - amount, "incorrect allowance");
+        assertEq(mamoProxy.allowance(address(this), to), 0, "incorrect allowance");
     }
 
+    // TODO
     //    function testPermit(uint256 amount) public {
     //        address spender = address(wormholeBridgeAdapterProxy);
     //        uint256 deadline = 5000000000; // timestamp far in the future
@@ -679,6 +676,7 @@ contract MAMOUnitTest is BaseTest {
     //        assertEq(mamoProxy.allowance(owner, spender), amount, "incorrect allowance");
     //        assertEq(mamoProxy.nonces(owner), 1, "incorrect nonce");
     //    }
+
     // Helper functions for testing bridge functionality
     function _bridgeCanMint(uint112 mintAmount) internal {
         uint256 startingTotalSupply = mamoProxy.totalSupply();

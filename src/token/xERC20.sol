@@ -93,16 +93,6 @@ abstract contract xERC20 is IXERC20, MintLimits, ERC20VotesUpgradeable {
     /// @notice maximum supply is 1 billion tokens
     function maxSupply() public pure virtual returns (uint256);
 
-    /// @notice hook to stop users from transferring tokens to the xERC20 contract
-    /// @param from the address to transfer from
-    /// @param to the address to transfer to
-    /// @param amount the amount to transfer
-    function _update(address from, address to, uint256 amount) internal override {
-        super._update(from, to, amount);
-
-        require(to != address(this), "xERC20: cannot transfer to token contract");
-    }
-
     /// --------------------------------------------------------
     /// --------------------------------------------------------
     /// -------------------- clock override --------------------

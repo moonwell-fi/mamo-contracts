@@ -3,6 +3,9 @@ pragma solidity 0.8.28;
 
 import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/contracts/access/Ownable2StepUpgradeable.sol";
 import {ERC20Upgradeable} from "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
+import {ERC20PermitUpgradeable} from
+    "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
+import {NoncesUpgradeable} from "@openzeppelin-upgradeable/contracts/utils/NoncesUpgradeable.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {IERC165, IERC7802} from "@contracts/interfaces/IERC7802.sol";
@@ -12,11 +15,14 @@ import {ConfigurablePauseGuardian} from "@contracts/token/ConfigurablePauseGuard
 import {MintLimits} from "@contracts/token/MintLimits.sol";
 import {xERC20} from "@contracts/token/xERC20.sol";
 
+import {ERC20VotesUpgradeable} from
+    "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
+import {IERC2612} from "@openzeppelin/contracts/interfaces/IERC2612.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
 /// @title MAMO
 /// @notice The MAMO token is xERC20 and SuperERC20 compatible
-contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IERC7802 {
+
+contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, ERC20PermitUpgradeable, IERC7802 {
     using SafeCast for uint256;
 
     /// @notice maximum supply is 1 billion tokens
@@ -55,7 +61,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     ) external initializer {
         require(newPauseDuration <= MAX_PAUSE_DURATION, "MAMO: pause duration too long");
         __ERC20_init(tokenName, tokenSymbol);
-        // TODO maybe add permit here
+        __ERC20Permit_init(tokenName);
 
         __Ownable_init(tokenOwner);
         _addLimits(newRateLimits);
@@ -80,7 +86,7 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     }
 
     /// @notice the maximum amount of time the token can be paused for
-    function maxPauseDuration() public pure override returns (uint256) {
+    function maxPauseDuration() public pure returns (uint256) {
         return MAX_PAUSE_DURATION;
     }
 
@@ -221,6 +227,35 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     /// @inheritdoc IERC165
     function supportsInterface(bytes4 _interfaceId) public view virtual returns (bool) {
         return _interfaceId == type(IERC7802).interfaceId || _interfaceId == type(IERC20).interfaceId
-            || _interfaceId == type(IERC165).interfaceId || _interfaceId == type(IXERC20).interfaceId;
+            || _interfaceId == type(IERC165).interfaceId || _interfaceId == type(IXERC20).interfaceId
+            || _interfaceId == type(IERC2612).interfaceId;
+    }
+
+    /// @notice Override _update to resolve inheritance conflict between ERC20Upgradeable and ERC20VotesUpgradeable
+    /// @param from the address to transfer from
+    /// @param to the address to transfer to
+    /// @param amount the amount to transfer
+    function _update(address from, address to, uint256 amount)
+        internal
+        override(ERC20Upgradeable, ERC20VotesUpgradeable)
+    {
+        // Call the ERC20Upgradeable implementation to handle the transfer
+        ERC20Upgradeable._update(from, to, amount);
+
+        // Add the xERC20 check to prevent transfers to the token contract
+        require(to != address(this), "xERC20: cannot transfer to token contract");
+    }
+
+    /// @notice Override nonces to resolve inheritance conflict
+    /// @param owner the address to get nonces for
+    /// @return the current nonce for the owner
+    function nonces(address owner)
+        public
+        view
+        virtual
+        override(ERC20PermitUpgradeable, NoncesUpgradeable)
+        returns (uint256)
+    {
+        return super.nonces(owner);
     }
 }
