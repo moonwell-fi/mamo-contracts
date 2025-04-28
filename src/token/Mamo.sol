@@ -20,16 +20,16 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, IER
     using SafeCast for uint256;
 
     /// @notice maximum supply is 1 billion tokens
-    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 1e18;
+    uint256 internal constant MAX_SUPPLY = 1_000_000_000 * 1e18;
 
     /// @notice maximum rate limit per second is 25k
-    uint128 public constant MAX_RATE_LIMIT_PER_SECOND = 25_000 * 1e18;
+    uint128 internal constant MAX_RATE_LIMIT_PER_SECOND = 25_000 * 1e18;
 
     /// @notice minimum buffer cap
-    uint112 public constant MIN_BUFFER_CAP = 1_000 * 1e18;
+    uint112 internal constant MIN_BUFFER_CAP = 1_000 * 1e18;
 
     /// @notice the maximum time the token can be paused for
-    uint256 public constant MAX_PAUSE_DURATION = 30 days;
+    uint256 internal constant MAX_PAUSE_DURATION = 30 days;
 
     /// @notice Address of the SuperchainTokenBridge predeploy.
     address internal constant SUPERCHAIN_TOKEN_BRIDGE = 0x4200000000000000000000000000000000000028;
