@@ -36,7 +36,6 @@ contract MAMODeployScript is Script {
         )
     {
         vm.startBroadcast();
-
         mamoLogic = new MAMO();
 
         bridgeAdapterLogic = new WormholeBridgeAdapter();
