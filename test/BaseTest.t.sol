@@ -41,16 +41,24 @@ contract BaseTest is MAMODeployScript, Test {
     uint16 public chainId = BASE_WORMHOLE_CHAIN_ID;
 
     /// @notice owner address for the contracts
-    address public owner = address(0x1234);
+    address public owner;
 
     /// @notice pause guardian address for the contracts
-    address public pauseGuardian = address(0x5678);
+    address public pauseGuardian;
+
+    /// @notice the duration of the pause for the MAMO token
+    /// once the contract has been paused, in this period of time,
+    /// it will automatically unpause if no action is taken.
+    uint128 public constant pauseDuration = 10 days;
 
     function setUp() public virtual {
         // Initialize addresses with the folder path and chain IDs
         uint256[] memory chainIdArray = new uint256[](1);
         chainIdArray[0] = block.chainid;
         addresses = new Addresses("./addresses", chainIdArray);
+
+        pauseGuardian = addresses.getAddress("MAMO_PAUSE_GUARDIAN");
+        owner = addresses.getAddress("MAMO_MULTISIG");
 
         {
             MAMO mamoLogicTemp;
@@ -78,7 +86,7 @@ contract BaseTest is MAMODeployScript, Test {
         newRateLimits[0].rateLimitPerSecond = externalChainRateLimitPerSecond;
 
         /// give wormhole bridge adapter and lock box a rate limit
-        //  initializeMamo(address(mamoProxy), mamoName, mamoSymbol, owner, newRateLimits, pauseDuration, pauseGuardian);
+        initializeMamo(address(mamoProxy), owner, newRateLimits, pauseDuration, pauseGuardian);
 
         /// initialize wormhole adapter
         uint16[] memory chainIds = new uint16[](1);
@@ -87,8 +95,10 @@ contract BaseTest is MAMODeployScript, Test {
         address[] memory targets = new address[](1);
         targets[0] = address(wormholeBridgeAdapterProxy);
 
-        // initializeWormholeAdapter(
-        //     address(wormholeBridgeAdapterProxy), address(mamoProxy), owner, wormholeRelayer, chainIds, targets
-        // );
+        address wormholeRelayer = addresses.getAddress("WORMHOLE_BRIDGE_RELAYER_PROXY");
+
+        initializeWormholeAdapter(
+            address(wormholeBridgeAdapterProxy), address(mamoProxy), owner, wormholeRelayer, chainIds, targets
+        );
     }
 }

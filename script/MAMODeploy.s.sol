@@ -14,11 +14,6 @@ import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transpa
 
 // TODO: make sure it uses create2
 contract MAMODeployScript is Script {
-    /// @notice the duration of the pause for the MAMO token
-    /// once the contract has been paused, in this period of time,
-    /// it will automatically unpause if no action is taken.
-    uint128 public constant pauseDuration = 10 days;
-
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -53,33 +48,37 @@ contract MAMODeployScript is Script {
         bridgeAdapterProxy =
             address(new TransparentUpgradeableProxy(address(bridgeAdapterLogic), address(proxyAdmin), ""));
 
-        // initialize bridgeAdapter
+        vm.stopBroadcast();
+    }
 
-        address relayer = addresses.getAddress("WORMHOLE_BRIDGE_RELAYER_PROXY");
+    function initializeWormholeAdapter(
+        address wormholeBridgeAdapterProxy,
+        address mamoProxy,
+        address owner,
+        address wormholeRelayer,
+        uint16[] memory chainIds,
+        address[] memory targets
+    ) public {
+        vm.startBroadcast();
 
-        uint16[] memory targetChains = new uint16[](0); // initialize with 0 target chains
-        address[] memory targetAddresses = new address[](0); // initialize with 0 target addresses
-
-        WormholeBridgeAdapter(bridgeAdapterProxy).initialize(
-            address(mamoProxy), addresses.getAddress("MAMO_MULTISIG"), relayer, targetChains, targetAddresses
+        WormholeBridgeAdapter(wormholeBridgeAdapterProxy).initialize(
+            address(mamoProxy), owner, wormholeRelayer, chainIds, targets
         );
 
-        // initialize mamoContract
+        vm.stopBroadcast();
+    }
 
-        MintLimits.RateLimitMidPointInfo[] memory limits = new MintLimits.RateLimitMidPointInfo[](1);
+    function initializeMamo(
+        address mamoProxy,
+        address owner,
+        MintLimits.RateLimitMidPointInfo[] memory limits,
+        uint128 pauseDuration,
+        address pauseGuardian
+    ) public {
+        vm.startBroadcast();
 
-        limits[0].bridge = bridgeAdapterProxy;
-        limits[0].rateLimitPerSecond = uint128(1e18);
-        limits[0].bufferCap = uint112(1_001 * 1e18); // Must be greater than MIN_BUFFER_CAP
+        MAMO(mamoProxy).initialize("MAMO", "MAMO", owner, limits, pauseDuration, pauseGuardian);
 
-        MAMO(mamoProxy).initialize(
-            "MAMO",
-            "MAMO",
-            addresses.getAddress("MAMO_MULTISIG"),
-            limits,
-            pauseDuration,
-            addresses.getAddress("MAMO_PAUSE_GUARDIAN")
-        );
         vm.stopBroadcast();
     }
 }
