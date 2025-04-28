@@ -19,9 +19,9 @@ import {ERC20VotesUpgradeable} from
     "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
 import {IERC2612} from "@openzeppelin/contracts/interfaces/IERC2612.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 /// @title MAMO
 /// @notice The MAMO token is xERC20 and SuperERC20 compatible
-
 contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, ERC20PermitUpgradeable, IERC7802 {
     using SafeCast for uint256;
 
@@ -224,12 +224,39 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, ERC
         _removeLimits(bridges);
     }
 
-    /// @inheritdoc IERC165
+    //// ------------------------------------------------------------
+    //// ------------------------------------------------------------
+    //// ------------------- View Functions -------------------------
+    //// ------------------------------------------------------------
+    //// ------------------------------------------------------------
+
+    /// @notice returns true if the interface is supported
+    /// @param _interfaceId the interface id to check
+    /// @return true if the interface is supported
     function supportsInterface(bytes4 _interfaceId) public view virtual returns (bool) {
         return _interfaceId == type(IERC7802).interfaceId || _interfaceId == type(IERC20).interfaceId
             || _interfaceId == type(IERC165).interfaceId || _interfaceId == type(IXERC20).interfaceId
             || _interfaceId == type(IERC2612).interfaceId;
     }
+
+    /// @notice Override nonces to resolve inheritance conflict
+    /// @param owner the address to get nonces for
+    /// @return the current nonce for the owner
+    function nonces(address owner)
+        public
+        view
+        virtual
+        override(ERC20PermitUpgradeable, NoncesUpgradeable)
+        returns (uint256)
+    {
+        return super.nonces(owner);
+    }
+
+    //// ------------------------------------------------------------
+    //// ------------------------------------------------------------
+    //// ------------------- Internal Functions ---------------------
+    //// ------------------------------------------------------------
+    //// ------------------------------------------------------------
 
     /// @notice Override _update to resolve inheritance conflict between ERC20Upgradeable and ERC20VotesUpgradeable
     /// @param from the address to transfer from
@@ -244,18 +271,5 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, ERC
 
         // Add the xERC20 check to prevent transfers to the token contract
         require(to != address(this), "xERC20: cannot transfer to token contract");
-    }
-
-    /// @notice Override nonces to resolve inheritance conflict
-    /// @param owner the address to get nonces for
-    /// @return the current nonce for the owner
-    function nonces(address owner)
-        public
-        view
-        virtual
-        override(ERC20PermitUpgradeable, NoncesUpgradeable)
-        returns (uint256)
-    {
-        return super.nonces(owner);
     }
 }

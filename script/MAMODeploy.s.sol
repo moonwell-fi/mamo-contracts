@@ -70,7 +70,7 @@ contract MAMODeployScript is Script {
 
         limits[0].bridge = bridgeAdapterProxy;
         limits[0].rateLimitPerSecond = uint128(1e18);
-        limits[0].bufferCap = uint112(1e18);
+        limits[0].bufferCap = uint112(1_001 * 1e18); // Must be greater than MIN_BUFFER_CAP
 
         MAMO(mamoProxy).initialize(
             "MAMO",
