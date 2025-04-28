@@ -11,7 +11,7 @@ import {MAMO} from "@contracts/token/Mamo.sol";
 
 import {MintLimits} from "@contracts/token/MintLimits.sol";
 import {WormholeBridgeAdapter} from "@contracts/token/WormholeBridgeAdapter.sol";
-import {MAMODeployScript} from "@script/MamoDeploy.s.sol";
+import {MAMODeployScript} from "@script/MAMODeploy.s.sol";
 
 // TODO: move this to ChainIds.sol
 uint16 constant BASE_WORMHOLE_CHAIN_ID = 30;
