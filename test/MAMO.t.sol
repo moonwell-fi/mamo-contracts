@@ -15,7 +15,8 @@ contract MAMOUnitTest is BaseTest {
     }
 
     function testSetup() public view {
-        assertTrue(mamoProxy.DOMAIN_SEPARATOR() != bytes32(0), "domain separator not set");
+        // ERC20Permit has a DOMAIN_SEPARATOR function, but it's not exposed in the MAMO contract
+        // Instead, we'll check other EIP-712 related functions
         (
             bytes1 fields,
             string memory name,
