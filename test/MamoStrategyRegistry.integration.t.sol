@@ -1169,4 +1169,156 @@ contract MamoStrategyRegistryIntegrationTest is Test {
             "isUserStrategy should return false for non-owner"
         );
     }
+
+    // ==================== TESTS FOR updateStrategyOwner METHOD ====================
+
+    function testUpdateStrategyOwnerSucceed() public {
+        // Deploy a mock strategy implementation
+        MockStrategy strategyImpl = new MockStrategy();
+
+        // Whitelist the implementation
+        vm.startPrank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // Create user addresses
+        address originalOwner = makeAddr("originalOwner");
+        address newOwner = makeAddr("newOwner");
+
+        // Create a proxy with the mock strategy implementation
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+        );
+
+        // Add strategy for the original owner
+        vm.startPrank(backend);
+        registry.addStrategy(originalOwner, address(strategy));
+        vm.stopPrank();
+
+        // Verify the strategy is owned by the original owner
+        assertTrue(
+            registry.isUserStrategy(originalOwner, address(strategy)), "Strategy should be owned by the original owner"
+        );
+        assertFalse(
+            registry.isUserStrategy(newOwner, address(strategy)), "Strategy should not be owned by the new owner yet"
+        );
+
+        // Expect the StrategyOwnerUpdated event to be emitted
+        vm.expectEmit(address(registry));
+        emit MamoStrategyRegistry.StrategyOwnerUpdated(address(strategy), originalOwner, newOwner);
+
+        // Call updateStrategyOwner as if it was called by the strategy
+        vm.prank(address(strategy));
+        registry.updateStrategyOwner(newOwner);
+
+        // Verify the ownership was updated in the registry
+        assertFalse(
+            registry.isUserStrategy(originalOwner, address(strategy)),
+            "Strategy should no longer be owned by the original owner"
+        );
+        assertTrue(
+            registry.isUserStrategy(newOwner, address(strategy)), "Strategy should now be owned by the new owner"
+        );
+    }
+
+    function testRevertIfNonStrategyCallsUpdateStrategyOwner() public {
+        // Create user addresses
+        address originalOwner = makeAddr("originalOwner");
+        address newOwner = makeAddr("newOwner");
+        address nonStrategy = makeAddr("nonStrategy");
+
+        // Call updateStrategyOwner from a non-strategy address
+        vm.prank(nonStrategy);
+        vm.expectRevert();
+        registry.updateStrategyOwner(newOwner);
+    }
+
+    function testRevertIfUpdateStrategyOwnerWithZeroAddress() public {
+        // Deploy a mock strategy implementation
+        MockStrategy strategyImpl = new MockStrategy();
+
+        // Whitelist the implementation
+        vm.startPrank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // Create user address
+        address originalOwner = makeAddr("originalOwner");
+
+        // Create a proxy with the mock strategy implementation
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+        );
+
+        // Add strategy for the original owner
+        vm.startPrank(backend);
+        registry.addStrategy(originalOwner, address(strategy));
+        vm.stopPrank();
+
+        // Call updateStrategyOwner with zero address
+        vm.prank(address(strategy));
+        vm.expectRevert("Invalid new owner address");
+        registry.updateStrategyOwner(address(0));
+    }
+
+    function testRevertIfUpdateStrategyOwnerWhenNotRegistered() public {
+        // Deploy a mock strategy implementation
+        MockStrategy strategyImpl = new MockStrategy();
+
+        // Whitelist the implementation
+        vm.startPrank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // Create user addresses
+        address originalOwner = makeAddr("originalOwner");
+        address newOwner = makeAddr("newOwner");
+
+        // Create a proxy with the mock strategy implementation
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+        );
+
+        // Call updateStrategyOwner
+        vm.prank(address(strategy));
+        vm.expectRevert("Not authorized to update strategy owner");
+        registry.updateStrategyOwner(newOwner);
+    }
+
+    function testRevertIfUpdateStrategyOwnerWhenPaused() public {
+        // Deploy a mock strategy implementation
+        MockStrategy strategyImpl = new MockStrategy();
+
+        // Whitelist the implementation
+        vm.startPrank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(strategyImpl), 0);
+        vm.stopPrank();
+
+        // Create user addresses
+        address originalOwner = makeAddr("originalOwner");
+        address newOwner = makeAddr("newOwner");
+
+        // Create a proxy with the mock strategy implementation
+        ERC1967Proxy strategy = new ERC1967Proxy(
+            address(strategyImpl),
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+        );
+
+        // Add strategy for the original owner
+        vm.startPrank(backend);
+        registry.addStrategy(originalOwner, address(strategy));
+        vm.stopPrank();
+
+        // Pause the registry
+        vm.prank(guardian);
+        registry.pause();
+
+        // Call updateStrategyOwner when registry is paused
+        vm.prank(address(strategy));
+        vm.expectRevert();
+        registry.updateStrategyOwner(newOwner);
+    }
 }

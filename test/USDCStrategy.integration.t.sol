@@ -10,11 +10,13 @@ import {Addresses} from "@addresses/Addresses.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
+import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {Surl} from "@surl/Surl.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
@@ -48,6 +50,10 @@ contract USDCStrategyTest is Test {
 
     // Magic value returned by isValidSignature for valid orders
     bytes4 private constant MAGIC_VALUE = 0x1626ba7e;
+
+    // Events
+    event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
+
     Addresses public addresses;
 
     // Contracts
@@ -1366,7 +1372,7 @@ contract USDCStrategyTest is Test {
     }
 
     function testSlippageAffectsPriceCheck() public {
-        uint256 wellAmount = 100e18;
+        uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
 
         vm.prank(owner);
@@ -1421,7 +1427,7 @@ contract USDCStrategyTest is Test {
 
         // Now create a more reasonable order with a higher buy amount
         // This amount is still low but might pass with high slippage
-        uint256 reasonableBuyAmount = 100 * 10 ** 6; // 100 USDC
+        uint256 reasonableBuyAmount = 1000 * 10 ** 6;
 
         GPv2Order.Data memory betterOrder = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1442,7 +1448,7 @@ contract USDCStrategyTest is Test {
         bytes32 betterDigest = betterOrder.hash(strategy.DOMAIN_SEPARATOR());
 
         // Set a maximum slippage 25%
-        uint256 veryHighSlippage = 2500; // 25%
+        uint256 veryHighSlippage = 2500;
         vm.prank(owner);
         strategy.setSlippage(veryHighSlippage);
 
@@ -1703,5 +1709,191 @@ contract USDCStrategyTest is Test {
 
         // The output is the JSON document itself, we need to hash it to get the appData hash
         return keccak256(abi.encode(appDataJson));
+    }
+    // Tests for setFeeRecipient function
+
+    function testBackendCanSetFeeRecipient() public {
+        // Create a new fee recipient address
+        address newFeeRecipient = makeAddr("newFeeRecipient");
+
+        // Get the current fee recipient
+        address currentFeeRecipient = strategy.feeRecipient();
+
+        // Backend sets a new fee recipient
+        vm.prank(backend);
+        vm.expectEmit(true, true, false, true, address(strategy));
+        emit FeeRecipientUpdated(currentFeeRecipient, newFeeRecipient);
+        strategy.setFeeRecipient(newFeeRecipient);
+
+        // Verify the fee recipient was updated
+        assertEq(strategy.feeRecipient(), newFeeRecipient, "Fee recipient should be updated");
+    }
+
+    function testRevertIfNonBackendSetsFeeRecipient() public {
+        // Create a new fee recipient address
+        address newFeeRecipient = makeAddr("newFeeRecipient");
+
+        // Get the current fee recipient
+        address currentFeeRecipient = strategy.feeRecipient();
+
+        // Owner attempts to set a new fee recipient (should fail despite being owner)
+        vm.prank(owner);
+        vm.expectRevert("Not backend");
+        strategy.setFeeRecipient(newFeeRecipient);
+
+        // Random address attempts to set a new fee recipient
+        address randomAddress = makeAddr("randomAddress");
+        vm.prank(randomAddress);
+        vm.expectRevert("Not backend");
+        strategy.setFeeRecipient(newFeeRecipient);
+
+        // Verify the fee recipient remains unchanged
+        assertEq(strategy.feeRecipient(), currentFeeRecipient, "Fee recipient should remain unchanged");
+    }
+
+    function testRevertIfSetFeeRecipientToZeroAddress() public {
+        // Backend attempts to set fee recipient to zero address
+        vm.prank(backend);
+        vm.expectRevert("Invalid fee recipient address");
+        strategy.setFeeRecipient(address(0));
+
+        // Verify the fee recipient remains unchanged
+        address currentFeeRecipient = strategy.feeRecipient();
+        assertEq(strategy.feeRecipient(), currentFeeRecipient, "Fee recipient should remain unchanged");
+    }
+
+    // Tests for transferOwnership function
+
+    function testOwnerCanTransferOwnership() public {
+        // Create a new owner address
+        address newOwner = makeAddr("newOwner");
+
+        // Check initial ownership
+        assertEq(strategy.owner(), owner, "Initial owner should be the original owner");
+
+        // First, we need to ensure the registry recognizes the strategy as belonging to the owner
+        assertTrue(
+            registry.isUserStrategy(owner, address(strategy)),
+            "Registry should recognize strategy as belonging to owner"
+        );
+
+        // Mock the registry's behavior for this test
+        // In a real scenario, the registry would need to be updated by the backend
+        vm.mockCall(
+            address(registry),
+            abi.encodeWithSelector(IMamoStrategyRegistry.updateStrategyOwner.selector, newOwner),
+            abi.encode()
+        );
+
+        // Now the owner can transfer ownership
+        vm.prank(owner);
+        strategy.transferOwnership(newOwner);
+
+        // Verify ownership was transferred
+        assertEq(strategy.owner(), newOwner, "Owner should be updated to the new owner");
+    }
+
+    function testRevertIfNonOwnerTransfersOwnership() public {
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+
+        // Create a new owner address
+        address newOwner = makeAddr("newOwner");
+
+        // Non-owner attempts to transfer ownership
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        strategy.transferOwnership(newOwner);
+
+        // Verify ownership remains unchanged
+        assertEq(strategy.owner(), owner, "Owner should remain unchanged");
+
+        // Verify the registry still has the original owner
+        assertTrue(registry.isUserStrategy(owner, address(strategy)), "Registry should still have the original owner");
+    }
+
+    function testRevertIfTransferOwnershipToZeroAddress() public {
+        // Owner attempts to transfer ownership to zero address
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableInvalidOwner(address)", address(0)));
+        strategy.transferOwnership(address(0));
+
+        // Verify ownership remains unchanged
+        assertEq(strategy.owner(), owner, "Owner should remain unchanged");
+
+        // Verify the registry still has the original owner
+        assertTrue(registry.isUserStrategy(owner, address(strategy)), "Registry should still have the original owner");
+    }
+
+    function testNewOwnerCanPerformOwnerActions() public {
+        // Create a new owner address
+        address newOwner = makeAddr("newOwner");
+
+        // First, we need to ensure the registry recognizes the strategy as belonging to the owner
+        // This is normally done in the _deployStrategy function, but we'll verify it here
+        assertTrue(
+            registry.isUserStrategy(owner, address(strategy)),
+            "Registry should recognize strategy as belonging to owner"
+        );
+
+        // Mock the registry's behavior for this test
+        // In a real scenario, the registry would need to be updated by the backend
+        vm.mockCall(
+            address(registry),
+            abi.encodeWithSelector(IMamoStrategyRegistry.updateStrategyOwner.selector, newOwner),
+            abi.encode()
+        );
+
+        // Now the owner can transfer ownership
+        vm.prank(owner);
+        strategy.transferOwnership(newOwner);
+
+        // Verify ownership was transferred
+        assertEq(strategy.owner(), newOwner, "Owner should be updated to the new owner");
+
+        // Verify new owner can perform owner-only actions
+        // For example, setting slippage
+        uint256 newSlippage = 200; // 2%
+        vm.prank(newOwner);
+        strategy.setSlippage(newSlippage);
+
+        // Verify the slippage was updated
+        assertEq(strategy.allowedSlippageInBps(), newSlippage, "New owner should be able to update slippage");
+
+        // Verify old owner can no longer perform owner-only actions
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", owner));
+        strategy.setSlippage(300);
+    }
+
+    // Tests for renounceOwnership function
+
+    function testRevertIfOwnerRenounceOwnership() public {
+        // Owner attempts to renounce ownership
+        vm.prank(owner);
+        vm.expectRevert("Ownership cannot be renounced in this contract");
+        strategy.renounceOwnership();
+
+        // Verify ownership remains unchanged
+        assertEq(strategy.owner(), owner, "Owner should remain unchanged");
+
+        // Verify the registry still has the original owner
+        assertTrue(registry.isUserStrategy(owner, address(strategy)), "Registry should still have the original owner");
+    }
+
+    function testRevertIfNonOwnerRenounceOwnership() public {
+        // Create a non-owner address
+        address nonOwner = makeAddr("nonOwner");
+
+        // Non-owner attempts to renounce ownership
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        strategy.renounceOwnership();
+
+        // Verify ownership remains unchanged
+        assertEq(strategy.owner(), owner, "Owner should remain unchanged");
+
+        // Verify the registry still has the original owner
+        assertTrue(registry.isUserStrategy(owner, address(strategy)), "Registry should still have the original owner");
     }
 }

@@ -3,12 +3,12 @@ pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
+
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
-import {console} from "@forge-std/console.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
@@ -311,9 +311,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
         require(_newFeeRecipient != address(0), "Invalid fee recipient address");
 
-        feeRecipient = _newFeeRecipient;
-
         emit FeeRecipientUpdated(feeRecipient, _newFeeRecipient);
+        feeRecipient = _newFeeRecipient;
     }
 
     // ==================== PERMISSIONLESS FUNCTIONS ====================
@@ -416,8 +415,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         );
 
         bytes32 expectedAppDataBytes = keccak256(abi.encode(expectedAppData));
-
-        console.log("expectedAppData: %s", expectedAppData);
 
         require(_order.appData == expectedAppDataBytes, "Invalid app data");
 

@@ -103,13 +103,6 @@ interface IMamoStrategyRegistry {
     function getBackendAddress() external view returns (address);
 
     /**
-     * @notice Gets the owner of a strategy
-     * @param strategy The address of the strategy
-     * @return The address of the strategy owner
-     */
-    function strategyOwner(address strategy) external view returns (address);
-
-    /**
      * @notice Updates the owner of a strategy
      * @dev Only callable by the current owner of the strategy
      * @param newOwner The address of the new owner
