@@ -96,7 +96,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
 
     // @notice Emitted when the fee recipient is updated
-    event FeeRecipientUpdated(address oldFeeRecipient, address newFeeRecipient);
+    event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
