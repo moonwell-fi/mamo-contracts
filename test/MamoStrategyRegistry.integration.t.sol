@@ -10,6 +10,8 @@ import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 import {MockFailingERC20} from "./MockFailingERC20.sol";
+
+import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
@@ -20,8 +22,8 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeab
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
-
 // Mock proxy that returns address(0) for implementation
+
 contract MockZeroImplProxy {
     // Mock implementation of getImplementation that returns address(0)
     function getImplementation() external pure returns (address) {
@@ -30,45 +32,11 @@ contract MockZeroImplProxy {
 }
 
 // Mock strategy contract for testing
-contract MockStrategy is Initializable, UUPSUpgradeable {
-    // Reference to the Mamo Strategy Registry contract
-    IMamoStrategyRegistry public mamoStrategyRegistry;
-
-    uint256 public strategyTypeId;
-    address private _owner;
-
-    function initialize(address owner_, address upgrader, address, uint256 _strategyTypeId) external initializer {
-        // Store reference to the registry
-        mamoStrategyRegistry = IMamoStrategyRegistry(upgrader);
-        _owner = owner_;
-        strategyTypeId = _strategyTypeId;
+contract MockStrategy is BaseStrategy {
+    function initialize(address _owner, address upgrader, uint256 _strategyTypeId) external initializer {
+        // Set state variables
+        __BaseStrategy_init(upgrader, _strategyTypeId, _owner);
     }
-
-    function owner() public view returns (address) {
-        return _owner;
-    }
-
-    function transferOwnership(address newOwner) public {
-        require(msg.sender == _owner, "Only owner can transfer ownership");
-        _owner = newOwner;
-    }
-
-    modifier onlyStrategyOwner() {
-        require(mamoStrategyRegistry.isUserStrategy(msg.sender, address(this)), "Not strategy owner");
-        _;
-    }
-
-    modifier onlyBackend() {
-        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
-        _;
-    }
-
-    function _authorizeUpgrade(address) internal view override {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
-    }
-
-    // Add a receive function to allow receiving ETH
-    receive() external payable {}
 }
 
 contract MamoStrategyRegistryIntegrationTest is Test {
@@ -98,15 +66,15 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         backend = addresses.getAddress(config.getConfig().backend);
         guardian = addresses.getAddress(config.getConfig().guardian);
 
-        if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
-            // Deploy the MamoStrategyRegistry using the script
-            StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
+        // if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
+        // Deploy the MamoStrategyRegistry using the script
+        StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
 
-            // Call the deployStrategyRegistry function with the addresses
-            registry = deployScript.deployStrategyRegistry(addresses, config.getConfig());
-        } else {
-            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        }
+        // Call the deployStrategyRegistry function with the addresses
+        registry = deployScript.deployStrategyRegistry(addresses, config.getConfig());
+        // } else {
+        //     registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        // }
     }
 
     function testRegistryDeployment() public view {
@@ -258,8 +226,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // Switch to the backend role to call addStrategy
@@ -299,7 +266,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user = makeAddr("user");
 
         // Initialize the strategy with the correct roles
-        strategy.initialize(user, address(registry), backend, strategyTypeId);
+        strategy.initialize(user, address(registry), strategyTypeId);
 
         // Create a non-backend address
         address nonBackend = makeAddr("nonBackend");
@@ -332,8 +299,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // Pause the registry
@@ -370,7 +336,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address someUser = makeAddr("someUser");
 
         // Initialize the strategy with the correct roles
-        strategy.initialize(someUser, address(registry), backend, strategyTypeId);
+        strategy.initialize(someUser, address(registry), strategyTypeId);
 
         // Switch to the backend role
         vm.startPrank(backend);
@@ -436,8 +402,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // Switch to the backend role
@@ -466,7 +431,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
             address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, 0)) // This case is testing non-whitelisted impl
+            abi.encodeCall(MockStrategy.initialize, (user, address(registry), 0)) // This case is testing non-whitelisted impl
         );
 
         // Switch to the backend role
@@ -502,8 +467,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation but with wrong registry
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, wrongRegistry, backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, wrongRegistry, strategyTypeId))
         );
 
         // Switch to the backend role
@@ -619,16 +583,13 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create proxies with the mock strategy implementations
         ERC1967Proxy strategy1 = new ERC1967Proxy(
-            address(strategyImpl1),
-            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId1))
+            address(strategyImpl1), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), strategyTypeId1))
         );
         ERC1967Proxy strategy2 = new ERC1967Proxy(
-            address(strategyImpl2),
-            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId2))
+            address(strategyImpl2), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), strategyTypeId2))
         );
         ERC1967Proxy strategy3 = new ERC1967Proxy(
-            address(strategyImpl2),
-            abi.encodeCall(MockStrategy.initialize, (user2, address(registry), backend, strategyTypeId2))
+            address(strategyImpl2), abi.encodeCall(MockStrategy.initialize, (user2, address(registry), strategyTypeId2))
         );
 
         // Add strategies for users
@@ -676,8 +637,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), strategyTypeId))
         );
 
         // Add the strategy for user1
@@ -976,8 +936,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // Add the strategy to the registry
@@ -1037,8 +996,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user1 = makeAddr("user1");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user1, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user1, address(registry), strategyTypeId))
         );
 
         // Add the strategy to the registry for user1
@@ -1086,8 +1044,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // Add the strategy to the registry
@@ -1122,8 +1079,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         address user = makeAddr("user");
 
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // 3. Deploy a new implementation and whitelist it (becomes latest)
@@ -1163,8 +1119,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
-            address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (user, address(registry), backend, strategyTypeId))
+            address(strategyImpl), abi.encodeCall(MockStrategy.initialize, (user, address(registry), strategyTypeId))
         );
 
         // Add strategy for user
@@ -1183,8 +1138,6 @@ contract MamoStrategyRegistryIntegrationTest is Test {
     // ==================== TESTS FOR updateStrategyOwner METHOD ====================
 
     function testUpdateStrategyOwnerSucceed() public {
-        // Skip this test for now
-        return;
         // Deploy a mock strategy implementation
         MockStrategy strategyImpl = new MockStrategy();
 
@@ -1200,7 +1153,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
             address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), strategyTypeId))
         );
 
         // Add strategy for the original owner
@@ -1237,7 +1190,6 @@ contract MamoStrategyRegistryIntegrationTest is Test {
 
     function testRevertIfNonStrategyCallsUpdateStrategyOwner() public {
         // Create user addresses
-        address originalOwner = makeAddr("originalOwner");
         address newOwner = makeAddr("newOwner");
         address nonStrategy = makeAddr("nonStrategy");
 
@@ -1262,7 +1214,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
             address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), strategyTypeId))
         );
 
         // Add strategy for the original owner
@@ -1292,7 +1244,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
             address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), strategyTypeId))
         );
 
         // Call updateStrategyOwner
@@ -1317,7 +1269,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         // Create a proxy with the mock strategy implementation
         ERC1967Proxy strategy = new ERC1967Proxy(
             address(strategyImpl),
-            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), backend, strategyTypeId))
+            abi.encodeCall(MockStrategy.initialize, (originalOwner, address(registry), strategyTypeId))
         );
 
         // Add strategy for the original owner

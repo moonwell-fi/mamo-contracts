@@ -224,13 +224,13 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         require(!isUserStrategy(user, strategy), "Strategy already added for user");
 
-        address owner = Ownable(strategy).owner();
-        require(owner == user, "Strategy owner is not the user");
-
         // Get the implementation address
         address implementation = ERC1967Proxy(payable(strategy)).getImplementation();
         require(implementation != address(0), "Invalid implementation");
         require(whitelistedImplementations[implementation], "Implementation not whitelisted");
+
+        address owner = Ownable(strategy).owner();
+        require(owner == user, "Strategy owner is not the user");
 
         // Check the strategy addresses are correct
         IBaseStrategy strategyContract = IBaseStrategy(strategy);
