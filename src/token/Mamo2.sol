@@ -17,7 +17,7 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /// @title MAMO
 /// @notice The MAMO token is SuperERC20 compatible
-contract MAMO is ERC20Upgradeable, ERC20PermitUpgradeable, ERC20VotesUpgradeable, IERC7802 {
+contract MAMO2 is ERC20Upgradeable, ERC20PermitUpgradeable, ERC20VotesUpgradeable, IERC7802 {
     error NotSuperchainTokenBridge();
 
     /// @notice Address of the SuperchainTokenBridge predeploy.
