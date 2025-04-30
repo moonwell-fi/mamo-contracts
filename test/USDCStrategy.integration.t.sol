@@ -1896,4 +1896,220 @@ contract USDCStrategyTest is Test {
         // Verify the registry still has the original owner
         assertTrue(registry.isUserStrategy(owner, address(strategy)), "Registry should still have the original owner");
     }
+    // ==================== ADDITIONAL TESTS FOR BRANCH COVERAGE ====================
+
+    function testInitializeWithRewardTokens() public {
+        // Deploy a new implementation for testing initialization
+        ERC20MoonwellMorphoStrategy newImpl = new ERC20MoonwellMorphoStrategy();
+
+        // Whitelist the implementation
+        vm.prank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
+
+        // Create reward tokens array
+        address[] memory rewardTokens = new address[](1);
+        rewardTokens[0] = address(well);
+
+        // Initialize with reward tokens
+        vm.prank(backend);
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(newImpl),
+            abi.encodeWithSelector(
+                ERC20MoonwellMorphoStrategy.initialize.selector,
+                ERC20MoonwellMorphoStrategy.InitParams({
+                    mamoStrategyRegistry: address(registry),
+                    mamoBackend: backend,
+                    mToken: address(mToken),
+                    metaMorphoVault: address(metaMorphoVault),
+                    token: address(usdc),
+                    slippagePriceChecker: address(slippagePriceChecker),
+                    feeRecipient: admin,
+                    splitMToken: 5000,
+                    splitVault: 5000,
+                    strategyTypeId: strategyTypeId,
+                    rewardTokens: rewardTokens, // Non-empty reward tokens array
+                    owner: owner,
+                    hookGasLimit: config.hookGasLimit,
+                    allowedSlippageInBps: config.allowedSlippageInBps,
+                    compoundFee: config.compoundFee
+                })
+            )
+        );
+
+        ERC20MoonwellMorphoStrategy strategyWithRewards = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
+
+        // Verify the strategy was initialized properly
+        assertEq(strategyWithRewards.owner(), owner);
+
+        // Verify the reward token was approved
+        uint256 allowance =
+            IERC20(address(well)).allowance(address(strategyWithRewards), strategyWithRewards.VAULT_RELAYER());
+        assertEq(allowance, type(uint256).max, "Reward token should be approved for the vault relayer");
+    }
+
+    function testRevertIfMTokenRedeemFails() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Mock the redeemUnderlying function to fail
+        // We need to mock any redeemUnderlying call since we don't know the exact amount that will be redeemed
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.redeemUnderlying.selector),
+            abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
+        );
+
+        // Attempt to withdraw should fail
+        vm.prank(owner);
+        vm.expectRevert("Failed to redeem mToken");
+        strategy.withdraw(depositAmount / 2);
+
+        // Clear the mock
+        vm.clearMockedCalls();
+    }
+
+    function testRevertIfWithdrawAllMTokenRedeemFails() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Get the current mToken balance
+        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(strategy));
+
+        // Mock the redeem function with the exact balance to make it fail
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.redeem.selector, mTokenBalance),
+            abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
+        );
+
+        // Attempt to withdraw all should fail
+        vm.prank(owner);
+        vm.expectRevert("Failed to redeem mToken");
+        strategy.withdrawAll();
+
+        // Clear the mock
+        vm.clearMockedCalls();
+    }
+
+    function testRevertIfUpdatePositionMTokenRedeemFails() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Get the current mToken balance
+        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(strategy));
+
+        // Calculate the amount that would be redeemed when updating position
+        // This depends on the current position and the new position
+        // For simplicity, we'll mock any redeem call to fail
+
+        // Mock the redeem function to fail
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.redeem.selector),
+            abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
+        );
+
+        // Attempt to update position should fail
+        vm.prank(backend);
+        vm.expectRevert("Failed to redeem mToken");
+        strategy.updatePosition(6000, 4000);
+
+        // Clear the mock
+        vm.clearMockedCalls();
+    }
+
+    function testRevertIfMTokenMintFails() public {
+        // Prepare for deposit
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        // Mock the mint function to fail
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.mint.selector, uint256(500000000)),
+            abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
+        );
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+
+        // Attempt to deposit should fail
+        vm.expectRevert("MToken mint failed");
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Clear the mock
+        vm.clearMockedCalls();
+    }
+
+    function testRevertIfDepositIdleTokensMTokenMintFails() public {
+        // Mint USDC directly to the strategy contract
+        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC (6 decimals)
+        deal(address(usdc), address(strategy), idleAmount);
+
+        // Mock the mint function to fail
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.mint.selector, uint256(250000000)),
+            abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
+        );
+
+        // Attempt to deposit idle tokens should fail
+        vm.expectRevert("MToken mint failed");
+        strategy.depositIdleTokens();
+
+        // Clear the mock
+        vm.clearMockedCalls();
+    }
+
+    function testRevertIfUpdatePositionMTokenMintFails() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        deal(address(usdc), owner, depositAmount);
+
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Mock the redeem function to succeed
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.redeem.selector),
+            abi.encode(uint256(0)) // Return 0 to indicate success
+        );
+
+        // Mock the mint function to fail
+        vm.mockCall(
+            address(mToken),
+            abi.encodeWithSelector(IMToken.mint.selector),
+            abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
+        );
+
+        // Now update position should fail on mint
+        vm.prank(backend);
+        vm.expectRevert("MToken mint failed");
+        strategy.updatePosition(6000, 4000);
+
+        // Clear the mocks
+        vm.clearMockedCalls();
+    }
 }
