@@ -852,6 +852,23 @@ contract USDCStrategyTest is Test {
         strategy.depositIdleTokens();
     }
 
+    function testDepositIdleTokensReturnValue() public {
+        // Mint USDC to the strategy contract directly
+        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
+        deal(address(usdc), address(strategy), idleAmount);
+
+        // Call depositIdleTokens and check the return value
+        vm.startPrank(owner);
+        uint256 returnedAmount = strategy.depositIdleTokens();
+        vm.stopPrank();
+
+        // Verify the returned amount matches the idle amount
+        assertEq(returnedAmount, idleAmount, "Return value should match the deposited amount");
+
+        // Verify the funds were properly deposited
+        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
+    }
+
     function testDepositIdleTokensWithDifferentSplit() public {
         // First deposit some funds to have a non-zero balance
         uint256 initialDeposit = 1000 * 10 ** 6; // 1000 USDC
@@ -1330,6 +1347,95 @@ contract USDCStrategyTest is Test {
         strategy.isValidSignature(digest, encodedOrder);
     }
 
+    // ==================== INITIALIZATION TESTS ====================
+
+    function testRevertIfInvalidInitializationParameters() public {
+        // Deploy a new implementation
+        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
+
+        // Whitelist the implementation
+        vm.prank(admin);
+        uint256 strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
+
+        // Test with invalid mamoStrategyRegistry
+        bytes memory invalidRegistryData = abi.encodeWithSelector(
+            ERC20MoonwellMorphoStrategy.initialize.selector,
+            ERC20MoonwellMorphoStrategy.InitParams({
+                mamoStrategyRegistry: address(0), // Invalid address
+                mamoBackend: backend,
+                mToken: address(mToken),
+                metaMorphoVault: address(metaMorphoVault),
+                token: address(usdc),
+                slippagePriceChecker: address(slippagePriceChecker),
+                feeRecipient: admin,
+                splitMToken: splitMToken,
+                splitVault: splitVault,
+                strategyTypeId: strategyTypeId,
+                rewardTokens: new address[](0),
+                owner: owner,
+                hookGasLimit: config.hookGasLimit,
+                allowedSlippageInBps: config.allowedSlippageInBps,
+                compoundFee: config.compoundFee
+            })
+        );
+
+        vm.prank(backend);
+        vm.expectRevert("Invalid mamoStrategyRegistry address");
+        new ERC1967Proxy(address(implementation), invalidRegistryData);
+
+        // Test with invalid split parameters
+        bytes memory invalidSplitData = abi.encodeWithSelector(
+            ERC20MoonwellMorphoStrategy.initialize.selector,
+            ERC20MoonwellMorphoStrategy.InitParams({
+                mamoStrategyRegistry: address(registry),
+                mamoBackend: backend,
+                mToken: address(mToken),
+                metaMorphoVault: address(metaMorphoVault),
+                token: address(usdc),
+                slippagePriceChecker: address(slippagePriceChecker),
+                feeRecipient: admin,
+                splitMToken: 6000, // 60%
+                splitVault: 3000, // 30% - doesn't add up to 100%
+                strategyTypeId: strategyTypeId,
+                rewardTokens: new address[](0),
+                owner: owner,
+                hookGasLimit: config.hookGasLimit,
+                allowedSlippageInBps: config.allowedSlippageInBps,
+                compoundFee: config.compoundFee
+            })
+        );
+
+        vm.prank(backend);
+        vm.expectRevert("Split parameters must add up to 10000");
+        new ERC1967Proxy(address(implementation), invalidSplitData);
+
+        // Test with invalid hook gas limit
+        bytes memory invalidHookGasData = abi.encodeWithSelector(
+            ERC20MoonwellMorphoStrategy.initialize.selector,
+            ERC20MoonwellMorphoStrategy.InitParams({
+                mamoStrategyRegistry: address(registry),
+                mamoBackend: backend,
+                mToken: address(mToken),
+                metaMorphoVault: address(metaMorphoVault),
+                token: address(usdc),
+                slippagePriceChecker: address(slippagePriceChecker),
+                feeRecipient: admin,
+                splitMToken: 5000,
+                splitVault: 5000,
+                strategyTypeId: strategyTypeId,
+                rewardTokens: new address[](0),
+                owner: owner,
+                hookGasLimit: 0, // Invalid hook gas limit
+                allowedSlippageInBps: config.allowedSlippageInBps,
+                compoundFee: config.compoundFee
+            })
+        );
+
+        vm.prank(backend);
+        vm.expectRevert("Invalid hook gas limit");
+        new ERC1967Proxy(address(implementation), invalidHookGasData);
+    }
+
     // Tests for setSlippage function
 
     function testOwnerCanSetSlippage() public {
@@ -1500,6 +1606,87 @@ contract USDCStrategyTest is Test {
 
         vm.expectRevert("Price check failed - output amount too low");
         strategy.isValidSignature(digest, encodedOrder);
+    }
+
+    function testRevertIfSellTokenIsStrategyToken() public {
+        // Create a mock order where the sell token is the strategy token (USDC)
+        // We need to set a valid expiration time to pass the earlier checks
+        uint32 validTo = uint32(block.timestamp + 30 minutes);
+
+        // Mock the slippagePriceChecker to return a specific max time
+        vm.mockCall(
+            address(slippagePriceChecker),
+            abi.encodeWithSelector(ISlippagePriceChecker.maxTimePriceValid.selector, address(usdc)),
+            abi.encode(60 minutes)
+        );
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: usdc, // This should be rejected
+            buyToken: well,
+            receiver: address(strategy),
+            sellAmount: 1000 * 10 ** 6,
+            buyAmount: 100 * 10 ** 18,
+            validTo: validTo,
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        // Encode the order
+        bytes memory encodedOrder = abi.encode(order);
+
+        // Calculate the order digest
+        bytes32 orderDigest = order.hash(strategy.DOMAIN_SEPARATOR());
+
+        // Call isValidSignature and expect it to revert
+        vm.expectRevert("Sell token can't be strategy token");
+        strategy.isValidSignature(orderDigest, encodedOrder);
+
+        // Clear the mock
+        vm.clearMockedCalls();
+    }
+
+    function testRevertIfOrderExpiresTooFarInFutureWithMockData() public {
+        // Create a mock order with a validity period that's too long
+        uint256 maxValidTime = 24 hours; // Assume this is the max time
+
+        // Mock the slippagePriceChecker to return a specific max time
+        vm.mockCall(
+            address(slippagePriceChecker),
+            abi.encodeWithSelector(ISlippagePriceChecker.maxTimePriceValid.selector, address(well)),
+            abi.encode(maxValidTime)
+        );
+
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: well,
+            buyToken: usdc,
+            receiver: address(strategy),
+            sellAmount: 100 * 10 ** 18,
+            buyAmount: 1000 * 10 ** 6,
+            validTo: uint32(block.timestamp + maxValidTime + 1 hours), // Too far in the future
+            appData: bytes32(0),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        // Encode the order
+        bytes memory encodedOrder = abi.encode(order);
+
+        // Calculate the order digest
+        bytes32 orderDigest = order.hash(strategy.DOMAIN_SEPARATOR());
+
+        // Call isValidSignature and expect it to revert
+        vm.expectRevert("Order expires too far in the future");
+        strategy.isValidSignature(orderDigest, encodedOrder);
+
+        // Clear the mock
+        vm.clearMockedCalls();
     }
 
     // Tests for approveCowSwap function
