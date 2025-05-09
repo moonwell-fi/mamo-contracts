@@ -25,6 +25,7 @@ contract DeployConfig is Test {
         string backend;
         uint256 chainId;
         uint256 compoundFee;
+        string deployer;
         string guardian;
         uint256 hookGasLimit;
         uint256 maxPriceValidTime;
@@ -136,6 +137,7 @@ contract DeployConfig is Test {
         config.backend = memConfig.backend;
         config.chainId = memConfig.chainId;
         config.compoundFee = memConfig.compoundFee;
+        config.deployer = memConfig.deployer;
         config.guardian = memConfig.guardian;
         config.hookGasLimit = memConfig.hookGasLimit;
         config.maxPriceValidTime = memConfig.maxPriceValidTime;

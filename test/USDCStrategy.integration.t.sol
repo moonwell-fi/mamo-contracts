@@ -2085,6 +2085,32 @@ contract USDCStrategyTest is Test {
     }
     // ==================== ADDITIONAL TESTS FOR BRANCH COVERAGE ====================
 
+    function testTransferOwnershipCallsRegistryUpdateStrategyOwner() public {
+        // Create a new owner address
+        address newOwner = makeAddr("newOwner");
+
+        // Check initial ownership
+        assertEq(strategy.owner(), owner, "Initial owner should be the original owner");
+
+        // First, we need to ensure the registry recognizes the strategy as belonging to the owner
+        assertTrue(
+            registry.isUserStrategy(owner, address(strategy)),
+            "Registry should recognize strategy as belonging to owner"
+        );
+
+        // Set up event monitoring to check if the registry's updateStrategyOwner is called
+        vm.expectCall(
+            address(registry), abi.encodeWithSelector(IMamoStrategyRegistry.updateStrategyOwner.selector, newOwner)
+        );
+
+        // Transfer ownership
+        vm.prank(owner);
+        strategy.transferOwnership(newOwner);
+
+        // Verify ownership was transferred
+        assertEq(strategy.owner(), newOwner, "Owner should be updated to the new owner");
+    }
+
     function testInitializeWithRewardTokens() public {
         // Deploy a new implementation for testing initialization
         ERC20MoonwellMorphoStrategy newImpl = new ERC20MoonwellMorphoStrategy();

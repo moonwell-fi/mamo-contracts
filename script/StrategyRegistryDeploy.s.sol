@@ -17,10 +17,11 @@ contract StrategyRegistryDeploy is Script {
         address admin = addresses.getAddress(config.admin);
         address backend = addresses.getAddress(config.backend);
         address guardian = addresses.getAddress(config.guardian);
+        address deployer = addresses.getAddress(config.deployer);
 
         vm.startBroadcast();
         // Deploy the MamoStrategyRegistry with the specified roles
-        registry = new MamoStrategyRegistry(admin, backend, guardian);
+        registry = new MamoStrategyRegistry(deployer, backend, guardian);
 
         vm.stopBroadcast();
 

@@ -29,9 +29,6 @@ contract USDCStrategyImplDeployer is Script {
             addresses.addAddress(implName, address(implementation), true);
         }
 
-        // Log the deployed contract address
-        console.log("ERC20MoonwellMorphoStrategy implementation deployed at:", address(implementation));
-
         return address(implementation);
     }
 }

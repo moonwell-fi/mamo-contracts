@@ -30,7 +30,7 @@ contract USDCStrategyFactoryDeployer is Script {
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address strategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
         // TODO: change this to the fee recipient address
-        address feeRecipient = addresses.getAddress("TESTING_EOA");
+        address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
 
         // Get reward token addresses
         address well = addresses.getAddress("xWELL_PROXY");
