@@ -275,8 +275,8 @@ contract Mamo2DeployScript is Script {
         uint256 minLiquidityAmount = 0; // Set to 0 to avoid slippage checks
 
         // Get the current price from the pool
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        console.log("%s: %s", StdStyle.bold("Current sqrtPriceX96"), StdStyle.yellow(vm.toString(sqrtPriceX96)));
+        (uint160 currentSqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        console.log("%s: %s", StdStyle.bold("Current sqrtPriceX96"), StdStyle.yellow(vm.toString(currentSqrtPriceX96)));
 
         // Create the mint parameters with correct token order and adjusted amounts
         // For a 1:1 price with WETH (18 decimals) and MAMO2 (18 decimals), we need equal amounts
