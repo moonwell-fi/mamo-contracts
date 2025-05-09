@@ -23,6 +23,38 @@ interface IUniswapV3Pool {
     function initialize(uint160 sqrtPriceX96) external;
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function slot0()
+        external
+        view
+        returns (
+            uint160 sqrtPriceX96,
+            int24 tick,
+            uint16 observationIndex,
+            uint16 observationCardinality,
+            uint16 observationCardinalityNext,
+            uint8 feeProtocol,
+            bool unlocked
+        );
+}
+
+interface INonfungiblePositionManager {
+    struct MintParams {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        address recipient;
+        uint256 deadline;
+    }
+
+    function mint(MintParams calldata params)
+        external
+        returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
 }
 
 interface IWETH9 {
@@ -119,7 +151,8 @@ contract Mamo2DeployScript is Script {
         address deployer = msg.sender;
 
         // Prepare initialization data for the proxy
-        bytes memory initData = abi.encodeWithSelector(MAMO2.initialize.selector, "Mamo Token V2", "MAMO2", deployer);
+        bytes memory initData =
+            abi.encodeWithSelector(MAMO2.initialize.selector, "Mamo SuperERC20 Test", "MAMO_SUPER_ERC20_TEST", deployer);
 
         // Deploy the proxy with the implementation and initialization data
         ERC1967Proxy proxy = new ERC1967Proxy(address(mamo2Implementation), initData);
@@ -206,20 +239,92 @@ contract Mamo2DeployScript is Script {
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 4: Initializing Uniswap V3 pool...")));
         console.log("%s: %s", StdStyle.bold("Initial sqrtPriceX96"), StdStyle.yellow(vm.toString(sqrtPriceX96)));
 
-        // Approve tokens for future liquidity provision
-        IERC20(mamo2Proxy).approve(wethAddress, INITIAL_LIQUIDITY_TOKENS);
-        console.log(
-            "Approved %s MAMO2 tokens for future liquidity provision",
-            StdStyle.yellow(vm.toString(INITIAL_LIQUIDITY_TOKENS / 1e18))
-        );
-        console.log(
-            "Prepared for minimal liquidity: %s ETH", StdStyle.yellow(vm.toString(INITIAL_LIQUIDITY_ETH / 1e18))
-        );
+        // Get the NonfungiblePositionManager address
+        address positionManagerAddress = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER");
 
-        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 5: Pool initialization complete")));
-        console.log("%s", StdStyle.bold("To add liquidity to this pool:"));
-        console.log("  1. Use the NonfungiblePositionManager to mint a position");
-        console.log("  2. Specify your desired price range and amount of tokens");
+        console.log(
+            "\n%s", StdStyle.bold(StdStyle.green("Step 5: Adding liquidity with NonfungiblePositionManager..."))
+        );
+        console.log("%s: %s", StdStyle.bold("Position Manager"), StdStyle.yellow(vm.toString(positionManagerAddress)));
+
+        // Calculate the amounts to use for the position
+        uint256 tokenAmount = INITIAL_LIQUIDITY_TOKENS * 10; // Increased token amount
+        uint256 ethAmount = INITIAL_LIQUIDITY_ETH * 10; // Increased ETH amount
+
+        // Approve tokens for the position manager - make sure to approve enough!
+        IERC20(mamo2Proxy).approve(positionManagerAddress, tokenAmount);
+        console.log("Approved %s MAMO2 tokens for position manager", StdStyle.yellow(vm.toString(tokenAmount / 1e18)));
+
+        // Wrap ETH to WETH - make sure to deposit enough!
+        IWETH9(wethAddress).deposit{value: ethAmount}();
+        IWETH9(wethAddress).approve(positionManagerAddress, ethAmount);
+        console.log("Wrapped and approved %s ETH for position manager", StdStyle.yellow(vm.toString(ethAmount / 1e18)));
+
+        // Use a narrower tick range for the position
+        // The tick spacing for 0.3% fee tier is 60, so ticks must be multiples of 60
+        int24 tickLower = -60 * 10; // -600, narrower range
+        int24 tickUpper = 60 * 10; // 600, narrower range
+
+        console.log("%s: %s", StdStyle.bold("Tick Lower"), StdStyle.yellow(vm.toString(int256(tickLower))));
+        console.log("%s: %s", StdStyle.bold("Tick Upper"), StdStyle.yellow(vm.toString(int256(tickUpper))));
+
+        // For Uniswap V3, we need to be careful about slippage
+        // Since we initialized the pool with a 1:1 price, we need to ensure our position matches
+
+        // Set minimum amounts to 0 to avoid slippage errors
+        uint256 minLiquidityAmount = 0; // Set to 0 to avoid slippage checks
+
+        // Get the current price from the pool
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        console.log("%s: %s", StdStyle.bold("Current sqrtPriceX96"), StdStyle.yellow(vm.toString(sqrtPriceX96)));
+
+        // Create the mint parameters with correct token order and adjusted amounts
+        // For a 1:1 price with WETH (18 decimals) and MAMO2 (18 decimals), we need equal amounts
+        INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
+            token0: token0, // WETH
+            token1: token1, // MAMO2
+            fee: POOL_FEE,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            amount0Desired: token0 == mamo2Proxy ? tokenAmount : ethAmount,
+            amount1Desired: token1 == mamo2Proxy ? tokenAmount : ethAmount,
+            amount0Min: 0, // Set to 0 to avoid slippage checks
+            amount1Min: 0, // Set to 0 to avoid slippage checks
+            recipient: msg.sender,
+            deadline: block.timestamp + 1 hours
+        });
+
+        // Check token balance before attempting to mint
+        uint256 tokenBalance = IERC20(mamo2Proxy).balanceOf(msg.sender);
+        console.log("%s: %s", StdStyle.bold("Current MAMO2 balance"), StdStyle.yellow(vm.toString(tokenBalance / 1e18)));
+
+        // If we don't have enough tokens, transfer them from the deployer
+        if (tokenBalance < tokenAmount) {
+            console.log("\n%s", StdStyle.bold(StdStyle.yellow("Transferring tokens for liquidity...")));
+
+            // Get the total supply to check if tokens were minted
+            uint256 totalSupply = IERC20(mamo2Proxy).totalSupply();
+            console.log("%s: %s", StdStyle.bold("Total MAMO2 supply"), StdStyle.yellow(vm.toString(totalSupply / 1e18)));
+
+            IERC20(mamo2Proxy).transfer(msg.sender, tokenAmount);
+            console.log("Transferred %s MAMO2 tokens for liquidity", StdStyle.yellow(vm.toString(tokenAmount / 1e18)));
+
+            // Check the new balance
+            tokenBalance = IERC20(mamo2Proxy).balanceOf(msg.sender);
+            console.log("%s: %s", StdStyle.bold("New MAMO2 balance"), StdStyle.yellow(vm.toString(tokenBalance / 1e18)));
+        }
+
+        // Only proceed with minting if we have enough tokens
+        if (tokenBalance >= tokenAmount) {
+            INonfungiblePositionManager positionManager = INonfungiblePositionManager(positionManagerAddress);
+            (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = positionManager.mint(params);
+
+            console.log("\n%s", StdStyle.bold(StdStyle.green("Step 6: Position minted successfully")));
+            console.log("%s: %s", StdStyle.bold("NFT Token ID"), StdStyle.yellow(vm.toString(tokenId)));
+            console.log("%s: %s", StdStyle.bold("Liquidity"), StdStyle.yellow(vm.toString(liquidity)));
+            console.log("%s: %s", StdStyle.bold("Amount0 used"), StdStyle.yellow(vm.toString(amount0)));
+            console.log("%s: %s", StdStyle.bold("Amount1 used"), StdStyle.yellow(vm.toString(amount1)));
+        }
 
         vm.stopBroadcast();
     }

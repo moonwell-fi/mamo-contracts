@@ -108,5 +108,10 @@
     "addr": "0x4200000000000000000000000000000000000006",
     "name": "WETH",
     "isContract": true
+  },
+  {
+    "addr": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "name": "UNISWAP_V3_POSITION_MANAGER",
+    "isContract": true
   }
 ]
