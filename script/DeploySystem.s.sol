@@ -19,14 +19,15 @@ import {USDCStrategyFactoryDeployer} from "./USDCStrategyFactoryDeployer.s.sol";
 import {USDCStrategyImplDeployer} from "./USDCStrategyImplDeployer.s.sol";
 
 /**
- * @title VersionedDeploySystem
- * @notice Script to deploy the entire Mamo system using version-based configuration
+ * @title DeploySystem
+ * @notice Script to deploy the entire Mamo system
  * @dev Reads configuration from JSON files in the deploy/ directory
  */
-contract VersionedDeploySystem is Script {
+contract DeploySystem is Script {
     function run() external {
         // Get the environment from command line arguments or use default
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
+        console.log("Environment: %s", StdStyle.yellow(environment));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== MAMO SYSTEM DEPLOYMENT ===")));
@@ -77,8 +78,23 @@ contract VersionedDeploySystem is Script {
         uint256 strategyTypeId = _whitelistUSDCStrategy(addresses);
         console.log("%s", StdStyle.italic("USDC strategy implementation whitelisted successfully"));
 
-        // Step 6: Deploy the USDCStrategyFactory
-        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 6: Deploying USDCStrategyFactory...")));
+        // Step 6: Grant admin role to the multisig
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 6: Granting admin role to the multisig...")));
+
+        vm.startBroadcast();
+        // transfer registry ownership to the multisig
+        registry.grantRole(registry.DEFAULT_ADMIN_ROLE(), addresses.getAddress("MAMO_MULTISIG"));
+
+        // Step 7: Revoke admin role from the deployer
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 7: Revoking admin role from the deployer...")));
+
+        // revoke admin role from the deployer
+        registry.revokeRole(registry.DEFAULT_ADMIN_ROLE(), msg.sender);
+
+        vm.stopBroadcast();
+
+        // Step 8: Deploy the USDCStrategyFactory
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 8: Deploying USDCStrategyFactory...")));
         USDCStrategyFactoryDeployer factoryDeployer = new USDCStrategyFactoryDeployer();
         address factoryAddress =
             factoryDeployer.deployUSDCStrategyFactory(addresses, config.getConfig(), strategyTypeId);
@@ -90,19 +106,102 @@ contract VersionedDeploySystem is Script {
 
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== DEPLOYMENT COMPLETE ===")));
         console.log("%s", StdStyle.bold(StdStyle.green("System deployment completed successfully!")));
+
+        // Validate the deployment
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Validating deployment...")));
+        validate(addresses, registry, priceChecker, config.getConfig());
+        console.log("%s", StdStyle.bold(StdStyle.green("Validation successful!")));
+    }
+
+    /**
+     * @notice Validates the deployment to ensure all roles, ownership, and parameters are correctly set
+     * @param addresses The addresses contract
+     * @param registry The MamoStrategyRegistry contract
+     * @param priceChecker The SlippagePriceChecker contract
+     * @param deployConfig The deployment configuration
+     */
+    function validate(
+        Addresses addresses,
+        MamoStrategyRegistry registry,
+        SlippagePriceChecker priceChecker,
+        DeployConfig.DeploymentConfig memory deployConfig
+    ) public view {
+        address admin = addresses.getAddress(deployConfig.admin);
+        address deployer = addresses.getAddress(deployConfig.deployer);
+
+        // Validate roles in the registry
+        console.log("Validating registry roles...");
+        require(registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), admin), "admin does not have DEFAULT_ADMIN_ROLE");
+        require(!registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), deployer), "Deployer still has DEFAULT_ADMIN_ROLE");
+
+        // Validate ownership of the SlippagePriceChecker
+        console.log("Validating SlippagePriceChecker ownership...");
+        require(priceChecker.owner() == admin, "SlippagePriceChecker is not owned by admin");
+
+        // Validate reward token configurations
+        console.log("Validating reward token configurations...");
+        for (uint256 i = 0; i < deployConfig.rewardTokens.length; i++) {
+            string memory tokenName = deployConfig.rewardTokens[i].token;
+            address token = addresses.getAddress(tokenName);
+
+            // Verify token is configured as a reward token
+            require(
+                priceChecker.isRewardToken(token),
+                string(abi.encodePacked("Token is not configured as a reward token: ", tokenName))
+            );
+
+            // Verify max price valid time
+            require(
+                priceChecker.maxTimePriceValid(token) == deployConfig.maxPriceValidTime,
+                string(abi.encodePacked("Incorrect maxPriceValidTime for ", tokenName))
+            );
+
+            // Get token oracle information
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds = priceChecker.tokenOracleInformation(token);
+
+            // Verify feed configurations exist
+            require(feeds.length > 0, string(abi.encodePacked("No feed configurations for ", tokenName)));
+
+            // Verify the first feed configuration (we only add one in _configureRewardTokens)
+            address expectedPriceFeed = addresses.getAddress(deployConfig.rewardTokens[i].priceFeed);
+            require(
+                feeds[0].chainlinkFeed == expectedPriceFeed,
+                string(abi.encodePacked("Incorrect price feed for ", tokenName))
+            );
+
+            require(
+                feeds[0].reverse == deployConfig.rewardTokens[i].reverse,
+                string(abi.encodePacked("Incorrect reverse flag for ", tokenName))
+            );
+
+            require(
+                feeds[0].heartbeat == deployConfig.rewardTokens[i].heartbeat,
+                string(abi.encodePacked("Incorrect heartbeat for ", tokenName))
+            );
+        }
+
+        // Validate USDC strategy implementation is whitelisted
+        console.log("Validating USDC strategy implementation...");
+        address usdcStrategyImpl = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        require(
+            registry.whitelistedImplementations(usdcStrategyImpl), "USDC strategy implementation is not whitelisted"
+        );
     }
 
     /**
      * @notice Helper function to configure reward tokens
-     * @param config The deployment configuration
      * @param addresses The addresses contract
      * @param priceChecker The SlippagePriceChecker contract
+     * @param deployConfig The deployment configuration
      */
     function _configureRewardTokens(
         Addresses addresses,
         SlippagePriceChecker priceChecker,
         DeployConfig.DeploymentConfig memory deployConfig
     ) private {
+        // Start a single broadcast for all token configurations
+        vm.startBroadcast();
+
         for (uint256 i = 0; i < deployConfig.rewardTokens.length; i++) {
             string memory tokenName = deployConfig.rewardTokens[i].token;
             address token = addresses.getAddress(tokenName);
@@ -119,10 +218,13 @@ contract VersionedDeploySystem is Script {
             });
 
             // Add token configuration
-            vm.startBroadcast();
             priceChecker.addTokenConfiguration(token, tokenConfigs, deployConfig.maxPriceValidTime);
-            vm.stopBroadcast();
         }
+
+        // Transfer ownership to the multisig only once after all tokens are configured
+        priceChecker.transferOwnership(addresses.getAddress("MAMO_MULTISIG"));
+
+        vm.stopBroadcast();
     }
 
     function _whitelistUSDCStrategy(Addresses addresses) private returns (uint256 strategyTypeId) {
