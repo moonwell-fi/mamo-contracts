@@ -19,3 +19,5 @@ lcov.info
 broadcast/
 
 node_modules/
+
+.roo/
