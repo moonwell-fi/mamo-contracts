@@ -3,10 +3,10 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @title Gnosis Protocol v2 Order Library
+/// @title Gnosis contracts v2 Order Library
 /// @author Gnosis Developers
 library GPv2Order {
-    /// @dev The complete data for a Gnosis Protocol order. This struct contains
+    /// @dev The complete data for a Gnosis contracts order. This struct contains
     /// all order parameters that are signed for submitting to GP.
     struct Data {
         IERC20 sellToken;
@@ -198,10 +198,10 @@ library GPv2Order {
     }
 
     /// @dev Extracts specific order information from the standardized unique
-    /// order id of the protocol.
+    /// order id of the contracts.
     ///
     /// @param orderUid The unique identifier used to represent an order in
-    /// the protocol. This uid is the packed concatenation of the order digest,
+    /// the contracts. This uid is the packed concatenation of the order digest,
     /// the validTo order parameter and the address of the user who created the
     /// order. It is used by the user to interface with the contract directly,
     /// and not by calls that are triggered by the solvers.

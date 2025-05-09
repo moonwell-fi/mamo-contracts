@@ -11,6 +11,15 @@ import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
  * @dev Creates proxies pointing to the ERC20MoonwellMorphoStrategy implementation
  */
 contract USDCStrategyFactory {
+    // @notice Total basis points used for split calculations (100%)
+    uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
+
+    /// @notice The maximum allowed slippage in basis points
+    uint256 public constant MAX_SLIPPAGE_IN_BPS = 1000; // 10% in basis points
+
+    /// @notice The maximum allowed compound fee in basis points
+    uint256 public constant MAX_COMPOUND_FEE = 1000; // 10% in basis points
+
     // Strategy parameters
     address public immutable mamoStrategyRegistry;
     address public immutable mamoBackend;
@@ -19,9 +28,13 @@ contract USDCStrategyFactory {
     address public immutable token;
     address public immutable slippagePriceChecker;
     address public immutable strategyImplementation;
+    address public immutable feeRecipient;
     uint256 public immutable splitMToken;
     uint256 public immutable splitVault;
     uint256 public immutable strategyTypeId;
+    uint256 public immutable hookGasLimit;
+    uint256 public immutable allowedSlippageInBps;
+    uint256 public immutable compoundFee;
     address[] public rewardTokens;
 
     // Reference to the MamoStrategyRegistry
@@ -42,6 +55,9 @@ contract USDCStrategyFactory {
      * @param _splitMToken Percentage of funds allocated to Moonwell mToken in basis points
      * @param _splitVault Percentage of funds allocated to MetaMorpho Vault in basis points
      * @param _strategyTypeId The strategy type ID
+     * @param _hookGasLimit The gas limit for the hook
+     * @param _allowedSlippageInBps The allowed slippage in basis points
+     * @param _compoundFee The compound fee in basis points
      * @param _rewardTokens Array of reward token addresses to be approved for CowSwap
      */
     constructor(
@@ -52,9 +68,13 @@ contract USDCStrategyFactory {
         address _token,
         address _slippagePriceChecker,
         address _strategyImplementation,
+        address _feeRecipient,
         uint256 _splitMToken,
         uint256 _splitVault,
         uint256 _strategyTypeId,
+        uint256 _hookGasLimit,
+        uint256 _allowedSlippageInBps,
+        uint256 _compoundFee,
         address[] memory _rewardTokens
     ) {
         require(_mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
@@ -64,8 +84,12 @@ contract USDCStrategyFactory {
         require(_token != address(0), "Invalid token address");
         require(_slippagePriceChecker != address(0), "Invalid slippagePriceChecker address");
         require(_strategyImplementation != address(0), "Invalid strategyImplementation address");
-        require(_splitMToken + _splitVault == 10000, "Split parameters must add up to 10000");
+        require(_feeRecipient != address(0), "Invalid feeRecipient address");
+        require(_splitMToken + _splitVault == SPLIT_TOTAL, "Split parameters must add up to 10000");
         require(_strategyTypeId != 0, "Strategy type id not set");
+        require(_hookGasLimit > 0, "Invalid hook gas limit");
+        require(_allowedSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
+        require(_compoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
 
         mamoStrategyRegistry = _mamoStrategyRegistry;
         mamoBackend = _mamoBackend;
@@ -74,9 +98,13 @@ contract USDCStrategyFactory {
         token = _token;
         slippagePriceChecker = _slippagePriceChecker;
         strategyImplementation = _strategyImplementation;
+        feeRecipient = _feeRecipient;
         splitMToken = _splitMToken;
         splitVault = _splitVault;
         strategyTypeId = _strategyTypeId;
+        hookGasLimit = _hookGasLimit;
+        allowedSlippageInBps = _allowedSlippageInBps;
+        compoundFee = _compoundFee;
 
         // Store the reward tokens
         if (_rewardTokens.length > 0) {
@@ -112,10 +140,15 @@ contract USDCStrategyFactory {
                 metaMorphoVault: metaMorphoVault,
                 token: token,
                 slippagePriceChecker: slippagePriceChecker,
+                feeRecipient: feeRecipient,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
                 strategyTypeId: strategyTypeId,
-                rewardTokens: rewardTokens
+                rewardTokens: rewardTokens,
+                owner: user,
+                hookGasLimit: hookGasLimit,
+                allowedSlippageInBps: allowedSlippageInBps,
+                compoundFee: compoundFee
             })
         );
 

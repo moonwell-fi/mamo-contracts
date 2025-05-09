@@ -10,3 +10,6 @@
 [submodule "lib/surl"]
 	path = lib/surl
 	url = https://github.com/memester-xyz/surl
+[submodule "lib/openzeppelin-foundry-upgrades"]
+	path = lib/openzeppelin-foundry-upgrades
+	url = https://github.com/OpenZeppelin/openzeppelin-foundry-upgrades

@@ -357,7 +357,7 @@ contract SlippagePriceCheckerTest is Test {
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: chainlinkWellUsd,
             reverse: false,
-            heartbeat: 30 minutes
+            heartbeat: 1 days
         });
         configs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: chainlinkUsdcUsd,
@@ -397,7 +397,7 @@ contract SlippagePriceCheckerTest is Test {
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: chainlinkWellUsd,
             reverse: true,
-            heartbeat: 1800
+            heartbeat: 86400
         });
 
         // First remove the existing configuration

@@ -8,6 +8,7 @@ import {IUUPSUpgradeable} from "@interfaces/IUUPSUpgradeable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
@@ -44,9 +45,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Maps implementations to their strategy ID
     mapping(address => uint256) public implementationToId;
 
-    /// @notice Maps strategy addresses to their owner addresses
-    mapping(address => address) public strategyOwner;
-
     // Events
     /// @notice Emitted when a strategy is added for a user
     event StrategyAdded(address indexed user, address strategy, address implementation);
@@ -55,6 +53,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     event StrategyImplementationUpdated(
         address indexed strategy, address indexed oldImplementation, address indexed newImplementation
     );
+
+    /// @notice Emitted when a strategy's owner is updated
+    event StrategyOwnerUpdated(address indexed strategy, address indexed oldOwner, address indexed newOwner);
 
     /// @notice Emitted when an implementation is whitelisted
     event ImplementationWhitelisted(address indexed implementation, uint256 indexed strategyType);
@@ -112,30 +113,73 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         // Update the implementation through the proxy's upgrade mechanism
         // Call upgradeToAndCall with empty data to just upgrade the implementation
+        // If any initialization is needed, it should be done in the new implementation
         IUUPSUpgradeable(strategy).upgradeToAndCall(latestImplementation, new bytes(0));
 
         emit StrategyImplementationUpdated(strategy, oldImplementation, latestImplementation);
     }
 
-    // ==================== ROLE-RESTRICTED FUNCTIONS ====================
+    /**
+     * @notice Updates the owner of a strategy
+     * @dev Only callable by the current owner of the strategy
+     * @param newOwner The address of the new owner
+     */
+    function updateStrategyOwner(address newOwner) external whenNotPaused {
+        address strategy = msg.sender;
+        address currentOwner = Ownable(strategy).owner();
+
+        require(newOwner != address(0), "Invalid new owner address");
+        require(currentOwner != address(0), "Invalid current owner address");
+
+        // Check if the caller is the current owner of the strategy
+        require(isUserStrategy(currentOwner, strategy), "Not authorized to update strategy owner");
+
+        // Remove the strategy from the current owner's list
+        _userStrategies[currentOwner].remove(strategy);
+
+        // Add the strategy to the new owner's list
+        _userStrategies[newOwner].add(strategy);
+
+        emit StrategyOwnerUpdated(strategy, currentOwner, newOwner);
+    }
+
+    // ==================== VIEW FUNCTIONS ====================
 
     /**
-     * @notice Pauses the contract in case of emergency
-     * @dev Only callable by accounts with the GUARDIAN_ROLE
-     * @dev When paused, most functions that modify state will revert
+     * @notice Gets all strategies for a user
+     * @param user The address of the user
+     * @return An array of strategy addresses
      */
-    function pause() external onlyRole(GUARDIAN_ROLE) {
-        _pause();
+    function getUserStrategies(address user) external view returns (address[] memory) {
+        uint256 length = _userStrategies[user].length();
+        address[] memory strategies = new address[](length);
+
+        for (uint256 i = 0; i < length; i++) {
+            strategies[i] = _userStrategies[user].at(i);
+        }
+
+        return strategies;
     }
 
     /**
-     * @notice Unpauses the contract after an emergency is resolved
-     * @dev Only callable by accounts with the GUARDIAN_ROLE
-     * @dev Allows normal operation to resume after the contract was paused
+     * @notice Checks if a strategy belongs to a user
+     * @param user The address of the user
+     * @param strategy The address of the strategy
+     * @return True if the strategy belongs to the user, false otherwise
      */
-    function unpause() external onlyRole(GUARDIAN_ROLE) {
-        _unpause();
+    function isUserStrategy(address user, address strategy) public view returns (bool) {
+        return _userStrategies[user].contains(strategy);
     }
+
+    /**
+     * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @return The address of the backend
+     */
+    function getBackendAddress() external view returns (address) {
+        return getRoleMember(BACKEND_ROLE, 0);
+    }
+
+    // ==================== BACKEND FUNCTIONS ====================
 
     /**
      * @notice Adds an implementation to the whitelist with a strategy type ID
@@ -177,12 +221,16 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     function addStrategy(address user, address strategy) external whenNotPaused onlyRole(BACKEND_ROLE) {
         require(user != address(0), "Invalid user address");
         require(strategy != address(0), "Invalid strategy address");
-        require(!_userStrategies[user].contains(strategy), "Strategy already added for user");
+
+        require(!isUserStrategy(user, strategy), "Strategy already added for user");
 
         // Get the implementation address
         address implementation = ERC1967Proxy(payable(strategy)).getImplementation();
         require(implementation != address(0), "Invalid implementation");
         require(whitelistedImplementations[implementation], "Implementation not whitelisted");
+
+        address owner = Ownable(strategy).owner();
+        require(owner == user, "Strategy owner is not the user");
 
         // Check the strategy addresses are correct
         IBaseStrategy strategyContract = IBaseStrategy(strategy);
@@ -197,47 +245,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         // Add the strategy to the user's strategies
         _userStrategies[user].add(strategy);
-        strategyOwner[strategy] = user;
 
         emit StrategyAdded(user, strategy, implementation);
     }
-
-    // ==================== GETTER FUNCTIONS ====================
-
-    /**
-     * @notice Gets all strategies for a user
-     * @param user The address of the user
-     * @return An array of strategy addresses
-     */
-    function getUserStrategies(address user) external view returns (address[] memory) {
-        uint256 length = _userStrategies[user].length();
-        address[] memory strategies = new address[](length);
-
-        for (uint256 i = 0; i < length; i++) {
-            strategies[i] = _userStrategies[user].at(i);
-        }
-
-        return strategies;
-    }
-
-    /**
-     * @notice Checks if a strategy belongs to a user
-     * @param user The address of the user
-     * @param strategy The address of the strategy
-     * @return True if the strategy belongs to the user, false otherwise
-     */
-    function isUserStrategy(address user, address strategy) public view returns (bool) {
-        return _userStrategies[user].contains(strategy);
-    }
-
-    /**
-     * @notice Gets the backend address (first member of the BACKEND_ROLE)
-     * @return The address of the backend
-     */
-    function getBackendAddress() external view returns (address) {
-        return getRoleMember(BACKEND_ROLE, 0);
-    }
-
     // ==================== ADMIN FUNCTIONS ====================
 
     /**
@@ -254,5 +264,25 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         IERC20(tokenAddress).safeTransfer(to, amount);
 
         emit TokenRecovered(tokenAddress, to, amount);
+    }
+
+    // ==================== GUARDIAN FUNCTIONS ====================
+
+    /**
+     * @notice Pauses the contract in case of emergency
+     * @dev Only callable by accounts with the GUARDIAN_ROLE
+     * @dev When paused, most functions that modify state will revert
+     */
+    function pause() external onlyRole(GUARDIAN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Unpauses the contract after an emergency is resolved
+     * @dev Only callable by accounts with the GUARDIAN_ROLE
+     * @dev Allows normal operation to resume after the contract was paused
+     */
+    function unpause() external onlyRole(GUARDIAN_ROLE) {
+        _unpause();
     }
 }

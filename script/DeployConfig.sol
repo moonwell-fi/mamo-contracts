@@ -21,11 +21,13 @@ contract DeployConfig is Test {
     /// @notice Deployment configuration struct
     struct DeploymentConfig {
         string admin;
+        uint256 allowedSlippageInBps;
         string backend;
         uint256 chainId;
+        uint256 compoundFee;
         string guardian;
+        uint256 hookGasLimit;
         uint256 maxPriceValidTime;
-        uint256 maxSlippageBps;
         RewardToken[] rewardTokens;
         uint256 splitMToken;
         uint256 splitVault;
@@ -125,7 +127,30 @@ contract DeployConfig is Test {
 
         bytes memory parsedJson = vm.parseJson(configData);
 
-        config = abi.decode(parsedJson, (DeploymentConfig));
+        // Decode to a memory struct first
+        DeploymentConfig memory memConfig = abi.decode(parsedJson, (DeploymentConfig));
+
+        // Copy fields individually to avoid struct array memory to storage copy
+        config.admin = memConfig.admin;
+        config.allowedSlippageInBps = memConfig.allowedSlippageInBps;
+        config.backend = memConfig.backend;
+        config.chainId = memConfig.chainId;
+        config.compoundFee = memConfig.compoundFee;
+        config.guardian = memConfig.guardian;
+        config.hookGasLimit = memConfig.hookGasLimit;
+        config.maxPriceValidTime = memConfig.maxPriceValidTime;
+        config.splitMToken = memConfig.splitMToken;
+        config.splitVault = memConfig.splitVault;
+        config.version = memConfig.version;
+
+        // Handle the array separately
+        if (memConfig.rewardTokens.length > 0) {
+            // Initialize the storage array with the correct length
+            delete config.rewardTokens;
+            for (uint256 i = 0; i < memConfig.rewardTokens.length; i++) {
+                config.rewardTokens.push(memConfig.rewardTokens[i]);
+            }
+        }
 
         // Validate configuration
         require(
