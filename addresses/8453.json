@@ -65,32 +65,32 @@
     "isContract": true
   },
   {
-    "addr": "0x7597418eC9f9630773b841DA05aF7a8b05B6FE29",
+    "addr": "0x142f39471D2c322d447BC6dAEf0F36aa7DBCb76c",
     "name": "MAMO_STRATEGY_REGISTRY",
     "isContract": true
   },
   {
-    "addr": "0x7D8Fa4C4BC2D35371Ea4F9394a5aeE1Fcfd5262b",
+    "addr": "0xBB42BCF182c3734286f9510Cb2A5462C71e5fEF7",
     "name": "CHAINLINK_SWAP_CHECKER_IMPLEMENTATION",
     "isContract": true
   },
   {
-    "addr": "0x68EfD623F47aCF218f5C2063F5a4Fb2d2eab7bb0",
+    "addr": "0x863f302e78A463dCb65e28b8A6507922240c188E",
     "name": "CHAINLINK_SWAP_CHECKER_PROXY",
     "isContract": true
   },
   {
-    "addr": "0xf5e786CEC90B64b3167A034B25bc8Fd6cF6380CD",
+    "addr": "0xa8A74aEEEf6C2Fa7C3bc2E35E996A3eB13a77e7F",
     "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
   {
-    "addr": "0xf64A5c786dAEE61D9Eb20d388099e56f9270b564",
+    "addr": "0x31B83D13c2A4c7fC034206ee8b89ADa3B73E47F9",
     "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
   },
   {
-    "addr": "0x706f82e9bb5b0813501714ab5974216704980e31",
+    "addr": "0x706F82e9bb5b0813501714Ab5974216704980e31",
     "name": "WORMHOLE_BRIDGE_RELAYER_PROXY",
     "isContract": true
   },

@@ -64,7 +64,7 @@ contract VersionedDeploySystem is Script {
         );
 
         // Configure reward tokens
-        _configureRewardTokens(config, addresses, priceChecker, config.getConfig());
+        _configureRewardTokens(addresses, priceChecker, config.getConfig());
 
         // Step 4: Deploy the USDC strategy implementation
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 4: Deploying USDC strategy implementation...")));
@@ -99,7 +99,6 @@ contract VersionedDeploySystem is Script {
      * @param priceChecker The SlippagePriceChecker contract
      */
     function _configureRewardTokens(
-        DeployConfig config,
         Addresses addresses,
         SlippagePriceChecker priceChecker,
         DeployConfig.DeploymentConfig memory deployConfig
