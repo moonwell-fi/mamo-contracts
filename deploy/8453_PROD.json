@@ -22,7 +22,7 @@
       "token": "xWELL_PROXY"
     }
   ],
-  "splitMToken": 0,
-  "splitVault": 10000,
+  "splitMToken": 10000,
+  "splitVault": 0,
   "version": "v1"
 }
