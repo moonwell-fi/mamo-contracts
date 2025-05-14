@@ -26,7 +26,7 @@ import {USDCStrategyImplDeployer} from "./USDCStrategyImplDeployer.s.sol";
 contract DeploySystem is Script {
     function run() external {
         // Get the environment from command line arguments or use default
-        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         console.log("Environment: %s", StdStyle.yellow(environment));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 

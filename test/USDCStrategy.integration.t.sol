@@ -70,11 +70,19 @@ contract USDCStrategyTest is Test {
     address backend;
     address admin;
     address guardian;
+    address deployer;
 
     uint256 splitMToken;
     uint256 splitVault;
 
     DeployConfig.DeploymentConfig public config;
+
+    function setUp() public {
+        _initializeAddresses();
+        _setupSlippagePriceChecker();
+        _deployStrategy();
+        vm.warp(block.timestamp + 1 hours);
+    }
 
     function _initializeAddresses() private {
         string memory addressesFolderPath = "./addresses";
@@ -83,7 +91,7 @@ contract USDCStrategyTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the environment from command line arguments or use default
-        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         DeployConfig configDeploy = new DeployConfig(configPath);
@@ -93,6 +101,7 @@ contract USDCStrategyTest is Test {
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
         guardian = addresses.getAddress(config.guardian);
+        deployer = addresses.getAddress(config.deployer);
         owner = makeAddr("owner");
 
         usdc = IERC20(addresses.getAddress("USDC"));
@@ -116,7 +125,7 @@ contract USDCStrategyTest is Test {
             });
         }
 
-        vm.prank(addresses.getAddress(config.admin));
+        vm.prank(deployer);
         slippagePriceChecker.addTokenConfiguration(address(well), configs, config.maxPriceValidTime);
     }
 
@@ -165,13 +174,6 @@ contract USDCStrategyTest is Test {
                 compoundFee: config.compoundFee
             })
         );
-    }
-
-    function setUp() public {
-        _initializeAddresses();
-        _setupSlippagePriceChecker();
-        _deployStrategy();
-        vm.warp(block.timestamp + 1 hours);
     }
 
     function testOwnerCanDepositFunds() public {
@@ -1889,6 +1891,7 @@ contract USDCStrategyTest is Test {
         ffiCommand[12] = vm.toString(fromAddress);
 
         // Execute the command and get the appData
+        // Use vm.ffi with ignoreStderr set to true to ignore deprecation warnings
         bytes memory appDataResult = vm.ffi(ffiCommand);
         string memory appDataJson = string(appDataResult);
 

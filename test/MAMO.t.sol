@@ -37,7 +37,7 @@ contract MAMOUnitTest is BaseTest {
         assertEq(name, "MAMO", "incorrect name from eip712Domain()");
         assertEq(mamoProxy.name(), "MAMO", "incorrect name");
         assertEq(mamoProxy.symbol(), "MAMO", "incorrect symbol");
-        assertEq(mamoProxy.totalSupply(), 0, "incorrect total supply");
+        assertEq(mamoProxy.totalSupply(), mamoProxy.maxSupply(), "incorrect total supply");
         assertEq(mamoProxy.owner(), address(this), "incorrect owner");
         assertEq(mamoProxy.pendingOwner(), address(0), "incorrect pending owner");
         assertEq(mamoProxy.CLOCK_MODE(), "mode=timestamp", "incorrect clock mode");
@@ -161,7 +161,7 @@ contract MAMOUnitTest is BaseTest {
         _bridgeCanMint(mintAmount);
         _bridgeCanBurn(mintAmount);
 
-        assertEq(mamoProxy.totalSupply(), 0, "incorrect total supply");
+        assertEq(mamoProxy.totalSupply(), mamoProxy.maxSupply(), "incorrect total supply");
     }
 
     /// ACL
