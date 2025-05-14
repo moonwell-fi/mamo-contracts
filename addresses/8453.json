@@ -60,27 +60,27 @@
     "isContract": true
   },
   {
-    "addr": "0x1B8B7deaAf29B8FCdCF904A26ea4d83e54508f97",
+    "addr": "0xB5C87722A0d4f285Ba117e8AA11d80BEB34d65D0",
     "name": "MAMO_STRATEGY_REGISTRY",
     "isContract": true
   },
   {
-    "addr": "0xF732cc757F195CC5312fE78398daC6bE9021C8D7",
+    "addr": "0x47517ABD7bEA7Ab21c7510Fc4b63eB2B74788DF7",
     "name": "CHAINLINK_SWAP_CHECKER_IMPLEMENTATION",
     "isContract": true
   },
   {
-    "addr": "0xFC5411069Edf7ace1E8178B1dAdf20De2D287628",
+    "addr": "0x64cf013Ba62FFd984b03eC14160b5301Bd67A07a",
     "name": "CHAINLINK_SWAP_CHECKER_PROXY",
     "isContract": true
   },
   {
-    "addr": "0xB638379De1C7739838c22bb982f29DaAb58a0e72",
+    "addr": "0xc0D09dE9097E29a80a8c28D94c2dB0a885EC2dD7",
     "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
   {
-    "addr": "0xD7757aA4CCF72F08637880440A710Eb57f058448",
+    "addr": "0x71be9CEE81EAcEcF7449DE13eE3C0F52C103Aa9E",
     "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
   },
