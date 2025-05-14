@@ -950,7 +950,7 @@ contract USDCStrategyTest is Test {
     }
 
     function testIsValidSignature() public {
-        uint256 wellAmount = 1000e18;
+        uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
 
         // Set the maximum allowed slippage tolerance to make the test pass
@@ -1891,14 +1891,11 @@ contract USDCStrategyTest is Test {
         ffiCommand[12] = vm.toString(fromAddress);
 
         // Execute the command and get the appData
-        // Use vm.ffi with ignoreStderr set to true to ignore deprecation warnings
         bytes memory appDataResult = vm.ffi(ffiCommand);
-        string memory appDataJson = string(appDataResult);
 
-        console.log("appDataJson: %s", appDataJson);
+        console.log("appData: %s", string(appDataResult));
 
-        // The output is the JSON document itself, we need to hash it to get the appData hash
-        return keccak256(abi.encode(appDataJson));
+        return bytes32(appDataResult);
     }
     // Tests for setFeeRecipient function
 
@@ -2228,13 +2225,6 @@ contract USDCStrategyTest is Test {
         usdc.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
-
-        // Get the current mToken balance
-        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(strategy));
-
-        // Calculate the amount that would be redeemed when updating position
-        // This depends on the current position and the new position
-        // For simplicity, we'll mock any redeem call to fail
 
         // Mock the redeem function to fail
         vm.mockCall(

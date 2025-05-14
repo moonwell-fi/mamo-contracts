@@ -207,7 +207,7 @@ Example:
 
     try {
       // Generate the appData document
-      const appDataDoc = await generateMamoAppData(
+      const appData = await generateMamoAppData(
         sellToken,
         feeRecipient.toLowerCase(),
         feeAmount,
@@ -215,8 +215,7 @@ Example:
         from.toLowerCase()
       );
 
-      // Output the result as JSON only (for easier parsing in tests)
-      console.log(JSON.stringify(appDataDoc));
+      console.log(appData);
     } catch (error) {
       console.error("Error generating appData:", error);
       process.exit(1);
