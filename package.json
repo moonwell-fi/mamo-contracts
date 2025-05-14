@@ -17,7 +17,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@cowprotocol/app-data": "^2.5.1"
+    "@cowprotocol/app-data": "^2.5.1",
+    "@cowprotocol/cow-sdk": "^5.10.3"
   },
   "devDependencies": {
     "ts-node": "^10.9.1",

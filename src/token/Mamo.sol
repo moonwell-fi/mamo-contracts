@@ -72,6 +72,9 @@ contract MAMO is xERC20, Ownable2StepUpgradeable, ConfigurablePauseGuardian, ERC
         _grantGuardian(newPauseGuardian);
         /// set the pause guardian
         _updatePauseDuration(newPauseDuration);
+
+        // mint supply to the deployer
+        _mint(msg.sender, MAX_SUPPLY);
     }
 
     ///  ------------------------------------------------------------

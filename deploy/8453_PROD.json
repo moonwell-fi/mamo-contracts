@@ -1,11 +1,11 @@
 {
-  "admin": "TESTING_EOA",
+  "admin": "MAMO_MULTISIG",
   "allowedSlippageInBps": 100,
-  "backend": "TESTING_EOA",
+  "backend": "MAMO_BACKEND",
   "chainId": 8453,
   "deployer": "TESTING_EOA",
-  "compoundFee": 100,
-  "guardian": "TESTING_EOA",
+  "compoundFee": 500,
+  "guardian": "MAMO_MULTISIG",
   "hookGasLimit": 100000,
   "maxPriceValidTime": 3600,
   "rewardTokens": [
