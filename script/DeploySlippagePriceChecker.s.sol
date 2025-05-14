@@ -28,7 +28,6 @@ contract DeploySlippagePriceChecker is Script {
         vm.startBroadcast();
 
         // Get the addresses from the addresses contract
-        address admin = addresses.getAddress(config.admin);
         address deployer = addresses.getAddress(config.deployer);
 
         // Deploy the SlippagePriceChecker implementation
