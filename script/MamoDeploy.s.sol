@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 // NOTE: This script uses Solidity 0.8.28 to match the Mamo.sol contract.
-// When running this script, use: forge script script/Mamo2Deploy.s.sol --use 0.8.28
+// When running this script, use: forge script script/MamoDeploy.s.sol --use 0.8.28
 pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
@@ -90,10 +90,10 @@ library TickMath {
 }
 
 /**
- * @title Mamo2DeployScript
- * @notice Script to deploy the Mamo2 token, create a Uniswap liquidity pool, and configure approvals
+ * @title MamoDeployScript
+ * @notice Script to deploy the Mamo token, create a Uniswap liquidity pool, and configure approvals
  */
-contract Mamo2DeployScript is Script {
+contract MamoDeployScript is Script {
     // Uniswap V3 Factory address on Base
     address constant UNISWAP_V3_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
 
@@ -115,8 +115,8 @@ contract Mamo2DeployScript is Script {
 
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
-        // Deploy the Mamo2 token
-        MAMO2 mamo2 = deployMamo2(addresses);
+        // Deploy the Mamo token
+        MAMO2 mamo2 = deployMamo(addresses);
 
         // Create Uniswap liquidity pool and configure approvals
         createLiquidityPool(addresses, address(mamo2));
@@ -125,7 +125,7 @@ contract Mamo2DeployScript is Script {
         addresses.updateJson();
         addresses.printJSONChanges();
 
-        console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== MAMO2 DEPLOYMENT COMPLETE ===")));
+        console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== MAMO DEPLOYMENT COMPLETE ===")));
         console.log("%s: %s", StdStyle.bold("Mamo2 contract"), StdStyle.yellow(vm.toString(address(mamo2))));
     }
 
@@ -134,7 +134,7 @@ contract Mamo2DeployScript is Script {
      * @param addresses The addresses contract
      * @return mamo2 The deployed MAMO2 contract
      */
-    function deployMamo2(Addresses addresses) public returns (MAMO2 mamo2) {
+    function deployMamo(Addresses addresses) public returns (MAMO2 mamo2) {
         vm.startBroadcast();
 
         // Get the deployer address (msg.sender)
@@ -142,8 +142,8 @@ contract Mamo2DeployScript is Script {
 
         // Deploy the Mamo2 contract directly with constructor parameters
         mamo2 = new MAMO2("Mamo SuperERC20 Test", "MAMO_SUPER_ERC20_TEST", deployer);
-        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying Mamo2 contract...")));
-        console.log("Mamo2 contract deployed at: %s", StdStyle.yellow(vm.toString(address(mamo2))));
+        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying Mamo contract...")));
+        console.log("Mamo contract deployed at: %s", StdStyle.yellow(vm.toString(address(mamo2))));
 
         vm.stopBroadcast();
 
