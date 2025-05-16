@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
-// NOTE: This script uses Solidity 0.8.28 to match the Mamo2.sol contract.
+// NOTE: This script uses Solidity 0.8.28 to match the Mamo.sol contract.
 // When running this script, use: forge script script/Mamo2Deploy.s.sol --use 0.8.28
 pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
 
-import {MAMO2} from "@contracts/token/Mamo2.sol";
+import {MAMO2} from "@contracts/token/Mamo.sol";
 import {Script} from "@forge-std/Script.sol";
 import {StdStyle} from "@forge-std/StdStyle.sol";
 import {console} from "@forge-std/console.sol";
