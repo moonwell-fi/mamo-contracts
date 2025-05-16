@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
 
-import {MAMO} from "@contracts/token/Mamo.sol";
+import {MAMO} from "@contracts/token/MamoXERC20.sol";
 
 import {MintLimits} from "@contracts/token/MintLimits.sol";
 import {WormholeBridgeAdapter} from "@contracts/token/WormholeBridgeAdapter.sol";
@@ -13,7 +13,7 @@ import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.s
 import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 // TODO: make sure it uses create2
-contract MAMODeployScript is Script {
+contract MamoXERC20DeployScript is Script {
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";

@@ -86,6 +86,7 @@
   },
   {
     "addr": "0x706F82e9bb5b0813501714Ab5974216704980e31",
+    "addr": "0x706F82e9bb5b0813501714Ab5974216704980e31",
     "name": "WORMHOLE_BRIDGE_RELAYER_PROXY",
     "isContract": true
   },
@@ -98,5 +99,35 @@
     "addr": "0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73",
     "name": "MAMO_BACKEND",
     "isContract": false
+  },
+  {
+    "addr": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+    "name": "UNISWAP_V3_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x4200000000000000000000000000000000000006",
+    "name": "WETH",
+    "isContract": true
+  },
+  {
+    "addr": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "name": "UNISWAP_V3_POSITION_MANAGER",
+    "isContract": true
+  },
+  {
+    "addr": "0x9294Ea619d273A7A9d9daCA79472a18d03cE6852",
+    "name": "MAMO2_IMPLEMENTATION",
+    "isContract": true
+  },
+  {
+    "addr": "0x980A12665Ebd7672EB1C91AB6e6De3a0CCfC6dCb",
+    "name": "MAMO2_PROXY",
+    "isContract": true
+  },
+  {
+    "addr": "0xDE32Af3A669C0B36Db092E6D0915e399F95f6f9C",
+    "name": "MAMO2_ETH_POOL",
+    "isContract": true
   }
 ]
