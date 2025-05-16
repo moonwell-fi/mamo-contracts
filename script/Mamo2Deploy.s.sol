@@ -187,16 +187,7 @@ contract Mamo2DeployScript is Script {
         vm.startBroadcast();
 
         // Get or add the Uniswap V3 Factory address
-        address uniswapV3FactoryAddress;
-        if (addresses.isAddressSet("UNISWAP_V3_FACTORY")) {
-            uniswapV3FactoryAddress = addresses.getAddress("UNISWAP_V3_FACTORY");
-        } else {
-            // Use the hardcoded Uniswap V3 Factory address
-            uniswapV3FactoryAddress = UNISWAP_V3_FACTORY;
-            addresses.addAddress("UNISWAP_V3_FACTORY", uniswapV3FactoryAddress, true);
-        }
-
-        // Get or add the WETH address
+        address uniswapV3FactoryAddress = addresses.getAddress("UNISWAP_V3_FACTORY");
         address wethAddress = addresses.getAddress("WETH");
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 3: Creating Uniswap V3 pool...")));
