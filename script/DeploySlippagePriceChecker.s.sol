@@ -27,14 +27,14 @@ contract DeploySlippagePriceChecker is Script {
     {
         vm.startBroadcast();
 
-        // Get the admin address from the addresses contract
-        address admin = addresses.getAddress(config.admin);
+        // Get the addresses from the addresses contract
+        address deployer = addresses.getAddress(config.deployer);
 
         // Deploy the SlippagePriceChecker implementation
         SlippagePriceChecker implementation = new SlippagePriceChecker();
 
         // Prepare initialization data for the proxy
-        bytes memory initData = abi.encodeWithSelector(SlippagePriceChecker.initialize.selector, admin);
+        bytes memory initData = abi.encodeWithSelector(SlippagePriceChecker.initialize.selector, deployer);
 
         // Deploy the proxy with the implementation and initialization data
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);

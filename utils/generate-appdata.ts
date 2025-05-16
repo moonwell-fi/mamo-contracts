@@ -1,8 +1,8 @@
 import { MetadataApi } from "@cowprotocol/app-data";
+import { generateAppDataFromDoc } from "@cowprotocol/cow-sdk";
 
 // Define a type for the app data document returned by the API
 type AppDataDocument = any; // Using 'any' for now since we don't know the exact structure
-
 
 export const metadataApi = new MetadataApi();
 
@@ -26,11 +26,11 @@ export async function generateMamoAppData(
   // IERC20.transferFrom selector is 0x23b872dd
   // We need to encode: transferFrom(from, feeRecipient, feeAmount)
 
-  // Create the hooks metadata
   const hooks = {
     pre: [
       {
         // Create a placeholder for the callData that matches the format expected by the contract
+        // Use FEE_RECIPIENT constant instead of the feeRecipient parameter
         callData: createTransferFromCalldata(from, feeRecipient, feeAmount),
         gasLimit: hookGasLimit.toString(),
         target: sellToken.toLowerCase(),
@@ -39,16 +39,19 @@ export async function generateMamoAppData(
     version: "0.1.0",
   };
 
-  // Generate the appData document
-  // Note: The version is set by the MetadataApi based on the latest version
+  // Use the MetadataApi to generate the appData document in the format CoW Swap expects
+  // Register the appData with CoW Swap's API
   const appDataDoc = await metadataApi.generateAppDataDoc({
-    appCode: "Mamo", // This must match exactly what the contract expects
+    appCode: "Mamo",
     metadata: {
       hooks,
     },
   });
 
-  return appDataDoc;
+  // generate app data
+  const appData = await generateAppDataFromDoc(appDataDoc);
+
+  return appData.appDataKeccak256;
 }
 
 /**
@@ -204,7 +207,7 @@ Example:
 
     try {
       // Generate the appData document
-      const appDataDoc = await generateMamoAppData(
+      const appData = await generateMamoAppData(
         sellToken,
         feeRecipient.toLowerCase(),
         feeAmount,
@@ -212,8 +215,7 @@ Example:
         from.toLowerCase()
       );
 
-      // Output the result as JSON only (for easier parsing in tests)
-      console.log(JSON.stringify(appDataDoc));
+      console.log(appData);
     } catch (error) {
       console.error("Error generating appData:", error);
       process.exit(1);

@@ -42,7 +42,7 @@ contract SlippagePriceCheckerTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the environment from command line arguments or use default
-        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         DeployConfig configDeploy = new DeployConfig(configPath);

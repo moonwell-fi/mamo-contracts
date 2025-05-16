@@ -56,7 +56,7 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the environment from command line arguments or use default
-        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_TESTING"));
+        string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         DeployConfig config = new DeployConfig(configPath);
@@ -66,15 +66,15 @@ contract MamoStrategyRegistryIntegrationTest is Test {
         backend = addresses.getAddress(config.getConfig().backend);
         guardian = addresses.getAddress(config.getConfig().guardian);
 
-        // if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
-        // Deploy the MamoStrategyRegistry using the script
-        StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
+        if (!addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
+            // Deploy the MamoStrategyRegistry using the script
+            StrategyRegistryDeploy deployScript = new StrategyRegistryDeploy();
 
-        // Call the deployStrategyRegistry function with the addresses
-        registry = deployScript.deployStrategyRegistry(addresses, config.getConfig());
-        // } else {
-        //     registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        // }
+            // Call the deployStrategyRegistry function with the addresses
+            registry = deployScript.deployStrategyRegistry(addresses, config.getConfig());
+        } else {
+            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        }
     }
 
     function testRegistryDeployment() public view {
