@@ -5,7 +5,7 @@ pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
 
-import {MAMO2} from "@contracts/token/Mamo.sol";
+import {MAMO} from "@contracts/token/Mamo.sol";
 import {Script} from "@forge-std/Script.sol";
 import {StdStyle} from "@forge-std/StdStyle.sol";
 import {console} from "@forge-std/console.sol";
@@ -116,53 +116,53 @@ contract MamoDeployScript is Script {
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Deploy the Mamo token
-        MAMO2 mamo2 = deployMamo(addresses);
+        MAMO mamo = deployMamo(addresses);
 
         // Create Uniswap liquidity pool and configure approvals
-        createLiquidityPool(addresses, address(mamo2));
+        createLiquidityPool(addresses, address(mamo));
 
         // Update the JSON file with all the new addresses
         addresses.updateJson();
         addresses.printJSONChanges();
 
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== MAMO DEPLOYMENT COMPLETE ===")));
-        console.log("%s: %s", StdStyle.bold("Mamo2 contract"), StdStyle.yellow(vm.toString(address(mamo2))));
+        console.log("%s: %s", StdStyle.bold("Mamo contract"), StdStyle.yellow(vm.toString(address(mamo))));
     }
 
     /**
-     * @notice Deploy the Mamo2 token contract (non-upgradeable)
+     * @notice Deploy the Mamo token contract (non-upgradeable)
      * @param addresses The addresses contract
-     * @return mamo2 The deployed MAMO2 contract
+     * @return mamo The deployed MAMO contract
      */
-    function deployMamo(Addresses addresses) public returns (MAMO2 mamo2) {
+    function deployMamo(Addresses addresses) public returns (MAMO mamo) {
         vm.startBroadcast();
 
         // Get the deployer address (msg.sender)
         address deployer = msg.sender;
 
         // Deploy the Mamo2 contract directly with constructor parameters
-        mamo2 = new MAMO2("Mamo SuperERC20 Test", "MAMO_SUPER_ERC20_TEST", deployer);
+        mamo = new MAMO("Mamo SuperERC20 Test", "MAMO_SUPER_ERC20_TEST", deployer);
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying Mamo contract...")));
-        console.log("Mamo contract deployed at: %s", StdStyle.yellow(vm.toString(address(mamo2))));
+        console.log("Mamo contract deployed at: %s", StdStyle.yellow(vm.toString(address(mamo))));
 
         vm.stopBroadcast();
 
         // Add the address to the Addresses contract
-        if (addresses.isAddressSet("MAMO2")) {
-            addresses.changeAddress("MAMO2", address(mamo2), true);
+        if (addresses.isAddressSet("MAMO")) {
+            addresses.changeAddress("MAMO", address(mamo), true);
         } else {
-            addresses.addAddress("MAMO2", address(mamo2), true);
+            addresses.addAddress("MAMO", address(mamo), true);
         }
 
-        return mamo2;
+        return mamo;
     }
 
     /**
      * @notice Create a Uniswap liquidity pool for the Mamo2 token and ETH
      * @param addresses The addresses contract
-     * @param mamo2Address The Mamo2 contract address
+     * @param mamoAddress The Mamo contract address
      */
-    function createLiquidityPool(Addresses addresses, address mamo2Address) public {
+    function createLiquidityPool(Addresses addresses, address mamoAddress) public {
         vm.startBroadcast();
 
         // Get or add the Uniswap V3 Factory address
@@ -174,10 +174,10 @@ contract MamoDeployScript is Script {
 
         // Create the pool if it doesn't exist
         IUniswapV3Factory factory = IUniswapV3Factory(uniswapV3FactoryAddress);
-        address pool = factory.getPool(mamo2Address, wethAddress, POOL_FEE);
+        address pool = factory.getPool(mamoAddress, wethAddress, POOL_FEE);
 
         if (pool == address(0)) {
-            pool = factory.createPool(mamo2Address, wethAddress, POOL_FEE);
+            pool = factory.createPool(mamoAddress, wethAddress, POOL_FEE);
             console.log("%s: %s", StdStyle.bold("Created new Uniswap V3 pool"), StdStyle.yellow(vm.toString(pool)));
         } else {
             console.log("%s: %s", StdStyle.bold("Existing Uniswap V3 pool found"), StdStyle.yellow(vm.toString(pool)));
@@ -222,7 +222,7 @@ contract MamoDeployScript is Script {
         uint256 ethAmount = INITIAL_LIQUIDITY_ETH * 10; // Increased ETH amount
 
         // Approve tokens for the position manager - make sure to approve enough!
-        IERC20(mamo2Address).approve(positionManagerAddress, tokenAmount);
+        IERC20(mamoAddress).approve(positionManagerAddress, tokenAmount);
         console.log("Approved %s MAMO2 tokens for position manager", StdStyle.yellow(vm.toString(tokenAmount / 1e18)));
 
         // Wrap ETH to WETH - make sure to deposit enough!
@@ -253,8 +253,8 @@ contract MamoDeployScript is Script {
             fee: POOL_FEE,
             tickLower: tickLower,
             tickUpper: tickUpper,
-            amount0Desired: token0 == mamo2Address ? tokenAmount : ethAmount,
-            amount1Desired: token1 == mamo2Address ? tokenAmount : ethAmount,
+            amount0Desired: token0 == mamoAddress ? tokenAmount : ethAmount,
+            amount1Desired: token1 == mamoAddress ? tokenAmount : ethAmount,
             amount0Min: 0, // Set to 0 to avoid slippage checks
             amount1Min: 0, // Set to 0 to avoid slippage checks
             recipient: msg.sender,
@@ -262,7 +262,7 @@ contract MamoDeployScript is Script {
         });
 
         // Check token balance before attempting to mint
-        uint256 tokenBalance = IERC20(mamo2Address).balanceOf(msg.sender);
+        uint256 tokenBalance = IERC20(mamoAddress).balanceOf(msg.sender);
         console.log("%s: %s", StdStyle.bold("Current MAMO2 balance"), StdStyle.yellow(vm.toString(tokenBalance / 1e18)));
 
         // If we don't have enough tokens, transfer them from the deployer
@@ -270,14 +270,14 @@ contract MamoDeployScript is Script {
             console.log("\n%s", StdStyle.bold(StdStyle.yellow("Transferring tokens for liquidity...")));
 
             // Get the total supply to check if tokens were minted
-            uint256 totalSupply = IERC20(mamo2Address).totalSupply();
+            uint256 totalSupply = IERC20(mamoAddress).totalSupply();
             console.log("%s: %s", StdStyle.bold("Total MAMO2 supply"), StdStyle.yellow(vm.toString(totalSupply / 1e18)));
 
-            IERC20(mamo2Address).transfer(msg.sender, tokenAmount);
+            IERC20(mamoAddress).transfer(msg.sender, tokenAmount);
             console.log("Transferred %s MAMO2 tokens for liquidity", StdStyle.yellow(vm.toString(tokenAmount / 1e18)));
 
             // Check the new balance
-            tokenBalance = IERC20(mamo2Address).balanceOf(msg.sender);
+            tokenBalance = IERC20(mamoAddress).balanceOf(msg.sender);
             console.log("%s: %s", StdStyle.bold("New MAMO2 balance"), StdStyle.yellow(vm.toString(tokenBalance / 1e18)));
         }
 
