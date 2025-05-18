@@ -118,9 +118,6 @@ contract MamoDeployScript is Script {
         // Deploy the Mamo token
         MAMO mamo = deployMamo(addresses);
 
-        // Create Uniswap liquidity pool and configure approvals
-        createLiquidityPool(addresses, address(mamo));
-
         // Update the JSON file with all the new addresses
         addresses.updateJson();
         addresses.printJSONChanges();
@@ -137,11 +134,10 @@ contract MamoDeployScript is Script {
     function deployMamo(Addresses addresses) public returns (MAMO mamo) {
         vm.startBroadcast();
 
-        // Get the deployer address (msg.sender)
-        address deployer = msg.sender;
+        address recipient = addresses.getAddress("MAMO_MULTISIG");
 
         // Deploy the Mamo2 contract directly with constructor parameters
-        mamo = new MAMO("Mamo SuperERC20 Test", "MAMO_SUPER_ERC20_TEST", deployer);
+        mamo = new MAMO("Mamo", "MAMO", recipient);
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying Mamo contract...")));
         console.log("Mamo contract deployed at: %s", StdStyle.yellow(vm.toString(address(mamo))));
 
@@ -155,144 +151,5 @@ contract MamoDeployScript is Script {
         }
 
         return mamo;
-    }
-
-    /**
-     * @notice Create a Uniswap liquidity pool for the Mamo2 token and ETH
-     * @param addresses The addresses contract
-     * @param mamoAddress The Mamo contract address
-     */
-    function createLiquidityPool(Addresses addresses, address mamoAddress) public {
-        vm.startBroadcast();
-
-        // Get or add the Uniswap V3 Factory address
-        address uniswapV3FactoryAddress = addresses.getAddress("UNISWAP_V3_FACTORY");
-        address wethAddress = addresses.getAddress("WETH");
-
-        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 2: Creating Uniswap V3 pool...")));
-        console.log("%s: %s", StdStyle.bold("Pool Fee"), StdStyle.yellow(vm.toString(POOL_FEE)));
-
-        // Create the pool if it doesn't exist
-        IUniswapV3Factory factory = IUniswapV3Factory(uniswapV3FactoryAddress);
-        address pool = factory.getPool(mamoAddress, wethAddress, POOL_FEE);
-
-        if (pool == address(0)) {
-            pool = factory.createPool(mamoAddress, wethAddress, POOL_FEE);
-            console.log("%s: %s", StdStyle.bold("Created new Uniswap V3 pool"), StdStyle.yellow(vm.toString(pool)));
-        } else {
-            console.log("%s: %s", StdStyle.bold("Existing Uniswap V3 pool found"), StdStyle.yellow(vm.toString(pool)));
-        }
-
-        // Add the pool address to the Addresses contract
-        if (addresses.isAddressSet("MAMO2_ETH_POOL")) {
-            addresses.changeAddress("MAMO2_ETH_POOL", pool, true);
-        } else {
-            addresses.addAddress("MAMO2_ETH_POOL", pool, true);
-        }
-
-        // Initialize the pool with a starting price
-        IUniswapV3Pool uniswapPool = IUniswapV3Pool(pool);
-
-        // Check token order (token0 should be the one with the lower address)
-        address token0 = uniswapPool.token0();
-        address token1 = uniswapPool.token1();
-
-        console.log("%s: %s", StdStyle.bold("Token0"), StdStyle.yellow(vm.getLabel(token0)));
-        console.log("%s: %s", StdStyle.bold("Token1"), StdStyle.yellow(vm.getLabel(token1)));
-
-        // Calculate the initial price (1:1 for simplicity)
-        // For Uniswap V3, we need to provide the square root of the price as a Q64.96 fixed point number
-        uint160 sqrtPriceX96 = TickMath.getSqrtPriceX96(1e18);
-
-        // Initialize the pool with the calculated price
-        uniswapPool.initialize(sqrtPriceX96);
-        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 3: Initializing Uniswap V3 pool...")));
-        console.log("%s: %s", StdStyle.bold("Initial sqrtPriceX96"), StdStyle.yellow(vm.toString(sqrtPriceX96)));
-
-        // Get the NonfungiblePositionManager address
-        address positionManagerAddress = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER");
-
-        console.log(
-            "\n%s", StdStyle.bold(StdStyle.green("Step 4: Adding liquidity with NonfungiblePositionManager..."))
-        );
-        console.log("%s: %s", StdStyle.bold("Position Manager"), StdStyle.yellow(vm.toString(positionManagerAddress)));
-
-        // Calculate the amounts to use for the position
-        uint256 tokenAmount = INITIAL_LIQUIDITY_TOKENS * 10; // Increased token amount
-        uint256 ethAmount = INITIAL_LIQUIDITY_ETH * 10; // Increased ETH amount
-
-        // Approve tokens for the position manager - make sure to approve enough!
-        IERC20(mamoAddress).approve(positionManagerAddress, tokenAmount);
-        console.log("Approved %s MAMO2 tokens for position manager", StdStyle.yellow(vm.toString(tokenAmount / 1e18)));
-
-        // Wrap ETH to WETH - make sure to deposit enough!
-        IWETH9(wethAddress).deposit{value: ethAmount}();
-        IWETH9(wethAddress).approve(positionManagerAddress, ethAmount);
-        console.log("Wrapped and approved %s ETH for position manager", StdStyle.yellow(vm.toString(ethAmount / 1e18)));
-
-        // Use a narrower tick range for the position
-        // The tick spacing for 0.3% fee tier is 60, so ticks must be multiples of 60
-        int24 tickLower = -60 * 10; // -600, narrower range
-        int24 tickUpper = 60 * 10; // 600, narrower range
-
-        console.log("%s: %s", StdStyle.bold("Tick Lower"), StdStyle.yellow(vm.toString(int256(tickLower))));
-        console.log("%s: %s", StdStyle.bold("Tick Upper"), StdStyle.yellow(vm.toString(int256(tickUpper))));
-
-        // For Uniswap V3, we need to be careful about slippage
-        // Since we initialized the pool with a 1:1 price, we need to ensure our position matches
-
-        // Get the current price from the pool
-        (uint160 currentSqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        console.log("%s: %s", StdStyle.bold("Current sqrtPriceX96"), StdStyle.yellow(vm.toString(currentSqrtPriceX96)));
-
-        // Create the mint parameters with correct token order and adjusted amounts
-        // For a 1:1 price with WETH (18 decimals) and MAMO2 (18 decimals), we need equal amounts
-        INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
-            token0: token0, // WETH
-            token1: token1, // MAMO2
-            fee: POOL_FEE,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            amount0Desired: token0 == mamoAddress ? tokenAmount : ethAmount,
-            amount1Desired: token1 == mamoAddress ? tokenAmount : ethAmount,
-            amount0Min: 0, // Set to 0 to avoid slippage checks
-            amount1Min: 0, // Set to 0 to avoid slippage checks
-            recipient: msg.sender,
-            deadline: block.timestamp + 1 hours
-        });
-
-        // Check token balance before attempting to mint
-        uint256 tokenBalance = IERC20(mamoAddress).balanceOf(msg.sender);
-        console.log("%s: %s", StdStyle.bold("Current MAMO2 balance"), StdStyle.yellow(vm.toString(tokenBalance / 1e18)));
-
-        // If we don't have enough tokens, transfer them from the deployer
-        if (tokenBalance < tokenAmount) {
-            console.log("\n%s", StdStyle.bold(StdStyle.yellow("Transferring tokens for liquidity...")));
-
-            // Get the total supply to check if tokens were minted
-            uint256 totalSupply = IERC20(mamoAddress).totalSupply();
-            console.log("%s: %s", StdStyle.bold("Total MAMO2 supply"), StdStyle.yellow(vm.toString(totalSupply / 1e18)));
-
-            IERC20(mamoAddress).transfer(msg.sender, tokenAmount);
-            console.log("Transferred %s MAMO2 tokens for liquidity", StdStyle.yellow(vm.toString(tokenAmount / 1e18)));
-
-            // Check the new balance
-            tokenBalance = IERC20(mamoAddress).balanceOf(msg.sender);
-            console.log("%s: %s", StdStyle.bold("New MAMO2 balance"), StdStyle.yellow(vm.toString(tokenBalance / 1e18)));
-        }
-
-        // Only proceed with minting if we have enough tokens
-        if (tokenBalance >= tokenAmount) {
-            INonfungiblePositionManager positionManager = INonfungiblePositionManager(positionManagerAddress);
-            (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = positionManager.mint(params);
-
-            console.log("\n%s", StdStyle.bold(StdStyle.green("Step 5: Position minted successfully")));
-            console.log("%s: %s", StdStyle.bold("NFT Token ID"), StdStyle.yellow(vm.toString(tokenId)));
-            console.log("%s: %s", StdStyle.bold("Liquidity"), StdStyle.yellow(vm.toString(liquidity)));
-            console.log("%s: %s", StdStyle.bold("Amount0 used"), StdStyle.yellow(vm.toString(amount0)));
-            console.log("%s: %s", StdStyle.bold("Amount1 used"), StdStyle.yellow(vm.toString(amount1)));
-        }
-
-        vm.stopBroadcast();
     }
 }

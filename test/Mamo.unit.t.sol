@@ -10,7 +10,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract MamoUnitTest is Test {
     MAMO public mamo;
-    address public owner;
     address public recipient;
     address public superchainTokenBridge;
 
@@ -39,7 +38,7 @@ contract MamoUnitTest is Test {
         assertEq(mamo.decimals(), 18, "incorrect decimals");
     }
 
-    function testSupportsInterface() public {
+    function testSupportsInterface() public view {
         assertTrue(mamo.supportsInterface(type(IERC7802).interfaceId), "should support IERC7802");
         assertTrue(mamo.supportsInterface(type(IERC20).interfaceId), "should support IERC20");
         assertTrue(mamo.supportsInterface(type(IERC165).interfaceId), "should support IERC165");

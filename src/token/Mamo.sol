@@ -14,7 +14,7 @@ import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /// @title MAMO
-/// @notice The MAMO token is SuperERC20 compatible
+/// @dev SuperERC20 compatible
 contract MAMO is ERC20, ERC20Permit, ERC20Votes, IERC7802 {
     error NotSuperchainTokenBridge();
 
