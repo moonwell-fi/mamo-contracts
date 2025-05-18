@@ -14,7 +14,7 @@ import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /// @title MAMO
-/// @dev SuperERC20 compatible
+/// @notice Mamo implements IERC7802 for unified cross-chain fungibility across the Superchain.
 contract MAMO is ERC20, ERC20Permit, ERC20Votes, IERC7802 {
     error NotSuperchainTokenBridge();
 

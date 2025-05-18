@@ -14,7 +14,7 @@ contract StrategyRegistryDeploy is Script {
         returns (MamoStrategyRegistry registry)
     {
         // Get the addresses for the roles
-        address admin = addresses.getAddress(config.admin);
+        //address admin = addresses.getAddress(config.admin);
         address backend = addresses.getAddress(config.backend);
         address guardian = addresses.getAddress(config.guardian);
         address deployer = addresses.getAddress(config.deployer);
