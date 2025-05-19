@@ -77,15 +77,18 @@ contract MamoDeployScript is Script, Test {
         assertEq(mamo.balanceOf(addresses.getAddress("MAMO_MULTISIG")), MAX_SUPPLY, "incorrect recipient balance");
         assertEq(mamo.decimals(), 18, "incorrect decimals");
 
+        uint256 amount = 100 * 1e18;
         // superchainTokenBridge can mint
         vm.prank(SUPERCHAIN_TOKEN_BRIDGE);
         address recipient = makeAddr("recipient");
-        mamo.crosschainMint(recipient, 100 * 1e18);
-        assertEq(mamo.balanceOf(recipient), MAX_SUPPLY + 100 * 1e18, "incorrect recipient balance");
+        mamo.crosschainMint(recipient, amount);
+        assertEq(mamo.balanceOf(recipient), amount, "incorrect recipient balance");
+
+        deal(address(mamo), recipient, amount);
 
         // superchainTokenBridge can burn
         vm.prank(SUPERCHAIN_TOKEN_BRIDGE);
-        mamo.crosschainBurn(recipient, 100 * 1e18);
-        assertEq(mamo.balanceOf(recipient), MAX_SUPPLY, "incorrect recipient balance");
+        mamo.crosschainBurn(recipient, amount);
+        assertEq(mamo.balanceOf(recipient), 0, "incorrect recipient balance");
     }
 }

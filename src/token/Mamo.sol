@@ -3,15 +3,11 @@ pragma solidity 0.8.28;
 
 import {IERC165, IERC7802} from "@contracts/interfaces/IERC7802.sol";
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
-import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /// @title MAMO
 /// @notice Mamo implements IERC7802 for unified cross-chain fungibility across the Superchain.
