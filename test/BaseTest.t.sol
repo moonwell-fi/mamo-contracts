@@ -7,16 +7,16 @@ import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transpa
 import "@forge-std/Test.sol";
 
 import {Addresses} from "@addresses/Addresses.sol";
-import {MAMO} from "@contracts/token/Mamo.sol";
+import {MAMO} from "@contracts/token/MamoXERC20.sol";
 
 import {MintLimits} from "@contracts/token/MintLimits.sol";
 import {WormholeBridgeAdapter} from "@contracts/token/WormholeBridgeAdapter.sol";
-import {MAMODeployScript} from "@script/MAMODeploy.s.sol";
+import {MamoXERC20DeployScript} from "@script/MamoXERC20Deploy.s.sol";
 
 // TODO: move this to ChainIds.sol
 uint16 constant BASE_WORMHOLE_CHAIN_ID = 30;
 
-contract BaseTest is MAMODeployScript, Test {
+contract BaseTest is MamoXERC20DeployScript, Test {
     /// @notice addresses contract, stores all addresses
     Addresses public addresses;
 
