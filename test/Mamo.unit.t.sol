@@ -87,6 +87,66 @@ contract MamoUnitTest is Test {
         assertEq(mamo.totalSupply(), initialTotalSupply - burnAmount, "incorrect total supply after burn");
     }
 
+    function testBurn() public {
+        // Test that a user can burn their own tokens
+        uint256 burnAmount = 1000;
+
+        // First, ensure recipient has enough tokens to burn
+        assertGt(mamo.balanceOf(recipient), burnAmount, "recipient should have enough tokens to burn");
+
+        uint256 initialBalance = mamo.balanceOf(recipient);
+        uint256 initialTotalSupply = mamo.totalSupply();
+
+        // Burn tokens
+        vm.prank(recipient);
+        mamo.burn(burnAmount);
+
+        // Verify balances
+        assertEq(mamo.balanceOf(recipient), initialBalance - burnAmount, "incorrect balance after burn");
+        assertEq(mamo.totalSupply(), initialTotalSupply - burnAmount, "incorrect total supply after burn");
+    }
+
+    function testBurnFrom() public {
+        // Test that a user can burn tokens from another account with allowance
+        uint256 burnAmount = 1000;
+        address spender = makeAddr("spender");
+
+        // First, ensure recipient has enough tokens to burn
+        assertGt(mamo.balanceOf(recipient), burnAmount, "recipient should have enough tokens to burn");
+
+        uint256 initialBalance = mamo.balanceOf(recipient);
+        uint256 initialTotalSupply = mamo.totalSupply();
+
+        // Approve spender
+        vm.prank(recipient);
+        mamo.approve(spender, burnAmount);
+
+        // Burn tokens
+        vm.prank(spender);
+        mamo.burnFrom(recipient, burnAmount);
+
+        // Verify balances
+        assertEq(mamo.balanceOf(recipient), initialBalance - burnAmount, "incorrect balance after burn");
+        assertEq(mamo.totalSupply(), initialTotalSupply - burnAmount, "incorrect total supply after burn");
+        assertEq(mamo.allowance(recipient, spender), 0, "allowance should be spent");
+    }
+
+    function testBurnFromInsufficientAllowanceFails() public {
+        // Test that burnFrom fails when allowance is insufficient
+        uint256 burnAmount = 1000;
+        address spender = makeAddr("spender");
+
+        // Approve less than burn amount
+        vm.prank(recipient);
+        mamo.approve(spender, burnAmount - 1);
+
+        // Attempt to burn more than allowed
+        vm.prank(spender);
+        // Use expectRevert without specific message since OpenZeppelin uses custom errors
+        vm.expectRevert();
+        mamo.burnFrom(recipient, burnAmount);
+    }
+
     function testUpdateOverride() public {
         // Test that _update is correctly overridden by transferring tokens
         uint256 transferAmount = 100;
