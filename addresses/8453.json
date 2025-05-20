@@ -135,17 +135,17 @@
     "isContract": true
   },
   {
-    "addr": "0xc741beb2156827704a1466575cca1cbf726a1178",
+    "addr": "0xc741beb2156827704A1466575ccA1cBf726a1178",
     "name": "AERODROME_POSITION_MANAGER",
     "isContract": true
   },
   {
-    "addr": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+    "addr": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
     "name": "cbBTC",
     "isContract": true
   },
   {
-    "addr": "0xBfd59caA3faF7caBBfA3ee1776a9FD3853c6a589",
+    "addr": "0x7300B37DfdfAb110d83290A29DfB31B1740219fE",
     "name": "MAMO",
     "isContract": true
   }
