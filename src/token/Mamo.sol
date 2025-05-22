@@ -5,13 +5,15 @@ import {IERC165, IERC7802} from "@contracts/interfaces/IERC7802.sol";
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
 import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
-
 /// @title MAMO
 /// @notice Mamo implements IERC7802 for unified cross-chain fungibility across the Superchain.
-contract MAMO is ERC20, ERC20Permit, ERC20Votes, IERC7802 {
+
+contract MAMO is ERC20, ERC20Permit, ERC20Votes, ERC20Burnable, IERC7802 {
     error NotSuperchainTokenBridge();
 
     /// @notice Address of the SuperchainTokenBridge predeploy.

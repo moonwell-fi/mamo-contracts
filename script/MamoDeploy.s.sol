@@ -90,5 +90,30 @@ contract MamoDeployScript is Script, Test {
         vm.prank(SUPERCHAIN_TOKEN_BRIDGE);
         mamo.crosschainBurn(recipient, amount);
         assertEq(mamo.balanceOf(recipient), 0, "incorrect recipient balance");
+
+        // Test burn function - user burning their own tokens
+        uint256 burnAmount = 50 * 1e18;
+        address burner = makeAddr("burner");
+        deal(address(mamo), burner, burnAmount);
+        assertEq(mamo.balanceOf(burner), burnAmount, "incorrect burner initial balance");
+
+        vm.prank(burner);
+        mamo.burn(burnAmount);
+        assertEq(mamo.balanceOf(burner), 0, "tokens were not burned");
+
+        // Test burnFrom function - burning with allowance
+        address owner = makeAddr("owner");
+        address spender = makeAddr("spender");
+        uint256 allowanceAmount = 75 * 1e18;
+
+        deal(address(mamo), owner, allowanceAmount);
+        assertEq(mamo.balanceOf(owner), allowanceAmount, "incorrect owner initial balance");
+
+        vm.prank(owner);
+        mamo.approve(spender, allowanceAmount);
+
+        vm.prank(spender);
+        mamo.burnFrom(owner, allowanceAmount);
+        assertEq(mamo.balanceOf(owner), 0, "tokens were not burned with allowance");
     }
 }

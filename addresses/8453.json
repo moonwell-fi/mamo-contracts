@@ -133,5 +133,20 @@
     "addr": "0xe25e010026692De7A3bb35ef7474cdf4fa1C7e44",
     "name": "BURN_AND_EARN",
     "isContract": true
+  },
+  {
+    "addr": "0xc741beb2156827704A1466575ccA1cBf726a1178",
+    "name": "AERODROME_POSITION_MANAGER",
+    "isContract": true
+  },
+  {
+    "addr": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+    "name": "cbBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x7300B37DfdfAb110d83290A29DfB31B1740219fE",
+    "name": "MAMO",
+    "isContract": true
   }
 ]
