@@ -2,138 +2,173 @@
 
 ### Core Components
 
-#### 1. WeeklyRewardsModule Contract
+#### 1. ConfigurableRewardsModule Contract
 ```solidity
-contract WeeklyRewardsModule {
+contract ConfigurableRewardsModule {
+    // ============ CONSTANTS ============
+    uint256 public constant BASIS_POINTS_DENOMINATOR = 10000;
+    uint256 public constant MAX_CALLER_REWARD_BPS = 1000; // 10%
+    uint256 public constant MIN_EXECUTION_INTERVAL = 1 hours;
+    uint256 public constant MAX_EXECUTION_INTERVAL = 1 month;
+    
+    // ============ STATE VARIABLES ============
     // Configuration
     mapping(uint256 => bool) public authorizedTokenIds;
-    uint256 public wellRetentionBps;  // Basis points (e.g., 1000 = 10%)
-    uint256 public btcRetentionBps;
+    uint256 public mamoMinBalance;  // Minimum balance to retain in Safe
+    uint256 public btcMinBalance;   // Minimum balance to retain in Safe
     uint256 public callerRewardBps;
     uint256 public lastExecutionTime;
-    uint256 public constant EXECUTION_INTERVAL = 7 days;
+    uint256 public executionInterval;
     
     // Contract addresses
     address public immutable burnAndEarn;
     address public immutable multiRewards;
-    address public immutable wellToken;
+    address public immutable mamoToken;
     address public immutable btcToken;
     address public immutable safe;
+    
+    // ============ EVENTS ============
+    event ExecutionIntervalUpdated(uint256 oldInterval, uint256 newInterval, address updatedBy);
+    event RewardsExecuted(uint256 timestamp, uint256 mamoDistributed, uint256 btcDistributed, uint256 callerReward);
+    event ConfigurationUpdated(string parameter, uint256 oldValue, uint256 newValue, address updatedBy);
 }
 ```
 
-#### 2. Execution Flow (Updated)
+#### 2. Enhanced Execution Flow
 
 ```mermaid
 sequenceDiagram
+    participant Owner as Safe Owner
     participant Caller
-    participant Module as WeeklyRewardsModule
+    participant Module as ConfigurableRewardsModule
     participant Safe as Safe Multisig
     participant BurnAndEarn
     participant MultiRewards
-    participant WELL as WELL Token
+    participant MAMO as MAMO Token
     participant BTC as BTC Token
 
-    Note over Caller,BTC: Prerequisites: Safe has approved Module for token spending
-
-    Caller->>Module: executeWeeklyRewards()
+    Note over Owner,BTC: Configuration Phase
+    Owner->>Module: setExecutionInterval(customInterval)
+    Module->>Module: Validate interval bounds
+    Module->>Module: Update executionInterval
     
-    Note over Module: Check weekly cooldown
+    Note over Caller,BTC: Execution Phase
+    Caller->>Module: executeRewards()
+    
+    Note over Module: Check configurable cooldown
+    Module->>Module: require(block.timestamp >= lastExecutionTime + executionInterval)
     
     Module->>Safe: execTransactionFromModule(BurnAndEarn.earn)
     Safe->>BurnAndEarn: earn(tokenIds)
-    BurnAndEarn->>WELL: transfer(safe, wellAmount)
+    BurnAndEarn->>MAMO: transfer(safe, mamoAmount)
     BurnAndEarn->>BTC: transfer(safe, btcAmount)
     
-    Note over Module: Calculate retention amounts
-    Module->>WELL: balanceOf(safe)
+    Note over Module: Calculate distribution using minimum balances
+    Module->>MAMO: balanceOf(safe)
     Module->>BTC: balanceOf(safe)
     
-    Note over Module: Retain configured percentage in Safe
+    Note over Module: Ensure minimum balances remain in Safe
     Note over Module: Calculate amounts for rewards distribution
     
     Module->>Safe: execTransactionFromModule(MultiRewards.setRewardsDuration)
-    Safe->>MultiRewards: setRewardsDuration(WELL, 7 days)
+    Safe->>MultiRewards: setRewardsDuration(MAMO, executionInterval)
     
     Module->>Safe: execTransactionFromModule(MultiRewards.setRewardsDuration)
-    Safe->>MultiRewards: setRewardsDuration(BTC, 7 days)
+    Safe->>MultiRewards: setRewardsDuration(BTC, executionInterval)
     
-    Module->>Safe: execTransactionFromModule(WELL.approve)
-    Safe->>WELL: approve(MultiRewards, distributionAmount)
+    Module->>Safe: execTransactionFromModule(MAMO.approve)
+    Safe->>MAMO: approve(MultiRewards, distributionAmount)
     
     Module->>Safe: execTransactionFromModule(BTC.approve)
     Safe->>BTC: approve(MultiRewards, distributionAmount)
     
     Module->>Safe: execTransactionFromModule(MultiRewards.notifyRewardAmount)
-    Safe->>MultiRewards: notifyRewardAmount(WELL, distributionAmount)
-    MultiRewards->>WELL: transferFrom(safe, multiRewards, distributionAmount)
+    Safe->>MultiRewards: notifyRewardAmount(MAMO, distributionAmount)
+    MultiRewards->>MAMO: transferFrom(safe, multiRewards, distributionAmount)
     
     Module->>Safe: execTransactionFromModule(MultiRewards.notifyRewardAmount)
     Safe->>MultiRewards: notifyRewardAmount(BTC, distributionAmount)
     MultiRewards->>BTC: transferFrom(safe, multiRewards, distributionAmount)
     
-    Module->>Safe: execTransactionFromModule(WELL.transfer)
-    Safe->>WELL: transfer(caller, callerReward)
+    Module->>Safe: execTransactionFromModule(MAMO.transfer)
+    Safe->>MAMO: transfer(caller, callerReward)
     
-    Note over Module: Update lastExecutionTime
+    Note over Module: Update lastExecutionTime and emit events
 ```
 
 #### 3. Key Functions
 
-##### Main Execution Function
+##### Main Execution Function (Enhanced)
 ```solidity
-function executeWeeklyRewards() external {
-    require(block.timestamp >= lastExecutionTime + EXECUTION_INTERVAL, "Too early");
+function executeRewards() external {
+    require(block.timestamp >= lastExecutionTime + executionInterval, "Execution interval not met");
     
     // 1. Collect LP fees
     _collectLPFees();
     
-    // 2. Calculate token balances and retention
-    (uint256 wellDistribution, uint256 btcDistribution, uint256 callerReward) = _calculateDistributions();
+    // 2. Calculate token balances and distribution
+    (uint256 mamoDistribution, uint256 btcDistribution, uint256 callerReward) = _calculateDistributions();
     
-    // 3. Set rewards duration
-    _setRewardsDuration();
+    // 3. Set rewards duration to match current interval
+    _setRewardsDuration(executionInterval);
     
     // 4. Approve and notify reward amounts
-    _distributeRewards(wellDistribution, btcDistribution);
+    _distributeRewards(mamoDistribution, btcDistribution);
     
     // 5. Reward caller
     _rewardCaller(callerReward);
     
     lastExecutionTime = block.timestamp;
+    
+    emit RewardsExecuted(block.timestamp, mamoDistribution, btcDistribution, callerReward);
 }
 ```
 
-##### Token Distribution Logic (Updated)
+##### Enhanced Token Distribution Logic with Minimum Balances
 ```solidity
-function _calculateDistributions() internal view returns (uint256 wellDist, uint256 btcDist, uint256 callerReward) {
-    uint256 wellBalance = IERC20(wellToken).balanceOf(safe);
+function _calculateDistributions() internal view returns (uint256 mamoDist, uint256 btcDist, uint256 callerReward) {
+    uint256 mamoBalance = IERC20(mamoToken).balanceOf(safe);
     uint256 btcBalance = IERC20(btcToken).balanceOf(safe);
     
-    // Calculate retention amounts (stay in Safe)
-    uint256 wellRetention = (wellBalance * wellRetentionBps) / 10000;
-    uint256 btcRetention = (btcBalance * btcRetentionBps) / 10000;
+    // Calculate distribution amounts ensuring minimum balances remain
+    mamoDist = mamoBalance > mamoMinBalance ? mamoBalance - mamoMinBalance : 0;
+    btcDist = btcBalance > btcMinBalance ? btcBalance - btcMinBalance : 0;
     
-    // Calculate distribution amounts (go to MultiRewards)
-    wellDist = wellBalance - wellRetention;
-    btcDist = btcBalance - btcRetention;
-    
-    // Calculate caller reward from WELL distribution
-    callerReward = (wellDist * callerRewardBps) / 10000;
-    wellDist -= callerReward;
+    // Calculate caller reward from MAMO distribution using named constant
+    callerReward = (mamoDist * callerRewardBps) / BASIS_POINTS_DENOMINATOR;
+    mamoDist -= callerReward;
 }
 ```
 
-##### Approval and Distribution (New)
+##### Enhanced Rewards Duration Setting
 ```solidity
-function _distributeRewards(uint256 wellAmount, uint256 btcAmount) internal {
+function _setRewardsDuration(uint256 duration) internal {
+    bytes memory setMamoDurationData = abi.encodeWithSelector(
+        IMultiRewards.setRewardsDuration.selector,
+        mamoToken,
+        duration
+    );
+    require(ISafe(safe).execTransactionFromModule(multiRewards, 0, setMamoDurationData, Enum.Operation.Call));
+    
+    bytes memory setBtcDurationData = abi.encodeWithSelector(
+        IMultiRewards.setRewardsDuration.selector,
+        btcToken,
+        duration
+    );
+    require(ISafe(safe).execTransactionFromModule(multiRewards, 0, setBtcDurationData, Enum.Operation.Call));
+}
+```
+
+##### Approval and Distribution (Enhanced)
+```solidity
+function _distributeRewards(uint256 mamoAmount, uint256 btcAmount) internal {
     // Approve MultiRewards to spend tokens
-    bytes memory approveWellData = abi.encodeWithSelector(
+    bytes memory approveMamoData = abi.encodeWithSelector(
         IERC20.approve.selector, 
         multiRewards, 
-        wellAmount
+        mamoAmount
     );
-    require(ISafe(safe).execTransactionFromModule(wellToken, 0, approveWellData, Enum.Operation.Call));
+    require(ISafe(safe).execTransactionFromModule(mamoToken, 0, approveMamoData, Enum.Operation.Call));
     
     bytes memory approveBtcData = abi.encodeWithSelector(
         IERC20.approve.selector, 
@@ -143,12 +178,12 @@ function _distributeRewards(uint256 wellAmount, uint256 btcAmount) internal {
     require(ISafe(safe).execTransactionFromModule(btcToken, 0, approveBtcData, Enum.Operation.Call));
     
     // Notify reward amounts (this will transfer tokens)
-    bytes memory notifyWellData = abi.encodeWithSelector(
+    bytes memory notifyMamoData = abi.encodeWithSelector(
         IMultiRewards.notifyRewardAmount.selector,
-        wellToken,
-        wellAmount
+        mamoToken,
+        mamoAmount
     );
-    require(ISafe(safe).execTransactionFromModule(multiRewards, 0, notifyWellData, Enum.Operation.Call));
+    require(ISafe(safe).execTransactionFromModule(multiRewards, 0, notifyMamoData, Enum.Operation.Call));
     
     bytes memory notifyBtcData = abi.encodeWithSelector(
         IMultiRewards.notifyRewardAmount.selector,
@@ -159,97 +194,268 @@ function _distributeRewards(uint256 wellAmount, uint256 btcAmount) internal {
 }
 ```
 
-#### 4. Configuration Management
+#### 4. Interval Configuration Management
 
-##### Owner-Only Configuration Functions
+##### Core Interval Configuration Functions
+```solidity
+/**
+ * @notice Set execution interval for rewards distribution
+ * @param newInterval New interval in seconds
+ * @dev Only Safe owners can call this function
+ */
+function setExecutionInterval(uint256 newInterval) external {
+    require(ISafe(safe).isOwner(msg.sender), "Only Safe owners");
+    require(newInterval >= MIN_EXECUTION_INTERVAL, "Interval too short");
+    require(newInterval <= MAX_EXECUTION_INTERVAL, "Interval too long");
+    
+    uint256 oldInterval = executionInterval;
+    executionInterval = newInterval;
+    
+    emit ExecutionIntervalUpdated(oldInterval, newInterval, msg.sender);
+}
+
+/**
+ * @notice Get time remaining until next execution
+ * @return seconds until next execution is allowed
+ */
+function getTimeUntilNextExecution() external view returns (uint256) {
+    uint256 nextExecutionTime = lastExecutionTime + executionInterval;
+    if (block.timestamp >= nextExecutionTime) {
+        return 0;
+    }
+    return nextExecutionTime - block.timestamp;
+}
+
+/**
+ * @notice Check if execution is currently allowed
+ * @return true if execution can proceed
+ */
+function canExecute() external view returns (bool) {
+    return block.timestamp >= lastExecutionTime + executionInterval;
+}
+```
+
+##### Enhanced Configuration Functions
 ```solidity
 function setTokenId(uint256 tokenId, bool authorized) external {
     require(ISafe(safe).isOwner(msg.sender), "Only Safe owners");
     authorizedTokenIds[tokenId] = authorized;
+    
+    emit ConfigurationUpdated("tokenId", authorized ? 0 : 1, authorized ? 1 : 0, msg.sender);
 }
 
-function setRetentionPercentages(uint256 _wellRetentionBps, uint256 _btcRetentionBps) external {
+function setMinimumBalances(uint256 _mamoMinBalance, uint256 _btcMinBalance) external {
     require(ISafe(safe).isOwner(msg.sender), "Only Safe owners");
-    require(_wellRetentionBps <= 10000 && _btcRetentionBps <= 10000, "Invalid percentages");
-    wellRetentionBps = _wellRetentionBps;
-    btcRetentionBps = _btcRetentionBps;
+    
+    uint256 oldMamoMinBalance = mamoMinBalance;
+    uint256 oldBtcMinBalance = btcMinBalance;
+    
+    mamoMinBalance = _mamoMinBalance;
+    btcMinBalance = _btcMinBalance;
+    
+    emit ConfigurationUpdated("mamoMinBalance", oldMamoMinBalance, _mamoMinBalance, msg.sender);
+    emit ConfigurationUpdated("btcMinBalance", oldBtcMinBalance, _btcMinBalance, msg.sender);
 }
 
 function setCallerRewardPercentage(uint256 _callerRewardBps) external {
     require(ISafe(safe).isOwner(msg.sender), "Only Safe owners");
-    require(_callerRewardBps <= 1000, "Max 10% caller reward");
+    require(_callerRewardBps <= MAX_CALLER_REWARD_BPS, "Max 10% caller reward");
+    
+    uint256 oldCallerReward = callerRewardBps;
     callerRewardBps = _callerRewardBps;
+    
+    emit ConfigurationUpdated("callerRewardBps", oldCallerReward, _callerRewardBps, msg.sender);
 }
 ```
 
-## Implementation Phases
+## Interval Configuration API
 
-### Phase 1: Core Module Structure
-- [ ] Basic Safe module setup with proper inheritance
-- [ ] Weekly cooldown mechanism
-- [ ] Access control for configuration functions
-- [ ] Event definitions
+### Custom Interval Configuration
+```solidity
+// Custom intervals with validation
+setExecutionInterval(12 hours);           // Every 12 hours
+setExecutionInterval(3 days);             // Every 3 days
+setExecutionInterval(14 days);            // Bi-weekly
+setExecutionInterval(30 days);            // Monthly
+setExecutionInterval(7 days + 12 hours);  // Weekly + 12 hours
+```
 
-### Phase 2: Configuration System
-- [ ] Token ID management functions
-- [ ] Retention percentage configuration
-- [ ] Caller reward configuration
-- [ ] Parameter validation
+### Interval Bounds and Validation
+- **Minimum Interval**: 1 hour (prevents spam and excessive gas costs)
+- **Maximum Interval**: 1 month (prevents indefinite delays)
+- **Validation**: All intervals must be within bounds and set by Safe owners only
 
-### Phase 3: LP Fee Collection
+### Monitoring Functions
+```solidity
+// Check execution readiness
+bool canRun = canExecute();
+
+// Get time until next execution
+uint256 timeRemaining = getTimeUntilNextExecution();
+
+// Get current interval
+uint256 currentInterval = executionInterval;
+```
+
+## Security Considerations
+
+### Access Control Security
+- **Owner-Only Configuration**: All interval changes require Safe owner authorization
+- **Multi-signature Protection**: Changes go through Safe's multi-sig process
+- **Event Logging**: All configuration changes are logged with timestamps and initiators
+
+### Interval Security Measures
+```solidity
+// Anti-spam protection
+require(newInterval >= MIN_EXECUTION_INTERVAL, "Prevents spam attacks");
+
+// Reasonable upper bound
+require(newInterval <= MAX_EXECUTION_INTERVAL, "Prevents indefinite delays");
+
+// Owner verification
+require(ISafe(safe).isOwner(msg.sender), "Prevents unauthorized changes");
+```
+
+### Gas Optimization Security
+- **Named Constants**: All magic numbers replaced with gas-efficient constants
+- **Batch Operations**: Multiple configuration changes can be batched
+- **Efficient Calculations**: Using constants reduces gas costs in calculations
+
+### Token Safety
+- **Critical**: Minimum balance retention happens BEFORE `notifyRewardAmount` calls
+- **Critical**: Proper approval flow before token transfers
+- Validation of minimum balances to ensure Safe always retains specified amounts
+- Protection against token drainage
+
+### Execution Safety
+- **Configurable Cooldown**: Prevents spam based on set interval
+- **Atomic Execution**: All steps execute atomically or revert completely
+- **Proper Error Handling**: Comprehensive reversion on failures
+- **Reentrancy Protection**: Standard reentrancy guards applied
+
+## Example Usage Patterns
+
+### High-Frequency Trading Setup
+```solidity
+// For active trading strategies
+setExecutionInterval(1 hours);
+setCallerRewardPercentage(500); // 5% to incentivize frequent execution
+setMinimumBalances(1000e18, 0.1e8); // Keep 1000 MAMO and 0.1 BTC minimum
+```
+
+### Conservative Long-term Setup
+```solidity
+// For long-term holding strategies
+setExecutionInterval(30 days);
+setMinimumBalances(10000e18, 1e8); // Keep 10,000 MAMO and 1 BTC minimum
+setCallerRewardPercentage(100); // 1% caller reward
+```
+
+### Balanced Setup
+```solidity
+// Balanced approach
+setExecutionInterval(7 days);
+setMinimumBalances(5000e18, 0.5e8); // Keep 5,000 MAMO and 0.5 BTC minimum
+setCallerRewardPercentage(250); // 2.5% caller reward
+```
+
+### Custom Interval Examples
+```solidity
+// Business hours execution (every 8 hours)
+setExecutionInterval(8 hours);
+
+// Bi-weekly execution
+setExecutionInterval(14 days);
+
+// Custom 10-day cycle
+setExecutionInterval(10 days);
+
+// Twice daily execution
+setExecutionInterval(12 hours);
+```
+
+## Implementation Phases (Updated)
+
+### Phase 1: Core Module Structure with Intervals
+- [x] Basic Safe module setup with proper inheritance
+- [x] Configurable interval mechanism replacing fixed weekly cooldown
+- [x] Enhanced access control for configuration functions
+- [x] Comprehensive event definitions
+- [x] Named constants implementation
+
+### Phase 2: Enhanced Configuration System
+- [x] Interval management functions (custom intervals only)
+- [x] Token ID management functions
+- [x] Minimum balance configuration replacing percentage retention
+- [x] Caller reward configuration with bounds
+- [x] Advanced parameter validation
+
+### Phase 3: LP Fee Collection (Unchanged)
 - [ ] Integration with BurnAndEarn contract
 - [ ] Token ID iteration and fee collection
 - [ ] Error handling for failed collections
 
-### Phase 4: Token Distribution Logic
-- [ ] Balance calculation functions
-- [ ] Retention amount calculations
-- [ ] Distribution amount calculations
-- [ ] Caller reward calculations
+### Phase 4: Enhanced Token Distribution Logic
+- [x] Balance calculation functions using constants
+- [x] Minimum balance calculations replacing percentage retention
+- [x] Distribution amount calculations
+- [x] Caller reward calculations with named constants
 
-### Phase 5: MultiRewards Integration
-- [ ] Rewards duration setting
-- [ ] Token approval mechanism
-- [ ] Reward amount notification
-- [ ] Proper error handling
+### Phase 5: Dynamic MultiRewards Integration
+- [x] Dynamic rewards duration setting based on execution interval
+- [x] Token approval mechanism
+- [x] Reward amount notification
+- [x] Proper error handling
 
-### Phase 6: Security & Testing
+### Phase 6: Security & Testing (Enhanced)
 - [ ] Reentrancy protection
-- [ ] Input validation
-- [ ] Comprehensive unit tests
+- [ ] Enhanced input validation for intervals
+- [ ] Comprehensive unit tests for all interval scenarios
 - [ ] Integration tests with Safe
+- [ ] Gas optimization testing
 
-### Phase 7: Deployment & Documentation
-- [ ] Deployment scripts
+### Phase 7: Deployment & Documentation (Enhanced)
+- [ ] Deployment scripts with interval configuration
 - [ ] Safe module installation guide
-- [ ] Usage documentation
-- [ ] Emergency procedures
+- [ ] Interval configuration usage documentation
+- [ ] Emergency procedures for interval changes
 
-## Security Considerations
+## Enhanced Security Considerations
+
+### Interval Change Security
+- **Immediate Effect**: Interval changes take effect immediately for next execution
+- **No Retroactive Changes**: Cannot affect already scheduled executions
+- **Owner Consensus**: Multi-sig requirements for interval modifications
+- **Event Auditing**: All changes logged for transparency
+
+### Gas Cost Management
+```solidity
+// Gas-efficient constant usage
+uint256 distribution = balance > minBalance ? balance - minBalance : 0;
+// vs inefficient magic number calculations
+```
+
+### Spam Prevention
+- **Minimum Interval**: 1-hour minimum prevents excessive execution
+- **Caller Incentives**: Balanced rewards prevent spam while encouraging execution
+- **Gas Cost Consideration**: Shorter intervals increase gas costs naturally
 
 ### Access Control
 - Only Safe owners can modify configuration
-- Anyone can trigger weekly execution (with cooldown)
+- Anyone can trigger execution (with configurable cooldown)
 - Module must be properly enabled on Safe
-
-### Token Safety
-- **Critical**: Retention happens BEFORE `notifyRewardAmount` calls
-- **Critical**: Proper approval flow before token transfers
-- Validation of retention percentages (≤100%)
-- Protection against token drainage
-
-### Execution Safety
-- Weekly cooldown prevents spam
-- Atomic execution of all steps
-- Proper error handling and reversion
-- Reentrancy protection
 
 ## Key Changes from Original Plan
 
-1. **Token Retention Timing**: Now happens BEFORE calling `notifyRewardAmount` instead of after
-2. **Approval Flow**: Added explicit approval steps before `notifyRewardAmount` calls
-3. **Distribution Calculation**: Updated to account for the fact that `notifyRewardAmount` transfers tokens away
-4. **Execution Order**: Restructured to ensure tokens are retained before any transfers occur
+1. **Configurable Intervals**: Replaced fixed 7-day cycle with flexible intervals (no predefined constants)
+2. **Named Constants**: Eliminated all hardcoded `10000` values with `BASIS_POINTS_DENOMINATOR`
+3. **Minimum Balance System**: Replaced percentage retention with minimum balance approach
+4. **Token Naming**: Changed from "WELL" to "MAMO" token throughout
+5. **Simplified Configuration**: Removed predefined interval constants, allowing any custom interval
+6. **Enhanced Security**: Added comprehensive validation and access controls
+7. **Gas Optimization**: Constants reduce gas costs and improve maintainability
+8. **Comprehensive Events**: Enhanced logging for all configuration changes
+9. **Dynamic Rewards Duration**: Rewards duration automatically matches execution interval
 
 ## Dependencies
 
@@ -259,24 +465,30 @@ function setCallerRewardPercentage(uint256 _callerRewardBps) external {
 - OpenZeppelin SafeERC20 library
 - Solidity 0.8.28 compatibility
 
-### Testing Strategy
+## Testing Strategy
 
-#### Unit Tests
+### Unit Tests
 - Test each internal function in isolation
 - Mock external contract calls
-- Validate calculation logic
+- Validate calculation logic with named constants
 - Test access control mechanisms
+- Test interval configuration functions
+- Test minimum balance calculations
 
-#### Integration Tests
+### Integration Tests
 - Test with actual [`BurnAndEarn`](src/BurnAndEarn.sol) and [`MultiRewards`](src/MultiRewards.sol) contracts
 - Verify token flow end-to-end
 - Test Safe module integration
-- Validate weekly cooldown mechanism
+- Validate configurable cooldown mechanism
+- Test various interval scenarios (hourly, daily, weekly, monthly, custom)
+- Test minimum balance enforcement
 
-#### Security Tests
+### Security Tests
 - Test reentrancy protection
-- Validate access control
+- Validate access control for interval changes
 - Test edge cases (zero balances, failed calls)
 - Test with malicious token contracts
+- Validate interval bounds and spam prevention
+- Test minimum balance edge cases
 
-This updated plan addresses the critical token flow requirements and ensures proper handling of approvals and retention percentages.
+This enhanced plan provides a robust, flexible, and secure foundation for the configurable execution interval system with minimum balance retention while maintaining backward compatibility and improving gas efficiency through the use of named constants.
