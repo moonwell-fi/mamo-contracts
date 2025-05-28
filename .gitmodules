@@ -13,3 +13,6 @@
 [submodule "lib/openzeppelin-foundry-upgrades"]
 	path = lib/openzeppelin-foundry-upgrades
 	url = https://github.com/OpenZeppelin/openzeppelin-foundry-upgrades
+[submodule "lib/safe-smart-account"]
+	path = lib/safe-smart-account
+	url = https://github.com/safe-global/safe-smart-account

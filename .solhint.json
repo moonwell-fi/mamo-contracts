@@ -1,0 +1,6 @@
+{
+  "extends": "solhint:recommended",
+  "rules": {
+    "immutable-vars-naming": "off"
+  }
+}
