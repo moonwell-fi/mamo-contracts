@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
 
-import {MAMO} from "@contracts/token/Mamo.sol";
+import {MAMO} from "@contracts/Mamo.sol";
 import {Script} from "@forge-std/Script.sol";
 import {StdStyle} from "@forge-std/StdStyle.sol";
 
