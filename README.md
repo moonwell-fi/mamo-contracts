@@ -32,9 +32,3 @@ Enable users to deploy personal strategy contracts and let Mamo Agent manage the
 9. The system does not support fee-on-transfer tokens. Using such tokens would result in deposit and withdrawal failures due to balance discrepancies, as the contracts assume that the exact amount of tokens specified is transferred.
 
 
-## TODO
-
-- [ ] Update docs
-- [ ] Increase coverage
-- [ ] Create mamo json deployment config 
-- [ ] Mamo integrationt tests
