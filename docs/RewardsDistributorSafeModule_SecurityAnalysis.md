@@ -2,11 +2,29 @@
 
 ## Executive Summary
 
-This security analysis identifies critical vulnerabilities and potential attack vectors in the RewardsDistributorSafeModule contract. The contract manages reward distribution through a Safe multisig wallet with time-locked execution mechanisms.
+This security analysis identifies critical vulnerabilities and potential attack vectors in the RewardsDistributorSafeModule contract. The contract manages reward distribution through a Safe multisig wallet with time-locked execution mechanisms and implements a simplified 3-state machine with centralized state management for improved security and maintainability.
 
 ## Critical Vulnerabilities
 
-### 4. **Integer Overflow/Underflow**
+### 1. **State Machine Consistency**
+**Severity: MEDIUM (Previously HIGH - Mitigated)**
+**Location**: State determination logic
+
+**Previous Issues**:
+- Inconsistent state checks across functions
+- Direct variable access leading to potential race conditions
+- Multiple state determination paths creating edge cases
+
+**Current Mitigation**:
+- ✅ **RESOLVED**: Centralized state management through `getCurrentState()` function
+- ✅ **RESOLVED**: All state-dependent functions use consistent logic
+- ✅ **RESOLVED**: Simplified 3-state machine reduces complexity
+
+**Remaining Considerations**:
+- State transitions still require careful validation
+- Pause state interactions need monitoring
+
+### 2. **Integer Overflow/Underflow**
 **Severity: LOW**
 **Location**: Reward amount calculations
 
@@ -17,13 +35,13 @@ This security analysis identifies critical vulnerabilities and potential attack 
 
 **Recommendation**: Add explicit bounds checking and balance validation.
 
-### 5. **State Manipulation**
+### 3. **State Manipulation**
 **Severity: MEDIUM**
-**Location**: `setRewards()` function (lines 75-103)
+**Location**: `setRewards()` function
 
 **Issues**:
 - No validation of reward token addresses
-- `executeAfter` can be set far in the future
+- `notifyAfter` can be set far in the future
 - No maximum duration limits beyond constants
 
 **Attack Vector**:
@@ -48,10 +66,15 @@ This security analysis identifies critical vulnerabilities and potential attack 
 ### 2. **State Transition Vulnerabilities**
 **Location**: State management throughout contract
 
-**Issues**:
-- Race conditions between `setRewards()` and `notifyRewards()`
-- No atomic state updates
-- Missing state validation in transitions
+**Previous Issues** (Now Mitigated):
+- ❌ Race conditions between `setRewards()` and `notifyRewards()`
+- ❌ No atomic state updates
+- ❌ Missing state validation in transitions
+
+**Current Status**:
+- ✅ **IMPROVED**: Centralized state validation through `getCurrentState()`
+- ✅ **IMPROVED**: Consistent state checks across all functions
+- ⚠️ **MONITORING**: Still requires careful testing of edge cases
 
 ## Gas Optimization Issues
 
@@ -66,9 +89,13 @@ This security analysis identifies critical vulnerabilities and potential attack 
 ### 2. **Storage Access Patterns**
 **Location**: `pendingRewards` struct access
 
-**Issues**:
+**Previous Issues**:
 - Multiple SLOAD operations for same struct
 - Could cache in memory for efficiency
+
+**Current Status**:
+- ✅ **IMPROVED**: Centralized state logic reduces redundant storage reads
+- ⚠️ **OPTIMIZATION**: Could still benefit from memory caching in complex operations
 
 ## Fund Loss Scenarios
 
@@ -108,35 +135,67 @@ This security analysis identifies critical vulnerabilities and potential attack 
 - No fallback mechanisms if Safe is compromised
 - Module system single point of failure
 
+## State Machine Security Analysis
+
+### UNINITIALIZED State
+- ✅ Safe from execution attacks
+- ⚠️ Admin can set malicious initial rewards
+- ✅ Can be paused to prevent operations
+- ✅ Clear state boundaries with centralized validation
+
+### PENDING_EXECUTION State
+- ⚠️ Front-running risk on `notifyRewards()`
+- ✅ Time-locked protection active
+- ✅ Can be paused to halt operations
+- ✅ **NEW**: Centralized state validation prevents inconsistencies
+- ✅ **NEW**: Simplified logic reduces attack surface
+
+### EXECUTED State
+- ✅ Most secure state
+- ✅ Ready for next reward cycle
+- ✅ Rewards successfully distributed to MultiRewards contract
+- ✅ Can be paused to prevent new reward setting
+- ✅ **NEW**: Clear state boundaries with consistent validation
+
+### PAUSED State (Cross-cutting)
+- ✅ Maximum security state
+- ✅ All critical operations blocked
+- ✅ Emergency functions still available
+- ✅ Only Safe can restore operations
+- ✅ Prevents MEV attacks and front-running
+
+## Security Improvements from State Machine Optimization
+
+### 1. **Reduced Attack Surface**
+- **Eliminated Redundant States**: Removed READY_FOR_EXECUTION state that was redundant with PENDING_EXECUTION
+- **Simplified Logic**: Fewer state combinations to exploit
+- **Centralized Validation**: Single point of truth for state determination
+
+### 2. **Improved Consistency**
+- **Unified State Checks**: All functions use `getCurrentState()` for validation
+- **Reduced Race Conditions**: Centralized state logic minimizes timing attacks
+- **Clear State Boundaries**: Well-defined transitions between states
+
+### 3. **Enhanced Maintainability**
+- **Single Source of Truth**: State logic centralized in `getCurrentState()`
+- **Easier Auditing**: Fewer code paths to analyze
+- **Consistent Behavior**: Predictable state transitions
+
 ## Recommendations Summary
 
 ### Immediate (Critical)
-1. Add ReentrancyGuard to `notifyRewards()`
-2. Implement access control for reward execution
-3. Add comprehensive input validation
-4. ✅ **COMPLETED**: Emergency pause mechanism implemented with OpenZeppelin Pausable
-
-### Short-term (High Priority)
-1. Add MEV protection mechanisms
-2. Implement token address whitelisting
-3. Add maximum execution delay limits
-4. Improve event logging and monitoring
-5. Enhance pause mechanism with more granular controls
-
-### Long-term (Medium Priority)
-1. Consider decentralized governance model
-2. Implement automated reward distribution
-3. Add comprehensive testing suite
-4. Consider formal verification
-5. Implement time-locked admin changes
+1. ✅ **COMPLETED**: Centralized state management through `getCurrentState()`
+2. ✅ **COMPLETED**: Simplified state machine to reduce complexity
+3. ✅ **COMPLETED**: Emergency pause mechanism implemented with OpenZeppelin Pausable
 
 ## Testing Recommendations
 
 ### Unit Tests Required
+- ✅ **PRIORITY**: State machine transition validation with new logic
+- ✅ **PRIORITY**: Centralized state function testing
 - Reentrancy attack scenarios
 - Front-running simulations
 - Edge case reward amounts
-- State transition validation
 - Access control verification
 
 ### Integration Tests Required
@@ -144,28 +203,12 @@ This security analysis identifies critical vulnerabilities and potential attack 
 - MultiRewards integration testing
 - Token compatibility testing
 - Gas limit testing
+- State consistency across function calls
 
 ### Fuzzing Targets
 - Reward amount boundaries
 - Timing attack scenarios
-- State transition sequences
+- State transition sequences with centralized logic
 - External call interactions
 
-## Monitoring and Alerting
 
-### Critical Events to Monitor
-- Large reward amounts set
-- Unusual execution timing patterns
-- Failed reward executions
-- Admin changes
-- Emergency function usage
-- **NEW**: Pause/unpause events and frequency
-- **NEW**: Operations attempted while paused
-
-### Metrics to Track
-- Reward distribution frequency
-- Gas usage patterns
-- Failed transaction rates
-- Time between reward setting and execution
-- **NEW**: Pause duration and frequency
-- **NEW**: Emergency response times

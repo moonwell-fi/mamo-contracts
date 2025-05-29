@@ -2,40 +2,30 @@
 
 ## Contract States
 
+The contract now uses a simplified 3-state machine with centralized state determination through the `getCurrentState()` function.
+
 ### 1. **UNINITIALIZED**
 - **Description**: Contract deployed but no rewards have been set
-- **Conditions**: `pendingRewards.executeAfter == 0`
+- **Conditions**: `pendingRewards.notifyAfter == 0`
 - **Available Actions**:
   - `setRewards()` (admin only, when not paused)
   - `pause()` (safe only)
   - `unpause()` (safe only)
 
 ### 2. **PENDING_EXECUTION**
-- **Description**: Rewards are set but not yet ready for execution
+- **Description**: Rewards are set and waiting for execution (includes time-locked period)
 - **Conditions**:
-  - `pendingRewards.executeAfter > 0`
+  - `pendingRewards.notifyAfter > 0`
   - `!pendingRewards.isNotified`
-  - `block.timestamp < pendingRewards.executeAfter`
 - **Available Actions**:
-  - `setRewards()` (admin only, if current rewards notified and not paused)
+  - `notifyRewards()` (anyone, when `block.timestamp >= pendingRewards.notifyAfter` and not paused)
+  - `setRewards()` (admin only, if current rewards executed and not paused)
   - `pause()` (safe only)
   - `unpause()` (safe only)
   - Wait for execution time
 
-### 3. **READY_FOR_EXECUTION**
-- **Description**: Rewards are ready to be executed
-- **Conditions**:
-  - `pendingRewards.executeAfter > 0`
-  - `!pendingRewards.isNotified`
-  - `block.timestamp >= pendingRewards.executeAfter`
-- **Available Actions**:
-  - `notifyRewards()` (anyone, when not paused)
-  - `setRewards()` (admin only, if current rewards notified and not paused)
-  - `pause()` (safe only)
-  - `unpause()` (safe only)
-
-### 4. **NOTIFIED**
-- **Description**: Current rewards have been notified to MultiRewards
+### 3. **EXECUTED**
+- **Description**: Current rewards have been executed and notified to MultiRewards
 - **Conditions**: `pendingRewards.isNotified == true`
 - **Available Actions**:
   - `setRewards()` (admin only, when not paused)
@@ -45,7 +35,7 @@
   - `pause()` (safe only)
   - `unpause()` (safe only)
 
-### 5. **PAUSED**
+### **PAUSED** (Cross-cutting State)
 - **Description**: Contract operations are paused for emergency situations
 - **Conditions**: `paused() == true`
 - **Available Actions**:
@@ -64,32 +54,41 @@ stateDiagram-v2
     UNINITIALIZED --> PENDING_EXECUTION : setRewards() [first time, not paused]
     UNINITIALIZED --> PAUSED : pause()
     
-    PENDING_EXECUTION --> READY_FOR_EXECUTION : Time passes (block.timestamp >= executeAfter)
-    PENDING_EXECUTION --> PENDING_EXECUTION : setRewards() [if notified, not paused]
+    PENDING_EXECUTION --> EXECUTED : notifyRewards() [when ready, not paused]
+    PENDING_EXECUTION --> PENDING_EXECUTION : setRewards() [if executed, not paused]
     PENDING_EXECUTION --> PAUSED : pause()
     
-    READY_FOR_EXECUTION --> NOTIFIED : notifyRewards() [not paused]
-    READY_FOR_EXECUTION --> PENDING_EXECUTION : setRewards() [if notified, not paused]
-    READY_FOR_EXECUTION --> PAUSED : pause()
-    
-    NOTIFIED --> PENDING_EXECUTION : setRewards() [new rewards, not paused]
-    NOTIFIED --> NOTIFIED : Admin/Safe operations
-    NOTIFIED --> PAUSED : pause()
+    EXECUTED --> PENDING_EXECUTION : setRewards() [new rewards, not paused]
+    EXECUTED --> EXECUTED : Admin/Safe operations
+    EXECUTED --> PAUSED : pause()
     
     PAUSED --> UNINITIALIZED : unpause() [if uninitialized]
     PAUSED --> PENDING_EXECUTION : unpause() [if pending]
-    PAUSED --> READY_FOR_EXECUTION : unpause() [if ready]
-    PAUSED --> NOTIFIED : unpause() [if notified]
+    PAUSED --> EXECUTED : unpause() [if executed]
 ```
+
+## Centralized State Management
+
+### State Query Functions
+- **`getCurrentState()`**: Returns the current RewardState enum value
+- **`isReadyForExecution()`**: Returns true if rewards can be executed now
+- **`getExecutionTimestamp()`**: Returns the timestamp when rewards become executable
+- **`isPaused()`**: Returns the pause status from OpenZeppelin Pausable
+
+### State Determination Logic
+All state-dependent functions now use the centralized `getCurrentState()` function:
+- `notifyRewards()` checks `getCurrentState() == RewardState.PENDING_EXECUTION`
+- `setRewards()` checks `getCurrentState() == RewardState.UNINITIALIZED` or `RewardState.EXECUTED`
+- `isReadyForExecution()` uses `getCurrentState() == RewardState.PENDING_EXECUTION`
 
 ## Trigger Conditions
 
 ### Time-Based Triggers
-- **Execution Window Opens**: `block.timestamp >= pendingRewards.executeAfter`
+- **Execution Window Opens**: `block.timestamp >= pendingRewards.notifyAfter`
 - **Reward Duration**: Configurable between 1-30 days
 
 ### Admin Triggers
-- **Set New Rewards**: `setRewards()` - Only when previous rewards notified
+- **Set New Rewards**: `setRewards()` - Only when previous rewards executed or uninitialized
 - **Update Admin**: `setAdmin()` - Safe only
 - **Update Duration**: `setRewardDuration()` - Safe only
 
@@ -108,14 +107,15 @@ stateDiagram-v2
 
 ## Critical State Invariants
 
-1. **Notification Order**: Rewards must be notified before new ones can be set
-2. **Time Constraint**: `executeAfter` must be in the future when setting rewards
-3. **Sequential Execution**: New `executeAfter` must be greater than previous
+1. **Execution Order**: Rewards must be executed before new ones can be set
+2. **Time Constraint**: `notifyAfter` must be in the future when setting rewards
+3. **Sequential Execution**: New `notifyAfter` must be greater than previous
 4. **Amount Validation**: At least one reward amount (BTC or MAMO) must be > 0
 5. **Balance Requirements**: Safe must have sufficient token balances before notification
-6. **State Consistency**: `isNotified` flag tracks notification status accurately
+6. **State Consistency**: `isNotified` flag tracks execution status accurately
 7. **Pause State**: When paused, `setRewards()` and `notifyRewards()` are blocked
 8. **Pause Authority**: Only Safe can pause/unpause the contract
+9. **Centralized Logic**: All state checks use `getCurrentState()` for consistency
 
 ## Emergency States
 
@@ -135,14 +135,9 @@ stateDiagram-v2
 - ⚠️ Front-running risk on `notifyRewards()`
 - ✅ Time-locked protection active
 - ✅ Can be paused to halt operations
+- ✅ Centralized state validation prevents inconsistencies
 
-### READY_FOR_EXECUTION
-- ⚠️ MEV extraction opportunities
-- ⚠️ Anyone can trigger execution
-- ⚠️ Potential for sandwich attacks
-- ✅ Can be paused to prevent execution
-
-### NOTIFIED
+### EXECUTED
 - ✅ Most secure state
 - ✅ Ready for next reward cycle
 - ✅ Rewards successfully distributed to MultiRewards contract
@@ -154,3 +149,20 @@ stateDiagram-v2
 - ✅ Emergency functions still available
 - ✅ Only Safe can restore operations
 - ✅ Prevents MEV attacks and front-running
+
+## Optimization Benefits
+
+### Simplified State Model
+- **Reduced Complexity**: Eliminated redundant READY_FOR_EXECUTION state
+- **Cleaner Logic**: PENDING_EXECUTION handles both waiting and ready states
+- **Centralized Validation**: All state checks use consistent logic
+
+### Improved Maintainability
+- **Single Source of Truth**: `getCurrentState()` function centralizes state logic
+- **Consistent Behavior**: All functions use the same state determination
+- **Easier Testing**: Fewer state combinations to validate
+
+### Enhanced Security
+- **Reduced Attack Surface**: Fewer state transitions to exploit
+- **Consistent Validation**: Centralized state checks prevent edge cases
+- **Clear State Boundaries**: Well-defined state transitions

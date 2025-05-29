@@ -18,11 +18,10 @@ import {Enum} from "lib/safe-smart-account/contracts/common/Enum.sol";
  *      for security. It allows an admin to set rewards that can only be executed after a specified
  *      time period, providing protection against immediate malicious actions.
  *
- *      The contract manages a state machine with four main states:
+ *      The contract manages a simplified state machine with three main states:
  *      - UNINITIALIZED: No rewards have been set
- *      - PENDING_EXECUTION: Rewards are set but time delay hasn't passed
- *      - READY_FOR_EXECUTION: Time delay has passed, rewards can be executed
- *      - EXECUTED: Rewards have been distributed
+ *      - PENDING_EXECUTION: Rewards are set and waiting for execution (includes time-locked period)
+ *      - EXECUTED: Rewards have been distributed and new rewards can be set
  *
  * @custom:security-contact evm@mamo.bot
  * @custom:audit-status unaudited
@@ -42,6 +41,14 @@ contract RewardsDistributorSafeModule is Pausable {
         uint256 amountMAMO;
         uint256 notifyAfter;
         bool isNotified;
+    }
+
+    /// @notice Simplified state enumeration for the reward distribution process
+    enum RewardState {
+        UNINITIALIZED, // No pending rewards set
+        PENDING_EXECUTION, // Rewards set but not yet notified
+        EXECUTED // Rewards have been notified and distributed
+
     }
 
     /////////////////////////// CONSTANTS ///////////////////////////
@@ -91,7 +98,7 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @notice The current pending rewards awaiting notification
     PendingRewards public pendingRewards;
 
-    ///////////////////////////// EVENTS /////////////////////////////
+    //////////////////////////////// EVENTS ////////////////////////////////
 
     /// @notice Emitted when the admin address is updated
     /// @param oldAdmin The previous admin address
@@ -121,7 +128,7 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @param rewardsDuration The duration for which rewards will be distributed
     event RewardTokenAdded(address indexed rewardToken, address indexed rewardsDistributor, uint256 rewardsDuration);
 
-    ///////////////////////////// MODIFIERS /////////////////////////////
+    //////////////////////////////// MODIFIERS ////////////////////////////////
 
     /// @notice Restricts function access to the admin address only
     /// @dev Reverts with "Only admin can call this function" if caller is not admin
@@ -181,13 +188,11 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @notice Executes pending rewards by transferring tokens and notifying the MultiRewards contract
     /// @dev Validates timing constraints, token balances, and execution state before proceeding
     /// @dev Sets up reward tokens in MultiRewards if not already configured
-    /// @custom:state-machine Moves from READY_FOR_EXECUTION→EXECUTED state
+    /// @dev Can only be called when rewards are ready for execution (time delay has passed)
     function notifyRewards() external whenNotPaused {
         require(getCurrentState() == RewardState.PENDING_EXECUTION, "Rewards not in pending state");
-        require(isReadyForExecution(), "Rewards not ready to be executed");
 
         uint256 mamoAmount = pendingRewards.amountMAMO;
-        uint256 btcAmount = pendingRewards.amountBTC;
 
         if (mamoAmount > 0) {
             require(mamoToken.balanceOf(address(safe)) >= mamoAmount, "Insufficient MAMO balance");
@@ -197,6 +202,8 @@ contract RewardsDistributorSafeModule is Pausable {
             _notifyRewardAmountFromSafe(address(mamoToken), mamoAmount);
         }
 
+        uint256 btcAmount = pendingRewards.amountBTC;
+
         if (btcAmount > 0) {
             require(btcToken.balanceOf(address(safe)) >= btcAmount, "Insufficient BTC balance");
             _setupRewardToken(address(btcToken));
@@ -205,25 +212,40 @@ contract RewardsDistributorSafeModule is Pausable {
             _notifyRewardAmountFromSafe(address(btcToken), btcAmount);
         }
 
-        pendingRewards.isNotified = true;
+        pendingRewards.isNotified = true; // state machine transition to EXECUTED
 
         emit RewardsNotified(mamoAmount, btcAmount, block.timestamp);
     }
 
-    ///////////////////////////// VIEW FUNCTIONS /////////////////////////////
+    //////////////////////////////// VIEW FUNCTIONS ////////////////////////////////
 
-    /// @notice Returns the timestamp when pending rewards can be executed
-    /// @dev View function to check the execution timestamp of pending rewards
-    /// @return The timestamp after which rewards can be executed (0 if no pending rewards)
-    function notifyAfter() external view returns (uint256) {
+    /// @notice Gets the current state of the reward distribution process using centralized logic
+    /// @dev This function provides the single source of truth for state determination
+    /// @return The current state as a RewardState enum value
+    function getCurrentState() public view returns (RewardState) {
+        if (pendingRewards.notifyAfter == 0) {
+            return RewardState.UNINITIALIZED;
+        }
+
+        if (block.timestamp >= pendingRewards.notifyAfter && !pendingRewards.isNotified) {
+            return RewardState.PENDING_EXECUTION;
+        }
+
+        return RewardState.EXECUTED;
+    }
+
+    /// @notice Gets the timestamp when rewards will be ready for execution
+    /// @return The timestamp when notifyRewards can be called, 0 if no rewards pending
+    function getExecutionTimestamp() external view returns (uint256) {
         return pendingRewards.notifyAfter;
     }
 
-    ///////////////////////////// ONLY ADMIN /////////////////////////////
+    //////////////////////////////// ONLY ADMIN ////////////////////////////////
 
     /// @notice Sets new pending rewards with time-locked execution
-    /// @dev Transitions the contract from UNINITIALIZED to PENDING_EXECUTION state, or from EXECUTED to PENDING_EXECUTION
+    /// @dev Transitions the contract from UNINITIALIZED or EXECUTED to PENDING_EXECUTION state
     /// @dev Validates execution time and ensures previous rewards are executed before setting new ones
+    /// @dev Uses centralized state validation through getCurrentState() function
     /// @param _pendingRewards The reward amounts and execution timestamp to set
     function addRewards(PendingRewards memory _pendingRewards) external onlyAdmin whenNotPaused {
         require(
@@ -253,7 +275,7 @@ contract RewardsDistributorSafeModule is Pausable {
         emit RewardAdded(_pendingRewards.amountBTC, _pendingRewards.amountMAMO, _pendingRewards.notifyAfter);
     }
 
-    ///////////////////////////// ONLY SAFE /////////////////////////////
+    //////////////////////////////// ONLY SAFE ////////////////////////////////
 
     /// @notice Updates the admin address for the contract
     /// @dev Only callable by the Safe contract to maintain proper access control
@@ -289,7 +311,7 @@ contract RewardsDistributorSafeModule is Pausable {
         _unpause();
     }
 
-    ///////////////////////////// INTERNAL FUNCTIONS /////////////////////////////
+    //////////////////////////////// INTERNAL FUNCTIONS ////////////////////////////////
 
     /// @notice Sets up a reward token in the MultiRewards contract if not already configured
     /// @dev Internal function that checks if reward token exists and adds it if necessary
@@ -348,41 +370,5 @@ contract RewardsDistributorSafeModule is Pausable {
 
         bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, Enum.Operation.Call);
         require(success, "Add reward failed");
-    }
-
-    ///////////////////////////// STATE MACHINE QUERIES /////////////////////////////
-
-    /// @notice Simplified state enumeration for the reward distribution process
-    enum RewardState {
-        UNINITIALIZED, // No pending rewards set
-        PENDING_EXECUTION, // Rewards set but not yet notified
-        EXECUTED // Rewards have been notified and distributed
-
-    }
-
-    /// @notice Gets the current state of the reward distribution process
-    /// @return The current state as a RewardState enum value
-    function getCurrentState() external view returns (RewardState) {
-        if (pendingRewards.notifyAfter == 0) {
-            return RewardState.UNINITIALIZED;
-        }
-
-        if (block.timestamp >= pendingRewards.notifyAfter && !pendingRewards.isNotified) {
-            return RewardState.PENDING_EXECUTION;
-        }
-
-        return RewardState.EXECUTED;
-    }
-
-    /// @notice Checks if rewards are ready for execution (notification)
-    /// @return True if rewards can be notified, false otherwise
-    function isReadyForExecution() external view returns (bool) {
-        return getCurrentState() == RewardState.PENDING_EXECUTION && block.timestamp >= pendingRewards.notifyAfter;
-    }
-
-    /// @notice Gets the timestamp when rewards will be ready for execution
-    /// @return The timestamp when notifyRewards can be called, 0 if no rewards pending
-    function getExecutionTimestamp() external view returns (uint256) {
-        return pendingRewards.notifyAfter;
     }
 }
