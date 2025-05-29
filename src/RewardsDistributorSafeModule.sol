@@ -157,6 +157,15 @@ contract RewardsDistributorSafeModule is Pausable {
         address _admin,
         uint256 _rewardDuration
     ) {
+        require(_safe != address(0), "Invalid Safe address");
+        require(_burnAndEarn != address(0), "Invalid BurnAndEarn address");
+        require(_multiRewards != address(0), "Invalid MultiRewards address");
+        require(_mamoToken != address(0), "Invalid MAMO token address");
+        require(_btcToken != address(0), "Invalid BTC token address");
+        require(_nftPositionManager != address(0), "Invalid NFT position manager address");
+        require(_admin != address(0), "Invalid admin address");
+        require(_rewardDuration > 0, "Invalid reward duration");
+
         safe = Safe(_safe);
         burnAndEarn = IBurnAndEarn(_burnAndEarn);
         multiRewards = IMultiRewards(_multiRewards);
@@ -174,14 +183,13 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @dev Sets up reward tokens in MultiRewards if not already configured
     /// @custom:state-machine Moves from READY_FOR_EXECUTION→EXECUTED state
     function notifyRewards() external whenNotPaused {
-        require(pendingRewards.isNotified, "Rewards not notified");
-        require(block.timestamp >= pendingRewards.notifyAfter, "Rewards not ready to be executed");
+        require(getCurrentState() == RewardState.PENDING_EXECUTION, "Rewards not in pending state");
+        require(isReadyForExecution(), "Rewards not ready to be executed");
 
         uint256 mamoAmount = pendingRewards.amountMAMO;
         uint256 btcAmount = pendingRewards.amountBTC;
 
         if (mamoAmount > 0) {
-            require(address(mamoToken) != address(0), "Invalid MAMO token address");
             require(mamoToken.balanceOf(address(safe)) >= mamoAmount, "Insufficient MAMO balance");
 
             _approveTokenFromSafe(address(mamoToken), address(multiRewards), mamoAmount);
@@ -190,7 +198,6 @@ contract RewardsDistributorSafeModule is Pausable {
         }
 
         if (btcAmount > 0) {
-            require(address(btcToken) != address(0), "Invalid BTC token address");
             require(btcToken.balanceOf(address(safe)) >= btcAmount, "Insufficient BTC balance");
             _setupRewardToken(address(btcToken));
 
@@ -218,41 +225,24 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @dev Transitions the contract from UNINITIALIZED to PENDING_EXECUTION state, or from EXECUTED to PENDING_EXECUTION
     /// @dev Validates execution time and ensures previous rewards are executed before setting new ones
     /// @param _pendingRewards The reward amounts and execution timestamp to set
-    function setRewards(PendingRewards memory _pendingRewards) external onlyAdmin whenNotPaused {
+    function addRewards(PendingRewards memory _pendingRewards) external onlyAdmin whenNotPaused {
+        require(
+            getCurrentState() == RewardState.EXECUTED || getCurrentState() == RewardState.UNINITIALIZED,
+            "Pending rewards waiting to be executed"
+        );
+
         uint256 currentTime = block.timestamp;
 
-        // Validate balance requirements before setting rewards
-        if (_pendingRewards.amountMAMO > 0) {
-            require(address(mamoToken) != address(0), "Invalid MAMO token address");
-            require(mamoToken.balanceOf(address(safe)) >= _pendingRewards.amountMAMO, "Insufficient MAMO balance");
-        }
+        require(mamoToken.balanceOf(address(safe)) >= _pendingRewards.amountMAMO, "Insufficient MAMO balance");
+        require(btcToken.balanceOf(address(safe)) >= _pendingRewards.amountBTC, "Insufficient BTC balance");
 
-        if (_pendingRewards.amountBTC > 0) {
-            require(address(btcToken) != address(0), "Invalid BTC token address");
-            require(btcToken.balanceOf(address(safe)) >= _pendingRewards.amountBTC, "Insufficient BTC balance");
-        }
-
-        // this means that the first time we set the _pendingRewards
-        if (pendingRewards.notifyAfter == 0) {
-            require(_pendingRewards.notifyAfter > currentTime, "Invalid execute after time");
-            require(_pendingRewards.notifyAfter >= currentTime + MIN_NOTIFY_DELAY, "Execute after time too soon");
-            require(_pendingRewards.notifyAfter <= currentTime + MAX_NOTIFY_DELAY, "Execute after time too far");
-            pendingRewards.notifyAfter = _pendingRewards.notifyAfter;
-            pendingRewards.amountBTC = _pendingRewards.amountBTC;
-            pendingRewards.amountMAMO = _pendingRewards.amountMAMO;
-            pendingRewards.isNotified = false;
-
-            emit RewardAdded(_pendingRewards.amountBTC, _pendingRewards.amountMAMO, _pendingRewards.notifyAfter);
-
-            return;
-        }
-
-        // this means that we are setting the rewards again
-        require(pendingRewards.isNotified, "Pending rewards not notified");
-        require(_pendingRewards.notifyAfter > currentTime, "Invalid execute after time");
-        require(_pendingRewards.notifyAfter >= currentTime + MIN_NOTIFY_DELAY, "Execute after time too soon");
-        require(_pendingRewards.notifyAfter <= currentTime + MAX_NOTIFY_DELAY, "Execute after time too far");
-        require(_pendingRewards.notifyAfter > pendingRewards.notifyAfter, "Invalid execute after time");
+        require(_pendingRewards.notifyAfter > currentTime, "Notify after time is in the past");
+        require(_pendingRewards.notifyAfter >= currentTime + MIN_NOTIFY_DELAY, "Notify after time too soon");
+        require(_pendingRewards.notifyAfter <= currentTime + MAX_NOTIFY_DELAY, "Notify after time too far");
+        require(
+            _pendingRewards.notifyAfter > pendingRewards.notifyAfter,
+            "Notify after time is not greater than the previous notify after time"
+        );
         require(_pendingRewards.amountBTC > 0 || _pendingRewards.amountMAMO > 0, "Invalid reward amount");
 
         pendingRewards.notifyAfter = _pendingRewards.notifyAfter;
@@ -358,5 +348,41 @@ contract RewardsDistributorSafeModule is Pausable {
 
         bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, Enum.Operation.Call);
         require(success, "Add reward failed");
+    }
+
+    ///////////////////////////// STATE MACHINE QUERIES /////////////////////////////
+
+    /// @notice Simplified state enumeration for the reward distribution process
+    enum RewardState {
+        UNINITIALIZED, // No pending rewards set
+        PENDING_EXECUTION, // Rewards set but not yet notified
+        EXECUTED // Rewards have been notified and distributed
+
+    }
+
+    /// @notice Gets the current state of the reward distribution process
+    /// @return The current state as a RewardState enum value
+    function getCurrentState() external view returns (RewardState) {
+        if (pendingRewards.notifyAfter == 0) {
+            return RewardState.UNINITIALIZED;
+        }
+
+        if (block.timestamp >= pendingRewards.notifyAfter && !pendingRewards.isNotified) {
+            return RewardState.PENDING_EXECUTION;
+        }
+
+        return RewardState.EXECUTED;
+    }
+
+    /// @notice Checks if rewards are ready for execution (notification)
+    /// @return True if rewards can be notified, false otherwise
+    function isReadyForExecution() external view returns (bool) {
+        return getCurrentState() == RewardState.PENDING_EXECUTION && block.timestamp >= pendingRewards.notifyAfter;
+    }
+
+    /// @notice Gets the timestamp when rewards will be ready for execution
+    /// @return The timestamp when notifyRewards can be called, 0 if no rewards pending
+    function getExecutionTimestamp() external view returns (uint256) {
+        return pendingRewards.notifyAfter;
     }
 }
