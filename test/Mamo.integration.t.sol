@@ -3,8 +3,8 @@ pragma solidity 0.8.28;
 
 import "@forge-std/Test.sol";
 
+import {MAMO} from "@contracts/Mamo.sol";
 import {IERC7802} from "@contracts/interfaces/IERC7802.sol";
-import {MAMO} from "@contracts/token/Mamo.sol";
 import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MamoDeployScript} from "@script/MamoDeploy.s.sol";

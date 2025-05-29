@@ -57,34 +57,28 @@ contract USDCStrategyTest is Test {
     Addresses public addresses;
 
     // Contracts
-    ERC20MoonwellMorphoStrategy strategy;
-    MamoStrategyRegistry registry;
-    ISlippagePriceChecker slippagePriceChecker;
-    IERC20 usdc;
-    IERC20 well;
-    IMToken mToken;
-    IERC4626 metaMorphoVault;
+    ERC20MoonwellMorphoStrategy public strategy;
+    MamoStrategyRegistry public registry;
+    ISlippagePriceChecker public slippagePriceChecker;
+    IERC20 public usdc;
+    IERC20 public well;
+    IMToken public mToken;
+    IERC4626 public metaMorphoVault;
 
     // Addresses
-    address owner;
-    address backend;
-    address admin;
-    address guardian;
-    address deployer;
+    address public owner;
+    address public backend;
+    address public admin;
+    address public guardian;
+    address public deployer;
 
-    uint256 splitMToken;
-    uint256 splitVault;
+    uint256 public splitMToken;
+    uint256 public splitVault;
 
     DeployConfig.DeploymentConfig public config;
+    uint256 public strategyTypeId;
 
     function setUp() public {
-        _initializeAddresses();
-        _setupSlippagePriceChecker();
-        _deployStrategy();
-        vm.warp(block.timestamp + 1 hours);
-    }
-
-    function _initializeAddresses() private {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
@@ -108,6 +102,47 @@ contract USDCStrategyTest is Test {
         well = IERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
+
+        if (addresses.isAddressSet("MOONWELL_STRATEGY_REGISTRY")) {
+            registry = MamoStrategyRegistry(addresses.getAddress("MOONWELL_STRATEGY_REGISTRY"));
+        } else {
+            registry = new MamoStrategyRegistry(admin, backend, guardian);
+        }
+
+        ERC20MoonwellMorphoStrategy implementation;
+
+        if (addresses.isAddressSet("MOONWELL_STRATEGY_IMPLEMENTATION")) {
+            implementation =
+                ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MOONWELL_STRATEGY_IMPLEMENTATION")));
+        } else {
+            // Deploy the strategy implementation
+            implementation = new ERC20MoonwellMorphoStrategy();
+
+            // Whitelist the implementation
+            vm.prank(admin);
+            strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
+        }
+
+        splitMToken = splitVault = 5000; // 50% in basis points each
+
+        if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
+            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        } else {
+            _setupSlippagePriceChecker();
+        }
+
+        // Create and deploy the proxy
+        vm.prank(backend);
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), _getInitData(strategyTypeId));
+        vm.label(address(proxy), "USER_USDC_STRATEGY_PROXY");
+
+        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
+
+        // Add the strategy to the registry
+        vm.prank(backend);
+        registry.addStrategy(owner, address(strategy));
+
+        vm.warp(block.timestamp + 1 minutes);
     }
 
     function _setupSlippagePriceChecker() private {
@@ -129,31 +164,11 @@ contract USDCStrategyTest is Test {
         slippagePriceChecker.addTokenConfiguration(address(well), configs, config.maxPriceValidTime);
     }
 
-    function _deployStrategy() private {
-        registry = new MamoStrategyRegistry(admin, backend, guardian);
+    function _initializeAddresses() private {}
 
-        // Deploy the strategy implementation
-        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
+    function _deployStrategy() private {}
 
-        // Whitelist the implementation
-        vm.prank(admin);
-        uint256 strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
-
-        splitMToken = splitVault = 5000; // 50% in basis points each
-
-        // Create and deploy the proxy
-        vm.prank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), _getInitData(strategyTypeId));
-        vm.label(address(proxy), "USER_USDC_STRATEGY_PROXY");
-
-        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        // Add the strategy to the registry
-        vm.prank(backend);
-        registry.addStrategy(owner, address(strategy));
-    }
-
-    function _getInitData(uint256 strategyTypeId) private view returns (bytes memory) {
+    function _getInitData(uint256 _strategyTypeId) private view returns (bytes memory) {
         return abi.encodeWithSelector(
             ERC20MoonwellMorphoStrategy.initialize.selector,
             ERC20MoonwellMorphoStrategy.InitParams({
@@ -166,7 +181,7 @@ contract USDCStrategyTest is Test {
                 feeRecipient: admin,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
-                strategyTypeId: strategyTypeId,
+                strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: config.hookGasLimit,
@@ -1372,7 +1387,7 @@ contract USDCStrategyTest is Test {
 
         // Whitelist the implementation
         vm.prank(admin);
-        uint256 strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
+        uint256 _strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
         // Test with invalid mamoStrategyRegistry
         bytes memory invalidRegistryData = abi.encodeWithSelector(
@@ -1387,7 +1402,7 @@ contract USDCStrategyTest is Test {
                 feeRecipient: admin,
                 splitMToken: splitMToken,
                 splitVault: splitVault,
-                strategyTypeId: strategyTypeId,
+                strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: config.hookGasLimit,
@@ -1413,7 +1428,7 @@ contract USDCStrategyTest is Test {
                 feeRecipient: admin,
                 splitMToken: 6000, // 60%
                 splitVault: 3000, // 30% - doesn't add up to 100%
-                strategyTypeId: strategyTypeId,
+                strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: config.hookGasLimit,
@@ -1439,7 +1454,7 @@ contract USDCStrategyTest is Test {
                 feeRecipient: admin,
                 splitMToken: 5000,
                 splitVault: 5000,
-                strategyTypeId: strategyTypeId,
+                strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: 0, // Invalid hook gas limit
@@ -1497,9 +1512,6 @@ contract USDCStrategyTest is Test {
     function testSlippageAffectsPriceCheck() public {
         uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
-
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
 
         // First check with default slippage (1%)
         uint256 defaultSlippage = 100; // 1%
@@ -1708,19 +1720,7 @@ contract USDCStrategyTest is Test {
 
     // Tests for approveCowSwap function
 
-    function testOwnerCanapproveCowSwap() public {
-        // Verify the token is configured in the swap checker
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false,
-            heartbeat: 30 minutes
-        });
-
-        vm.prank(addresses.getAddress(config.deployer));
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
-
+    function testOwnerCanApproveCowSwap() public {
         // Check initial approval
         uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(initialAllowance, 0, "Initial allowance should be zero");
@@ -1735,18 +1735,6 @@ contract USDCStrategyTest is Test {
     }
 
     function testRevertIfNonOwnerApproveCowSwap() public {
-        // Configure the token in the swap checker
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false,
-            heartbeat: 30 minutes
-        });
-
-        vm.prank(addresses.getAddress(config.deployer));
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, 30 minutes);
-
         // Create a non-owner address
         address nonOwner = makeAddr("nonOwner");
 
@@ -1775,18 +1763,6 @@ contract USDCStrategyTest is Test {
     }
 
     function testApproveCowSwapZeroAmountRemovesApproval() public {
-        // Verify the token is configured in the swap checker
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_WELL_USD"),
-            reverse: false,
-            heartbeat: 30 minutes
-        });
-
-        vm.prank(addresses.getAddress(config.deployer));
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, 35 minutes);
-
         // First set a non-zero approval
         vm.startPrank(owner);
         strategy.approveCowSwap(address(well), type(uint256).max);
@@ -1861,58 +1837,6 @@ contract USDCStrategyTest is Test {
         vm.expectRevert("Order expires too far in the future");
         strategy.isValidSignature(digest, encodedOrder);
     }
-
-    function parseUint(string memory json, string memory key) internal pure returns (uint256) {
-        bytes memory valueBytes = vm.parseJson(json, key);
-        string memory valueString = abi.decode(valueBytes, (string));
-        return vm.parseUint(valueString);
-    }
-
-    function getTotalBalance(address _strategy) internal returns (uint256) {
-        uint256 metaMorphoShares = metaMorphoVault.balanceOf(_strategy);
-        uint256 metaMorphoBalance = metaMorphoShares > 0 ? metaMorphoVault.convertToAssets(metaMorphoShares) : 0;
-        uint256 mTokenBalance = mToken.balanceOfUnderlying(_strategy);
-        uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
-
-        return metaMorphoBalance + mTokenBalance + tokenBalance;
-    }
-
-    /**
-     * @notice Generates app data hash for CoW Swap orders
-     * @param sellToken The address of the token being sold
-     * @param feeRecipient The address that will receive the fee
-     * @param sellAmount The amount of tokens being sold
-     * @param fromAddress The address the order is from
-     * @return bytes32 The app data hash
-     */
-    function generateAppDataHash(address sellToken, address feeRecipient, uint256 sellAmount, address fromAddress)
-        internal
-        returns (bytes32)
-    {
-        // Use FFI to call our generate-appdata script
-        string[] memory ffiCommand = new string[](13);
-        ffiCommand[0] = "npx";
-        ffiCommand[1] = "ts-node";
-        ffiCommand[2] = "utils/generate-appdata.ts";
-        ffiCommand[3] = "--sell-token";
-        ffiCommand[4] = vm.toString(sellToken);
-        ffiCommand[5] = "--fee-recipient";
-        ffiCommand[6] = vm.toString(feeRecipient); // Using admin as fee recipient
-        ffiCommand[7] = "--sell-amount";
-        ffiCommand[8] = vm.toString(sellAmount);
-        ffiCommand[9] = "--compound-fee";
-        ffiCommand[10] = vm.toString(strategy.compoundFee());
-        ffiCommand[11] = "--from";
-        ffiCommand[12] = vm.toString(fromAddress);
-
-        // Execute the command and get the appData
-        bytes memory appDataResult = vm.ffi(ffiCommand);
-
-        console.log("appData: %s", string(appDataResult));
-
-        return bytes32(appDataResult);
-    }
-    // Tests for setFeeRecipient function
 
     function testBackendCanSetFeeRecipient() public {
         // Create a new fee recipient address
@@ -2132,7 +2056,7 @@ contract USDCStrategyTest is Test {
 
         // Whitelist the implementation
         vm.prank(admin);
-        uint256 strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
+        uint256 _strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
 
         // Create reward tokens array
         address[] memory rewardTokens = new address[](1);
@@ -2154,7 +2078,7 @@ contract USDCStrategyTest is Test {
                     feeRecipient: admin,
                     splitMToken: 5000,
                     splitVault: 5000,
-                    strategyTypeId: strategyTypeId,
+                    strategyTypeId: _strategyTypeId,
                     rewardTokens: rewardTokens, // Non-empty reward tokens array
                     owner: owner,
                     hookGasLimit: config.hookGasLimit,
@@ -2332,5 +2256,56 @@ contract USDCStrategyTest is Test {
 
         // Clear the mocks
         vm.clearMockedCalls();
+    }
+
+    function parseUint(string memory json, string memory key) internal pure returns (uint256) {
+        bytes memory valueBytes = vm.parseJson(json, key);
+        string memory valueString = abi.decode(valueBytes, (string));
+        return vm.parseUint(valueString);
+    }
+
+    function getTotalBalance(address _strategy) internal returns (uint256) {
+        uint256 metaMorphoShares = metaMorphoVault.balanceOf(_strategy);
+        uint256 metaMorphoBalance = metaMorphoShares > 0 ? metaMorphoVault.convertToAssets(metaMorphoShares) : 0;
+        uint256 mTokenBalance = mToken.balanceOfUnderlying(_strategy);
+        uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
+
+        return metaMorphoBalance + mTokenBalance + tokenBalance;
+    }
+
+    /**
+     * @notice Generates app data hash for CoW Swap orders
+     * @param sellToken The address of the token being sold
+     * @param feeRecipient The address that will receive the fee
+     * @param sellAmount The amount of tokens being sold
+     * @param fromAddress The address the order is from
+     * @return bytes32 The app data hash
+     */
+    function generateAppDataHash(address sellToken, address feeRecipient, uint256 sellAmount, address fromAddress)
+        internal
+        returns (bytes32)
+    {
+        // Use FFI to call our generate-appdata script
+        string[] memory ffiCommand = new string[](13);
+        ffiCommand[0] = "npx";
+        ffiCommand[1] = "ts-node";
+        ffiCommand[2] = "utils/generate-appdata.ts";
+        ffiCommand[3] = "--sell-token";
+        ffiCommand[4] = vm.toString(sellToken);
+        ffiCommand[5] = "--fee-recipient";
+        ffiCommand[6] = vm.toString(feeRecipient); // Using admin as fee recipient
+        ffiCommand[7] = "--sell-amount";
+        ffiCommand[8] = vm.toString(sellAmount);
+        ffiCommand[9] = "--compound-fee";
+        ffiCommand[10] = vm.toString(strategy.compoundFee());
+        ffiCommand[11] = "--from";
+        ffiCommand[12] = vm.toString(fromAddress);
+
+        // Execute the command and get the appData
+        bytes memory appDataResult = vm.ffi(ffiCommand);
+
+        console.log("appData: %s", string(appDataResult));
+
+        return bytes32(appDataResult);
     }
 }

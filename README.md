@@ -31,4 +31,3 @@ Enable users to deploy personal strategy contracts and let Mamo Agent manage the
 8. The strategy integrates with Cow Swap through the isValidSignature function, which validates orders according to EIP-1271. Any bot can fulfill orders as long as the price matches the Chainlink price within the set slippage tolerance, as verified by the SlippagePriceChecker contract.
 9. The system does not support fee-on-transfer tokens. Using such tokens would result in deposit and withdrawal failures due to balance discrepancies, as the contracts assume that the exact amount of tokens specified is transferred.
 
-
