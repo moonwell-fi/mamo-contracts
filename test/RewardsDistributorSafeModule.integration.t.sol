@@ -90,7 +90,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
 
     function _deployContracts() internal {
         if (!addresses.isAddressSet("MAMO_STAKING")) {
-            deployMultiRewards(addresses);
+            deployMultiRewards(addresses, payable(address(safe)));
         }
 
         if (!addresses.isAddressSet("REWARDS_DISTRIBUTOR_SAFE_MODULE")) {
@@ -147,43 +147,44 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         safe.execTransactionFromModule(address(mamoToken), 0, data, ISafe.Operation.DelegateCall);
     }
 
-    function test_addRewards() public {
-        uint256 amountBTC = 100e8;
-        uint256 amountMAMO = 1000e18;
-
-        deal(address(mamoToken), address(safe), amountMAMO);
-        deal(address(cbBtcToken), address(safe), amountBTC);
+    function test_addRewardsFirstTime() public {
+        deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
+        deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
 
         vm.expectEmit(true, true, true, true);
-        emit RewardAdded(amountBTC, amountMAMO, block.timestamp + module.notifyDelay());
+        emit RewardAdded(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT, 1);
 
         vm.prank(admin);
-        module.addRewards(amountBTC, amountMAMO);
+        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.NOT_READY));
+        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
 
         (uint256 amountBTCStored, uint256 amountMAMOStored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
-        assertEq(amountBTCStored, amountBTC);
-        assertEq(amountMAMOStored, amountMAMO);
-        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay());
+        assertEq(amountBTCStored, CBBTC_REWARD_AMOUNT);
+        assertEq(amountMAMOStored, MAMO_REWARD_AMOUNT);
+        assertEq(storedUnlockTime, 1, "First time it is set to 1"); // first time it is set to 1
         assertEq(isNotified, false);
     }
 
     function test_notifyRewardsIntegration() public {
-        uint256 unlockTime = block.timestamp + TIMELOCK_DURATION;
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-
-        vm.warp(unlockTime + 1);
+        test_addRewardsFirstTime();
 
         vm.expectEmit(true, true, true, true);
-        emit RewardsNotified(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT, block.timestamp);
+        emit RewardsNotified(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT, block.timestamp);
 
         module.notifyRewards();
 
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
         assertEq(mamoToken.balanceOf(address(multiRewards)), MAMO_REWARD_AMOUNT);
-        //assertEq(module.pendingRewards().notifyAfter, block.timestamp + module.notifyDelay());
+
+        (uint256 amountBTCStored, uint256 amountMAMOStored, uint256 storedUnlockTime, bool isNotified) =
+            module.pendingRewards();
+
+        assertEq(amountBTCStored, CBBTC_REWARD_AMOUNT);
+        assertEq(amountMAMOStored, MAMO_REWARD_AMOUNT);
+        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay());
+        assertEq(isNotified, true);
     }
 
     function test_multipleRewardTokensIntegration() public {

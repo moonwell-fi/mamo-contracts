@@ -130,12 +130,6 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @param notifiedAt The timestamp when rewards were notified
     event RewardsNotified(uint256 mamoAmount, uint256 btcAmount, uint256 notifiedAt);
 
-    /// @notice Emitted when a new reward token is added to the MultiRewards contract
-    /// @param rewardToken The address of the reward token being added
-    /// @param rewardsDistributor The address of the rewards distributor (typically the Safe)
-    /// @param rewardsDuration The duration for which rewards will be distributed
-    event RewardTokenAdded(address indexed rewardToken, address indexed rewardsDistributor, uint256 rewardsDuration);
-
     //////////////////////////////// MODIFIERS ////////////////////////////////
 
     /// @notice Restricts function access to the admin address only
@@ -146,9 +140,9 @@ contract RewardsDistributorSafeModule is Pausable {
     }
 
     /// @notice Restricts function access to the Safe contract only
-    /// @dev Reverts with "Timelock: caller is not the safe" if caller is not the Safe
+    /// @dev Reverts with "Only Safe can call this function" if caller is not the Safe
     modifier onlySafe() {
-        require(msg.sender == address(safe), "Timelock: caller is not the safe");
+        require(msg.sender == address(safe), "Only Safe can call this function");
         _;
     }
 
@@ -210,7 +204,7 @@ contract RewardsDistributorSafeModule is Pausable {
             require(mamoToken.balanceOf(address(safe)) >= mamoAmount, "Insufficient MAMO balance");
 
             _approveTokenFromSafe(address(mamoToken), address(multiRewards), mamoAmount);
-            _setupRewardToken(address(mamoToken));
+            _addRewardFromSafe(address(mamoToken), rewardDuration);
             _notifyRewardAmountFromSafe(address(mamoToken), mamoAmount);
         }
 
@@ -218,9 +212,9 @@ contract RewardsDistributorSafeModule is Pausable {
 
         if (btcAmount > 0) {
             require(btcToken.balanceOf(address(safe)) >= btcAmount, "Insufficient BTC balance");
-            _setupRewardToken(address(btcToken));
 
             _approveTokenFromSafe(address(btcToken), address(multiRewards), btcAmount);
+            _addRewardFromSafe(address(btcToken), rewardDuration);
             _notifyRewardAmountFromSafe(address(btcToken), btcAmount);
         }
 
@@ -240,11 +234,11 @@ contract RewardsDistributorSafeModule is Pausable {
             return RewardState.UNINITIALIZED;
         }
 
-        if (block.timestamp < pendingRewards.notifyAfter) {
+        if (block.timestamp <= pendingRewards.notifyAfter && !pendingRewards.isNotified) {
             return RewardState.NOT_READY;
         }
 
-        if (block.timestamp >= pendingRewards.notifyAfter && !pendingRewards.isNotified) {
+        if (block.timestamp > pendingRewards.notifyAfter && !pendingRewards.isNotified) {
             return RewardState.PENDING_EXECUTION;
         }
 
@@ -271,16 +265,14 @@ contract RewardsDistributorSafeModule is Pausable {
             "Pending rewards waiting to be executed"
         );
 
-        uint256 currentTime = block.timestamp;
-
-        if (pendingRewards.notifyAfter == 0) {
-            pendingRewards.notifyAfter = currentTime + notifyDelay;
-        }
-
         require(mamoToken.balanceOf(address(safe)) >= amountMAMO, "Insufficient MAMO balance");
         require(btcToken.balanceOf(address(safe)) >= amountBTC, "Insufficient BTC balance");
 
         require(amountBTC > 0 || amountMAMO > 0, "Invalid reward amount");
+
+        if (pendingRewards.notifyAfter == 0) {
+            pendingRewards.notifyAfter = 1; // set to 1 at first time to change state to PENDING_EXECUTION
+        }
 
         pendingRewards.amountBTC = amountBTC;
         pendingRewards.amountMAMO = amountMAMO;
@@ -335,18 +327,6 @@ contract RewardsDistributorSafeModule is Pausable {
     }
 
     //////////////////////////////// INTERNAL FUNCTIONS ////////////////////////////////
-
-    /// @notice Sets up a reward token in the MultiRewards contract if not already configured
-    /// @dev Internal function that checks if reward token exists and adds it if necessary
-    /// @param rewardToken The address of the token to set up as a reward token
-    function _setupRewardToken(address rewardToken) internal {
-        (address rewardsDistributor,,,,,) = multiRewards.rewardData(rewardToken);
-
-        if (rewardsDistributor == address(0)) {
-            _addRewardFromSafe(rewardToken, rewardDuration);
-            emit RewardTokenAdded(rewardToken, address(safe), rewardDuration);
-        }
-    }
 
     /// @notice Transfers tokens from the Safe to a specified address
     /// @dev Internal function that executes token transfer through Safe's module execution

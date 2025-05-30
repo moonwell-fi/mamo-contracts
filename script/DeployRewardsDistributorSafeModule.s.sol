@@ -27,7 +27,7 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
 
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
-        address multiRewards = deployMultiRewards(addresses);
+        address multiRewards = deployMultiRewards(addresses, payable(addresses.getAddress("MAMO_MULTISIG")));
         address rewardsModule =
             deployRewardsDistributorSafeModule(addresses, payable(addresses.getAddress("MAMO_MULTISIG")));
 
@@ -46,15 +46,14 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
      * @param addresses The addresses contract for dependency injection
      * @return multiRewards The deployed MultiRewards contract address
      */
-    function deployMultiRewards(Addresses addresses) public returns (address multiRewards) {
+    function deployMultiRewards(Addresses addresses, address safe) public returns (address multiRewards) {
         console.log("\n%s", StdStyle.bold(StdStyle.green("Phase 1: Deploying MultiRewards contract...")));
 
-        address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
         address mamoToken = addresses.getAddress("MAMO");
 
         vm.startBroadcast();
 
-        multiRewards = deployCode("out/MultiRewards.sol/MultiRewards.json", abi.encode(mamoMultisig, mamoToken));
+        multiRewards = deployCode("out/MultiRewards.sol/MultiRewards.json", abi.encode(safe, mamoToken));
         console.log("MultiRewards contract deployed at: %s", StdStyle.yellow(vm.toString(multiRewards)));
 
         vm.stopBroadcast();
