@@ -82,25 +82,15 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         );
 
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
-        address burnAndEarn = addresses.getAddress("BURN_AND_EARN");
         address multiRewards = addresses.getAddress("MAMO_STAKING");
         address mamoToken = addresses.getAddress("MAMO");
         address btcToken = addresses.getAddress("cbBTC");
-        address nftPositionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER");
 
         vm.startBroadcast();
 
         rewardsModule = address(
             new RewardsDistributorSafeModule(
-                safe,
-                burnAndEarn,
-                multiRewards,
-                mamoToken,
-                btcToken,
-                nftPositionManager,
-                mamoBackend,
-                DEFAULT_REWARD_DURATION,
-                DEFAULT_NOTIFY_DELAY
+                safe, multiRewards, mamoToken, btcToken, mamoBackend, DEFAULT_REWARD_DURATION, DEFAULT_NOTIFY_DELAY
             )
         );
 
@@ -126,10 +116,8 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         console.log("\n%s", StdStyle.bold(StdStyle.green("Phase 3: Validating deployment...")));
 
         address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
-        address burnAndEarn = addresses.getAddress("BURN_AND_EARN");
         address mamoToken = addresses.getAddress("MAMO");
         address btcToken = addresses.getAddress("cbBTC");
-        address nftPositionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER");
 
         // Validate MultiRewards contract
         IMultiRewards multiRewardsContract = IMultiRewards(multiRewards);
@@ -140,15 +128,9 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         RewardsDistributorSafeModule moduleContract = RewardsDistributorSafeModule(rewardsModule);
 
         assertEq(address(moduleContract.safe()), mamoMultisig, "RewardsModule: incorrect Safe address");
-        assertEq(address(moduleContract.burnAndEarn()), burnAndEarn, "RewardsModule: incorrect BurnAndEarn address");
         assertEq(address(moduleContract.multiRewards()), multiRewards, "RewardsModule: incorrect MultiRewards address");
         assertEq(address(moduleContract.mamoToken()), mamoToken, "RewardsModule: incorrect MAMO token address");
         assertEq(address(moduleContract.btcToken()), btcToken, "RewardsModule: incorrect BTC token address");
-        assertEq(
-            address(moduleContract.nftPositionManager()),
-            nftPositionManager,
-            "RewardsModule: incorrect NFT position manager address"
-        );
         assertEq(moduleContract.admin(), mamoMultisig, "RewardsModule: incorrect admin address");
         assertEq(moduleContract.rewardDuration(), DEFAULT_REWARD_DURATION, "RewardsModule: incorrect reward duration");
 

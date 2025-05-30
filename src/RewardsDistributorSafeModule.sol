@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.28;
 
-import {IBurnAndEarn} from "./interfaces/IBurnAndEarn.sol";
 import {IMultiRewards} from "./interfaces/IMultiRewards.sol";
 import {ISafe} from "./interfaces/ISafe.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
@@ -70,9 +68,6 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @notice The Safe smart account that this module is attached to
     ISafe public immutable safe;
 
-    /// @notice The BurnAndEarn contract interface
-    IBurnAndEarn public immutable burnAndEarn;
-
     /// @notice The MultiRewards contract interface
     IMultiRewards public immutable multiRewards;
 
@@ -81,9 +76,6 @@ contract RewardsDistributorSafeModule is Pausable {
 
     /// @notice The BTC token contract
     IERC20 public immutable btcToken;
-
-    /// @notice The NFT position manager contract
-    IERC721 public immutable nftPositionManager;
 
     /////////////////////////// STATE VARIABLES //////////////////////////
 
@@ -149,41 +141,33 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @notice Initializes the RewardsDistributorSafeModule with required contract addresses and configuration
     /// @dev Sets up all immutable contract references and initial state variables
     /// @param _safe The address of the Safe smart account this module will be attached to
-    /// @param _burnAndEarn The address of the BurnAndEarn contract for token burning functionality
     /// @param _multiRewards The address of the MultiRewards contract for reward distribution
     /// @param _mamoToken The address of the MAMO ERC20 token contract
     /// @param _btcToken The address of the BTC ERC20 token contract
-    /// @param _nftPositionManager The address of the NFT position manager contract
     /// @param _admin The address that will have admin privileges for this module
     /// @param _rewardDuration The initial reward duration in seconds for time-locked execution
     /// @param _notifyDelay The initial notify delay in seconds for time-locked execution
     constructor(
         address payable _safe,
-        address _burnAndEarn,
         address _multiRewards,
         address _mamoToken,
         address _btcToken,
-        address _nftPositionManager,
         address _admin,
         uint256 _rewardDuration,
         uint256 _notifyDelay
     ) {
         require(_safe != address(0), "Invalid Safe address");
-        require(_burnAndEarn != address(0), "Invalid BurnAndEarn address");
         require(_multiRewards != address(0), "Invalid MultiRewards address");
         require(_mamoToken != address(0), "Invalid MAMO token address");
         require(_btcToken != address(0), "Invalid BTC token address");
-        require(_nftPositionManager != address(0), "Invalid NFT position manager address");
         require(_admin != address(0), "Invalid admin address");
         require(_rewardDuration > 0, "Invalid reward duration");
         require(_notifyDelay > 0, "Invalid notify delay");
 
         safe = ISafe(_safe);
-        burnAndEarn = IBurnAndEarn(_burnAndEarn);
         multiRewards = IMultiRewards(_multiRewards);
         mamoToken = IERC20(_mamoToken);
         btcToken = IERC20(_btcToken);
-        nftPositionManager = IERC721(_nftPositionManager);
         admin = _admin;
         rewardDuration = _rewardDuration;
         notifyDelay = _notifyDelay;
