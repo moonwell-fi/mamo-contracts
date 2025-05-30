@@ -45,7 +45,8 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @notice Simplified state enumeration for the reward distribution process
     enum RewardState {
         UNINITIALIZED, // No pending rewards set
-        PENDING_EXECUTION, // Rewards set but not yet notified
+        NOT_READY, // Rewards are not ready to be notified
+        PENDING_EXECUTION, // Rewards ready to be notified
         EXECUTED // Rewards have been notified and distributed
 
     }
@@ -237,6 +238,10 @@ contract RewardsDistributorSafeModule is Pausable {
     function getCurrentState() public view returns (RewardState) {
         if (pendingRewards.notifyAfter == 0) {
             return RewardState.UNINITIALIZED;
+        }
+
+        if (block.timestamp < pendingRewards.notifyAfter) {
+            return RewardState.NOT_READY;
         }
 
         if (block.timestamp >= pendingRewards.notifyAfter && !pendingRewards.isNotified) {

@@ -28,7 +28,8 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
         address multiRewards = deployMultiRewards(addresses);
-        address rewardsModule = deployRewardsDistributorSafeModule(addresses);
+        address rewardsModule =
+            deployRewardsDistributorSafeModule(addresses, payable(addresses.getAddress("MAMO_MULTISIG")));
 
         validateDeployment(addresses, multiRewards, rewardsModule);
 
@@ -73,12 +74,14 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
      * @param addresses The addresses contract for dependency injection
      * @return rewardsModule The deployed RewardsDistributorSafeModule contract address
      */
-    function deployRewardsDistributorSafeModule(Addresses addresses) public returns (address rewardsModule) {
+    function deployRewardsDistributorSafeModule(Addresses addresses, address payable safe)
+        public
+        returns (address rewardsModule)
+    {
         console.log(
             "\n%s", StdStyle.bold(StdStyle.green("Phase 2: Deploying RewardsDistributorSafeModule contract..."))
         );
 
-        address payable safe = payable(addresses.getAddress("MAMO_MULTISIG"));
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
         address burnAndEarn = addresses.getAddress("BURN_AND_EARN");
         address multiRewards = addresses.getAddress("MAMO_STAKING");

@@ -94,7 +94,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         }
 
         if (!addresses.isAddressSet("REWARDS_DISTRIBUTOR_SAFE_MODULE")) {
-            deployRewardsDistributorSafeModule(addresses);
+            deployRewardsDistributorSafeModule(addresses, payable(address(safe)));
         }
 
         module = RewardsDistributorSafeModule(addresses.getAddress("REWARDS_DISTRIBUTOR_SAFE_MODULE"));
@@ -153,7 +153,6 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
 
         deal(address(mamoToken), address(safe), amountMAMO);
         deal(address(cbBtcToken), address(safe), amountBTC);
-        deal(0x7458bfDC30034EB860B265E6068121D18Fa5Aa72, address(module), amountBTC);
 
         vm.expectEmit(true, true, true, true);
         emit RewardAdded(amountBTC, amountMAMO, block.timestamp + module.notifyDelay());
@@ -161,7 +160,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         vm.prank(admin);
         module.addRewards(amountBTC, amountMAMO);
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
+        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.NOT_READY));
 
         (uint256 amountBTCStored, uint256 amountMAMOStored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
