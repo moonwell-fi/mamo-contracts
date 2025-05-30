@@ -17,6 +17,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
  *
  *      The contract manages a simplified state machine with three main states:
  *      - UNINITIALIZED: No rewards have been set
+ *      - NOT_READY: Rewards are not ready to be notified
  *      - PENDING_EXECUTION: Rewards are set and waiting for execution (includes time-locked period)
  *      - EXECUTED: Rewards have been distributed and new rewards can be set
  *
@@ -188,7 +189,14 @@ contract RewardsDistributorSafeModule is Pausable {
             require(mamoToken.balanceOf(address(safe)) >= mamoAmount, "Insufficient MAMO balance");
 
             _approveTokenFromSafe(address(mamoToken), address(multiRewards), mamoAmount);
-            _addRewardFromSafe(address(mamoToken), rewardDuration);
+
+            (address rewardsDistributor,,,,,) = multiRewards.rewardData(address(mamoToken));
+            if (rewardsDistributor == address(0)) {
+                _addRewardFromSafe(address(mamoToken), rewardDuration);
+            } else {
+                _setRewardDurationFromSafe(address(mamoToken), rewardDuration);
+            }
+
             _notifyRewardAmountFromSafe(address(mamoToken), mamoAmount);
         }
 
@@ -198,7 +206,14 @@ contract RewardsDistributorSafeModule is Pausable {
             require(btcToken.balanceOf(address(safe)) >= btcAmount, "Insufficient BTC balance");
 
             _approveTokenFromSafe(address(btcToken), address(multiRewards), btcAmount);
-            _addRewardFromSafe(address(btcToken), rewardDuration);
+
+            (address rewardsDistributor,,,,,) = multiRewards.rewardData(address(btcToken));
+            if (rewardsDistributor == address(0)) {
+                _addRewardFromSafe(address(btcToken), rewardDuration);
+            } else {
+                _setRewardDurationFromSafe(address(btcToken), rewardDuration);
+            }
+
             _notifyRewardAmountFromSafe(address(btcToken), btcAmount);
         }
 
@@ -357,5 +372,17 @@ contract RewardsDistributorSafeModule is Pausable {
 
         bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, ISafe.Operation.Call);
         require(success, "Add reward failed");
+    }
+
+    /// @notice Set reward duration for a reward token in the MultiRewards contract
+    /// @dev Internal function that calls setRewardsDuration on MultiRewards through Safe execution
+    /// @param rewardToken The address of the reward token to set the duration for
+    /// @param rewardsDuration The duration over which rewards will be distributed
+    function _setRewardDurationFromSafe(address rewardToken, uint256 rewardsDuration) internal {
+        bytes memory data =
+            abi.encodeWithSelector(IMultiRewards.setRewardsDuration.selector, rewardToken, rewardsDuration);
+
+        bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, ISafe.Operation.Call);
+        require(success, "Set reward duration failed");
     }
 }
