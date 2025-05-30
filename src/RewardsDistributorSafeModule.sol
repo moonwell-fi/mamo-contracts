@@ -2,14 +2,13 @@
 pragma solidity ^0.8.28;
 
 import {IBurnAndEarn} from "./interfaces/IBurnAndEarn.sol";
-
 import {IMultiRewards} from "./interfaces/IMultiRewards.sol";
+import {ISafe} from "./interfaces/ISafe.sol";
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {Safe} from "lib/safe-smart-account/contracts/Safe.sol";
-import {Enum} from "lib/safe-smart-account/contracts/common/Enum.sol";
 
 /**
  * @title RewardsDistributorSafeModule
@@ -68,7 +67,7 @@ contract RewardsDistributorSafeModule is Pausable {
     /////////////////////////// IMMUTABLES ///////////////////////////
 
     /// @notice The Safe smart account that this module is attached to
-    Safe public immutable safe;
+    ISafe public immutable safe;
 
     /// @notice The BurnAndEarn contract interface
     IBurnAndEarn public immutable burnAndEarn;
@@ -95,6 +94,9 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @dev Must be between MIN_REWARDS_DURATION and MAX_REWARDS_DURATION
     uint256 public rewardDuration;
 
+    /// @notice The delay in seconds before rewards can be notified
+    uint256 public notifyDelay;
+
     /// @notice The current pending rewards awaiting notification
     PendingRewards public pendingRewards;
 
@@ -110,11 +112,16 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @param newDuration The new reward duration in seconds
     event RewardDurationUpdated(uint256 oldDuration, uint256 newDuration);
 
+    /// @notice Emitted when the notify delay is updated
+    /// @param oldNotifyDelay The previous notify delay in seconds
+    /// @param newNotifyDelay The new notify delay in seconds
+    event NotifyDelayUpdated(uint256 oldNotifyDelay, uint256 newNotifyDelay);
+
     /// @notice Emitted when new rewards are added to the pending state
-    /// @param rewardToken The amount of reward tokens (BTC amount in the current implementation)
-    /// @param amount The amount of reward tokens (MAMO amount in the current implementation)
+    /// @param amountBTC The amount of BTC tokens to distribute as rewards
+    /// @param amountMAMO The amount of MAMO tokens to distribute as rewards
     /// @param notifyAfter The timestamp after which rewards can be executed
-    event RewardAdded(uint256 rewardToken, uint256 amount, uint256 notifyAfter);
+    event RewardAdded(uint256 amountBTC, uint256 amountMAMO, uint256 notifyAfter);
 
     /// @notice Emitted when pending rewards are successfully executed
     /// @param mamoAmount The amount of MAMO tokens distributed
@@ -154,6 +161,7 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @param _nftPositionManager The address of the NFT position manager contract
     /// @param _admin The address that will have admin privileges for this module
     /// @param _rewardDuration The initial reward duration in seconds for time-locked execution
+    /// @param _notifyDelay The initial notify delay in seconds for time-locked execution
     constructor(
         address payable _safe,
         address _burnAndEarn,
@@ -162,7 +170,8 @@ contract RewardsDistributorSafeModule is Pausable {
         address _btcToken,
         address _nftPositionManager,
         address _admin,
-        uint256 _rewardDuration
+        uint256 _rewardDuration,
+        uint256 _notifyDelay
     ) {
         require(_safe != address(0), "Invalid Safe address");
         require(_burnAndEarn != address(0), "Invalid BurnAndEarn address");
@@ -172,8 +181,9 @@ contract RewardsDistributorSafeModule is Pausable {
         require(_nftPositionManager != address(0), "Invalid NFT position manager address");
         require(_admin != address(0), "Invalid admin address");
         require(_rewardDuration > 0, "Invalid reward duration");
+        require(_notifyDelay > 0, "Invalid notify delay");
 
-        safe = Safe(_safe);
+        safe = ISafe(_safe);
         burnAndEarn = IBurnAndEarn(_burnAndEarn);
         multiRewards = IMultiRewards(_multiRewards);
         mamoToken = IERC20(_mamoToken);
@@ -181,6 +191,7 @@ contract RewardsDistributorSafeModule is Pausable {
         nftPositionManager = IERC721(_nftPositionManager);
         admin = _admin;
         rewardDuration = _rewardDuration;
+        notifyDelay = _notifyDelay;
     }
 
     ///////////////////////////// PERMISSIONLESS FUNCTIONS /////////////////////////////
@@ -213,6 +224,7 @@ contract RewardsDistributorSafeModule is Pausable {
         }
 
         pendingRewards.isNotified = true; // state machine transition to EXECUTED
+        pendingRewards.notifyAfter = block.timestamp + notifyDelay;
 
         emit RewardsNotified(mamoAmount, btcAmount, block.timestamp);
     }
@@ -246,8 +258,9 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @dev Transitions the contract from UNINITIALIZED or EXECUTED to PENDING_EXECUTION state
     /// @dev Validates execution time and ensures previous rewards are executed before setting new ones
     /// @dev Uses centralized state validation through getCurrentState() function
-    /// @param _pendingRewards The reward amounts and execution timestamp to set
-    function addRewards(PendingRewards memory _pendingRewards) external onlyAdmin whenNotPaused {
+    /// @param amountBTC The amount of BTC tokens to distribute as rewards
+    /// @param amountMAMO The amount of MAMO tokens to distribute as rewards
+    function addRewards(uint256 amountBTC, uint256 amountMAMO) external onlyAdmin whenNotPaused {
         require(
             getCurrentState() == RewardState.EXECUTED || getCurrentState() == RewardState.UNINITIALIZED,
             "Pending rewards waiting to be executed"
@@ -255,24 +268,20 @@ contract RewardsDistributorSafeModule is Pausable {
 
         uint256 currentTime = block.timestamp;
 
-        require(mamoToken.balanceOf(address(safe)) >= _pendingRewards.amountMAMO, "Insufficient MAMO balance");
-        require(btcToken.balanceOf(address(safe)) >= _pendingRewards.amountBTC, "Insufficient BTC balance");
+        if (pendingRewards.notifyAfter == 0) {
+            pendingRewards.notifyAfter = currentTime + notifyDelay;
+        }
 
-        require(_pendingRewards.notifyAfter > currentTime, "Notify after time is in the past");
-        require(_pendingRewards.notifyAfter >= currentTime + MIN_NOTIFY_DELAY, "Notify after time too soon");
-        require(_pendingRewards.notifyAfter <= currentTime + MAX_NOTIFY_DELAY, "Notify after time too far");
-        require(
-            _pendingRewards.notifyAfter > pendingRewards.notifyAfter,
-            "Notify after time is not greater than the previous notify after time"
-        );
-        require(_pendingRewards.amountBTC > 0 || _pendingRewards.amountMAMO > 0, "Invalid reward amount");
+        require(mamoToken.balanceOf(address(safe)) >= amountMAMO, "Insufficient MAMO balance");
+        require(btcToken.balanceOf(address(safe)) >= amountBTC, "Insufficient BTC balance");
 
-        pendingRewards.notifyAfter = _pendingRewards.notifyAfter;
-        pendingRewards.amountBTC = _pendingRewards.amountBTC;
-        pendingRewards.amountMAMO = _pendingRewards.amountMAMO;
+        require(amountBTC > 0 || amountMAMO > 0, "Invalid reward amount");
+
+        pendingRewards.amountBTC = amountBTC;
+        pendingRewards.amountMAMO = amountMAMO;
         pendingRewards.isNotified = false;
 
-        emit RewardAdded(_pendingRewards.amountBTC, _pendingRewards.amountMAMO, _pendingRewards.notifyAfter);
+        emit RewardAdded(amountBTC, amountMAMO, pendingRewards.notifyAfter);
     }
 
     //////////////////////////////// ONLY SAFE ////////////////////////////////
@@ -295,8 +304,17 @@ contract RewardsDistributorSafeModule is Pausable {
         multiRewards.setRewardsDuration(address(btcToken), newDuration);
 
         emit RewardDurationUpdated(rewardDuration, newDuration);
-
         rewardDuration = newDuration;
+    }
+
+    /// @notice Updates the notify delay for the contract
+    /// @dev Validates delay bounds and updates the notify delay
+    /// @param newNotifyDelay The new notify delay in seconds
+    function setNotifyDelay(uint256 newNotifyDelay) external onlySafe {
+        require(newNotifyDelay >= MIN_NOTIFY_DELAY && newNotifyDelay <= MAX_NOTIFY_DELAY, "Invalid notify delay");
+
+        emit NotifyDelayUpdated(notifyDelay, newNotifyDelay);
+        notifyDelay = newNotifyDelay;
     }
 
     /// @notice Pauses the setRewards and notifyRewards functions
@@ -333,7 +351,7 @@ contract RewardsDistributorSafeModule is Pausable {
     function _transferFromSafe(address token, address to, uint256 amount) internal {
         bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, to, amount);
 
-        bool success = safe.execTransactionFromModule(token, 0, data, Enum.Operation.Call);
+        bool success = safe.execTransactionFromModule(token, 0, data, ISafe.Operation.Call);
         require(success, "Transfer failed");
     }
 
@@ -345,7 +363,7 @@ contract RewardsDistributorSafeModule is Pausable {
     function _approveTokenFromSafe(address token, address spender, uint256 amount) internal {
         bytes memory data = abi.encodeWithSelector(IERC20.approve.selector, spender, amount);
 
-        bool success = safe.execTransactionFromModule(token, 0, data, Enum.Operation.Call);
+        bool success = safe.execTransactionFromModule(token, 0, data, ISafe.Operation.Call);
         require(success, "Approve failed");
     }
 
@@ -356,7 +374,7 @@ contract RewardsDistributorSafeModule is Pausable {
     function _notifyRewardAmountFromSafe(address rewardToken, uint256 amount) internal {
         bytes memory data = abi.encodeWithSelector(IMultiRewards.notifyRewardAmount.selector, rewardToken, amount);
 
-        bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, Enum.Operation.Call);
+        bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, ISafe.Operation.Call);
         require(success, "Notify reward amount failed");
     }
 
@@ -368,7 +386,7 @@ contract RewardsDistributorSafeModule is Pausable {
         bytes memory data =
             abi.encodeWithSelector(IMultiRewards.addReward.selector, rewardToken, address(safe), rewardsDuration);
 
-        bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, Enum.Operation.Call);
+        bool success = safe.execTransactionFromModule(address(multiRewards), 0, data, ISafe.Operation.Call);
         require(success, "Add reward failed");
     }
 }

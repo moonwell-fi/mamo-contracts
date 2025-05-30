@@ -28,8 +28,7 @@ The contract now uses a simplified 3-state machine with centralized state determ
 - **Description**: Current rewards have been executed and notified to MultiRewards
 - **Conditions**: `pendingRewards.isNotified == true`
 - **Available Actions**:
-  - `setRewards()` (admin only, when not paused)
-  - `emergencyTransferNFT()` (safe only)
+  - `addRewards()` (admin only, when `block.timestamp >= pendingRewards.notifyAfter` and not paused)
   - `setAdmin()` (safe only)
   - `setRewardDuration()` (safe only)
   - `pause()` (safe only)
@@ -40,7 +39,6 @@ The contract now uses a simplified 3-state machine with centralized state determ
 - **Conditions**: `paused() == true`
 - **Available Actions**:
   - `unpause()` (safe only)
-  - `emergencyTransferNFT()` (safe only)
   - `setAdmin()` (safe only)
   - `setRewardDuration()` (safe only)
 - **Restricted Actions**: `setRewards()` and `notifyRewards()` are blocked
@@ -51,14 +49,14 @@ The contract now uses a simplified 3-state machine with centralized state determ
 stateDiagram-v2
     [*] --> UNINITIALIZED : Contract Deployed
     
-    UNINITIALIZED --> PENDING_EXECUTION : setRewards() [first time, not paused]
+    UNINITIALIZED --> PENDING_EXECUTION : addRewards() [first time, not paused]
     UNINITIALIZED --> PAUSED : pause()
     
     PENDING_EXECUTION --> EXECUTED : notifyRewards() [when ready, not paused]
-    PENDING_EXECUTION --> PENDING_EXECUTION : setRewards() [if executed, not paused]
+    PENDING_EXECUTION --> PENDING_EXECUTION : addRewards() [if executed, not paused]
     PENDING_EXECUTION --> PAUSED : pause()
     
-    EXECUTED --> PENDING_EXECUTION : setRewards() [new rewards, not paused]
+    EXECUTED --> PENDING_EXECUTION : addRewards() [new rewards, when notifyDelay elapsed, not paused]
     EXECUTED --> EXECUTED : Admin/Safe operations
     EXECUTED --> PAUSED : pause()
     
@@ -71,15 +69,15 @@ stateDiagram-v2
 
 ### State Query Functions
 - **`getCurrentState()`**: Returns the current RewardState enum value
-- **`isReadyForExecution()`**: Returns true if rewards can be executed now
 - **`getExecutionTimestamp()`**: Returns the timestamp when rewards become executable
 - **`isPaused()`**: Returns the pause status from OpenZeppelin Pausable
 
 ### State Determination Logic
 All state-dependent functions now use the centralized `getCurrentState()` function:
 - `notifyRewards()` checks `getCurrentState() == RewardState.PENDING_EXECUTION`
-- `setRewards()` checks `getCurrentState() == RewardState.UNINITIALIZED` or `RewardState.EXECUTED`
-- `isReadyForExecution()` uses `getCurrentState() == RewardState.PENDING_EXECUTION`
+- `addRewards()` checks `getCurrentState() == RewardState.UNINITIALIZED` or `RewardState.EXECUTED`
+
+**Important**: After `notifyRewards()` is executed, `pendingRewards.notifyAfter` is updated to `block.timestamp + notifyDelay`, creating a delay period before new rewards can be added.
 
 ## Trigger Conditions
 
@@ -88,7 +86,7 @@ All state-dependent functions now use the centralized `getCurrentState()` functi
 - **Reward Duration**: Configurable between 1-30 days
 
 ### Admin Triggers
-- **Set New Rewards**: `setRewards()` - Only when previous rewards executed or uninitialized
+- **Set New Rewards**: `addRewards()` - Only when previous rewards executed (and notifyDelay elapsed) or uninitialized
 - **Update Admin**: `setAdmin()` - Safe only
 - **Update Duration**: `setRewardDuration()` - Safe only
 
@@ -97,7 +95,7 @@ All state-dependent functions now use the centralized `getCurrentState()` functi
 - **Emergency NFT Transfer**: `emergencyTransferNFT()` - Safe only
 
 ### Pause Control Triggers
-- **Pause Contract**: `pause()` - Safe only, blocks setRewards() and notifyRewards()
+- **Pause Contract**: `pause()` - Safe only, blocks addRewards() and notifyRewards()
 - **Unpause Contract**: `unpause()` - Safe only, restores normal operations
 
 ### Safe Module Triggers
@@ -113,9 +111,10 @@ All state-dependent functions now use the centralized `getCurrentState()` functi
 4. **Amount Validation**: At least one reward amount (BTC or MAMO) must be > 0
 5. **Balance Requirements**: Safe must have sufficient token balances before notification
 6. **State Consistency**: `isNotified` flag tracks execution status accurately
-7. **Pause State**: When paused, `setRewards()` and `notifyRewards()` are blocked
+7. **Pause State**: When paused, `addRewards()` and `notifyRewards()` are blocked
 8. **Pause Authority**: Only Safe can pause/unpause the contract
 9. **Centralized Logic**: All state checks use `getCurrentState()` for consistency
+10. **Notify Delay**: After rewards are executed, `notifyAfter` is updated to `block.timestamp + notifyDelay`, preventing immediate new reward setting
 
 ## Emergency States
 

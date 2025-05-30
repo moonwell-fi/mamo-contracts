@@ -8,8 +8,8 @@ import {console} from "@forge-std/console.sol";
 
 import {Addresses} from "@addresses/Addresses.sol";
 
-import {MultiRewards} from "@contracts/MultiRewards.sol";
 import {RewardsDistributorSafeModule} from "@contracts/RewardsDistributorSafeModule.sol";
+import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
 
 /**
  * @title DeployRewardsDistributorSafeModule
@@ -18,6 +18,7 @@ import {RewardsDistributorSafeModule} from "@contracts/RewardsDistributorSafeMod
  */
 contract DeployRewardsDistributorSafeModule is Script, Test {
     uint256 public constant DEFAULT_REWARD_DURATION = 7 days;
+    uint256 public constant DEFAULT_NOTIFY_DELAY = 7 days;
 
     function run() public {
         string memory addressesFolderPath = "./addresses";
@@ -48,18 +49,19 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         console.log("\n%s", StdStyle.bold(StdStyle.green("Phase 1: Deploying MultiRewards contract...")));
 
         address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
+        address mamoToken = addresses.getAddress("MAMO");
 
         vm.startBroadcast();
 
-        multiRewards = address(new MultiRewards(mamoMultisig));
+        multiRewards = deployCode("out/MultiRewards.sol/MultiRewards.json", abi.encode(mamoMultisig, mamoToken));
         console.log("MultiRewards contract deployed at: %s", StdStyle.yellow(vm.toString(multiRewards)));
 
         vm.stopBroadcast();
 
-        if (addresses.isAddressSet("MULTI_REWARDS")) {
-            addresses.changeAddress("MULTI_REWARDS", multiRewards, true);
+        if (addresses.isAddressSet("MAMO_STAKING")) {
+            addresses.changeAddress("MAMO_STAKING", multiRewards, true);
         } else {
-            addresses.addAddress("MULTI_REWARDS", multiRewards, true);
+            addresses.addAddress("MAMO_STAKING", multiRewards, true);
         }
 
         console.log("MultiRewards address registered in address registry");
@@ -77,8 +79,9 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         );
 
         address payable safe = payable(addresses.getAddress("MAMO_MULTISIG"));
+        address mamoBackend = addresses.getAddress("MAMO_BACKEND");
         address burnAndEarn = addresses.getAddress("BURN_AND_EARN");
-        address multiRewards = addresses.getAddress("MULTI_REWARDS");
+        address multiRewards = addresses.getAddress("MAMO_STAKING");
         address mamoToken = addresses.getAddress("MAMO");
         address btcToken = addresses.getAddress("cbBTC");
         address nftPositionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER");
@@ -93,8 +96,9 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
                 mamoToken,
                 btcToken,
                 nftPositionManager,
-                safe, // Using Safe as admin
-                DEFAULT_REWARD_DURATION
+                mamoBackend,
+                DEFAULT_REWARD_DURATION,
+                DEFAULT_NOTIFY_DELAY
             )
         );
 
@@ -106,6 +110,7 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
             addresses.addAddress("REWARDS_DISTRIBUTOR_SAFE_MODULE", rewardsModule, true);
         }
 
+        console.log("RewardsDistributorSafeModule address registered in address registry");
         return rewardsModule;
     }
 
@@ -125,7 +130,7 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
         address nftPositionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER");
 
         // Validate MultiRewards contract
-        MultiRewards multiRewardsContract = MultiRewards(multiRewards);
+        IMultiRewards multiRewardsContract = IMultiRewards(multiRewards);
         assertEq(multiRewardsContract.owner(), mamoMultisig, "MultiRewards: incorrect owner");
         console.log("[OK] MultiRewards owner validation passed");
 

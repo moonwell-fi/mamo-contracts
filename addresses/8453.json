@@ -148,5 +148,15 @@
     "addr": "0x7300B37DfdfAb110d83290A29DfB31B1740219fE",
     "name": "MAMO",
     "isContract": true
+  },
+  {
+    "addr": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+    "name": "SAFE_PROXY",
+    "isContract": true
+  },
+  {
+    "addr": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+    "name": "SAFE_FACTORY",
+    "isContract": true
   }
 ]
