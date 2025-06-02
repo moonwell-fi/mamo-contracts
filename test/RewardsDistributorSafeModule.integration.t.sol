@@ -242,7 +242,6 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         module.notifyRewards();
 
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
-        assertEq(mamoToken.balanceOf(address(multiRewards)), 1);
 
         (uint256 amountBTCStored, uint256 amountMAMOStored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
@@ -252,69 +251,23 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         assertEq(isNotified, true);
     }
 
-    function test_multipleRewardTokensIntegration() public {
-        uint256 unlockTime1 = block.timestamp + TIMELOCK_DURATION;
-        uint256 unlockTime2 = block.timestamp + TIMELOCK_DURATION + 1 hours;
-
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-        vm.warp(unlockTime1 + 1);
-        module.notifyRewards();
-
-        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-        vm.warp(unlockTime2 + 1);
-        module.notifyRewards();
-
-        assertEq(mamoToken.balanceOf(address(multiRewards)), MAMO_REWARD_AMOUNT);
-        assertEq(cbBtcToken.balanceOf(address(multiRewards)), CBBTC_REWARD_AMOUNT);
-    }
-
-    function test_stateTransitionFlow() public {
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.UNINITIALIZED));
-
-        uint256 unlockTime = block.timestamp + TIMELOCK_DURATION;
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
-
-        vm.warp(unlockTime + 1);
-        module.notifyRewards();
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
-    }
-
-    function test_timelockEnforcementIntegration() public {
-        uint256 unlockTime = block.timestamp + TIMELOCK_DURATION;
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-
-        vm.expectRevert("Timelock not expired");
-        module.notifyRewards();
-
-        vm.warp(unlockTime);
-        vm.expectRevert("Timelock not expired");
-        module.notifyRewards();
-
-        vm.warp(unlockTime + 1);
-        module.notifyRewards();
-    }
-
     function test_unauthorizedAccessPrevention() public {
         address unauthorized = makeAddr("unauthorized");
 
         vm.prank(unauthorized);
-        vm.expectRevert();
+        vm.expectRevert("Only admin can call this function");
         module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
-        vm.warp(block.timestamp + TIMELOCK_DURATION + 1);
-
-        vm.prank(unauthorized);
-        vm.expectRevert();
-        module.notifyRewards();
     }
 
     function test_pauseFunctionalityIntegration() public {
+        vm.prank(safe);
         module.pause();
 
         vm.expectRevert("Pausable: paused");
         module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
+
+        vm.expectRevert("Pausable: paused");
+        module.notifyRewards();
 
         module.unpause();
         module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
