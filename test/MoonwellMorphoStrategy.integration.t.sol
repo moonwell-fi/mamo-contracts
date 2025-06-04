@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
@@ -139,12 +140,10 @@ contract MoonwellMorphoStrategyTest is Test {
             _setupSlippagePriceChecker();
         }
 
-        // Create and deploy the proxy
-        vm.prank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), _getInitData(strategyTypeId));
-        vm.label(address(proxy), "USER_MOONWELL_MORPHO_STRATEGY_PROXY");
+        address strategyFactory = addresses.getAddress(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")));
 
-        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
+        strategy =
+            ERC20MoonwellMorphoStrategy(payable(StrategyFactory(payable(strategyFactory)).createStrategyForUser(owner)));
 
         // Add the strategy to the registry
         vm.prank(backend);

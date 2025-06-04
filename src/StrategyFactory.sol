@@ -6,11 +6,11 @@ import {ERC20MoonwellMorphoStrategy} from "./ERC20MoonwellMorphoStrategy.sol";
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
 
 /**
- * @title USDCStrategyFactory
- * @notice Factory contract for creating new USDC strategy instances with configurable parameters
+ * @title StrategyFactory
+ * @notice Factory contract for creating new strategy instances with configurable parameters
  * @dev Creates proxies pointing to the ERC20MoonwellMorphoStrategy implementation
  */
-contract USDCStrategyFactory {
+contract StrategyFactory {
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
