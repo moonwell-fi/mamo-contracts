@@ -27,7 +27,7 @@ contract StrategyFactoryDeployer is Script {
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
         address mToken = addresses.getAddress("MOONWELL_USDC");
         address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
-        address usdc = addresses.getAddress("USDC");
+        address underlying = addresses.getAddress("USDC");
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
         // TODO: change this to the fee recipient address
@@ -42,13 +42,19 @@ contract StrategyFactoryDeployer is Script {
         rewardTokens[0] = well;
         rewardTokens[1] = morpho;
 
+        console.log("config.splitMToken", config.splitMToken);
+        console.log("config.splitVault", config.splitVault);
+        console.log("config.hookGasLimit", config.hookGasLimit);
+        console.log("config.allowedSlippageInBps", config.allowedSlippageInBps);
+        console.log("config.compoundFee", config.compoundFee);
+
         // Deploy the USDCStrategyFactory
         StrategyFactory factory = new StrategyFactory(
             mamoStrategyRegistry,
             mamoBackend,
             mToken,
             metaMorphoVault,
-            usdc,
+            underlying,
             slippagePriceChecker,
             strategyImplementation,
             feeRecipient,
@@ -91,11 +97,18 @@ contract StrategyFactoryDeployer is Script {
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
         address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
+        address underlying = addresses.getAddress(assetConfig.token);
 
         // Get reward token addresses
         address[] memory rewardTokens = new address[](2);
         rewardTokens[0] = addresses.getAddress("xWELL_PROXY");
         rewardTokens[1] = addresses.getAddress("MORPHO");
+
+        console.log("splitMToken", assetConfig.strategyParams.splitMToken);
+        console.log("splitVault", assetConfig.strategyParams.splitVault);
+        console.log("hookGasLimit", assetConfig.strategyParams.hookGasLimit);
+        console.log("allowedSlippageInBps", assetConfig.strategyParams.allowedSlippageInBps);
+        console.log("compoundFee", assetConfig.strategyParams.compoundFee);
 
         // Deploy the StrategyFactory
         StrategyFactory factory = new StrategyFactory(
@@ -103,7 +116,7 @@ contract StrategyFactoryDeployer is Script {
             mamoBackend,
             mToken,
             metaMorphoVault,
-            addresses.getAddress(assetConfig.token),
+            underlying,
             slippagePriceChecker,
             strategyImplementation,
             feeRecipient,

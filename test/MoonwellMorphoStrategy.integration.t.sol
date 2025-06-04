@@ -31,6 +31,8 @@ import {MockERC20} from "./MockERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
+import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
+
 /**
  * @title MockRejectETH
  * @notice A mock contract that rejects all ETH transfers
@@ -100,6 +102,12 @@ contract MoonwellMorphoStrategyTest is Test {
         DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
         assetConfig = assetConfigDeploy.getConfig();
 
+        console.log("assetConfig.strategyParams.splitMToken", assetConfig.strategyParams.splitMToken);
+        console.log("assetConfig.strategyParams.splitVault", assetConfig.strategyParams.splitVault);
+        console.log("assetConfig.strategyParams.hookGasLimit", assetConfig.strategyParams.hookGasLimit);
+        console.log("assetConfig.strategyParams.allowedSlippageInBps", assetConfig.strategyParams.allowedSlippageInBps);
+        console.log("assetConfig.strategyParams.compoundFee", assetConfig.strategyParams.compoundFee);
+
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
@@ -132,7 +140,8 @@ contract MoonwellMorphoStrategyTest is Test {
             strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
         }
 
-        splitMToken = splitVault = 5000; // 50% in basis points each
+        splitMToken = assetConfig.strategyParams.splitMToken;
+        splitVault = assetConfig.strategyParams.splitVault;
 
         if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
@@ -140,7 +149,13 @@ contract MoonwellMorphoStrategyTest is Test {
             _setupSlippagePriceChecker();
         }
 
-        address strategyFactory = addresses.getAddress(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")));
+        address strategyFactory;
+        if (addresses.isAddressSet(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")))) {
+            strategyFactory = addresses.getAddress(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")));
+        } else {
+            StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
+            strategyFactory = factoryDeployer.deployStrategyFactory(addresses, assetConfig, strategyTypeId);
+        }
 
         strategy =
             ERC20MoonwellMorphoStrategy(payable(StrategyFactory(payable(strategyFactory)).createStrategyForUser(owner)));

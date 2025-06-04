@@ -120,7 +120,17 @@ contract DeployAssetConfig is Test {
         config.moonwellMarket = abi.decode(vm.parseJson(configData, ".moonwellMarket"), (string));
         config.metamorphoVault = abi.decode(vm.parseJson(configData, ".metamorphoVault"), (string));
         config.priceOracle = abi.decode(vm.parseJson(configData, ".priceOracle"), (string));
-        config.strategyParams = abi.decode(vm.parseJson(configData, ".strategyParams"), (StrategyParams));
+        config.strategyParams.splitMToken =
+            abi.decode(vm.parseJson(configData, ".strategyParams.splitMToken"), (uint256));
+        config.strategyParams.splitVault = abi.decode(vm.parseJson(configData, ".strategyParams.splitVault"), (uint256));
+        config.strategyParams.hookGasLimit =
+            abi.decode(vm.parseJson(configData, ".strategyParams.hookGasLimit"), (uint256));
+        config.strategyParams.allowedSlippageInBps =
+            abi.decode(vm.parseJson(configData, ".strategyParams.allowedSlippageInBps"), (uint256));
+        config.strategyParams.compoundFee =
+            abi.decode(vm.parseJson(configData, ".strategyParams.compoundFee"), (uint256));
+        config.strategyParams.strategyTypeId =
+            abi.decode(vm.parseJson(configData, ".strategyParams.strategyTypeId"), (uint256));
 
         // Handle the array separately
         config.rewardTokens = abi.decode(vm.parseJson(configData, ".rewardTokens"), (RewardToken[]));
