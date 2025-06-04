@@ -2299,7 +2299,7 @@ contract MoonwellMorphoStrategyTest is Test {
         string[] memory ffiCommand = new string[](13);
         ffiCommand[0] = "npx";
         ffiCommand[1] = "ts-node";
-        ffiCommand[2] = "utils/generate-appdata.ts";
+        ffiCommand[2] = "test/utils/generate-appdata.ts";
         ffiCommand[3] = "--sell-token";
         ffiCommand[4] = vm.toString(sellToken);
         ffiCommand[5] = "--fee-recipient";
@@ -2313,8 +2313,6 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Execute the command and get the appData
         bytes memory appDataResult = vm.ffi(ffiCommand);
-
-        console.log("appData: %s", string(appDataResult));
 
         return bytes32(appDataResult);
     }

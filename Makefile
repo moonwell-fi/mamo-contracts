@@ -9,6 +9,6 @@ deploy-broadcast:
 
 
 usdc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy 
 
-.PHONY: test coverage deploy-broadcast usdc-strategy
+.PHONY: test coverage deploy-broadcast usdc-strategy 

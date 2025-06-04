@@ -14,12 +14,12 @@
     "strategyTypeId": 1
   },
   "rewardTokens": [
-    {
-      "token": "xWELL_PROXY",
-      "priceFeed": "CHAINLINK_WELL_USD",
-      "reverse": false,
-      "heartbeat": 86400
-    },
+  {
+    "token": "xWELL_PROXY",
+    "priceFeed": "CHAINLINK_WELL_USD",
+    "reverse": false,
+    "heartbeat": 86400
+  },
     {
       "token": "MORPHO",
       "priceFeed": "CHAINLINK_MORPHO_USD",
