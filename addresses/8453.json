@@ -148,5 +148,20 @@
     "addr": "0x7300B37DfdfAb110d83290A29DfB31B1740219fE",
     "name": "MAMO",
     "isContract": true
+  },
+  {
+    "addr": "0x543257eF2161176D7C8cD90BA65C2d4CaEF5a796",
+    "isContract": true,
+    "name": "cbBTC_METAMORPHO_VAULT"
+  },
+  {
+    "addr": "0xF877ACaFA28c19b96727966690b2f44d35aD5976",
+    "isContract": true,
+    "name": "MOONWELL_cbBTC"
+  },
+  {
+    "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+    "isContract": true,
+    "name": "CHAINLINK_BTC_USD"
   }
 ]
