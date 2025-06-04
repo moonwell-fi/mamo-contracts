@@ -154,7 +154,7 @@ contract MoonwellMorphoStrategyTest is Test {
             strategyFactory = addresses.getAddress(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")));
         } else {
             StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-            strategyFactory = factoryDeployer.deployStrategyFactory(addresses, assetConfig, strategyTypeId);
+            strategyFactory = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
         }
 
         strategy =
@@ -2317,7 +2317,7 @@ contract MoonwellMorphoStrategyTest is Test {
         ffiCommand[3] = "--sell-token";
         ffiCommand[4] = vm.toString(sellToken);
         ffiCommand[5] = "--fee-recipient";
-        ffiCommand[6] = vm.toString(feeRecipient); // Using admin as fee recipient
+        ffiCommand[6] = vm.toString(feeRecipient);
         ffiCommand[7] = "--sell-amount";
         ffiCommand[8] = vm.toString(sellAmount);
         ffiCommand[9] = "--compound-fee";
@@ -2325,8 +2325,16 @@ contract MoonwellMorphoStrategyTest is Test {
         ffiCommand[11] = "--from";
         ffiCommand[12] = vm.toString(fromAddress);
 
+        // Log the command for debugging
+        console.log("FFI Command:");
+        for (uint256 i = 0; i < ffiCommand.length; i++) {
+            console.log("  ", ffiCommand[i]);
+        }
+
         // Execute the command and get the appData
         bytes memory appDataResult = vm.ffi(ffiCommand);
+
+        console.log("Generated app data hash:", vm.toString(bytes32(appDataResult)));
 
         return bytes32(appDataResult);
     }

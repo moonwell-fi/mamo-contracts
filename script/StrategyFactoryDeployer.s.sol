@@ -15,6 +15,23 @@ import {StrategyFactory} from "@contracts/StrategyFactory.sol";
  * @notice Script to deploy the StrategyFactory contract
  */
 contract StrategyFactoryDeployer is Script {
+    function run() public {
+        // Load the addresses from the JSON file
+        string memory addressesFolderPath = "./addresses";
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid; // Use the current chain ID
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
+
+        string memory assetConfigPath = "config/strategies/cbBTCStrategyConfig.json";
+        DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
+        DeployAssetConfig.Config memory assetConfig = assetConfigDeploy.getConfig();
+
+        deployStrategyFactory(addresses, assetConfig);
+
+        addresses.updateJson();
+        addresses.printJSONChanges();
+    }
+
     function deployStrategyFactory(
         Addresses addresses,
         DeployConfig.DeploymentConfig memory config,
@@ -82,11 +99,10 @@ contract StrategyFactoryDeployer is Script {
         return address(factory);
     }
 
-    function deployStrategyFactory(
-        Addresses addresses,
-        DeployAssetConfig.Config memory assetConfig,
-        uint256 strategyTypeId
-    ) public returns (address) {
+    function deployStrategyFactory(Addresses addresses, DeployAssetConfig.Config memory assetConfig)
+        public
+        returns (address)
+    {
         vm.startBroadcast();
 
         // Get the addresses for the initialization parameters
@@ -122,7 +138,7 @@ contract StrategyFactoryDeployer is Script {
             feeRecipient,
             assetConfig.strategyParams.splitMToken,
             assetConfig.strategyParams.splitVault,
-            strategyTypeId,
+            assetConfig.strategyParams.strategyTypeId,
             assetConfig.strategyParams.hookGasLimit,
             assetConfig.strategyParams.allowedSlippageInBps, // TODO: change this to the allowed slippage in bps
             assetConfig.strategyParams.compoundFee, // TODO: change this to the compound fee
