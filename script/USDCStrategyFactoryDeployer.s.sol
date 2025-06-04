@@ -28,7 +28,7 @@ contract USDCStrategyFactoryDeployer is Script {
         address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
         address usdc = addresses.getAddress("USDC");
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address strategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
         // TODO: change this to the fee recipient address
         address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
 

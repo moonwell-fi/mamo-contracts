@@ -76,7 +76,7 @@
   },
   {
     "addr": "0x5fAB373f43079CE488C2b8579751791982C03A35",
-    "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
   {

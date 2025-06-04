@@ -182,7 +182,7 @@ contract DeploySystem is Script {
 
         // Validate USDC strategy implementation is whitelisted
         console.log("Validating USDC strategy implementation...");
-        address usdcStrategyImpl = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        address usdcStrategyImpl = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
         require(
             registry.whitelistedImplementations(usdcStrategyImpl), "USDC strategy implementation is not whitelisted"
         );
@@ -233,7 +233,7 @@ contract DeploySystem is Script {
 
         // Get the addresses
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address usdcStrategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        address usdcStrategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
 
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);

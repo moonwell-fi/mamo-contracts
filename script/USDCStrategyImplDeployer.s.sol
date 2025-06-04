@@ -20,7 +20,7 @@ contract USDCStrategyImplDeployer is Script {
         vm.stopBroadcast();
 
         // Check if the implementation address already exists
-        string memory implName = "USDC_MOONWELL_MORPHO_STRATEGY_IMPL";
+        string memory implName = "MOONWELL_MORPHO_STRATEGY_IMPL";
         if (addresses.isAddressSet(implName)) {
             // Update the existing address
             addresses.changeAddress(implName, address(implementation), true);

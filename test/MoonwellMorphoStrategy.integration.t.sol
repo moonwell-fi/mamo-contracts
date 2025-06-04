@@ -28,6 +28,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 
+import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
+
 /**
  * @title MockRejectETH
  * @notice A mock contract that rejects all ETH transfers
@@ -43,7 +45,7 @@ contract MockRejectETH {
 // }
 }
 
-contract USDCStrategyTest is Test {
+contract MoonwellMorphoStrategyTest is Test {
     using GPv2Order for GPv2Order.Data;
     using Surl for *;
     using stdJson for string;
@@ -60,7 +62,7 @@ contract USDCStrategyTest is Test {
     ERC20MoonwellMorphoStrategy public strategy;
     MamoStrategyRegistry public registry;
     ISlippagePriceChecker public slippagePriceChecker;
-    IERC20 public usdc;
+    IERC20 public underlying;
     IERC20 public well;
     IMToken public mToken;
     IERC4626 public metaMorphoVault;
@@ -76,6 +78,7 @@ contract USDCStrategyTest is Test {
     uint256 public splitVault;
 
     DeployConfig.DeploymentConfig public config;
+    DeployAssetConfig.Config public assetConfig;
     uint256 public strategyTypeId;
 
     function setUp() public {
@@ -88,8 +91,13 @@ contract USDCStrategyTest is Test {
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
+        string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
+
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
+
+        DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
+        assetConfig = assetConfigDeploy.getConfig();
 
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
@@ -98,22 +106,21 @@ contract USDCStrategyTest is Test {
         deployer = addresses.getAddress(config.deployer);
         owner = makeAddr("owner");
 
-        usdc = IERC20(addresses.getAddress("USDC"));
+        underlying = IERC20(addresses.getAddress(assetConfig.token));
         well = IERC20(addresses.getAddress("xWELL_PROXY"));
-        mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
-        metaMorphoVault = IERC4626(addresses.getAddress("USDC_METAMORPHO_VAULT"));
+        mToken = IMToken(addresses.getAddress(assetConfig.moonwellMarket));
+        metaMorphoVault = IERC4626(addresses.getAddress(assetConfig.metamorphoVault));
 
-        if (addresses.isAddressSet("MOONWELL_STRATEGY_REGISTRY")) {
-            registry = MamoStrategyRegistry(addresses.getAddress("MOONWELL_STRATEGY_REGISTRY"));
+        if (addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
+            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         } else {
             registry = new MamoStrategyRegistry(admin, backend, guardian);
         }
 
         ERC20MoonwellMorphoStrategy implementation;
 
-        if (addresses.isAddressSet("MOONWELL_STRATEGY_IMPLEMENTATION")) {
-            implementation =
-                ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MOONWELL_STRATEGY_IMPLEMENTATION")));
+        if (addresses.isAddressSet("MOONWELL_MORPHO_STRATEGY_IMPL")) {
+            implementation = ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
         } else {
             // Deploy the strategy implementation
             implementation = new ERC20MoonwellMorphoStrategy();
@@ -134,7 +141,7 @@ contract USDCStrategyTest is Test {
         // Create and deploy the proxy
         vm.prank(backend);
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), _getInitData(strategyTypeId));
-        vm.label(address(proxy), "USER_USDC_STRATEGY_PROXY");
+        vm.label(address(proxy), "USER_MOONWELL_MORPHO_STRATEGY_PROXY");
 
         strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
 
@@ -176,7 +183,7 @@ contract USDCStrategyTest is Test {
                 mamoBackend: backend,
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
-                token: address(usdc),
+                token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
                 splitMToken: splitMToken,
@@ -194,14 +201,14 @@ contract USDCStrategyTest is Test {
     function testOwnerCanDepositFunds() public {
         // Mint USDC to the owner
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         // Verify the owner has the USDC balance
-        assertEq(usdc.balanceOf(owner), depositAmount, "Owner should have USDC balance");
+        assertEq(underlying.balanceOf(owner), depositAmount, "Owner should have USDC balance");
 
         // Owner approves the strategy to spend USDC
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
 
         // Check initial strategy balance
         uint256 initialBalance = getTotalBalance(address(strategy));
@@ -217,7 +224,7 @@ contract USDCStrategyTest is Test {
         );
 
         // Verify the owner's USDC balance decreased
-        assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
+        assertEq(underlying.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
 
         // Calculate expected balances based on split
         uint256 expectedMTokenAmount = (depositAmount * splitMToken) / 10000;
@@ -243,34 +250,34 @@ contract USDCStrategyTest is Test {
 
         // Mint USDC to the non-owner
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), nonOwner, depositAmount);
+        deal(address(underlying), nonOwner, depositAmount);
 
         // Verify the non-owner has the USDC balance
-        assertEq(usdc.balanceOf(nonOwner), depositAmount, "Non-owner should have USDC balance");
+        assertEq(underlying.balanceOf(nonOwner), depositAmount, "Non-owner should have USDC balance");
 
         // Non-owner approves the strategy to spend USDC
         vm.startPrank(nonOwner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
 
         // Attempt to deposit should not revert
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
         // Verify the non-owner's USDC balance remains unchanged
-        assertEq(usdc.balanceOf(nonOwner), 0, "Non-owner's USDC balance should be 0");
+        assertEq(underlying.balanceOf(nonOwner), 0, "Non-owner's USDC balance should be 0");
     }
 
     function testOwnerCanWithdrawFunds() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
 
         // Verify initial balances
-        assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
+        assertEq(underlying.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
         uint256 strategyBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
 
@@ -280,7 +287,9 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the owner received the withdrawn funds
-        assertApproxEqAbs(usdc.balanceOf(owner), withdrawAmount, 1e3, "Owner should have received the withdrawn amount");
+        assertApproxEqAbs(
+            underlying.balanceOf(owner), withdrawAmount, 1e3, "Owner should have received the withdrawn amount"
+        );
 
         // Verify the strategy's balance decreased
         uint256 newStrategyBalance = getTotalBalance(address(strategy));
@@ -308,10 +317,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfNonOwnerWithdraw() public {
         // First deposit funds as the owner
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -336,10 +345,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfWithdrawAmountTooLarge() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
 
         // Attempt to withdraw more than deposited
@@ -359,10 +368,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfWithdrawAmountIsZero() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
 
         // Attempt to withdraw zero amount
@@ -382,13 +391,13 @@ contract USDCStrategyTest is Test {
     function testRevertIfDepositAmountIsZero() public {
         // Mint USDC to the owner
         uint256 initialBalance = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, initialBalance);
+        deal(address(underlying), owner, initialBalance);
 
         // Attempt to deposit zero amount
         uint256 depositAmount = 0;
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
 
         // Attempt to deposit should revert with "Amount must be greater than 0"
         vm.expectRevert("Amount must be greater than 0");
@@ -396,7 +405,7 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the owner's balance remains unchanged
-        assertEq(usdc.balanceOf(owner), initialBalance, "Owner's USDC balance should remain unchanged");
+        assertEq(underlying.balanceOf(owner), initialBalance, "Owner's USDC balance should remain unchanged");
 
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(getTotalBalance(address(strategy)), 0, 1e3, "Strategy balance should remain unchanged");
@@ -596,14 +605,14 @@ contract USDCStrategyTest is Test {
     function testOwnerCanWithdrawAll() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
 
         // Verify initial balances
-        assertEq(usdc.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
+        assertEq(underlying.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
         uint256 strategyBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
 
@@ -612,7 +621,7 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the owner received all funds
-        assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
 
         // Verify the strategy's balance is now 0
         assertEq(getTotalBalance(address(strategy)), 0, "Strategy balance should be 0");
@@ -625,10 +634,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfNonOwnerWithdrawAll() public {
         // First deposit funds as the owner
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -661,10 +670,10 @@ contract USDCStrategyTest is Test {
     function testWithdrawAllWithDifferentSplits() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
 
         // Update position to 70% mToken, 30% vault
@@ -678,7 +687,7 @@ contract USDCStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the owner received all funds
-        assertApproxEqAbs(usdc.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
 
         // Verify the strategy's balance is now 0
         assertEq(getTotalBalance(address(strategy)), 0, "Strategy balance should be 0");
@@ -691,10 +700,10 @@ contract USDCStrategyTest is Test {
     function testBackendCanUpdatePosition() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -756,10 +765,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfNonBackendUpdatePosition() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -780,10 +789,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfInvalidSplitParameters() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -815,10 +824,10 @@ contract USDCStrategyTest is Test {
     function testDepositIdleTokens() public {
         // Mint USDC directly to the strategy contract (simulating tokens received from elsewhere)
         uint256 idleAmount = 500 * 10 ** 6; // 500 USDC (6 decimals)
-        deal(address(usdc), address(strategy), idleAmount);
+        deal(address(underlying), address(strategy), idleAmount);
 
         // Verify the strategy has the idle tokens
-        assertEq(usdc.balanceOf(address(strategy)), idleAmount, "Strategy should have idle USDC");
+        assertEq(underlying.balanceOf(address(strategy)), idleAmount, "Strategy should have idle USDC");
 
         // Check initial balances in protocols
         uint256 initialMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
@@ -834,7 +843,7 @@ contract USDCStrategyTest is Test {
         assertEq(depositedAmount, idleAmount, "Returned amount should match idle amount");
 
         // Verify the strategy's token balance is now 0
-        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
+        assertEq(underlying.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
 
         // Calculate expected balances based on split
         uint256 expectedMTokenAmount = (idleAmount * splitMToken) / 10000;
@@ -862,7 +871,7 @@ contract USDCStrategyTest is Test {
 
     function testRevertIfNoIdleTokensToDeposit() public {
         // Ensure the strategy has no idle tokens
-        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC");
+        assertEq(underlying.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC");
 
         // Call depositIdleTokens should revert
         vm.expectRevert("No tokens to deposit");
@@ -872,7 +881,7 @@ contract USDCStrategyTest is Test {
     function testDepositIdleTokensReturnValue() public {
         // Mint USDC to the strategy contract directly
         uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
-        deal(address(usdc), address(strategy), idleAmount);
+        deal(address(underlying), address(strategy), idleAmount);
 
         // Call depositIdleTokens and check the return value
         vm.startPrank(owner);
@@ -883,16 +892,16 @@ contract USDCStrategyTest is Test {
         assertEq(returnedAmount, idleAmount, "Return value should match the deposited amount");
 
         // Verify the funds were properly deposited
-        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
+        assertEq(underlying.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
     }
 
     function testDepositIdleTokensWithDifferentSplit() public {
         // First deposit some funds to have a non-zero balance
         uint256 initialDeposit = 1000 * 10 ** 6; // 1000 USDC
-        deal(address(usdc), owner, initialDeposit);
+        deal(address(underlying), owner, initialDeposit);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), initialDeposit);
+        underlying.approve(address(strategy), initialDeposit);
         strategy.deposit(initialDeposit);
         vm.stopPrank();
 
@@ -905,7 +914,7 @@ contract USDCStrategyTest is Test {
 
         // Mint USDC directly to the strategy contract
         uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
-        deal(address(usdc), address(strategy), idleAmount);
+        deal(address(underlying), address(strategy), idleAmount);
 
         // Check balances before depositing idle tokens
         uint256 initialMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
@@ -942,7 +951,7 @@ contract USDCStrategyTest is Test {
     function testAnyoneCanCallDepositIdleTokens() public {
         // Mint USDC directly to the strategy contract
         uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
-        deal(address(usdc), address(strategy), idleAmount);
+        deal(address(underlying), address(strategy), idleAmount);
 
         // Create various addresses to test
         address randomUser1 = makeAddr("randomUser1");
@@ -956,7 +965,7 @@ contract USDCStrategyTest is Test {
         assertEq(depositedAmount, idleAmount, "Returned amount should match idle amount");
 
         // Verify the strategy's token balance is now 0
-        assertEq(usdc.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
+        assertEq(underlying.balanceOf(address(strategy)), 0, "Strategy should have no idle USDC left");
 
         // Second user tries to call depositIdleTokens but it should revert
         vm.prank(randomUser2);
@@ -989,7 +998,7 @@ contract USDCStrategyTest is Test {
                         '{"sellToken": "',
                         vm.toString(address(well)),
                         '", "buyToken": "',
-                        vm.toString(address(usdc)),
+                        vm.toString(address(underlying)),
                         '", "from": "',
                         vm.toString(address(strategy)),
                         '", "kind": "sell", "sellAmountBeforeFee": "',
@@ -1017,7 +1026,12 @@ contract USDCStrategyTest is Test {
         vm.mockCall(
             address(slippagePriceChecker),
             abi.encodeWithSelector(
-                ISlippagePriceChecker.checkPrice.selector, wellAmount, address(well), address(usdc), buyAmount, 2500
+                ISlippagePriceChecker.checkPrice.selector,
+                wellAmount,
+                address(well),
+                address(underlying),
+                buyAmount,
+                2500
             ),
             abi.encode(true)
         );
@@ -1025,7 +1039,7 @@ contract USDCStrategyTest is Test {
         // Create a valid order that meets all requirements
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1062,7 +1076,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1096,7 +1110,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1129,7 +1143,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1161,7 +1175,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1193,7 +1207,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1225,7 +1239,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1295,7 +1309,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: differentReceiver, // Using a different receiver
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1327,7 +1341,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1359,7 +1373,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1397,7 +1411,7 @@ contract USDCStrategyTest is Test {
                 mamoBackend: backend,
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
-                token: address(usdc),
+                token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
                 splitMToken: splitMToken,
@@ -1423,7 +1437,7 @@ contract USDCStrategyTest is Test {
                 mamoBackend: backend,
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
-                token: address(usdc),
+                token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
                 splitMToken: 6000, // 60%
@@ -1449,7 +1463,7 @@ contract USDCStrategyTest is Test {
                 mamoBackend: backend,
                 mToken: address(mToken),
                 metaMorphoVault: address(metaMorphoVault),
-                token: address(usdc),
+                token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
                 splitMToken: 5000,
@@ -1527,7 +1541,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: extremelyLowBuyAmount,
@@ -1566,7 +1580,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory betterOrder = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: reasonableBuyAmount,
@@ -1617,7 +1631,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -1645,12 +1659,12 @@ contract USDCStrategyTest is Test {
         // Mock the slippagePriceChecker to return a specific max time
         vm.mockCall(
             address(slippagePriceChecker),
-            abi.encodeWithSelector(ISlippagePriceChecker.maxTimePriceValid.selector, address(usdc)),
+            abi.encodeWithSelector(ISlippagePriceChecker.maxTimePriceValid.selector, address(underlying)),
             abi.encode(60 minutes)
         );
 
         GPv2Order.Data memory order = GPv2Order.Data({
-            sellToken: usdc, // This should be rejected
+            sellToken: underlying, // This should be rejected
             buyToken: well,
             receiver: address(strategy),
             sellAmount: 1000 * 10 ** 6,
@@ -1691,7 +1705,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: well,
-            buyToken: usdc,
+            buyToken: underlying,
             receiver: address(strategy),
             sellAmount: 100 * 10 ** 18,
             buyAmount: 1000 * 10 ** 6,
@@ -1812,7 +1826,7 @@ contract USDCStrategyTest is Test {
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
-            buyToken: IERC20(address(usdc)),
+            buyToken: IERC20(address(underlying)),
             receiver: address(strategy),
             sellAmount: wellAmount,
             buyAmount: buyAmount,
@@ -2073,7 +2087,7 @@ contract USDCStrategyTest is Test {
                     mamoBackend: backend,
                     mToken: address(mToken),
                     metaMorphoVault: address(metaMorphoVault),
-                    token: address(usdc),
+                    token: address(underlying),
                     slippagePriceChecker: address(slippagePriceChecker),
                     feeRecipient: admin,
                     splitMToken: 5000,
@@ -2102,10 +2116,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfMTokenRedeemFails() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -2129,10 +2143,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfWithdrawAllMTokenRedeemFails() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -2158,10 +2172,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfUpdatePositionMTokenRedeemFails() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
@@ -2184,7 +2198,7 @@ contract USDCStrategyTest is Test {
     function testRevertIfMTokenMintFails() public {
         // Prepare for deposit
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         // Mock the mint function to fail
         vm.mockCall(
@@ -2194,7 +2208,7 @@ contract USDCStrategyTest is Test {
         );
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
 
         // Attempt to deposit should fail
         vm.expectRevert("MToken mint failed");
@@ -2208,7 +2222,7 @@ contract USDCStrategyTest is Test {
     function testRevertIfDepositIdleTokensMTokenMintFails() public {
         // Mint USDC directly to the strategy contract
         uint256 idleAmount = 500 * 10 ** 6; // 500 USDC (6 decimals)
-        deal(address(usdc), address(strategy), idleAmount);
+        deal(address(underlying), address(strategy), idleAmount);
 
         // Mock the mint function to fail
         vm.mockCall(
@@ -2228,10 +2242,10 @@ contract USDCStrategyTest is Test {
     function testRevertIfUpdatePositionMTokenMintFails() public {
         // First deposit funds
         uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
-        deal(address(usdc), owner, depositAmount);
+        deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
-        usdc.approve(address(strategy), depositAmount);
+        underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
