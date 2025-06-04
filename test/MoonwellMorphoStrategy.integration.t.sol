@@ -121,6 +121,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         if (addresses.isAddressSet("MOONWELL_MORPHO_STRATEGY_IMPL")) {
             implementation = ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
+            strategyTypeId = assetConfig.strategyParams.strategyTypeId;
         } else {
             // Deploy the strategy implementation
             implementation = new ERC20MoonwellMorphoStrategy();
@@ -170,10 +171,6 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.prank(deployer);
         slippagePriceChecker.addTokenConfiguration(address(well), configs, config.maxPriceValidTime);
     }
-
-    function _initializeAddresses() private {}
-
-    function _deployStrategy() private {}
 
     function _getInitData(uint256 _strategyTypeId) private view returns (bytes memory) {
         return abi.encodeWithSelector(
@@ -1970,7 +1967,6 @@ contract MoonwellMorphoStrategyTest is Test {
         address newOwner = makeAddr("newOwner");
 
         // First, we need to ensure the registry recognizes the strategy as belonging to the owner
-        // This is normally done in the _deployStrategy function, but we'll verify it here
         assertTrue(
             registry.isUserStrategy(owner, address(strategy)),
             "Registry should recognize strategy as belonging to owner"

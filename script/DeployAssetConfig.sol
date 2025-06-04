@@ -18,8 +18,8 @@ contract DeployAssetConfig is Test {
 
     struct Config {
         string symbol;
-        string token;
         uint8 decimals;
+        string token;
         string moonwellMarket;
         string metamorphoVault;
         string priceOracle;
@@ -33,6 +33,7 @@ contract DeployAssetConfig is Test {
         uint256 hookGasLimit;
         uint256 allowedSlippageInBps;
         uint256 compoundFee;
+        uint256 strategyTypeId;
     }
 
     /// @notice Reward token configuration struct
@@ -107,62 +108,21 @@ contract DeployAssetConfig is Test {
     }
 
     /**
-     * @notice Get the version from the configuration
-     * @return The version string
-     */
-    function getVersion() public view returns (string memory) {
-        return getString("version");
-    }
-
-    /**
-     * @notice Get the chain ID from the configuration
-     * @return The chain ID
-     */
-    function getChainId() public view returns (uint256) {
-        return getNumber("chainId");
-    }
-
-    /**
      * @notice Load configuration from the JSON file
      */
     function _loadConfig(string memory configPath) private {
         configData = vm.readFile(configPath);
 
-        bytes memory parsedJson = vm.parseJson(configData);
-
-        // Decode to a memory struct first
-        Config memory memConfig = abi.decode(parsedJson, (Config));
-
         // Copy fields individually to avoid struct array memory to storage copy
-        config.symbol = memConfig.symbol;
-        config.token = memConfig.token;
-        config.decimals = memConfig.decimals;
-        config.moonwellMarket = memConfig.moonwellMarket;
-        config.metamorphoVault = memConfig.metamorphoVault;
-        config.priceOracle = memConfig.priceOracle;
-        config.strategyParams = memConfig.strategyParams;
+        config.symbol = abi.decode(vm.parseJson(configData, ".symbol"), (string));
+        config.token = abi.decode(vm.parseJson(configData, ".token"), (string));
+        config.decimals = abi.decode(vm.parseJson(configData, ".decimals"), (uint8));
+        config.moonwellMarket = abi.decode(vm.parseJson(configData, ".moonwellMarket"), (string));
+        config.metamorphoVault = abi.decode(vm.parseJson(configData, ".metamorphoVault"), (string));
+        config.priceOracle = abi.decode(vm.parseJson(configData, ".priceOracle"), (string));
+        config.strategyParams = abi.decode(vm.parseJson(configData, ".strategyParams"), (StrategyParams));
 
         // Handle the array separately
-        if (memConfig.rewardTokens.length > 0) {
-            // Initialize the storage array with the correct length
-            delete config.rewardTokens;
-            for (uint256 i = 0; i < memConfig.rewardTokens.length; i++) {
-                config.rewardTokens.push(memConfig.rewardTokens[i]);
-            }
-        }
-
-        // Validate configuration
-        require(
-            getChainId() == block.chainid,
-            string(
-                abi.encodePacked(
-                    "Config chain ID (",
-                    vm.toString(getChainId()),
-                    ") does not match current chain ID (",
-                    vm.toString(block.chainid),
-                    ")"
-                )
-            )
-        );
+        config.rewardTokens = abi.decode(vm.parseJson(configData, ".rewardTokens"), (RewardToken[]));
     }
 }
