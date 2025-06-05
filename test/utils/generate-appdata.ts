@@ -1,15 +1,13 @@
 import { MetadataApi } from "@cowprotocol/app-data";
 import { generateAppDataFromDoc } from "@cowprotocol/cow-sdk";
 
-// Define a type for the app data document returned by the API
-type AppDataDocument = any; // Using 'any' for now since we don't know the exact structure
+const FEE_RECIPIENT = "0x26c158a4cd56d148c554190a95a921d90f00c160";
 
 export const metadataApi = new MetadataApi();
 
 /**
  * Generates appData for Mamo strategy orders
  * @param sellToken The address of the token being sold
- * @param feeRecipient The address that will receive the fee
  * @param feeAmount The amount of fee to be taken (as a string)
  * @param hookGasLimit The gas limit for the pre-hook
  * @param from The address from which the transfer is made
@@ -17,21 +15,17 @@ export const metadataApi = new MetadataApi();
  */
 export async function generateMamoAppData(
   sellToken: string,
-  feeRecipient: string,
   feeAmount: string,
-  hookGasLimit: number,
+  hookGasLimit: BigInt,
   from: string
-): Promise<AppDataDocument> {
-  // Create the transferFrom calldata for the pre-hook
-  // IERC20.transferFrom selector is 0x23b872dd
-  // We need to encode: transferFrom(from, feeRecipient, feeAmount)
-
+): Promise<string> {
+  // Create the hooks metadata
   const hooks = {
     pre: [
       {
         // Create a placeholder for the callData that matches the format expected by the contract
         // Use FEE_RECIPIENT constant instead of the feeRecipient parameter
-        callData: createTransferFromCalldata(from, feeRecipient, feeAmount),
+        callData: createTransferFromCalldata(from, FEE_RECIPIENT, feeAmount),
         gasLimit: hookGasLimit.toString(),
         target: sellToken.toLowerCase(),
       },
@@ -136,26 +130,25 @@ Usage: ts-node utils/generate-appdata.ts [options]
 
 Options:
   --sell-token, -s      The address of the token being sold (required)
-  --fee-recipient, -r   The address that will receive the fee (required)
   --sell-amount, -a     The amount being sold (required)
   --compound-fee, -c    The compound fee in basis points (e.g., 100 = 1%) (required)
   --hook-gas-limit, -g  The gas limit for the pre-hook (default: 100000)
+  --from, -f            The address from which the transfer is made (required)
   --verbose, -v         Show detailed output with formatting and hash
   --help, -h            Show this help message
 
 Example:
   ts-node utils/generate-appdata.ts \\
     --sell-token 0x1234567890123456789012345678901234567890 \\
-    --fee-recipient 0xabcdef1234567890abcdef1234567890abcdef12 \\
     --sell-amount 1000000000000000000 \\
-    --compound-fee 100
+    --compound-fee 100 \\
+    --from 0xabcdef1234567890abcdef1234567890abcdef12
       `);
       process.exit(0);
     }
 
     // Parse arguments
     let sellToken = "";
-    let feeRecipient = "";
     let sellAmount = "";
     let compoundFeeBps = 0;
     let hookGasLimit = 100000; // Default value
@@ -167,9 +160,6 @@ Example:
 
       if ((arg === "--sell-token" || arg === "-s") && nextArg) {
         sellToken = nextArg;
-        i++;
-      } else if ((arg === "--fee-recipient" || arg === "-r") && nextArg) {
-        feeRecipient = nextArg;
         i++;
       } else if ((arg === "--sell-amount" || arg === "-a") && nextArg) {
         sellAmount = nextArg;
@@ -189,7 +179,6 @@ Example:
     // Validate required arguments
     const missingArgs = [];
     if (!sellToken) missingArgs.push("--sell-token");
-    if (!feeRecipient) missingArgs.push("--fee-recipient");
     if (!sellAmount) missingArgs.push("--sell-amount");
     if (!compoundFeeBps) missingArgs.push("--compound-fee");
     if (!from) missingArgs.push("--from");
@@ -209,9 +198,8 @@ Example:
       // Generate the appData document
       const appData = await generateMamoAppData(
         sellToken,
-        feeRecipient.toLowerCase(),
         feeAmount,
-        hookGasLimit,
+        BigInt(hookGasLimit),
         from.toLowerCase()
       );
 

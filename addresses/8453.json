@@ -76,7 +76,7 @@
   },
   {
     "addr": "0x5fAB373f43079CE488C2b8579751791982C03A35",
-    "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
   {
@@ -147,6 +147,26 @@
   {
     "addr": "0x7300B37DfdfAb110d83290A29DfB31B1740219fE",
     "name": "MAMO",
+    "isContract": true
+  },
+  {
+    "addr": "0x543257eF2161176D7C8cD90BA65C2d4CaEF5a796",
+    "name": "cbBTC_METAMORPHO_VAULT",
+    "isContract": true
+  },
+  {
+    "addr": "0xF877ACaFA28c19b96727966690b2f44d35aD5976",
+    "name": "MOONWELL_cbBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+    "name": "CHAINLINK_BTC_USD",
+    "isContract": true
+  },
+  {
+    "addr": "0x1f9B6cBC4d89D66Be7E13075AB06FEbe9A42db9f",
+    "name": "cbBTC_STRATEGY_FACTORY",
     "isContract": true
   }
 ]
