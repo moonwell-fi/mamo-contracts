@@ -130,8 +130,7 @@ contract MockStrategy is IStrategyWithOwnership, Ownable {
         token = IERC20(_token);
     }
 
-    function deposit(address _token, uint256 amount) external override {
-        require(_token == address(token), "Invalid token");
+    function deposit(uint256 amount) external override {
         require(amount > 0, "Amount must be greater than 0");
 
         // Transfer tokens from caller to this contract
