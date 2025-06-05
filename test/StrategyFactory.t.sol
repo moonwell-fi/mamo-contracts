@@ -829,14 +829,14 @@ contract StrategyFactoryTest is Test {
         vm.startPrank(owner);
         factory.add(address(strategy1));
 
-        // Adding the same strategy again should work (no duplicate check in contract)
+        // Adding the same strategy again should revert
+        vm.expectRevert("Strategy already exists");
         factory.add(address(strategy1));
         vm.stopPrank();
 
-        assertEq(factory.getAvailableStrategiesCount(), 2);
+        assertEq(factory.getAvailableStrategiesCount(), 1);
 
         address[] memory strategies = factory.getAvailableStrategies();
         assertEq(strategies[0], address(strategy1));
-        assertEq(strategies[1], address(strategy1));
     }
 }
