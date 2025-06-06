@@ -20,10 +20,9 @@ interface IStrategy {
 
     /**
      * @notice Deposits funds into the strategy
-     * @param asset The address of the token to deposit
      * @param amount The amount to deposit
      */
-    function deposit(address asset, uint256 amount) external;
+    function deposit(uint256 amount) external;
 
     /**
      * @notice Withdraws funds from the strategy
