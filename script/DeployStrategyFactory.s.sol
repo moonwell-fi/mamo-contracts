@@ -7,7 +7,7 @@ import {console} from "@forge-std/console.sol";
 
 import {DeployConfig} from "./DeployConfig.sol";
 import {Addresses} from "@addresses/Addresses.sol";
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {StrategyReserves} from "@contracts/StrategyReserves.sol";
 
 /**
  * @title DeployStrategyFactory
@@ -24,7 +24,7 @@ contract DeployStrategyFactory is Script {
         address owner = addresses.getAddress("MAMO_BACKEND");
 
         // Deploy the StrategyFactory
-        StrategyFactory factory = new StrategyFactory(usdc, owner);
+        StrategyReserves factory = new StrategyReserves(usdc, owner);
 
         vm.stopBroadcast();
 

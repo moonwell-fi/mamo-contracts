@@ -22,11 +22,11 @@ interface IStrategyWithOwnership is IStrategy {
 }
 
 /**
- * @title StrategyFactory
- * @notice Factory contract for managing a pool of strategies that users can claim
- * @dev Maintains a list of strategies owned by the factory that users can claim by depositing USDC
+ * @title StrategyReserves
+ * @notice Contract for managing a pool of strategies that users can claim
+ * @dev Maintains a list of strategies owned by the contract that users can claim by depositing USDC
  */
-contract StrategyFactory is Ownable {
+contract StrategyReserves is Ownable {
     using SafeERC20 for IERC20;
 
     /// @notice The USDC token contract
@@ -35,11 +35,23 @@ contract StrategyFactory is Ownable {
     /// @notice Array of available strategies
     address[] public strategies;
 
-    /// @notice Emitted when a strategy is added to the factory
+    /// @notice Mapping to track which strategies have been added for O(1) duplicate checking
+    mapping(address => bool) public strategyExists;
+
+    /// @notice Minimum amount required to claim a strategy (in USDC's native decimals)
+    uint256 public minimumClaimAmount = 1e6; // 1 USDC
+
+    /// @notice Emitted when a strategy is added to the contract
     event StrategyAdded(address indexed strategy);
 
     /// @notice Emitted when a strategy is claimed by a user
     event StrategyClaimed(address indexed user, address indexed strategy, uint256 amount);
+
+    /// @notice Emitted when a strategy is claimed on behalf of an address
+    event StrategyClaimedForAddress(address indexed beneficiary, address indexed strategy);
+
+    /// @notice Emitted when the minimum claim amount is updated
+    event MinimumClaimAmountUpdated(uint256 oldAmount, uint256 newAmount);
 
     /**
      * @notice Constructor that initializes the factory with USDC token address
@@ -53,7 +65,7 @@ contract StrategyFactory is Ownable {
 
     /**
      * @notice Adds a strategy to the available pool
-     * @dev The factory must be the owner of the strategy when adding
+     * @dev The factory must be the owner of the strategy when adding. Duplicate strategies are not allowed.
      * @param strategy The address of the strategy to add
      */
     function add(address strategy) external onlyOwner {
@@ -64,7 +76,11 @@ contract StrategyFactory is Ownable {
         // Verify that this contract is the owner of the strategy
         require(strategyContract.owner() == address(this), "Factory must be the owner of the strategy");
 
+        // Check for duplicate strategy using O(1) mapping lookup
+        require(!strategyExists[strategy], "Strategy already exists");
+
         strategies.push(strategy);
+        strategyExists[strategy] = true;
 
         emit StrategyAdded(strategy);
     }
@@ -78,12 +94,13 @@ contract StrategyFactory is Ownable {
     function claim(uint256 amount) external {
         // Check that we have available strategies
         require(strategies.length > 0, "No strategies available");
-        // Require at least 1 USDC (6 decimals)
-        require(amount >= 1e6, "Amount must be at least 1 USDC");
+        // Require minimum amount
+        require(amount >= minimumClaimAmount, "Amount must be at least minimum claim amount");
 
         // Pop the last strategy from the list
         address strategyAddress = strategies[strategies.length - 1];
         strategies.pop();
+        delete strategyExists[strategyAddress]; // Remove entry from mapping
 
         IStrategyWithOwnership strategy = IStrategyWithOwnership(strategyAddress);
 
@@ -97,12 +114,48 @@ contract StrategyFactory is Ownable {
         usdc.forceApprove(strategyAddress, amount);
 
         // Call deposit on the strategy
-        strategy.deposit(address(usdc), amount);
+        strategy.deposit(amount);
 
         // Confirm that the owner of the strategy is now msg.sender
         require(strategy.owner() == msg.sender, "Ownership transfer failed");
 
         emit StrategyClaimed(msg.sender, strategyAddress, amount);
+    }
+
+    /**
+     * @notice Claims a strategy on behalf of another address (for ACP agents)
+     * @dev Only callable by owner. Transfers strategy ownership without requiring USDC deposit.
+     * @param beneficiary The address that will receive ownership of the strategy
+     */
+    function claimForAddress(address beneficiary) external onlyOwner {
+        require(beneficiary != address(0), "Invalid beneficiary address");
+        require(strategies.length > 0, "No strategies available");
+
+        // Pop the last strategy from the list
+        address strategyAddress = strategies[strategies.length - 1];
+        strategies.pop();
+        delete strategyExists[strategyAddress]; // Remove entry from mapping
+
+        IStrategyWithOwnership strategy = IStrategyWithOwnership(strategyAddress);
+
+        // Transfer ownership of the strategy to beneficiary
+        strategy.transferOwnership(beneficiary);
+
+        // Confirm that the owner of the strategy is now the beneficiary
+        require(strategy.owner() == beneficiary, "Ownership transfer failed");
+
+        emit StrategyClaimedForAddress(beneficiary, strategyAddress);
+    }
+
+    /**
+     * @notice Updates the minimum claim amount
+     * @dev Only callable by the owner
+     * @param newAmount The new minimum claim amount
+     */
+    function setMinimumClaimAmount(uint256 newAmount) external onlyOwner {
+        uint256 oldAmount = minimumClaimAmount;
+        minimumClaimAmount = newAmount;
+        emit MinimumClaimAmountUpdated(oldAmount, newAmount);
     }
 
     /**
