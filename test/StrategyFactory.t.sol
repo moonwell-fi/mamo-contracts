@@ -210,6 +210,8 @@ contract StrategyFactoryTest is Test {
     // Events from StrategyFactory
     event StrategyAdded(address indexed strategy);
     event StrategyClaimed(address indexed user, address indexed strategy, uint256 amount);
+    event StrategyClaimedForAddress(address indexed beneficiary, address indexed strategy);
+    event MinimumClaimAmountUpdated(uint256 oldAmount, uint256 newAmount);
 
     function setUp() public {
         // Create test addresses
@@ -409,7 +411,7 @@ contract StrategyFactoryTest is Test {
 
         // Attempt to claim with insufficient amount
         vm.prank(user1);
-        vm.expectRevert("Amount must be at least 1 USDC");
+        vm.expectRevert("Amount must be at least minimum claim amount");
         factory.claim(insufficientAmount);
 
         // Verify strategy wasn't claimed
@@ -485,7 +487,7 @@ contract StrategyFactoryTest is Test {
         vm.prank(owner);
         factory.add(address(strategy1));
 
-        uint256 minAmount = 1 * 10 ** 6; // Exactly 1 USDC (minimum)
+        uint256 minAmount = factory.minimumClaimAmount(); // Use the public getter
         usdc.mint(user1, minAmount);
 
         vm.prank(user1);
@@ -796,7 +798,7 @@ contract StrategyFactoryTest is Test {
         vm.prank(owner);
         factory.add(address(strategy1));
 
-        uint256 minAmount = 1e6; // Exactly 1 USDC
+        uint256 minAmount = factory.minimumClaimAmount(); // Use the public getter
         usdc.mint(user1, minAmount);
 
         vm.prank(user1);
@@ -837,5 +839,221 @@ contract StrategyFactoryTest is Test {
 
         address[] memory strategies = factory.getAvailableStrategies();
         assertEq(strategies[0], address(strategy1));
+    }
+
+    function testOwnerCanClaimForAddress() public {
+        // Setup: Add a strategy
+        vm.prank(owner);
+        factory.add(address(strategy1));
+
+        address beneficiary = makeAddr("beneficiary");
+
+        // Verify initial state
+        assertEq(factory.getAvailableStrategiesCount(), 1, "Should have 1 strategy available");
+        assertEq(strategy1.owner(), address(factory), "Strategy should be owned by factory");
+
+        // Owner claims strategy for beneficiary
+        vm.prank(owner);
+        vm.expectEmit(true, true, false, false, address(factory));
+        emit StrategyClaimedForAddress(beneficiary, address(strategy1));
+        factory.claimForAddress(beneficiary);
+
+        // Verify the claim was successful
+        assertEq(factory.getAvailableStrategiesCount(), 0, "Should have 0 strategies available");
+        assertEq(strategy1.owner(), beneficiary, "Strategy should now be owned by beneficiary");
+        assertEq(strategy1.getTotalBalance(), 0, "Strategy should have no balance (no deposit)");
+    }
+
+    function testRevertIfNonOwnerClaimsForAddress() public {
+        vm.prank(owner);
+        factory.add(address(strategy1));
+
+        address beneficiary = makeAddr("beneficiary");
+
+        vm.prank(user1);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", user1));
+        factory.claimForAddress(beneficiary);
+
+        // Verify no claim occurred
+        assertEq(factory.getAvailableStrategiesCount(), 1, "Should still have 1 strategy available");
+        assertEq(strategy1.owner(), address(factory), "Strategy should still be owned by factory");
+    }
+
+    function testRevertIfClaimForZeroAddress() public {
+        vm.prank(owner);
+        factory.add(address(strategy1));
+
+        vm.prank(owner);
+        vm.expectRevert("Invalid beneficiary address");
+        factory.claimForAddress(address(0));
+
+        // Verify no claim occurred
+        assertEq(factory.getAvailableStrategiesCount(), 1, "Should still have 1 strategy available");
+        assertEq(strategy1.owner(), address(factory), "Strategy should still be owned by factory");
+    }
+
+    function testRevertIfClaimForAddressWithNoStrategies() public {
+        address beneficiary = makeAddr("beneficiary");
+
+        vm.prank(owner);
+        vm.expectRevert("No strategies available");
+        factory.claimForAddress(beneficiary);
+    }
+
+    function testClaimForAddressPopsFromEnd() public {
+        // Setup: Add multiple strategies
+        vm.startPrank(owner);
+        factory.add(address(strategy1));
+        factory.add(address(strategy2));
+        factory.add(address(strategy3));
+        vm.stopPrank();
+
+        address beneficiary = makeAddr("beneficiary");
+
+        // Verify initial order
+        address[] memory initialStrategies = factory.getAvailableStrategies();
+        assertEq(initialStrategies[0], address(strategy1));
+        assertEq(initialStrategies[1], address(strategy2));
+        assertEq(initialStrategies[2], address(strategy3));
+
+        // Owner claims strategy for beneficiary - should get the last one (strategy3)
+        vm.prank(owner);
+        factory.claimForAddress(beneficiary);
+
+        // Verify strategy3 was claimed and removed from the end
+        assertEq(factory.getAvailableStrategiesCount(), 2, "Should have 2 strategies remaining");
+        assertEq(strategy3.owner(), beneficiary, "Strategy3 should be owned by beneficiary");
+
+        address[] memory remainingStrategies = factory.getAvailableStrategies();
+        assertEq(remainingStrategies.length, 2);
+        assertEq(remainingStrategies[0], address(strategy1));
+        assertEq(remainingStrategies[1], address(strategy2));
+    }
+
+    function testClaimForAddressOwnershipTransferFails() public {
+        // Create a strategy that will reject ownership transfer
+        MockStrategy faultyStrategy = new MockStrategy(address(usdc), address(this)); // Owned by test contract
+
+        // Transfer ownership to factory first
+        faultyStrategy.transferOwnership(address(factory));
+
+        vm.prank(owner);
+        factory.add(address(faultyStrategy));
+
+        address beneficiary = makeAddr("beneficiary");
+
+        // Override the owner() function to return factory address even after transfer
+        // This simulates a scenario where ownership transfer appears to succeed but doesn't
+        vm.mockCall(
+            address(faultyStrategy), abi.encodeWithSelector(Ownable.owner.selector), abi.encode(address(factory))
+        );
+
+        // Attempt to claim should fail ownership verification
+        vm.prank(owner);
+        vm.expectRevert("Ownership transfer failed");
+        factory.claimForAddress(beneficiary);
+
+        vm.clearMockedCalls();
+    }
+
+    function testOwnerCanSetMinimumClaimAmount() public {
+        // Check initial minimum claim amount
+        assertEq(factory.minimumClaimAmount(), 1e6, "Initial minimum should be 1 USDC");
+
+        uint256 newMinimum = 5e6; // 5 USDC
+
+        // Owner sets new minimum
+        vm.prank(owner);
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit MinimumClaimAmountUpdated(1e6, newMinimum);
+        factory.setMinimumClaimAmount(newMinimum);
+
+        // Verify minimum was updated
+        assertEq(factory.minimumClaimAmount(), newMinimum, "Minimum should be updated");
+    }
+
+    function testRevertIfNonOwnerSetsMinimumClaimAmount() public {
+        uint256 newMinimum = 5e6; // 5 USDC
+
+        vm.prank(user1);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", user1));
+        factory.setMinimumClaimAmount(newMinimum);
+
+        // Verify minimum wasn't changed
+        assertEq(factory.minimumClaimAmount(), 1e6, "Minimum should remain unchanged");
+    }
+
+    function testClaimWithUpdatedMinimumAmount() public {
+        // Setup: Add a strategy and update minimum
+        vm.prank(owner);
+        factory.add(address(strategy1));
+
+        uint256 newMinimum = 5e6; // 5 USDC
+        vm.prank(owner);
+        factory.setMinimumClaimAmount(newMinimum);
+
+        // Try to claim with old minimum (should fail)
+        uint256 oldMinimum = 1e6;
+        usdc.mint(user1, oldMinimum);
+        vm.prank(user1);
+        usdc.approve(address(factory), oldMinimum);
+
+        vm.prank(user1);
+        vm.expectRevert("Amount must be at least minimum claim amount");
+        factory.claim(oldMinimum);
+
+        // Claim with new minimum (should succeed)
+        usdc.mint(user1, newMinimum - oldMinimum); // mint the difference
+        vm.prank(user1);
+        usdc.approve(address(factory), newMinimum);
+
+        vm.prank(user1);
+        factory.claim(newMinimum);
+
+        assertEq(strategy1.owner(), user1, "Strategy should be owned by user");
+        assertEq(strategy1.getTotalBalance(), newMinimum, "Strategy should have the new minimum amount");
+    }
+
+    function testMixedClaimAndClaimForAddress() public {
+        // Setup: Add multiple strategies
+        vm.startPrank(owner);
+        factory.add(address(strategy1));
+        factory.add(address(strategy2));
+        factory.add(address(strategy3));
+        vm.stopPrank();
+
+        // User claims a strategy normally
+        uint256 claimAmount = 1000 * 10 ** 6;
+        usdc.mint(user1, claimAmount);
+        vm.prank(user1);
+        usdc.approve(address(factory), claimAmount);
+        vm.prank(user1);
+        factory.claim(claimAmount);
+
+        assertEq(strategy3.owner(), user1, "User1 should own strategy3");
+        assertEq(strategy3.getTotalBalance(), claimAmount, "Strategy3 should have deposit");
+
+        // Owner claims for an address
+        address beneficiary = makeAddr("beneficiary");
+        vm.prank(owner);
+        factory.claimForAddress(beneficiary);
+
+        assertEq(strategy2.owner(), beneficiary, "Beneficiary should own strategy2");
+        assertEq(strategy2.getTotalBalance(), 0, "Strategy2 should have no deposit");
+
+        // Only strategy1 should remain
+        assertEq(factory.getAvailableStrategiesCount(), 1, "Should have 1 strategy remaining");
+        address[] memory remaining = factory.getAvailableStrategies();
+        assertEq(remaining[0], address(strategy1));
+    }
+
+    function testGetMinimumClaimAmountAfterUpdate() public {
+        // Test that the public getter works correctly
+        assertEq(factory.minimumClaimAmount(), 1e6, "Initial minimum should be 1 USDC");
+
+        vm.prank(owner);
+        factory.setMinimumClaimAmount(2e6);
+
+        assertEq(factory.minimumClaimAmount(), 2e6, "Minimum should be updated to 2 USDC");
     }
 }
