@@ -244,13 +244,13 @@ contract StrategyFactoryTest is Test {
     function testConstructorWithValidParameters() public {
         StrategyReserves newFactory = new StrategyReserves(address(usdc), owner);
 
-        assertEq(address(newFactory.usdc()), address(usdc), "USDC address should be set correctly");
+        assertEq(address(newFactory.token()), address(usdc), "USDC address should be set correctly");
         assertEq(newFactory.owner(), owner, "Owner should be set correctly");
         assertEq(newFactory.getAvailableStrategiesCount(), 0, "Initial strategy count should be 0");
     }
 
     function testRevertIfConstructorWithZeroUSDCAddress() public {
-        vm.expectRevert("Invalid USDC address");
+        vm.expectRevert("Invalid token address");
         new StrategyReserves(address(0), owner);
     }
 

@@ -24,13 +24,13 @@ interface IStrategyWithOwnership is IStrategy {
 /**
  * @title StrategyReserves
  * @notice Contract for managing a pool of strategies that users can claim
- * @dev Maintains a list of strategies owned by the contract that users can claim by depositing USDC
+ * @dev Maintains a list of strategies owned by the contract that users can claim by depositing tokens
  */
 contract StrategyReserves is Ownable {
     using SafeERC20 for IERC20;
 
-    /// @notice The USDC token contract
-    IERC20 public immutable usdc;
+    /// @notice The ERC20 token contract
+    IERC20 public immutable token;
 
     /// @notice Array of available strategies
     address[] public strategies;
@@ -38,8 +38,8 @@ contract StrategyReserves is Ownable {
     /// @notice Mapping to track which strategies have been added for O(1) duplicate checking
     mapping(address => bool) public strategyExists;
 
-    /// @notice Minimum amount required to claim a strategy (in USDC's native decimals)
-    uint256 public minimumClaimAmount = 1e6; // 1 USDC
+    /// @notice Minimum amount required to claim a strategy (in token's native decimals)
+    uint256 public minimumClaimAmount = 1e6; // Default: 1 token (assuming 6 decimals)
 
     /// @notice Emitted when a strategy is added to the contract
     event StrategyAdded(address indexed strategy);
@@ -54,13 +54,13 @@ contract StrategyReserves is Ownable {
     event MinimumClaimAmountUpdated(uint256 oldAmount, uint256 newAmount);
 
     /**
-     * @notice Constructor that initializes the factory with USDC token address
-     * @param _usdc Address of the USDC token
+     * @notice Constructor that initializes the factory with ERC20 token address
+     * @param _token Address of the ERC20 token
      * @param _owner Address of the factory owner
      */
-    constructor(address _usdc, address _owner) Ownable(_owner) {
-        require(_usdc != address(0), "Invalid USDC address");
-        usdc = IERC20(_usdc);
+    constructor(address _token, address _owner) Ownable(_owner) {
+        require(_token != address(0), "Invalid token address");
+        token = IERC20(_token);
     }
 
     /**
@@ -86,10 +86,10 @@ contract StrategyReserves is Ownable {
     }
 
     /**
-     * @notice Claims a strategy from the pool by depositing USDC
-     * @dev Pops the last strategy from the list, transfers USDC from caller to contract,
-     *      transfers ownership to caller, deposits USDC, and verifies ownership transfer
-     * @param amount The amount of USDC to deposit (in USDC's native decimals, typically 6)
+     * @notice Claims a strategy from the pool by depositing tokens
+     * @dev Pops the last strategy from the list, transfers tokens from caller to contract,
+     *      transfers ownership to caller, deposits tokens, and verifies ownership transfer
+     * @param amount The amount of tokens to deposit (in token's native decimals)
      */
     function claim(uint256 amount) external {
         // Check that we have available strategies
@@ -104,14 +104,14 @@ contract StrategyReserves is Ownable {
 
         IStrategyWithOwnership strategy = IStrategyWithOwnership(strategyAddress);
 
-        // Transfer USDC from msg.sender to this contract
-        usdc.safeTransferFrom(msg.sender, address(this), amount);
+        // Transfer tokens from msg.sender to this contract
+        token.safeTransferFrom(msg.sender, address(this), amount);
 
         // Transfer ownership of the strategy to msg.sender
         strategy.transferOwnership(msg.sender);
 
-        // Approve the strategy to spend USDC for the deposit
-        usdc.forceApprove(strategyAddress, amount);
+        // Approve the strategy to spend tokens for the deposit
+        token.forceApprove(strategyAddress, amount);
 
         // Call deposit on the strategy
         strategy.deposit(amount);
@@ -124,7 +124,7 @@ contract StrategyReserves is Ownable {
 
     /**
      * @notice Claims a strategy on behalf of another address (for ACP agents)
-     * @dev Only callable by owner. Transfers strategy ownership without requiring USDC deposit.
+     * @dev Only callable by owner. Transfers strategy ownership without requiring token deposit.
      * @param beneficiary The address that will receive ownership of the strategy
      */
     function claimForAddress(address beneficiary) external onlyOwner {
@@ -177,15 +177,15 @@ contract StrategyReserves is Ownable {
     /**
      * @notice Emergency function to recover ERC20 tokens sent to this contract
      * @dev Only callable by the owner
-     * @param token The address of the token to recover
+     * @param tokenAddress The address of the token to recover
      * @param to The address to send the tokens to
      * @param amount The amount of tokens to recover
      */
-    function recoverERC20(address token, address to, uint256 amount) external onlyOwner {
+    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "Cannot send to zero address");
         require(amount > 0, "Amount must be greater than 0");
 
-        IERC20(token).safeTransfer(to, amount);
+        IERC20(tokenAddress).safeTransfer(to, amount);
     }
 
     /**
