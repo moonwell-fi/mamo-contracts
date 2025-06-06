@@ -43,12 +43,6 @@ contract StrategyFactory {
     // Events
     event StrategyCreated(address indexed user, address indexed strategy);
 
-    /// @notice Emitted when a strategy is claimed on behalf of an address
-    event StrategyClaimedForAddress(address indexed beneficiary, address indexed strategy);
-
-    /// @notice Emitted when the minimum claim amount is updated
-    event MinimumClaimAmountUpdated(uint256 oldAmount, uint256 newAmount);
-
     /**
      * @notice Constructor that initializes the factory with all required parameters
      * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
