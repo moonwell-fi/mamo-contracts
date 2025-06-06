@@ -24,7 +24,7 @@ contract DeployStrategyFactory is Script {
         address owner = addresses.getAddress("MAMO_BACKEND");
 
         // Deploy the StrategyFactory
-        StrategyReserves factory = new StrategyReserves(usdc, owner);
+        StrategyReserves factory = new StrategyReserves(usdc, owner, 1e6);
 
         vm.stopBroadcast();
 

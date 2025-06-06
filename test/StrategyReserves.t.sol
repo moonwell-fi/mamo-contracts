@@ -223,7 +223,7 @@ contract StrategyFactoryTest is Test {
         usdc = new MockERC20("USD Coin", "USDC", 6);
 
         // Deploy StrategyFactory
-        factory = new StrategyReserves(address(usdc), owner);
+        factory = new StrategyReserves(address(usdc), owner, 1e6);
 
         // Deploy mock strategies owned by the factory
         strategy1 = new MockStrategy(address(usdc), address(factory));
@@ -242,7 +242,7 @@ contract StrategyFactoryTest is Test {
     }
 
     function testConstructorWithValidParameters() public {
-        StrategyReserves newFactory = new StrategyReserves(address(usdc), owner);
+        StrategyReserves newFactory = new StrategyReserves(address(usdc), owner, 1e6);
 
         assertEq(address(newFactory.token()), address(usdc), "USDC address should be set correctly");
         assertEq(newFactory.owner(), owner, "Owner should be set correctly");
@@ -251,7 +251,7 @@ contract StrategyFactoryTest is Test {
 
     function testRevertIfConstructorWithZeroUSDCAddress() public {
         vm.expectRevert("Invalid token address");
-        new StrategyReserves(address(0), owner);
+        new StrategyReserves(address(0), owner, 1e6);
     }
 
     function testOwnerCanAddStrategy() public {

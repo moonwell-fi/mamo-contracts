@@ -58,9 +58,10 @@ contract StrategyReserves is Ownable {
      * @param _token Address of the ERC20 token
      * @param _owner Address of the factory owner
      */
-    constructor(address _token, address _owner) Ownable(_owner) {
+    constructor(address _token, address _owner, uint256 _minimumClaimAmount) Ownable(_owner) {
         require(_token != address(0), "Invalid token address");
         token = IERC20(_token);
+        minimumClaimAmount = _minimumClaimAmount;
     }
 
     /**
