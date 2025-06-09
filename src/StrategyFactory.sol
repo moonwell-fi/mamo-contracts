@@ -130,9 +130,12 @@ contract StrategyFactory {
      * @return strategy The address of the newly created strategy
      */
     function createStrategyForUser(address user) external returns (address strategy) {
-        // Encode the initialization data with the parameters
-        bytes memory initData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
+        // Deploy the proxy with empty initialization data
+        ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, "");
+        strategy = address(proxy);
+
+        // Initialize the strategy with the parameters
+        ERC20MoonwellMorphoStrategy(payable(strategy)).initialize(
             ERC20MoonwellMorphoStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
@@ -151,10 +154,6 @@ contract StrategyFactory {
                 compoundFee: compoundFee
             })
         );
-
-        // Deploy the proxy with the implementation and initialization data
-        ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, initData);
-        strategy = address(proxy);
 
         emit StrategyCreated(user, strategy);
 
