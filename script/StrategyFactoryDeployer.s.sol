@@ -120,12 +120,6 @@ contract StrategyFactoryDeployer is Script {
         rewardTokens[0] = addresses.getAddress("xWELL_PROXY");
         rewardTokens[1] = addresses.getAddress("MORPHO");
 
-        console.log("splitMToken", assetConfig.strategyParams.splitMToken);
-        console.log("splitVault", assetConfig.strategyParams.splitVault);
-        console.log("hookGasLimit", assetConfig.strategyParams.hookGasLimit);
-        console.log("allowedSlippageInBps", assetConfig.strategyParams.allowedSlippageInBps);
-        console.log("compoundFee", assetConfig.strategyParams.compoundFee);
-
         // Deploy the StrategyFactory
         StrategyFactory factory = new StrategyFactory(
             mamoStrategyRegistry,
@@ -140,8 +134,8 @@ contract StrategyFactoryDeployer is Script {
             assetConfig.strategyParams.splitVault,
             assetConfig.strategyParams.strategyTypeId,
             assetConfig.strategyParams.hookGasLimit,
-            assetConfig.strategyParams.allowedSlippageInBps, // TODO: change this to the allowed slippage in bps
-            assetConfig.strategyParams.compoundFee, // TODO: change this to the compound fee
+            assetConfig.strategyParams.allowedSlippageInBps,
+            assetConfig.strategyParams.compoundFee,
             rewardTokens
         );
 

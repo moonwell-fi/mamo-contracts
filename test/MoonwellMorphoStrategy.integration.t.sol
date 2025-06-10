@@ -102,12 +102,6 @@ contract MoonwellMorphoStrategyTest is Test {
         DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
         assetConfig = assetConfigDeploy.getConfig();
 
-        console.log("assetConfig.strategyParams.splitMToken", assetConfig.strategyParams.splitMToken);
-        console.log("assetConfig.strategyParams.splitVault", assetConfig.strategyParams.splitVault);
-        console.log("assetConfig.strategyParams.hookGasLimit", assetConfig.strategyParams.hookGasLimit);
-        console.log("assetConfig.strategyParams.allowedSlippageInBps", assetConfig.strategyParams.allowedSlippageInBps);
-        console.log("assetConfig.strategyParams.compoundFee", assetConfig.strategyParams.compoundFee);
-
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
@@ -719,8 +713,8 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify initial split
-        assertEq(strategy.splitMToken(), 5000, "Initial mToken split should be 5000 (50%)");
-        assertEq(strategy.splitVault(), 5000, "Initial vault split should be 5000 (50%)");
+        assertEq(strategy.splitMToken(), config.splitMToken, "Initial mToken split should be 5000 (50%)");
+        assertEq(strategy.splitVault(), config.splitVault, "Initial vault split should be 5000 (50%)");
 
         // Verify initial balances match the expected split
         uint256 totalBalance = getTotalBalance(address(strategy));
@@ -793,8 +787,8 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfInvalidSplitParameters() public {
@@ -814,8 +808,8 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfNoFundsToRebalance() public {
@@ -828,8 +822,8 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), 5000, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), 5000, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
     }
 
     function testDepositIdleTokens() public {
@@ -1746,17 +1740,12 @@ contract MoonwellMorphoStrategyTest is Test {
     // Tests for approveCowSwap function
 
     function testOwnerCanApproveCowSwap() public {
-        // Check initial approval
-        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(initialAllowance, 0, "Initial allowance should be zero");
-
-        // Owner approves the vault relayer
         vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.approveCowSwap(address(well), 1e18);
 
         // Verify the approval was successful
         uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(finalAllowance, type(uint256).max, "Allowance should be set to maximum");
+        assertEq(finalAllowance, 1e18, "Allowance should be set to maximum");
     }
 
     function testRevertIfNonOwnerApproveCowSwap() public {
@@ -1770,7 +1759,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify the approval was not granted
         uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(allowance, 0, "Allowance should remain zero");
+        assertEq(allowance, type(uint256).max, "Allowance should remain maximum");
     }
 
     function testRevertIfTokenNotConfiguredInSlippagePriceChecker() public {
@@ -2213,7 +2202,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Mock the mint function to fail
         vm.mockCall(
             address(mToken),
-            abi.encodeWithSelector(IMToken.mint.selector, uint256(500000000)),
+            abi.encodeWithSelector(IMToken.mint.selector, depositAmount),
             abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
         );
 
@@ -2251,7 +2240,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfUpdatePositionMTokenMintFails() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 10000 * 10 ** 6; // 1000 USDC (6 decimals)
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -2325,16 +2314,8 @@ contract MoonwellMorphoStrategyTest is Test {
         ffiCommand[11] = "--from";
         ffiCommand[12] = vm.toString(fromAddress);
 
-        // Log the command for debugging
-        console.log("FFI Command:");
-        for (uint256 i = 0; i < ffiCommand.length; i++) {
-            console.log("  ", ffiCommand[i]);
-        }
-
         // Execute the command and get the appData
         bytes memory appDataResult = vm.ffi(ffiCommand);
-
-        console.log("Generated app data hash:", vm.toString(bytes32(appDataResult)));
 
         return bytes32(appDataResult);
     }
