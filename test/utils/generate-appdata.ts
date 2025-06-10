@@ -1,13 +1,12 @@
 import { MetadataApi } from "@cowprotocol/app-data";
-import { generateAppDataFromDoc } from "@cowprotocol/cow-sdk";
+import { AppDataInfo, generateAppDataFromDoc } from "@cowprotocol/cow-sdk";
 
-const FEE_RECIPIENT = "0x26c158a4cd56d148c554190a95a921d90f00c160";
-
-export const metadataApi = new MetadataApi();
+const metadataApi = new MetadataApi();
 
 /**
  * Generates appData for Mamo strategy orders
  * @param sellToken The address of the token being sold
+ * @param feeRecipient The address that will receive the fee (this parameter is ignored, using FEE_RECIPIENT constant instead)
  * @param feeAmount The amount of fee to be taken (as a string)
  * @param hookGasLimit The gas limit for the pre-hook
  * @param from The address from which the transfer is made
@@ -17,15 +16,16 @@ export async function generateMamoAppData(
   sellToken: string,
   feeAmount: string,
   hookGasLimit: BigInt,
-  from: string
-): Promise<string> {
+  from: string,
+  feeRecipient: string
+): Promise<Pick<AppDataInfo, "fullAppData" | "appDataKeccak256">> {
   // Create the hooks metadata
   const hooks = {
     pre: [
       {
         // Create a placeholder for the callData that matches the format expected by the contract
         // Use FEE_RECIPIENT constant instead of the feeRecipient parameter
-        callData: createTransferFromCalldata(from, FEE_RECIPIENT, feeAmount),
+        callData: createTransferFromCalldata(from, feeRecipient, feeAmount),
         gasLimit: hookGasLimit.toString(),
         target: sellToken.toLowerCase(),
       },
@@ -44,14 +44,15 @@ export async function generateMamoAppData(
 
   // generate app data
   const appData = await generateAppDataFromDoc(appDataDoc);
+  //console.log("Generated appData:", appData);
 
-  return appData.appDataKeccak256;
+  return appData;
 }
 
 /**
  * Creates a transferFrom calldata string
  * @param from The address from which the transfer is made
- * @param recipient The recipient address
+ * @param recipient The address that will receive the fee
  * @param feeAmount The amount to transfer as fee
  * @returns The calldata as a hex string
  */
@@ -136,13 +137,15 @@ Options:
   --from, -f            The address from which the transfer is made (required)
   --verbose, -v         Show detailed output with formatting and hash
   --help, -h            Show this help message
+  --fee-recipient, -fr   The address that will receive the fee (required)
 
 Example:
   ts-node utils/generate-appdata.ts \\
     --sell-token 0x1234567890123456789012345678901234567890 \\
     --sell-amount 1000000000000000000 \\
     --compound-fee 100 \\
-    --from 0xabcdef1234567890abcdef1234567890abcdef12
+    --from 0xabcdef1234567890abcdef1234567890abcdef12 \\
+    --fee-recipient 0xabcdef1234567890abcdef1234567890abcdef12
       `);
       process.exit(0);
     }
@@ -153,6 +156,7 @@ Example:
     let compoundFeeBps = 0;
     let hookGasLimit = 100000; // Default value
     let from = "";
+    let feeRecipient = "";
 
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
@@ -173,6 +177,9 @@ Example:
       } else if ((arg === "--from" || arg === "-f") && nextArg) {
         from = nextArg;
         i++;
+      } else if ((arg === "--fee-recipient" || arg === "-fr") && nextArg) {
+        feeRecipient = nextArg;
+        i++;
       }
     }
 
@@ -182,6 +189,7 @@ Example:
     if (!sellAmount) missingArgs.push("--sell-amount");
     if (!compoundFeeBps) missingArgs.push("--compound-fee");
     if (!from) missingArgs.push("--from");
+    if (!feeRecipient) missingArgs.push("--fee-recipient");
 
     if (missingArgs.length > 0) {
       console.error(
@@ -200,10 +208,11 @@ Example:
         sellToken,
         feeAmount,
         BigInt(hookGasLimit),
-        from.toLowerCase()
+        from.toLowerCase(),
+        feeRecipient
       );
 
-      console.log(appData);
+      console.log(appData.appDataKeccak256);
     } catch (error) {
       console.error("Error generating appData:", error);
       process.exit(1);

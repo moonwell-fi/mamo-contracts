@@ -1548,7 +1548,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
 
         // Set an extremely low buy amount that will definitely fail the price check
-        uint256 extremelyLowBuyAmount = 1; // Just 1 unit of USDC
+        uint256 extremelyLowBuyAmount = 1; // Just 1 unit of underlying
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
