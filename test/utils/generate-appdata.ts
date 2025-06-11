@@ -51,6 +51,7 @@ export async function generateMamoAppData(
   // generate app data
   const appData = await generateAppDataFromDoc(appDataDoc);
 
+
   return appData.appDataKeccak256;
 }
 

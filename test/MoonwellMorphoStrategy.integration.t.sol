@@ -114,10 +114,17 @@ contract MoonwellMorphoStrategyTest is Test {
         mToken = IMToken(addresses.getAddress(assetConfig.moonwellMarket));
         metaMorphoVault = IERC4626(addresses.getAddress(assetConfig.metamorphoVault));
 
+        if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
+            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        } else {
+            _setupSlippagePriceChecker();
+        }
+
         if (addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
             registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         } else {
             registry = new MamoStrategyRegistry(admin, backend, guardian);
+            addresses.changeAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
         }
 
         ERC20MoonwellMorphoStrategy implementation;
@@ -128,6 +135,7 @@ contract MoonwellMorphoStrategyTest is Test {
         } else {
             // Deploy the strategy implementation
             implementation = new ERC20MoonwellMorphoStrategy();
+            addresses.changeAddress("MOONWELL_MORPHO_STRATEGY_IMPL", address(implementation), true);
 
             // Whitelist the implementation
             vm.prank(admin);
@@ -136,12 +144,6 @@ contract MoonwellMorphoStrategyTest is Test {
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
-
-        if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
-            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
-        } else {
-            _setupSlippagePriceChecker();
-        }
 
         address strategyFactory;
         if (addresses.isAddressSet(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")))) {
@@ -166,18 +168,22 @@ contract MoonwellMorphoStrategyTest is Test {
         DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
         slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
 
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+        vm.startPrank(deployer);
         for (uint256 i = 0; i < config.rewardTokens.length; i++) {
-            configs[i] = ISlippagePriceChecker.TokenFeedConfiguration({
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+                new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+
+            configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
                 chainlinkFeed: addresses.getAddress(config.rewardTokens[i].priceFeed),
                 reverse: config.rewardTokens[i].reverse,
                 heartbeat: config.rewardTokens[i].heartbeat
             });
-        }
 
-        vm.prank(deployer);
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, config.maxPriceValidTime);
+            slippagePriceChecker.addTokenConfiguration(
+                address(addresses.getAddress(config.rewardTokens[i].token)), configs, config.maxPriceValidTime
+            );
+        }
+        vm.stopPrank();
     }
 
     function _getInitData(uint256 _strategyTypeId) private view returns (bytes memory) {
@@ -196,9 +202,9 @@ contract MoonwellMorphoStrategyTest is Test {
                 strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
-                hookGasLimit: config.hookGasLimit,
-                allowedSlippageInBps: config.allowedSlippageInBps,
-                compoundFee: config.compoundFee
+                hookGasLimit: assetConfig.strategyParams.hookGasLimit,
+                allowedSlippageInBps: assetConfig.strategyParams.allowedSlippageInBps,
+                compoundFee: assetConfig.strategyParams.compoundFee
             })
         );
     }
@@ -1581,7 +1587,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Now create a more reasonable order with a higher buy amount
         // This amount is still low but might pass with high slippage
-        uint256 reasonableBuyAmount = 1000 * 10 ** 6;
+        uint256 reasonableBuyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory betterOrder = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -2220,13 +2226,13 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfDepositIdleTokensMTokenMintFails() public {
         // Mint USDC directly to the strategy contract
-        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC (6 decimals)
+        uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
         deal(address(underlying), address(strategy), idleAmount);
 
         // Mock the mint function to fail
         vm.mockCall(
             address(mToken),
-            abi.encodeWithSelector(IMToken.mint.selector, uint256(250000000)),
+            abi.encodeWithSelector(IMToken.mint.selector, uint256(idleAmount)),
             abi.encode(uint256(1)) // Return 1 instead of 0 to indicate failure
         );
 
@@ -2240,20 +2246,13 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfUpdatePositionMTokenMintFails() public {
         // First deposit funds
-        uint256 depositAmount = 10000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1 * 10 ** (assetConfig.decimals);
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
         underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
         vm.stopPrank();
-
-        // Mock the redeem function to succeed
-        vm.mockCall(
-            address(mToken),
-            abi.encodeWithSelector(IMToken.redeem.selector),
-            abi.encode(uint256(0)) // Return 0 to indicate success
-        );
 
         // Mock the mint function to fail
         vm.mockCall(
@@ -2299,7 +2298,7 @@ contract MoonwellMorphoStrategyTest is Test {
         returns (bytes32)
     {
         // Use FFI to call our generate-appdata script
-        string[] memory ffiCommand = new string[](13);
+        string[] memory ffiCommand = new string[](15);
         ffiCommand[0] = "npx";
         ffiCommand[1] = "ts-node";
         ffiCommand[2] = "test/utils/generate-appdata.ts";
@@ -2310,9 +2309,11 @@ contract MoonwellMorphoStrategyTest is Test {
         ffiCommand[7] = "--sell-amount";
         ffiCommand[8] = vm.toString(sellAmount);
         ffiCommand[9] = "--compound-fee";
-        ffiCommand[10] = vm.toString(strategy.compoundFee());
+        ffiCommand[10] = vm.toString(assetConfig.strategyParams.compoundFee);
         ffiCommand[11] = "--from";
         ffiCommand[12] = vm.toString(fromAddress);
+        ffiCommand[13] = "--hook-gas-limit";
+        ffiCommand[14] = vm.toString(assetConfig.strategyParams.hookGasLimit);
 
         // Execute the command and get the appData
         bytes memory appDataResult = vm.ffi(ffiCommand);
