@@ -76,17 +76,12 @@
   },
   {
     "addr": "0x5fAB373f43079CE488C2b8579751791982C03A35",
-    "name": "USDC_MOONWELL_MORPHO_STRATEGY_IMPL",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
   {
     "addr": "0x5967ea71cC65d610dc6999d7dF62bfa512e62D07",
     "name": "USDC_STRATEGY_FACTORY",
-    "isContract": true
-  },
-  {
-    "addr": "0x706F82e9bb5b0813501714Ab5974216704980e31",
-    "name": "WORMHOLE_BRIDGE_RELAYER_PROXY",
     "isContract": true
   },
   {
@@ -115,21 +110,6 @@
     "isContract": true
   },
   {
-    "addr": "0x9294Ea619d273A7A9d9daCA79472a18d03cE6852",
-    "name": "MAMO2_IMPLEMENTATION",
-    "isContract": true
-  },
-  {
-    "addr": "0x980A12665Ebd7672EB1C91AB6e6De3a0CCfC6dCb",
-    "name": "MAMO2_PROXY",
-    "isContract": true
-  },
-  {
-    "addr": "0xDE32Af3A669C0B36Db092E6D0915e399F95f6f9C",
-    "name": "MAMO2_ETH_POOL",
-    "isContract": true
-  },
-  {
     "addr": "0xe25e010026692De7A3bb35ef7474cdf4fa1C7e44",
     "name": "BURN_AND_EARN",
     "isContract": true
@@ -147,6 +127,26 @@
   {
     "addr": "0x7300B37DfdfAb110d83290A29DfB31B1740219fE",
     "name": "MAMO",
+    "isContract": true
+  },
+  {
+    "addr": "0x543257eF2161176D7C8cD90BA65C2d4CaEF5a796",
+    "name": "cbBTC_METAMORPHO_VAULT",
+    "isContract": true
+  },
+  {
+    "addr": "0xF877ACaFA28c19b96727966690b2f44d35aD5976",
+    "name": "MOONWELL_cbBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+    "name": "CHAINLINK_BTC_USD",
+    "isContract": true
+  },
+  {
+    "addr": "0xF3A72612Bdd50480672350dCEe4609B94Da9ECF9",
+    "name": "cbBTC_STRATEGY_FACTORY",
     "isContract": true
   }
 ]

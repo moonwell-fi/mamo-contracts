@@ -6,11 +6,11 @@ import {ERC20MoonwellMorphoStrategy} from "./ERC20MoonwellMorphoStrategy.sol";
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
 
 /**
- * @title USDCStrategyFactory
- * @notice Factory contract for creating new USDC strategy instances with configurable parameters
+ * @title StrategyFactory
+ * @notice Factory contract for creating new strategy instances with configurable parameters
  * @dev Creates proxies pointing to the ERC20MoonwellMorphoStrategy implementation
  */
-contract USDCStrategyFactory {
+contract StrategyFactory {
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
@@ -130,9 +130,12 @@ contract USDCStrategyFactory {
      * @return strategy The address of the newly created strategy
      */
     function createStrategyForUser(address user) external returns (address strategy) {
-        // Encode the initialization data with the parameters
-        bytes memory initData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
+        // Deploy the proxy with empty initialization data
+        ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, "");
+        strategy = address(proxy);
+
+        // Initialize the strategy with the parameters
+        ERC20MoonwellMorphoStrategy(payable(strategy)).initialize(
             ERC20MoonwellMorphoStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
@@ -151,10 +154,6 @@ contract USDCStrategyFactory {
                 compoundFee: compoundFee
             })
         );
-
-        // Deploy the proxy with the implementation and initialization data
-        ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, initData);
-        strategy = address(proxy);
 
         emit StrategyCreated(user, strategy);
 

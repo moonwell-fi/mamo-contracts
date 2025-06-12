@@ -7,4 +7,12 @@ coverage:
 deploy-broadcast:
 	export DEPLOY_ENV="8453_PROD" && forge script script/DeploySystem.s.sol:DeploySystem --fork-url base --account mamo-test --verify --slow -vvvvv --broadcast --sender   0xDca82E03057329f53Ed4173429D46B0511E46Fb8             
 
-.PHONY: test coverage deploy-broadcast
+
+usdc-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy 
+
+cbbtc-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
+
+
+.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy 

@@ -1,0 +1,30 @@
+{
+  "symbol": "USDC",
+  "decimals": 6,
+  "token": "USDC",
+  "moonwellMarket": "MOONWELL_USDC",
+  "metamorphoVault": "USDC_METAMORPHO_VAULT",
+  "priceOracle": "CHAINLINK_USDC_USD",
+  "strategyParams": {
+    "splitMToken": 10000,
+    "splitVault": 0,
+    "hookGasLimit": 100000,
+    "allowedSlippageInBps": 100,
+    "compoundFee": 500,
+    "strategyTypeId": 1
+  },
+  "rewardTokens": [
+  {
+    "token": "xWELL_PROXY",
+    "priceFeed": "CHAINLINK_WELL_USD",
+    "reverse": false,
+    "heartbeat": 86400
+  },
+    {
+      "token": "MORPHO",
+      "priceFeed": "CHAINLINK_MORPHO_USD",
+      "reverse": false,
+      "heartbeat": 86400
+    }
+  ]
+}

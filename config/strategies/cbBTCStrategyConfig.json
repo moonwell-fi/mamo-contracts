@@ -1,0 +1,30 @@
+{
+  "decimals": 8,
+  "metamorphoVault": "cbBTC_METAMORPHO_VAULT",
+  "moonwellMarket": "MOONWELL_cbBTC",
+  "priceOracle": "CHAINLINK_BTC_USD",
+  "rewardTokens": [
+    {
+      "heartbeat": 86400,
+      "priceFeed": "CHAINLINK_MORPHO_USD",
+      "reverse": false,
+      "token": "MORPHO"
+    },
+    {
+      "heartbeat": 86400,
+      "priceFeed": "CHAINLINK_WELL_USD",
+      "reverse": false,
+      "token": "xWELL_PROXY"
+    }
+  ],
+  "strategyParams": {
+    "allowedSlippageInBps": 100,
+    "compoundFee": 500,
+    "hookGasLimit": 100000,
+    "splitMToken": 10000,
+    "splitVault": 0,
+    "strategyTypeId": 1
+  },
+  "symbol": "cbBTC",
+  "token": "cbBTC"
+}

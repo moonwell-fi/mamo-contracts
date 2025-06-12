@@ -11,11 +11,8 @@ env:
   BASESCAN_API_KEY: ${{secrets.BASESCAN_API_KEY}} 
 
 jobs:
-  check:
-    strategy:
-      fail-fast: true
-
-    name: Foundry project
+  setup:
+    name: Setup and Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +47,80 @@ jobs:
           forge build --sizes
         id: build
 
-      - name: Run Forge tests
-        run: |
-          forge test --fork-url base -vvv --ffi
-        id: test
+  test:
+    name: Basic Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+
+      - name: Run basic tests
+        run: forge test --fork-url base --ffi -vvv --no-match-contract MoonwellMorphoStrategy
+
+  usdc-strategy:
+    name: USDC Strategy Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+
+      - name: Run USDC strategy tests
+        run: make usdc-strategy
+
+  cbbtc-strategy:
+    name: cbBTC Strategy Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+
+      - name: Run cbBTC strategy tests
+        run: make cbbtc-strategy
