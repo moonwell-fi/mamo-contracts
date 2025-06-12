@@ -6,11 +6,11 @@
   "metamorphoVault": "USDC_METAMORPHO_VAULT",
   "priceOracle": "CHAINLINK_USDC_USD",
   "strategyParams": {
-    "splitMToken": 5000,
-    "splitVault": 5000,
-    "hookGasLimit": 300000,
+    "splitMToken": 10000,
+    "splitVault": 0,
+    "hookGasLimit": 100000,
     "allowedSlippageInBps": 100,
-    "compoundFee": 1000,
+    "compoundFee": 500,
     "strategyTypeId": 1
   },
   "rewardTokens": [

@@ -19,8 +19,8 @@
   ],
   "strategyParams": {
     "allowedSlippageInBps": 100,
-    "compoundFee": 1000,
-    "hookGasLimit": 300000,
+    "compoundFee": 500,
+    "hookGasLimit": 100000,
     "splitMToken": 10000,
     "splitVault": 0,
     "strategyTypeId": 1

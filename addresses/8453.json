@@ -85,11 +85,6 @@
     "isContract": true
   },
   {
-    "addr": "0x706F82e9bb5b0813501714Ab5974216704980e31",
-    "name": "WORMHOLE_BRIDGE_RELAYER_PROXY",
-    "isContract": true
-  },
-  {
     "addr": "0xB9d4acf113a423Bc4A64110B8738a52E51C2AB38",
     "name": "MAMO_PAUSE_GUARDIAN",
     "isContract": true
@@ -112,21 +107,6 @@
   {
     "addr": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
     "name": "UNISWAP_V3_POSITION_MANAGER",
-    "isContract": true
-  },
-  {
-    "addr": "0x9294Ea619d273A7A9d9daCA79472a18d03cE6852",
-    "name": "MAMO2_IMPLEMENTATION",
-    "isContract": true
-  },
-  {
-    "addr": "0x980A12665Ebd7672EB1C91AB6e6De3a0CCfC6dCb",
-    "name": "MAMO2_PROXY",
-    "isContract": true
-  },
-  {
-    "addr": "0xDE32Af3A669C0B36Db092E6D0915e399F95f6f9C",
-    "name": "MAMO2_ETH_POOL",
     "isContract": true
   },
   {
@@ -165,7 +145,7 @@
     "isContract": true
   },
   {
-    "addr": "0x1f9B6cBC4d89D66Be7E13075AB06FEbe9A42db9f",
+    "addr": "0xF3A72612Bdd50480672350dCEe4609B94Da9ECF9",
     "name": "cbBTC_STRATEGY_FACTORY",
     "isContract": true
   }
