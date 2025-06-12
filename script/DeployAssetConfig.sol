@@ -36,12 +36,18 @@ contract DeployAssetConfig is Test {
         uint256 strategyTypeId;
     }
 
-    /// @notice Reward token configuration struct
-    struct RewardToken {
-        uint256 heartbeat;
+    /// @notice Price feed configuration struct
+    struct PriceFeedConfig {
         string priceFeed;
         bool reverse;
+        uint256 heartbeat;
+    }
+
+    /// @notice Reward token configuration struct
+    struct RewardToken {
         string token;
+        PriceFeedConfig[] priceFeeds;
+        uint256 maxTimePriceValid;
     }
 
     Config private config;
@@ -132,7 +138,25 @@ contract DeployAssetConfig is Test {
         config.strategyParams.strategyTypeId =
             abi.decode(vm.parseJson(configData, ".strategyParams.strategyTypeId"), (uint256));
 
-        // Handle the array separately
-        config.rewardTokens = abi.decode(vm.parseJson(configData, ".rewardTokens"), (RewardToken[]));
+        // Handle the reward tokens array separately with new structure
+        console.log("DEBUG: Starting to parse rewardTokens array");
+        bytes memory rewardTokensData = vm.parseJson(configData, ".rewardTokens");
+        console.log("DEBUG: rewardTokensData length:", rewardTokensData.length);
+
+        // Get the length of the array first
+        uint256 rewardTokensLength = abi.decode(rewardTokensData, (uint256[])).length;
+        console.log("DEBUG: Number of reward tokens:", rewardTokensLength);
+
+        for (uint256 i = 0; i < rewardTokensLength; i++) {
+            console.log("DEBUG: Processing reward token index:", i);
+            string memory indexPath = string(abi.encodePacked(".rewardTokens[", vm.toString(i), "]"));
+            console.log("DEBUG: JSON path:", indexPath);
+
+            bytes memory tokenData = vm.parseJson(configData, indexPath);
+            console.log("DEBUG: tokenData length:", tokenData.length);
+
+            RewardToken memory rewardToken = abi.decode(tokenData, (RewardToken));
+            config.rewardTokens.push(rewardToken);
+        }
     }
 }

@@ -5,16 +5,31 @@
   "priceOracle": "CHAINLINK_BTC_USD",
   "rewardTokens": [
     {
-      "heartbeat": 86400,
-      "priceFeed": "CHAINLINK_MORPHO_USD",
-      "reverse": false,
-      "token": "MORPHO"
+      "token": "MORPHO",
+      "maxTimePriceValid": 3600,
+      "priceFeeds": [
+        {
+          "priceFeed": "CHAINLINK_MORPHO_USD",
+          "reverse": false,
+          "heartbeat": 86400
+        }
+      ]
     },
     {
-      "heartbeat": 86400,
-      "priceFeed": "CHAINLINK_WELL_USD",
-      "reverse": false,
-      "token": "xWELL_PROXY"
+      "token": "xWELL_PROXY",
+      "maxTimePriceValid": 3600,
+      "priceFeeds": [
+        {
+          "priceFeed": "CHAINLINK_WELL_USD",
+          "reverse": false,
+          "heartbeat": 86400
+        },
+        {
+          "priceFeed": "CHAINLINK_BTC_USD",
+          "reverse": true,
+          "heartbeat": 86400
+        }
+      ]
     }
   ],
   "strategyParams": {
