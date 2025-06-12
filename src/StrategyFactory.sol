@@ -155,10 +155,6 @@ contract StrategyFactory {
             })
         );
 
-        // Deploy the proxy with the implementation and initialization data
-        ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, initData);
-        strategy = address(proxy);
-
         // Register the strategy with the MamoStrategyRegistry
         mamoStrategyRegistryInterface.addStrategy(user, strategy);
 
