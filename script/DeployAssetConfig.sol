@@ -36,11 +36,17 @@ contract DeployAssetConfig is Test {
         uint256 strategyTypeId;
     }
 
-    /// @notice Reward token configuration struct
-    struct RewardToken {
+    /// @notice Price feed configuration struct
+    struct PriceFeedConfig {
         uint256 heartbeat;
         string priceFeed;
         bool reverse;
+    }
+
+    /// @notice Reward token configuration struct
+    struct RewardToken {
+        uint256 maxTimePriceValid;
+        PriceFeedConfig[] priceFeeds;
         string token;
     }
 
@@ -132,7 +138,14 @@ contract DeployAssetConfig is Test {
         config.strategyParams.strategyTypeId =
             abi.decode(vm.parseJson(configData, ".strategyParams.strategyTypeId"), (uint256));
 
-        // Handle the array separately
-        config.rewardTokens = abi.decode(vm.parseJson(configData, ".rewardTokens"), (RewardToken[]));
+        // Parse reward tokens array using parseRaw for better control
+        if (configData.keyExists(".rewardTokens")) {
+            bytes memory rewardTokensData = configData.parseRaw(".rewardTokens");
+            RewardToken[] memory rewardTokens = abi.decode(rewardTokensData, (RewardToken[]));
+
+            for (uint256 i = 0; i < rewardTokens.length; i++) {
+                config.rewardTokens.push(rewardTokens[i]);
+            }
+        }
     }
 }
