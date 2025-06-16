@@ -46,7 +46,7 @@
   },
   {
     "addr": "0xDca82E03057329f53Ed4173429D46B0511E46Fb8",
-    "name": "TESTING_EOA",
+    "name": "DEPLOYER_EOA",
     "isContract": false
   },
   {

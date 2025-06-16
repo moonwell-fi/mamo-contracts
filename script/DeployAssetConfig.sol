@@ -22,7 +22,6 @@ contract DeployAssetConfig is Test {
         string token;
         string moonwellMarket;
         string metamorphoVault;
-        string priceOracle;
         StrategyParams strategyParams;
         RewardToken[] rewardTokens;
     }
@@ -125,7 +124,6 @@ contract DeployAssetConfig is Test {
         config.decimals = abi.decode(vm.parseJson(configData, ".decimals"), (uint8));
         config.moonwellMarket = abi.decode(vm.parseJson(configData, ".moonwellMarket"), (string));
         config.metamorphoVault = abi.decode(vm.parseJson(configData, ".metamorphoVault"), (string));
-        config.priceOracle = abi.decode(vm.parseJson(configData, ".priceOracle"), (string));
         config.strategyParams.splitMToken =
             abi.decode(vm.parseJson(configData, ".strategyParams.splitMToken"), (uint256));
         config.strategyParams.splitVault = abi.decode(vm.parseJson(configData, ".strategyParams.splitVault"), (uint256));

@@ -2,7 +2,6 @@
   "decimals": 8,
   "metamorphoVault": "cbBTC_METAMORPHO_VAULT",
   "moonwellMarket": "MOONWELL_cbBTC",
-  "priceOracle": "CHAINLINK_BTC_USD",
   "rewardTokens": [
     {
       "token": "MORPHO",
@@ -11,6 +10,11 @@
         {
           "priceFeed": "CHAINLINK_MORPHO_USD",
           "reverse": false,
+          "heartbeat": 86400
+        },
+        {
+          "priceFeed": "CHAINLINK_BTC_USD",
+          "reverse": true,
           "heartbeat": 86400
         }
       ]

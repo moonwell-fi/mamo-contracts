@@ -4,7 +4,6 @@
   "token": "USDC",
   "moonwellMarket": "MOONWELL_USDC",
   "metamorphoVault": "USDC_METAMORPHO_VAULT",
-  "priceOracle": "CHAINLINK_USDC_USD",
   "strategyParams": {
     "splitMToken": 10000,
     "splitVault": 0,

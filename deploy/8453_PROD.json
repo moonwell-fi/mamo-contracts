@@ -3,7 +3,7 @@
   "allowedSlippageInBps": 100,
   "backend": "MAMO_BACKEND",
   "chainId": 8453,
-  "deployer": "TESTING_EOA",
+  "deployer": "DEPLOYER_EOA",
   "compoundFee": 500,
   "guardian": "MAMO_MULTISIG",
   "hookGasLimit": 100000,

@@ -16,9 +16,6 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
  * @dev Loads addresses from addresses JSON and configuration from strategy config JSON
  */
 contract AddTokenConfiguration is Script, Test {
-    /// @notice The MAMO multisig address that owns the SlippagePriceChecker
-    address constant MAMO_MULTISIG = 0x26c158A4CD56d148c554190A95A921d90F00C160;
-
     /**
      * @notice Adds token configurations to the SlippagePriceChecker
      * @param addresses The addresses contract instance
@@ -53,9 +50,6 @@ contract AddTokenConfiguration is Script, Test {
                 });
             }
 
-            // Prank as MAMO_MULTISIG to call addTokenConfiguration
-            vm.startPrank(MAMO_MULTISIG);
-
             console.log("Adding token configuration for:", rewardToken.token);
             console.log("Token address:", tokenAddress);
             console.log("Max time price valid:", rewardToken.maxTimePriceValid);
@@ -63,8 +57,6 @@ contract AddTokenConfiguration is Script, Test {
 
             // Add the token configuration
             priceChecker.addTokenConfiguration(tokenAddress, feedConfigs, rewardToken.maxTimePriceValid);
-
-            vm.stopPrank();
 
             console.log("Successfully added configuration for token:", rewardToken.token);
         }
