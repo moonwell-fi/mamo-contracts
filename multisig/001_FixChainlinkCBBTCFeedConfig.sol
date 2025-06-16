@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {MultisigProposal} from "@fps/proposals/MultisigProposal.sol";
-
 import {Addresses} from "@addresses/Addresses.sol";
-import {AddTokenConfiguration} from "@script/AddTokenConfiguration.s.sol";
+import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
+import {MultisigProposal} from "@fps/proposals/MultisigProposal.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
+import {console} from "forge-std/console.sol";
 
 contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfig;
@@ -31,11 +32,45 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
         return "Fix Chainlink CBBTC Feed Config";
     }
 
-    function build() public override {
-        vm.startPrank(addresses.getAddress("MAMO_MULTISIG"));
-        AddTokenConfiguration addTokenConfiguration = new AddTokenConfiguration();
-        addTokenConfiguration.addTokenConfiguration(addresses, deployAssetConfig);
-        vm.stopPrank();
+    function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
+        // Get the SlippagePriceChecker proxy address
+        address slippagePriceCheckerProxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
+        SlippagePriceChecker priceChecker = SlippagePriceChecker(slippagePriceCheckerProxy);
+
+        // Get the configuration
+        DeployAssetConfig.Config memory config = deployAssetConfig.getConfig();
+
+        // Process each reward token
+        for (uint256 i = 0; i < config.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = config.rewardTokens[i];
+
+            // Get the token address
+            address tokenAddress = addresses.getAddress(rewardToken.token);
+
+            // Convert price feed configurations
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigs =
+                new ISlippagePriceChecker.TokenFeedConfiguration[](rewardToken.priceFeeds.length);
+
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                DeployAssetConfig.PriceFeedConfig memory priceFeedConfig = rewardToken.priceFeeds[j];
+
+                feedConfigs[j] = ISlippagePriceChecker.TokenFeedConfiguration({
+                    chainlinkFeed: addresses.getAddress(priceFeedConfig.priceFeed),
+                    reverse: priceFeedConfig.reverse,
+                    heartbeat: priceFeedConfig.heartbeat
+                });
+            }
+
+            console.log("Adding token configuration for:", rewardToken.token);
+            console.log("Token address:", tokenAddress);
+            console.log("Max time price valid:", rewardToken.maxTimePriceValid);
+            console.log("Number of price feeds:", feedConfigs.length);
+
+            // Add the token configuration
+            priceChecker.addTokenConfiguration(tokenAddress, feedConfigs, rewardToken.maxTimePriceValid);
+
+            console.log("Successfully added configuration for token:", rewardToken.token);
+        }
     }
 
     function simulate() public override {

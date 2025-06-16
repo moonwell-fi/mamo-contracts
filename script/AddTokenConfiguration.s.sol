@@ -29,6 +29,8 @@ contract AddTokenConfiguration is Script, Test {
         // Get the configuration
         DeployAssetConfig.Config memory config = assetConfig.getConfig();
 
+        vm.startPrank(addresses.getAddress("MAMO_MULTISIG"));
+
         // Process each reward token
         for (uint256 i = 0; i < config.rewardTokens.length; i++) {
             DeployAssetConfig.RewardToken memory rewardToken = config.rewardTokens[i];
@@ -60,6 +62,7 @@ contract AddTokenConfiguration is Script, Test {
 
             console.log("Successfully added configuration for token:", rewardToken.token);
         }
+        vm.stopPrank();
     }
 
     /**
