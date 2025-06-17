@@ -26,6 +26,8 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
+
 contract StrategyMulticallIntegrationTest is Test {
     Addresses public addresses;
     StrategyMulticall public multicall;
@@ -82,12 +84,23 @@ contract StrategyMulticallIntegrationTest is Test {
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
-        StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-        address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
-        factory = StrategyFactory(payable(factoryAddress));
+        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
+        if (addresses.isAddressSet(factoryName)) {
+            factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
+        } else {
+            StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
+            address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
+            factory = StrategyFactory(payable(factoryAddress));
+        }
 
         // Deploy StrategyMulticall with backend as owner
-        multicall = new StrategyMulticall(backend);
+        string memory multicallName = "STRATEGY_MULTICALL";
+        if (addresses.isAddressSet(multicallName)) {
+            multicall = StrategyMulticall(payable(addresses.getAddress(multicallName)));
+        } else {
+            DeployStrategyMulticall deployStrategyMulticall = new DeployStrategyMulticall();
+            multicall = StrategyMulticall(payable(deployStrategyMulticall.deployStrategyMulticall(addresses)));
+        }
 
         vm.startPrank(mamoMultisig);
         registry.revokeRole(registry.BACKEND_ROLE(), backend);

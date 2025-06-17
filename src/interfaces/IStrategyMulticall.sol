@@ -13,7 +13,6 @@ interface IStrategyMulticall {
      */
     event GenericMulticallExecuted(address indexed initiator, uint256 callsCount);
 
-
     /**
      * @notice Struct containing the parameters for a generic call
      * @param target The address of the target contract

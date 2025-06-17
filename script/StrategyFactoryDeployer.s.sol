@@ -142,7 +142,7 @@ contract StrategyFactoryDeployer is Script {
         vm.stopBroadcast();
 
         // Check if the factory address already exists
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
+        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
         if (addresses.isAddressSet(factoryName)) {
             // Update the existing address
             addresses.changeAddress(factoryName, address(factory), true);
