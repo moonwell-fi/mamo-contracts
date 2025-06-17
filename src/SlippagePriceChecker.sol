@@ -173,22 +173,11 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     }
 
     /**
-     * @notice Gets the oracle information for a token
-     * @dev Implements the interface function to access the token oracle configurations
-     * @param token The token address to get oracle information for
-     * @return Array of TokenFeedConfiguration for the token
-     */
-    function tokenOracleInformation(address token) external view override returns (TokenFeedConfiguration[] memory) {
-        return tokenOracleData[token];
-    }
-
-    /**
      * @notice Checks if a token is configured as a reward token
      * @dev DEPRECATED: This function cannot determine reward tokens in the new token pair model
-     * @param token The address of the token to check
      * @return Always returns false - use isTokenPairConfigured instead
      */
-    function isRewardToken(address token) external view override returns (bool) {
+    function isRewardToken(address) external view override returns (bool) {
         // Return false to indicate this function is deprecated
         return false;
     }

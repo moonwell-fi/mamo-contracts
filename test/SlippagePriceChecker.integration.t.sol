@@ -108,8 +108,8 @@ contract SlippagePriceCheckerTest is Test {
                 "maxTimePriceValid should match"
             );
 
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory rewardTokenConfigs =
-                slippagePriceChecker.tokenOracleInformation(addresses.getAddress(rewardToken.token));
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory rewardTokenConfigs = slippagePriceChecker
+                .tokenPairOracleInformation(addresses.getAddress(rewardToken.token), address(underlying));
 
             assertEq(
                 rewardTokenConfigs.length,
@@ -177,7 +177,7 @@ contract SlippagePriceCheckerTest is Test {
 
         // Verify the token configuration was updated
         ISlippagePriceChecker.TokenFeedConfiguration[] memory updatedConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(well));
+            slippagePriceChecker.tokenPairOracleInformation(address(well), address(underlying));
         assertEq(updatedConfigs.length, 1, "WELL should still have 1 configuration");
         assertEq(updatedConfigs[0].chainlinkFeed, chainlinkWellUsd, "WELL price feed should remain the same");
         assertEq(updatedConfigs[0].reverse, true, "WELL reverse flag should be updated");
@@ -331,7 +331,7 @@ contract SlippagePriceCheckerTest is Test {
 
         // Try to get the token configuration - should return an empty array
         ISlippagePriceChecker.TokenFeedConfiguration[] memory finalConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(well));
+            slippagePriceChecker.tokenPairOracleInformation(address(well), address(underlying));
         assertEq(finalConfigs.length, 0, "WELL should have no configurations after removal");
     }
 
@@ -422,7 +422,7 @@ contract SlippagePriceCheckerTest is Test {
 
         // Verify the token configuration
         ISlippagePriceChecker.TokenFeedConfiguration[] memory storedConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(well));
+            slippagePriceChecker.tokenPairOracleInformation(address(well), address(underlying));
         assertEq(storedConfigs.length, 2, "WELL should have 2 configurations");
         assertEq(storedConfigs[0].chainlinkFeed, chainlinkWellUsd, "First price feed should match");
         assertEq(storedConfigs[0].reverse, false, "First reverse flag should match");

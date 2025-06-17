@@ -23,10 +23,14 @@ interface ISlippagePriceChecker {
     /**
      * @notice Maps token addresses to their oracle configurations
      * @dev Each token can have multiple price feed configurations in sequence
-     * @param token The token address to get oracle information for
+     * @param fromToken The token address to swap from
+     * @param toToken The token address to swap to
      * @return Array of TokenFeedConfiguration for the token
      */
-    function tokenOracleInformation(address token) external view returns (TokenFeedConfiguration[] memory);
+    function tokenPairOracleInformation(address fromToken, address toToken)
+        external
+        view
+        returns (TokenFeedConfiguration[] memory);
 
     /**
      * @notice Checks if a swap meets the price requirements
@@ -102,15 +106,4 @@ interface ISlippagePriceChecker {
      * @return Whether the token pair is configured
      */
     function isTokenPairConfigured(address fromToken, address toToken) external view returns (bool);
-
-    /**
-     * @notice Gets the oracle information for a token pair
-     * @param fromToken The address of the token to swap from
-     * @param toToken The address of the token to swap to
-     * @return Array of TokenFeedConfiguration for the token pair
-     */
-    function tokenPairOracleInformation(address fromToken, address toToken)
-        external
-        view
-        returns (TokenFeedConfiguration[] memory);
 }

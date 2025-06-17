@@ -157,7 +157,8 @@ contract DeploySystem is Script {
             );
 
             // Get token oracle information
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds = priceChecker.tokenOracleInformation(token);
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
+                priceChecker.tokenPairOracleInformation(token, addresses.getAddress("USDC"));
 
             // Verify feed configurations exist
             require(feeds.length > 0, string(abi.encodePacked("No feed configurations for ", tokenName)));
