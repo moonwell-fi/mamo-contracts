@@ -130,6 +130,9 @@ contract StrategyFactory {
      * @return strategy The address of the newly created strategy
      */
     function createStrategyForUser(address user) external returns (address strategy) {
+        require(user != address(0), "Invalid user address");
+        require(msg.sender == mamoBackend || msg.sender == user, "Only backend or user can create strategy");
+
         // Deploy the proxy with empty initialization data
         ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, "");
         strategy = address(proxy);

@@ -484,7 +484,8 @@ contract StrategyFactoryTest is Test {
         vm.expectEmit(true, false, false, false);
         emit StrategyFactory.StrategyCreated(user, address(0)); // address(0) is placeholder for strategy
 
-        // Call createStrategyForUser
+        // Call createStrategyForUser as backend
+        vm.prank(mamoBackend);
         address strategyAddress = factory.createStrategyForUser(user);
 
         // Verify strategy was created successfully
@@ -495,7 +496,8 @@ contract StrategyFactoryTest is Test {
     }
 
     function testCreateStrategyForUserInitializesCorrectly() public {
-        // Create strategy
+        // Create strategy as backend
+        vm.prank(mamoBackend);
         address strategyAddress = factory.createStrategyForUser(user);
 
         // Cast to the mock strategy to check initialization
@@ -513,9 +515,11 @@ contract StrategyFactoryTest is Test {
         address user1 = makeAddr("user1");
         address user2 = makeAddr("user2");
 
-        // Create strategies for different users
+        // Create strategies for different users as backend
+        vm.startPrank(mamoBackend);
         address strategy1 = factory.createStrategyForUser(user1);
         address strategy2 = factory.createStrategyForUser(user2);
+        vm.stopPrank();
 
         // Verify strategies are different
         assertTrue(strategy1 != strategy2, "Strategies for different users should be different");
@@ -530,9 +534,11 @@ contract StrategyFactoryTest is Test {
     }
 
     function testCreateStrategyForUserMultipleStrategiesPerUser() public {
-        // Create multiple strategies for the same user
+        // Create multiple strategies for the same user as backend
+        vm.startPrank(mamoBackend);
         address strategy1 = factory.createStrategyForUser(user);
         address strategy2 = factory.createStrategyForUser(user);
+        vm.stopPrank();
 
         // Verify strategies are different
         assertTrue(strategy1 != strategy2, "Multiple strategies for same user should be different");
@@ -549,7 +555,27 @@ contract StrategyFactoryTest is Test {
         // Expect the call to revert with the registry error
         vm.expectRevert("Registry add strategy failed");
 
-        // Try to create a strategy
+        // Try to create a strategy as backend
+        vm.prank(mamoBackend);
+        factory.createStrategyForUser(user);
+    }
+
+    // ==================== ACCESS CONTROL TESTS ====================
+
+    function testCreateStrategyForUserAsUser() public {
+        // User can create strategy for themselves
+        vm.prank(user);
+        address strategyAddress = factory.createStrategyForUser(user);
+
+        assertTrue(strategyAddress != address(0), "Strategy should be created");
+        assertTrue(mockRegistry.userStrategies(user, strategyAddress), "Strategy should be registered for user");
+    }
+
+    function testRevertCreateStrategyForUserAsNonBackendNonUser() public {
+        address nonAuthorized = makeAddr("nonAuthorized");
+
+        vm.expectRevert("Only backend or user can create strategy");
+        vm.prank(nonAuthorized);
         factory.createStrategyForUser(user);
     }
 
@@ -564,9 +590,10 @@ contract StrategyFactoryTest is Test {
     // ==================== EDGE CASES ====================
 
     function testCreateStrategyWithZeroUserAddress() public {
-        // This should work at the factory level - validation happens in the strategy
-        address strategy = factory.createStrategyForUser(address(0));
-        assertTrue(strategy != address(0), "Strategy should be created even with zero user address");
+        // This should revert now since the factory validates user address
+        vm.expectRevert("Invalid user address");
+        vm.prank(mamoBackend);
+        factory.createStrategyForUser(address(0));
     }
 
     function testCreateStrategyWithMaximumValidParameters() public {
@@ -589,6 +616,7 @@ contract StrategyFactoryTest is Test {
             rewardTokens
         );
 
+        vm.prank(mamoBackend);
         address strategy = maxParamsFactory.createStrategyForUser(user);
         assertTrue(strategy != address(0), "Strategy should be created with maximum valid parameters");
     }
