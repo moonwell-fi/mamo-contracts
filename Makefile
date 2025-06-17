@@ -9,10 +9,16 @@ deploy-broadcast:
 
 
 usdc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy 
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy -vvv
 
 cbbtc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvvvv
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
+
+usdc-price-checker:
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi --mc SlippagePriceCheckerTest -vvv
+
+cbbtc-price-checker:
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc SlippagePriceCheckerTest -vvv  --show-progress
 
 
-.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy 
+.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker integration-test

@@ -15,7 +15,7 @@
         {
           "priceFeed": "CHAINLINK_BTC_USD",
           "reverse": true,
-          "heartbeat": 86400
+          "heartbeat": 3600
         }
       ]
     },
@@ -31,7 +31,7 @@
         {
           "priceFeed": "CHAINLINK_BTC_USD",
           "reverse": true,
-          "heartbeat": 86400
+          "heartbeat": 3600
         }
       ]
     }

@@ -61,15 +61,20 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
                 });
             }
 
-            console.log("Adding token configuration for:", rewardToken.token);
+            console.log("Removing existing configuration for:", rewardToken.token);
             console.log("Token address:", tokenAddress);
+
+            // Remove existing configuration first
+            priceChecker.removeTokenConfiguration(tokenAddress);
+
+            console.log("Adding new token configuration for:", rewardToken.token);
             console.log("Max time price valid:", rewardToken.maxTimePriceValid);
             console.log("Number of price feeds:", feedConfigs.length);
 
-            // Add the token configuration
+            // Add the new token configuration
             priceChecker.addTokenConfiguration(tokenAddress, feedConfigs, rewardToken.maxTimePriceValid);
 
-            console.log("Successfully added configuration for token:", rewardToken.token);
+            console.log("Successfully updated configuration for token:", rewardToken.token);
         }
     }
 

@@ -17,3 +17,4 @@ openzeppelin-contracts/=lib/openzeppelin-contracts/
 @test=test/
 @openzeppelin-foundry-upgrades/=lib/openzeppelin-foundry-upgrades/src/
 @fps=lib/forge-proposal-simulator/src/
+@multisig=multisig/

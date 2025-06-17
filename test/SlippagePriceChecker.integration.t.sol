@@ -16,16 +16,18 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {FixChainlinkCBBTCFeedConfig} from "@multisig/001_FixChainlinkCBBTCFeedConfig.sol";
+import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
+
 contract SlippagePriceCheckerTest is Test {
     ISlippagePriceChecker public slippagePriceChecker;
     Addresses public addresses;
 
     // Contracts from Base network
-    ERC20 public usdc;
+    ERC20 public underlying;
     ERC20 public well;
+    ERC20 public morpho;
     address public owner;
-    address public chainlinkWellUsd;
-    address public chainlinkUsdcUsd;
 
     // Constants
     uint256 public constant INITIAL_SLIPPAGE = 100; // 1%
@@ -33,9 +35,18 @@ contract SlippagePriceCheckerTest is Test {
     uint256 public constant DEFAULT_MAX_TIME_PRICE_VALID = 3600; // 1 hour in seconds
 
     DeployConfig.DeploymentConfig public config;
+    DeployAssetConfig.Config public assetConfig;
+
+    mapping(address => uint256) public amountInByToken;
+
+    address public chainlinkWellUsd;
+    address public chainlinkBtcUsd;
 
     function setUp() public {
+        // workaround to make test contract work with mappings
+        vm.makePersistent(DEFAULT_TEST_CONTRACT);
         // Initialize addresses
+
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
@@ -48,46 +59,39 @@ contract SlippagePriceCheckerTest is Test {
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
 
+        // Load asset configuration from environment
+        string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
+        assetConfig = new DeployAssetConfig(assetConfigPath).getConfig();
+
         // Get the addresses from the addresses contract
         owner = addresses.getAddress(config.admin);
-        usdc = ERC20(addresses.getAddress("USDC"));
+        underlying = ERC20(addresses.getAddress(assetConfig.token));
         well = ERC20(addresses.getAddress("xWELL_PROXY"));
-        chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
-        chainlinkUsdcUsd = addresses.getAddress("CHAINLINK_USDC_USD");
+        morpho = ERC20(addresses.getAddress("MORPHO"));
 
         if (!addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
             // Deploy the SlippagePriceChecker using the script
             DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
             slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
+            addresses.addAddress("CHAINLINK_SWAP_CHECKER_PROXY", address(slippagePriceChecker), true);
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
-    }
 
-    function addTokenConfigurations() internal {
-        // Configure WELL token with WELL/USD price feed
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory wellConfigs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        wellConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd,
-            reverse: false,
-            heartbeat: 1800
-        });
+        // todo remove this once FixChainlinkCBBTCFeedConfig is executed
+        if (keccak256(bytes(assetConfig.symbol)) == keccak256(bytes("cbBTC"))) {
+            // run 001_FixChainlinkCBBTCFeedConfig proposal
+            FixChainlinkCBBTCFeedConfig proposal = new FixChainlinkCBBTCFeedConfig();
+            proposal.build();
+            proposal.simulate();
+            proposal.validate();
+        }
 
-        vm.prank(owner);
-        slippagePriceChecker.addTokenConfiguration(address(well), wellConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        amountInByToken[address(well)] = 300e18;
+        amountInByToken[address(morpho)] = 3e18;
 
-        // Configure USDC token with USDC/USD price feed
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory usdcConfigs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        usdcConfigs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkUsdcUsd,
-            reverse: false,
-            heartbeat: 1800
-        });
-
-        vm.prank(owner);
-        slippagePriceChecker.addTokenConfiguration(address(usdc), usdcConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
+        chainlinkBtcUsd = addresses.getAddress("CHAINLINK_BTC_USD");
     }
 
     function testInitialState() public view {
@@ -95,35 +99,34 @@ contract SlippagePriceCheckerTest is Test {
         assertEq(OwnableUpgradeable(address(slippagePriceChecker)).owner(), owner, "Owner should be set correctly");
     }
 
-    function testTokenConfiguration() public view {
-        // Verify WELL token configuration
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory wellConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(well));
-        assertEq(wellConfigs.length, 1, "WELL should have 1 configuration");
-        assertEq(wellConfigs[0].chainlinkFeed, chainlinkWellUsd, "WELL price feed should match");
-        assertEq(wellConfigs[0].reverse, false, "WELL reverse flag should match");
-        assertEq(
-            slippagePriceChecker.maxTimePriceValid(address(well)),
-            DEFAULT_MAX_TIME_PRICE_VALID,
-            "WELL maxTimePriceValid should match"
-        );
+    function testTokenConfigurationMatchesAssetConfig() public view {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            assertEq(
+                slippagePriceChecker.maxTimePriceValid(addresses.getAddress(rewardToken.token)),
+                rewardToken.maxTimePriceValid,
+                "maxTimePriceValid should match"
+            );
 
-        address morpho = addresses.getAddress("MORPHO");
-        // Verify USDC token configuration
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory morphoConfigs =
-            slippagePriceChecker.tokenOracleInformation(morpho);
-        assertEq(morphoConfigs.length, 1, "Morpho should have 1 configuration");
-        assertEq(
-            morphoConfigs[0].chainlinkFeed,
-            addresses.getAddress("CHAINLINK_MORPHO_USD"),
-            "Morpho price feed should match"
-        );
-        assertEq(morphoConfigs[0].reverse, false, "Morpho reverse flag should match");
-        assertEq(
-            slippagePriceChecker.maxTimePriceValid(address(morpho)),
-            config.maxPriceValidTime,
-            "MORPHO maxTimePriceValid should match"
-        );
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory rewardTokenConfigs =
+                slippagePriceChecker.tokenOracleInformation(addresses.getAddress(rewardToken.token));
+
+            assertEq(
+                rewardTokenConfigs.length,
+                rewardToken.priceFeeds.length,
+                "rewardToken should have as many configurations as the asset config priceFeeds length"
+            );
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                DeployAssetConfig.PriceFeedConfig memory priceFeed = rewardToken.priceFeeds[j];
+                assertEq(
+                    rewardTokenConfigs[j].chainlinkFeed,
+                    addresses.getAddress(priceFeed.priceFeed),
+                    "rewardToken price feed should match"
+                );
+                assertEq(rewardTokenConfigs[j].reverse, priceFeed.reverse, "rewardToken reverse flag should match");
+                assertEq(rewardTokenConfigs[j].heartbeat, priceFeed.heartbeat, "rewardToken heartbeat should match");
+            }
+        }
     }
 
     function testUpdateMaxTimePriceValid() public {
@@ -154,7 +157,7 @@ contract SlippagePriceCheckerTest is Test {
         );
     }
 
-    function testReaddTokenConfiguration() public {
+    function testRemoveAndAddTokenConfiguration() public {
         // Create a new configuration for WELL token
         ISlippagePriceChecker.TokenFeedConfiguration[] memory newConfigs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
@@ -181,18 +184,63 @@ contract SlippagePriceCheckerTest is Test {
     }
 
     function testGetExpectedOut() public view {
-        // Get the expected output from the swap checker
-        uint256 amountIn = 1 * 10 ** 18; // 1 WELL
-        uint256 slippagePriceCheckerOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        // Loop over assetConfig.rewardTokens and get the expected output for each token
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            uint256 amountIn = amountInByToken[addresses.getAddress(rewardToken.token)];
 
-        // Verify the output is non-zero
-        assertTrue(slippagePriceCheckerOut > 0, "Expected output should be greater than zero");
+            console.log("=== DEBUGGING CALCULATION ===");
+            console.log("Token:", rewardToken.token);
+            console.log("AmountIn:", amountIn);
+
+            uint256 slippagePriceCheckerOut = slippagePriceChecker.getExpectedOut(
+                amountIn, addresses.getAddress(rewardToken.token), address(underlying)
+            );
+            console.log("SlippagePriceChecker result:", slippagePriceCheckerOut);
+
+            assertTrue(slippagePriceCheckerOut > 0, "Expected output should be greater than zero");
+
+            uint256 expectedOutFromChainlink = amountIn;
+
+            // check if the output matches the chainlink price
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                DeployAssetConfig.PriceFeedConfig memory priceFeed = rewardToken.priceFeeds[j];
+                (, int256 answer,,,) = IPriceFeed(addresses.getAddress(priceFeed.priceFeed)).latestRoundData();
+                uint256 chainlinkPrice = uint256(answer);
+                uint256 scaleAnswerBy = 10 ** uint256(IPriceFeed(addresses.getAddress(priceFeed.priceFeed)).decimals());
+
+                expectedOutFromChainlink = priceFeed.reverse
+                    ? (expectedOutFromChainlink * scaleAnswerBy) / chainlinkPrice
+                    : (expectedOutFromChainlink * chainlinkPrice) / scaleAnswerBy;
+
+                console.log("After feed", j, ":", expectedOutFromChainlink);
+            }
+
+            uint256 fromTokenDecimals = 18; // TODO move this to assetConfig
+            uint256 toTokenDecimals = assetConfig.decimals;
+
+            // Apply decimal adjustment AFTER all price feed calculations (same as SlippagePriceChecker)
+            if (fromTokenDecimals > toTokenDecimals) {
+                uint256 divisor = 10 ** (fromTokenDecimals - toTokenDecimals);
+                console.log("Dividing by:", divisor);
+                expectedOutFromChainlink = expectedOutFromChainlink / divisor;
+            } else if (fromTokenDecimals < toTokenDecimals) {
+                uint256 multiplier = 10 ** (toTokenDecimals - fromTokenDecimals);
+                console.log("Multiplying by:", multiplier);
+                expectedOutFromChainlink = expectedOutFromChainlink * multiplier;
+            }
+
+            console.log("Final test calculation:", expectedOutFromChainlink);
+            console.log("SlippagePriceChecker result:", slippagePriceCheckerOut);
+
+            assertEq(slippagePriceCheckerOut, expectedOutFromChainlink, "Expected output should match chainlink price");
+        }
     }
 
     function testCheckPrice() public view {
         // Get the expected output for 1 WELL to USDC
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
-        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(underlying));
 
         // Calculate the minimum acceptable output with slippage
         // The contract checks if minOut > (expectedOut * (MAX_BPS - slippage)) / MAX_BPS
@@ -200,7 +248,8 @@ contract SlippagePriceCheckerTest is Test {
         uint256 minOut = (expectedOut * (MAX_BPS - INITIAL_SLIPPAGE + 10)) / MAX_BPS;
 
         // Check if the price is acceptable
-        bool result = slippagePriceChecker.checkPrice(amountIn, address(well), address(usdc), minOut, INITIAL_SLIPPAGE);
+        bool result =
+            slippagePriceChecker.checkPrice(amountIn, address(well), address(underlying), minOut, INITIAL_SLIPPAGE);
 
         assertTrue(result, "Price check should pass with acceptable slippage");
     }
@@ -208,7 +257,7 @@ contract SlippagePriceCheckerTest is Test {
     function testCheckPriceFail() public view {
         // Get the expected output for 1 WELL to USDC
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
-        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(underlying));
 
         // Calculate a minimum output that's too low (below allowed slippage)
         // The contract checks if minOut > (expectedOut * (MAX_BPS - slippage)) / MAX_BPS
@@ -216,7 +265,8 @@ contract SlippagePriceCheckerTest is Test {
         uint256 minOut = (expectedOut * (MAX_BPS - INITIAL_SLIPPAGE - 10)) / MAX_BPS;
 
         // Check if the price is acceptable (should fail)
-        bool result = slippagePriceChecker.checkPrice(amountIn, address(well), address(usdc), minOut, INITIAL_SLIPPAGE);
+        bool result =
+            slippagePriceChecker.checkPrice(amountIn, address(well), address(underlying), minOut, INITIAL_SLIPPAGE);
 
         assertFalse(result, "Price check should fail with too much slippage");
     }
@@ -282,7 +332,7 @@ contract SlippagePriceCheckerTest is Test {
 
         // Verify that the token configuration has been removed
         vm.expectRevert("Token not configured");
-        slippagePriceChecker.getExpectedOut(1 * 10 ** 18, address(well), address(usdc));
+        slippagePriceChecker.getExpectedOut(1 * 10 ** 18, address(well), address(underlying));
 
         // Try to get the token configuration - should return an empty array
         ISlippagePriceChecker.TokenFeedConfiguration[] memory finalConfigs =
@@ -305,10 +355,12 @@ contract SlippagePriceCheckerTest is Test {
         address unconfiguredToken = makeAddr("unconfiguredToken");
 
         vm.expectRevert("Token not configured");
-        slippagePriceChecker.getExpectedOut(1 * 10 ** 18, unconfiguredToken, address(usdc));
+        slippagePriceChecker.getExpectedOut(1 * 10 ** 18, unconfiguredToken, address(underlying));
 
         vm.expectRevert("Token not configured");
-        slippagePriceChecker.checkPrice(1 * 10 ** 18, unconfiguredToken, address(usdc), 1 * 10 ** 6, INITIAL_SLIPPAGE);
+        slippagePriceChecker.checkPrice(
+            1 * 10 ** 18, unconfiguredToken, address(underlying), 1 * 10 ** 6, INITIAL_SLIPPAGE
+        );
     }
 
     function testRevertIfZeroTokenAddressInRemoveTokenConfiguration() public {
@@ -319,12 +371,12 @@ contract SlippagePriceCheckerTest is Test {
 
     function testRevertIfSlippageExceedsMaximum() public {
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
-        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(underlying));
         uint256 minOut = expectedOut / 2; // Some arbitrary minOut value
         uint256 excessiveSlippage = MAX_BPS + 1; // Exceeds maximum BPS
 
         vm.expectRevert("Slippage exceeds maximum");
-        slippagePriceChecker.checkPrice(amountIn, address(well), address(usdc), minOut, excessiveSlippage);
+        slippagePriceChecker.checkPrice(amountIn, address(well), address(underlying), minOut, excessiveSlippage);
     }
 
     function testRevertIfZeroMaxTimePriceValid() public {
@@ -360,7 +412,7 @@ contract SlippagePriceCheckerTest is Test {
             heartbeat: 1 days
         });
         configs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkUsdcUsd,
+            chainlinkFeed: chainlinkBtcUsd,
             reverse: true, // Reverse to get USD/USDC
             heartbeat: 1 days
         });
@@ -379,12 +431,12 @@ contract SlippagePriceCheckerTest is Test {
         assertEq(storedConfigs.length, 2, "WELL should have 2 configurations");
         assertEq(storedConfigs[0].chainlinkFeed, chainlinkWellUsd, "First price feed should match");
         assertEq(storedConfigs[0].reverse, false, "First reverse flag should match");
-        assertEq(storedConfigs[1].chainlinkFeed, chainlinkUsdcUsd, "Second price feed should match");
+        assertEq(storedConfigs[1].chainlinkFeed, chainlinkBtcUsd, "Second price feed should match");
         assertEq(storedConfigs[1].reverse, true, "Second reverse flag should match");
 
         // Test the expected output with the new configuration
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
-        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(underlying));
 
         // The expected output should be non-zero
         assertTrue(expectedOut > 0, "Expected output should be greater than zero");
@@ -410,7 +462,7 @@ contract SlippagePriceCheckerTest is Test {
 
         // Get the expected output from the swap checker
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL
-        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(usdc));
+        uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(underlying));
 
         // Verify the output is non-zero
         assertTrue(expectedOut > 0, "Expected output should be greater than zero");
@@ -443,59 +495,74 @@ contract SlippagePriceCheckerTest is Test {
     }
 
     function testRevertIfChainlinkPriceIsZero() public {
-        // Mock the latestRoundData call to return zero price
-        vm.mockCall(
-            chainlinkWellUsd,
-            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
-            abi.encode(
-                uint80(1), // roundId
-                int256(0), // answer (price)
-                uint256(0), // startedAt
-                block.timestamp, // updatedAt
-                uint80(1) // answeredInRound
-            )
-        );
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            address tokenAddress = addresses.getAddress(rewardToken.token);
 
-        // Try to get expected output - should revert
-        vm.expectRevert("Chainlink price cannot be lower or equal to 0");
-        slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
+            // Mock the latestRoundData call to return zero price
+            vm.mockCall(
+                addresses.getAddress(rewardToken.priceFeeds[0].priceFeed),
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(
+                    uint80(1), // roundId
+                    int256(0), // answer (price)
+                    uint256(0), // startedAt
+                    block.timestamp, // updatedAt
+                    uint80(1) // answeredInRound
+                )
+            );
+
+            // Try to get expected output - should revert
+            vm.expectRevert("Chainlink price cannot be lower or equal to 0");
+            slippagePriceChecker.getExpectedOut(1e18, tokenAddress, address(underlying));
+        }
     }
 
     function testRevertIfChainlinkRoundIncomplete() public {
-        // Mock the latestRoundData call to return incomplete round (updatedAt = 0)
-        vm.mockCall(
-            chainlinkWellUsd,
-            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
-            abi.encode(
-                uint80(1), // roundId
-                int256(1e8), // answer (price)
-                uint256(0), // startedAt
-                uint256(0), // updatedAt (incomplete round)
-                uint80(1) // answeredInRound
-            )
-        );
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            address tokenAddress = addresses.getAddress(rewardToken.token);
 
-        // Try to get expected output - should revert
-        vm.expectRevert("Round is in incompleted state");
-        slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
+            // Mock the latestRoundData call to return incomplete round (updatedAt = 0)
+            vm.mockCall(
+                addresses.getAddress(rewardToken.priceFeeds[0].priceFeed),
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(
+                    uint80(1), // roundId
+                    int256(1e8), // answer (price)
+                    uint256(0), // startedAt
+                    uint256(0), // updatedAt (incomplete round)
+                    uint80(1) // answeredInRound
+                )
+            );
+
+            // Try to get expected output - should revert
+            vm.expectRevert("Round is in incompleted state");
+            slippagePriceChecker.getExpectedOut(1e18, tokenAddress, address(underlying));
+        }
     }
 
     function testRevertIfChainlinkPriceStale() public {
-        // Mock the latestRoundData call to return stale price (updatedAt is too old)
-        vm.mockCall(
-            chainlinkWellUsd,
-            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
-            abi.encode(
-                uint80(1), // roundId
-                int256(1e8), // answer (price)
-                uint256(0), // startedAt
-                block.timestamp - 86401, // updatedAt
-                uint80(1) // answeredInRound
-            )
-        );
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            address tokenAddress = addresses.getAddress(rewardToken.token);
 
-        // Try to get expected output - should revert
-        vm.expectRevert("Price feed update time exceeds heartbeat");
-        slippagePriceChecker.getExpectedOut(1e18, address(well), address(usdc));
+            // Mock the latestRoundData call to return stale price (updatedAt is too old)
+            vm.mockCall(
+                addresses.getAddress(rewardToken.priceFeeds[0].priceFeed),
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(
+                    uint80(1), // roundId
+                    int256(1e8), // answer (price)
+                    uint256(0), // startedAt
+                    block.timestamp - 86401, // updatedAt
+                    uint80(1) // answeredInRound
+                )
+            );
+
+            // Try to get expected output - should revert
+            vm.expectRevert("Price feed update time exceeds heartbeat");
+            slippagePriceChecker.getExpectedOut(1e18, address(well), address(underlying));
+        }
     }
 }
