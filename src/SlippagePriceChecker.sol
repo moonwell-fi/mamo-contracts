@@ -175,9 +175,10 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     /**
      * @notice Checks if a token is configured as a reward token
      * @dev DEPRECATED: This function cannot determine reward tokens in the new token pair model
+     * @dev keeping it here for backwards compatibility
      * @return Always returns false - use isTokenPairConfigured instead
      */
-    function isRewardToken(address) external view override returns (bool) {
+    function isRewardToken(address) external pure override returns (bool) {
         // Return false to indicate this function is deprecated
         return false;
     }

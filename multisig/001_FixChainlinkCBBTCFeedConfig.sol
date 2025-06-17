@@ -2,14 +2,19 @@
 pragma solidity 0.8.28;
 
 import {Addresses} from "@addresses/Addresses.sol";
+
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {MultisigProposal} from "@fps/proposals/MultisigProposal.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {console} from "forge-std/console.sol";
 
 contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfig;
+    address public slippagePriceCheckerImplementation;
 
     constructor() {
         setPrimaryForkId(vm.createSelectFork("base"));
@@ -32,6 +37,12 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
         return "Fix Chainlink CBBTC Feed Config";
     }
 
+    function deploy() public override {
+        // deploy the new slippage price checker implementation
+        slippagePriceCheckerImplementation = address(new SlippagePriceChecker());
+        addresses.changeAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION", slippagePriceCheckerImplementation, true);
+    }
+
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         // Get the SlippagePriceChecker proxy address
         address slippagePriceCheckerProxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
@@ -41,6 +52,9 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
         DeployAssetConfig.Config memory config = deployAssetConfig.getConfig();
 
         address to = addresses.getAddress(config.token);
+
+        // upgrade the slippage price checker proxy
+        UUPSUpgradeable(slippagePriceCheckerProxy).upgradeToAndCall(slippagePriceCheckerImplementation, bytes(""));
 
         // Process each reward token
         for (uint256 i = 0; i < config.rewardTokens.length; i++) {
@@ -63,18 +77,11 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
                 });
             }
 
-            console.log("Removing existing configuration for:", rewardToken.token);
-            console.log("Token address:", from);
-
-            // Remove existing configuration first
-            //priceChecker.removeTokenConfiguration(from);
-
             console.log("Adding new token configuration for:", rewardToken.token);
             console.log("Max time price valid:", rewardToken.maxTimePriceValid);
             console.log("Number of price feeds:", feedConfigs.length);
 
             // Add the new token configuration
-
             priceChecker.addTokenConfiguration(from, to, feedConfigs);
 
             console.log("Successfully updated configuration for token:", rewardToken.token);
