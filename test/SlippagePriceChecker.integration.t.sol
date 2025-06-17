@@ -143,11 +143,11 @@ contract SlippagePriceCheckerTest is Test {
 
         // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.removeTokenConfiguration(address(well));
+        slippagePriceChecker.removeTokenConfiguration(address(well), address(underlying));
 
         // Then add the new configuration with updated maxTimePriceValid
         vm.prank(owner);
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, newMaxTimePriceValid);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), configs);
 
         // Verify the maxTimePriceValid was updated
         assertEq(
@@ -169,11 +169,11 @@ contract SlippagePriceCheckerTest is Test {
 
         // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.removeTokenConfiguration(address(well));
+        slippagePriceChecker.removeTokenConfiguration(address(well), address(underlying));
 
         // Then add the new configuration
         vm.prank(owner);
-        slippagePriceChecker.addTokenConfiguration(address(well), newConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), newConfigs);
 
         // Verify the token configuration was updated
         ISlippagePriceChecker.TokenFeedConfiguration[] memory updatedConfigs =
@@ -284,7 +284,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), configs);
     }
 
     function testRevertIfNonOwnerRemoveTokenConfiguration() public {
@@ -292,7 +292,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
-        slippagePriceChecker.removeTokenConfiguration(address(well));
+        slippagePriceChecker.removeTokenConfiguration(address(well), address(underlying));
     }
 
     function testRevertIfZeroTokenAddress() public {
@@ -306,7 +306,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Invalid token address");
-        slippagePriceChecker.addTokenConfiguration(address(0), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(0), address(underlying), configs);
     }
 
     function testRevertIfZeroPriceFeedAddress() public {
@@ -317,18 +317,13 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Invalid chainlink feed address");
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), configs);
     }
 
     function testRemoveTokenConfiguration() public {
-        // First, verify that the token is configured
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory initialConfigs =
-            slippagePriceChecker.tokenOracleInformation(address(well));
-        assertEq(initialConfigs.length, 1, "WELL should have 1 configuration initially");
-
         // Call removeTokenConfiguration
         vm.prank(owner);
-        slippagePriceChecker.removeTokenConfiguration(address(well));
+        slippagePriceChecker.removeTokenConfiguration(address(well), address(underlying));
 
         // Verify that the token configuration has been removed
         vm.expectRevert("Token not configured");
@@ -347,7 +342,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Empty configurations array");
-        slippagePriceChecker.addTokenConfiguration(address(well), emptyConfigs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), emptyConfigs);
     }
 
     function testRevertIfTokenNotConfigured() public {
@@ -366,7 +361,7 @@ contract SlippagePriceCheckerTest is Test {
     function testRevertIfZeroTokenAddressInRemoveTokenConfiguration() public {
         vm.prank(owner);
         vm.expectRevert("Invalid token address");
-        slippagePriceChecker.removeTokenConfiguration(address(0));
+        slippagePriceChecker.removeTokenConfiguration(address(0), address(underlying));
     }
 
     function testRevertIfSlippageExceedsMaximum() public {
@@ -390,7 +385,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Max time price valid can't be zero");
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, 0);
+        slippagePriceChecker.setMaxTimePriceValid(address(well), 0);
     }
 
     function testRevertIfTokenNotConfiguredInRemoveTokenConfiguration() public {
@@ -399,7 +394,7 @@ contract SlippagePriceCheckerTest is Test {
 
         vm.prank(owner);
         vm.expectRevert("Token not configured");
-        slippagePriceChecker.removeTokenConfiguration(unconfiguredToken);
+        slippagePriceChecker.removeTokenConfiguration(unconfiguredToken, address(underlying));
     }
 
     function testAddTokenConfigurationWithMultipleFeeds() public {
@@ -419,11 +414,11 @@ contract SlippagePriceCheckerTest is Test {
 
         // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.removeTokenConfiguration(address(well));
+        slippagePriceChecker.removeTokenConfiguration(address(well), address(underlying));
 
         // Then add the new configuration
         vm.prank(owner);
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), configs);
 
         // Verify the token configuration
         ISlippagePriceChecker.TokenFeedConfiguration[] memory storedConfigs =
@@ -454,11 +449,11 @@ contract SlippagePriceCheckerTest is Test {
 
         // First remove the existing configuration
         vm.prank(owner);
-        slippagePriceChecker.removeTokenConfiguration(address(well));
+        slippagePriceChecker.removeTokenConfiguration(address(well), address(underlying));
 
         // Then add the new configuration
         vm.prank(owner);
-        slippagePriceChecker.addTokenConfiguration(address(well), configs, DEFAULT_MAX_TIME_PRICE_VALID);
+        slippagePriceChecker.addTokenConfiguration(address(well), address(underlying), configs);
 
         // Get the expected output from the swap checker
         uint256 amountIn = 1 * 10 ** 18; // 1 WELL

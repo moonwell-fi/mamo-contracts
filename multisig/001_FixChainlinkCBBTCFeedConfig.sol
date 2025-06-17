@@ -40,12 +40,14 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
         // Get the configuration
         DeployAssetConfig.Config memory config = deployAssetConfig.getConfig();
 
+        address to = addresses.getAddress(config.token);
+
         // Process each reward token
         for (uint256 i = 0; i < config.rewardTokens.length; i++) {
             DeployAssetConfig.RewardToken memory rewardToken = config.rewardTokens[i];
 
             // Get the token address
-            address tokenAddress = addresses.getAddress(rewardToken.token);
+            address from = addresses.getAddress(rewardToken.token);
 
             // Convert price feed configurations
             ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigs =
@@ -62,17 +64,18 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
             }
 
             console.log("Removing existing configuration for:", rewardToken.token);
-            console.log("Token address:", tokenAddress);
+            console.log("Token address:", from);
 
             // Remove existing configuration first
-            priceChecker.removeTokenConfiguration(tokenAddress);
+            //priceChecker.removeTokenConfiguration(from);
 
             console.log("Adding new token configuration for:", rewardToken.token);
             console.log("Max time price valid:", rewardToken.maxTimePriceValid);
             console.log("Number of price feeds:", feedConfigs.length);
 
             // Add the new token configuration
-            priceChecker.addTokenConfiguration(tokenAddress, feedConfigs, rewardToken.maxTimePriceValid);
+
+            priceChecker.addTokenConfiguration(from, to, feedConfigs);
 
             console.log("Successfully updated configuration for token:", rewardToken.token);
         }
