@@ -14,5 +14,11 @@ usdc-strategy:
 cbbtc-strategy:
 	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
 
+strategy-factory:
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationTest
 
-.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy 
+strategy-multicall:
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyMulticallIntegrationTest
+
+
+.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall 
