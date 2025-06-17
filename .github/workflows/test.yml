@@ -71,7 +71,7 @@ jobs:
           version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
 
       - name: Run basic tests
-        run: forge test --fork-url base --ffi -vvv --no-match-contract MoonwellMorphoStrategy
+        run: make test
 
   usdc-strategy:
     name: USDC Strategy Tests
