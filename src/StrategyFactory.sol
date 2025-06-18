@@ -49,7 +49,7 @@ contract StrategyFactory {
      * @param _mamoBackend Address of the Mamo backend
      * @param _mToken Address of the Moonwell mToken
      * @param _metaMorphoVault Address of the MetaMorpho Vault
-     * @param _token Address of the underlying token (USDC)
+     * @param _token Address of the underlying token
      * @param _slippagePriceChecker Address of the SlippagePriceChecker
      * @param _strategyImplementation Address of the strategy implementation
      * @param _splitMToken Percentage of funds allocated to Moonwell mToken in basis points
@@ -124,12 +124,15 @@ contract StrategyFactory {
     }
 
     /**
-     * @notice Creates a new USDC strategy for a specified user
+     * @notice Creates a new strategy for a specified user
      * @dev Only callable by accounts with the BACKEND_ROLE in the MamoStrategyRegistry
      * @param user The address of the user to create the strategy for
      * @return strategy The address of the newly created strategy
      */
     function createStrategyForUser(address user) external returns (address strategy) {
+        require(user != address(0), "Invalid user address");
+        require(msg.sender == mamoBackend || msg.sender == user, "Only backend or user can create strategy");
+
         // Deploy the proxy with empty initialization data
         ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, "");
         strategy = address(proxy);
@@ -154,6 +157,9 @@ contract StrategyFactory {
                 compoundFee: compoundFee
             })
         );
+
+        // Register the strategy with the MamoStrategyRegistry
+        mamoStrategyRegistryInterface.addStrategy(user, strategy);
 
         emit StrategyCreated(user, strategy);
 
