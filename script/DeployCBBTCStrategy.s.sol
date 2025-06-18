@@ -132,7 +132,7 @@ contract DeployCBBTCStrategy is Script {
      */
     function _deployUserStrategy() private {
         // Get testing EOA address for demonstration
-        address testUser = addresses.getAddress("TESTING_EOA");
+        address testUser = addresses.getAddress("DEPLOYER_EOA");
 
         console.log("=== Deploying Strategy for Test User ===");
         console.log("Test User:", testUser);

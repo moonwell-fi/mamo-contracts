@@ -157,7 +157,8 @@ contract DeploySystem is Script {
             );
 
             // Get token oracle information
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds = priceChecker.tokenOracleInformation(token);
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
+                priceChecker.tokenPairOracleInformation(token, addresses.getAddress("USDC"));
 
             // Verify feed configurations exist
             require(feeds.length > 0, string(abi.encodePacked("No feed configurations for ", tokenName)));
@@ -204,7 +205,8 @@ contract DeploySystem is Script {
 
         for (uint256 i = 0; i < deployConfig.rewardTokens.length; i++) {
             string memory tokenName = deployConfig.rewardTokens[i].token;
-            address token = addresses.getAddress(tokenName);
+            address from = addresses.getAddress(tokenName);
+            address to = addresses.getAddress("USDC"); // TODO make it dynamic
             address priceFeed = addresses.getAddress(deployConfig.rewardTokens[i].priceFeed);
 
             // Create token configuration
@@ -218,7 +220,7 @@ contract DeploySystem is Script {
             });
 
             // Add token configuration
-            priceChecker.addTokenConfiguration(token, tokenConfigs, deployConfig.maxPriceValidTime);
+            priceChecker.addTokenConfiguration(from, to, tokenConfigs);
         }
 
         // Transfer ownership to the multisig only once after all tokens are configured

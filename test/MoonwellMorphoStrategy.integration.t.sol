@@ -180,7 +180,7 @@ contract MoonwellMorphoStrategyTest is Test {
             });
 
             slippagePriceChecker.addTokenConfiguration(
-                address(addresses.getAddress(config.rewardTokens[i].token)), configs, config.maxPriceValidTime
+                address(addresses.getAddress(config.rewardTokens[i].token)), address(underlying), configs
             );
         }
         vm.stopPrank();

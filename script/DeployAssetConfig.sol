@@ -22,7 +22,6 @@ contract DeployAssetConfig is Test {
         string token;
         string moonwellMarket;
         string metamorphoVault;
-        string priceOracle;
         StrategyParams strategyParams;
         RewardToken[] rewardTokens;
     }
@@ -36,11 +35,17 @@ contract DeployAssetConfig is Test {
         uint256 strategyTypeId;
     }
 
-    /// @notice Reward token configuration struct
-    struct RewardToken {
+    /// @notice Price feed configuration struct
+    struct PriceFeedConfig {
         uint256 heartbeat;
         string priceFeed;
         bool reverse;
+    }
+
+    /// @notice Reward token configuration struct
+    struct RewardToken {
+        uint256 maxTimePriceValid;
+        PriceFeedConfig[] priceFeeds;
         string token;
     }
 
@@ -119,7 +124,6 @@ contract DeployAssetConfig is Test {
         config.decimals = abi.decode(vm.parseJson(configData, ".decimals"), (uint8));
         config.moonwellMarket = abi.decode(vm.parseJson(configData, ".moonwellMarket"), (string));
         config.metamorphoVault = abi.decode(vm.parseJson(configData, ".metamorphoVault"), (string));
-        config.priceOracle = abi.decode(vm.parseJson(configData, ".priceOracle"), (string));
         config.strategyParams.splitMToken =
             abi.decode(vm.parseJson(configData, ".strategyParams.splitMToken"), (uint256));
         config.strategyParams.splitVault = abi.decode(vm.parseJson(configData, ".strategyParams.splitVault"), (uint256));
@@ -132,7 +136,14 @@ contract DeployAssetConfig is Test {
         config.strategyParams.strategyTypeId =
             abi.decode(vm.parseJson(configData, ".strategyParams.strategyTypeId"), (uint256));
 
-        // Handle the array separately
-        config.rewardTokens = abi.decode(vm.parseJson(configData, ".rewardTokens"), (RewardToken[]));
+        // Parse reward tokens array using parseRaw for better control
+        if (configData.keyExists(".rewardTokens")) {
+            bytes memory rewardTokensData = configData.parseRaw(".rewardTokens");
+            RewardToken[] memory rewardTokens = abi.decode(rewardTokensData, (RewardToken[]));
+
+            for (uint256 i = 0; i < rewardTokens.length; i++) {
+                config.rewardTokens.push(rewardTokens[i]);
+            }
+        }
     }
 }

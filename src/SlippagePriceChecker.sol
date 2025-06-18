@@ -28,28 +28,50 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     /**
      * @notice Maps token addresses to their oracle configurations
      * @dev Each token can have multiple price feed configurations in sequence
+     * @dev DEPRECATED: Use tokenPairOracleData instead
      */
     mapping(address token => TokenFeedConfiguration[]) public tokenOracleData;
 
+    /**
+     * @notice Maps token addresses to their maximum time price valid
+     */
     mapping(address token => uint256 maxTimePriceValid) public maxTimePriceValid;
 
     /**
-     * @notice Emitted when a token's price feed configuration is updated
-     * @param token The address of the configured token
+     * @notice Maps token pairs to their oracle configurations
+     * @dev Primary storage for token pair configurations (fromToken -> toToken -> configurations)
+     */
+    mapping(address fromToken => mapping(address toToken => TokenFeedConfiguration[])) public tokenPairOracleData;
+
+    /**
+     * @notice Emitted when a token pair's price feed configuration is updated
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
      * @param chainlinkFeed The address of the Chainlink price feed
      * @param reverse Whether to reverse the price calculation
      * @param heartbeat Maximum time between price feed updates
-     * @param maxTimePriceValid Maximum time in seconds that a price is considered valid
      */
-    event TokenConfigured(
-        address indexed token, address indexed chainlinkFeed, bool reverse, uint256 heartbeat, uint256 maxTimePriceValid
+    event TokenPairConfigured(
+        address indexed fromToken,
+        address indexed toToken,
+        address indexed chainlinkFeed,
+        bool reverse,
+        uint256 heartbeat
     );
 
     /**
-     * @notice Emitted when all price feed configurations for a token are removed
-     * @param token The address of the token whose configurations were removed
+     * @notice Emitted when all price feed configurations for a token pair are removed
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
      */
-    event TokenConfigurationRemoved(address indexed token);
+    event TokenPairConfigurationRemoved(address indexed fromToken, address indexed toToken);
+
+    /**
+     * @notice Emitted when the max time price valid is set for a token
+     * @param fromToken The address of the token to swap from
+     * @param maxTimePriceValid Maximum time in seconds that a price is considered valid
+     */
+    event MaxTimePriceValidSet(address indexed fromToken, uint256 maxTimePriceValid);
 
     /**
      * @dev Initializes the contract with the given owner
@@ -63,57 +85,63 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     // ==================== External Functions ====================
 
     /**
-     * @notice Adds a configuration for a token
+     * @notice Adds a configuration for a token pair
      * @dev Only callable by the owner
-     * @param token The address of the token to configure
-     * @param configurations Array of TokenFeedConfiguration for the token
-     * @param _maxTimePriceValid Maximum time in seconds that a price is considered valid
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
+     * @param configurations Array of TokenFeedConfiguration for the token pair
      */
-    function addTokenConfiguration(
-        address token,
-        TokenFeedConfiguration[] calldata configurations,
-        uint256 _maxTimePriceValid
-    ) external onlyOwner {
-        require(token != address(0), "Invalid token address");
+    function addTokenConfiguration(address fromToken, address toToken, TokenFeedConfiguration[] calldata configurations)
+        external
+        onlyOwner
+    {
+        require(fromToken != address(0), "Invalid from token address");
+        require(toToken != address(0), "Invalid to token address");
         require(configurations.length > 0, "Empty configurations array");
-        require(_maxTimePriceValid > 0, "Max time price valid can't be zero");
 
-        // Set the maxTimePriceValid for the token
-        maxTimePriceValid[token] = _maxTimePriceValid;
+        // Clear existing configurations for this pair
+        delete tokenPairOracleData[fromToken][toToken];
 
         // Add new configurations
         for (uint256 i = 0; i < configurations.length; i++) {
             require(configurations[i].chainlinkFeed != address(0), "Invalid chainlink feed address");
             require(configurations[i].heartbeat > 0, "Heartbeat must be greater than 0");
-            tokenOracleData[token].push(configurations[i]);
+            tokenPairOracleData[fromToken][toToken].push(configurations[i]);
 
             // Emit event for each configuration
-            emit TokenConfigured(
-                token,
+            emit TokenPairConfigured(
+                fromToken,
+                toToken,
                 configurations[i].chainlinkFeed,
                 configurations[i].reverse,
-                configurations[i].heartbeat,
-                _maxTimePriceValid
+                configurations[i].heartbeat
             );
         }
     }
 
     /**
-     * @notice Removes all configurations for a token
+     * @notice Removes configuration for a token pair
      * @dev Only callable by the owner
-     * @param token The address of the token to remove configuration for
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
      */
-    function removeTokenConfiguration(address token) external onlyOwner {
-        require(token != address(0), "Invalid token address");
-        require(tokenOracleData[token].length > 0, "Token not configured");
+    function removeTokenConfiguration(address fromToken, address toToken) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+        require(toToken != address(0), "Invalid to token address");
+        require(tokenPairOracleData[fromToken][toToken].length > 0, "Token pair not configured");
 
-        // Clear any existing configurations
-        delete tokenOracleData[token];
+        // Clear configurations
+        delete tokenPairOracleData[fromToken][toToken];
 
-        // Reset the maxTimePriceValid for the token
-        delete maxTimePriceValid[token];
+        emit TokenPairConfigurationRemoved(fromToken, toToken);
+    }
 
-        emit TokenConfigurationRemoved(token);
+    function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+        require(_maxTimePriceValid > 0, "Max time price valid can't be zero");
+        maxTimePriceValid[fromToken] = _maxTimePriceValid;
+
+        emit MaxTimePriceValidSet(fromToken, _maxTimePriceValid);
     }
 
     // ==================== External View Functions ====================
@@ -134,34 +162,50 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         uint256 _minOut,
         uint256 _slippageInBps
     ) external view override returns (bool) {
-        // Check that the sell token exists in the mapping
-        require(tokenOracleData[_fromToken].length > 0, "Token not configured");
+        // Check that the token pair is configured
+        require(tokenPairOracleData[_fromToken][_toToken].length > 0, "Token pair not configured");
         require(_slippageInBps <= MAX_BPS, "Slippage exceeds maximum");
 
-        // Get expected out using the token configuration from storage
+        // Get expected out using the token pair configuration from storage
         uint256 _expectedOut = getExpectedOut(_amountIn, _fromToken, _toToken);
 
         return _minOut > (_expectedOut * (MAX_BPS - _slippageInBps)) / MAX_BPS;
     }
 
     /**
-     * @notice Gets the oracle information for a token
-     * @dev Implements the interface function to access the token oracle configurations
-     * @param token The token address to get oracle information for
-     * @return Array of TokenFeedConfiguration for the token
+     * @notice Checks if a token is configured as a reward token
+     * @dev DEPRECATED: This function cannot determine reward tokens in the new token pair model
+     * @dev keeping it here for backwards compatibility
+     * @return Always returns false - use isTokenPairConfigured instead
      */
-    function tokenOracleInformation(address token) external view override returns (TokenFeedConfiguration[] memory) {
-        return tokenOracleData[token];
+    function isRewardToken(address) external pure override returns (bool) {
+        // Return false to indicate this function is deprecated
+        return false;
     }
 
     /**
-     * @notice Checks if a token is configured as a reward token
-     * @dev A token is considered a reward token if it has at least one oracle configuration
-     * @param token The address of the token to check
-     * @return Whether the token is configured as a reward token
+     * @notice Checks if a token pair is configured
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
+     * @return Whether the token pair is configured
      */
-    function isRewardToken(address token) external view override returns (bool) {
-        return tokenOracleData[token].length > 0 && maxTimePriceValid[token] > 0;
+    function isTokenPairConfigured(address fromToken, address toToken) external view override returns (bool) {
+        return tokenPairOracleData[fromToken][toToken].length > 0 && maxTimePriceValid[fromToken] > 0;
+    }
+
+    /**
+     * @notice Gets the oracle information for a token pair
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
+     * @return Array of TokenFeedConfiguration for the token pair
+     */
+    function tokenPairOracleInformation(address fromToken, address toToken)
+        external
+        view
+        override
+        returns (TokenFeedConfiguration[] memory)
+    {
+        return tokenPairOracleData[fromToken][toToken];
     }
 
     /**
@@ -177,11 +221,11 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         override
         returns (uint256)
     {
-        // Check that the sell token exists in the mapping
-        require(tokenOracleData[_fromToken].length > 0, "Token not configured");
+        // Check that the token pair is configured
+        require(tokenPairOracleData[_fromToken][_toToken].length > 0, "Token pair not configured");
 
-        // Get the token configuration from storage
-        TokenFeedConfiguration[] storage configs = tokenOracleData[_fromToken];
+        // Get the token pair configuration from storage
+        TokenFeedConfiguration[] storage configs = tokenPairOracleData[_fromToken][_toToken];
 
         // Convert to memory arrays for the getExpectedOutFromChainlink function
         address[] memory priceFeeds = new address[](configs.length);
