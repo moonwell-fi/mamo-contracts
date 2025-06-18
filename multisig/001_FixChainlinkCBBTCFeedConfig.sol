@@ -118,10 +118,70 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
     }
 
     function validate() public override {
-        // check if returns the correct well - btc exchange rate
+        // check if the feeds are added correctly
+        address slippagePriceCheckerProxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
+        SlippagePriceChecker priceChecker = SlippagePriceChecker(slippagePriceCheckerProxy);
+
+        // check if the feeds are added correctly
         address well = addresses.getAddress("xWELL_PROXY");
         address btc = addresses.getAddress("cbBTC");
-        address chainlinkBTC = addresses.getAddress("CHAINLINK_BTC_USD");
-        address chainlinkWell = addresses.getAddress("CHAINLINK_WELL_USD");
+        address usdc = addresses.getAddress("USDC");
+        address morpho = addresses.getAddress("MORPHO");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigsWellBtc =
+            priceChecker.tokenPairOracleInformation(well, btc);
+
+        assertEq(feedConfigsWellBtc.length, 2, "WELL > BTC should have 2 configurations");
+        assertEq(
+            feedConfigsWellBtc[0].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_WELL_USD"),
+            "First price feed should match"
+        );
+        assertEq(feedConfigsWellBtc[0].reverse, false, "First reverse flag should match");
+        assertEq(
+            feedConfigsWellBtc[1].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_BTC_USD"),
+            "Second price feed should match"
+        );
+        assertEq(feedConfigsWellBtc[1].reverse, true, "Second reverse flag should match");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigsWellUsdc =
+            priceChecker.tokenPairOracleInformation(well, usdc);
+
+        assertEq(feedConfigsWellUsdc.length, 1, "WELL > USDC should have 1 configuration");
+        assertEq(
+            feedConfigsWellUsdc[0].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_WELL_USD"),
+            "First price feed should match"
+        );
+        assertEq(feedConfigsWellUsdc[0].reverse, false, "First reverse flag should match");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigsMorphoBtc =
+            priceChecker.tokenPairOracleInformation(morpho, btc);
+
+        assertEq(feedConfigsMorphoBtc.length, 2, "MORPHO > BTC should have 2 configurations");
+        assertEq(
+            feedConfigsMorphoBtc[0].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_MORPHO_USD"),
+            "First price feed should match"
+        );
+        assertEq(feedConfigsMorphoBtc[0].reverse, false, "First reverse flag should match");
+        assertEq(
+            feedConfigsMorphoBtc[1].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_BTC_USD"),
+            "Second price feed should match"
+        );
+        assertEq(feedConfigsMorphoBtc[1].reverse, true, "Second reverse flag should match");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigsMorphoUsdc =
+            priceChecker.tokenPairOracleInformation(morpho, usdc);
+
+        assertEq(feedConfigsMorphoUsdc.length, 1, "MORPHO > USDC should have 1 configuration");
+        assertEq(
+            feedConfigsMorphoUsdc[0].chainlinkFeed,
+            addresses.getAddress("CHAINLINK_MORPHO_USD"),
+            "First price feed should match"
+        );
+        assertEq(feedConfigsMorphoUsdc[0].reverse, false, "First reverse flag should match");
     }
 }
