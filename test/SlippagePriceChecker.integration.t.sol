@@ -446,7 +446,7 @@ contract SlippagePriceCheckerTest is Test {
         assertEq(storedConfigs[1].reverse, true, "Second reverse flag should match");
 
         // Test the expected output with the new configuration
-        uint256 amountIn = 1 * 10 ** 18; // 1 WELL
+        uint256 amountIn = amountInByToken[address(well)];
         uint256 expectedOut = slippagePriceChecker.getExpectedOut(amountIn, address(well), address(underlying));
 
         // The expected output should be non-zero
