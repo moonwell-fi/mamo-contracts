@@ -79,14 +79,12 @@ contract SlippagePriceCheckerTest is Test {
         }
 
         // todo remove this once FixChainlinkCBBTCFeedConfig is executed
-        if (keccak256(bytes(assetConfig.symbol)) == keccak256(bytes("cbBTC"))) {
-            // run 001_FixChainlinkCBBTCFeedConfig proposal
-            FixChainlinkCBBTCFeedConfig proposal = new FixChainlinkCBBTCFeedConfig();
-            proposal.deploy();
-            proposal.build();
-            proposal.simulate();
-            proposal.validate();
-        }
+        // run 001_FixChainlinkCBBTCFeedConfig proposal
+        FixChainlinkCBBTCFeedConfig proposal = new FixChainlinkCBBTCFeedConfig();
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
 
         amountInByToken[address(well)] = 300e18;
         amountInByToken[address(morpho)] = 3e18;
