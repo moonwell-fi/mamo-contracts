@@ -94,23 +94,15 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
     AccountRegistry public immutable registry;
     MamoStrategyRegistry public immutable mamoStrategyRegistry;
     address public stakingStrategy;
-    CompoundMode public compoundMode;
-    
-    enum CompoundMode {
-        COMPOUND,    // Convert cbBTC to MAMO and restake everything
-        REINVEST     // Restake MAMO, deposit cbBTC to ERC20Strategy
-    }
     
     /// @notice Initialize the staking account
     /// @param _owner The owner of the staking account
     /// @param _registry The AccountRegistry contract
     /// @param _mamoStrategyRegistry The MamoStrategyRegistry contract
-    /// @param _compoundMode The user's preferred compound mode
     function initialize(
         address _owner,
         AccountRegistry _registry,
-        MamoStrategyRegistry _mamoStrategyRegistry,
-        CompoundMode _compoundMode
+        MamoStrategyRegistry _mamoStrategyRegistry
     ) external initializer {
         require(_owner != address(0), "Invalid owner");
         
@@ -119,7 +111,6 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
         
         registry = _registry;
         mamoStrategyRegistry = _mamoStrategyRegistry;
-        compoundMode = _compoundMode;
     }
     
     /// @notice Authorize upgrade to new implementation
@@ -191,16 +182,9 @@ contract MamoStakingAccountFactory {
         CompoundMode defaultMode
     );
     
-    function createStakingAccount(
-        CompoundMode preferredMode
-    ) external returns (address stakingAccount);
-    
     /// @notice Create a new staking account for the user
-    /// @param preferredMode The user's preferred compound mode
     /// @return stakingAccount The address of the deployed staking account
-    function createStakingAccount(
-        CompoundMode preferredMode
-    ) external returns (address stakingAccount) {
+    function createStakingAccount() external returns (address stakingAccount) {
         require(msg.sender != address(0), "Invalid caller");
         require(userStakingAccounts[msg.sender] == address(0), "Account already exists");
         
@@ -214,15 +198,14 @@ contract MamoStakingAccountFactory {
                 MamoStakingAccount.initialize.selector,
                 msg.sender,
                 registry,
-                mamoStrategyRegistry,
-                preferredMode
+                mamoStrategyRegistry
             )
         ));
         
         // Register the account
         userStakingAccounts[msg.sender] = stakingAccount;
         
-        emit StakingAccountCreated(msg.sender, stakingAccount, preferredMode);
+        emit StakingAccountCreated(msg.sender, stakingAccount, CompoundMode.COMPOUND);
         
         return stakingAccount;
     }
@@ -298,12 +281,21 @@ contract MamoStakingStrategy {
     ERC20MoonwellMorphoStrategy public immutable morphoStrategy;
     uint256 public immutable compoundFee; // Immutable fee in basis points (e.g., 100 = 1%)
     
+    /// @notice Mapping of staking account to compound mode
+    mapping(address => CompoundMode) public accountCompoundMode;
+    
+    enum CompoundMode {
+        COMPOUND,    // Convert cbBTC to MAMO and restake everything
+        REINVEST     // Restake MAMO, deposit cbBTC to ERC20Strategy
+    }
+    
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
     
     event Deposited(address indexed account, uint256 amount);
     event Withdrawn(address indexed account, uint256 amount);
     event Compounded(address indexed account, uint256 mamoAmount, uint256 cbBTCAmount);
     event Reinvested(address indexed account, uint256 mamoAmount, uint256 cbBTCAmount);
+    event CompoundModeUpdated(address indexed account, CompoundMode newMode);
     
     constructor(
         AccountRegistry _registry,
@@ -332,6 +324,17 @@ contract MamoStakingStrategy {
     modifier onlyBackend() {
         require(hasRole(BACKEND_ROLE, msg.sender), "Not backend");
         _;
+    }
+    
+    /// @notice Set compound mode for a staking account
+    /// @param stakingAccount The staking account address
+    /// @param mode The compound mode to set
+    function setCompoundMode(address stakingAccount, CompoundMode mode)
+        external
+        onlyAccountOwner(stakingAccount)
+    {
+        accountCompoundMode[stakingAccount] = mode;
+        emit CompoundModeUpdated(stakingAccount, mode);
     }
     
     /// @notice Deposit MAMO tokens into MultiRewards on behalf of staking account
@@ -392,7 +395,7 @@ contract MamoStakingStrategy {
     /// @notice Process rewards according to the account's preferred compound mode
     /// @param stakingAccount The staking account address
     function processRewards(address stakingAccount) external onlyBackend {
-        CompoundMode accountMode = MamoStakingAccount(stakingAccount).compoundMode();
+        CompoundMode accountMode = accountCompoundMode[stakingAccount];
         if (accountMode == CompoundMode.COMPOUND) {
             _compound(stakingAccount);
         } else {
@@ -609,16 +612,17 @@ sequenceDiagram
     participant Registry as AccountRegistry
     participant MultiRewards as MultiRewards
 
-    User->>Factory: createStakingAccount(COMPOUND)
+    User->>Factory: createStakingAccount()
     Factory->>StakingAccount: Deploy with CREATE2
     Factory->>Registry: Register new account
     Factory->>User: Return account address
     
+    User->>Strategy: setCompoundMode(stakingAccount, COMPOUND)
     User->>StakingAccount: Transfer MAMO tokens
-    User->>StakingAccount: stake(amount)
-    StakingAccount->>MultiRewards: stake(amount)
+    User->>Strategy: deposit(stakingAccount, amount)
+    Strategy->>MultiRewards: stake(amount)
     
-    Note over User: Account ready for automated compounding
+    Note over User: Account ready for automated processing
 ```
 
 ## Security Model
@@ -628,10 +632,12 @@ sequenceDiagram
 | Function | Caller | Permission Source | Notes |
 |----------|--------|------------------|-------|
 | `getReward(address)` | Anyone | Permissionless | Modified function, maintains all existing security |
-| `executeCompound()` | Mamo Backend | Registry whitelist | Automated execution |
-| `executeReinvest()` | Mamo Backend | Registry whitelist | Automated execution |
-| `multicall()` | Whitelisted | AccountRegistry | Existing security model |
-| `stake()` | Account Owner | Ownership check | Via StakingAccount delegation |
+| `processRewards()` | Mamo Backend | Backend role | Automated execution |
+| `deposit()` | Account Owner | Ownership check | Direct strategy call |
+| `withdraw()` | Account Owner | Ownership check | Direct strategy call |
+| `setCompoundMode()` | Account Owner | Ownership check | Strategy function |
+| `multicall()` | Whitelisted | AccountRegistry | Per-account whitelist |
+| `setWhitelistCaller()` | Account Owner | Ownership check | Account-specific control |
 | `createStakingAccount()` | Anyone | Permissionless | Factory deployment |
 
 ### Security Considerations
