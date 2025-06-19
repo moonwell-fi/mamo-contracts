@@ -22,10 +22,8 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     address public usdcStrategyFactory;
     address public strategyMulticall;
 
-    constructor(address _addresses) {
+    constructor() {
         setPrimaryForkId(vm.createSelectFork("base"));
-
-        addresses = Addresses(_addresses);
 
         // Load asset configurations
         deployAssetConfigBtc = new DeployAssetConfig("./config/strategies/cbBTCStrategyConfig.json");
@@ -50,17 +48,20 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         return "Deploy cbBTC and USDC strategy factories and StrategyMulticall contract";
     }
 
-    function deploy() public override {
+    function deploy(Addresses _addresses) public {
+        // Store the addresses instance for use by other functions
+        addresses = _addresses;
+        
         // Deploy cbBTC strategy factory
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
-        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc);
+        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(_addresses, configBtc);
         
         // Deploy USDC strategy factory
         DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
-        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc);
+        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(_addresses, configUsdc);
 
         // Deploy StrategyMulticall
-        strategyMulticall = deployStrategyMulticall.deployStrategyMulticall(addresses);
+        strategyMulticall = deployStrategyMulticall.deployStrategyMulticall(_addresses);
 
         console.log("cbBTC Strategy Factory deployed at:", cbBTCStrategyFactory);
         console.log("USDC Strategy Factory deployed at:", usdcStrategyFactory);

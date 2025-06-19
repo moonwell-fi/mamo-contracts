@@ -31,6 +31,7 @@ import {MockERC20} from "./MockERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
+import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
 import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
 
 /**
@@ -76,6 +77,7 @@ contract MoonwellMorphoStrategyTest is Test {
     address public admin;
     address public guardian;
     address public deployer;
+    address public multicall;
 
     uint256 public splitMToken;
     uint256 public splitVault;
@@ -85,6 +87,9 @@ contract MoonwellMorphoStrategyTest is Test {
     uint256 public strategyTypeId;
 
     function setUp() public {
+        // workaround to make test contract work with mappings
+        vm.makePersistent(DEFAULT_TEST_CONTRACT);
+
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
@@ -145,21 +150,18 @@ contract MoonwellMorphoStrategyTest is Test {
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
 
-        address strategyFactory;
-        if (addresses.isAddressSet(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")))) {
-            strategyFactory = addresses.getAddress(string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY")));
-        } else {
-            StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-            strategyFactory = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
-        }
+        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
+        proposal.deploy(addresses);
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
 
-        vm.startPrank(admin);
-        registry.grantRole(registry.BACKEND_ROLE(), address(strategyFactory));
-        vm.stopPrank();
+        StrategyFactory factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
+
+        multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
         vm.startPrank(owner);
-        strategy =
-            ERC20MoonwellMorphoStrategy(payable(StrategyFactory(payable(strategyFactory)).createStrategyForUser(owner)));
+        strategy = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(owner)));
         vm.stopPrank();
 
         vm.warp(block.timestamp + 1 minutes);
@@ -691,7 +693,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Update position to 70% mToken, 30% vault
         vm.stopPrank();
-        vm.prank(backend);
+        vm.prank(multicall);
         strategy.updatePosition(7000, 3000); // 70% - 30% split
 
         // Withdraw all as owner
@@ -751,7 +753,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 newSplitMToken = 7000; // 70%
         uint256 newSplitVault = 3000; // 30%
 
-        vm.startPrank(backend);
+        vm.startPrank(multicall);
         strategy.updatePosition(newSplitMToken, newSplitVault);
         vm.stopPrank();
 
@@ -810,7 +812,7 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Backend attempts to update position with invalid split parameters
-        vm.startPrank(backend);
+        vm.startPrank(multicall);
         vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
         strategy.updatePosition(6000, 5000); // 60% + 50% = 110%
         vm.stopPrank();
@@ -824,7 +826,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // No funds deposited
 
         // Backend attempts to update position
-        vm.startPrank(backend);
+        vm.startPrank(multicall);
         vm.expectRevert("Nothing to rebalance");
         strategy.updatePosition(6000, 4000);
         vm.stopPrank();
@@ -922,7 +924,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 newSplitMToken = 7000; // 70%
         uint256 newSplitVault = 3000; // 30%
 
-        vm.prank(backend);
+        vm.prank(multicall);
         strategy.updatePosition(newSplitMToken, newSplitVault);
 
         // Mint USDC directly to the strategy contract
@@ -1868,7 +1870,7 @@ contract MoonwellMorphoStrategyTest is Test {
         address currentFeeRecipient = strategy.feeRecipient();
 
         // Backend sets a new fee recipient
-        vm.prank(backend);
+        vm.prank(multicall);
         vm.expectEmit(true, true, false, true, address(strategy));
         emit FeeRecipientUpdated(currentFeeRecipient, newFeeRecipient);
         strategy.setFeeRecipient(newFeeRecipient);
@@ -1901,7 +1903,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfSetFeeRecipientToZeroAddress() public {
         // Backend attempts to set fee recipient to zero address
-        vm.prank(backend);
+        vm.prank(multicall);
         vm.expectRevert("Invalid fee recipient address");
         strategy.setFeeRecipient(address(0));
 
@@ -2194,7 +2196,7 @@ contract MoonwellMorphoStrategyTest is Test {
         );
 
         // Attempt to update position should fail
-        vm.prank(backend);
+        vm.prank(multicall);
         vm.expectRevert("Failed to redeem mToken");
         strategy.updatePosition(6000, 4000);
 
@@ -2264,7 +2266,7 @@ contract MoonwellMorphoStrategyTest is Test {
         );
 
         // Now update position should fail on mint
-        vm.prank(backend);
+        vm.prank(multicall);
         vm.expectRevert("MToken mint failed");
         strategy.updatePosition(6000, 4000);
 

@@ -85,8 +85,8 @@ contract StrategyMulticallIntegrationTest is Test {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
 
-        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall(address(addresses));
-        proposal.deploy();
+        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
+        proposal.deploy(addresses);
         proposal.build();
         proposal.simulate();
         proposal.validate();
