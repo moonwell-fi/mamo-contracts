@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -85,7 +85,7 @@ contract StrategyMulticallIntegrationTest is Test {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
 
-        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
+        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall(address(addresses));
         proposal.deploy();
         proposal.build();
         proposal.simulate();
@@ -94,7 +94,7 @@ contract StrategyMulticallIntegrationTest is Test {
         factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
         multicall = StrategyMulticall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
-        // registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
         // string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         // if (addresses.isAddressSet(factoryName)) {

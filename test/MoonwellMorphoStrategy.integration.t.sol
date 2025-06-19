@@ -6,7 +6,7 @@ import {DeployConfig} from "@script/DeployConfig.sol";
 import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {MockFailingERC20} from "./MockFailingERC20.sol";
-import {Addresses} from "@addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
@@ -153,12 +153,14 @@ contract MoonwellMorphoStrategyTest is Test {
             strategyFactory = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
         }
 
+        vm.startPrank(admin);
+        registry.grantRole(registry.BACKEND_ROLE(), address(strategyFactory));
+        vm.stopPrank();
+
+        vm.startPrank(owner);
         strategy =
             ERC20MoonwellMorphoStrategy(payable(StrategyFactory(payable(strategyFactory)).createStrategyForUser(owner)));
-
-        // Add the strategy to the registry
-        vm.prank(backend);
-        registry.addStrategy(owner, address(strategy));
+        vm.stopPrank();
 
         vm.warp(block.timestamp + 1 minutes);
     }

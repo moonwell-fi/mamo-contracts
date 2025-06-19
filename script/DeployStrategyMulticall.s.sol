@@ -6,8 +6,9 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
 import {DeployConfig} from "./DeployConfig.sol";
-import {Addresses} from "@addresses/Addresses.sol";
+
 import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /**
  * @title DeployStrategyMulticall

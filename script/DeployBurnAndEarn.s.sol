@@ -7,8 +7,8 @@ import {StdStyle} from "@forge-std/StdStyle.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
-import {Addresses} from "@addresses/Addresses.sol";
 import {BurnAndEarn} from "@contracts/BurnAndEarn.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /**
  * @title DeployBurnAndEarn

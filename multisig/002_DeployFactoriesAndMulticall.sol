@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@addresses/Addresses.sol";
-
+import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
-import {MultisigProposal} from "@fps/proposals/MultisigProposal.sol";
+import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
@@ -23,14 +22,10 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     address public usdcStrategyFactory;
     address public strategyMulticall;
 
-    constructor() {
+    constructor(address _addresses) {
         setPrimaryForkId(vm.createSelectFork("base"));
 
-        // Initialize addresses
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        addresses = Addresses(_addresses);
 
         // Load asset configurations
         deployAssetConfigBtc = new DeployAssetConfig("./config/strategies/cbBTCStrategyConfig.json");
