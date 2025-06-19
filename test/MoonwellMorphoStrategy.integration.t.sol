@@ -157,7 +157,8 @@ contract MoonwellMorphoStrategyTest is Test {
         proposal.simulate();
         proposal.validate();
 
-        StrategyFactory factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
+        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
+        StrategyFactory factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
 
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
