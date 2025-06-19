@@ -385,8 +385,14 @@ contract MamoStakingStrategy {
     /// @notice Internal function to compound rewards by converting cbBTC to MAMO and restaking
     /// @param stakingAccount The staking account address
     function _compound(address stakingAccount) internal {
-        // Claim rewards to staking account
-        multiRewards.getReward(stakingAccount);
+        // Claim rewards through staking account
+        bytes memory getRewardData = abi.encodeWithSelector(
+            MultiRewards.getReward.selector
+        );
+        MamoStakingAccount(stakingAccount).multicall(
+            [address(multiRewards)],
+            [getRewardData]
+        );
         
         // Get reward balances
         uint256 mamoBalance = mamoToken.balanceOf(stakingAccount);
@@ -458,8 +464,14 @@ contract MamoStakingStrategy {
     /// @notice Internal function to reinvest rewards by staking MAMO and depositing cbBTC to Morpho strategy
     /// @param stakingAccount The staking account address
     function _reinvest(address stakingAccount) internal {
-        // Claim rewards to staking account
-        multiRewards.getReward(stakingAccount);
+        // Claim rewards through staking account
+        bytes memory getRewardData = abi.encodeWithSelector(
+            MultiRewards.getReward.selector
+        );
+        MamoStakingAccount(stakingAccount).multicall(
+            [address(multiRewards)],
+            [getRewardData]
+        );
         
         // Get reward balances
         uint256 mamoBalance = mamoToken.balanceOf(stakingAccount);
@@ -627,9 +639,10 @@ sequenceDiagram
    - ✅ No risk of reward theft
    - ✅ Enables automation without compromising security
 
-2. **Strategy Whitelisting**:
-   - ✅ Only registry-approved strategies can interact with StakingAccounts
-   - ✅ Users maintain control over their strategy selection
+2. **Two-Tier Strategy Approval**:
+   - ✅ Backend must first approve strategies globally via `setApprovedStrategy()`
+   - ✅ Account owners can only whitelist pre-approved strategies via `setWhitelistStrategy()`
+   - ✅ Prevents unauthorized strategy interactions while maintaining user control
    - ✅ Emergency pause mechanisms inherited from existing contracts
 
 3. **Fee Protection**:
@@ -661,34 +674,30 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    subgraph "Phase 1: Core Modification"
-        A[Modify MultiRewards] --> B[Update getReward function]
+    subgraph "Phase 1: Registry & Factory"
+        A[Deploy AccountRegistry] --> B[Deploy StakingAccountFactory]
+        B --> C[Configure Registry Permissions]
     end
     
-    subgraph "Phase 2: Registry & Factory"
-        C[Deploy AccountRegistry] --> D[Deploy StakingAccountFactory]
-        D --> E[Configure Registry Permissions]
+    subgraph "Phase 2: Strategy Deployment"
+        D[Deploy Staking Strategy] --> E[Configure Fee & Recipients]
+        E --> F[Approve Strategy via Backend]
     end
     
-    subgraph "Phase 3: Strategy Deployment"
-        F[Deploy Staking Strategy] --> G[Configure Fee & Recipients]
-        G --> H[Register with AccountRegistry]
+    subgraph "Phase 3: User Onboarding"
+        G[User Creates Account] --> H[Whitelist Strategy]
+        H --> I[Set Strategy Preference]
+        I --> J[Stake MAMO Tokens]
     end
     
-    subgraph "Phase 4: User Onboarding"
-        I[User Creates Account] --> J[Set Strategy Preference]
-        J --> K[Stake MAMO Tokens]
+    subgraph "Phase 4: Automation"
+        K[Backend Monitoring] --> L[Trigger Compound/Reinvest]
+        L --> M[Process Rewards]
     end
     
-    subgraph "Phase 5: Automation"
-        L[Backend Monitoring] --> M[Trigger Compound/Reinvest]
-        M --> N[Process Rewards]
-    end
-    
-    B --> C
-    E --> F
-    H --> I
-    K --> L
+    C --> D
+    F --> G
+    J --> K
 ```
 
-This architecture provides a robust, secure, and scalable foundation for the Mamo Staking feature while maintaining compatibility with the existing ecosystem and introducing proper factory patterns for user account management.
+This architecture provides a robust, secure, and scalable foundation for the Mamo Staking feature while maintaining compatibility with the existing MultiRewards contract and introducing proper factory patterns for user account management with two-tier strategy approval.
