@@ -80,11 +80,6 @@
     "isContract": true
   },
   {
-    "addr": "0x5967ea71cC65d610dc6999d7dF62bfa512e62D07",
-    "name": "USDC_STRATEGY_FACTORY",
-    "isContract": true
-  },
-  {
     "addr": "0xB9d4acf113a423Bc4A64110B8738a52E51C2AB38",
     "name": "MAMO_PAUSE_GUARDIAN",
     "isContract": true
@@ -142,11 +137,6 @@
   {
     "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
     "name": "CHAINLINK_BTC_USD",
-    "isContract": true
-  },
-  {
-    "addr": "0xF3A72612Bdd50480672350dCEe4609B94Da9ECF9",
-    "name": "cbBTC_STRATEGY_FACTORY",
     "isContract": true
   }
 ]

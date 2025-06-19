@@ -7,8 +7,9 @@ import {console} from "@forge-std/console.sol";
 
 import {DeployAssetConfig} from "./DeployAssetConfig.sol";
 import {DeployConfig} from "./DeployConfig.sol";
-import {Addresses} from "@addresses/Addresses.sol";
+
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /**
  * @title StrategyFactoryDeployer
@@ -37,8 +38,6 @@ contract StrategyFactoryDeployer is Script {
         DeployConfig.DeploymentConfig memory config,
         uint256 strategyTypeId
     ) public returns (address) {
-        vm.startBroadcast();
-
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
@@ -84,8 +83,6 @@ contract StrategyFactoryDeployer is Script {
             rewardTokens
         );
 
-        vm.stopBroadcast();
-
         // Check if the factory address already exists
         string memory factoryName = "USDC_STRATEGY_FACTORY";
         if (addresses.isAddressSet(factoryName)) {
@@ -103,8 +100,6 @@ contract StrategyFactoryDeployer is Script {
         public
         returns (address)
     {
-        vm.startBroadcast();
-
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
@@ -139,10 +134,8 @@ contract StrategyFactoryDeployer is Script {
             rewardTokens
         );
 
-        vm.stopBroadcast();
-
         // Check if the factory address already exists
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
+        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         if (addresses.isAddressSet(factoryName)) {
             // Update the existing address
             addresses.changeAddress(factoryName, address(factory), true);

@@ -6,8 +6,8 @@ import {Script} from "forge-std/Script.sol";
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 
-import {Addresses} from "../addresses/Addresses.sol";
 import {MamoStrategyRegistry} from "../src/MamoStrategyRegistry.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 contract AddUserStrategy is Script {
     Addresses public addresses;

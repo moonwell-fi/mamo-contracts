@@ -9,7 +9,7 @@ import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MamoDeployScript} from "@script/MamoDeploy.s.sol";
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 contract MamoIntegrationTest is MamoDeployScript {
     MAMO public mamo;

@@ -2,10 +2,11 @@
 pragma solidity 0.8.28;
 
 import {DeployConfig} from "./DeployConfig.sol";
-import {Addresses} from "@addresses/Addresses.sol";
+
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Script} from "@forge-std/Script.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {StdStyle} from "@forge-std/StdStyle.sol";
