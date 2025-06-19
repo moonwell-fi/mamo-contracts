@@ -58,14 +58,14 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     function deploy() public override {
         // Deploy cbBTC strategy factory
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
-        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc, false);
+        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc);
         
         // Deploy USDC strategy factory
         DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
-        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc, false);
+        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc);
 
         // Deploy StrategyMulticall
-        strategyMulticall = deployStrategyMulticall.deployStrategyMulticall(addresses, false);
+        strategyMulticall = deployStrategyMulticall.deployStrategyMulticall(addresses);
 
         console.log("cbBTC Strategy Factory deployed at:", cbBTCStrategyFactory);
         console.log("USDC Strategy Factory deployed at:", usdcStrategyFactory);
@@ -85,13 +85,10 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         // Step 2: Grant BACKEND_ROLE to multicall first
         registry.grantRole(registry.BACKEND_ROLE(), strategyMulticall);
 
-        // Step 3: Grant BACKEND_ROLE back to the original backend
-        registry.grantRole(registry.BACKEND_ROLE(), currentBackend);
-
-        // Step 4: Grant BACKEND_ROLE to cbBTC strategy factory
+        // Step 3: Grant BACKEND_ROLE to cbBTC strategy factory
         registry.grantRole(registry.BACKEND_ROLE(), cbBTCStrategyFactory);
 
-        // Step 5: Grant BACKEND_ROLE to USDC strategy factory
+        // Step 4: Grant BACKEND_ROLE to USDC strategy factory
         registry.grantRole(registry.BACKEND_ROLE(), usdcStrategyFactory);
     }
 
@@ -100,7 +97,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         _simulateActions(multisig);
     }
 
-    function validate() public override {
+    function validate() public view override {
         // Get the registry contract
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         
@@ -116,10 +113,6 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         assertTrue(
             registry.hasRole(registry.BACKEND_ROLE(), strategyMulticall),
             "StrategyMulticall should have BACKEND_ROLE"
-        );
-        assertTrue(
-            registry.hasRole(registry.BACKEND_ROLE(), currentBackend),
-            "Original backend should have BACKEND_ROLE"
         );
         assertTrue(
             registry.hasRole(registry.BACKEND_ROLE(), cbBTCStrategyFactory),
@@ -151,8 +144,8 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         );
 
         // Validate that addresses were added to the addresses contract
-        string memory cbBTCFactoryName = string(abi.encodePacked("cbBTC", "_STRATEGY_FACTORY_V2"));
-        string memory usdcFactoryName = string(abi.encodePacked("USDC", "_STRATEGY_FACTORY_V2"));
+        string memory cbBTCFactoryName = string(abi.encodePacked("cbBTC", "_STRATEGY_FACTORY"));
+        string memory usdcFactoryName = string(abi.encodePacked("USDC", "_STRATEGY_FACTORY"));
         string memory multicallName = "STRATEGY_MULTICALL";
 
         assertTrue(addresses.isAddressSet(cbBTCFactoryName), "cbBTC Factory address should be set");

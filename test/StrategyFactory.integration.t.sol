@@ -71,7 +71,7 @@ contract StrategyFactoryIntegrationTest is Test {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin; // Use admin as mamo multisig for testing
 
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
+        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         if (addresses.isAddressSet(factoryName)) {
             factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
         } else {

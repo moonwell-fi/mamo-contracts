@@ -35,13 +35,8 @@ contract StrategyFactoryDeployer is Script {
     function deployStrategyFactory(
         Addresses addresses,
         DeployConfig.DeploymentConfig memory config,
-        uint256 strategyTypeId,
-        bool useBroadcast
+        uint256 strategyTypeId
     ) public returns (address) {
-        if (useBroadcast) {
-            vm.startBroadcast();
-        }
-
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
@@ -87,10 +82,6 @@ contract StrategyFactoryDeployer is Script {
             rewardTokens
         );
 
-        if (useBroadcast) {
-            vm.stopBroadcast();
-        }
-
         // Check if the factory address already exists
         string memory factoryName = "USDC_STRATEGY_FACTORY";
         if (addresses.isAddressSet(factoryName)) {
@@ -104,22 +95,10 @@ contract StrategyFactoryDeployer is Script {
         return address(factory);
     }
 
-    function deployStrategyFactory(
-        Addresses addresses,
-        DeployConfig.DeploymentConfig memory config,
-        uint256 strategyTypeId
-    ) public returns (address) {
-        return deployStrategyFactory(addresses, config, strategyTypeId, true);
-    }
-
-    function deployStrategyFactory(Addresses addresses, DeployAssetConfig.Config memory assetConfig, bool useBroadcast)
+    function deployStrategyFactory(Addresses addresses, DeployAssetConfig.Config memory assetConfig)
         public
         returns (address)
     {
-        if (useBroadcast) {
-            vm.startBroadcast();
-        }
-
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
@@ -154,12 +133,9 @@ contract StrategyFactoryDeployer is Script {
             rewardTokens
         );
 
-        if (useBroadcast) {
-            vm.stopBroadcast();
-        }
-
         // Check if the factory address already exists
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
+        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
+        console.log("factoryName", factoryName);
         if (addresses.isAddressSet(factoryName)) {
             // Update the existing address
             addresses.changeAddress(factoryName, address(factory), true);
@@ -169,12 +145,5 @@ contract StrategyFactoryDeployer is Script {
         }
 
         return address(factory);
-    }
-
-    function deployStrategyFactory(Addresses addresses, DeployAssetConfig.Config memory assetConfig)
-        public
-        returns (address)
-    {
-        return deployStrategyFactory(addresses, assetConfig, true);
     }
 }
