@@ -40,44 +40,7 @@ graph TB
 
 ## Core Components
 
-### 1. Modified MultiRewards Contract
-
-**Key Changes:**
-- **Permissionless Claiming**: Modified [`getReward(address account)`](src/MultiRewards.sol:475) function allows anyone to claim rewards on behalf of a staker
-- **Breaking Change**: Function signature changed to accept account parameter
-- **Enhanced Security**: Maintains all existing reentrancy and access controls
-
-**Current Implementation:**
-```solidity
-function getReward() public nonReentrant updateReward(msg.sender) {
-    for (uint256 i; i < rewardTokens.length; i++) {
-        address _rewardsToken = rewardTokens[i];
-        uint256 reward = rewards[msg.sender][_rewardsToken];
-        if (reward > 0) {
-            rewards[msg.sender][_rewardsToken] = 0;
-            IERC20(_rewardsToken).safeTransfer(msg.sender, reward);
-            emit RewardPaid(msg.sender, _rewardsToken, reward);
-        }
-    }
-}
-```
-
-**Proposed Modification:**
-```solidity
-function getReward(address account) public nonReentrant updateReward(account) {
-    for (uint256 i; i < rewardTokens.length; i++) {
-        address _rewardsToken = rewardTokens[i];
-        uint256 reward = rewards[account][_rewardsToken];
-        if (reward > 0) {
-            rewards[account][_rewardsToken] = 0;
-            IERC20(_rewardsToken).safeTransfer(account, reward);
-            emit RewardPaid(account, _rewardsToken, reward);
-        }
-    }
-}
-```
-
-### 2. MamoStakingAccount Contract
+### 1. MamoStakingAccount Contract
 
 **Purpose**: Acts as an intermediary UUPS proxy contract that holds user stakes and enables automated reward management.
 
