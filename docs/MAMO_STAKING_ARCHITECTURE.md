@@ -83,11 +83,10 @@ function getReward(address account) public nonReentrant updateReward(account) {
 
 **Key Features:**
 - **UUPS Proxy**: Upgradeable proxy pattern with owner-controlled upgrades
-- **Stake Management**: Holds user's staked MAMO tokens
+- **Stake Ownership**: Acts as the staking position owner in MultiRewards contract
 - **Strategy Integration**: Whitelists and delegates to strategy contracts
 - **Access Control**: Uses AccountRegistry for permission management
 - **Reward Receiving**: Receives claimed rewards from MultiRewards
-- **Fee Configuration**: Compound fee set during initialization (immutable)
 
 **Architecture Pattern:**
 ```solidity
@@ -96,7 +95,6 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
     MamoStrategyRegistry public immutable mamoStrategyRegistry;
     address public stakingStrategy;
     CompoundMode public compoundMode;
-    uint256 public immutable compoundFee; // Set during initialization, cannot be changed
     
     enum CompoundMode {
         COMPOUND,    // Convert cbBTC to MAMO and restake everything
@@ -107,17 +105,14 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
     /// @param _owner The owner of the staking account
     /// @param _registry The AccountRegistry contract
     /// @param _mamoStrategyRegistry The MamoStrategyRegistry contract
-    /// @param _compoundMode The initial compound mode
-    /// @param _compoundFee The compound fee in basis points (immutable)
+    /// @param _compoundMode The user's preferred compound mode
     function initialize(
         address _owner,
         AccountRegistry _registry,
         MamoStrategyRegistry _mamoStrategyRegistry,
-        CompoundMode _compoundMode,
-        uint256 _compoundFee
+        CompoundMode _compoundMode
     ) external initializer {
         require(_owner != address(0), "Invalid owner");
-        require(_compoundFee <= 1000, "Fee too high"); // Max 10%
         
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();
@@ -125,7 +120,6 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
         registry = _registry;
         mamoStrategyRegistry = _mamoStrategyRegistry;
         compoundMode = _compoundMode;
-        compoundFee = _compoundFee;
     }
     
     /// @notice Authorize upgrade to new implementation
@@ -198,9 +192,40 @@ contract MamoStakingAccountFactory {
     );
     
     function createStakingAccount(
-        CompoundMode defaultMode,
-        uint256 compoundFee
+        CompoundMode preferredMode
     ) external returns (address stakingAccount);
+    
+    /// @notice Create a new staking account for the user
+    /// @param preferredMode The user's preferred compound mode
+    /// @return stakingAccount The address of the deployed staking account
+    function createStakingAccount(
+        CompoundMode preferredMode
+    ) external returns (address stakingAccount) {
+        require(msg.sender != address(0), "Invalid caller");
+        require(userStakingAccounts[msg.sender] == address(0), "Account already exists");
+        
+        // Calculate deterministic address using CREATE2
+        bytes32 salt = keccak256(abi.encodePacked(msg.sender, block.timestamp));
+        
+        // Deploy new staking account proxy
+        stakingAccount = address(new ERC1967Proxy{salt: salt}(
+            stakingAccountImplementation,
+            abi.encodeWithSelector(
+                MamoStakingAccount.initialize.selector,
+                msg.sender,
+                registry,
+                mamoStrategyRegistry,
+                preferredMode
+            )
+        ));
+        
+        // Register the account
+        userStakingAccounts[msg.sender] = stakingAccount;
+        
+        emit StakingAccountCreated(msg.sender, stakingAccount, preferredMode);
+        
+        return stakingAccount;
+    }
 }
 ```
 
@@ -238,27 +263,28 @@ contract AccountRegistry is Admin {
     }
     
     /// @notice Whitelist a caller for a specific staking account (account owner only)
+    /// @param stakingAccount The staking account address
     /// @param caller The caller address to whitelist
     /// @param approved Whether to approve or revoke the caller
-    function setWhitelistCaller(address caller, bool approved) external {
+    function setWhitelistCaller(address stakingAccount, address caller, bool approved) external {
         // msg.sender must be the staking account owner
-        require(Ownable(msg.sender).owner() == tx.origin, "Not account owner");
-        isWhitelistedCaller[msg.sender][caller] = approved;
-        emit CallerWhitelisted(msg.sender, caller, approved);
+        require(Ownable(stakingAccount).owner() == msg.sender, "Not account owner");
+        isWhitelistedCaller[stakingAccount][caller] = approved;
+        emit CallerWhitelisted(stakingAccount, caller, approved);
     }
 }
 ```
 
 ### 5. Mamo Staking Strategy Contract
 
-**Purpose**: Executes the automated reward claiming and processing logic with user deposit/withdraw capabilities.
+**Purpose**: Executes the automated reward claiming and processing logic with user deposit/withdraw capabilities. This contract is immutable and not upgradeable.
 
 **Core Responsibilities:**
 - **User Operations**: Deposit and withdraw functions for account owners
 - **Automated Processing**: Backend-controlled compound and reinvest functions
 - **Permissionless Claiming**: Calls [`getReward(address)`](src/MultiRewards.sol:475) on behalf of staking accounts
 - **Token Processing**: Handles MAMO and cbBTC rewards according to user preferences
-- **Fee Management**: Deducts compound fee before processing
+- **Fee Management**: Immutable compound fee applied to all operations
 - **Integration**: Interfaces with DEX routers and ERC20MoonwellMorphoStrategy
 
 **Architecture Pattern:**
@@ -270,6 +296,7 @@ contract MamoStakingStrategy {
     IERC20 public immutable cbBTCToken;
     IDEXRouter public immutable dexRouter;
     ERC20MoonwellMorphoStrategy public immutable morphoStrategy;
+    uint256 public immutable compoundFee; // Immutable fee in basis points (e.g., 100 = 1%)
     
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
     
@@ -277,6 +304,25 @@ contract MamoStakingStrategy {
     event Withdrawn(address indexed account, uint256 amount);
     event Compounded(address indexed account, uint256 mamoAmount, uint256 cbBTCAmount);
     event Reinvested(address indexed account, uint256 mamoAmount, uint256 cbBTCAmount);
+    
+    constructor(
+        AccountRegistry _registry,
+        MultiRewards _multiRewards,
+        IERC20 _mamoToken,
+        IERC20 _cbBTCToken,
+        IDEXRouter _dexRouter,
+        ERC20MoonwellMorphoStrategy _morphoStrategy,
+        uint256 _compoundFee
+    ) {
+        require(_compoundFee <= 1000, "Fee too high"); // Max 10%
+        registry = _registry;
+        multiRewards = _multiRewards;
+        mamoToken = _mamoToken;
+        cbBTCToken = _cbBTCToken;
+        dexRouter = _dexRouter;
+        morphoStrategy = _morphoStrategy;
+        compoundFee = _compoundFee;
+    }
     
     modifier onlyAccountOwner(address stakingAccount) {
         require(Ownable(stakingAccount).owner() == msg.sender, "Not account owner");
@@ -343,9 +389,20 @@ contract MamoStakingStrategy {
         emit Withdrawn(stakingAccount, amount);
     }
     
-    /// @notice Compound rewards by converting cbBTC to MAMO and restaking
+    /// @notice Process rewards according to the account's preferred compound mode
     /// @param stakingAccount The staking account address
-    function compound(address stakingAccount) external onlyBackend {
+    function processRewards(address stakingAccount) external onlyBackend {
+        CompoundMode accountMode = MamoStakingAccount(stakingAccount).compoundMode();
+        if (accountMode == CompoundMode.COMPOUND) {
+            _compound(stakingAccount);
+        } else {
+            _reinvest(stakingAccount);
+        }
+    }
+    
+    /// @notice Internal function to compound rewards by converting cbBTC to MAMO and restaking
+    /// @param stakingAccount The staking account address
+    function _compound(address stakingAccount) internal {
         // Claim rewards to staking account
         multiRewards.getReward(stakingAccount);
         
@@ -356,7 +413,6 @@ contract MamoStakingStrategy {
         if (mamoBalance == 0 && cbBTCBalance == 0) return;
         
         // Calculate and transfer fees
-        uint256 compoundFee = MamoStakingAccount(stakingAccount).compoundFee();
         uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
         uint256 cbBTCFee = (cbBTCBalance * compoundFee) / 10000;
         
@@ -417,9 +473,9 @@ contract MamoStakingStrategy {
         emit Compounded(stakingAccount, mamoBalance, cbBTCBalance);
     }
     
-    /// @notice Reinvest rewards by staking MAMO and depositing cbBTC to Morpho strategy
+    /// @notice Internal function to reinvest rewards by staking MAMO and depositing cbBTC to Morpho strategy
     /// @param stakingAccount The staking account address
-    function reinvest(address stakingAccount) external onlyBackend {
+    function _reinvest(address stakingAccount) internal {
         // Claim rewards to staking account
         multiRewards.getReward(stakingAccount);
         
@@ -430,7 +486,6 @@ contract MamoStakingStrategy {
         if (mamoBalance == 0 && cbBTCBalance == 0) return;
         
         // Calculate and transfer fees
-        uint256 compoundFee = MamoStakingAccount(stakingAccount).compoundFee();
         uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
         uint256 cbBTCFee = (cbBTCBalance * compoundFee) / 10000;
         
@@ -502,17 +557,19 @@ sequenceDiagram
     participant DEX as DEX Router
     participant Fee as Fee Recipient
 
-    Backend->>Strategy: executeCompound(stakingAccountAddress)
+    Backend->>Strategy: processRewards(stakingAccountAddress)
     Strategy->>MultiRewards: getReward(stakingAccountAddress)
     MultiRewards->>StakingAccount: Transfer MAMO + cbBTC
     
     Strategy->>StakingAccount: Pull rewards (via multicall)
-    Strategy->>Fee: Transfer 1% fee (MAMO + cbBTC)
-    Strategy->>DEX: Swap cbBTC → MAMO
+    Strategy->>Fee: Transfer compound fee (MAMO + cbBTC)
+    Strategy->>DEX: Swap cbBTC → MAMO (if COMPOUND mode)
     Strategy->>MultiRewards: Stake all MAMO (via StakingAccount)
+    
+    Note over Strategy: Processing based on account's preferred mode
 ```
 
-### Reinvest Mode Flow
+### Reward Processing Flow
 
 ```mermaid
 sequenceDiagram
@@ -521,16 +578,25 @@ sequenceDiagram
     participant StakingAccount as User Staking Account
     participant MultiRewards as MultiRewards
     participant ERC20Strategy as ERC20Strategy
+    participant DEX as DEX Router
     participant Fee as Fee Recipient
 
-    Backend->>Strategy: executeReinvest(stakingAccountAddress)
+    Backend->>Strategy: processRewards(stakingAccountAddress)
     Strategy->>MultiRewards: getReward(stakingAccountAddress)
     MultiRewards->>StakingAccount: Transfer MAMO + cbBTC
     
     Strategy->>StakingAccount: Pull rewards (via multicall)
-    Strategy->>Fee: Transfer 1% fee (MAMO + cbBTC)
-    Strategy->>MultiRewards: Stake MAMO (via StakingAccount)
-    Strategy->>ERC20Strategy: Deposit cbBTC (via StakingAccount)
+    Strategy->>Fee: Transfer compound fee (MAMO + cbBTC)
+    
+    alt Account Mode: COMPOUND
+        Strategy->>DEX: Swap cbBTC → MAMO
+        Strategy->>MultiRewards: Stake all MAMO (via StakingAccount)
+    else Account Mode: REINVEST
+        Strategy->>MultiRewards: Stake MAMO (via StakingAccount)
+        Strategy->>ERC20Strategy: Deposit cbBTC (via StakingAccount)
+    end
+    
+    Note over Strategy: Processing based on account's preferred mode
 ```
 
 ### User Onboarding Flow
@@ -543,7 +609,7 @@ sequenceDiagram
     participant Registry as AccountRegistry
     participant MultiRewards as MultiRewards
 
-    User->>Factory: createStakingAccount(COMPOUND, 100)
+    User->>Factory: createStakingAccount(COMPOUND)
     Factory->>StakingAccount: Deploy with CREATE2
     Factory->>Registry: Register new account
     Factory->>User: Return account address
@@ -596,19 +662,14 @@ sequenceDiagram
 
 1. **MamoStrategyRegistry**: Manages strategy whitelisting and user permissions
 2. **ERC20MoonwellMorphoStrategy**: Receives cbBTC deposits in reinvest mode
-3. **SlippagePriceChecker**: Validates DEX swap prices for cbBTC→MAMO conversion
 
 ### New Components
 
 1. **AccountRegistry**: Provides access control for StakingAccount operations
 2. **MamoStakingAccountFactory**: Standardized deployment of user accounts
 3. **MamoStakingAccount**: User-owned intermediary contracts
+4. **MamoStakingStrategy**: Manages compound and reinvest operations
 
-### External Dependencies
-
-1. **DEX Router**: For cbBTC to MAMO token swaps (compound mode)
-2. **Chainlink Price Feeds**: Via SlippagePriceChecker for swap validation
-3. **MultiRewards Contract**: Core staking and reward distribution
 
 ## Deployment Architecture
 
@@ -643,64 +704,5 @@ graph LR
     H --> I
     K --> L
 ```
-
-## Performance Considerations
-
-### Gas Optimization
-
-- **Batch Operations**: Strategy processes all reward tokens in single transaction
-- **Efficient Swaps**: Direct DEX integration minimizes intermediate steps
-- **State Updates**: Minimal storage writes through careful state management
-- **Factory Pattern**: Reduced deployment costs through proxy patterns
-### Scalability
-
-- **Permissionless Design**: No bottlenecks from centralized claiming
-- **Modular Architecture**: Easy to add new compound strategies
-- **Registry Pattern**: Efficient whitelist management
-- **Factory Deployment**: Standardized account creation
-
-## Risk Mitigation
-
-### Technical Risks
-
-1. **Smart Contract Risk**: Comprehensive testing and audit requirements
-2. **Integration Risk**: Staged deployment with fallback mechanisms
-3. **Economic Risk**: Fee caps and transparent pricing
-4. **Factory Risk**: Deterministic deployment and access controls
-4. **Factory Risk**: Deterministic deployment and access controls
-
-### Operational Risks
-
-1. **Backend Failure**: Manual override capabilities for users
-2. **Strategy Malfunction**: Emergency pause and strategy replacement
-3. **Market Volatility**: Slippage protection and price validation
-4. **Registry Compromise**: Multi-sig admin controls and time delays
-4. **Registry Compromise**: Multi-sig admin controls and time delays
-
-## Future Extensibility
-
-### Planned Enhancements
-
-1. **Multi-Token Support**: Extend beyond MAMO/cbBTC pairs
-2. **Custom Strategies**: User-defined compound logic
-3. **Cross-Chain Integration**: Bridge rewards across networks
-4. **Advanced Analytics**: Performance tracking and optimization
-
-### Architecture Flexibility
-
-- **Plugin System**: Easy addition of new reward processing strategies
-- **Upgrade Path**: UUPS proxy pattern for contract evolution
-- **Integration Ready**: Standard interfaces for third-party integrations
-- **Factory Evolution**: Upgradeable factory for new account types
-- **Factory Evolution**: Upgradeable factory for new account types
-
----
-
-## Next Steps
-
-1. **Review Architecture**: Validate design decisions with stakeholders
-2. **Security Analysis**: Conduct threat modeling for new components
-3. **Implementation Planning**: Define development phases and milestones
-4. **Testing Strategy**: Establish comprehensive test coverage requirements
 
 This architecture provides a robust, secure, and scalable foundation for the Mamo Staking feature while maintaining compatibility with the existing ecosystem and introducing proper factory patterns for user account management.
