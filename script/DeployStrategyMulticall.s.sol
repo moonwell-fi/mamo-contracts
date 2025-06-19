@@ -27,8 +27,10 @@ contract DeployStrategyMulticall is Script {
         addresses.printJSONChanges();
     }
 
-    function deployStrategyMulticall(Addresses addresses) public returns (address) {
-        vm.startBroadcast();
+    function deployStrategyMulticall(Addresses addresses, bool useBroadcast) public returns (address) {
+        if (useBroadcast) {
+            vm.startBroadcast();
+        }
 
         // Get the addresses for the initialization parameters
         address owner = addresses.getAddress("MAMO_BACKEND");
@@ -40,7 +42,9 @@ contract DeployStrategyMulticall is Script {
 
         console.log("StrategyMulticall deployed at:", address(multicall));
 
-        vm.stopBroadcast();
+        if (useBroadcast) {
+            vm.stopBroadcast();
+        }
 
         // Check if the multicall address already exists
         string memory multicallName = "STRATEGY_MULTICALL";
@@ -55,5 +59,9 @@ contract DeployStrategyMulticall is Script {
         }
 
         return address(multicall);
+    }
+
+    function deployStrategyMulticall(Addresses addresses) public returns (address) {
+        return deployStrategyMulticall(addresses, true);
     }
 }
