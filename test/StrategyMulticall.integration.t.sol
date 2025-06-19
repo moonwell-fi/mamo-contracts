@@ -96,31 +96,6 @@ contract StrategyMulticallIntegrationTest is Test {
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
-        // string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
-        // if (addresses.isAddressSet(factoryName)) {
-        //     factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
-        // } else {
-        //     StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-        //     address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
-        //     factory = StrategyFactory(payable(factoryAddress));
-        // }
-
-        // // Deploy StrategyMulticall with backend as owner
-        // string memory multicallName = "STRATEGY_MULTICALL";
-        // if (addresses.isAddressSet(multicallName)) {
-        //     multicall = StrategyMulticall(payable(addresses.getAddress(multicallName)));
-        // } else {
-        //     DeployStrategyMulticall deployStrategyMulticall = new DeployStrategyMulticall();
-        //     multicall = StrategyMulticall(payable(deployStrategyMulticall.deployStrategyMulticall(addresses)));
-        // }
-
-        // vm.startPrank(mamoMultisig);
-        // registry.revokeRole(registry.BACKEND_ROLE(), backend);
-        // registry.grantRole(registry.BACKEND_ROLE(), address(multicall));
-        // registry.grantRole(registry.BACKEND_ROLE(), address(backend));
-        // registry.grantRole(registry.BACKEND_ROLE(), address(factory));
-        // vm.stopPrank();
-
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
     }
