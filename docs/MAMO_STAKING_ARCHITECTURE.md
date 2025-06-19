@@ -12,7 +12,8 @@ graph TB
     Backend[🖥️ Mamo Backend] --> |Triggers Automation| Strategy[⚡ Mamo Staking Strategy]
     
     StakingAccount --> |Stakes MAMO| MultiRewards[🏆 MultiRewards Contract]
-    Strategy --> |Claims Rewards| MultiRewards
+    Strategy --> |Triggers Claim| StakingAccount
+    StakingAccount --> |Claims Rewards| MultiRewards
     MultiRewards --> |MAMO + cbBTC| StakingAccount
     
     Strategy --> |Compound Mode| CompoundFlow[📈 Compound Flow]
@@ -86,8 +87,8 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
         );
     }
     
-    modifier onlyWhitelistedCaller() {
-        require(registry.isWhitelistedCaller(address(this), msg.sender), "Caller not whitelisted");
+    modifier onlyWhitelistedStrategy() {
+        require(registry.isWhitelistedStrategy(address(this), msg.sender), "Strategy not whitelisted");
         _;
     }
     
@@ -97,7 +98,7 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
     function multicall(
         address[] calldata targets,
         bytes[] calldata data
-    ) external payable onlyWhitelistedCaller {
+    ) external payable onlyWhitelistedStrategy {
         require(targets.length == data.length, "Length mismatch");
         
         for (uint256 i = 0; i < data.length; i++) {
@@ -121,7 +122,7 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
 }
 ```
 
-### 3. MamoStakingAccountFactory Contract
+### 2. MamoStakingAccountFactory Contract
 
 **Purpose**: Factory contract for deploying user staking accounts with standardized configuration.
 
@@ -175,29 +176,42 @@ contract MamoStakingAccountFactory {
 }
 ```
 
-### 4. AccountRegistry Contract
+### 3. AccountRegistry Contract
 
 **Purpose**: Manages caller whitelist and fee collection for the staking system.
 
 **Key Features:**
-- **Caller Whitelist**: Controls which contracts can interact with staking accounts (owner-controlled)
+- **Strategy Whitelist**: Backend-controlled whitelist of approved strategies
+- **Caller Whitelist**: Controls which whitelisted strategies can interact with staking accounts (owner-controlled)
 - **Fee Collection**: Backend-controlled fee collector address management
-- **Simplified Access**: Removed target whitelisting since MamoStakingStrategy is immutable
 
 **Updated specification:**
 ```solidity
 contract AccountRegistry is Admin {
-    /// @notice Mapping of staking account to whitelisted callers
-    mapping(address => mapping(address => bool)) public isWhitelistedCaller;
+    /// @notice Mapping of staking account to whitelisted strategies
+    mapping(address => mapping(address => bool)) public isWhitelistedStrategy;
+    
+    /// @notice Mapping of backend-approved strategies
+    mapping(address => bool) public approvedStrategies;
     
     /// @notice Fee collector address
     address public feeCollector;
     
-    /// @notice Backend role for fee collector management
+    /// @notice Backend role for strategy approval and fee collector management
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
     
-    event CallerWhitelisted(address indexed stakingAccount, address indexed caller, bool approved);
+    event StrategyWhitelisted(address indexed stakingAccount, address indexed strategy, bool approved);
+    event StrategyApproved(address indexed strategy, bool approved);
     event FeeCollectorUpdated(address indexed oldCollector, address indexed newCollector);
+    
+    /// @notice Approve a strategy globally (backend only)
+    /// @param strategy The strategy address to approve
+    /// @param approved Whether to approve or revoke the strategy
+    function setApprovedStrategy(address strategy, bool approved) external onlyRole(BACKEND_ROLE) {
+        require(strategy != address(0), "Invalid strategy");
+        approvedStrategies[strategy] = approved;
+        emit StrategyApproved(strategy, approved);
+    }
     
     /// @notice Set fee collector address (backend only)
     /// @param newFeeCollector The new fee collector address
@@ -208,27 +222,29 @@ contract AccountRegistry is Admin {
         emit FeeCollectorUpdated(oldCollector, newFeeCollector);
     }
     
-    /// @notice Whitelist a caller for a specific staking account (account owner only)
+    /// @notice Whitelist an approved strategy for a specific staking account (account owner only)
     /// @param stakingAccount The staking account address
-    /// @param caller The caller address to whitelist
-    /// @param approved Whether to approve or revoke the caller
-    function setWhitelistCaller(address stakingAccount, address caller, bool approved) external {
+    /// @param strategy The strategy address to whitelist
+    /// @param approved Whether to approve or revoke the strategy
+    function setWhitelistStrategy(address stakingAccount, address strategy, bool approved) external {
         // msg.sender must be the staking account owner
         require(Ownable(stakingAccount).owner() == msg.sender, "Not account owner");
-        isWhitelistedCaller[stakingAccount][caller] = approved;
-        emit CallerWhitelisted(stakingAccount, caller, approved);
+        // Strategy must be approved by backend first
+        require(approvedStrategies[strategy], "Strategy not approved by backend");
+        isWhitelistedStrategy[stakingAccount][strategy] = approved;
+        emit StrategyWhitelisted(stakingAccount, strategy, approved);
     }
 }
 ```
 
-### 5. Mamo Staking Strategy Contract
+### 4. Mamo Staking Strategy Contract
 
 **Purpose**: Executes the automated reward claiming and processing logic with user deposit/withdraw capabilities. This contract is immutable and not upgradeable.
 
 **Core Responsibilities:**
 - **User Operations**: Deposit and withdraw functions for account owners
 - **Automated Processing**: Backend-controlled compound and reinvest functions
-- **Permissionless Claiming**: Calls [`getReward(address)`](src/MultiRewards.sol:475) on behalf of staking accounts
+- **Reward Claiming**: Calls [`getReward()`](src/MultiRewards.sol:475) from staking accounts (accounts are the msg.sender)
 - **Token Processing**: Handles MAMO and cbBTC rewards according to user preferences
 - **Fee Management**: Immutable compound fee applied to all operations
 - **Integration**: Interfaces with DEX routers and ERC20MoonwellMorphoStrategy
@@ -548,7 +564,8 @@ sequenceDiagram
     participant Fee as Fee Recipient
 
     Backend->>Strategy: processRewards(stakingAccountAddress)
-    Strategy->>MultiRewards: getReward(stakingAccountAddress)
+    Strategy->>StakingAccount: Trigger getReward() (via multicall)
+    StakingAccount->>MultiRewards: getReward()
     MultiRewards->>StakingAccount: Transfer MAMO + cbBTC
     
     Strategy->>StakingAccount: Pull rewards (via multicall)
@@ -594,19 +611,19 @@ sequenceDiagram
 
 | Function | Caller | Permission Source | Notes |
 |----------|--------|------------------|-------|
-| `getReward(address)` | Anyone | Permissionless | Modified function, maintains all existing security |
+| `getReward()` | Staking Account | Account-based | Existing function, staking account calls as msg.sender |
 | `processRewards()` | Mamo Backend | Backend role | Automated execution |
 | `deposit()` | Account Owner | Ownership check | Direct strategy call |
 | `withdraw()` | Account Owner | Ownership check | Direct strategy call |
 | `setCompoundMode()` | Account Owner | Ownership check | Strategy function |
 | `multicall()` | Whitelisted | AccountRegistry | Per-account whitelist |
-| `setWhitelistCaller()` | Account Owner | Ownership check | Account-specific control |
+| `setWhitelistStrategy()` | Account Owner | Ownership check + Backend approval | Account-specific control |
 | `createStakingAccount()` | Anyone | Permissionless | Factory deployment |
 
 ### Security Considerations
 
-1. **Permissionless Claiming**:
-   - ✅ Rewards always go to the rightful owner (account parameter)
+1. **Account-Based Claiming**:
+   - ✅ Rewards always go to the staking account (msg.sender validation)
    - ✅ No risk of reward theft
    - ✅ Enables automation without compromising security
 
