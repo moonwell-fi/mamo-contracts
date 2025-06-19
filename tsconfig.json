@@ -9,6 +9,6 @@
     "outDir": "dist",
     "declaration": true
   },
-  "include": ["utils/**/*"],
+  "include": ["test/utils/**/*"],
   "exclude": ["node_modules"]
 }

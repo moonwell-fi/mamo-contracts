@@ -14,8 +14,9 @@ import {console} from "@forge-std/console.sol";
 
 // Import all the necessary deployment scripts
 import {DeploySlippagePriceChecker} from "./DeploySlippagePriceChecker.s.sol";
+
+import {StrategyFactoryDeployer} from "./StrategyFactoryDeployer.s.sol";
 import {StrategyRegistryDeploy} from "./StrategyRegistryDeploy.s.sol";
-import {USDCStrategyFactoryDeployer} from "./USDCStrategyFactoryDeployer.s.sol";
 import {USDCStrategyImplDeployer} from "./USDCStrategyImplDeployer.s.sol";
 
 /**
@@ -95,9 +96,8 @@ contract DeploySystem is Script {
 
         // Step 8: Deploy the USDCStrategyFactory
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 8: Deploying USDCStrategyFactory...")));
-        USDCStrategyFactoryDeployer factoryDeployer = new USDCStrategyFactoryDeployer();
-        address factoryAddress =
-            factoryDeployer.deployUSDCStrategyFactory(addresses, config.getConfig(), strategyTypeId);
+        StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
+        address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, config.getConfig(), strategyTypeId);
         console.log("USDCStrategyFactory deployed at: %s", StdStyle.yellow(vm.toString(factoryAddress)));
 
         // Update the JSON file with all the new addresses
@@ -157,7 +157,8 @@ contract DeploySystem is Script {
             );
 
             // Get token oracle information
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds = priceChecker.tokenOracleInformation(token);
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
+                priceChecker.tokenPairOracleInformation(token, addresses.getAddress("USDC"));
 
             // Verify feed configurations exist
             require(feeds.length > 0, string(abi.encodePacked("No feed configurations for ", tokenName)));
@@ -182,7 +183,7 @@ contract DeploySystem is Script {
 
         // Validate USDC strategy implementation is whitelisted
         console.log("Validating USDC strategy implementation...");
-        address usdcStrategyImpl = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        address usdcStrategyImpl = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
         require(
             registry.whitelistedImplementations(usdcStrategyImpl), "USDC strategy implementation is not whitelisted"
         );
@@ -204,7 +205,8 @@ contract DeploySystem is Script {
 
         for (uint256 i = 0; i < deployConfig.rewardTokens.length; i++) {
             string memory tokenName = deployConfig.rewardTokens[i].token;
-            address token = addresses.getAddress(tokenName);
+            address from = addresses.getAddress(tokenName);
+            address to = addresses.getAddress("USDC"); // TODO make it dynamic
             address priceFeed = addresses.getAddress(deployConfig.rewardTokens[i].priceFeed);
 
             // Create token configuration
@@ -218,7 +220,7 @@ contract DeploySystem is Script {
             });
 
             // Add token configuration
-            priceChecker.addTokenConfiguration(token, tokenConfigs, deployConfig.maxPriceValidTime);
+            priceChecker.addTokenConfiguration(from, to, tokenConfigs);
         }
 
         // Transfer ownership to the multisig only once after all tokens are configured
@@ -233,7 +235,7 @@ contract DeploySystem is Script {
 
         // Get the addresses
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address usdcStrategyImplementation = addresses.getAddress("USDC_MOONWELL_MORPHO_STRATEGY_IMPL");
+        address usdcStrategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
 
         // Whitelist the implementation in the registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(mamoStrategyRegistry);

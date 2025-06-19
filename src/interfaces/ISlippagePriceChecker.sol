@@ -23,10 +23,14 @@ interface ISlippagePriceChecker {
     /**
      * @notice Maps token addresses to their oracle configurations
      * @dev Each token can have multiple price feed configurations in sequence
-     * @param token The token address to get oracle information for
+     * @param fromToken The token address to swap from
+     * @param toToken The token address to swap to
      * @return Array of TokenFeedConfiguration for the token
      */
-    function tokenOracleInformation(address token) external view returns (TokenFeedConfiguration[] memory);
+    function tokenPairOracleInformation(address fromToken, address toToken)
+        external
+        view
+        returns (TokenFeedConfiguration[] memory);
 
     /**
      * @notice Checks if a swap meets the price requirements
@@ -70,22 +74,36 @@ interface ISlippagePriceChecker {
     function maxTimePriceValid(address token) external view returns (uint256);
 
     /**
-     * @notice Adds a configuration for a token
+     * @notice Adds a configuration for a token pair
      * @dev Only callable by the owner
-     * @param token The address of the token to configure
-     * @param configurations Array of TokenFeedConfiguration for the token
-     * @param _maxTimePriceValid Maximum time in seconds that a price is considered valid
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
+     * @param configurations Array of TokenFeedConfiguration for the token pair
      */
-    function addTokenConfiguration(
-        address token,
-        TokenFeedConfiguration[] calldata configurations,
-        uint256 _maxTimePriceValid
-    ) external;
+    function addTokenConfiguration(address fromToken, address toToken, TokenFeedConfiguration[] calldata configurations)
+        external;
 
     /**
-     * @notice Removes all configurations for a token
+     * @notice Removes configuration for a token pair
      * @dev Only callable by the owner
-     * @param token The address of the token to remove configuration for
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
      */
-    function removeTokenConfiguration(address token) external;
+    function removeTokenConfiguration(address fromToken, address toToken) external;
+
+    /**
+     * @notice Sets the maximum time a price is considered valid for a token
+     * @dev Only callable by the owner
+     * @param fromToken The address of the token to swap from
+     * @param maxTimePriceValid Maximum time in seconds that a price is considered valid
+     */
+    function setMaxTimePriceValid(address fromToken, uint256 maxTimePriceValid) external;
+
+    /**
+     * @notice Checks if a token pair is configured
+     * @param fromToken The address of the token to swap from
+     * @param toToken The address of the token to swap to
+     * @return Whether the token pair is configured
+     */
+    function isTokenPairConfigured(address fromToken, address toToken) external view returns (bool);
 }

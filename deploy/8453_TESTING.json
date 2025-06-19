@@ -1,11 +1,11 @@
 {
-  "admin": "TESTING_EOA",
+  "admin": "DEPLOYER_EOA",
   "allowedSlippageInBps": 100,
-  "backend": "TESTING_EOA",
+  "backend": "DEPLOYER_EOA",
   "chainId": 8453,
-  "deployer": "TESTING_EOA",
+  "deployer": "DEPLOYER_EOA",
   "compoundFee": 100,
-  "guardian": "TESTING_EOA",
+  "guardian": "DEPLOYER_EOA",
   "hookGasLimit": 100000,
   "maxPriceValidTime": 3600,
   "rewardTokens": [
