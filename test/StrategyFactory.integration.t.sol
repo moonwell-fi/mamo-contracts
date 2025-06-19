@@ -76,7 +76,8 @@ contract StrategyFactoryIntegrationTest is Test {
         mamoMultisig = admin; // Use admin as mamo multisig for testing
 
         DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
-        proposal.deploy(addresses);
+        proposal.setAddresses(addresses);
+        proposal.deploy();
         proposal.build();
         proposal.simulate();
         proposal.validate();

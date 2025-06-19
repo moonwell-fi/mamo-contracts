@@ -151,7 +151,8 @@ contract MoonwellMorphoStrategyTest is Test {
         splitVault = assetConfig.strategyParams.splitVault;
 
         DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
-        proposal.deploy(addresses);
+        proposal.setAddresses(addresses);
+        proposal.deploy();
         proposal.build();
         proposal.simulate();
         proposal.validate();

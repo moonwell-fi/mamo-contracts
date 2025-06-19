@@ -48,20 +48,17 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         return "Deploy cbBTC and USDC strategy factories and StrategyMulticall contract";
     }
 
-    function deploy(Addresses _addresses) public {
-        // Store the addresses instance for use by other functions
-        addresses = _addresses;
-        
+    function deploy() public override {
         // Deploy cbBTC strategy factory
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
-        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(_addresses, configBtc);
+        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc);
         
         // Deploy USDC strategy factory
         DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
-        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(_addresses, configUsdc);
+        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc);
 
         // Deploy StrategyMulticall
-        strategyMulticall = deployStrategyMulticall.deployStrategyMulticall(_addresses);
+        strategyMulticall = deployStrategyMulticall.deployStrategyMulticall(addresses);
 
         console.log("cbBTC Strategy Factory deployed at:", cbBTCStrategyFactory);
         console.log("USDC Strategy Factory deployed at:", usdcStrategyFactory);
