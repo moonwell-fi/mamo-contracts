@@ -17,8 +17,6 @@ contract FixIsRewardToken is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfigUsdc;
 
     constructor() {
-        setPrimaryForkId(vm.createSelectFork("base"));
-
         // TODO move four below lines to a generic function as we use all the time
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);

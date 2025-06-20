@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
-import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
+
 import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
+import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
 import {console} from "forge-std/console.sol";
 
 contract DeployFactoriesAndMulticall is MultisigProposal {
@@ -17,14 +18,12 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfigUsdc;
     StrategyFactoryDeployer public immutable strategyFactoryDeployer;
     DeployStrategyMulticall public immutable deployStrategyMulticall;
-    
+
     address public cbBTCStrategyFactory;
     address public usdcStrategyFactory;
     address public strategyMulticall;
 
     constructor() {
-        setPrimaryForkId(vm.createSelectFork("base"));
-
         // Load asset configurations
         deployAssetConfigBtc = new DeployAssetConfig("./config/strategies/cbBTCStrategyConfig.json");
         vm.makePersistent(address(deployAssetConfigBtc));
@@ -52,7 +51,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         // Deploy cbBTC strategy factory
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
         cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc);
-        
+
         // Deploy USDC strategy factory
         DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
         usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc);
@@ -68,7 +67,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         // Get the registry contract
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        
+
         // Get current backend address
         address currentBackend = addresses.getAddress("MAMO_BACKEND");
 
@@ -93,7 +92,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     function validate() public view override {
         // Get the registry contract
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        
+
         // Get addresses
         address currentBackend = addresses.getAddress("MAMO_BACKEND");
 
@@ -104,8 +103,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
 
         // Validate that all contracts have the BACKEND_ROLE
         assertTrue(
-            registry.hasRole(registry.BACKEND_ROLE(), strategyMulticall),
-            "StrategyMulticall should have BACKEND_ROLE"
+            registry.hasRole(registry.BACKEND_ROLE(), strategyMulticall), "StrategyMulticall should have BACKEND_ROLE"
         );
         assertTrue(
             registry.hasRole(registry.BACKEND_ROLE(), cbBTCStrategyFactory),
@@ -125,16 +123,8 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         StrategyFactory usdcFactory = StrategyFactory(payable(usdcStrategyFactory));
 
         // Check that both factories are properly configured
-        assertEq(
-            cbBTCFactory.mamoStrategyRegistry(), 
-            address(registry), 
-            "cbBTC Factory should have correct registry"
-        );
-        assertEq(
-            usdcFactory.mamoStrategyRegistry(), 
-            address(registry), 
-            "USDC Factory should have correct registry"
-        );
+        assertEq(cbBTCFactory.mamoStrategyRegistry(), address(registry), "cbBTC Factory should have correct registry");
+        assertEq(usdcFactory.mamoStrategyRegistry(), address(registry), "USDC Factory should have correct registry");
 
         // Validate that addresses were added to the addresses contract
         string memory cbBTCFactoryName = string(abi.encodePacked("cbBTC", "_STRATEGY_FACTORY"));
@@ -145,22 +135,10 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         assertTrue(addresses.isAddressSet(usdcFactoryName), "USDC Factory address should be set");
         assertTrue(addresses.isAddressSet(multicallName), "StrategyMulticall address should be set");
 
-        assertEq(
-            addresses.getAddress(cbBTCFactoryName),
-            cbBTCStrategyFactory,
-            "cbBTC Factory address should match"
-        );
-        assertEq(
-            addresses.getAddress(usdcFactoryName),
-            usdcStrategyFactory,
-            "USDC Factory address should match"
-        );
-        assertEq(
-            addresses.getAddress(multicallName),
-            strategyMulticall,
-            "StrategyMulticall address should match"
-        );
+        assertEq(addresses.getAddress(cbBTCFactoryName), cbBTCStrategyFactory, "cbBTC Factory address should match");
+        assertEq(addresses.getAddress(usdcFactoryName), usdcStrategyFactory, "USDC Factory address should match");
+        assertEq(addresses.getAddress(multicallName), strategyMulticall, "StrategyMulticall address should match");
 
         console.log("All validations passed successfully");
     }
-} 
+}

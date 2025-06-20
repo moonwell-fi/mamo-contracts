@@ -26,7 +26,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
+import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
 
 contract StrategyMulticallIntegrationTest is Test {

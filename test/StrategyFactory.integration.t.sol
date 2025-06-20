@@ -9,7 +9,7 @@ import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
-import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
+import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 

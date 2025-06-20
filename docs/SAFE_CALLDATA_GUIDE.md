@@ -14,6 +14,9 @@ safe-cli 0x26c158A4CD56d148c554190A95A921d90F00C160 $RPC_URL
 
 ## Load Owner
 
+
+Change the derivation path to the one you want to use.
+
 ```bash
 load_ledger_cli_owners --derivation-path "44'/60'/1'/0/0"
 ```

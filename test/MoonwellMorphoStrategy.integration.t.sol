@@ -31,7 +31,8 @@ import {MockERC20} from "./MockERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
-import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
+import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
+import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 
 /**
  * @title MockRejectETH
@@ -148,6 +149,13 @@ contract MoonwellMorphoStrategyTest is Test {
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
+
+        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
+        fixIsRewardToken.setAddresses(addresses);
+        fixIsRewardToken.deploy();
+        fixIsRewardToken.build();
+        fixIsRewardToken.simulate();
+        fixIsRewardToken.validate();
 
         DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
         proposal.setAddresses(addresses);
