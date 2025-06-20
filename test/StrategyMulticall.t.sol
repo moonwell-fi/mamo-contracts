@@ -409,4 +409,163 @@ contract StrategyMulticallTest is Test {
             assertEq(actualSplitB, splitMorpho, "Fuzz: splitB incorrect");
         }
     }
+
+    /* ============ ETH VALIDATION AND REFUND TESTS ============ */
+
+    function testETHValidation_ExactAmount() public {
+        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+
+        calls[0] = StrategyMulticall.Call({
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
+        });
+
+        calls[1] = StrategyMulticall.Call({
+            target: address(payableContract2),
+            data: abi.encodeWithSignature("setValue2(uint256)", 200),
+            value: 0.5 ether
+        });
+
+        uint256 initialBalance = multicallOwner.balance;
+
+        vm.prank(multicallOwner);
+        multicall.genericMulticall{value: 1.5 ether}(calls);
+
+        // Verify contracts received the correct amounts
+        assertEq(payableContract1.receivedETH(), 1 ether, "Contract1 should receive 1 ether");
+        assertEq(payableContract2.receivedETH(), 0.5 ether, "Contract2 should receive 0.5 ether");
+
+        // Verify no refund (exact amount provided)
+        assertEq(multicallOwner.balance, initialBalance - 1.5 ether, "Owner should pay exactly 1.5 ether");
+    }
+
+    function testETHValidation_ExcessAmount() public {
+        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+
+        calls[0] = StrategyMulticall.Call({
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
+        });
+
+        calls[1] = StrategyMulticall.Call({
+            target: address(payableContract2),
+            data: abi.encodeWithSignature("setValue2(uint256)", 200),
+            value: 0.5 ether
+        });
+
+        uint256 initialBalance = multicallOwner.balance;
+
+        vm.prank(multicallOwner);
+        multicall.genericMulticall{value: 2 ether}(calls); // Sending 2 ether for 1.5 ether worth of calls
+
+        // Verify contracts received the correct amounts
+        assertEq(payableContract1.receivedETH(), 1 ether, "Contract1 should receive 1 ether");
+        assertEq(payableContract2.receivedETH(), 0.5 ether, "Contract2 should receive 0.5 ether");
+
+        // Verify refund of excess 0.5 ether
+        assertEq(
+            multicallOwner.balance, initialBalance - 1.5 ether, "Owner should only pay 1.5 ether (0.5 ether refunded)"
+        );
+    }
+
+    function testETHValidation_InsufficientAmount() public {
+        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+
+        calls[0] = StrategyMulticall.Call({
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
+        });
+
+        calls[1] = StrategyMulticall.Call({
+            target: address(payableContract2),
+            data: abi.encodeWithSignature("setValue2(uint256)", 200),
+            value: 0.5 ether
+        });
+
+        uint256 initialBalance = multicallOwner.balance;
+
+        // Try to send only 1 ether for 1.5 ether worth of calls
+        vm.expectRevert("StrategyMulticall: Insufficient ETH provided");
+        vm.prank(multicallOwner);
+        multicall.genericMulticall{value: 1 ether}(calls);
+
+        // Verify no state changes occurred
+        assertEq(payableContract1.receivedETH(), 0, "Contract1 should not receive any ETH");
+        assertEq(payableContract2.receivedETH(), 0, "Contract2 should not receive any ETH");
+        assertEq(multicallOwner.balance, initialBalance, "Owner balance should be unchanged");
+    }
+
+    function testETHValidation_ZeroValueCalls() public {
+        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+
+        calls[0] = StrategyMulticall.Call({
+            target: address(strategy1),
+            data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
+            value: 0
+        });
+
+        calls[1] = StrategyMulticall.Call({
+            target: address(strategy2),
+            data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
+            value: 0
+        });
+
+        uint256 initialBalance = multicallOwner.balance;
+
+        vm.prank(multicallOwner);
+        multicall.genericMulticall{value: 1 ether}(calls); // Sending excess ETH for zero-value calls
+
+        // Verify strategies were updated
+        (uint256 split1A, uint256 split1B) = strategy1.getCurrentSplit();
+        (uint256 split2A, uint256 split2B) = strategy2.getCurrentSplit();
+        assertEq(split1A, SPLIT_MOONWELL, "Strategy1 should be updated");
+        assertEq(split2A, SPLIT_MOONWELL, "Strategy2 should be updated");
+
+        // Verify full refund (all calls had zero value)
+        assertEq(multicallOwner.balance, initialBalance, "Owner should get full refund");
+    }
+
+    function testETHValidation_MixedValueCalls() public {
+        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](3);
+
+        calls[0] = StrategyMulticall.Call({
+            target: address(strategy1),
+            data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
+            value: 0
+        });
+
+        calls[1] = StrategyMulticall.Call({
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 0.3 ether
+        });
+
+        calls[2] = StrategyMulticall.Call({
+            target: address(strategy2),
+            data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
+            value: 0
+        });
+
+        uint256 initialBalance = multicallOwner.balance;
+
+        vm.prank(multicallOwner);
+        multicall.genericMulticall{value: 1 ether}(calls); // Sending 1 ether for 0.3 ether worth of calls
+
+        // Verify strategies were updated
+        (uint256 split1A, uint256 split1B) = strategy1.getCurrentSplit();
+        (uint256 split2A, uint256 split2B) = strategy2.getCurrentSplit();
+        assertEq(split1A, SPLIT_MOONWELL, "Strategy1 should be updated");
+        assertEq(split2A, SPLIT_MOONWELL, "Strategy2 should be updated");
+
+        // Verify payable contract received ETH
+        assertEq(payableContract1.receivedETH(), 0.3 ether, "PayableContract should receive 0.3 ether");
+
+        // Verify refund of excess 0.7 ether
+        assertEq(
+            multicallOwner.balance, initialBalance - 0.3 ether, "Owner should only pay 0.3 ether (0.7 ether refunded)"
+        );
+    }
 }
