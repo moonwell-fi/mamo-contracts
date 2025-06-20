@@ -32,7 +32,6 @@ import {MockERC20} from "./MockERC20.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
-import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
 
 /**
  * @title MockRejectETH
