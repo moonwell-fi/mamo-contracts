@@ -587,5 +587,9 @@ contract SlippagePriceCheckerTest is Test {
 
             assertEq(slippagePriceChecker.isRewardToken(tokenAddress), true);
         }
+
+        // random token that is not a reward token
+        address randomToken = makeAddr("randomToken");
+        assertEq(slippagePriceChecker.isRewardToken(randomToken), false);
     }
 }
