@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title StrategyMulticall
@@ -10,7 +11,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  * @dev This contract allows efficient batch updates and generic multicalls to strategies
  * @dev Only the owner can execute multicalls to prevent unauthorized strategy modifications
  */
-contract StrategyMulticall is Ownable {
+contract StrategyMulticall is Ownable, ReentrancyGuard {
     /**
      * @notice Emitted when a generic multicall is executed
      * @param initiator The address that initiated the multicall
@@ -43,8 +44,9 @@ contract StrategyMulticall is Ownable {
      * @dev Can be used for any contract calls, not just strategies
      * @dev Only callable by the contract owner
      * @dev Validates that total call values don't exceed msg.value and refunds excess ETH
+     * @dev Protected against reentrancy attacks
      */
-    function genericMulticall(Call[] calldata calls) external payable onlyOwner {
+    function genericMulticall(Call[] calldata calls) external payable onlyOwner nonReentrant {
         require(calls.length > 0, "StrategyMulticall: Empty calls array");
 
         // Calculate total ETH required for all calls
