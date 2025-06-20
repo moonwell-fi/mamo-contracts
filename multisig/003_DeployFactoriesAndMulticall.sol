@@ -40,7 +40,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     }
 
     function name() public pure override returns (string memory) {
-        return "002_DeployFactoriesAndMulticall";
+        return "003_DeployFactoriesAndMulticall";
     }
 
     function description() public pure override returns (string memory) {
