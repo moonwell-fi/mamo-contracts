@@ -22,6 +22,8 @@ import {IMToken} from "@interfaces/IMToken.sol";
 
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+
+import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract StrategyFactoryIntegrationTest is Test {
@@ -74,6 +76,14 @@ contract StrategyFactoryIntegrationTest is Test {
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin; // Use admin as mamo multisig for testing
+
+        // todo remove this once FixIsRewardToken is executed
+        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
+        fixIsRewardToken.setAddresses(addresses);
+        fixIsRewardToken.deploy();
+        fixIsRewardToken.build();
+        fixIsRewardToken.simulate();
+        fixIsRewardToken.validate();
 
         DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
         proposal.setAddresses(addresses);

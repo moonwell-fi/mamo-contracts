@@ -26,6 +26,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
 
@@ -84,6 +85,14 @@ contract StrategyMulticallIntegrationTest is Test {
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
+
+        // todo remove this once FixIsRewardToken is executed
+        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
+        fixIsRewardToken.setAddresses(addresses);
+        fixIsRewardToken.deploy();
+        fixIsRewardToken.build();
+        fixIsRewardToken.simulate();
+        fixIsRewardToken.validate();
 
         DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
         proposal.setAddresses(addresses);
