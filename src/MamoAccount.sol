@@ -16,23 +16,15 @@ import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/U
  */
 contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     /// @notice The AccountRegistry contract for permission management
-    AccountRegistry public immutable registry;
+    AccountRegistry public registry;
 
     /// @notice The MamoStrategyRegistry contract for implementation validation
-    IMamoStrategyRegistry public immutable mamoStrategyRegistry;
+    IMamoStrategyRegistry public mamoStrategyRegistry;
 
     /**
-     * @notice Constructor sets immutable references
-     * @param _registry The AccountRegistry contract
-     * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
+     * @notice Constructor disables initializers in the implementation contract
      */
-    constructor(AccountRegistry _registry, IMamoStrategyRegistry _mamoStrategyRegistry) {
-        require(address(_registry) != address(0), "Invalid registry");
-        require(address(_mamoStrategyRegistry) != address(0), "Invalid strategy registry");
-
-        registry = _registry;
-        mamoStrategyRegistry = _mamoStrategyRegistry;
-
+    constructor() {
         // Disable initializers in the implementation contract
         _disableInitializers();
     }
@@ -40,9 +32,19 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     /**
      * @notice Initialize the account
      * @param _owner The owner of the account
+     * @param _registry The AccountRegistry contract
+     * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
      */
-    function initialize(address _owner) external initializer {
+    function initialize(address _owner, AccountRegistry _registry, IMamoStrategyRegistry _mamoStrategyRegistry)
+        external
+        initializer
+    {
         require(_owner != address(0), "Invalid owner");
+        require(address(_registry) != address(0), "Invalid registry");
+        require(address(_mamoStrategyRegistry) != address(0), "Invalid strategy registry");
+
+        registry = _registry;
+        mamoStrategyRegistry = _mamoStrategyRegistry;
 
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();
@@ -60,27 +62,6 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     modifier onlyWhitelistedStrategy() {
         require(registry.isWhitelistedStrategy(address(this), msg.sender), "Strategy not whitelisted");
         _;
-    }
-
-    /**
-     * @notice Execute a multicall with strategy validation (similar to StrategyMulticall.genericMulticall)
-     * @param calls Array of Call structs containing target, data, and value for each call
-     */
-    function genericMulticall(StrategyMulticall.Call[] calldata calls) external payable onlyWhitelistedStrategy {
-        require(calls.length > 0, "Empty calls array");
-
-        for (uint256 i = 0; i < calls.length; i++) {
-            StrategyMulticall.Call calldata call = calls[i];
-            require(call.target != address(0), "Invalid target address");
-
-            (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
-
-            if (!success) {
-                assembly {
-                    revert(add(returnData, 0x20), mload(returnData))
-                }
-            }
-        }
     }
 
     /**
@@ -106,40 +87,4 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
             }
         }
     }
-
-    /**
-     * @notice Execute a direct call to a target contract
-     * @param target The target contract address
-     * @param data The call data
-     * @return result The return data from the call
-     */
-    function execute(address target, bytes calldata data)
-        external
-        payable
-        onlyWhitelistedStrategy
-        returns (bytes memory result)
-    {
-        require(target != address(0), "Invalid target");
-
-        (bool success, bytes memory returnData) = target.call{value: msg.value}(data);
-
-        if (!success) {
-            if (returnData.length == 0) revert();
-            assembly {
-                revert(add(32, returnData), mload(returnData))
-            }
-        }
-
-        return returnData;
-    }
-
-    /**
-     * @notice Receive function to accept ETH
-     */
-    receive() external payable {}
-
-    /**
-     * @notice Fallback function
-     */
-    fallback() external payable {}
 }
