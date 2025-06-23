@@ -260,7 +260,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
     }
 
     function test_pauseFunctionalityIntegration() public {
-        vm.prank(safe);
+        vm.prank(address(safe));
         module.pause();
 
         vm.expectRevert("Pausable: paused");
