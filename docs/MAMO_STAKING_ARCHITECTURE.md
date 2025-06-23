@@ -8,7 +8,7 @@ The Mamo Staking feature introduces an automated reward claiming and compounding
 
 ```mermaid
 graph TB
-    User[👤 User] --> |Deploys & Stakes| StakingAccount[🔄 MamoStakingAccount]
+    User[👤 User] --> |Deploys & Stakes| StakingAccount[🔄 ]
     Backend[🖥️ Mamo Backend] --> |Triggers Automation| Strategy[⚡ Mamo Staking Strategy]
     
     StakingAccount --> |Stakes MAMO| MultiRewards[🏆 MultiRewards Contract]
@@ -41,7 +41,7 @@ graph TB
 
 ## Core Components
 
-### 1. MamoStakingAccount Contract
+### 1.  Contract
 
 **Purpose**: Acts as an intermediary UUPS proxy contract that holds user stakes and enables automated reward management.
 
@@ -54,7 +54,7 @@ graph TB
 
 **Architecture Pattern:**
 ```solidity
-contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
+contract  is Initializable, UUPSUpgradeable, Ownable {
     AccountRegistry public immutable registry;
     MamoStrategyRegistry public immutable mamoStrategyRegistry;
     address public stakingStrategy;
@@ -122,7 +122,7 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
 }
 ```
 
-### 2. MamoStakingAccountFactory Contract
+### 2. Factory Contract
 
 **Purpose**: Factory contract for deploying user staking accounts with standardized configuration.
 
@@ -134,7 +134,7 @@ contract MamoStakingAccount is Initializable, UUPSUpgradeable, Ownable {
 
 **Architecture Pattern:**
 ```solidity
-contract MamoStakingAccountFactory {
+contract Factory {
     AccountRegistry public immutable registry;
     address public immutable stakingAccountImplementation;
     
@@ -159,7 +159,7 @@ contract MamoStakingAccountFactory {
         stakingAccount = address(new ERC1967Proxy{salt: salt}(
             stakingAccountImplementation,
             abi.encodeWithSelector(
-                MamoStakingAccount.initialize.selector,
+                .initialize.selector,
                 msg.sender,
                 registry,
                 mamoStrategyRegistry
@@ -255,7 +255,7 @@ contract MamoStakingStrategy {
     AccountRegistry public immutable registry;
     MultiRewards public immutable multiRewards;
     IERC20 public immutable mamoToken;
-    IERC20 public immutable cbBTCToken;
+    IERC20[] public immutable rewardTokens;
     IDEXRouter public immutable dexRouter;
     ERC20MoonwellMorphoStrategy public immutable morphoStrategy;
     uint256 public immutable compoundFee; // Immutable fee in basis points (e.g., 100 = 1%)
@@ -280,7 +280,7 @@ contract MamoStakingStrategy {
         AccountRegistry _registry,
         MultiRewards _multiRewards,
         IERC20 _mamoToken,
-        IERC20 _cbBTCToken,
+        IERC20[] _rewardTokens,
         IDEXRouter _dexRouter,
         ERC20MoonwellMorphoStrategy _morphoStrategy,
         uint256 _compoundFee
@@ -289,7 +289,7 @@ contract MamoStakingStrategy {
         registry = _registry;
         multiRewards = _multiRewards;
         mamoToken = _mamoToken;
-        cbBTCToken = _cbBTCToken;
+        rewardTokens = _rewardTokens;
         dexRouter = _dexRouter;
         morphoStrategy = _morphoStrategy;
         compoundFee = _compoundFee;
@@ -321,7 +321,6 @@ contract MamoStakingStrategy {
     /// @param amount The amount of MAMO to deposit
     function deposit(address stakingAccount, uint256 amount)
         external
-        onlyAccountOwner(stakingAccount)
     {
         require(amount > 0, "Amount must be greater than 0");
         
@@ -337,7 +336,7 @@ contract MamoStakingStrategy {
             amount
         );
         
-        MamoStakingAccount(stakingAccount).multicall(
+        (stakingAccount).multicall(
             [address(multiRewards)],
             [stakeData]
         );
@@ -360,7 +359,7 @@ contract MamoStakingStrategy {
             amount
         );
         
-        MamoStakingAccount(stakingAccount).multicall(
+        (stakingAccount).multicall(
             [address(multiRewards)],
             [withdrawData]
         );
@@ -381,6 +380,11 @@ contract MamoStakingStrategy {
             _reinvest(stakingAccount);
         }
     }
+
+    /// @notice Set the DEX router for the staking strategy
+    function setDexRouter(IDEXRouter _dexRouter) external onlyBackend {
+        dexRouter = _dexRouter;
+    }
     
     /// @notice Internal function to compound rewards by converting cbBTC to MAMO and restaking
     /// @param stakingAccount The staking account address
@@ -389,20 +393,34 @@ contract MamoStakingStrategy {
         bytes memory getRewardData = abi.encodeWithSelector(
             MultiRewards.getReward.selector
         );
-        MamoStakingAccount(stakingAccount).multicall(
+        (stakingAccount).multicall(
             [address(multiRewards)],
             [getRewardData]
         );
         
         // Get reward balances
         uint256 mamoBalance = mamoToken.balanceOf(stakingAccount);
-        uint256 cbBTCBalance = cbBTCToken.balanceOf(stakingAccount);
-        
-        if (mamoBalance == 0 && cbBTCBalance == 0) return;
+
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            uint256 rewardTokenBalance = rewardTokens[i].balanceOf(stakingAccount);
+            if (rewardTokenBalance == 0) continue;
+
+            uint256 rewardTokenFee = (rewardTokenBalance * compoundFee) / 10000;
+            if (rewardTokenFee > 0) {
+                bytes memory transferRewardTokenFeeData = abi.encodeWithSelector(
+                    IERC20.transfer.selector,
+                    registry.feeCollector(),
+                    rewardTokenFee
+                );
+                (stakingAccount).multicall(
+                    [address(rewardTokens[i])],
+                    [transferRewardTokenFeeData]
+                );
+            }
         
         // Calculate and transfer fees
         uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
-        uint256 cbBTCFee = (cbBTCBalance * compoundFee) / 10000;
+        uint256 rewardTokenFee = (rewardTokenBalance * compoundFee) / 10000;
         
         if (mamoFee > 0) {
             bytes memory transferMamoFeeData = abi.encodeWithSelector(
@@ -410,26 +428,26 @@ contract MamoStakingStrategy {
                 registry.feeCollector(),
                 mamoFee
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(mamoToken)],
                 [transferMamoFeeData]
             );
         }
         
-        if (cbBTCFee > 0) {
+        if (rewardTokenFee > 0) {
             bytes memory transferCbBTCFeeData = abi.encodeWithSelector(
                 IERC20.transfer.selector,
                 registry.feeCollector(),
-                cbBTCFee
+                rewardTokenFee
             );
-            MamoStakingAccount(stakingAccount).multicall(
-                [address(cbBTCToken)],
+            (stakingAccount).multicall(
+                [address(rewardTokens[0])],
                 [transferCbBTCFeeData]
             );
         }
         
         // Swap remaining cbBTC to MAMO
-        uint256 remainingCbBTC = cbBTCBalance - cbBTCFee;
+        uint256 remainingCbBTC = rewardTokenBalance - rewardTokenFee;
         if (remainingCbBTC > 0) {
             bytes memory swapData = abi.encodeWithSelector(
                 IDEXRouter.swapExactTokensForTokens.selector,
@@ -439,7 +457,7 @@ contract MamoStakingStrategy {
                 stakingAccount,
                 block.timestamp + 300
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(dexRouter)],
                 [swapData]
             );
@@ -452,7 +470,7 @@ contract MamoStakingStrategy {
                 MultiRewards.stake.selector,
                 totalMamo
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(multiRewards)],
                 [stakeData]
             );
@@ -468,7 +486,7 @@ contract MamoStakingStrategy {
         bytes memory getRewardData = abi.encodeWithSelector(
             MultiRewards.getReward.selector
         );
-        MamoStakingAccount(stakingAccount).multicall(
+        (stakingAccount).multicall(
             [address(multiRewards)],
             [getRewardData]
         );
@@ -489,7 +507,7 @@ contract MamoStakingStrategy {
                 registry.feeCollector(),
                 mamoFee
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(mamoToken)],
                 [transferMamoFeeData]
             );
@@ -501,7 +519,7 @@ contract MamoStakingStrategy {
                 registry.feeCollector(),
                 cbBTCFee
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(cbBTCToken)],
                 [transferCbBTCFeeData]
             );
@@ -514,7 +532,7 @@ contract MamoStakingStrategy {
                 MultiRewards.stake.selector,
                 remainingMamo
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(multiRewards)],
                 [stakeData]
             );
@@ -527,7 +545,7 @@ contract MamoStakingStrategy {
                 ERC20MoonwellMorphoStrategy.deposit.selector,
                 remainingCbBTC
             );
-            MamoStakingAccount(stakingAccount).multicall(
+            (stakingAccount).multicall(
                 [address(morphoStrategy)],
                 [depositData]
             );
@@ -600,7 +618,7 @@ sequenceDiagram
 sequenceDiagram
     participant User as User
     participant Factory as StakingAccountFactory
-    participant StakingAccount as MamoStakingAccount
+    participant StakingAccount as 
     participant Registry as AccountRegistry
     participant MultiRewards as MultiRewards
 
@@ -665,8 +683,8 @@ sequenceDiagram
 ### New Components
 
 1. **AccountRegistry**: Provides access control for StakingAccount operations
-2. **MamoStakingAccountFactory**: Standardized deployment of user accounts
-3. **MamoStakingAccount**: User-owned intermediary contracts
+2. **Factory**: Standardized deployment of user accounts
+3. ****: User-owned intermediary contracts
 4. **MamoStakingStrategy**: Manages compound and reinvest operations
 
 
