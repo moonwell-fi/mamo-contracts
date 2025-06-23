@@ -60,27 +60,17 @@ graph TB
 
 **Architecture Pattern:**
 ```solidity
-contract MamoAccount is Initializable, UUPSUpgradeable, Ownable {
+contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     AccountRegistry public immutable registry;
     MamoStrategyRegistry public immutable mamoStrategyRegistry;
-    address public stakingStrategy;
     
     /// @notice Initialize the account
     /// @param _owner The owner of the account
-    /// @param _registry The AccountRegistry contract
-    /// @param _mamoStrategyRegistry The MamoStrategyRegistry contract
-    function initialize(
-        address _owner,
-        AccountRegistry _registry,
-        MamoStrategyRegistry _mamoStrategyRegistry
-    ) external initializer {
+    function initialize(address _owner) external initializer {
         require(_owner != address(0), "Invalid owner");
         
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();
-        
-        registry = _registry;
-        mamoStrategyRegistry = _mamoStrategyRegistry;
     }
     
     /// @notice Authorize upgrade to new implementation
@@ -112,9 +102,6 @@ contract MamoAccount is Initializable, UUPSUpgradeable, Ownable {
                 continue; // No-op
             }
             
-            // No target validation needed since MamoStakingStrategy is immutable
-            // and all interactions are controlled through this contract
-            
             (bool success, bytes memory result) = targets[i].delegatecall(data[i]);
             
             if (!success) {
@@ -124,6 +111,25 @@ contract MamoAccount is Initializable, UUPSUpgradeable, Ownable {
                 }
             }
         }
+    }
+    
+    /// @notice Execute a direct call to a target contract (inherited from StrategyMulticall pattern)
+    /// @param target The target contract address
+    /// @param data The call data
+    /// @return result The return data from the call
+    function execute(address target, bytes calldata data) external payable onlyWhitelistedStrategy returns (bytes memory result) {
+        require(target != address(0), "Invalid target");
+        
+        (bool success, bytes memory returnData) = target.call{value: msg.value}(data);
+        
+        if (!success) {
+            if (returnData.length == 0) revert();
+            assembly {
+                revert(add(32, returnData), mload(returnData))
+            }
+        }
+        
+        return returnData;
     }
 }
 ```
