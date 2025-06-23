@@ -2,21 +2,26 @@
 pragma solidity 0.8.28;
 
 import {IStrategy} from "./interfaces/IStrategy.sol";
+import {IUUPSUpgradeable} from "./interfaces/IUUPSUpgradeable.sol";
+
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /**
- * @title StrategyMulticall
+ * @title Multicall
  * @notice Enables batching multiple calls to strategies in a single transaction
  * @dev This contract allows efficient batch updates and generic multicalls to strategies
  * @dev Only the owner can execute multicalls to prevent unauthorized strategy modifications
+ * @dev This contract is upgradeable using the UUPS pattern
  */
-contract StrategyMulticall is Ownable {
+contract Multicall is Initializable, Ownable, UUPSUpgradeable, IUUPSUpgradeable {
     /**
-     * @notice Emitted when a generic multicall is executed
+     * @notice Emitted when a multicall is executed
      * @param initiator The address that initiated the multicall
      * @param callsCount The number of calls executed
      */
-    event GenericMulticallExecuted(address indexed initiator, uint256 callsCount);
+    event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
     /**
      * @notice Struct containing the parameters for a generic call
@@ -31,10 +36,20 @@ contract StrategyMulticall is Ownable {
     }
 
     /**
-     * @notice Constructor to set the initial owner of the contract
+     * @notice Initializes the contract with the initial owner
      * @param _owner The address that will own this contract and can execute multicalls
+     * @dev This function replaces the constructor for upgradeable contracts
      */
-    constructor(address _owner) Ownable(_owner) {}
+    function initialize(address _owner) external initializer {
+        _transferOwnership(_owner);
+    }
+
+    /**
+     * @notice Authorizes contract upgrades
+     * @param newImplementation The address of the new implementation
+     * @dev Only the owner can authorize upgrades
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     /**
      * @notice Executes a sequence of arbitrary calls to contracts
@@ -44,8 +59,8 @@ contract StrategyMulticall is Ownable {
      * @dev Only callable by the contract owner
      * @dev Validates that total call values don't exceed msg.value and refunds excess ETH
      */
-    function genericMulticall(Call[] calldata calls) external payable onlyOwner {
-        require(calls.length > 0, "StrategyMulticall: Empty calls array");
+    function multicall(Call[] calldata calls) external payable onlyOwner {
+        require(calls.length > 0, "Multicall: Empty calls array");
 
         // Calculate total ETH required for all calls
         uint256 totalValue = 0;
@@ -54,12 +69,12 @@ contract StrategyMulticall is Ownable {
         }
 
         // Ensure we have enough ETH to cover all calls
-        require(totalValue <= msg.value, "StrategyMulticall: Insufficient ETH provided");
+        require(totalValue <= msg.value, "Multicall: Insufficient ETH provided");
 
         // Execute all calls
         for (uint256 i = 0; i < calls.length; i++) {
             Call calldata call = calls[i];
-            require(call.target != address(0), "StrategyMulticall: Invalid target address");
+            require(call.target != address(0), "Multicall: Invalid target address");
 
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
 
@@ -75,9 +90,9 @@ contract StrategyMulticall is Ownable {
         uint256 excessETH = msg.value - totalValue;
         if (excessETH > 0) {
             (bool refundSuccess,) = payable(msg.sender).call{value: excessETH}("");
-            require(refundSuccess, "StrategyMulticall: ETH refund failed");
+            require(refundSuccess, "Multicall: ETH refund failed");
         }
 
-        emit GenericMulticallExecuted(msg.sender, calls.length);
+        emit MulticallExecuted(msg.sender, calls.length);
     }
 }

@@ -7,14 +7,14 @@ import {console} from "@forge-std/console.sol";
 
 import {DeployConfig} from "./DeployConfig.sol";
 
-import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
+import {Multicall} from "@contracts/Multicall.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /**
- * @title DeployStrategyMulticall
- * @notice Script to deploy and manage StrategyMulticall contract
+ * @title DeployMulticall
+ * @notice Script to deploy and manage Multicall contract
  */
-contract DeployStrategyMulticall is Script {
+contract DeployMulticall is Script {
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -22,22 +22,22 @@ contract DeployStrategyMulticall is Script {
         chainIds[0] = block.chainid; // Use the current chain ID
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
-        deployStrategyMulticall(addresses);
+        DeployMulticall(addresses);
 
         addresses.updateJson();
         addresses.printJSONChanges();
     }
 
-    function deployStrategyMulticall(Addresses addresses) public returns (address) {
+    function DeployMulticall(Addresses addresses) public returns (address) {
         // Get the addresses for the initialization parameters
         address owner = addresses.getAddress("MAMO_BACKEND");
 
-        console.log("Deploying StrategyMulticall with owner:", owner);
+        console.log("Deploying Multicall with owner:", owner);
 
-        // Deploy the StrategyMulticall
-        StrategyMulticall multicall = new StrategyMulticall(owner);
+        // Deploy the Multicall
+        Multicall multicall = new Multicall(owner);
 
-        console.log("StrategyMulticall deployed at:", address(multicall));
+        console.log("Multicall deployed at:", address(multicall));
 
         // Check if the multicall address already exists
         string memory multicallName = "STRATEGY_MULTICALL";

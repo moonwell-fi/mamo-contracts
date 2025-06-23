@@ -2,10 +2,10 @@
 pragma solidity 0.8.28;
 
 /**
- * @title IStrategyMulticall
- * @notice Interface for the StrategyMulticall contract
+ * @title IMulticall
+ * @notice Interface for the Multicall contract
  */
-interface IStrategyMulticall {
+interface IMulticall {
     /**
      * @notice Emitted when a generic multicall is executed
      * @param initiator The address that initiated the multicall
@@ -37,5 +37,5 @@ interface IStrategyMulticall {
      * @notice Executes a sequence of arbitrary calls to contracts
      * @param calls Array of Call structs containing target, data, and value for each call
      */
-    function genericMulticall(Call[] calldata calls) external payable;
+    function multicall(Call[] calldata calls) external payable;
 }

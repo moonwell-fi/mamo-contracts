@@ -5,8 +5,9 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+
+import {Multicall} from "@contracts/Multicall.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
-import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
@@ -27,11 +28,11 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
-import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
+import {DeployMulticall} from "@script/DeployMulticall.s.sol";
 
-contract StrategyMulticallIntegrationTest is Test {
+contract MulticallIntegrationTest is Test {
     Addresses public addresses;
-    StrategyMulticall public multicall;
+    Multicall public multicall;
     StrategyFactory public factory;
     MamoStrategyRegistry public registry;
     ERC20MoonwellMorphoStrategy public implementation;
@@ -93,7 +94,7 @@ contract StrategyMulticallIntegrationTest is Test {
         proposal.validate();
 
         factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
-        multicall = StrategyMulticall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
+        multicall = Multicall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
@@ -155,15 +156,15 @@ contract StrategyMulticallIntegrationTest is Test {
         uint256 newSplitVault = 4000; // 40%
 
         // Prepare multicall data for updatePosition calls
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: strategy1,
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", newSplitMToken, newSplitVault),
             value: 0
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: strategy2,
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", newSplitMToken, newSplitVault),
             value: 0
@@ -176,7 +177,7 @@ contract StrategyMulticallIntegrationTest is Test {
         vm.expectEmit(true, false, false, true);
         emit GenericMulticallExecuted(backend, 2);
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
 
@@ -220,9 +221,8 @@ contract StrategyMulticallIntegrationTest is Test {
         address nonOwner = makeAddr("nonOwner");
 
         // Prepare a simple multicall
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] =
-            StrategyMulticall.Call({target: address(registry), data: abi.encodeWithSignature("paused()"), value: 0});
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({target: address(registry), data: abi.encodeWithSignature("paused()"), value: 0});
 
         // Try to call multicall as non-owner
         vm.startPrank(nonOwner);
@@ -230,37 +230,36 @@ contract StrategyMulticallIntegrationTest is Test {
         // Expect the call to revert due to onlyOwner modifier
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
 
     function testMulticallWithEmptyCallsArray() public {
         // Prepare empty calls array
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](0);
+        Multicall.Call[] memory calls = new Multicall.Call[](0);
 
         vm.startPrank(backend);
 
         // Expect the call to revert with "Empty calls array"
-        vm.expectRevert("StrategyMulticall: Empty calls array");
+        vm.expectRevert("Multicall: Empty calls array");
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
 
     function testMulticallWithInvalidTargetAddress() public {
         // Prepare multicall with invalid target (zero address)
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] =
-            StrategyMulticall.Call({target: address(0), data: abi.encodeWithSignature("someFunction()"), value: 0});
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({target: address(0), data: abi.encodeWithSignature("someFunction()"), value: 0});
 
         vm.startPrank(backend);
 
         // Expect the call to revert with "Invalid target address"
-        vm.expectRevert("StrategyMulticall: Invalid target address");
+        vm.expectRevert("Multicall: Invalid target address");
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
@@ -298,10 +297,10 @@ contract StrategyMulticallIntegrationTest is Test {
         uint256 newSplitMToken = 7000; // 70%
         uint256 newSplitVault = 3000; // 30%
 
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](3);
+        Multicall.Call[] memory calls = new Multicall.Call[](3);
 
         for (uint256 i = 0; i < 3; i++) {
-            calls[i] = StrategyMulticall.Call({
+            calls[i] = Multicall.Call({
                 target: strategies[i],
                 data: abi.encodeWithSignature("updatePosition(uint256,uint256)", newSplitMToken, newSplitVault),
                 value: 0
@@ -314,7 +313,7 @@ contract StrategyMulticallIntegrationTest is Test {
         vm.expectEmit(true, false, false, true);
         emit GenericMulticallExecuted(backend, 3);
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
 
@@ -343,8 +342,8 @@ contract StrategyMulticallIntegrationTest is Test {
         vm.stopPrank();
 
         // Prepare multicall with an invalid call that will fail
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: strategy,
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", 5000, 6000), // Invalid: adds up to 11000 > 10000
             value: 0
@@ -355,7 +354,7 @@ contract StrategyMulticallIntegrationTest is Test {
         // Expect the multicall to revert because the individual call fails
         vm.expectRevert();
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
