@@ -16,7 +16,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {FixChainlinkCBBTCFeedConfig} from "@multisig/001_FixChainlinkCBBTCFeedConfig.sol";
+import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 contract SlippagePriceCheckerTest is Test {
@@ -78,13 +78,13 @@ contract SlippagePriceCheckerTest is Test {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
 
-        // todo remove this once FixChainlinkCBBTCFeedConfig is executed
-        // run 001_FixChainlinkCBBTCFeedConfig proposal
-        FixChainlinkCBBTCFeedConfig proposal = new FixChainlinkCBBTCFeedConfig();
-        proposal.deploy();
-        proposal.build();
-        proposal.simulate();
-        proposal.validate();
+        // todo remove this once FixIsRewardToken is executed
+        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
+        fixIsRewardToken.setAddresses(addresses);
+        fixIsRewardToken.deploy();
+        fixIsRewardToken.build();
+        fixIsRewardToken.simulate();
+        fixIsRewardToken.validate();
 
         amountInByToken[address(well)] = 300e18;
         amountInByToken[address(morpho)] = 3e18;
@@ -578,5 +578,18 @@ contract SlippagePriceCheckerTest is Test {
             vm.expectRevert("Price feed update time exceeds heartbeat");
             slippagePriceChecker.getExpectedOut(1e18, tokenAddress, address(underlying));
         }
+    }
+
+    function testIsRewardToken() public {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            address tokenAddress = addresses.getAddress(rewardToken.token);
+
+            assertEq(slippagePriceChecker.isRewardToken(tokenAddress), true);
+        }
+
+        // random token that is not a reward token
+        address randomToken = makeAddr("randomToken");
+        assertEq(slippagePriceChecker.isRewardToken(randomToken), false);
     }
 }
