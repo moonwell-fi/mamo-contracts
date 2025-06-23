@@ -2,20 +2,16 @@
 pragma solidity 0.8.28;
 
 import {IStrategy} from "./interfaces/IStrategy.sol";
-import {IUUPSUpgradeable} from "./interfaces/IUUPSUpgradeable.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /**
  * @title Multicall
  * @notice Enables batching multiple calls to strategies in a single transaction
  * @dev This contract allows efficient batch updates and generic multicalls to strategies
  * @dev Only the owner can execute multicalls to prevent unauthorized strategy modifications
- * @dev This contract is upgradeable using the UUPS pattern
  */
-contract Multicall is Initializable, Ownable, UUPSUpgradeable, IUUPSUpgradeable {
+contract Multicall is Ownable {
     /**
      * @notice Emitted when a multicall is executed
      * @param initiator The address that initiated the multicall
@@ -38,18 +34,8 @@ contract Multicall is Initializable, Ownable, UUPSUpgradeable, IUUPSUpgradeable 
     /**
      * @notice Initializes the contract with the initial owner
      * @param _owner The address that will own this contract and can execute multicalls
-     * @dev This function replaces the constructor for upgradeable contracts
      */
-    function initialize(address _owner) external initializer {
-        _transferOwnership(_owner);
-    }
-
-    /**
-     * @notice Authorizes contract upgrades
-     * @param newImplementation The address of the new implementation
-     * @dev Only the owner can authorize upgrades
-     */
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    constructor(address _owner) Ownable(_owner) {}
 
     /**
      * @notice Executes a sequence of arbitrary calls to contracts
