@@ -138,5 +138,15 @@
     "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
     "name": "CHAINLINK_BTC_USD",
     "isContract": true
+  },
+  {
+    "addr": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+    "name": "SAFE_PROXY",
+    "isContract": true
+  },
+  {
+    "addr": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+    "name": "SAFE_FACTORY",
+    "isContract": true
   }
 ]

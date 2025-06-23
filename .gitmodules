@@ -16,3 +16,6 @@
 [submodule "lib/forge-proposal-simulator"]
 	path = lib/forge-proposal-simulator
 	url = https://github.com/anajuliabit/forge-proposal-simulator
+[submodule "lib/safe-smart-account"]
+	path = lib/safe-smart-account
+	url = https://github.com/safe-global/safe-smart-account

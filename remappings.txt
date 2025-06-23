@@ -17,3 +17,4 @@ openzeppelin-contracts/=lib/openzeppelin-contracts/
 @openzeppelin-foundry-upgrades/=lib/openzeppelin-foundry-upgrades/src/
 @fps=lib/forge-proposal-simulator/
 @multisig=multisig/
+@safe/=lib/safe-smart-account/contracts/
