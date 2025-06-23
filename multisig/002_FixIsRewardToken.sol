@@ -12,13 +12,11 @@ import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/U
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {console} from "forge-std/console.sol";
 
-contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
+contract FixIsRewardToken is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfigBtc;
     DeployAssetConfig public immutable deployAssetConfigUsdc;
 
     constructor() {
-        setPrimaryForkId(vm.createSelectFork("base"));
-
         // TODO move four below lines to a generic function as we use all the time
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -33,11 +31,11 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
     }
 
     function name() public pure override returns (string memory) {
-        return "001_FixChainlinkCBBTCFeedConfig";
+        return "002_FixIsRewardToken";
     }
 
     function description() public pure override returns (string memory) {
-        return "Fix Chainlink CBBTC Feed Config";
+        return "Fix isRewardToken function on SlippagePriceChecker";
     }
 
     function deploy() public override {
@@ -55,61 +53,6 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
 
         // upgrade the slippage price checker proxy
         UUPSUpgradeable(slippagePriceCheckerProxy).upgradeToAndCall(slippagePriceCheckerImplementation, "");
-
-        // Get the configuration
-        DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
-
-        address toBtc = addresses.getAddress(configBtc.token);
-
-        // Process each reward token
-        for (uint256 i = 0; i < configBtc.rewardTokens.length; i++) {
-            DeployAssetConfig.RewardToken memory rewardToken = configBtc.rewardTokens[i];
-
-            // Get the token address
-            address from = addresses.getAddress(rewardToken.token);
-
-            // Convert price feed configurations
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigs =
-                new ISlippagePriceChecker.TokenFeedConfiguration[](rewardToken.priceFeeds.length);
-
-            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
-                DeployAssetConfig.PriceFeedConfig memory priceFeedConfig = rewardToken.priceFeeds[j];
-
-                feedConfigs[j] = ISlippagePriceChecker.TokenFeedConfiguration({
-                    chainlinkFeed: addresses.getAddress(priceFeedConfig.priceFeed),
-                    reverse: priceFeedConfig.reverse,
-                    heartbeat: priceFeedConfig.heartbeat
-                });
-            }
-
-            // Add the new token configuration
-            priceChecker.addTokenConfiguration(from, toBtc, feedConfigs);
-        }
-
-        DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
-        address toUsdc = addresses.getAddress(configUsdc.token);
-
-        for (uint256 i = 0; i < configUsdc.rewardTokens.length; i++) {
-            DeployAssetConfig.RewardToken memory rewardToken = configUsdc.rewardTokens[i];
-
-            address from = addresses.getAddress(rewardToken.token);
-
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory feedConfigs =
-                new ISlippagePriceChecker.TokenFeedConfiguration[](rewardToken.priceFeeds.length);
-
-            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
-                DeployAssetConfig.PriceFeedConfig memory priceFeedConfig = rewardToken.priceFeeds[j];
-
-                feedConfigs[j] = ISlippagePriceChecker.TokenFeedConfiguration({
-                    chainlinkFeed: addresses.getAddress(priceFeedConfig.priceFeed),
-                    reverse: priceFeedConfig.reverse,
-                    heartbeat: priceFeedConfig.heartbeat
-                });
-            }
-
-            // Add the new token configuration
-            priceChecker.addTokenConfiguration(from, toUsdc, feedConfigs);
-        }
     }
 
     function simulate() public override {
@@ -123,7 +66,11 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
         address slippagePriceCheckerProxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         SlippagePriceChecker priceChecker = SlippagePriceChecker(slippagePriceCheckerProxy);
 
+        assertEq(priceChecker.isRewardToken(addresses.getAddress("xWELL_PROXY")), true);
+        assertEq(priceChecker.isRewardToken(addresses.getAddress("MORPHO")), true);
+
         // check if the feeds are added correctly
+        // keeping this to make sure the upgrade didn't mess up the storage
         address well = addresses.getAddress("xWELL_PROXY");
         address btc = addresses.getAddress("cbBTC");
         address usdc = addresses.getAddress("USDC");
