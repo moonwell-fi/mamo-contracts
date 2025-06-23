@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -26,6 +26,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {DeployFactoriesAndMulticall} from "@multisig/002_DeployFactoriesAndMulticall.sol";
 import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
 
 contract StrategyMulticallIntegrationTest is Test {
@@ -56,6 +57,9 @@ contract StrategyMulticallIntegrationTest is Test {
     event GenericMulticallExecuted(address indexed initiator, uint256 callsCount);
 
     function setUp() public {
+        // workaround to make test contract work with mappings
+        vm.makePersistent(DEFAULT_TEST_CONTRACT);
+
         // Create a new addresses instance for testing
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -63,12 +67,11 @@ contract StrategyMulticallIntegrationTest is Test {
 
         addresses = new Addresses(addressesFolderPath, chainIds);
 
-        // Get the environment from command line arguments or use default
+        // Load configurations
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
         string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
 
-        // Load configurations
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
 
@@ -80,34 +83,19 @@ contract StrategyMulticallIntegrationTest is Test {
         backend = addresses.getAddress(config.backend);
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
-        mamoMultisig = admin; // Use admin as mamo multisig for testing
+        mamoMultisig = admin;
+
+        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
+        proposal.setAddresses(addresses);
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
+        multicall = StrategyMulticall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
-        if (addresses.isAddressSet(factoryName)) {
-            factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
-        } else {
-            StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-            address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
-            factory = StrategyFactory(payable(factoryAddress));
-        }
-
-        // Deploy StrategyMulticall with backend as owner
-        string memory multicallName = "STRATEGY_MULTICALL";
-        if (addresses.isAddressSet(multicallName)) {
-            multicall = StrategyMulticall(payable(addresses.getAddress(multicallName)));
-        } else {
-            DeployStrategyMulticall deployStrategyMulticall = new DeployStrategyMulticall();
-            multicall = StrategyMulticall(payable(deployStrategyMulticall.deployStrategyMulticall(addresses)));
-        }
-
-        vm.startPrank(mamoMultisig);
-        registry.revokeRole(registry.BACKEND_ROLE(), backend);
-        registry.grantRole(registry.BACKEND_ROLE(), address(multicall));
-        registry.grantRole(registry.BACKEND_ROLE(), address(backend));
-        registry.grantRole(registry.BACKEND_ROLE(), address(factory));
-        vm.stopPrank();
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;

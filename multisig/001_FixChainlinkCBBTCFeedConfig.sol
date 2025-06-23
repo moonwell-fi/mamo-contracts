@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
-import {MultisigProposal} from "@fps/proposals/MultisigProposal.sol";
+import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 
@@ -15,7 +15,6 @@ import {console} from "forge-std/console.sol";
 contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfigBtc;
     DeployAssetConfig public immutable deployAssetConfigUsdc;
-    address public slippagePriceCheckerImplementation;
 
     constructor() {
         setPrimaryForkId(vm.createSelectFork("base"));
@@ -43,7 +42,7 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
 
     function deploy() public override {
         // deploy the new slippage price checker implementation
-        slippagePriceCheckerImplementation = address(new SlippagePriceChecker());
+        address slippagePriceCheckerImplementation = address(new SlippagePriceChecker());
         addresses.changeAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION", slippagePriceCheckerImplementation, true);
     }
 
@@ -52,8 +51,10 @@ contract FixChainlinkCBBTCFeedConfig is MultisigProposal {
         address slippagePriceCheckerProxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         SlippagePriceChecker priceChecker = SlippagePriceChecker(slippagePriceCheckerProxy);
 
+        address slippagePriceCheckerImplementation = addresses.getAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION");
+
         // upgrade the slippage price checker proxy
-        UUPSUpgradeable(slippagePriceCheckerProxy).upgradeToAndCall(slippagePriceCheckerImplementation, bytes(""));
+        UUPSUpgradeable(slippagePriceCheckerProxy).upgradeToAndCall(slippagePriceCheckerImplementation, "");
 
         // Get the configuration
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();

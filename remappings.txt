@@ -1,7 +1,6 @@
 @openzeppelin/=lib/openzeppelin-contracts/
 @openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/
 @forge-std/=lib/forge-std/src/
-@addresses/=addresses/
 @contracts/=src/
 @interfaces/=src/interfaces/
 @libraries/=src/libraries/
@@ -16,6 +15,6 @@ openzeppelin-contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/
 openzeppelin-contracts/=lib/openzeppelin-contracts/
 @test=test/
 @openzeppelin-foundry-upgrades/=lib/openzeppelin-foundry-upgrades/src/
-@fps=lib/forge-proposal-simulator/src/
+@fps=lib/forge-proposal-simulator/
 @multisig=multisig/
 @safe/=lib/safe-smart-account/contracts/

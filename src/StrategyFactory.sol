@@ -125,7 +125,7 @@ contract StrategyFactory {
 
     /**
      * @notice Creates a new strategy for a specified user
-     * @dev Only callable by accounts with the BACKEND_ROLE in the MamoStrategyRegistry
+     * @dev Only callable by accounts with the BACKEND_ROLE and the user address
      * @param user The address of the user to create the strategy for
      * @return strategy The address of the newly created strategy
      */

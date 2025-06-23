@@ -6,8 +6,9 @@ import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
 import {DeployConfig} from "./DeployConfig.sol";
-import {Addresses} from "@addresses/Addresses.sol";
+
 import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /**
  * @title DeployStrategyMulticall
@@ -28,8 +29,6 @@ contract DeployStrategyMulticall is Script {
     }
 
     function deployStrategyMulticall(Addresses addresses) public returns (address) {
-        vm.startBroadcast();
-
         // Get the addresses for the initialization parameters
         address owner = addresses.getAddress("MAMO_BACKEND");
 
@@ -39,8 +38,6 @@ contract DeployStrategyMulticall is Script {
         StrategyMulticall multicall = new StrategyMulticall(owner);
 
         console.log("StrategyMulticall deployed at:", address(multicall));
-
-        vm.stopBroadcast();
 
         // Check if the multicall address already exists
         string memory multicallName = "STRATEGY_MULTICALL";

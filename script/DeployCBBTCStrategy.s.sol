@@ -5,7 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 
-import {Addresses} from "../addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "../src/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "../src/MamoStrategyRegistry.sol";
