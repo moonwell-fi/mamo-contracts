@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Script} from "@forge-std/Script.sol";
-import {Test} from "@forge-std/Test.sol";
-import {console} from "@forge-std/console.sol";
-
-import {DeployConfig} from "./DeployConfig.sol";
-
 import {Multicall} from "@contracts/Multicall.sol";
+import {Script} from "@forge-std/Script.sol";
+import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /**
@@ -22,13 +18,13 @@ contract DeployMulticall is Script {
         chainIds[0] = block.chainid; // Use the current chain ID
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
-        DeployMulticall(addresses);
+        deploy(addresses);
 
         addresses.updateJson();
         addresses.printJSONChanges();
     }
 
-    function DeployMulticall(Addresses addresses) public returns (address) {
+    function deploy(Addresses addresses) public returns (address) {
         // Get the addresses for the initialization parameters
         address owner = addresses.getAddress("MAMO_BACKEND");
 

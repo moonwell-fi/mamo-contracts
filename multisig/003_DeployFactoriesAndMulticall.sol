@@ -18,7 +18,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfigBtc;
     DeployAssetConfig public immutable deployAssetConfigUsdc;
     StrategyFactoryDeployer public immutable strategyFactoryDeployer;
-    DeployMulticall public immutable deploy;
+    DeployMulticall public immutable deployMulticall;
 
     address public cbBTCStrategyFactory;
     address public usdcStrategyFactory;
@@ -36,8 +36,8 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         strategyFactoryDeployer = new StrategyFactoryDeployer();
         vm.makePersistent(address(strategyFactoryDeployer));
 
-        deploy = new DeployMulticall();
-        vm.makePersistent(address(deploy));
+        deployMulticall = new DeployMulticall();
+        vm.makePersistent(address(deployMulticall));
     }
 
     function name() public pure override returns (string memory) {
@@ -58,7 +58,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc);
 
         // Deploy Multicall
-        strategyMulticall = deploy.DeployMulticall(addresses);
+        strategyMulticall = deployMulticall.deploy(addresses);
 
         console.log("cbBTC Strategy Factory deployed at:", cbBTCStrategyFactory);
         console.log("USDC Strategy Factory deployed at:", usdcStrategyFactory);

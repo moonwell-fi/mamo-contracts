@@ -29,8 +29,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
+
 import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
+import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployMulticall} from "@script/DeployMulticall.s.sol";
 
@@ -39,12 +40,12 @@ import {DeployMulticall} from "@script/DeployMulticall.s.sol";
  * @notice A malicious contract that attempts to perform reentrancy attacks on StrategyMulticall
  */
 contract MaliciousReentrantContract {
-    StrategyMulticall public immutable multicall;
+    Multicall public immutable multicall;
     bool public attackExecuted;
     uint256 public callDepth;
 
     constructor(address _multicall) {
-        multicall = StrategyMulticall(payable(_multicall));
+        multicall = Multicall(payable(_multicall));
     }
 
     /**
@@ -56,15 +57,12 @@ contract MaliciousReentrantContract {
         // Only attempt reentrancy if we're the owner and this is the first call
         if (multicall.owner() == address(this) && callDepth == 1) {
             // Attempt to call back into the multicall during execution
-            StrategyMulticall.Call[] memory maliciousCalls = new StrategyMulticall.Call[](1);
-            maliciousCalls[0] = StrategyMulticall.Call({
-                target: address(this),
-                data: abi.encodeWithSignature("harmlessFunction()"),
-                value: 0
-            });
+            Multicall.Call[] memory maliciousCalls = new Multicall.Call[](1);
+            maliciousCalls[0] =
+                Multicall.Call({target: address(this), data: abi.encodeWithSignature("harmlessFunction()"), value: 0});
 
             // This should fail due to reentrancy protection
-            multicall.genericMulticall(maliciousCalls);
+            multicall.multicall(maliciousCalls);
             attackExecuted = true; // This should never execute
         }
 
@@ -429,8 +427,8 @@ contract MulticallIntegrationTest is Test {
         assertEq(multicall.owner(), address(maliciousContract), "Ownership should be transferred to malicious contract");
 
         // Prepare multicall that will trigger the malicious contract's reentrancy attempt
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: address(maliciousContract),
             data: abi.encodeWithSignature("triggerReentrancy()"),
             value: 0
@@ -443,7 +441,7 @@ contract MulticallIntegrationTest is Test {
         // The ReentrancyGuard should prevent the nested call
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
 
@@ -461,8 +459,8 @@ contract MulticallIntegrationTest is Test {
         vm.stopPrank();
 
         // First, attempt reentrancy (should fail)
-        StrategyMulticall.Call[] memory maliciousCalls = new StrategyMulticall.Call[](1);
-        maliciousCalls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory maliciousCalls = new Multicall.Call[](1);
+        maliciousCalls[0] = Multicall.Call({
             target: address(maliciousContract),
             data: abi.encodeWithSignature("triggerReentrancy()"),
             value: 0
@@ -472,11 +470,11 @@ contract MulticallIntegrationTest is Test {
 
         // Expect the reentrancy attempt to fail
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
-        multicall.genericMulticall(maliciousCalls);
+        multicall.multicall(maliciousCalls);
 
         // Now verify that normal operations still work after the failed reentrancy
-        StrategyMulticall.Call[] memory normalCalls = new StrategyMulticall.Call[](1);
-        normalCalls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory normalCalls = new Multicall.Call[](1);
+        normalCalls[0] = Multicall.Call({
             target: address(maliciousContract),
             data: abi.encodeWithSignature("harmlessFunction()"),
             value: 0
@@ -486,7 +484,7 @@ contract MulticallIntegrationTest is Test {
         vm.expectEmit(true, false, false, true);
         emit GenericMulticallExecuted(address(maliciousContract), 1);
 
-        multicall.genericMulticall(normalCalls);
+        multicall.multicall(normalCalls);
 
         vm.stopPrank();
 
