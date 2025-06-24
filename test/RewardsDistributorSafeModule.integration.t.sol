@@ -263,27 +263,39 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         vm.prank(address(safe));
         module.pause();
 
-        vm.expectRevert("Pausable: paused");
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        vm.prank(admin);
         module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
 
-        vm.expectRevert("Pausable: paused");
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         module.notifyRewards();
 
+        vm.prank(address(safe));
         module.unpause();
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
+
+        deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
+        deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
+
+        vm.prank(admin);
+        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
     }
 
     function test_zeroAmountRewards() public {
-        vm.expectRevert("Amount must be greater than 0");
+        vm.expectRevert("Invalid reward amount");
         vm.prank(admin);
-        module.addRewards(MAMO_REWARD_AMOUNT, 0);
+        module.addRewards(0, 0);
     }
 
     function test_stateConsistencyAcrossTransactions() public {
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.UNINITIALIZED));
 
         uint256 unlockTime = block.timestamp + TIMELOCK_DURATION;
-        module.addRewards(MAMO_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
+
+        deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
+        deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
+
+        vm.prank(admin);
+        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
 
         for (uint256 i = 0; i < 5; i++) {
             assertEq(
@@ -305,6 +317,10 @@ contract RewardsDistributorSafeModuleIntegrationTest is DeployRewardsDistributor
         uint256 shortTimelock = 1 hours;
         uint256 unlockTime = block.timestamp + shortTimelock;
 
+        deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
+        deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
+
+        vm.prank(admin);
         module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
 
         assertEq(cbBtcToken.balanceOf(address(multiRewards)), 0);
