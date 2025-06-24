@@ -18,33 +18,30 @@ contract DeployMulticall is Script {
         chainIds[0] = block.chainid; // Use the current chain ID
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
-        deploy(addresses);
+        deploy(addresses, addresses.getAddress("DEPLOYER_EOA"));
 
         addresses.updateJson();
         addresses.printJSONChanges();
     }
 
-    function deploy(Addresses addresses) public returns (address) {
+    function deploy(Addresses addresses, address deployer) public returns (address) {
         // Get the addresses for the initialization parameters
         address owner = addresses.getAddress("MAMO_COMPOUNDER");
 
-        console.log("Deploying Multicall with owner:", owner);
-
+        vm.startBroadcast(deployer);
         // Deploy the Multicall
         Multicall multicall = new Multicall(owner);
 
-        console.log("Multicall deployed at:", address(multicall));
+        vm.stopBroadcast();
 
         // Check if the multicall address already exists
         string memory multicallName = "STRATEGY_MULTICALL";
         if (addresses.isAddressSet(multicallName)) {
             // Update the existing address
             addresses.changeAddress(multicallName, address(multicall), true);
-            console.log("Updated existing STRATEGY_MULTICALL address");
         } else {
             // Add the multicall address to the addresses contract
             addresses.addAddress(multicallName, address(multicall), true);
-            console.log("Added new STRATEGY_MULTICALL address");
         }
 
         return address(multicall);

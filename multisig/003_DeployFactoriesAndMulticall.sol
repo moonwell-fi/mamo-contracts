@@ -40,6 +40,37 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         vm.makePersistent(address(deployMulticall));
     }
 
+    function _initalizeAddresses() internal {
+        // Load the addresses from the JSON file
+        string memory addressesFolderPath = "./addresses";
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid; // Use the current chain ID
+
+        addresses = new Addresses(addressesFolderPath, chainIds);
+        vm.makePersistent(address(addresses));
+    }
+
+    function run() public override {
+        _initalizeAddresses();
+
+        if (DO_DEPLOY) {
+            /// DEPLOYER_EOA must be an unlocked account when running through forge script
+            /// use cast wallet to unlock the account
+            address deployer = addresses.getAddress("DEPLOYER_EOA");
+
+            deploy();
+            addresses.updateJson();
+            addresses.printJSONChanges();
+        }
+
+        if (DO_PRE_BUILD_MOCK) preBuildMock();
+        if (DO_BUILD) build();
+        if (DO_SIMULATE) simulate();
+        if (DO_VALIDATE) validate();
+        if (DO_PRINT) print();
+        if (DO_UPDATE_ADDRESS_JSON) addresses.updateJson();
+    }
+
     function name() public pure override returns (string memory) {
         return "003_DeployFactoriesAndMulticall";
     }
@@ -49,16 +80,18 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     }
 
     function deploy() public override {
+        address deployer = addresses.getAddress("DEPLOYER_EOA");
+
         // Deploy cbBTC strategy factory
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
-        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc);
+        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc, deployer);
 
         // Deploy USDC strategy factory
         DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
-        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc);
+        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc, deployer);
 
         // Deploy Multicall
-        strategyMulticall = deployMulticall.deploy(addresses);
+        strategyMulticall = deployMulticall.deploy(addresses, deployer);
 
         console.log("cbBTC Strategy Factory deployed at:", cbBTCStrategyFactory);
         console.log("USDC Strategy Factory deployed at:", usdcStrategyFactory);
@@ -116,7 +149,6 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         // Validate Multicall owner
         Multicall multicall = Multicall(strategyMulticall);
         assertEq(multicall.owner(), currentCompounder, "Multicall owner should be the compounder");
-      
 
         // Validate Strategy Factory configurations
         StrategyFactory cbBTCFactory = StrategyFactory(payable(cbBTCStrategyFactory));

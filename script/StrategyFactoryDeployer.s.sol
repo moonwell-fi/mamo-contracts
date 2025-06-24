@@ -27,7 +27,7 @@ contract StrategyFactoryDeployer is Script {
         DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
         DeployAssetConfig.Config memory assetConfig = assetConfigDeploy.getConfig();
 
-        deployStrategyFactory(addresses, assetConfig);
+        deployStrategyFactory(addresses, assetConfig, addresses.getAddress("DEPLOYER_EOA"));
 
         addresses.updateJson();
         addresses.printJSONChanges();
@@ -36,7 +36,8 @@ contract StrategyFactoryDeployer is Script {
     function deployStrategyFactory(
         Addresses addresses,
         DeployConfig.DeploymentConfig memory config,
-        uint256 strategyTypeId
+        uint256 strategyTypeId,
+        address deployer
     ) public returns (address) {
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
@@ -64,6 +65,8 @@ contract StrategyFactoryDeployer is Script {
         console.log("config.allowedSlippageInBps", config.allowedSlippageInBps);
         console.log("config.compoundFee", config.compoundFee);
 
+        vm.startBroadcast(deployer);
+
         // Deploy the USDCStrategyFactory
         StrategyFactory factory = new StrategyFactory(
             mamoStrategyRegistry,
@@ -83,6 +86,8 @@ contract StrategyFactoryDeployer is Script {
             rewardTokens
         );
 
+        vm.stopBroadcast();
+
         // Check if the factory address already exists
         string memory factoryName = "USDC_STRATEGY_FACTORY";
         if (addresses.isAddressSet(factoryName)) {
@@ -96,7 +101,7 @@ contract StrategyFactoryDeployer is Script {
         return address(factory);
     }
 
-    function deployStrategyFactory(Addresses addresses, DeployAssetConfig.Config memory assetConfig)
+    function deployStrategyFactory(Addresses addresses, DeployAssetConfig.Config memory assetConfig, address deployer)
         public
         returns (address)
     {
@@ -114,6 +119,8 @@ contract StrategyFactoryDeployer is Script {
         address[] memory rewardTokens = new address[](2);
         rewardTokens[0] = addresses.getAddress("xWELL_PROXY");
         rewardTokens[1] = addresses.getAddress("MORPHO");
+
+        vm.startBroadcast(deployer);
 
         // Deploy the StrategyFactory
         StrategyFactory factory = new StrategyFactory(
@@ -133,6 +140,8 @@ contract StrategyFactoryDeployer is Script {
             assetConfig.strategyParams.compoundFee,
             rewardTokens
         );
+
+        vm.stopBroadcast();
 
         // Check if the factory address already exists
         string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));

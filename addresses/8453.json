@@ -153,5 +153,20 @@
     "addr": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
     "name": "SAFE_FACTORY",
     "isContract": true
+  },
+  {
+    "addr": "0x20C444BEd40faFee49222eE9A480937b825282DC",
+    "name": "cbBTC_STRATEGY_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x1Eeb3FD8C8302dAf6BC265a6B8a5C397d89DE286",
+    "name": "USDC_STRATEGY_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x7cb24EFA3fe76650388145b9B0823De6600f1f4c",
+    "name": "STRATEGY_MULTICALL",
+    "isContract": true
   }
 ]
