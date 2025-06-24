@@ -105,7 +105,7 @@ contract MulticallTest is Test {
     uint256 public constant SPLIT_MOONWELL = 6000; // 60%
     uint256 public constant SPLIT_MORPHO = 4000; // 40%
 
-    event GenericMulticallExecuted(address indexed initiator, uint256 callsCount);
+    event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
     function setUp() public {
         // Deploy contracts
@@ -209,7 +209,7 @@ contract MulticallTest is Test {
         });
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(multicallOwner, 3);
+        emit MulticallExecuted(multicallOwner, 3);
 
         vm.prank(multicallOwner);
         multicall.multicall{value: 1 ether}(calls);
@@ -292,7 +292,7 @@ contract MulticallTest is Test {
         });
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(multicallOwner, 3);
+        emit MulticallExecuted(multicallOwner, 3);
 
         vm.prank(multicallOwner);
         multicall.multicall(calls);
@@ -361,7 +361,7 @@ contract MulticallTest is Test {
         }
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(multicallOwner, strategyCount);
+        emit MulticallExecuted(multicallOwner, strategyCount);
 
         vm.prank(multicallOwner);
         multicall.multicall(calls);
