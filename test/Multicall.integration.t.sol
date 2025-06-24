@@ -92,6 +92,7 @@ contract MulticallIntegrationTest is Test {
     // Addresses
     address public admin;
     address public backend;
+    address public compounder;
     address public guardian;
     address public deployer;
     address public mamoMultisig;
@@ -129,6 +130,7 @@ contract MulticallIntegrationTest is Test {
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
+        compounder = addresses.getAddress(config.compounder);
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
@@ -162,7 +164,7 @@ contract MulticallIntegrationTest is Test {
         assertTrue(address(multicall) != address(0), "Multicall not deployed");
 
         // Test that the multicall has the correct owner
-        assertEq(multicall.owner(), backend, "Owner should be backend");
+        assertEq(multicall.owner(), compounder, "Owner should be compounder");
     }
 
     function testRenounceOwnership_Reverts() public {
@@ -180,7 +182,7 @@ contract MulticallIntegrationTest is Test {
         vm.stopPrank();
 
         // Verify ownership is still intact
-        assertEq(multicall.owner(), backend, "Ownership should remain unchanged");
+        assertEq(multicall.owner(), compounder, "Ownership should remain unchanged");
     }
 
     function testDeployStrategiesAndUpdatePositionViaMulticall() public {
@@ -243,12 +245,12 @@ contract MulticallIntegrationTest is Test {
             value: 0
         });
 
-        // Execute multicall as the owner (backend)
-        vm.startPrank(backend);
+        // Execute multicall as the owner (compounder)
+        vm.startPrank(compounder);
 
         // Expect the MulticallExecuted event
         vm.expectEmit(true, false, false, true);
-        emit MulticallExecuted(backend, 2);
+        emit MulticallExecuted(compounder, 2);
 
         multicall.multicall(calls);
 
@@ -282,7 +284,7 @@ contract MulticallIntegrationTest is Test {
         // Step 3: Transfer ownership of multicall to a new owner
         address newOwner = makeAddr("newOwner");
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         multicall.transferOwnership(newOwner);
         vm.stopPrank();
 
@@ -312,7 +314,7 @@ contract MulticallIntegrationTest is Test {
         // Prepare empty calls array
         Multicall.Call[] memory calls = new Multicall.Call[](0);
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         // Expect the call to revert with "Empty calls array"
         vm.expectRevert("Multicall: Empty calls array");
@@ -327,7 +329,7 @@ contract MulticallIntegrationTest is Test {
         Multicall.Call[] memory calls = new Multicall.Call[](1);
         calls[0] = Multicall.Call({target: address(0), data: abi.encodeWithSignature("someFunction()"), value: 0});
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         // Expect the call to revert with "Invalid target address"
         vm.expectRevert("Multicall: Invalid target address");
@@ -381,10 +383,10 @@ contract MulticallIntegrationTest is Test {
         }
 
         // Execute multicall
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         vm.expectEmit(true, false, false, true);
-        emit MulticallExecuted(backend, 3);
+        emit MulticallExecuted(compounder, 3);
 
         multicall.multicall(calls);
 
@@ -422,7 +424,7 @@ contract MulticallIntegrationTest is Test {
             value: 0
         });
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         // Expect the multicall to revert because the individual call fails
         vm.expectRevert();
@@ -437,7 +439,7 @@ contract MulticallIntegrationTest is Test {
         MaliciousReentrantContract maliciousContract = new MaliciousReentrantContract(address(multicall));
 
         // Transfer ownership to the malicious contract so it can attempt reentrancy
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         multicall.transferOwnership(address(maliciousContract));
         vm.stopPrank();
 
@@ -472,7 +474,7 @@ contract MulticallIntegrationTest is Test {
         MaliciousReentrantContract maliciousContract = new MaliciousReentrantContract(address(multicall));
 
         // Transfer ownership to the malicious contract
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         multicall.transferOwnership(address(maliciousContract));
         vm.stopPrank();
 
@@ -509,9 +511,9 @@ contract MulticallIntegrationTest is Test {
         // Verify attack was never executed
         assertFalse(maliciousContract.attackExecuted(), "Attack should never have been executed");
 
-        // Transfer ownership back to backend for cleanup
+        // Transfer ownership back to compounder for cleanup
         vm.startPrank(address(maliciousContract));
-        multicall.transferOwnership(backend);
+        multicall.transferOwnership(compounder);
         vm.stopPrank();
     }
 }

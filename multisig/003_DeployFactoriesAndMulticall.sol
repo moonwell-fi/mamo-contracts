@@ -95,7 +95,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
         // Get addresses
-        address currentBackend = addresses.getAddress("MAMO_BACKEND");
+        address currentCompounder = addresses.getAddress("MAMO_COMPOUNDER");
 
         // Validate that all contracts were deployed
         assertTrue(cbBTCStrategyFactory != address(0), "cbBTC Strategy Factory should be deployed");
@@ -115,7 +115,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
 
         // Validate Multicall owner
         Multicall multicall = Multicall(strategyMulticall);
-        assertEq(multicall.owner(), currentBackend, "Multicall owner should be the backend");
+        assertEq(multicall.owner(), currentCompounder, "Multicall owner should be the compounder");
 
         // Validate Strategy Factory configurations
         StrategyFactory cbBTCFactory = StrategyFactory(payable(cbBTCStrategyFactory));
