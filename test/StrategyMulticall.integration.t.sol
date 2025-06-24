@@ -165,6 +165,24 @@ contract MulticallIntegrationTest is Test {
         assertEq(multicall.owner(), backend, "Owner should be backend");
     }
 
+    function testRenounceOwnership_Reverts() public {
+        // Test that renounceOwnership always reverts when called by owner
+        vm.startPrank(backend);
+        vm.expectRevert("Multicall: Ownership cannot be revoked");
+        multicall.renounceOwnership();
+        vm.stopPrank();
+
+        // Test that renounceOwnership always reverts when called by non-owner
+        address nonOwner = makeAddr("nonOwner");
+        vm.startPrank(nonOwner);
+        vm.expectRevert("Multicall: Ownership cannot be revoked");
+        multicall.renounceOwnership();
+        vm.stopPrank();
+
+        // Verify ownership is still intact
+        assertEq(multicall.owner(), backend, "Ownership should remain unchanged");
+    }
+
     function testDeployStrategiesAndUpdatePositionViaMulticall() public {
         // Create users and deploy strategies
         address user1 = makeAddr("user1");

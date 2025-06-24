@@ -39,6 +39,14 @@ contract Multicall is Ownable, ReentrancyGuard {
     constructor(address _owner) Ownable(_owner) {}
 
     /**
+     * @notice Override to prevent ownership revocation
+     * @dev This function always reverts to ensure the contract always has an owner
+     */
+    function renounceOwnership() public pure override {
+        revert("Multicall: Ownership cannot be revoked");
+    }
+
+    /**
      * @notice Executes a sequence of arbitrary calls to contracts
      * @param calls Array of Call structs containing target, data, and value for each call
      * @dev Reverts on any failure - no partial success handling
