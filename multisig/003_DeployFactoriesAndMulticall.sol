@@ -20,8 +20,6 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     StrategyFactoryDeployer public immutable strategyFactoryDeployer;
     DeployMulticall public immutable deployMulticall;
 
-    address public cbBTCStrategyFactory;
-    address public usdcStrategyFactory;
     address public strategyMulticall;
 
     constructor() {
@@ -54,10 +52,6 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         _initalizeAddresses();
 
         if (DO_DEPLOY) {
-            /// DEPLOYER_EOA must be an unlocked account when running through forge script
-            /// use cast wallet to unlock the account
-            address deployer = addresses.getAddress("DEPLOYER_EOA");
-
             deploy();
             addresses.updateJson();
             addresses.printJSONChanges();
@@ -84,18 +78,14 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
 
         // Deploy cbBTC strategy factory
         DeployAssetConfig.Config memory configBtc = deployAssetConfigBtc.getConfig();
-        cbBTCStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc, deployer);
+        strategyFactoryDeployer.deployStrategyFactory(addresses, configBtc, deployer);
 
         // Deploy USDC strategy factory
         DeployAssetConfig.Config memory configUsdc = deployAssetConfigUsdc.getConfig();
-        usdcStrategyFactory = strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc, deployer);
+        strategyFactoryDeployer.deployStrategyFactory(addresses, configUsdc, deployer);
 
         // Deploy Multicall
-        strategyMulticall = deployMulticall.deploy(addresses, deployer);
-
-        console.log("cbBTC Strategy Factory deployed at:", cbBTCStrategyFactory);
-        console.log("USDC Strategy Factory deployed at:", usdcStrategyFactory);
-        console.log("Multicall deployed at:", strategyMulticall);
+        deployMulticall.deploy(addresses, deployer);
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -109,13 +99,17 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         registry.revokeRole(registry.BACKEND_ROLE(), currentBackend);
 
         // Step 2: Grant BACKEND_ROLE to multicall first
-        registry.grantRole(registry.BACKEND_ROLE(), strategyMulticall);
+        registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress("STRATEGY_MULTICALL"));
+
+        address cbBTCFactory = addresses.getAddress("cbBTC_STRATEGY_FACTORY");
 
         // Step 3: Grant BACKEND_ROLE to cbBTC strategy factory
-        registry.grantRole(registry.BACKEND_ROLE(), cbBTCStrategyFactory);
+        registry.grantRole(registry.BACKEND_ROLE(), cbBTCFactory);
+
+        address usdcFactory = addresses.getAddress("USDC_STRATEGY_FACTORY");
 
         // Step 4: Grant BACKEND_ROLE to USDC strategy factory
-        registry.grantRole(registry.BACKEND_ROLE(), usdcStrategyFactory);
+        registry.grantRole(registry.BACKEND_ROLE(), usdcFactory);
     }
 
     function simulate() public override {
@@ -131,28 +125,31 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         address currentCompounder = addresses.getAddress("MAMO_COMPOUNDER");
 
         // Validate that all contracts were deployed
-        assertTrue(cbBTCStrategyFactory != address(0), "cbBTC Strategy Factory should be deployed");
-        assertTrue(usdcStrategyFactory != address(0), "USDC Strategy Factory should be deployed");
-        assertTrue(strategyMulticall != address(0), "Multicall should be deployed");
+        assertTrue(addresses.isAddressSet("cbBTC_STRATEGY_FACTORY"), "cbBTC Strategy Factory should be deployed");
+        assertTrue(addresses.isAddressSet("USDC_STRATEGY_FACTORY"), "USDC Strategy Factory should be deployed");
+        assertTrue(addresses.isAddressSet("STRATEGY_MULTICALL"), "Multicall should be deployed");
 
         // Validate that all contracts have the BACKEND_ROLE
-        assertTrue(registry.hasRole(registry.BACKEND_ROLE(), strategyMulticall), "Multicall should have BACKEND_ROLE");
         assertTrue(
-            registry.hasRole(registry.BACKEND_ROLE(), cbBTCStrategyFactory),
+            registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress("STRATEGY_MULTICALL")),
+            "Multicall should have BACKEND_ROLE"
+        );
+        assertTrue(
+            registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress("cbBTC_STRATEGY_FACTORY")),
             "cbBTC Strategy Factory should have BACKEND_ROLE"
         );
         assertTrue(
-            registry.hasRole(registry.BACKEND_ROLE(), usdcStrategyFactory),
+            registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress("USDC_STRATEGY_FACTORY")),
             "USDC Strategy Factory should have BACKEND_ROLE"
         );
 
         // Validate Multicall owner
-        Multicall multicall = Multicall(strategyMulticall);
+        Multicall multicall = Multicall(addresses.getAddress("STRATEGY_MULTICALL"));
         assertEq(multicall.owner(), currentCompounder, "Multicall owner should be the compounder");
 
         // Validate Strategy Factory configurations
-        StrategyFactory cbBTCFactory = StrategyFactory(payable(cbBTCStrategyFactory));
-        StrategyFactory usdcFactory = StrategyFactory(payable(usdcStrategyFactory));
+        StrategyFactory cbBTCFactory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
+        StrategyFactory usdcFactory = StrategyFactory(payable(addresses.getAddress("USDC_STRATEGY_FACTORY")));
 
         // Check that both factories are properly configured
         assertEq(cbBTCFactory.mamoStrategyRegistry(), address(registry), "cbBTC Factory should have correct registry");
@@ -172,9 +169,21 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         assertTrue(addresses.isAddressSet(usdcFactoryName), "USDC Factory address should be set");
         assertTrue(addresses.isAddressSet(multicallName), "Multicall address should be set");
 
-        assertEq(addresses.getAddress(cbBTCFactoryName), cbBTCStrategyFactory, "cbBTC Factory address should match");
-        assertEq(addresses.getAddress(usdcFactoryName), usdcStrategyFactory, "USDC Factory address should match");
-        assertEq(addresses.getAddress(multicallName), strategyMulticall, "Multicall address should match");
+        assertEq(
+            addresses.getAddress(cbBTCFactoryName),
+            addresses.getAddress("cbBTC_STRATEGY_FACTORY"),
+            "cbBTC Factory address should match"
+        );
+        assertEq(
+            addresses.getAddress(usdcFactoryName),
+            addresses.getAddress("USDC_STRATEGY_FACTORY"),
+            "USDC Factory address should match"
+        );
+        assertEq(
+            addresses.getAddress(multicallName),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "Multicall address should match"
+        );
 
         console.log("All validations passed successfully");
     }
