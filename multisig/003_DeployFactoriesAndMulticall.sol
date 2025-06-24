@@ -116,6 +116,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         // Validate Multicall owner
         Multicall multicall = Multicall(strategyMulticall);
         assertEq(multicall.owner(), currentCompounder, "Multicall owner should be the compounder");
+      
 
         // Validate Strategy Factory configurations
         StrategyFactory cbBTCFactory = StrategyFactory(payable(cbBTCStrategyFactory));
@@ -124,6 +125,11 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
         // Check that both factories are properly configured
         assertEq(cbBTCFactory.mamoStrategyRegistry(), address(registry), "cbBTC Factory should have correct registry");
         assertEq(usdcFactory.mamoStrategyRegistry(), address(registry), "USDC Factory should have correct registry");
+
+        // Validate that factories have the correct backend address
+        address expectedBackend = addresses.getAddress("MAMO_BACKEND");
+        assertEq(cbBTCFactory.mamoBackend(), expectedBackend, "cbBTC Factory should have correct backend address");
+        assertEq(usdcFactory.mamoBackend(), expectedBackend, "USDC Factory should have correct backend address");
 
         // Validate that addresses were added to the addresses contract
         string memory cbBTCFactoryName = string(abi.encodePacked("cbBTC", "_STRATEGY_FACTORY"));
