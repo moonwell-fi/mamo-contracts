@@ -98,7 +98,9 @@ contract DeploySystem is Script {
         // Step 8: Deploy the USDCStrategyFactory
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 8: Deploying USDCStrategyFactory...")));
         StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-        address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, config.getConfig(), strategyTypeId);
+        address factoryAddress = factoryDeployer.deployStrategyFactory(
+            addresses, config.getConfig(), strategyTypeId, addresses.getAddress("DEPLOYER_EOA")
+        );
         console.log("USDCStrategyFactory deployed at: %s", StdStyle.yellow(vm.toString(factoryAddress)));
 
         // Update the JSON file with all the new addresses
