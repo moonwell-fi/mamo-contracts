@@ -26,7 +26,7 @@ contract DeployMulticall is Script {
 
     function deploy(Addresses addresses) public returns (address) {
         // Get the addresses for the initialization parameters
-        address owner = addresses.getAddress("MAMO_BACKEND");
+        address owner = addresses.getAddress("MAMO_COMPOUNDER");
 
         console.log("Deploying Multicall with owner:", owner);
 

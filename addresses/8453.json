@@ -90,6 +90,11 @@
     "isContract": false
   },
   {
+    "addr": "0x00bC3dCef80329F6670B34eF40Ec5919EFAdbA39",
+    "name": "MAMO_COMPOUNDER",
+    "isContract": false
+  },
+  {
     "addr": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
     "name": "UNISWAP_V3_FACTORY",
     "isContract": true
