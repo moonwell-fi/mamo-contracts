@@ -25,8 +25,6 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     address public strategyMulticall;
 
     constructor() {
-        setPrimaryForkId(vm.createSelectFork("base"));
-
         // Load asset configurations
         deployAssetConfigBtc = new DeployAssetConfig("./config/strategies/cbBTCStrategyConfig.json");
         vm.makePersistent(address(deployAssetConfigBtc));
@@ -43,7 +41,7 @@ contract DeployFactoriesAndMulticall is MultisigProposal {
     }
 
     function name() public pure override returns (string memory) {
-        return "002_DeployFactoriesAndMulticall";
+        return "003_DeployFactoriesAndMulticall";
     }
 
     function description() public pure override returns (string memory) {
