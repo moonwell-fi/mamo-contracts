@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
+import {Multicall} from "@contracts/Multicall.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
+import {IMulticall} from "@contracts/interfaces/IMulticall.sol";
 import {IStrategy} from "@contracts/interfaces/IStrategy.sol";
-import {IStrategyMulticall} from "@contracts/interfaces/IStrategyMulticall.sol";
 import "@forge-std/Test.sol";
 
 /**
@@ -85,11 +85,11 @@ contract MockPayableContract {
 }
 
 /**
- * @title StrategyMulticallTest
- * @notice Comprehensive test suite for StrategyMulticall contract
+ * @title MulticallTest
+ * @notice Comprehensive test suite for Multicall contract
  */
-contract StrategyMulticallTest is Test {
-    StrategyMulticall public multicall;
+contract MulticallTest is Test {
+    Multicall public multicall;
     MockStrategy public strategy1;
     MockStrategy public strategy2;
     MockStrategy public strategy3;
@@ -105,11 +105,11 @@ contract StrategyMulticallTest is Test {
     uint256 public constant SPLIT_MOONWELL = 6000; // 60%
     uint256 public constant SPLIT_MORPHO = 4000; // 40%
 
-    event GenericMulticallExecuted(address indexed initiator, uint256 callsCount);
+    event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
     function setUp() public {
         // Deploy contracts
-        multicall = new StrategyMulticall(multicallOwner);
+        multicall = new Multicall(multicallOwner);
         strategy1 = new MockStrategy(strategyOwner, mamoCore);
         strategy2 = new MockStrategy(strategyOwner, mamoCore);
         strategy3 = new MockStrategy(strategyOwner, mamoCore);
@@ -121,7 +121,7 @@ contract StrategyMulticallTest is Test {
         vm.deal(nonOwner, 10 ether);
 
         // Label contracts for better test output
-        vm.label(address(multicall), "StrategyMulticall");
+        vm.label(address(multicall), "Multicall");
         vm.label(address(strategy1), "Strategy1");
         vm.label(address(strategy2), "Strategy2");
         vm.label(address(strategy3), "Strategy3");
@@ -135,14 +135,14 @@ contract StrategyMulticallTest is Test {
 
     function testConstructor_Success() public {
         address owner = makeAddr("testOwner");
-        StrategyMulticall testMulticall = new StrategyMulticall(owner);
+        Multicall testMulticall = new Multicall(owner);
 
         assertEq(testMulticall.owner(), owner, "Owner should be set correctly");
     }
 
     function testConstructor_ZeroAddress() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new StrategyMulticall(address(0));
+        new Multicall(address(0));
     }
 
     function testOwnership_TransferOwnership() public {
@@ -165,8 +165,8 @@ contract StrategyMulticallTest is Test {
     /* ============ ACCESS CONTROL TESTS ============ */
 
     function testAccessControl_GenericMulticall() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
@@ -175,44 +175,44 @@ contract StrategyMulticallTest is Test {
         // Should fail when called by non-owner
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
         vm.prank(nonOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         // Should succeed when called by owner
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
     }
 
     /* ============ GENERIC MULTICALL TESTS ============ */
 
     function testGenericMulticall_Success() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](3);
+        Multicall.Call[] memory calls = new Multicall.Call[](3);
 
         // First call: updatePosition on strategy1
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
         // Second call: setValue1 on payableContract1 with ETH
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(payableContract1),
             data: abi.encodeWithSignature("setValue1(uint256)", 100),
             value: 1 ether
         });
 
         // Third call: setValue2 on payableContract2
-        calls[2] = StrategyMulticall.Call({
+        calls[2] = Multicall.Call({
             target: address(payableContract2),
             data: abi.encodeWithSignature("setValue2(uint256)", 200),
             value: 0
         });
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(multicallOwner, 3);
+        emit MulticallExecuted(multicallOwner, 3);
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall{value: 1 ether}(calls);
+        multicall.multicall{value: 1 ether}(calls);
 
         // Verify results
         (uint256 splitA, uint256 splitB) = strategy1.getCurrentSplit();
@@ -224,36 +224,36 @@ contract StrategyMulticallTest is Test {
     }
 
     function testGenericMulticall_EmptyArray() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](0);
+        Multicall.Call[] memory calls = new Multicall.Call[](0);
 
-        vm.expectRevert("StrategyMulticall: Empty calls array");
+        vm.expectRevert("Multicall: Empty calls array");
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
     }
 
     function testGenericMulticall_InvalidTarget() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: address(0),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
-        vm.expectRevert("StrategyMulticall: Invalid target address");
+        vm.expectRevert("Multicall: Invalid target address");
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
     }
 
     function testGenericMulticall_CallFailure() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(payableContract1),
             data: abi.encodeWithSignature("failingFunction()"),
             value: 0
@@ -261,7 +261,7 @@ contract StrategyMulticallTest is Test {
 
         vm.expectRevert("MockPayableContract: Intentional failure");
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         // Verify that strategy1 was NOT updated due to revert (all state changes are reverted)
         (uint256 splitA, uint256 splitB) = strategy1.getCurrentSplit();
@@ -270,32 +270,32 @@ contract StrategyMulticallTest is Test {
     }
 
     function testGenericMulticall_MultipleStrategies() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](3);
+        Multicall.Call[] memory calls = new Multicall.Call[](3);
 
-        // Update multiple strategies using genericMulticall
-        calls[0] = StrategyMulticall.Call({
+        // Update multiple strategies using multicall
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(strategy2),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
-        calls[2] = StrategyMulticall.Call({
+        calls[2] = Multicall.Call({
             target: address(strategy3),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(multicallOwner, 3);
+        emit MulticallExecuted(multicallOwner, 3);
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         // Verify all strategies were updated
         (uint256 split1A, uint256 split1B) = strategy1.getCurrentSplit();
@@ -313,15 +313,15 @@ contract StrategyMulticallTest is Test {
     /* ============ EDGE CASES AND INTEGRATION TESTS ============ */
 
     function testGenericMulticall_ZeroSplits() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", 0, 0),
             value: 0
         });
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         (uint256 splitA, uint256 splitB) = strategy1.getCurrentSplit();
         assertEq(splitA, 0, "Strategy splitA should be 0");
@@ -331,15 +331,15 @@ contract StrategyMulticallTest is Test {
     function testGenericMulticall_MaxSplits() public {
         uint256 maxSplit = type(uint256).max;
 
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", maxSplit, maxSplit),
             value: 0
         });
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         (uint256 splitA, uint256 splitB) = strategy1.getCurrentSplit();
         assertEq(splitA, maxSplit, "Strategy splitA should be max");
@@ -349,11 +349,11 @@ contract StrategyMulticallTest is Test {
     function testLargeScale_GenericMulticall() public {
         // Test with a larger number of strategies
         uint256 strategyCount = 50;
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](strategyCount);
+        Multicall.Call[] memory calls = new Multicall.Call[](strategyCount);
 
         for (uint256 i = 0; i < strategyCount; i++) {
             address strategyAddr = address(new MockStrategy(strategyOwner, mamoCore));
-            calls[i] = StrategyMulticall.Call({
+            calls[i] = Multicall.Call({
                 target: strategyAddr,
                 data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
                 value: 0
@@ -361,10 +361,10 @@ contract StrategyMulticallTest is Test {
         }
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(multicallOwner, strategyCount);
+        emit MulticallExecuted(multicallOwner, strategyCount);
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         // Spot check a few strategies
         MockStrategy firstStrategy = MockStrategy(calls[0].target);
@@ -381,17 +381,17 @@ contract StrategyMulticallTest is Test {
 
     /* ============ FUZZ TESTS ============ */
 
-    function testFuzz_genericMulticall(uint256 splitMoonwell, uint256 splitMorpho, uint8 strategyCount) public {
+    function testFuzz_multicall(uint256 splitMoonwell, uint256 splitMorpho, uint8 strategyCount) public {
         // Bound inputs to reasonable values
         strategyCount = uint8(bound(strategyCount, 1, 20));
         splitMoonwell = bound(splitMoonwell, 0, type(uint128).max);
         splitMorpho = bound(splitMorpho, 0, type(uint128).max);
 
         // Create calls array
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](strategyCount);
+        Multicall.Call[] memory calls = new Multicall.Call[](strategyCount);
         for (uint256 i = 0; i < strategyCount; i++) {
             address strategyAddr = address(new MockStrategy(strategyOwner, mamoCore));
-            calls[i] = StrategyMulticall.Call({
+            calls[i] = Multicall.Call({
                 target: strategyAddr,
                 data: abi.encodeWithSignature("updatePosition(uint256,uint256)", splitMoonwell, splitMorpho),
                 value: 0
@@ -399,7 +399,7 @@ contract StrategyMulticallTest is Test {
         }
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         // Verify all strategies were updated correctly
         for (uint256 i = 0; i < strategyCount; i++) {
@@ -413,15 +413,15 @@ contract StrategyMulticallTest is Test {
     /* ============ ETH VALIDATION AND REFUND TESTS ============ */
 
     function testETHValidation_ExactAmount() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(payableContract1),
             data: abi.encodeWithSignature("setValue1(uint256)", 100),
             value: 1 ether
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(payableContract2),
             data: abi.encodeWithSignature("setValue2(uint256)", 200),
             value: 0.5 ether
@@ -430,7 +430,7 @@ contract StrategyMulticallTest is Test {
         uint256 initialBalance = multicallOwner.balance;
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall{value: 1.5 ether}(calls);
+        multicall.multicall{value: 1.5 ether}(calls);
 
         // Verify contracts received the correct amounts
         assertEq(payableContract1.receivedETH(), 1 ether, "Contract1 should receive 1 ether");
@@ -441,15 +441,15 @@ contract StrategyMulticallTest is Test {
     }
 
     function testETHValidation_ExcessAmount() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(payableContract1),
             data: abi.encodeWithSignature("setValue1(uint256)", 100),
             value: 1 ether
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(payableContract2),
             data: abi.encodeWithSignature("setValue2(uint256)", 200),
             value: 0.5 ether
@@ -458,7 +458,7 @@ contract StrategyMulticallTest is Test {
         uint256 initialBalance = multicallOwner.balance;
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall{value: 2 ether}(calls); // Sending 2 ether for 1.5 ether worth of calls
+        multicall.multicall{value: 2 ether}(calls); // Sending 2 ether for 1.5 ether worth of calls
 
         // Verify contracts received the correct amounts
         assertEq(payableContract1.receivedETH(), 1 ether, "Contract1 should receive 1 ether");
@@ -471,15 +471,15 @@ contract StrategyMulticallTest is Test {
     }
 
     function testETHValidation_InsufficientAmount() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(payableContract1),
             data: abi.encodeWithSignature("setValue1(uint256)", 100),
             value: 1 ether
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(payableContract2),
             data: abi.encodeWithSignature("setValue2(uint256)", 200),
             value: 0.5 ether
@@ -488,9 +488,9 @@ contract StrategyMulticallTest is Test {
         uint256 initialBalance = multicallOwner.balance;
 
         // Try to send only 1 ether for 1.5 ether worth of calls
-        vm.expectRevert("StrategyMulticall: Insufficient ETH provided");
+        vm.expectRevert("Multicall: Insufficient ETH provided");
         vm.prank(multicallOwner);
-        multicall.genericMulticall{value: 1 ether}(calls);
+        multicall.multicall{value: 1 ether}(calls);
 
         // Verify no state changes occurred
         assertEq(payableContract1.receivedETH(), 0, "Contract1 should not receive any ETH");
@@ -499,15 +499,15 @@ contract StrategyMulticallTest is Test {
     }
 
     function testETHValidation_ZeroValueCalls() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(strategy2),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
@@ -516,7 +516,7 @@ contract StrategyMulticallTest is Test {
         uint256 initialBalance = multicallOwner.balance;
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall{value: 1 ether}(calls); // Sending excess ETH for zero-value calls
+        multicall.multicall{value: 1 ether}(calls); // Sending excess ETH for zero-value calls
 
         // Verify strategies were updated
         (uint256 split1A, uint256 split1B) = strategy1.getCurrentSplit();
@@ -529,21 +529,21 @@ contract StrategyMulticallTest is Test {
     }
 
     function testETHValidation_MixedValueCalls() public {
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](3);
+        Multicall.Call[] memory calls = new Multicall.Call[](3);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: address(strategy1),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: address(payableContract1),
             data: abi.encodeWithSignature("setValue1(uint256)", 100),
             value: 0.3 ether
         });
 
-        calls[2] = StrategyMulticall.Call({
+        calls[2] = Multicall.Call({
             target: address(strategy2),
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", SPLIT_MOONWELL, SPLIT_MORPHO),
             value: 0
@@ -552,7 +552,7 @@ contract StrategyMulticallTest is Test {
         uint256 initialBalance = multicallOwner.balance;
 
         vm.prank(multicallOwner);
-        multicall.genericMulticall{value: 1 ether}(calls); // Sending 1 ether for 0.3 ether worth of calls
+        multicall.multicall{value: 1 ether}(calls); // Sending 1 ether for 0.3 ether worth of calls
 
         // Verify strategies were updated
         (uint256 split1A, uint256 split1B) = strategy1.getCurrentSplit();

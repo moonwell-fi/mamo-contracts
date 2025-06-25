@@ -5,8 +5,9 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+
+import {Multicall} from "@contracts/Multicall.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
-import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
@@ -28,20 +29,23 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
+
+import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
-import {DeployStrategyMulticall} from "@script/DeployStrategyMulticall.s.sol";
+import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
+import {DeployMulticall} from "@script/DeployMulticall.s.sol";
 
 /**
  * @title MaliciousReentrantContract
  * @notice A malicious contract that attempts to perform reentrancy attacks on StrategyMulticall
  */
 contract MaliciousReentrantContract {
-    StrategyMulticall public immutable multicall;
+    Multicall public immutable multicall;
     bool public attackExecuted;
     uint256 public callDepth;
 
     constructor(address _multicall) {
-        multicall = StrategyMulticall(payable(_multicall));
+        multicall = Multicall(payable(_multicall));
     }
 
     /**
@@ -53,15 +57,12 @@ contract MaliciousReentrantContract {
         // Only attempt reentrancy if we're the owner and this is the first call
         if (multicall.owner() == address(this) && callDepth == 1) {
             // Attempt to call back into the multicall during execution
-            StrategyMulticall.Call[] memory maliciousCalls = new StrategyMulticall.Call[](1);
-            maliciousCalls[0] = StrategyMulticall.Call({
-                target: address(this),
-                data: abi.encodeWithSignature("harmlessFunction()"),
-                value: 0
-            });
+            Multicall.Call[] memory maliciousCalls = new Multicall.Call[](1);
+            maliciousCalls[0] =
+                Multicall.Call({target: address(this), data: abi.encodeWithSignature("harmlessFunction()"), value: 0});
 
             // This should fail due to reentrancy protection
-            multicall.genericMulticall(maliciousCalls);
+            multicall.multicall(maliciousCalls);
             attackExecuted = true; // This should never execute
         }
 
@@ -76,9 +77,9 @@ contract MaliciousReentrantContract {
     }
 }
 
-contract StrategyMulticallIntegrationTest is Test {
+contract MulticallIntegrationTest is Test {
     Addresses public addresses;
-    StrategyMulticall public multicall;
+    Multicall public multicall;
     StrategyFactory public factory;
     MamoStrategyRegistry public registry;
     ERC20MoonwellMorphoStrategy public implementation;
@@ -91,6 +92,7 @@ contract StrategyMulticallIntegrationTest is Test {
     // Addresses
     address public admin;
     address public backend;
+    address public compounder;
     address public guardian;
     address public deployer;
     address public mamoMultisig;
@@ -101,7 +103,7 @@ contract StrategyMulticallIntegrationTest is Test {
     uint256 public splitVault;
 
     // Events
-    event GenericMulticallExecuted(address indexed initiator, uint256 callsCount);
+    event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
     function setUp() public {
         // workaround to make test contract work with mappings
@@ -128,6 +130,7 @@ contract StrategyMulticallIntegrationTest is Test {
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
+        compounder = addresses.getAddress(config.compounder);
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
@@ -148,7 +151,7 @@ contract StrategyMulticallIntegrationTest is Test {
         proposal.validate();
 
         factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
-        multicall = StrategyMulticall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
+        multicall = Multicall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
@@ -161,7 +164,25 @@ contract StrategyMulticallIntegrationTest is Test {
         assertTrue(address(multicall) != address(0), "Multicall not deployed");
 
         // Test that the multicall has the correct owner
-        assertEq(multicall.owner(), backend, "Owner should be backend");
+        assertEq(multicall.owner(), compounder, "Owner should be compounder");
+    }
+
+    function testRenounceOwnership_Reverts() public {
+        // Test that renounceOwnership always reverts when called by owner
+        vm.startPrank(backend);
+        vm.expectRevert("Multicall: Ownership cannot be revoked");
+        multicall.renounceOwnership();
+        vm.stopPrank();
+
+        // Test that renounceOwnership always reverts when called by non-owner
+        address nonOwner = makeAddr("nonOwner");
+        vm.startPrank(nonOwner);
+        vm.expectRevert("Multicall: Ownership cannot be revoked");
+        multicall.renounceOwnership();
+        vm.stopPrank();
+
+        // Verify ownership is still intact
+        assertEq(multicall.owner(), compounder, "Ownership should remain unchanged");
     }
 
     function testDeployStrategiesAndUpdatePositionViaMulticall() public {
@@ -210,28 +231,28 @@ contract StrategyMulticallIntegrationTest is Test {
         uint256 newSplitVault = 4000; // 40%
 
         // Prepare multicall data for updatePosition calls
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](2);
+        Multicall.Call[] memory calls = new Multicall.Call[](2);
 
-        calls[0] = StrategyMulticall.Call({
+        calls[0] = Multicall.Call({
             target: strategy1,
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", newSplitMToken, newSplitVault),
             value: 0
         });
 
-        calls[1] = StrategyMulticall.Call({
+        calls[1] = Multicall.Call({
             target: strategy2,
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", newSplitMToken, newSplitVault),
             value: 0
         });
 
-        // Execute multicall as the owner (backend)
-        vm.startPrank(backend);
+        // Execute multicall as the owner (compounder)
+        vm.startPrank(compounder);
 
-        // Expect the GenericMulticallExecuted event
+        // Expect the MulticallExecuted event
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(backend, 2);
+        emit MulticallExecuted(compounder, 2);
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
 
@@ -263,7 +284,7 @@ contract StrategyMulticallIntegrationTest is Test {
         // Step 3: Transfer ownership of multicall to a new owner
         address newOwner = makeAddr("newOwner");
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         multicall.transferOwnership(newOwner);
         vm.stopPrank();
 
@@ -275,9 +296,8 @@ contract StrategyMulticallIntegrationTest is Test {
         address nonOwner = makeAddr("nonOwner");
 
         // Prepare a simple multicall
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] =
-            StrategyMulticall.Call({target: address(registry), data: abi.encodeWithSignature("paused()"), value: 0});
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({target: address(registry), data: abi.encodeWithSignature("paused()"), value: 0});
 
         // Try to call multicall as non-owner
         vm.startPrank(nonOwner);
@@ -285,37 +305,36 @@ contract StrategyMulticallIntegrationTest is Test {
         // Expect the call to revert due to onlyOwner modifier
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
 
     function testMulticallWithEmptyCallsArray() public {
         // Prepare empty calls array
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](0);
+        Multicall.Call[] memory calls = new Multicall.Call[](0);
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         // Expect the call to revert with "Empty calls array"
-        vm.expectRevert("StrategyMulticall: Empty calls array");
+        vm.expectRevert("Multicall: Empty calls array");
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
 
     function testMulticallWithInvalidTargetAddress() public {
         // Prepare multicall with invalid target (zero address)
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] =
-            StrategyMulticall.Call({target: address(0), data: abi.encodeWithSignature("someFunction()"), value: 0});
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({target: address(0), data: abi.encodeWithSignature("someFunction()"), value: 0});
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         // Expect the call to revert with "Invalid target address"
-        vm.expectRevert("StrategyMulticall: Invalid target address");
+        vm.expectRevert("Multicall: Invalid target address");
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
@@ -353,10 +372,10 @@ contract StrategyMulticallIntegrationTest is Test {
         uint256 newSplitMToken = 7000; // 70%
         uint256 newSplitVault = 3000; // 30%
 
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](3);
+        Multicall.Call[] memory calls = new Multicall.Call[](3);
 
         for (uint256 i = 0; i < 3; i++) {
-            calls[i] = StrategyMulticall.Call({
+            calls[i] = Multicall.Call({
                 target: strategies[i],
                 data: abi.encodeWithSignature("updatePosition(uint256,uint256)", newSplitMToken, newSplitVault),
                 value: 0
@@ -364,12 +383,12 @@ contract StrategyMulticallIntegrationTest is Test {
         }
 
         // Execute multicall
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(backend, 3);
+        emit MulticallExecuted(compounder, 3);
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
 
@@ -398,19 +417,19 @@ contract StrategyMulticallIntegrationTest is Test {
         vm.stopPrank();
 
         // Prepare multicall with an invalid call that will fail
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: strategy,
             data: abi.encodeWithSignature("updatePosition(uint256,uint256)", 5000, 6000), // Invalid: adds up to 11000 > 10000
             value: 0
         });
 
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
 
         // Expect the multicall to revert because the individual call fails
         vm.expectRevert();
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
     }
@@ -420,7 +439,7 @@ contract StrategyMulticallIntegrationTest is Test {
         MaliciousReentrantContract maliciousContract = new MaliciousReentrantContract(address(multicall));
 
         // Transfer ownership to the malicious contract so it can attempt reentrancy
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         multicall.transferOwnership(address(maliciousContract));
         vm.stopPrank();
 
@@ -428,8 +447,8 @@ contract StrategyMulticallIntegrationTest is Test {
         assertEq(multicall.owner(), address(maliciousContract), "Ownership should be transferred to malicious contract");
 
         // Prepare multicall that will trigger the malicious contract's reentrancy attempt
-        StrategyMulticall.Call[] memory calls = new StrategyMulticall.Call[](1);
-        calls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory calls = new Multicall.Call[](1);
+        calls[0] = Multicall.Call({
             target: address(maliciousContract),
             data: abi.encodeWithSignature("triggerReentrancy()"),
             value: 0
@@ -442,7 +461,7 @@ contract StrategyMulticallIntegrationTest is Test {
         // The ReentrancyGuard should prevent the nested call
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
 
-        multicall.genericMulticall(calls);
+        multicall.multicall(calls);
 
         vm.stopPrank();
 
@@ -455,13 +474,13 @@ contract StrategyMulticallIntegrationTest is Test {
         MaliciousReentrantContract maliciousContract = new MaliciousReentrantContract(address(multicall));
 
         // Transfer ownership to the malicious contract
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         multicall.transferOwnership(address(maliciousContract));
         vm.stopPrank();
 
         // First, attempt reentrancy (should fail)
-        StrategyMulticall.Call[] memory maliciousCalls = new StrategyMulticall.Call[](1);
-        maliciousCalls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory maliciousCalls = new Multicall.Call[](1);
+        maliciousCalls[0] = Multicall.Call({
             target: address(maliciousContract),
             data: abi.encodeWithSignature("triggerReentrancy()"),
             value: 0
@@ -471,11 +490,11 @@ contract StrategyMulticallIntegrationTest is Test {
 
         // Expect the reentrancy attempt to fail
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
-        multicall.genericMulticall(maliciousCalls);
+        multicall.multicall(maliciousCalls);
 
         // Now verify that normal operations still work after the failed reentrancy
-        StrategyMulticall.Call[] memory normalCalls = new StrategyMulticall.Call[](1);
-        normalCalls[0] = StrategyMulticall.Call({
+        Multicall.Call[] memory normalCalls = new Multicall.Call[](1);
+        normalCalls[0] = Multicall.Call({
             target: address(maliciousContract),
             data: abi.encodeWithSignature("harmlessFunction()"),
             value: 0
@@ -483,18 +502,18 @@ contract StrategyMulticallIntegrationTest is Test {
 
         // This should succeed
         vm.expectEmit(true, false, false, true);
-        emit GenericMulticallExecuted(address(maliciousContract), 1);
+        emit MulticallExecuted(address(maliciousContract), 1);
 
-        multicall.genericMulticall(normalCalls);
+        multicall.multicall(normalCalls);
 
         vm.stopPrank();
 
         // Verify attack was never executed
         assertFalse(maliciousContract.attackExecuted(), "Attack should never have been executed");
 
-        // Transfer ownership back to backend for cleanup
+        // Transfer ownership back to compounder for cleanup
         vm.startPrank(address(maliciousContract));
-        multicall.transferOwnership(backend);
+        multicall.transferOwnership(compounder);
         vm.stopPrank();
     }
 }
