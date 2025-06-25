@@ -3,6 +3,9 @@ pragma solidity 0.8.28;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
@@ -11,6 +14,8 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
  * @dev Provides two-tier strategy approval system and fee collection management
  */
 contract AccountRegistry is AccessControlEnumerable, Pausable {
+    using SafeERC20 for IERC20;
+
     /// @notice Backend role for strategy approval and fee collector management
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
@@ -29,6 +34,7 @@ contract AccountRegistry is AccessControlEnumerable, Pausable {
     event StrategyWhitelisted(address indexed account, address indexed strategy, bool approved);
     event StrategyApproved(address indexed strategy, bool approved);
     event FeeCollectorUpdated(address indexed oldCollector, address indexed newCollector);
+    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     /**
      * @notice Constructor that sets up initial roles

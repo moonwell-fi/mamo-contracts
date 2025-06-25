@@ -185,16 +185,18 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         require(amount > 0, "Amount must be greater than 0");
         require(account != address(0), "Invalid account");
 
-        // Transfer MAMO from depositor to this contract
-        mamoToken.safeTransferFrom(msg.sender, address(this), amount);
+        // Transfer MAMO from depositor to account
+        mamoToken.safeTransferFrom(msg.sender, account, amount);
 
         // Approve and stake in MultiRewards on behalf of account
-        mamoToken.safeApprove(address(multiRewards), amount);
-
-        // Call stake through the account's execute function
+        bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), amount);
         bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, amount);
 
-        MamoAccount(account).execute(address(multiRewards), stakeData);
+        // Call stake through the account's multicall function
+        Call[] memory calls = new Call[](2);
+        calls[0] = Call({target: address(multiRewards), data: approveData, value: 0});
+        calls[1] = Call({target: address(multiRewards), data: stakeData, value: 0});
+        MamoAccount(account).multicall(calls);
 
         emit Deposited(account, msg.sender, amount);
     }
@@ -210,10 +212,17 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         // Call withdraw through the account's execute function
         bytes memory withdrawData = abi.encodeWithSelector(IMultiRewards.withdraw.selector, amount);
 
-        MamoAccount(account).execute(address(multiRewards), withdrawData);
+        Call[] memory calls = new Call[](2);
+        calls[0] = Call({target: address(multiRewards), data: withdrawData, value: 0});
 
         // Transfer withdrawn MAMO to account owner
-        mamoToken.safeTransfer(msg.sender, amount);
+        calls[1] = Call({
+            target: address(mamoToken),
+            data: abi.encodeWithSelector(IERC20.transfer.selector, msg.sender, amount),
+            value: 0
+        });
+
+        MamoAccount(account).multicall(calls);
 
         emit Withdrawn(account, amount);
     }

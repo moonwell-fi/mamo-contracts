@@ -7,13 +7,14 @@ import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title MamoAccount
  * @notice Acts as an intermediary UUPS proxy contract that holds user stakes and enables automated reward management
  * @dev This contract inherits from Multicall for multicall functionality and is designed to be used as a proxy implementation
  */
-contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuard {
     /**
      * @notice Emitted when a multicall is executed
      * @param initiator The address that initiated the multicall
