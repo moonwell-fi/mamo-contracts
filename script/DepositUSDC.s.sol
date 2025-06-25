@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@addresses/Addresses.sol";
 import {Script} from "@forge-std/Script.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {StdStyle} from "@forge-std/StdStyle.sol";
 import {console} from "@forge-std/console.sol";

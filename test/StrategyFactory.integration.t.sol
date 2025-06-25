@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -9,6 +9,7 @@ import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
+import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 
@@ -21,6 +22,8 @@ import {IMToken} from "@interfaces/IMToken.sol";
 
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+
+import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract StrategyFactoryIntegrationTest is Test {
@@ -45,6 +48,9 @@ contract StrategyFactoryIntegrationTest is Test {
     uint256 public splitVault;
 
     function setUp() public {
+        // workaround to make test contract work with mappings
+        vm.makePersistent(DEFAULT_TEST_CONTRACT);
+
         // Create a new addresses instance for testing
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -71,20 +77,23 @@ contract StrategyFactoryIntegrationTest is Test {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin; // Use admin as mamo multisig for testing
 
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY_V2"));
-        if (addresses.isAddressSet(factoryName)) {
-            factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
-        } else {
-            StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-            address factoryAddress = factoryDeployer.deployStrategyFactory(addresses, assetConfig);
-            factory = StrategyFactory(payable(factoryAddress));
-        }
+        // todo remove this once FixIsRewardToken is executed
+        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
+        fixIsRewardToken.setAddresses(addresses);
+        fixIsRewardToken.deploy();
+        fixIsRewardToken.build();
+        fixIsRewardToken.simulate();
+        fixIsRewardToken.validate();
 
+        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
+        proposal.setAddresses(addresses);
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-
-        vm.startPrank(mamoMultisig);
-        registry.grantRole(registry.BACKEND_ROLE(), address(factory));
-        vm.stopPrank();
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
@@ -130,7 +139,6 @@ contract StrategyFactoryIntegrationTest is Test {
 
         // Verify strategy has correct parameters
         assertEq(address(strategyContract.mamoStrategyRegistry()), address(registry), "Registry mismatch in strategy");
-        assertEq(strategyContract.mamoStrategyRegistry().getBackendAddress(), backend, "Backend mismatch in strategy");
     }
 
     function testUserCanCreateStrategyForThemselves() public {
@@ -160,7 +168,6 @@ contract StrategyFactoryIntegrationTest is Test {
 
         // Verify strategy has correct parameters
         assertEq(address(strategyContract.mamoStrategyRegistry()), address(registry), "Registry mismatch in strategy");
-        assertEq(strategyContract.mamoStrategyRegistry().getBackendAddress(), backend, "Backend mismatch in strategy");
     }
 
     function testCreateMultipleStrategiesForDifferentUsers() public {

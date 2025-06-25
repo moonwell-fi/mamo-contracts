@@ -65,7 +65,7 @@
     "isContract": true
   },
   {
-    "addr": "0x518e95F6f91E316133FE256fBc1Cf47a54e50c56",
+    "addr": "0x413C38B68fe730F2bC30d8Cde965967D1C7BC599",
     "name": "CHAINLINK_SWAP_CHECKER_IMPLEMENTATION",
     "isContract": true
   },
@@ -77,11 +77,6 @@
   {
     "addr": "0x5fAB373f43079CE488C2b8579751791982C03A35",
     "name": "MOONWELL_MORPHO_STRATEGY_IMPL",
-    "isContract": true
-  },
-  {
-    "addr": "0x5967ea71cC65d610dc6999d7dF62bfa512e62D07",
-    "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
   },
   {
@@ -142,11 +137,6 @@
   {
     "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
     "name": "CHAINLINK_BTC_USD",
-    "isContract": true
-  },
-  {
-    "addr": "0xF3A72612Bdd50480672350dCEe4609B94Da9ECF9",
-    "name": "cbBTC_STRATEGY_FACTORY",
     "isContract": true
   },
   {
