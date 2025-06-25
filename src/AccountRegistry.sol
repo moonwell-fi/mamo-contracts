@@ -51,6 +51,22 @@ contract AccountRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
+     * @notice Whitelist an approved strategy for a specific account (account owner only)
+     * @param account The account address
+     * @param strategy The strategy address to whitelist
+     * @param approved Whether to approve or revoke the strategy
+     */
+    function setWhitelistStrategy(address account, address strategy, bool approved) external whenNotPaused {
+        // msg.sender must be the account owner
+        require(Ownable(account).owner() == msg.sender, "Not account owner");
+        // Strategy must be approved by backend first
+        require(approvedStrategies[strategy], "Strategy not approved by backend");
+        isWhitelistedStrategy[account][strategy] = approved;
+        emit StrategyWhitelisted(account, strategy, approved);
+    }
+
+    // ==================== ADMIN FUNCTIONS ====================
+    /**
      * @notice Approve a strategy globally (backend only)
      * @param strategy The strategy address to approve
      * @param approved Whether to approve or revoke the strategy
@@ -71,21 +87,24 @@ contract AccountRegistry is AccessControlEnumerable, Pausable {
         feeCollector = newFeeCollector;
         emit FeeCollectorUpdated(oldCollector, newFeeCollector);
     }
-
     /**
-     * @notice Whitelist an approved strategy for a specific account (account owner only)
-     * @param account The account address
-     * @param strategy The strategy address to whitelist
-     * @param approved Whether to approve or revoke the strategy
+     * @notice Recovers ERC20 tokens accidentally sent to this contract
+     * @dev Only callable by the user who owns this strategy
+     * @param tokenAddress The address of the token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount of tokens to recover
      */
-    function setWhitelistStrategy(address account, address strategy, bool approved) external whenNotPaused {
-        // msg.sender must be the account owner
-        require(Ownable(account).owner() == msg.sender, "Not account owner");
-        // Strategy must be approved by backend first
-        require(approvedStrategies[strategy], "Strategy not approved by backend");
-        isWhitelistedStrategy[account][strategy] = approved;
-        emit StrategyWhitelisted(account, strategy, approved);
+
+    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(to != address(0), "Cannot send to zero address");
+        require(amount > 0, "Amount must be greater than 0");
+
+        IERC20(tokenAddress).safeTransfer(to, amount);
+
+        emit TokenRecovered(tokenAddress, to, amount);
     }
+
+    // ==================== GUARDIAN FUNCTIONS ====================
 
     /**
      * @notice Pauses the contract in case of emergency

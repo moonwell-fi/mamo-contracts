@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 
-import {StrategyMulticall} from "@contracts/StrategyMulticall.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -12,9 +11,28 @@ import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/U
 /**
  * @title MamoAccount
  * @notice Acts as an intermediary UUPS proxy contract that holds user stakes and enables automated reward management
- * @dev This contract inherits from StrategyMulticall for multicall functionality and is designed to be used as a proxy implementation
+ * @dev This contract inherits from Multicall for multicall functionality and is designed to be used as a proxy implementation
  */
 contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    /**
+     * @notice Emitted when a multicall is executed
+     * @param initiator The address that initiated the multicall
+     * @param callsCount The number of calls executed
+     */
+    event MulticallExecuted(address indexed initiator, uint256 callsCount);
+
+    /**
+     * @notice Struct containing the parameters for a generic call
+     * @param target The address of the target contract
+     * @param data The encoded function call data
+     * @param value The amount of ETH to send with the call
+     */
+    struct Call {
+        address target;
+        bytes data;
+        uint256 value;
+    }
+
     /// @notice The AccountRegistry contract for permission management
     AccountRegistry public registry;
 
@@ -65,26 +83,48 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     /**
-     * @notice Batch multiple delegatecalls together
-     * @param targets Array of targets to call
-     * @param data Array of data to pass with the calls
+     * @notice Executes a sequence of arbitrary calls to contracts
+     * @param calls Array of Call structs containing target, data, and value for each call
+     * @dev Reverts on any failure - no partial success handling
+     * @dev Can be used for any contract calls, not just strategies
+     * @dev Only callable by the contract owner
+     * @dev Validates that total call values don't exceed msg.value and refunds excess ETH
+     * @dev Protected against reentrancy attacks
      */
-    function multicall(address[] calldata targets, bytes[] calldata data) external payable onlyWhitelistedStrategy {
-        require(targets.length == data.length, "Length mismatch");
+    function multicall(Call[] calldata calls) external payable onlyWhitelistedStrategy nonReentrant {
+        require(calls.length > 0, "Multicall: Empty calls array");
 
-        for (uint256 i = 0; i < data.length; i++) {
-            if (targets[i] == address(0)) {
-                continue; // No-op
-            }
+        // Calculate total ETH required for all calls
+        uint256 totalValue = 0;
+        for (uint256 i = 0; i < calls.length; i++) {
+            totalValue += calls[i].value;
+        }
 
-            (bool success, bytes memory result) = targets[i].delegatecall(data[i]);
+        // Ensure we have enough ETH to cover all calls
+        require(totalValue <= msg.value, "Multicall: Insufficient ETH provided");
+
+        // Execute all calls
+        for (uint256 i = 0; i < calls.length; i++) {
+            Call calldata call = calls[i];
+            require(call.target != address(0), "Multicall: Invalid target address");
+
+            (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);
 
             if (!success) {
-                if (result.length == 0) revert();
+                // Revert with the original error data
                 assembly {
-                    revert(add(32, result), mload(result))
+                    revert(add(returnData, 0x20), mload(returnData))
                 }
             }
         }
+
+        // Refund any excess ETH to the caller
+        uint256 excessETH = msg.value - totalValue;
+        if (excessETH > 0) {
+            (bool refundSuccess,) = payable(msg.sender).call{value: excessETH}("");
+            require(refundSuccess, "Multicall: ETH refund failed");
+        }
+
+        emit MulticallExecuted(msg.sender, calls.length);
     }
 }
