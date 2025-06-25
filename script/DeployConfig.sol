@@ -24,6 +24,7 @@ contract DeployConfig is Test {
         uint256 allowedSlippageInBps;
         string backend;
         uint256 chainId;
+        string compounder;
         uint256 compoundFee;
         string deployer;
         string guardian;
@@ -126,32 +127,28 @@ contract DeployConfig is Test {
     function _loadConfig(string memory configPath) private {
         configData = vm.readFile(configPath);
 
-        bytes memory parsedJson = vm.parseJson(configData);
+        // Parse individual fields instead of using abi.decode
+        config.admin = configData.readString(".admin");
+        config.allowedSlippageInBps = configData.readUint(".allowedSlippageInBps");
+        config.backend = configData.readString(".backend");
+        config.chainId = configData.readUint(".chainId");
+        config.compounder = configData.readString(".compounder");
+        config.compoundFee = configData.readUint(".compoundFee");
+        config.deployer = configData.readString(".deployer");
+        config.guardian = configData.readString(".guardian");
+        config.hookGasLimit = configData.readUint(".hookGasLimit");
+        config.maxPriceValidTime = configData.readUint(".maxPriceValidTime");
+        config.splitMToken = configData.readUint(".splitMToken");
+        config.splitVault = configData.readUint(".splitVault");
+        config.version = configData.readString(".version");
 
-        // Decode to a memory struct first
-        DeploymentConfig memory memConfig = abi.decode(parsedJson, (DeploymentConfig));
+        // Handle reward tokens array
+        bytes memory rewardTokensJson = vm.parseJson(configData, ".rewardTokens");
+        RewardToken[] memory rewardTokens = abi.decode(rewardTokensJson, (RewardToken[]));
 
-        // Copy fields individually to avoid struct array memory to storage copy
-        config.admin = memConfig.admin;
-        config.allowedSlippageInBps = memConfig.allowedSlippageInBps;
-        config.backend = memConfig.backend;
-        config.chainId = memConfig.chainId;
-        config.compoundFee = memConfig.compoundFee;
-        config.deployer = memConfig.deployer;
-        config.guardian = memConfig.guardian;
-        config.hookGasLimit = memConfig.hookGasLimit;
-        config.maxPriceValidTime = memConfig.maxPriceValidTime;
-        config.splitMToken = memConfig.splitMToken;
-        config.splitVault = memConfig.splitVault;
-        config.version = memConfig.version;
-
-        // Handle the array separately
-        if (memConfig.rewardTokens.length > 0) {
-            // Initialize the storage array with the correct length
-            delete config.rewardTokens;
-            for (uint256 i = 0; i < memConfig.rewardTokens.length; i++) {
-                config.rewardTokens.push(memConfig.rewardTokens[i]);
-            }
+        delete config.rewardTokens;
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            config.rewardTokens.push(rewardTokens[i]);
         }
 
         // Validate configuration
