@@ -6,6 +6,7 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 
+import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -247,7 +248,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     function _compound(address account) internal {
         // Claim rewards through account
         bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
-        MamoAccount(account).execute(address(multiRewards), getRewardData);
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({target: address(multiRewards), data: getRewardData, value: 0});
+        MamoAccount(account).multicall(calls);
 
         // Get MAMO balance
         uint256 mamoBalance = mamoToken.balanceOf(account);
@@ -266,7 +269,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (rewardFee > 0) {
                 bytes memory transferFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), rewardFee);
-                MamoAccount(account).execute(address(rewardToken), transferFeeData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(rewardToken), data: transferFeeData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
 
             // Swap remaining reward tokens to MAMO
@@ -275,7 +280,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Approve DEX router to spend reward tokens
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
-                MamoAccount(account).execute(address(rewardToken), approveData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(rewardToken), data: approveData, value: 0});
+                MamoAccount(account).multicall(calls);
 
                 // Swap tokens
                 bytes memory swapData = abi.encodeWithSelector(
@@ -286,7 +293,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                     account,
                     block.timestamp + 300
                 );
-                MamoAccount(account).execute(address(dexRouter), swapData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(dexRouter), data: swapData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
         }
 
@@ -296,7 +305,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (mamoFee > 0) {
                 bytes memory transferMamoFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
-                MamoAccount(account).execute(address(mamoToken), transferMamoFeeData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
         }
 
@@ -305,11 +316,15 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         if (totalMamo > 0) {
             // Approve MultiRewards to spend MAMO
             bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), totalMamo);
-            MamoAccount(account).execute(address(mamoToken), approveData);
+            Call[] memory calls = new Call[](1);
+            calls[0] = Call({target: address(mamoToken), data: approveData, value: 0});
+            MamoAccount(account).multicall(calls);
 
             // Stake MAMO
             bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, totalMamo);
-            MamoAccount(account).execute(address(multiRewards), stakeData);
+            Call[] memory calls = new Call[](1);
+            calls[0] = Call({target: address(multiRewards), data: stakeData, value: 0});
+            MamoAccount(account).multicall(calls);
         }
 
         emit Compounded(account, mamoBalance, rewardAmounts);
@@ -322,7 +337,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     function _reinvest(address account) internal {
         // Claim rewards through account
         bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
-        MamoAccount(account).execute(address(multiRewards), getRewardData);
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({target: address(multiRewards), data: getRewardData, value: 0});
+        MamoAccount(account).multicall(calls);
 
         // Get MAMO balance
         uint256 mamoBalance = mamoToken.balanceOf(account);
@@ -334,7 +351,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (mamoFee > 0) {
                 bytes memory transferMamoFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
-                MamoAccount(account).execute(address(mamoToken), transferMamoFeeData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
 
             // Stake remaining MAMO
@@ -343,11 +362,15 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Approve MultiRewards to spend MAMO
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), remainingMamo);
-                MamoAccount(account).execute(address(mamoToken), approveData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(mamoToken), data: approveData, value: 0});
+                MamoAccount(account).multicall(calls);
 
                 // Stake MAMO
                 bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, remainingMamo);
-                MamoAccount(account).execute(address(multiRewards), stakeData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(multiRewards), data: stakeData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
         }
 
@@ -364,7 +387,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (rewardFee > 0) {
                 bytes memory transferFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), rewardFee);
-                MamoAccount(account).execute(address(rewardToken), transferFeeData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(rewardToken), data: transferFeeData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
 
             // Deposit remaining reward tokens to Morpho strategy
@@ -373,12 +398,16 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Approve Morpho strategy to spend reward tokens
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(morphoStrategy), remainingReward);
-                MamoAccount(account).execute(address(rewardToken), approveData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(rewardToken), data: approveData, value: 0});
+                MamoAccount(account).multicall(calls);
 
                 // Deposit to Morpho strategy
                 bytes memory depositData =
                     abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, remainingReward);
-                MamoAccount(account).execute(address(morphoStrategy), depositData);
+                Call[] memory calls = new Call[](1);
+                calls[0] = Call({target: address(morphoStrategy), data: depositData, value: 0});
+                MamoAccount(account).multicall(calls);
             }
         }
 

@@ -108,7 +108,7 @@ contract DeployMamoStaking is Script {
         IERC20 mamoToken = IERC20(addresses.getAddress("MAMO_TOKEN"));
         IDEXRouter dexRouter = IDEXRouter(addresses.getAddress("DEX_ROUTER"));
         ERC20MoonwellMorphoStrategy morphoStrategy =
-            ERC20MoonwellMorphoStrategy(addresses.getAddress("MORPHO_STRATEGY"));
+            ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MORPHO_STRATEGY")));
         uint256 compoundFee = 100; // 1% compound fee in basis points
 
         vm.startBroadcast(deployer);
