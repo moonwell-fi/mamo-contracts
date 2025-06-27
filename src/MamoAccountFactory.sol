@@ -115,7 +115,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
         // Deploy new account proxy
         account = address(
             new ERC1967Proxy{salt: salt}(
-                accountImplementation, abi.encodeWithSelector(MamoAccount.initialize.selector, user)
+                accountImplementation, abi.encodeWithSelector(MamoAccount.initialize.selector, user, registry, mamoStrategyRegistry)
             )
         );
 

@@ -5,9 +5,8 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
-
-import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
+import {IMulticall} from "@interfaces/IMulticall.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
@@ -198,9 +197,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, amount);
 
         // Call stake through the account's multicall function
-        Call[] memory calls = new Call[](2);
-        calls[0] = Call({target: address(multiRewards), data: approveData, value: 0});
-        calls[1] = Call({target: address(multiRewards), data: stakeData, value: 0});
+        IMulticall.Call[] memory calls = new IMulticall.Call[](2);
+        calls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
+        calls[1] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
         MamoAccount(account).multicall(calls);
 
         emit Deposited(account, msg.sender, amount);
@@ -217,11 +216,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         // Call withdraw through the account's execute function
         bytes memory withdrawData = abi.encodeWithSelector(IMultiRewards.withdraw.selector, amount);
 
-        Call[] memory calls = new Call[](2);
-        calls[0] = Call({target: address(multiRewards), data: withdrawData, value: 0});
+        IMulticall.Call[] memory calls = new IMulticall.Call[](2);
+        calls[0] = IMulticall.Call({target: address(multiRewards), data: withdrawData, value: 0});
 
         // Transfer withdrawn MAMO to account owner
-        calls[1] = Call({
+        calls[1] = IMulticall.Call({
             target: address(mamoToken),
             data: abi.encodeWithSelector(IERC20.transfer.selector, msg.sender, amount),
             value: 0
@@ -252,8 +251,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     function _compound(address account) internal {
         // Claim rewards through account
         bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
-        Call[] memory calls = new Call[](1);
-        calls[0] = Call({target: address(multiRewards), data: getRewardData, value: 0});
+        IMulticall.Call[] memory calls = new IMulticall.Call[](1);
+        calls[0] = IMulticall.Call({target: address(multiRewards), data: getRewardData, value: 0});
         MamoAccount(account).multicall(calls);
 
         // Get MAMO balance
@@ -273,9 +272,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (rewardFee > 0) {
                 bytes memory transferFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), rewardFee);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(rewardToken), data: transferFeeData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory feeCalls = new IMulticall.Call[](1);
+                feeCalls[0] = IMulticall.Call({target: address(rewardToken), data: transferFeeData, value: 0});
+                MamoAccount(account).multicall(feeCalls);
             }
 
             // Swap remaining reward tokens to MAMO
@@ -284,9 +283,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Approve DEX router to spend reward tokens
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(rewardToken), data: approveData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory approveCalls = new IMulticall.Call[](1);
+                approveCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
+                MamoAccount(account).multicall(approveCalls);
 
                 // Swap tokens
                 bytes memory swapData = abi.encodeWithSelector(
@@ -297,9 +296,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                     account,
                     block.timestamp + 300
                 );
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(dexRouter), data: swapData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory swapCalls = new IMulticall.Call[](1);
+                swapCalls[0] = IMulticall.Call({target: address(dexRouter), data: swapData, value: 0});
+                MamoAccount(account).multicall(swapCalls);
             }
         }
 
@@ -309,9 +308,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (mamoFee > 0) {
                 bytes memory transferMamoFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory mamoFeeCalls = new IMulticall.Call[](1);
+                mamoFeeCalls[0] = IMulticall.Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
+                MamoAccount(account).multicall(mamoFeeCalls);
             }
         }
 
@@ -320,15 +319,15 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         if (totalMamo > 0) {
             // Approve MultiRewards to spend MAMO
             bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), totalMamo);
-            Call[] memory calls = new Call[](1);
-            calls[0] = Call({target: address(mamoToken), data: approveData, value: 0});
-            MamoAccount(account).multicall(calls);
+            IMulticall.Call[] memory mamoApproveCalls = new IMulticall.Call[](1);
+            mamoApproveCalls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
+            MamoAccount(account).multicall(mamoApproveCalls);
 
             // Stake MAMO
             bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, totalMamo);
-            Call[] memory calls = new Call[](1);
-            calls[0] = Call({target: address(multiRewards), data: stakeData, value: 0});
-            MamoAccount(account).multicall(calls);
+            IMulticall.Call[] memory stakeCalls = new IMulticall.Call[](1);
+            stakeCalls[0] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
+            MamoAccount(account).multicall(stakeCalls);
         }
 
         emit Compounded(account, mamoBalance, rewardAmounts);
@@ -341,8 +340,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     function _reinvest(address account) internal {
         // Claim rewards through account
         bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
-        Call[] memory calls = new Call[](1);
-        calls[0] = Call({target: address(multiRewards), data: getRewardData, value: 0});
+        IMulticall.Call[] memory calls = new IMulticall.Call[](1);
+        calls[0] = IMulticall.Call({target: address(multiRewards), data: getRewardData, value: 0});
         MamoAccount(account).multicall(calls);
 
         // Get MAMO balance
@@ -355,9 +354,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (mamoFee > 0) {
                 bytes memory transferMamoFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory reinvestMamoFeeCalls = new IMulticall.Call[](1);
+                reinvestMamoFeeCalls[0] = IMulticall.Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
+                MamoAccount(account).multicall(reinvestMamoFeeCalls);
             }
 
             // Stake remaining MAMO
@@ -366,15 +365,15 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Approve MultiRewards to spend MAMO
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), remainingMamo);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(mamoToken), data: approveData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory reinvestMamoApproveCalls = new IMulticall.Call[](1);
+                reinvestMamoApproveCalls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
+                MamoAccount(account).multicall(reinvestMamoApproveCalls);
 
                 // Stake MAMO
                 bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, remainingMamo);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(multiRewards), data: stakeData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory reinvestStakeCalls = new IMulticall.Call[](1);
+                reinvestStakeCalls[0] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
+                MamoAccount(account).multicall(reinvestStakeCalls);
             }
         }
 
@@ -392,9 +391,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             if (rewardFee > 0) {
                 bytes memory transferFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), rewardFee);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(rewardToken), data: transferFeeData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory rewardFeeCalls = new IMulticall.Call[](1);
+                rewardFeeCalls[0] = IMulticall.Call({target: address(rewardToken), data: transferFeeData, value: 0});
+                MamoAccount(account).multicall(rewardFeeCalls);
             }
 
             // Deposit remaining reward tokens to the configured strategy
@@ -403,16 +402,16 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Approve strategy to spend reward tokens
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, remainingReward);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(rewardToken), data: approveData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory strategyApproveCalls = new IMulticall.Call[](1);
+                strategyApproveCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
+                MamoAccount(account).multicall(strategyApproveCalls);
 
                 // Deposit to strategy
                 bytes memory depositData =
                     abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, remainingReward);
-                Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: strategyAddress, data: depositData, value: 0});
-                MamoAccount(account).multicall(calls);
+                IMulticall.Call[] memory strategyDepositCalls = new IMulticall.Call[](1);
+                strategyDepositCalls[0] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
+                MamoAccount(account).multicall(strategyDepositCalls);
             }
         }
 

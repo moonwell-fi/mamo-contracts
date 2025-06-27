@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 
+import {IMulticall} from "@interfaces/IMulticall.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -14,7 +15,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @notice Acts as an intermediary UUPS proxy contract that holds user stakes and enables automated reward management
  * @dev This contract inherits from Multicall for multicall functionality and is designed to be used as a proxy implementation
  */
-contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuard {
+contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuard, IMulticall {
     /**
      * @notice Emitted when a multicall is executed
      * @param initiator The address that initiated the multicall
@@ -22,17 +23,6 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
      */
     event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
-    /**
-     * @notice Struct containing the parameters for a generic call
-     * @param target The address of the target contract
-     * @param data The encoded function call data
-     * @param value The amount of ETH to send with the call
-     */
-    struct Call {
-        address target;
-        bytes data;
-        uint256 value;
-    }
 
     /// @notice The AccountRegistry contract for permission management
     AccountRegistry public registry;
@@ -92,7 +82,7 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
      * @dev Validates that total call values don't exceed msg.value and refunds excess ETH
      * @dev Protected against reentrancy attacks
      */
-    function multicall(Call[] calldata calls) external payable onlyWhitelistedStrategy nonReentrant {
+    function multicall(IMulticall.Call[] calldata calls) external payable onlyWhitelistedStrategy nonReentrant {
         require(calls.length > 0, "Multicall: Empty calls array");
 
         // Calculate total ETH required for all calls
@@ -106,7 +96,7 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
 
         // Execute all calls
         for (uint256 i = 0; i < calls.length; i++) {
-            Call calldata call = calls[i];
+            IMulticall.Call calldata call = calls[i];
             require(call.target != address(0), "Multicall: Invalid target address");
 
             (bool success, bytes memory returnData) = call.target.call{value: call.value}(call.data);

@@ -25,4 +25,7 @@ strategy-factory:
 strategy-multicall:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MulticallIntegrationTest
 
-.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker integration-test
+mamo-staking:
+	forge test --fork-url base --ffi --mc MamoStakingStrategyIntegrationTest -vvv
+
+.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker integration-test mamo-staking
