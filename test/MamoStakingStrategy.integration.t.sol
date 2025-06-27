@@ -11,6 +11,7 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
+import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -22,6 +23,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
     MamoAccountFactory public mamoAccountFactory;
     MamoStakingStrategy public mamoStakingStrategy;
     MamoAccount public userAccount;
+    IMultiRewards public multiRewards;
 
     IERC20 public mamoToken;
     address public user;
@@ -49,8 +51,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoAccountFactory = MamoAccountFactory(deployedContracts[1]);
         mamoStakingStrategy = MamoStakingStrategy(deployedContracts[2]);
 
-        // Get MAMO token from addresses
+        // Get MAMO token and MultiRewards from addresses
         mamoToken = IERC20(addresses.getAddress("MAMO"));
+        multiRewards = IMultiRewards(addresses.getAddress("MULTI_REWARDS"));
 
         // Create test user (only address we create)
         user = makeAddr("testUser");
@@ -95,5 +98,56 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Verify that the tokens were staked in MultiRewards (not sitting in userAccount)
         assertEq(mamoToken.balanceOf(address(userAccount)), 0, "UserAccount should not hold MAMO after staking");
+        
+        // Verify that MultiRewards contract received the MAMO tokens
+        assertEq(mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens");
+        
+        // Verify that the user account has a staking balance in MultiRewards
+        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "UserAccount should have staking balance in MultiRewards");
+    }
+
+    function testRandomUserCanDepositOnBehalfOfOther() public {
+        // Step 1: Approve the MamoStakingStrategy in AccountRegistry (backend role)
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        // Step 2: Whitelist the strategy for the user account (account owner)
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        // Step 3: Create a random depositor (different from the account owner)
+        address randomDepositor = makeAddr("randomDepositor");
+        uint256 depositAmount = 500 * 10 ** 18; // 500 MAMO tokens
+
+        // Step 4: Give MAMO tokens to the random depositor
+        deal(address(mamoToken), randomDepositor, depositAmount);
+
+        // Step 5: Random depositor approves the strategy to spend their MAMO tokens
+        vm.startPrank(randomDepositor);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+        vm.stopPrank();
+
+        // Step 6: Random depositor deposits MAMO tokens on behalf of the user account
+        vm.startPrank(randomDepositor);
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+
+        // Verify that the random depositor's balance decreased
+        assertEq(mamoToken.balanceOf(randomDepositor), 0, "Random depositor MAMO balance should be 0 after deposit");
+
+        // Verify that the tokens were staked in MultiRewards on behalf of the user account
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "UserAccount should not hold MAMO after staking");
+        
+        // Verify that the user account owner didn't spend any tokens
+        assertEq(mamoToken.balanceOf(user), 0, "User should not have spent any tokens");
+        
+        // Verify that MultiRewards contract received the MAMO tokens
+        assertEq(mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens");
+        
+        // Verify that the user account has a staking balance in MultiRewards
+        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "UserAccount should have staking balance in MultiRewards");
     }
 }
