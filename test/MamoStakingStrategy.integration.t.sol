@@ -162,4 +162,215 @@ contract MamoStakingStrategyIntegrationTest is Test {
             "UserAccount should have staking balance in MultiRewards"
         );
     }
+
+    // ========== UNHAPPY PATH TESTS ==========
+
+    function testDepositRevertsWhenAmountIsZero() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        // Attempt to deposit 0 amount
+        vm.startPrank(user);
+        vm.expectRevert("Amount must be greater than 0");
+        mamoStakingStrategy.deposit(address(userAccount), 0);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenAccountIsZeroAddress() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+
+        // Attempt to deposit to zero address
+        vm.expectRevert("Invalid account");
+        mamoStakingStrategy.deposit(address(0), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenContractIsPaused() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+        vm.stopPrank();
+
+        // Pause the contract
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        // Attempt to deposit when paused
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenInsufficientBalance() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        // Don't give user enough tokens - they have 0 balance
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+
+        // Attempt to deposit more than balance
+        vm.expectRevert(
+            abi.encodeWithSignature("ERC20InsufficientBalance(address,uint256,uint256)", user, 0, depositAmount)
+        );
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenInsufficientAllowance() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        // Approve less than deposit amount
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount - 1);
+
+        // Attempt to deposit more than allowance
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "ERC20InsufficientAllowance(address,uint256,uint256)",
+                address(mamoStakingStrategy),
+                depositAmount - 1,
+                depositAmount
+            )
+        );
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenAccountIsNotMamoAccount() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        // Create a regular address instead of MamoAccount
+        address regularAccount = makeAddr("regularAccount");
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+
+        // Attempt to deposit to regular address (not a MamoAccount)
+        // This should fail when trying to call multicall on a non-contract address
+        vm.expectRevert();
+        mamoStakingStrategy.deposit(regularAccount, depositAmount);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenStrategyNotApprovedInRegistry() public {
+        // Don't approve the strategy in AccountRegistry
+
+        vm.startPrank(user);
+        // This should fail because the strategy is not approved
+        vm.expectRevert();
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenStrategyNotWhitelistedForAccount() public {
+        // Setup - approve strategy in registry but don't whitelist for account
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        // Don't whitelist strategy for the user account
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+
+        // This should fail during multicall execution due to whitelisting check
+        vm.expectRevert();
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testDepositRevertsWhenMultiRewardsIsPaused() public {
+        // Setup
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+        vm.stopPrank();
+
+        // Pause MultiRewards contract
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multiRewardsOwner);
+        multiRewards.setPaused(true);
+        vm.stopPrank();
+
+        // Attempt to deposit when MultiRewards is paused
+        vm.startPrank(user);
+        vm.expectRevert("This action cannot be performed while the contract is paused");
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
 }
