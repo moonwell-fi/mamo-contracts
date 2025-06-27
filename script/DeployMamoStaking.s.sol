@@ -93,8 +93,15 @@ contract DeployMamoStaking is Script {
 
         vm.startBroadcast(deployer);
         // Deploy the MamoAccountFactory
-        MamoAccountFactory mamoAccountFactory =
-            new MamoAccountFactory(admin, backend, guardian, registry, mamoStrategyRegistry, accountImplementation);
+        MamoAccountFactory mamoAccountFactory = new MamoAccountFactory(
+            admin,
+            backend,
+            guardian,
+            registry,
+            mamoStrategyRegistry,
+            accountImplementation,
+            1 // Account strategy type ID
+        );
         vm.stopBroadcast();
 
         // Check if the mamo account factory address already exists

@@ -29,6 +29,9 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
     /// @notice The MamoStrategyRegistry contract for implementation validation
     IMamoStrategyRegistry public mamoStrategyRegistry;
 
+    /// @notice The strategy type ID that identifies this account's implementation
+    uint256 public strategyTypeId;
+
     /**
      * @notice Constructor disables initializers in the implementation contract
      */
@@ -42,17 +45,21 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
      * @param _owner The owner of the account
      * @param _registry The AccountRegistry contract
      * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
+     * @param _strategyTypeId The unique identifier for this account type
      */
-    function initialize(address _owner, AccountRegistry _registry, IMamoStrategyRegistry _mamoStrategyRegistry)
-        external
-        initializer
-    {
+    function initialize(
+        address _owner,
+        AccountRegistry _registry,
+        IMamoStrategyRegistry _mamoStrategyRegistry,
+        uint256 _strategyTypeId
+    ) external initializer {
         require(_owner != address(0), "Invalid owner");
         require(address(_registry) != address(0), "Invalid registry");
         require(address(_mamoStrategyRegistry) != address(0), "Invalid strategy registry");
 
         registry = _registry;
         mamoStrategyRegistry = _mamoStrategyRegistry;
+        strategyTypeId = _strategyTypeId;
 
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();

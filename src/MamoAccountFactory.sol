@@ -28,6 +28,9 @@ contract MamoAccountFactory is AccessControlEnumerable {
     /// @notice The MamoAccount implementation contract
     address public immutable accountImplementation;
 
+    /// @notice The strategy type ID for MamoAccount implementations
+    uint256 public immutable accountStrategyTypeId;
+
     /// @notice Mapping of user to their account address
     mapping(address => address) public userAccounts;
 
@@ -52,6 +55,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
      * @param _registry The AccountRegistry contract
      * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
      * @param _accountImplementation The MamoAccount implementation contract
+     * @param _accountStrategyTypeId The strategy type ID for MamoAccount implementations
      */
     constructor(
         address admin,
@@ -59,7 +63,8 @@ contract MamoAccountFactory is AccessControlEnumerable {
         address guardian,
         AccountRegistry _registry,
         IMamoStrategyRegistry _mamoStrategyRegistry,
-        address _accountImplementation
+        address _accountImplementation,
+        uint256 _accountStrategyTypeId
     ) {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
@@ -75,6 +80,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
         registry = _registry;
         mamoStrategyRegistry = _mamoStrategyRegistry;
         accountImplementation = _accountImplementation;
+        accountStrategyTypeId = _accountStrategyTypeId;
     }
 
     /**
@@ -116,7 +122,9 @@ contract MamoAccountFactory is AccessControlEnumerable {
         account = address(
             new ERC1967Proxy{salt: salt}(
                 accountImplementation,
-                abi.encodeWithSelector(MamoAccount.initialize.selector, user, registry, mamoStrategyRegistry)
+                abi.encodeWithSelector(
+                    MamoAccount.initialize.selector, user, registry, mamoStrategyRegistry, accountStrategyTypeId
+                )
             )
         );
 

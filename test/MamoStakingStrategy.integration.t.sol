@@ -868,4 +868,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Verify account has no remaining MAMO tokens
         assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
     }
+
+    function testMamoAccountHasCorrectStrategyTypeId() public {
+        // Verify the MamoAccount has the correct strategyTypeId
+        assertEq(userAccount.strategyTypeId(), 1, "MamoAccount should have strategyTypeId 1");
+    }
 }
