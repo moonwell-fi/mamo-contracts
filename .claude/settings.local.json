@@ -6,7 +6,8 @@
       "Bash(git push:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(forge fmt:*)"
     ]
   },
   "enableAllProjectMcpServers": false

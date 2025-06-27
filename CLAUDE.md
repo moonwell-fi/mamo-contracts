@@ -13,6 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Deploy system**: `make deploy-broadcast` (deploys to Base mainnet with configured parameters)
 - **Generate TypeScript utilities**: `npm run generate-appdata` (generates app data for CowSwap integration)
 - Always look for the right command to run the test by reading the @Makefile file 
+- Always run 'forge fmt' before git commit
 
 ### Common Foundry Commands
 - **Run scripts**: `forge script script/ScriptName.s.sol:ScriptContractName --fork-url base --account <account-name> -vvv`
