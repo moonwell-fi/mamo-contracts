@@ -16,7 +16,6 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 contract SlippagePriceCheckerTest is Test {

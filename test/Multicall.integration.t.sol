@@ -28,11 +28,6 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
-
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployMulticall} from "@script/DeployMulticall.s.sol";
 
 /**
