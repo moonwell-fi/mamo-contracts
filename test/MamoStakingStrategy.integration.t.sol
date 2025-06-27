@@ -11,6 +11,7 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
+import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -83,7 +84,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         deal(address(mamoToken), depositor, amount);
         vm.startPrank(depositor);
         mamoToken.approve(address(mamoStakingStrategy), amount);
-        
+
         // Execute deposit
         mamoStakingStrategy.deposit(account, amount);
         vm.stopPrank();
@@ -404,19 +405,19 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testUserCanWithdrawFullDeposit() public {
         uint256 depositAmount = 1000 * 10 ** 18;
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Verify initial state after deposit
         assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "Should have staked balance");
         assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO tokens after deposit");
-        
+
         // Withdraw full amount
         vm.startPrank(user);
         mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
         vm.stopPrank();
-        
+
         // Verify withdraw was successful
         assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
         assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
@@ -426,19 +427,19 @@ contract MamoStakingStrategyIntegrationTest is Test {
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 withdrawAmount = 400 * 10 ** 18;
         uint256 remainingAmount = depositAmount - withdrawAmount;
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Verify initial state after deposit
         assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "Should have full staked balance");
         assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO tokens after deposit");
-        
+
         // Withdraw partial amount
         vm.startPrank(user);
         mamoStakingStrategy.withdraw(address(userAccount), withdrawAmount);
         vm.stopPrank();
-        
+
         // Verify partial withdraw was successful
         assertEq(multiRewards.balanceOf(address(userAccount)), remainingAmount, "Should have remaining staked balance");
         assertEq(mamoToken.balanceOf(user), withdrawAmount, "User should have received withdrawn MAMO tokens");
@@ -448,10 +449,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testWithdrawRevertsWhenAmountIsZero() public {
         uint256 depositAmount = 1000 * 10 ** 18;
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Attempt to withdraw 0 amount
         vm.startPrank(user);
         vm.expectRevert("Amount must be greater than 0");
@@ -469,16 +470,16 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testWithdrawRevertsWhenContractIsPaused() public {
         uint256 depositAmount = 1000 * 10 ** 18;
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Pause the contract
         address guardian = addresses.getAddress("MAMO_MULTISIG");
         vm.startPrank(guardian);
         mamoStakingStrategy.pause();
         vm.stopPrank();
-        
+
         // Attempt to withdraw when paused
         vm.startPrank(user);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
@@ -489,10 +490,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
     function testWithdrawRevertsWhenInsufficientStakedBalance() public {
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 withdrawAmount = 1500 * 10 ** 18; // More than deposited
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Attempt to withdraw more than staked balance
         vm.startPrank(user);
         vm.expectRevert(); // MultiRewards will revert with insufficient balance
@@ -502,13 +503,13 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testWithdrawRevertsWhenNotAccountOwner() public {
         uint256 depositAmount = 1000 * 10 ** 18;
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Create another user who is not the account owner
         address attacker = makeAddr("attacker");
-        
+
         // Attempt to withdraw as non-owner
         vm.startPrank(attacker);
         vm.expectRevert(); // Should revert because attacker is not the account owner
@@ -518,23 +519,320 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testWithdrawSucceedsWhenMultiRewardsIsPaused() public {
         uint256 depositAmount = 1000 * 10 ** 18;
-        
+
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
-        
+
         // Pause MultiRewards contract
         address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
         vm.startPrank(multiRewardsOwner);
         multiRewards.setPaused(true);
         vm.stopPrank();
-        
+
         // Withdraw should succeed even when MultiRewards is paused (withdraw is not restricted by pause)
         vm.startPrank(user);
         mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
         vm.stopPrank();
-        
+
         // Verify withdraw was successful
         assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
         assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
+    }
+
+    // ========== PROCESS REWARDS TESTS - REINVEST MODE ==========
+
+    // Helper function to setup rewards in MultiRewards contract
+    function _setupRewardsInMultiRewards(address rewardToken, uint256 rewardAmount, uint256 duration) internal {
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+
+        // Add reward token to MultiRewards (as owner)
+        vm.startPrank(multiRewardsOwner);
+
+        // Check if reward token is already added by checking if rewardsDuration > 0
+        (, uint256 existingDuration,,,,) = multiRewards.rewardData(rewardToken);
+        if (existingDuration == 0) {
+            multiRewards.addReward(rewardToken, multiRewardsOwner, duration);
+        }
+
+        // Give reward tokens to the owner and notify reward amount
+        deal(rewardToken, multiRewardsOwner, rewardAmount);
+        IERC20(rewardToken).approve(address(multiRewards), rewardAmount);
+        multiRewards.notifyRewardAmount(rewardToken, rewardAmount);
+
+        vm.stopPrank();
+    }
+
+    // Helper function to deploy a cbBTC strategy for testing
+    function _deployCbBTCStrategy(address strategyOwner) internal returns (address cbBTCStrategy) {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        address cbBTCStrategyFactory = addresses.getAddress("cbBTC_STRATEGY_FACTORY");
+
+        // Deploy strategy using the factory
+        vm.startPrank(backend);
+        cbBTCStrategy = StrategyFactory(cbBTCStrategyFactory).createStrategyForUser(strategyOwner);
+        vm.stopPrank();
+
+        return cbBTCStrategy;
+    }
+
+    // Helper function to setup cbBTC reward token for testing
+    function _setupCbBTCRewardToken(address strategyOwner) internal returns (address cbBTCStrategy) {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        address cbBTC = addresses.getAddress("cbBTC");
+
+        // Deploy an actual cbBTC strategy for the specified owner
+        cbBTCStrategy = _deployCbBTCStrategy(strategyOwner);
+
+        vm.startPrank(backend);
+        // Add cbBTC as a reward token with the deployed strategy
+        mamoStakingStrategy.addRewardToken(cbBTC, cbBTCStrategy);
+        vm.stopPrank();
+
+        return cbBTCStrategy;
+    }
+
+    function testProcessRewardsReinvestModeWithMamoOnly() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 100 * 10 ** 18;
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup MAMO rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+
+        // Process rewards as backend
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Calculate expected values
+        uint256 compoundFee = mamoStakingStrategy.compoundFee();
+        uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
+        uint256 expectedStakedAmount = earnedRewards - expectedFee;
+
+        // Verify MAMO rewards were claimed and staked after fee deduction
+        assertGt(earnedRewards, 0, "Should have earned some MAMO rewards");
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            initialStakedBalance + expectedStakedAmount,
+            "Should have staked MAMO rewards minus fee"
+        );
+
+        // Verify account has no remaining MAMO tokens
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
+    }
+
+    function testProcessRewardsReinvestModeWithCbBTCRewards() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token for testing - strategy owned by the same user
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
+
+        // Process rewards as backend - this should deposit cbBTC to the deployed strategy
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Verify cbBTC rewards were earned and processed
+        assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
+
+        // Verify account has no remaining cbBTC tokens
+        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no remaining cbBTC");
+
+        // Verify no additional MAMO was staked (only cbBTC processing)
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            initialStakedBalance,
+            "MAMO staked balance should remain unchanged"
+        );
+    }
+
+    function testProcessRewardsFailsWhenStrategyOwnershipMismatch() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Create another user who will own the strategy
+        address otherUser = makeAddr("otherUser");
+
+        // Setup cbBTC reward token for testing - strategy owned by different user
+        address cbBTCStrategy = _setupCbBTCRewardToken(otherUser);
+
+        // Setup and deposit using helper function (user account)
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Process rewards as backend - this should fail because strategy is owned by different user
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        vm.expectRevert(); // Should revert because the strategy owner doesn't match the account owner
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+    }
+
+    function testProcessRewardsReinvestModeWithMamoAndFees() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 100 * 10 ** 18;
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup MAMO rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+
+        // Process rewards as backend
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Calculate expected values
+        uint256 compoundFee = mamoStakingStrategy.compoundFee();
+        uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
+        uint256 expectedStakedAmount = earnedRewards - expectedFee;
+
+        // Verify correct fee calculation and staking
+        if (compoundFee > 0 && earnedRewards > 0) {
+            assertGt(expectedFee, 0, "Fee should be greater than 0 when compound fee is set and rewards exist");
+            assertLt(expectedStakedAmount, earnedRewards, "Staked amount should be less than reward amount due to fee");
+        }
+
+        // Verify MAMO was staked after fee deduction
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            initialStakedBalance + expectedStakedAmount,
+            "Should have staked MAMO rewards minus fee"
+        );
+    }
+
+    function testProcessRewardsRevertsWhenNotBackendRole() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Attempt to process rewards as non-backend user
+        vm.startPrank(user);
+        vm.expectRevert(); // Should revert because user doesn't have BACKEND_ROLE
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+    }
+
+    function testProcessRewardsRevertsWhenContractPaused() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Pause the contract
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        // Attempt to process rewards when paused
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+    }
+
+    function testProcessRewardsDefaultsToReinvestMode() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 100 * 10 ** 18;
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Don't set compound mode - should default to REINVEST (CompoundMode(0))
+
+        // Setup MAMO rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+
+        // Process rewards as backend
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Calculate expected values (should use REINVEST logic)
+        uint256 compoundFee = mamoStakingStrategy.compoundFee();
+        uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
+        uint256 expectedStakedAmount = earnedRewards - expectedFee;
+
+        // Verify MAMO was staked after fee deduction (REINVEST behavior)
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            initialStakedBalance + expectedStakedAmount,
+            "Should have staked MAMO rewards minus fee using REINVEST mode"
+        );
+
+        // Verify account has no remaining MAMO tokens
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
     }
 }
