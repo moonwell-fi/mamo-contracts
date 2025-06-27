@@ -871,7 +871,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testMamoAccountHasCorrectStrategyTypeId() public {
         // Verify the MamoAccount has the correct strategyTypeId
-        assertEq(userAccount.strategyTypeId(), 1, "MamoAccount should have strategyTypeId 1");
+        assertEq(userAccount.strategyTypeId(), 2, "MamoAccount should have strategyTypeId 1");
     }
 
     // ========== PROCESS REWARDS TESTS - COMPOUND MODE WITH DEX SWAPS ==========

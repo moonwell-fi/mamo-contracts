@@ -124,4 +124,21 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
 
         emit MulticallExecuted(msg.sender, calls.length);
     }
+
+    /**
+     * @dev Override the transferOwnership function to update the owner in MamoStrategyRegistry
+     * @param newOwner The address to transfer ownership to
+     */
+    function transferOwnership(address newOwner) public override onlyOwner {
+        mamoStrategyRegistry.updateStrategyOwner(newOwner);
+
+        super.transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Disable the renounceOwnership function since ownership is managed by the registry
+     */
+    function renounceOwnership() public virtual override onlyOwner {
+        revert("Ownership cannot be renounced in this contract");
+    }
 }
