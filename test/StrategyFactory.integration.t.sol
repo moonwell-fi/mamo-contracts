@@ -70,7 +70,7 @@ contract StrategyFactoryIntegrationTest is Test {
 
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
-        backend = addresses.getAddress(config.backend);
+        backend = addresses.getAddress("MAMO_BACKEND");
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin; // Use admin as mamo multisig for testing
