@@ -164,7 +164,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @notice Update DEX router (backend only)
      * @param newRouter The new DEX router address
      */
-    function setDEXRouter(IDEXRouter newRouter) external onlyRole(BACKEND_ROLE) {
+    function setDEXRouter(IDEXRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(address(newRouter) != address(0), "Invalid router");
 
         address oldRouter = address(dexRouter);
@@ -403,6 +403,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             // Deposit remaining reward tokens to the configured strategy
             uint256 remainingReward = rewardBalance - rewardFee;
             if (remainingReward > 0) {
+                // Validate strategy ownership - strategy must be owned by the same user as the account
+                address accountOwner = Ownable(account).owner();
+                address strategyOwner = Ownable(strategyAddress).owner();
+                require(accountOwner == strategyOwner, "Strategy owner mismatch");
+
                 // Approve strategy to spend reward tokens
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, remainingReward);
