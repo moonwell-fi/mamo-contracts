@@ -873,4 +873,230 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Verify the MamoAccount has the correct strategyTypeId
         assertEq(userAccount.strategyTypeId(), 1, "MamoAccount should have strategyTypeId 1");
     }
+
+    // ========== PROCESS REWARDS TESTS - COMPOUND MODE WITH DEX SWAPS ==========
+
+    function testProcessRewardsCompoundModeWithCbBTCAndDEXSwap() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 50 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token for testing - strategy owned by the same user
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Explicitly set account to COMPOUND mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        vm.stopPrank();
+
+        // Setup MAMO rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
+
+        // Get initial balances before swap
+        uint256 initialMamoBalanceInAccount = mamoToken.balanceOf(address(userAccount));
+        uint256 initialCbBTCBalanceInAccount = IERC20(cbBTC).balanceOf(address(userAccount));
+
+        // Process rewards as backend - this should swap cbBTC to MAMO and compound everything
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Verify both rewards were earned
+        assertGt(earnedMamoRewards, 0, "Should have earned some MAMO rewards");
+        assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
+
+        // Verify the DEX swap occurred - account should have more MAMO than just the original MAMO rewards
+        uint256 finalMamoBalanceInAccount = mamoToken.balanceOf(address(userAccount));
+        assertEq(finalMamoBalanceInAccount, 0, "All MAMO should have been staked after compound");
+
+        // Verify cbBTC was swapped (account should have no cbBTC left)
+        uint256 finalCbBTCBalanceInAccount = IERC20(cbBTC).balanceOf(address(userAccount));
+        assertEq(finalCbBTCBalanceInAccount, 0, "All cbBTC should have been swapped to MAMO");
+
+        // Verify the final staked balance is higher than initial + just MAMO rewards
+        // This proves the cbBTC was swapped to MAMO and then staked
+        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
+        assertGt(
+            finalStakedBalance,
+            initialStakedBalance + earnedMamoRewards,
+            "Final staked balance should include swapped cbBTC converted to MAMO"
+        );
+
+        // Verify the increase in staked balance comes from both MAMO rewards and swapped cbBTC
+        uint256 totalIncrease = finalStakedBalance - initialStakedBalance;
+        assertGt(totalIncrease, earnedMamoRewards, "Total increase should be more than just MAMO rewards due to swap");
+    }
+
+    function testProcessRewardsCompoundModeMultipleTokensDEXSwap() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 50 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token for testing
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to COMPOUND mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        vm.stopPrank();
+
+        // Setup rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get pre-process state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
+
+        // Process rewards - compound mode with DEX swaps
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Verify final state
+        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
+
+        // Check that both reward tokens were processed
+        assertGt(earnedMamoRewards, 0, "Should have earned MAMO rewards");
+        assertGt(earnedCbBTCRewards, 0, "Should have earned cbBTC rewards");
+
+        // Verify all tokens were converted and staked
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "No MAMO should remain in account");
+        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "No cbBTC should remain in account");
+
+        // Verify the compound worked - staked balance should include original MAMO rewards + swapped tokens
+        assertGt(
+            finalStakedBalance,
+            initialStakedBalance + earnedMamoRewards,
+            "Staked balance should include both MAMO rewards and swapped tokens"
+        );
+
+        // Verify the account doesn't hold any reward tokens in its strategy (they should be compounded back to MAMO staking)
+        // The cbBTC strategy should remain unchanged since we're in COMPOUND mode, not REINVEST mode
+        address mToken = addresses.getAddress("MOONWELL_cbBTC");
+        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
+        assertEq(
+            IERC20(mToken).balanceOf(cbBTCStrategy), 0, "cbBTC strategy should not receive deposits in COMPOUND mode"
+        );
+        assertEq(
+            IERC20(morphoVault).balanceOf(cbBTCStrategy),
+            0,
+            "cbBTC strategy should not receive deposits in COMPOUND mode"
+        );
+    }
+
+    function testProcessRewardsCompoundModeZeroRewardsNoDEXSwap() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup cbBTC reward token
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to COMPOUND mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        vm.stopPrank();
+
+        // Don't setup any rewards - so no rewards to claim or swap
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+
+        // Process rewards - should not perform any swaps since there are no rewards
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Verify no changes occurred
+        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
+        assertEq(finalStakedBalance, initialStakedBalance, "Staked balance should remain unchanged with zero rewards");
+
+        // Verify no tokens in account
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no MAMO");
+        address cbBTC = addresses.getAddress("cbBTC");
+        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no cbBTC");
+    }
+
+    function testProcessRewardsCompoundModeVerifyDEXRouterCalls() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token for testing
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to COMPOUND mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        vm.stopPrank();
+
+        // Setup only cbBTC rewards (no MAMO rewards to isolate the swap test)
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Verify cbBTC rewards are available
+        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
+        assertGt(earnedCbBTCRewards, 0, "Should have earned cbBTC rewards");
+
+        // Get initial balances to track the swap
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 initialMamoInAccount = mamoToken.balanceOf(address(userAccount));
+
+        // Process rewards - this should trigger DEX swap from cbBTC to MAMO
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        // Verify the swap occurred by checking final balances
+        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 finalMamoInAccount = mamoToken.balanceOf(address(userAccount));
+        uint256 finalCbBTCInAccount = IERC20(cbBTC).balanceOf(address(userAccount));
+
+        // Verify cbBTC was fully consumed in the swap
+        assertEq(finalCbBTCInAccount, 0, "All cbBTC should have been swapped");
+
+        // Verify account has no remaining MAMO (it was all staked after swap)
+        assertEq(finalMamoInAccount, 0, "All MAMO should have been staked after swap");
+
+        // Verify staked balance increased due to the swap
+        assertGt(finalStakedBalance, initialStakedBalance, "Staked balance should increase from swapped MAMO");
+
+        // The increase should be the result of swapping cbBTC to MAMO
+        uint256 stakingIncrease = finalStakedBalance - initialStakedBalance;
+        assertGt(stakingIncrease, 0, "Should have staked some MAMO from the cbBTC swap");
+    }
 }
