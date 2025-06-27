@@ -127,13 +127,11 @@ contract DeployMamoStaking is Script {
 
         IMultiRewards multiRewards = IMultiRewards(multiRewardsAddr);
         IDEXRouter dexRouter = IDEXRouter(dexRouterAddr);
-        ERC20MoonwellMorphoStrategy morphoStrategy = ERC20MoonwellMorphoStrategy(payable(morphoStrategyAddr));
-        uint256 compoundFee = 100; // 1% compound fee in basis points
 
         vm.startBroadcast(deployer);
         // Deploy the MamoStakingStrategy
         MamoStakingStrategy mamoStakingStrategy =
-            new MamoStakingStrategy(admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter, compoundFee);
+            new MamoStakingStrategy(admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter);
         vm.stopBroadcast();
 
         // Check if the mamo staking strategy address already exists

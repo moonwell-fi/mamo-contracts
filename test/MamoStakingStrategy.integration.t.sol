@@ -619,17 +619,12 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
 
-        // Calculate expected values
-        uint256 compoundFee = mamoStakingStrategy.compoundFee();
-        uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
-        uint256 expectedStakedAmount = earnedRewards - expectedFee;
-
-        // Verify MAMO rewards were claimed and staked after fee deduction
+        // Verify MAMO rewards were claimed and staked
         assertGt(earnedRewards, 0, "Should have earned some MAMO rewards");
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + expectedStakedAmount,
-            "Should have staked MAMO rewards minus fee"
+            initialStakedBalance + earnedRewards,
+            "Should have staked all MAMO rewards"
         );
 
         // Verify account has no remaining MAMO tokens
@@ -679,22 +674,15 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
 
-        // Calculate expected values
-        uint256 compoundFee = mamoStakingStrategy.compoundFee();
-        uint256 expectedMamoFee = (earnedMamoRewards * compoundFee) / 10000;
-        uint256 expectedMamoStakedAmount = earnedMamoRewards - expectedMamoFee;
-        uint256 expectedCbBTCFee = (earnedCbBTCRewards * compoundFee) / 10000;
-        uint256 expectedCbBTCDepositAmount = earnedCbBTCRewards - expectedCbBTCFee;
-
         // Verify both rewards were earned
         assertGt(earnedMamoRewards, 0, "Should have earned some MAMO rewards");
         assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
 
-        // Verify MAMO was restaked in MultiRewards after fee deduction
+        // Verify MAMO was restaked in MultiRewards
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + expectedMamoStakedAmount,
-            "Should have restaked MAMO rewards minus fee"
+            initialStakedBalance + earnedMamoRewards,
+            "Should have restaked all MAMO rewards"
         );
 
         // Verify account has no remaining tokens
@@ -789,39 +777,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
 
-        // Calculate expected values
-        uint256 compoundFee = mamoStakingStrategy.compoundFee();
-        uint256 expectedMamoFee = (earnedMamoRewards * compoundFee) / 10000;
-        uint256 expectedMamoStakedAmount = earnedMamoRewards - expectedMamoFee;
-        uint256 expectedCbBTCFee = (earnedCbBTCRewards * compoundFee) / 10000;
-        uint256 expectedCbBTCDepositAmount = earnedCbBTCRewards - expectedCbBTCFee;
-
-        // Verify correct fee calculation for both tokens
-        if (compoundFee > 0 && earnedMamoRewards > 0) {
-            assertGt(expectedMamoFee, 0, "MAMO fee should be greater than 0 when compound fee is set and rewards exist");
-            assertLt(
-                expectedMamoStakedAmount,
-                earnedMamoRewards,
-                "MAMO staked amount should be less than reward amount due to fee"
-            );
-        }
-
-        if (compoundFee > 0 && earnedCbBTCRewards > 0) {
-            assertGt(
-                expectedCbBTCFee, 0, "cbBTC fee should be greater than 0 when compound fee is set and rewards exist"
-            );
-            assertLt(
-                expectedCbBTCDepositAmount,
-                earnedCbBTCRewards,
-                "cbBTC deposit amount should be less than reward amount due to fee"
-            );
-        }
-
-        // Verify MAMO was restaked after fee deduction
+        // Verify MAMO was restaked
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + expectedMamoStakedAmount,
-            "Should have restaked MAMO rewards minus fee"
+            initialStakedBalance + earnedMamoRewards,
+            "Should have restaked all MAMO rewards"
         );
 
         // Verify account has no remaining tokens
@@ -898,16 +858,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
 
-        // Calculate expected values (should use COMPOUND logic)
-        uint256 compoundFee = mamoStakingStrategy.compoundFee();
-        uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
-        uint256 expectedStakedAmount = earnedRewards - expectedFee;
-
-        // Verify MAMO was staked after fee deduction (COMPOUND behavior)
+        // Verify MAMO was staked (COMPOUND behavior)
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + expectedStakedAmount,
-            "Should have staked MAMO rewards minus fee using COMPOUND mode"
+            initialStakedBalance + earnedRewards,
+            "Should have staked all MAMO rewards using COMPOUND mode"
         );
 
         // Verify account has no remaining MAMO tokens

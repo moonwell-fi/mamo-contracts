@@ -38,9 +38,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice The MAMO token contract
     IERC20 public immutable mamoToken;
 
-    /// @notice The compound fee in basis points (immutable)
-    uint256 public immutable compoundFee;
-
     /// @notice Reward token configuration
     struct RewardToken {
         address token;
@@ -83,7 +80,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param _multiRewards The MultiRewards contract
      * @param _mamoToken The MAMO token contract
      * @param _dexRouter The initial DEX router contract
-     * @param _compoundFee The compound fee in basis points
      */
     constructor(
         address admin,
@@ -92,8 +88,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         AccountRegistry _registry,
         IMultiRewards _multiRewards,
         IERC20 _mamoToken,
-        IDEXRouter _dexRouter,
-        uint256 _compoundFee
+        IDEXRouter _dexRouter
     ) {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
@@ -102,7 +97,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         require(address(_multiRewards) != address(0), "Invalid multiRewards");
         require(address(_mamoToken) != address(0), "Invalid mamoToken");
         require(address(_dexRouter) != address(0), "Invalid dexRouter");
-        require(_compoundFee <= 1000, "Fee too high"); // Max 10%
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -112,7 +106,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         multiRewards = _multiRewards;
         mamoToken = _mamoToken;
         dexRouter = _dexRouter;
-        compoundFee = _compoundFee;
     }
 
     modifier onlyAccountOwner(address account) {
@@ -270,18 +263,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
             if (rewardBalance == 0) continue;
 
-            // Calculate and transfer fee
-            uint256 rewardFee = (rewardBalance * compoundFee) / 10000;
-            if (rewardFee > 0) {
-                bytes memory transferFeeData =
-                    abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), rewardFee);
-                IMulticall.Call[] memory feeCalls = new IMulticall.Call[](1);
-                feeCalls[0] = IMulticall.Call({target: address(rewardToken), data: transferFeeData, value: 0});
-                MamoAccount(account).multicall(feeCalls);
-            }
-
-            // Swap remaining reward tokens to MAMO
-            uint256 remainingReward = rewardBalance - rewardFee;
+            // Swap reward tokens to MAMO
+            uint256 remainingReward = rewardBalance;
             if (remainingReward > 0 && address(rewardToken) != address(mamoToken)) {
                 // Approve DEX router to spend reward tokens
                 bytes memory approveData =
@@ -302,18 +285,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 IMulticall.Call[] memory swapCalls = new IMulticall.Call[](1);
                 swapCalls[0] = IMulticall.Call({target: address(dexRouter), data: swapData, value: 0});
                 MamoAccount(account).multicall(swapCalls);
-            }
-        }
-
-        // Handle MAMO fee
-        if (mamoBalance > 0) {
-            uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
-            if (mamoFee > 0) {
-                bytes memory transferMamoFeeData =
-                    abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
-                IMulticall.Call[] memory mamoFeeCalls = new IMulticall.Call[](1);
-                mamoFeeCalls[0] = IMulticall.Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
-                MamoAccount(account).multicall(mamoFeeCalls);
             }
         }
 
@@ -351,34 +322,20 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         uint256 mamoBalance = mamoToken.balanceOf(account);
         uint256[] memory rewardAmounts = new uint256[](rewardTokens.length);
 
-        // Handle MAMO fee and staking
+        // Stake MAMO
         if (mamoBalance > 0) {
-            uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
-            if (mamoFee > 0) {
-                bytes memory transferMamoFeeData =
-                    abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
-                IMulticall.Call[] memory reinvestMamoFeeCalls = new IMulticall.Call[](1);
-                reinvestMamoFeeCalls[0] =
-                    IMulticall.Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
-                MamoAccount(account).multicall(reinvestMamoFeeCalls);
-            }
+            // Approve MultiRewards to spend MAMO
+            bytes memory approveData =
+                abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), mamoBalance);
+            IMulticall.Call[] memory reinvestMamoApproveCalls = new IMulticall.Call[](1);
+            reinvestMamoApproveCalls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
+            MamoAccount(account).multicall(reinvestMamoApproveCalls);
 
-            // Stake remaining MAMO
-            uint256 remainingMamo = mamoBalance - mamoFee;
-            if (remainingMamo > 0) {
-                // Approve MultiRewards to spend MAMO
-                bytes memory approveData =
-                    abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), remainingMamo);
-                IMulticall.Call[] memory reinvestMamoApproveCalls = new IMulticall.Call[](1);
-                reinvestMamoApproveCalls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
-                MamoAccount(account).multicall(reinvestMamoApproveCalls);
-
-                // Stake MAMO
-                bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, remainingMamo);
-                IMulticall.Call[] memory reinvestStakeCalls = new IMulticall.Call[](1);
-                reinvestStakeCalls[0] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
-                MamoAccount(account).multicall(reinvestStakeCalls);
-            }
+            // Stake MAMO
+            bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, mamoBalance);
+            IMulticall.Call[] memory reinvestStakeCalls = new IMulticall.Call[](1);
+            reinvestStakeCalls[0] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
+            MamoAccount(account).multicall(reinvestStakeCalls);
         }
 
         // Process each reward token
@@ -390,19 +347,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
             if (rewardBalance == 0 || address(rewardToken) == address(mamoToken)) continue;
 
-            // Calculate and transfer fee
-            uint256 rewardFee = (rewardBalance * compoundFee) / 10000;
-            if (rewardFee > 0) {
-                bytes memory transferFeeData =
-                    abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), rewardFee);
-                IMulticall.Call[] memory rewardFeeCalls = new IMulticall.Call[](1);
-                rewardFeeCalls[0] = IMulticall.Call({target: address(rewardToken), data: transferFeeData, value: 0});
-                MamoAccount(account).multicall(rewardFeeCalls);
-            }
-
-            // Deposit remaining reward tokens to the configured strategy
-            uint256 remainingReward = rewardBalance - rewardFee;
-            if (remainingReward > 0) {
+            // Deposit reward tokens to the configured strategy
+            if (rewardBalance > 0) {
                 // Validate strategy ownership - strategy must be owned by the same user as the account
                 address accountOwner = Ownable(account).owner();
                 address strategyOwner = Ownable(strategyAddress).owner();
@@ -410,14 +356,14 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
                 // Approve strategy to spend reward tokens
                 bytes memory approveData =
-                    abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, remainingReward);
+                    abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, rewardBalance);
                 IMulticall.Call[] memory strategyApproveCalls = new IMulticall.Call[](1);
                 strategyApproveCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
                 MamoAccount(account).multicall(strategyApproveCalls);
 
                 // Deposit to strategy
                 bytes memory depositData =
-                    abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, remainingReward);
+                    abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, rewardBalance);
                 IMulticall.Call[] memory strategyDepositCalls = new IMulticall.Call[](1);
                 strategyDepositCalls[0] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
                 MamoAccount(account).multicall(strategyDepositCalls);
@@ -433,18 +379,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      */
     function getRewardTokens() external view returns (RewardToken[] memory) {
         return rewardTokens;
-    }
-
-    /**
-     * @notice Get reward token addresses only
-     * @return Array of reward token addresses
-     */
-    function getRewardTokenAddresses() external view returns (address[] memory) {
-        address[] memory tokenAddresses = new address[](rewardTokens.length);
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            tokenAddresses[i] = rewardTokens[i].token;
-        }
-        return tokenAddresses;
     }
 
     /**

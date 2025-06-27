@@ -28,7 +28,6 @@ graph TB
     ReinvestFlow --> |Deposit Rewards| ERC20Strategy[🏦 ERC20MoonwellMorphoStrategy]
     
     Registry[📋 AccountRegistry] --> |Whitelist Check| Account
-    Strategy --> |1% Fee| FeeRecipient[💳 Fee Recipient]
     Backend --> |Manages Reward Tokens| Strategy
     Backend --> |Updates DEX Router| Strategy
     
@@ -278,7 +277,6 @@ contract AccountRegistry is Admin {
 - **Automated Processing**: Backend-controlled compound and reinvest functions
 - **Reward Claiming**: Calls [`getReward()`](src/MultiRewards.sol:475) from accounts (accounts are the msg.sender)
 - **Dynamic Reward Processing**: Handles multiple configurable reward tokens
-- **Fee Management**: Immutable compound fee applied to all operations
 - **Configurable Integration**: Updatable DEX router and reward token management
 
 **Architecture Pattern:**
@@ -288,7 +286,6 @@ contract MamoStakingStrategy {
     MultiRewards public immutable multiRewards;
     IERC20 public immutable mamoToken;
     ERC20MoonwellMorphoStrategy public immutable morphoStrategy;
-    uint256 public immutable compoundFee; // Immutable fee in basis points (e.g., 100 = 1%)
     
     /// @notice Dynamic reward token management
     address[] public rewardTokens;
@@ -322,15 +319,12 @@ contract MamoStakingStrategy {
         IERC20 _mamoToken,
         IDEXRouter _dexRouter,
         ERC20MoonwellMorphoStrategy _morphoStrategy,
-        uint256 _compoundFee
     ) {
-        require(_compoundFee <= 1000, "Fee too high"); // Max 10%
         registry = _registry;
         multiRewards = _multiRewards;
         mamoToken = _mamoToken;
         dexRouter = _dexRouter;
         morphoStrategy = _morphoStrategy;
-        compoundFee = _compoundFee;
     }
     
     modifier onlyAccountOwner(address account) {
@@ -484,26 +478,11 @@ contract MamoStakingStrategy {
             
             if (rewardBalance == 0) continue;
             
-            // Calculate and transfer fee
-            uint256 rewardFee = (rewardBalance * compoundFee) / 10000;
-            if (rewardFee > 0) {
-                bytes memory transferFeeData = abi.encodeWithSelector(
-                    IERC20.transfer.selector,
-                    registry.feeCollector(),
-                    rewardFee
-                );
-                MamoAccount(account).multicall(
-                    [address(rewardToken)],
-                    [transferFeeData]
-                );
-            }
-            
-            // Swap remaining reward tokens to MAMO
-            uint256 remainingReward = rewardBalance - rewardFee;
-            if (remainingReward > 0 && address(rewardToken) != address(mamoToken)) {
+            // Swap reward tokens to MAMO
+            if (rewardBalance > 0 && address(rewardToken) != address(mamoToken)) {
                 bytes memory swapData = abi.encodeWithSelector(
                     IDEXRouter.swapExactTokensForTokens.selector,
-                    remainingReward,
+                    rewardBalance,
                     0, // Accept any amount of MAMO
                     [address(rewardToken), address(mamoToken)],
                     account,
@@ -512,22 +491,6 @@ contract MamoStakingStrategy {
                 MamoAccount(account).multicall(
                     [address(dexRouter)],
                     [swapData]
-                );
-            }
-        }
-        
-        // Handle MAMO fee
-        if (mamoBalance > 0) {
-            uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
-            if (mamoFee > 0) {
-                bytes memory transferMamoFeeData = abi.encodeWithSelector(
-                    IERC20.transfer.selector,
-                    registry.feeCollector(),
-                    mamoFee
-                );
-                MamoAccount(account).multicall(
-                    [address(mamoToken)],
-                    [transferMamoFeeData]
                 );
             }
         }
@@ -564,33 +527,16 @@ contract MamoStakingStrategy {
         uint256 mamoBalance = mamoToken.balanceOf(account);
         uint256[] memory rewardAmounts = new uint256[](rewardTokens.length);
         
-        // Handle MAMO fee and staking
+        // Stake MAMO
         if (mamoBalance > 0) {
-            uint256 mamoFee = (mamoBalance * compoundFee) / 10000;
-            if (mamoFee > 0) {
-                bytes memory transferMamoFeeData = abi.encodeWithSelector(
-                    IERC20.transfer.selector,
-                    registry.feeCollector(),
-                    mamoFee
-                );
-                MamoAccount(account).multicall(
-                    [address(mamoToken)],
-                    [transferMamoFeeData]
-                );
-            }
-            
-            // Stake remaining MAMO
-            uint256 remainingMamo = mamoBalance - mamoFee;
-            if (remainingMamo > 0) {
-                bytes memory stakeData = abi.encodeWithSelector(
-                    MultiRewards.stake.selector,
-                    remainingMamo
-                );
-                MamoAccount(account).multicall(
-                    [address(multiRewards)],
-                    [stakeData]
-                );
-            }
+            bytes memory stakeData = abi.encodeWithSelector(
+                MultiRewards.stake.selector,
+                mamoBalance
+            );
+            MamoAccount(account).multicall(
+                [address(multiRewards)],
+                [stakeData]
+            );
         }
         
         // Process each reward token
@@ -601,26 +547,11 @@ contract MamoStakingStrategy {
             
             if (rewardBalance == 0 || address(rewardToken) == address(mamoToken)) continue;
             
-            // Calculate and transfer fee
-            uint256 rewardFee = (rewardBalance * compoundFee) / 10000;
-            if (rewardFee > 0) {
-                bytes memory transferFeeData = abi.encodeWithSelector(
-                    IERC20.transfer.selector,
-                    registry.feeCollector(),
-                    rewardFee
-                );
-                MamoAccount(account).multicall(
-                    [address(rewardToken)],
-                    [transferFeeData]
-                );
-            }
-            
-            // Deposit remaining reward tokens to Morpho strategy
-            uint256 remainingReward = rewardBalance - rewardFee;
-            if (remainingReward > 0) {
+            // Deposit reward tokens to Morpho strategy
+            if (rewardBalance > 0) {
                 bytes memory depositData = abi.encodeWithSelector(
                     ERC20MoonwellMorphoStrategy.deposit.selector,
-                    remainingReward
+                    rewardBalance
                 );
                 MamoAccount(account).multicall(
                     [address(morphoStrategy)],
@@ -651,7 +582,6 @@ sequenceDiagram
     participant Account as User Account
     participant MultiRewards as MultiRewards
     participant DEX as Configurable DEX Router
-    participant Fee as Fee Recipient
 
     Backend->>Strategy: processRewards(accountAddress)
     Strategy->>Account: Trigger getReward() (via multicall)
@@ -659,7 +589,6 @@ sequenceDiagram
     MultiRewards->>Account: Transfer MAMO + Multiple Rewards
     
     Strategy->>Account: Pull rewards (via multicall)
-    Strategy->>Fee: Transfer compound fee (MAMO + All Rewards)
     
     loop For each reward token
         Strategy->>DEX: Swap RewardToken → MAMO
@@ -681,7 +610,6 @@ sequenceDiagram
     participant MultiRewards as MultiRewards
     participant ERC20Strategy as ERC20Strategy
     participant DEX as Configurable DEX Router
-    participant Fee as Fee Recipient
 
     Backend->>Strategy: processRewards(accountAddress)
     Strategy->>Account: Trigger getReward() (via multicall)
@@ -689,7 +617,6 @@ sequenceDiagram
     MultiRewards->>Account: Transfer MAMO + Multiple Rewards
     
     Strategy->>Account: Pull rewards (via multicall)
-    Strategy->>Fee: Transfer compound fee (MAMO + All Rewards)
     
     alt Account Mode: COMPOUND
         loop For each reward token
@@ -815,12 +742,8 @@ sequenceDiagram
    - ✅ Prevents unauthorized strategy interactions while maintaining user control
    - ✅ Emergency pause mechanisms inherited from existing contracts
 
-6. **Fee Protection**:
-   - ✅ Fee percentage fixed at initialization (1%)
-   - ✅ Fee recipient set during strategy deployment
-   - ✅ Transparent fee calculation and deduction
 
-7. **Factory Security**:
+6. **Factory Security**:
    - ✅ Deterministic deployment prevents address collisions
    - ✅ One account per user prevents confusion
    - ✅ Registry integration ensures proper access control
@@ -851,9 +774,8 @@ graph LR
     end
     
     subgraph "Phase 2: Strategy Deployment"
-        D[Deploy Enhanced Staking Strategy] --> E[Configure Fee & Recipients]
-        E --> F[Approve Strategy via Backend]
-        F --> G[Configure Initial Reward Tokens]
+        D[Deploy Enhanced Staking Strategy] --> E[Approve Strategy via Backend]
+        E --> F[Configure Initial Reward Tokens]
     end
     
     subgraph "Phase 3: User Onboarding"
@@ -869,7 +791,7 @@ graph LR
     end
     
     C --> D
-    G --> H
+    F --> H
     K --> L
 ```
 
