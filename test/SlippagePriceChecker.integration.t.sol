@@ -78,14 +78,6 @@ contract SlippagePriceCheckerTest is Test {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
 
-        // todo remove this once FixIsRewardToken is executed
-        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
-        fixIsRewardToken.setAddresses(addresses);
-        fixIsRewardToken.deploy();
-        fixIsRewardToken.build();
-        fixIsRewardToken.simulate();
-        fixIsRewardToken.validate();
-
         amountInByToken[address(well)] = 300e18;
         amountInByToken[address(morpho)] = 3e18;
 

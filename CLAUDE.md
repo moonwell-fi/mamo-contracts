@@ -67,6 +67,9 @@ The project uses Foundry for testing with three primary test types:
 
 Tests fork the Base network to interact with production dependencies like Moonwell and MetaMorpho.
 
+### Testing Best Practices
+- When calling vm.expectRevert on tests, always pass the expected revert string as a parameter
+
 ## Deployment Process
 
 Deployment is managed through Foundry scripts:
