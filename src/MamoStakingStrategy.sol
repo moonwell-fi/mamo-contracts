@@ -38,15 +38,19 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice The MAMO token contract
     IERC20 public immutable mamoToken;
 
-    /// @notice The ERC20MoonwellMorphoStrategy for reinvest mode
-    ERC20MoonwellMorphoStrategy public immutable morphoStrategy;
-
     /// @notice The compound fee in basis points (immutable)
     uint256 public immutable compoundFee;
 
+    /// @notice Reward token configuration
+    struct RewardToken {
+        address token;
+        address strategy;
+    }
+
     /// @notice Dynamic reward token management
-    address[] public rewardTokens;
+    RewardToken[] public rewardTokens;
     mapping(address => bool) public isRewardToken;
+    mapping(address => address) public tokenToStrategy;
 
     /// @notice Configurable DEX router
     IDEXRouter public dexRouter;
@@ -78,7 +82,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param _multiRewards The MultiRewards contract
      * @param _mamoToken The MAMO token contract
      * @param _dexRouter The initial DEX router contract
-     * @param _morphoStrategy The ERC20MoonwellMorphoStrategy contract
      * @param _compoundFee The compound fee in basis points
      */
     constructor(
@@ -89,7 +92,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         IMultiRewards _multiRewards,
         IERC20 _mamoToken,
         IDEXRouter _dexRouter,
-        ERC20MoonwellMorphoStrategy _morphoStrategy,
         uint256 _compoundFee
     ) {
         require(admin != address(0), "Invalid admin address");
@@ -99,7 +101,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         require(address(_multiRewards) != address(0), "Invalid multiRewards");
         require(address(_mamoToken) != address(0), "Invalid mamoToken");
         require(address(_dexRouter) != address(0), "Invalid dexRouter");
-        require(address(_morphoStrategy) != address(0), "Invalid morphoStrategy");
         require(_compoundFee <= 1000, "Fee too high"); // Max 10%
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -110,7 +111,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         multiRewards = _multiRewards;
         mamoToken = _mamoToken;
         dexRouter = _dexRouter;
-        morphoStrategy = _morphoStrategy;
         compoundFee = _compoundFee;
     }
 
@@ -120,15 +120,18 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Add a reward token (backend only)
+     * @notice Add a reward token with its strategy (backend only)
      * @param token The reward token address to add
+     * @param strategy The strategy contract address for this token
      */
-    function addRewardToken(address token) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function addRewardToken(address token, address strategy) external onlyRole(BACKEND_ROLE) whenNotPaused {
         require(token != address(0), "Invalid token");
+        require(strategy != address(0), "Invalid strategy");
         require(!isRewardToken[token], "Token already added");
 
-        rewardTokens.push(token);
+        rewardTokens.push(RewardToken({token: token, strategy: strategy}));
         isRewardToken[token] = true;
+        tokenToStrategy[token] = strategy;
 
         emit RewardTokenAdded(token);
     }
@@ -142,7 +145,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
         // Find and remove token from array
         for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (rewardTokens[i] == token) {
+            if (rewardTokens[i].token == token) {
                 rewardTokens[i] = rewardTokens[rewardTokens.length - 1];
                 rewardTokens.pop();
                 break;
@@ -150,6 +153,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         }
 
         isRewardToken[token] = false;
+        delete tokenToStrategy[token];
 
         emit RewardTokenRemoved(token);
     }
@@ -258,7 +262,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
-            IERC20 rewardToken = IERC20(rewardTokens[i]);
+            IERC20 rewardToken = IERC20(rewardTokens[i].token);
             uint256 rewardBalance = rewardToken.balanceOf(account);
             rewardAmounts[i] = rewardBalance;
 
@@ -376,7 +380,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
-            IERC20 rewardToken = IERC20(rewardTokens[i]);
+            IERC20 rewardToken = IERC20(rewardTokens[i].token);
+            address strategyAddress = rewardTokens[i].strategy;
             uint256 rewardBalance = rewardToken.balanceOf(account);
             rewardAmounts[i] = rewardBalance;
 
@@ -392,21 +397,21 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 MamoAccount(account).multicall(calls);
             }
 
-            // Deposit remaining reward tokens to Morpho strategy
+            // Deposit remaining reward tokens to the configured strategy
             uint256 remainingReward = rewardBalance - rewardFee;
             if (remainingReward > 0) {
-                // Approve Morpho strategy to spend reward tokens
+                // Approve strategy to spend reward tokens
                 bytes memory approveData =
-                    abi.encodeWithSelector(IERC20.approve.selector, address(morphoStrategy), remainingReward);
+                    abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, remainingReward);
                 Call[] memory calls = new Call[](1);
                 calls[0] = Call({target: address(rewardToken), data: approveData, value: 0});
                 MamoAccount(account).multicall(calls);
 
-                // Deposit to Morpho strategy
+                // Deposit to strategy
                 bytes memory depositData =
                     abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, remainingReward);
                 Call[] memory calls = new Call[](1);
-                calls[0] = Call({target: address(morphoStrategy), data: depositData, value: 0});
+                calls[0] = Call({target: strategyAddress, data: depositData, value: 0});
                 MamoAccount(account).multicall(calls);
             }
         }
@@ -416,10 +421,22 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
     /**
      * @notice Get all reward tokens
+     * @return Array of RewardToken structs
+     */
+    function getRewardTokens() external view returns (RewardToken[] memory) {
+        return rewardTokens;
+    }
+
+    /**
+     * @notice Get reward token addresses only
      * @return Array of reward token addresses
      */
-    function getRewardTokens() external view returns (address[] memory) {
-        return rewardTokens;
+    function getRewardTokenAddresses() external view returns (address[] memory) {
+        address[] memory tokenAddresses = new address[](rewardTokens.length);
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            tokenAddresses[i] = rewardTokens[i].token;
+        }
+        return tokenAddresses;
     }
 
     /**
