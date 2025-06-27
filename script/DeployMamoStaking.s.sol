@@ -102,7 +102,7 @@ contract DeployMamoStaking is Script {
             registry,
             mamoStrategyRegistry,
             accountImplementation,
-            1 // Account strategy type ID
+            2 // Account strategy type ID
         );
         vm.stopBroadcast();
 
@@ -208,18 +208,12 @@ contract DeployMamoStaking is Script {
         IMamoStrategyRegistry mamoStrategyRegistry =
             IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
-        // Check if implementation is already whitelisted
-        if (mamoStrategyRegistry.whitelistedImplementations(accountImplementation)) {
-            console.log("MamoAccount implementation already whitelisted");
-            return;
-        }
-
         // Get the admin address for the registry
         address admin = addresses.getAddress("MAMO_MULTISIG");
 
         // Whitelist the MamoAccount implementation with strategy type ID 1
         vm.startPrank(admin);
-        uint256 assignedStrategyTypeId = mamoStrategyRegistry.whitelistImplementation(accountImplementation, 1);
+        uint256 assignedStrategyTypeId = mamoStrategyRegistry.whitelistImplementation(accountImplementation, 0);
         vm.stopPrank();
 
         console.log("Whitelisted MamoAccount implementation with strategy type ID:", assignedStrategyTypeId);

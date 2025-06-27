@@ -34,18 +34,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
     /// @notice Mapping of user to their account address
     mapping(address => address) public userAccounts;
 
-    /// @notice Contract pause state
-    bool public paused;
-
     event AccountCreated(address indexed user, address indexed account, address indexed creator);
-
-    event Paused(address account);
-    event Unpaused(address account);
-
-    modifier whenNotPaused() {
-        require(!paused, "Factory is paused");
-        _;
-    }
 
     /**
      * @notice Constructor sets up the factory with required contracts and roles
@@ -87,7 +76,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
      * @notice Create a new account for the caller
      * @return account The address of the deployed account
      */
-    function createAccount() external whenNotPaused returns (address account) {
+    function createAccount() external returns (address account) {
         return _createAccountForUser(msg.sender, msg.sender);
     }
 
@@ -96,12 +85,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
      * @param user The user to create the account for
      * @return account The address of the deployed account
      */
-    function createAccountForUser(address user)
-        external
-        onlyRole(BACKEND_ROLE)
-        whenNotPaused
-        returns (address account)
-    {
+    function createAccountForUser(address user) external onlyRole(BACKEND_ROLE) returns (address account) {
         return _createAccountForUser(user, msg.sender);
     }
 
@@ -152,21 +136,5 @@ contract MamoAccountFactory is AccessControlEnumerable {
      */
     function hasAccount(address user) external view returns (bool) {
         return userAccounts[user] != address(0);
-    }
-
-    /**
-     * @notice Pause the factory (guardian only)
-     */
-    function pause() external onlyRole(GUARDIAN_ROLE) {
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    /**
-     * @notice Unpause the factory (guardian only)
-     */
-    function unpause() external onlyRole(GUARDIAN_ROLE) {
-        paused = false;
-        emit Unpaused(msg.sender);
     }
 }
