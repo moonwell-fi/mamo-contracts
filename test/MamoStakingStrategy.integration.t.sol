@@ -638,6 +638,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     function testProcessRewardsReinvestModeWithCbBTCRewards() public {
         uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 50 * 10 ** 18; // Add MAMO rewards too
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
 
         // Setup cbBTC reward token for testing - strategy owned by the same user
@@ -651,6 +652,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
         vm.stopPrank();
 
+        // Setup MAMO rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
+
         // Setup cbBTC rewards in MultiRewards
         address cbBTC = addresses.getAddress("cbBTC");
         _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
@@ -660,25 +664,52 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Get initial state
         uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
         uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
 
-        // Process rewards as backend - this should deposit cbBTC to the deployed strategy
+        // Get initial strategy token balances (mToken and Morpho vault shares)
+        address mToken = addresses.getAddress("MOONWELL_cbBTC");
+        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
+        uint256 initialMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
+
+        // Process rewards as backend - this should restake MAMO and deposit cbBTC to strategy
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
 
-        // Verify cbBTC rewards were earned and processed
+        // Calculate expected values
+        uint256 compoundFee = mamoStakingStrategy.compoundFee();
+        uint256 expectedMamoFee = (earnedMamoRewards * compoundFee) / 10000;
+        uint256 expectedMamoStakedAmount = earnedMamoRewards - expectedMamoFee;
+        uint256 expectedCbBTCFee = (earnedCbBTCRewards * compoundFee) / 10000;
+        uint256 expectedCbBTCDepositAmount = earnedCbBTCRewards - expectedCbBTCFee;
+
+        // Verify both rewards were earned
+        assertGt(earnedMamoRewards, 0, "Should have earned some MAMO rewards");
         assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
 
-        // Verify account has no remaining cbBTC tokens
-        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no remaining cbBTC");
-
-        // Verify no additional MAMO was staked (only cbBTC processing)
+        // Verify MAMO was restaked in MultiRewards after fee deduction
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance,
-            "MAMO staked balance should remain unchanged"
+            initialStakedBalance + expectedMamoStakedAmount,
+            "Should have restaked MAMO rewards minus fee"
+        );
+
+        // Verify account has no remaining tokens
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
+        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no remaining cbBTC");
+
+        // Verify cbBTC was deposited to strategy by checking strategy token balances increased
+        // The strategy converts cbBTC to mTokens or deposits to Morpho vault
+        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
+
+        bool strategyBalanceIncreased =
+            (finalMTokenBalance > initialMTokenBalance) || (finalMorphoBalance > initialMorphoBalance);
+        assertTrue(
+            strategyBalanceIncreased, "Strategy should have received deposited cbBTC (as mTokens or Morpho shares)"
         );
     }
 
@@ -718,6 +749,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
     function testProcessRewardsReinvestModeWithMamoAndFees() public {
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 100 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token for testing - strategy owned by the same user
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
 
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
@@ -730,12 +765,23 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup MAMO rewards in MultiRewards
         _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
 
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
         // Fast forward time to accrue rewards
         vm.warp(block.timestamp + 1 days);
 
         // Get initial state
         uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
+        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
+
+        // Get initial strategy token balances (mToken and Morpho vault shares)
+        address mToken = addresses.getAddress("MOONWELL_cbBTC");
+        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
+        uint256 initialMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
 
         // Process rewards as backend
         address backend = addresses.getAddress("MAMO_BACKEND");
@@ -745,20 +791,52 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Calculate expected values
         uint256 compoundFee = mamoStakingStrategy.compoundFee();
-        uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
-        uint256 expectedStakedAmount = earnedRewards - expectedFee;
+        uint256 expectedMamoFee = (earnedMamoRewards * compoundFee) / 10000;
+        uint256 expectedMamoStakedAmount = earnedMamoRewards - expectedMamoFee;
+        uint256 expectedCbBTCFee = (earnedCbBTCRewards * compoundFee) / 10000;
+        uint256 expectedCbBTCDepositAmount = earnedCbBTCRewards - expectedCbBTCFee;
 
-        // Verify correct fee calculation and staking
-        if (compoundFee > 0 && earnedRewards > 0) {
-            assertGt(expectedFee, 0, "Fee should be greater than 0 when compound fee is set and rewards exist");
-            assertLt(expectedStakedAmount, earnedRewards, "Staked amount should be less than reward amount due to fee");
+        // Verify correct fee calculation for both tokens
+        if (compoundFee > 0 && earnedMamoRewards > 0) {
+            assertGt(expectedMamoFee, 0, "MAMO fee should be greater than 0 when compound fee is set and rewards exist");
+            assertLt(
+                expectedMamoStakedAmount,
+                earnedMamoRewards,
+                "MAMO staked amount should be less than reward amount due to fee"
+            );
         }
 
-        // Verify MAMO was staked after fee deduction
+        if (compoundFee > 0 && earnedCbBTCRewards > 0) {
+            assertGt(
+                expectedCbBTCFee, 0, "cbBTC fee should be greater than 0 when compound fee is set and rewards exist"
+            );
+            assertLt(
+                expectedCbBTCDepositAmount,
+                earnedCbBTCRewards,
+                "cbBTC deposit amount should be less than reward amount due to fee"
+            );
+        }
+
+        // Verify MAMO was restaked after fee deduction
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + expectedStakedAmount,
-            "Should have staked MAMO rewards minus fee"
+            initialStakedBalance + expectedMamoStakedAmount,
+            "Should have restaked MAMO rewards minus fee"
+        );
+
+        // Verify account has no remaining tokens
+        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
+        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no remaining cbBTC");
+
+        // Verify cbBTC was deposited to strategy by checking strategy token balances increased
+        // The strategy converts cbBTC to mTokens or deposits to Morpho vault
+        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
+
+        bool strategyBalanceIncreased =
+            (finalMTokenBalance > initialMTokenBalance) || (finalMorphoBalance > initialMorphoBalance);
+        assertTrue(
+            strategyBalanceIncreased, "Strategy should have received deposited cbBTC (as mTokens or Morpho shares)"
         );
     }
 
@@ -795,14 +873,14 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
-    function testProcessRewardsDefaultsToReinvestMode() public {
+    function testProcessRewardsDefaultsToCompoundMode() public {
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 100 * 10 ** 18;
 
         // Setup and deposit using helper function
         _setupAndDeposit(user, address(userAccount), depositAmount);
 
-        // Don't set compound mode - should default to REINVEST (CompoundMode(0))
+        // Don't set compound mode - should default to COMPOUND (CompoundMode(0))
 
         // Setup MAMO rewards in MultiRewards
         _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
@@ -820,16 +898,16 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
 
-        // Calculate expected values (should use REINVEST logic)
+        // Calculate expected values (should use COMPOUND logic)
         uint256 compoundFee = mamoStakingStrategy.compoundFee();
         uint256 expectedFee = (earnedRewards * compoundFee) / 10000;
         uint256 expectedStakedAmount = earnedRewards - expectedFee;
 
-        // Verify MAMO was staked after fee deduction (REINVEST behavior)
+        // Verify MAMO was staked after fee deduction (COMPOUND behavior)
         assertEq(
             multiRewards.balanceOf(address(userAccount)),
             initialStakedBalance + expectedStakedAmount,
-            "Should have staked MAMO rewards minus fee using REINVEST mode"
+            "Should have staked MAMO rewards minus fee using COMPOUND mode"
         );
 
         // Verify account has no remaining MAMO tokens
