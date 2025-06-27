@@ -78,7 +78,7 @@ contract DeployMamoStaking is Script {
         AccountRegistry registry = AccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
         IMamoStrategyRegistry mamoStrategyRegistry =
             IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        
+
         // Deploy MamoAccount implementation if it doesn't exist
         address accountImplementation;
         if (addresses.isAddressSet("MAMO_ACCOUNT_IMPLEMENTATION")) {
@@ -116,15 +116,15 @@ contract DeployMamoStaking is Script {
         address backend = addresses.getAddress("MAMO_BACKEND");
         address guardian = addresses.getAddress("MAMO_MULTISIG");
         AccountRegistry registry = AccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
-        
+
         // Use MAMO instead of MAMO_TOKEN (different naming convention)
         IERC20 mamoToken = IERC20(addresses.getAddress("MAMO"));
-        
+
         // Deploy missing components if they don't exist
         address multiRewardsAddr = deployMultiRewards(addresses, deployer, address(mamoToken));
         address dexRouterAddr = addresses.getAddress("AERODROME_ROUTER");
         address morphoStrategyAddr = deployMorphoStrategy(addresses, deployer);
-        
+
         IMultiRewards multiRewards = IMultiRewards(multiRewardsAddr);
         IDEXRouter dexRouter = IDEXRouter(dexRouterAddr);
         ERC20MoonwellMorphoStrategy morphoStrategy = ERC20MoonwellMorphoStrategy(payable(morphoStrategyAddr));
@@ -132,9 +132,8 @@ contract DeployMamoStaking is Script {
 
         vm.startBroadcast(deployer);
         // Deploy the MamoStakingStrategy
-        MamoStakingStrategy mamoStakingStrategy = new MamoStakingStrategy(
-            admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter, compoundFee
-        );
+        MamoStakingStrategy mamoStakingStrategy =
+            new MamoStakingStrategy(admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter, compoundFee);
         vm.stopBroadcast();
 
         // Check if the mamo staking strategy address already exists

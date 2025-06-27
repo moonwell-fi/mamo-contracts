@@ -6,8 +6,9 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
-import {IMulticall} from "@interfaces/IMulticall.sol";
+
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+import {IMulticall} from "@interfaces/IMulticall.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -355,7 +356,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 bytes memory transferMamoFeeData =
                     abi.encodeWithSelector(IERC20.transfer.selector, registry.feeCollector(), mamoFee);
                 IMulticall.Call[] memory reinvestMamoFeeCalls = new IMulticall.Call[](1);
-                reinvestMamoFeeCalls[0] = IMulticall.Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
+                reinvestMamoFeeCalls[0] =
+                    IMulticall.Call({target: address(mamoToken), data: transferMamoFeeData, value: 0});
                 MamoAccount(account).multicall(reinvestMamoFeeCalls);
             }
 

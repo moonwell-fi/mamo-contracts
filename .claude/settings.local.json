@@ -1,3 +1,11 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(forge test:*)",
+      "Bash(forge build:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)"
+    ]
+  },
   "enableAllProjectMcpServers": false
 }

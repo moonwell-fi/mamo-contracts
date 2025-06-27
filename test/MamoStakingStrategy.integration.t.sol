@@ -98,12 +98,18 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Verify that the tokens were staked in MultiRewards (not sitting in userAccount)
         assertEq(mamoToken.balanceOf(address(userAccount)), 0, "UserAccount should not hold MAMO after staking");
-        
+
         // Verify that MultiRewards contract received the MAMO tokens
-        assertEq(mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens");
-        
+        assertEq(
+            mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens"
+        );
+
         // Verify that the user account has a staking balance in MultiRewards
-        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "UserAccount should have staking balance in MultiRewards");
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            depositAmount,
+            "UserAccount should have staking balance in MultiRewards"
+        );
     }
 
     function testRandomUserCanDepositOnBehalfOfOther() public {
@@ -140,14 +146,20 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Verify that the tokens were staked in MultiRewards on behalf of the user account
         assertEq(mamoToken.balanceOf(address(userAccount)), 0, "UserAccount should not hold MAMO after staking");
-        
+
         // Verify that the user account owner didn't spend any tokens
         assertEq(mamoToken.balanceOf(user), 0, "User should not have spent any tokens");
-        
+
         // Verify that MultiRewards contract received the MAMO tokens
-        assertEq(mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens");
-        
+        assertEq(
+            mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens"
+        );
+
         // Verify that the user account has a staking balance in MultiRewards
-        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "UserAccount should have staking balance in MultiRewards");
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            depositAmount,
+            "UserAccount should have staking balance in MultiRewards"
+        );
     }
 }

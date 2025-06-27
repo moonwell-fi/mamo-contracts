@@ -3,8 +3,8 @@ pragma solidity 0.8.28;
 
 import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 
-import {IMulticall} from "@interfaces/IMulticall.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {IMulticall} from "@interfaces/IMulticall.sol";
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
@@ -22,7 +22,6 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
      * @param callsCount The number of calls executed
      */
     event MulticallExecuted(address indexed initiator, uint256 callsCount);
-
 
     /// @notice The AccountRegistry contract for permission management
     AccountRegistry public registry;
