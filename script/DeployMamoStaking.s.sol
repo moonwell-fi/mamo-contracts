@@ -42,6 +42,9 @@ contract DeployMamoStaking is Script {
         deployedContracts[1] = deployMamoAccountFactory(addresses, deployer);
         deployedContracts[2] = deployMamoStakingStrategy(addresses, deployer);
 
+        // Whitelist MamoAccount implementation in MamoStrategyRegistry
+        whitelistMamoAccountImplementation(addresses, deployer);
+
         return deployedContracts;
     }
 
@@ -50,11 +53,10 @@ contract DeployMamoStaking is Script {
         address admin = addresses.getAddress("MAMO_MULTISIG");
         address backend = addresses.getAddress("MAMO_BACKEND");
         address guardian = addresses.getAddress("MAMO_MULTISIG");
-        address feeCollector = addresses.getAddress("MAMO_MULTISIG");
 
         vm.startBroadcast(deployer);
         // Deploy the AccountRegistry
-        AccountRegistry accountRegistry = new AccountRegistry(admin, backend, guardian, feeCollector);
+        AccountRegistry accountRegistry = new AccountRegistry(admin, backend, guardian);
         vm.stopBroadcast();
 
         // Check if the account registry address already exists
@@ -190,5 +192,36 @@ contract DeployMamoStaking is Script {
         // If no implementation exists, we need to deploy one
         // For now, return the existing implementation address
         revert("No Morpho strategy implementation found");
+    }
+
+    /**
+     * @notice Whitelists the MamoAccount implementation in the MamoStrategyRegistry
+     * @param addresses The addresses contract
+     * @param deployer The deployer address
+     */
+    function whitelistMamoAccountImplementation(Addresses addresses, address deployer) public {
+        // Get the MamoAccount implementation address
+        address accountImplementation = addresses.getAddress("MAMO_ACCOUNT_IMPLEMENTATION");
+        require(accountImplementation != address(0), "MamoAccount implementation not deployed");
+
+        // Get the MamoStrategyRegistry
+        IMamoStrategyRegistry mamoStrategyRegistry =
+            IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+
+        // Check if implementation is already whitelisted
+        if (mamoStrategyRegistry.whitelistedImplementations(accountImplementation)) {
+            console.log("MamoAccount implementation already whitelisted");
+            return;
+        }
+
+        // Get the admin address for the registry
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+
+        // Whitelist the MamoAccount implementation with strategy type ID 1
+        vm.startPrank(admin);
+        uint256 assignedStrategyTypeId = mamoStrategyRegistry.whitelistImplementation(accountImplementation, 1);
+        vm.stopPrank();
+
+        console.log("Whitelisted MamoAccount implementation with strategy type ID:", assignedStrategyTypeId);
     }
 }

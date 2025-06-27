@@ -208,12 +208,11 @@ contract MamoAccountFactory {
 
 ### 3. AccountRegistry Contract
 
-**Purpose**: Manages caller whitelist and fee collection for the staking system.
+**Purpose**: Manages caller whitelist for the staking system.
 
 **Key Features:**
 - **Strategy Whitelist**: Backend-controlled whitelist of approved strategies
 - **Caller Whitelist**: Controls which whitelisted strategies can interact with accounts (owner-controlled)
-- **Fee Collection**: Backend-controlled fee collector address management
 
 **Updated specification:**
 ```solidity
@@ -224,15 +223,11 @@ contract AccountRegistry is Admin {
     /// @notice Mapping of backend-approved strategies
     mapping(address => bool) public approvedStrategies;
     
-    /// @notice Fee collector address
-    address public feeCollector;
-    
-    /// @notice Backend role for strategy approval and fee collector management
+    /// @notice Backend role for strategy approval
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
     
     event StrategyWhitelisted(address indexed account, address indexed strategy, bool approved);
     event StrategyApproved(address indexed strategy, bool approved);
-    event FeeCollectorUpdated(address indexed oldCollector, address indexed newCollector);
     
     /// @notice Approve a strategy globally (backend only)
     /// @param strategy The strategy address to approve
@@ -241,15 +236,6 @@ contract AccountRegistry is Admin {
         require(strategy != address(0), "Invalid strategy");
         approvedStrategies[strategy] = approved;
         emit StrategyApproved(strategy, approved);
-    }
-    
-    /// @notice Set fee collector address (backend only)
-    /// @param newFeeCollector The new fee collector address
-    function setFeeCollector(address newFeeCollector) external onlyRole(BACKEND_ROLE) {
-        require(newFeeCollector != address(0), "Invalid fee collector");
-        address oldCollector = feeCollector;
-        feeCollector = newFeeCollector;
-        emit FeeCollectorUpdated(oldCollector, newFeeCollector);
     }
     
     /// @notice Whitelist an approved strategy for a specific account (account owner only)

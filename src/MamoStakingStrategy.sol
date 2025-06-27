@@ -123,6 +123,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         require(token != address(0), "Invalid token");
         require(strategy != address(0), "Invalid strategy");
         require(!isRewardToken[token], "Token already added");
+        require(token != address(mamoToken), "Cannot add staking token as a reward token");
 
         rewardTokens.push(RewardToken({token: token, strategy: strategy}));
         isRewardToken[token] = true;
@@ -251,8 +252,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         calls[0] = IMulticall.Call({target: address(multiRewards), data: getRewardData, value: 0});
         MamoAccount(account).multicall(calls);
 
-        // Get MAMO balance
-        uint256 mamoBalance = mamoToken.balanceOf(account);
         uint256[] memory rewardAmounts = new uint256[](rewardTokens.length);
 
         // Process each reward token
@@ -265,7 +264,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
             // Swap reward tokens to MAMO
             uint256 remainingReward = rewardBalance;
-            if (remainingReward > 0 && address(rewardToken) != address(mamoToken)) {
+            if (remainingReward > 0) {
                 // Approve DEX router to spend reward tokens
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
@@ -304,7 +303,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             MamoAccount(account).multicall(stakeCalls);
         }
 
-        emit Compounded(account, mamoBalance, rewardAmounts);
+        emit Compounded(account, totalMamo, rewardAmounts);
     }
 
     /**
