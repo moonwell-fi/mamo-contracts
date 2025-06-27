@@ -65,6 +65,32 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    // Helper function to set up and execute a deposit, returns the deposited amount
+    function _setupAndDeposit(address depositor, address account, uint256 amount) internal returns (uint256) {
+        // Approve strategy in registry
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        // Whitelist strategy for account
+        address accountOwner = MamoAccount(payable(account)).owner();
+        vm.startPrank(accountOwner);
+        accountRegistry.setWhitelistStrategy(account, address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        // Give tokens to depositor and approve
+        deal(address(mamoToken), depositor, amount);
+        vm.startPrank(depositor);
+        mamoToken.approve(address(mamoStakingStrategy), amount);
+        
+        // Execute deposit
+        mamoStakingStrategy.deposit(account, amount);
+        vm.stopPrank();
+
+        return amount;
+    }
+
     function testUserCanDepositIntoStrategy() public {
         // Step 1: Approve the MamoStakingStrategy in AccountRegistry (backend role)
         address backend = addresses.getAddress("MAMO_BACKEND");
@@ -367,10 +393,148 @@ contract MamoStakingStrategyIntegrationTest is Test {
         multiRewards.setPaused(true);
         vm.stopPrank();
 
-        // Attempt to deposit when MultiRewards is paused
+        // Attempt to deposit when MultiRewards is paused (should fail because stake() has notPaused modifier)
         vm.startPrank(user);
         vm.expectRevert("This action cannot be performed while the contract is paused");
         mamoStakingStrategy.deposit(address(userAccount), depositAmount);
         vm.stopPrank();
+    }
+
+    // ========== WITHDRAW TESTS - HAPPY PATH ==========
+
+    function testUserCanWithdrawFullDeposit() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Verify initial state after deposit
+        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "Should have staked balance");
+        assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO tokens after deposit");
+        
+        // Withdraw full amount
+        vm.startPrank(user);
+        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
+        vm.stopPrank();
+        
+        // Verify withdraw was successful
+        assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
+    }
+
+    function testUserCanWithdrawPartialDeposit() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 withdrawAmount = 400 * 10 ** 18;
+        uint256 remainingAmount = depositAmount - withdrawAmount;
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Verify initial state after deposit
+        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "Should have full staked balance");
+        assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO tokens after deposit");
+        
+        // Withdraw partial amount
+        vm.startPrank(user);
+        mamoStakingStrategy.withdraw(address(userAccount), withdrawAmount);
+        vm.stopPrank();
+        
+        // Verify partial withdraw was successful
+        assertEq(multiRewards.balanceOf(address(userAccount)), remainingAmount, "Should have remaining staked balance");
+        assertEq(mamoToken.balanceOf(user), withdrawAmount, "User should have received withdrawn MAMO tokens");
+    }
+
+    // ========== WITHDRAW TESTS - UNHAPPY PATH ==========
+
+    function testWithdrawRevertsWhenAmountIsZero() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Attempt to withdraw 0 amount
+        vm.startPrank(user);
+        vm.expectRevert("Amount must be greater than 0");
+        mamoStakingStrategy.withdraw(address(userAccount), 0);
+        vm.stopPrank();
+    }
+
+    function testWithdrawRevertsWhenAccountIsZeroAddress() public {
+        // Attempt to withdraw from zero address
+        vm.startPrank(user);
+        vm.expectRevert("Invalid account");
+        mamoStakingStrategy.withdraw(address(0), 1000 * 10 ** 18);
+        vm.stopPrank();
+    }
+
+    function testWithdrawRevertsWhenContractIsPaused() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Pause the contract
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+        
+        // Attempt to withdraw when paused
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testWithdrawRevertsWhenInsufficientStakedBalance() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 withdrawAmount = 1500 * 10 ** 18; // More than deposited
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Attempt to withdraw more than staked balance
+        vm.startPrank(user);
+        vm.expectRevert(); // MultiRewards will revert with insufficient balance
+        mamoStakingStrategy.withdraw(address(userAccount), withdrawAmount);
+        vm.stopPrank();
+    }
+
+    function testWithdrawRevertsWhenNotAccountOwner() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Create another user who is not the account owner
+        address attacker = makeAddr("attacker");
+        
+        // Attempt to withdraw as non-owner
+        vm.startPrank(attacker);
+        vm.expectRevert(); // Should revert because attacker is not the account owner
+        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testWithdrawSucceedsWhenMultiRewardsIsPaused() public {
+        uint256 depositAmount = 1000 * 10 ** 18;
+        
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+        
+        // Pause MultiRewards contract
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multiRewardsOwner);
+        multiRewards.setPaused(true);
+        vm.stopPrank();
+        
+        // Withdraw should succeed even when MultiRewards is paused (withdraw is not restricted by pause)
+        vm.startPrank(user);
+        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
+        vm.stopPrank();
+        
+        // Verify withdraw was successful
+        assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
     }
 }

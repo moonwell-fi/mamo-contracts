@@ -58,6 +58,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice Mapping of account to compound mode
     mapping(address => CompoundMode) public accountCompoundMode;
 
+    /// @notice Compound mode enum
     enum CompoundMode {
         COMPOUND, // Convert reward tokens to MAMO and restake everything
         REINVEST // Restake MAMO, deposit other rewards to ERC20Strategy
@@ -115,6 +116,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     modifier onlyAccountOwner(address account) {
+        require(account != address(0), "Invalid account");
         require(Ownable(account).owner() == msg.sender, "Not account owner");
         _;
     }
