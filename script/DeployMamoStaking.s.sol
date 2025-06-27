@@ -6,7 +6,7 @@ import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrateg
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
-import {MultiRewards} from "@contracts/MultiRewards.sol";
+// MultiRewards is deployed using vm.deployCode due to Solidity version compatibility
 
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
@@ -159,15 +159,16 @@ contract DeployMamoStaking is Script {
         address owner = addresses.getAddress("MAMO_MULTISIG");
 
         vm.startBroadcast(deployer);
-        MultiRewards multiRewards = new MultiRewards(owner, stakingToken);
+        bytes memory constructorArgs = abi.encode(owner, stakingToken);
+        address multiRewardsAddr = vm.deployCode("MultiRewards.sol:MultiRewards", constructorArgs);
         vm.stopBroadcast();
 
         if (addresses.isAddressSet("MULTI_REWARDS")) {
-            addresses.changeAddress("MULTI_REWARDS", address(multiRewards), true);
+            addresses.changeAddress("MULTI_REWARDS", multiRewardsAddr, true);
         } else {
-            addresses.addAddress("MULTI_REWARDS", address(multiRewards), true);
+            addresses.addAddress("MULTI_REWARDS", multiRewardsAddr, true);
         }
-        return address(multiRewards);
+        return multiRewardsAddr;
     }
 
     function deployMorphoStrategy(Addresses addresses, address deployer) public returns (address) {
