@@ -16,8 +16,6 @@ contract MamoAccountFactory is AccessControlEnumerable {
     /// @notice Backend role for creating accounts on behalf of users
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
-    /// @notice Guardian role for emergency pause functionality
-    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
     /// @notice The AccountRegistry contract
     AccountRegistry public immutable registry;
@@ -40,7 +38,6 @@ contract MamoAccountFactory is AccessControlEnumerable {
      * @notice Constructor sets up the factory with required contracts and roles
      * @param admin The address to grant the DEFAULT_ADMIN_ROLE to
      * @param backend The address to grant the BACKEND_ROLE to
-     * @param guardian The address to grant the GUARDIAN_ROLE to
      * @param _registry The AccountRegistry contract
      * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
      * @param _accountImplementation The MamoAccount implementation contract
@@ -49,7 +46,6 @@ contract MamoAccountFactory is AccessControlEnumerable {
     constructor(
         address admin,
         address backend,
-        address guardian,
         AccountRegistry _registry,
         IMamoStrategyRegistry _mamoStrategyRegistry,
         address _accountImplementation,
@@ -57,14 +53,12 @@ contract MamoAccountFactory is AccessControlEnumerable {
     ) {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
-        require(guardian != address(0), "Invalid guardian address");
         require(address(_registry) != address(0), "Invalid registry");
         require(address(_mamoStrategyRegistry) != address(0), "Invalid strategy registry");
         require(_accountImplementation != address(0), "Invalid implementation");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
-        _grantRole(GUARDIAN_ROLE, guardian);
 
         registry = _registry;
         mamoStrategyRegistry = _mamoStrategyRegistry;
@@ -100,7 +94,7 @@ contract MamoAccountFactory is AccessControlEnumerable {
         require(userAccounts[user] == address(0), "Account already exists");
 
         // Calculate deterministic address using CREATE2
-        bytes32 salt = keccak256(abi.encodePacked(user, block.timestamp));
+        bytes32 salt = keccak256(abi.encodePacked(user));
 
         // Deploy new account proxy
         account = address(
