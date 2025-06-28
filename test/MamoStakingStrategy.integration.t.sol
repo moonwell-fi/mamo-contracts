@@ -13,6 +13,7 @@ import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -344,7 +345,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         vm.startPrank(user);
         // This should fail because the strategy is not approved
-        vm.expectRevert();
+        vm.expectRevert("Strategy not approved by backend");
         accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
         vm.stopPrank();
     }
@@ -365,7 +366,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoToken.approve(address(mamoStakingStrategy), depositAmount);
 
         // This should fail during multicall execution due to whitelisting check
-        vm.expectRevert();
+        vm.expectRevert("Strategy not whitelisted");
         mamoStakingStrategy.deposit(address(userAccount), depositAmount);
         vm.stopPrank();
     }
@@ -496,7 +497,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Attempt to withdraw more than staked balance
         vm.startPrank(user);
-        vm.expectRevert(); // MultiRewards will revert with insufficient balance
+        vm.expectRevert("SafeMath: subtraction overflow");
         mamoStakingStrategy.withdraw(address(userAccount), withdrawAmount);
         vm.stopPrank();
     }
@@ -512,7 +513,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Attempt to withdraw as non-owner
         vm.startPrank(attacker);
-        vm.expectRevert(); // Should revert because attacker is not the account owner
+        vm.expectRevert("Not account owner");
         mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
         vm.stopPrank();
     }
@@ -730,7 +731,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards as backend - this should fail because strategy is owned by different user
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        vm.expectRevert(); // Should revert because the strategy owner doesn't match the account owner
+        vm.expectRevert("Strategy owner mismatch");
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
     }
@@ -809,7 +810,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Attempt to process rewards as non-backend user
         vm.startPrank(user);
-        vm.expectRevert(); // Should revert because user doesn't have BACKEND_ROLE
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
+            )
+        );
         mamoStakingStrategy.processRewards(address(userAccount));
         vm.stopPrank();
     }
@@ -1099,5 +1104,506 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // The increase should be the result of swapping cbBTC to MAMO
         uint256 stakingIncrease = finalStakedBalance - initialStakedBalance;
         assertGt(stakingIncrease, 0, "Should have staked some MAMO from the cbBTC swap");
+    }
+
+    // ========== ADMINISTRATIVE FUNCTION TESTS ==========
+
+    function testAddRewardTokenSuccessful() public {
+        address newToken = makeAddr("newRewardToken");
+        address newStrategy = makeAddr("newStrategy");
+        address newPool = makeAddr("newPool");
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
+
+        mamoStakingStrategy.addRewardToken(newToken, newStrategy, newPool);
+
+        assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 1, "Reward token count should increase");
+        assertTrue(mamoStakingStrategy.isRewardToken(newToken), "Token should be marked as reward token");
+        assertEq(mamoStakingStrategy.tokenToStrategy(newToken), newStrategy, "Token strategy mapping should be correct");
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWithInvalidToken() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert("Invalid token");
+        mamoStakingStrategy.addRewardToken(address(0), makeAddr("strategy"), makeAddr("pool"));
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWithInvalidStrategy() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert("Invalid strategy");
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), address(0), makeAddr("pool"));
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWithInvalidPool() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert("Invalid pool");
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), address(0));
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenTokenAlreadyAdded() public {
+        address token = makeAddr("rewardToken");
+        address strategy = makeAddr("strategy");
+        address pool = makeAddr("pool");
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        mamoStakingStrategy.addRewardToken(token, strategy, pool);
+
+        vm.expectRevert("Token already added");
+        mamoStakingStrategy.addRewardToken(token, strategy, pool);
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenTokenIsMAMO() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert("Cannot add staking token as a reward token");
+        mamoStakingStrategy.addRewardToken(address(mamoToken), makeAddr("strategy"), makeAddr("pool"));
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenNotBackendRole() public {
+        vm.startPrank(user);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
+            )
+        );
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), makeAddr("pool"));
+
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenPaused() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), makeAddr("pool"));
+
+        vm.stopPrank();
+    }
+
+    function testRemoveRewardTokenSuccessful() public {
+        address token = makeAddr("rewardToken");
+        address strategy = makeAddr("strategy");
+        address pool = makeAddr("pool");
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        mamoStakingStrategy.addRewardToken(token, strategy, pool);
+        uint256 countAfterAdd = mamoStakingStrategy.getRewardTokenCount();
+
+        mamoStakingStrategy.removeRewardToken(token);
+
+        assertEq(mamoStakingStrategy.getRewardTokenCount(), countAfterAdd - 1, "Reward token count should decrease");
+        assertFalse(mamoStakingStrategy.isRewardToken(token), "Token should not be marked as reward token");
+        assertEq(mamoStakingStrategy.tokenToStrategy(token), address(0), "Token strategy mapping should be cleared");
+
+        vm.stopPrank();
+    }
+
+    function testRemoveRewardTokenRevertsWhenTokenNotFound() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert("Token not found");
+        mamoStakingStrategy.removeRewardToken(makeAddr("nonExistentToken"));
+
+        vm.stopPrank();
+    }
+
+    function testRemoveRewardTokenRevertsWhenNotBackendRole() public {
+        vm.startPrank(user);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
+            )
+        );
+        mamoStakingStrategy.removeRewardToken(makeAddr("token"));
+
+        vm.stopPrank();
+    }
+
+    function testRemoveRewardTokenRevertsWhenPaused() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.removeRewardToken(makeAddr("token"));
+
+        vm.stopPrank();
+    }
+
+    function testSetDEXRouterSuccessful() public {
+        address newRouter = makeAddr("newDEXRouter");
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+
+        vm.startPrank(admin);
+
+        address oldRouter = address(mamoStakingStrategy.dexRouter());
+        mamoStakingStrategy.setDEXRouter(ISwapRouter(newRouter));
+
+        assertEq(address(mamoStakingStrategy.dexRouter()), newRouter, "DEX router should be updated");
+
+        vm.stopPrank();
+    }
+
+    function testSetDEXRouterRevertsWithInvalidRouter() public {
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(admin);
+
+        vm.expectRevert("Invalid router");
+        mamoStakingStrategy.setDEXRouter(ISwapRouter(address(0)));
+
+        vm.stopPrank();
+    }
+
+    function testSetDEXRouterRevertsWhenNotAdminRole() public {
+        vm.startPrank(user);
+
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, bytes32(0)));
+        mamoStakingStrategy.setDEXRouter(ISwapRouter(makeAddr("newRouter")));
+
+        vm.stopPrank();
+    }
+
+    // ========== PAUSE/UNPAUSE TESTS ==========
+
+    function testPauseSuccessful() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+
+        assertFalse(mamoStakingStrategy.paused(), "Contract should not be paused initially");
+
+        mamoStakingStrategy.pause();
+
+        assertTrue(mamoStakingStrategy.paused(), "Contract should be paused");
+
+        vm.stopPrank();
+    }
+
+    function testPauseRevertsWhenNotGuardianRole() public {
+        vm.startPrank(user);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
+            )
+        );
+        mamoStakingStrategy.pause();
+
+        vm.stopPrank();
+    }
+
+    function testUnpauseSuccessful() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+
+        mamoStakingStrategy.pause();
+        assertTrue(mamoStakingStrategy.paused(), "Contract should be paused");
+
+        mamoStakingStrategy.unpause();
+        assertFalse(mamoStakingStrategy.paused(), "Contract should be unpaused");
+
+        vm.stopPrank();
+    }
+
+    function testUnpauseRevertsWhenNotGuardianRole() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
+            )
+        );
+        mamoStakingStrategy.unpause();
+
+        vm.stopPrank();
+    }
+
+    // ========== VIEW FUNCTION TESTS ==========
+
+    function testGetRewardTokensReturnsCorrectData() public {
+        address token1 = makeAddr("token1");
+        address strategy1 = makeAddr("strategy1");
+        address pool1 = makeAddr("pool1");
+
+        address token2 = makeAddr("token2");
+        address strategy2 = makeAddr("strategy2");
+        address pool2 = makeAddr("pool2");
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        mamoStakingStrategy.addRewardToken(token1, strategy1, pool1);
+        mamoStakingStrategy.addRewardToken(token2, strategy2, pool2);
+
+        MamoStakingStrategy.RewardToken[] memory rewardTokens = mamoStakingStrategy.getRewardTokens();
+
+        assertTrue(rewardTokens.length >= 2, "Should have at least 2 reward tokens");
+
+        bool found1 = false;
+        bool found2 = false;
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardTokens[i].token == token1) {
+                assertEq(rewardTokens[i].strategy, strategy1, "Strategy1 should match");
+                assertEq(rewardTokens[i].pool, pool1, "Pool1 should match");
+                found1 = true;
+            }
+            if (rewardTokens[i].token == token2) {
+                assertEq(rewardTokens[i].strategy, strategy2, "Strategy2 should match");
+                assertEq(rewardTokens[i].pool, pool2, "Pool2 should match");
+                found2 = true;
+            }
+        }
+
+        assertTrue(found1, "Token1 should be found in reward tokens");
+        assertTrue(found2, "Token2 should be found in reward tokens");
+
+        vm.stopPrank();
+    }
+
+    function testGetRewardTokenCountReturnsCorrectCount() public {
+        uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        mamoStakingStrategy.addRewardToken(makeAddr("token1"), makeAddr("strategy1"), makeAddr("pool1"));
+        assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 1, "Count should increase by 1");
+
+        mamoStakingStrategy.addRewardToken(makeAddr("token2"), makeAddr("strategy2"), makeAddr("pool2"));
+        assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 2, "Count should increase by 2");
+
+        vm.stopPrank();
+    }
+
+    // ========== ROLE-BASED ACCESS CONTROL TESTS ==========
+
+    function testBackendRoleCanProcessRewards() public {
+        _setupAndDeposit(user, address(userAccount), 1000 * 10 ** 18);
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        mamoStakingStrategy.processRewards(address(userAccount));
+
+        vm.stopPrank();
+    }
+
+    function testBackendRoleCanAddRemoveRewardTokens() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        address token = makeAddr("testToken");
+        mamoStakingStrategy.addRewardToken(token, makeAddr("strategy"), makeAddr("pool"));
+        assertTrue(mamoStakingStrategy.isRewardToken(token), "Token should be added");
+
+        mamoStakingStrategy.removeRewardToken(token);
+        assertFalse(mamoStakingStrategy.isRewardToken(token), "Token should be removed");
+
+        vm.stopPrank();
+    }
+
+    function testGuardianRoleCanPauseUnpause() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+
+        mamoStakingStrategy.pause();
+        assertTrue(mamoStakingStrategy.paused(), "Should be paused");
+
+        mamoStakingStrategy.unpause();
+        assertFalse(mamoStakingStrategy.paused(), "Should be unpaused");
+
+        vm.stopPrank();
+    }
+
+    function testAdminRoleCanSetDEXRouter() public {
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(admin);
+
+        address newRouter = makeAddr("newRouter");
+        mamoStakingStrategy.setDEXRouter(ISwapRouter(newRouter));
+        assertEq(address(mamoStakingStrategy.dexRouter()), newRouter, "Router should be updated");
+
+        vm.stopPrank();
+    }
+
+    function testNonPrivilegedUserCannotAccessAdminFunctions() public {
+        vm.startPrank(user);
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
+            )
+        );
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), makeAddr("pool"));
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
+            )
+        );
+        mamoStakingStrategy.removeRewardToken(makeAddr("token"));
+
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, bytes32(0)));
+        mamoStakingStrategy.setDEXRouter(ISwapRouter(makeAddr("router")));
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
+            )
+        );
+        mamoStakingStrategy.pause();
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
+            )
+        );
+        mamoStakingStrategy.unpause();
+
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
+            )
+        );
+        mamoStakingStrategy.processRewards(address(userAccount));
+
+        vm.stopPrank();
+    }
+
+    // ========== COMPOUND MODE TESTS ==========
+
+    function testSetCompoundModeByAccountOwner() public {
+        vm.startPrank(user);
+
+        assertEq(
+            uint256(mamoStakingStrategy.accountCompoundMode(address(userAccount))), 0, "Should default to COMPOUND"
+        );
+
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        assertEq(uint256(mamoStakingStrategy.accountCompoundMode(address(userAccount))), 1, "Should be set to REINVEST");
+
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        assertEq(uint256(mamoStakingStrategy.accountCompoundMode(address(userAccount))), 0, "Should be set to COMPOUND");
+
+        vm.stopPrank();
+    }
+
+    function testSetCompoundModeRevertsWhenNotAccountOwner() public {
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+
+        vm.expectRevert("Not account owner");
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+
+        vm.stopPrank();
+    }
+
+    function testSetCompoundModeRevertsWhenAccountIsZeroAddress() public {
+        vm.startPrank(user);
+
+        vm.expectRevert("Invalid account");
+        mamoStakingStrategy.setCompoundMode(address(0), MamoStakingStrategy.CompoundMode.REINVEST);
+
+        vm.stopPrank();
+    }
+
+    function testSetCompoundModeRevertsWhenPaused() public {
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+
+        vm.stopPrank();
+    }
+
+    // ========== EDGE CASES AND ERROR HANDLING ==========
+
+    function testDepositRevertsWhenMultiRewardsCallFails() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
+        vm.stopPrank();
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multiRewardsOwner);
+        multiRewards.setPaused(true);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        vm.expectRevert("This action cannot be performed while the contract is paused");
+        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.stopPrank();
+    }
+
+    function testProcessRewardsHandlesZeroRewardTokensGracefully() public {
+        _setupAndDeposit(user, address(userAccount), 1000 * 10 ** 18);
+
+        uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
+        uint256 initialBalance = multiRewards.balanceOf(address(userAccount));
+
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.processRewards(address(userAccount));
+        vm.stopPrank();
+
+        assertEq(multiRewards.balanceOf(address(userAccount)), initialBalance, "Balance should remain unchanged");
     }
 }
