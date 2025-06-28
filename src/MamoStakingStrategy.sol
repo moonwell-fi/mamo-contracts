@@ -5,7 +5,8 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
-import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+import {IPool} from "@interfaces/IPool.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IMulticall} from "@interfaces/IMulticall.sol";
@@ -42,6 +43,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     struct RewardToken {
         address token;
         address strategy;
+        address pool; // Pool address for swapping this token to MAMO
     }
 
     /// @notice Dynamic reward token management
@@ -50,7 +52,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     mapping(address => address) public tokenToStrategy;
 
     /// @notice Configurable DEX router
-    IDEXRouter public dexRouter;
+    ISwapRouter public dexRouter;
 
     /// @notice Mapping of account to compound mode
     mapping(address => CompoundMode) public accountCompoundMode;
@@ -88,7 +90,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         AccountRegistry _registry,
         IMultiRewards _multiRewards,
         IERC20 _mamoToken,
-        IDEXRouter _dexRouter
+        ISwapRouter _dexRouter
     ) {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
@@ -115,17 +117,19 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Add a reward token with its strategy (backend only)
+     * @notice Add a reward token with its strategy and pool (backend only)
      * @param token The reward token address to add
      * @param strategy The strategy contract address for this token
+     * @param pool The pool address for swapping this token to MAMO
      */
-    function addRewardToken(address token, address strategy) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function addRewardToken(address token, address strategy, address pool) external onlyRole(BACKEND_ROLE) whenNotPaused {
         require(token != address(0), "Invalid token");
         require(strategy != address(0), "Invalid strategy");
+        require(pool != address(0), "Invalid pool");
         require(!isRewardToken[token], "Token already added");
         require(token != address(mamoToken), "Cannot add staking token as a reward token");
 
-        rewardTokens.push(RewardToken({token: token, strategy: strategy}));
+        rewardTokens.push(RewardToken({token: token, strategy: strategy, pool: pool}));
         isRewardToken[token] = true;
         tokenToStrategy[token] = strategy;
 
@@ -158,7 +162,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @notice Update DEX router (backend only)
      * @param newRouter The new DEX router address
      */
-    function setDEXRouter(IDEXRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setDEXRouter(ISwapRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(address(newRouter) != address(0), "Invalid router");
 
         address oldRouter = address(dexRouter);
@@ -265,16 +269,29 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             // Swap reward tokens to MAMO
             uint256 remainingReward = rewardBalance;
             if (remainingReward > 0) {
-                // Approve DEX router to spend reward tokens and swap in a single multicall
+                // Get tickSpacing from the pool
+                address poolAddress = rewardTokens[i].pool;
+                int24 tickSpacing = _getPoolTickSpacing(poolAddress);
+                
+                // Approve DEX router to spend reward tokens and swap using SwapRouter
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
+                
+                // Create swap parameters
+                ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
+                    tokenIn: address(rewardToken),
+                    tokenOut: address(mamoToken),
+                    tickSpacing: tickSpacing,
+                    recipient: account,
+                    deadline: block.timestamp + 300,
+                    amountIn: remainingReward,
+                    amountOutMinimum: 0, // Accept any amount of MAMO
+                    sqrtPriceLimitX96: 0 // No price limit
+                });
+                
                 bytes memory swapData = abi.encodeWithSelector(
-                    IDEXRouter.swapExactTokensForTokens.selector,
-                    remainingReward,
-                    0, // Accept any amount of MAMO
-                    _getPath(address(rewardToken), address(mamoToken)),
-                    account,
-                    block.timestamp + 300
+                    ISwapRouter.exactInputSingle.selector,
+                    swapParams
                 );
 
                 IMulticall.Call[] memory swapCalls = new IMulticall.Call[](2);
@@ -335,7 +352,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             uint256 rewardBalance = rewardToken.balanceOf(account);
             rewardAmounts[i] = rewardBalance;
 
-            if (rewardBalance == 0 || address(rewardToken) == address(mamoToken)) continue;
+            if (rewardBalance == 0) continue;
 
             // Deposit reward tokens to the configured strategy
             if (rewardBalance > 0) {
@@ -377,15 +394,12 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Internal function to get swap path between two tokens
-     * @param tokenA The input token
-     * @param tokenB The output token
-     * @return path The swap path
+     * @notice Internal function to get the tick spacing from a pool contract
+     * @param pool The pool address
+     * @return tickSpacing The pool tick spacing
      */
-    function _getPath(address tokenA, address tokenB) internal pure returns (address[] memory path) {
-        path = new address[](2);
-        path[0] = tokenA;
-        path[1] = tokenB;
+    function _getPoolTickSpacing(address pool) internal view returns (int24 tickSpacing) {
+        tickSpacing = IPool(pool).tickSpacing();
     }
 
     /**

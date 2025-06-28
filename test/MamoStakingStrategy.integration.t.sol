@@ -584,8 +584,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         cbBTCStrategy = _deployCbBTCStrategy(strategyOwner);
 
         vm.startPrank(backend);
-        // Add cbBTC as a reward token with the deployed strategy
-        mamoStakingStrategy.addRewardToken(cbBTC, cbBTCStrategy);
+        // Add cbBTC as a reward token with the deployed strategy and pool
+        address cbBTCMAMOPool = addresses.getAddress("cbBTC_MAMO_POOL");
+        mamoStakingStrategy.addRewardToken(cbBTC, cbBTCStrategy, cbBTCMAMOPool);
         vm.stopPrank();
 
         return cbBTCStrategy;

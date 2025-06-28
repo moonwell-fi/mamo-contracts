@@ -170,8 +170,13 @@
     "isContract": true
   },
   {
-    "addr": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+    "addr": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
     "name": "AERODROME_ROUTER",
+    "isContract": true
+  },
+  {
+    "addr": "0xe2b3aa806e56603a244bfc111c9474f7dedd03db",
+    "name": "cbBTC_MAMO_POOL",
     "isContract": true
   }
 ]
