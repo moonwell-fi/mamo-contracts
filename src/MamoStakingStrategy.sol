@@ -213,10 +213,12 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
     /**
      * @notice Withdraw MAMO tokens from MultiRewards on behalf of account
+     * @dev This function intentionally does not have the whenNotPaused modifier to ensure users can always
+     *      withdraw their funds in emergency situations, even when the contract is paused
      * @param account The account address
      * @param amount The amount of MAMO to withdraw
      */
-    function withdraw(address account, uint256 amount) external onlyAccountOwner(account) whenNotPaused {
+    function withdraw(address account, uint256 amount) external onlyAccountOwner(account) {
         require(amount > 0, "Amount must be greater than 0");
 
         // Call withdraw through the account's execute function
@@ -356,24 +358,20 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
             if (rewardBalance == 0) continue;
 
-            // Deposit reward tokens to the configured strategy
-            if (rewardBalance > 0) {
-                // Validate strategy ownership - strategy must be owned by the same user as the account
-                address accountOwner = Ownable(account).owner();
-                address strategyOwner = Ownable(strategyAddress).owner();
-                require(accountOwner == strategyOwner, "Strategy owner mismatch");
+            // Validate strategy ownership - strategy must be owned by the same user as the account
+            address accountOwner = Ownable(account).owner();
+            address strategyOwner = Ownable(strategyAddress).owner();
+            require(accountOwner == strategyOwner, "Strategy owner mismatch");
 
-                // Approve strategy to spend reward tokens and deposit in a single multicall
-                bytes memory approveData =
-                    abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, rewardBalance);
-                bytes memory depositData =
-                    abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, rewardBalance);
+            // Approve strategy to spend reward tokens and deposit in a single multicall
+            bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, rewardBalance);
+            bytes memory depositData =
+                abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, rewardBalance);
 
-                IMulticall.Call[] memory strategyCalls = new IMulticall.Call[](2);
-                strategyCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
-                strategyCalls[1] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
-                MamoAccount(account).multicall(strategyCalls);
-            }
+            IMulticall.Call[] memory strategyCalls = new IMulticall.Call[](2);
+            strategyCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
+            strategyCalls[1] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
+            MamoAccount(account).multicall(strategyCalls);
         }
 
         emit Reinvested(account, mamoBalance, rewardAmounts);
@@ -396,15 +394,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Internal function to get the tick spacing from a pool contract
-     * @param pool The pool address
-     * @return tickSpacing The pool tick spacing
-     */
-    function _getPoolTickSpacing(address pool) internal view returns (int24 tickSpacing) {
-        tickSpacing = IPool(pool).tickSpacing();
-    }
-
-    /**
      * @notice Pause the strategy (guardian only)
      */
     function pause() external onlyRole(GUARDIAN_ROLE) {
@@ -416,5 +405,14 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      */
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
+    }
+
+    /**
+     * @notice Internal function to get the tick spacing from a pool contract
+     * @param pool The pool address
+     * @return tickSpacing The pool tick spacing
+     */
+    function _getPoolTickSpacing(address pool) internal view returns (int24 tickSpacing) {
+        tickSpacing = IPool(pool).tickSpacing();
     }
 }

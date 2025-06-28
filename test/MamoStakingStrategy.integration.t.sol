@@ -498,7 +498,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
-    function testWithdrawRevertsWhenContractIsPaused() public {
+    function testWithdrawSucceedsWhenContractIsPaused() public {
         userAccount = _deployUserAccount(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
@@ -512,11 +512,14 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoStakingStrategy.pause();
         vm.stopPrank();
 
-        // Attempt to withdraw when paused
+        // Withdraw should succeed even when contract is paused (emergency access)
         vm.startPrank(user);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
         vm.stopPrank();
+
+        // Verify withdraw was successful
+        assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
     }
 
     function testWithdrawRevertsWhenInsufficientStakedBalance() public {
