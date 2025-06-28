@@ -11,9 +11,10 @@ import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
-import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
+
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
@@ -135,7 +136,7 @@ contract DeployMamoStaking is Script {
         address morphoStrategyAddr = deployMorphoStrategy(addresses, deployer);
 
         IMultiRewards multiRewards = IMultiRewards(multiRewardsAddr);
-        IDEXRouter dexRouter = IDEXRouter(dexRouterAddr);
+        ISwapRouter dexRouter = ISwapRouter(dexRouterAddr);
 
         vm.startBroadcast(deployer);
         // Deploy the MamoStakingStrategy

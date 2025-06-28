@@ -5,8 +5,9 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
-import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+
 import {IPool} from "@interfaces/IPool.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IMulticall} from "@interfaces/IMulticall.sol";
@@ -122,7 +123,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param strategy The strategy contract address for this token
      * @param pool The pool address for swapping this token to MAMO
      */
-    function addRewardToken(address token, address strategy, address pool) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function addRewardToken(address token, address strategy, address pool)
+        external
+        onlyRole(BACKEND_ROLE)
+        whenNotPaused
+    {
         require(token != address(0), "Invalid token");
         require(strategy != address(0), "Invalid strategy");
         require(pool != address(0), "Invalid pool");
@@ -272,11 +277,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 // Get tickSpacing from the pool
                 address poolAddress = rewardTokens[i].pool;
                 int24 tickSpacing = _getPoolTickSpacing(poolAddress);
-                
+
                 // Approve DEX router to spend reward tokens and swap using SwapRouter
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
-                
+
                 // Create swap parameters
                 ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
                     tokenIn: address(rewardToken),
@@ -288,11 +293,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                     amountOutMinimum: 0, // Accept any amount of MAMO
                     sqrtPriceLimitX96: 0 // No price limit
                 });
-                
-                bytes memory swapData = abi.encodeWithSelector(
-                    ISwapRouter.exactInputSingle.selector,
-                    swapParams
-                );
+
+                bytes memory swapData = abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector, swapParams);
 
                 IMulticall.Call[] memory swapCalls = new IMulticall.Call[](2);
                 swapCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
