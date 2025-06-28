@@ -5,22 +5,21 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
-import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
-
 /**
  * @title MamoAccountFactory
  * @notice Factory contract for deploying user accounts with standardized configuration
  * @dev Supports both user self-deployment and backend-initiated deployment
  */
-contract MamoAccountFactory is AccessControlEnumerable {
-    /// @notice Backend role for creating accounts on behalf of users
-    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
+contract MamoAccountFactory {
     /// @notice The AccountRegistry contract
     AccountRegistry public immutable registry;
 
     /// @notice The MamoStrategyRegistry contract
     IMamoStrategyRegistry public immutable mamoStrategyRegistry;
+
+    /// @notice The backend address that can create accounts for users
+    address public immutable mamoBackend;
 
     /// @notice The MamoAccount implementation contract
     address public immutable accountImplementation;
@@ -34,31 +33,26 @@ contract MamoAccountFactory is AccessControlEnumerable {
     event AccountCreated(address indexed user, address indexed account, address indexed creator);
 
     /**
-     * @notice Constructor sets up the factory with required contracts and roles
-     * @param admin The address to grant the DEFAULT_ADMIN_ROLE to
-     * @param backend The address to grant the BACKEND_ROLE to
+     * @notice Constructor sets up the factory with required contracts and backend address
+     * @param _mamoBackend The backend address that can create accounts for users
      * @param _registry The AccountRegistry contract
      * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
      * @param _accountImplementation The MamoAccount implementation contract
      * @param _accountStrategyTypeId The strategy type ID for MamoAccount implementations
      */
     constructor(
-        address admin,
-        address backend,
+        address _mamoBackend,
         AccountRegistry _registry,
         IMamoStrategyRegistry _mamoStrategyRegistry,
         address _accountImplementation,
         uint256 _accountStrategyTypeId
     ) {
-        require(admin != address(0), "Invalid admin address");
-        require(backend != address(0), "Invalid backend address");
+        require(_mamoBackend != address(0), "Invalid backend address");
         require(address(_registry) != address(0), "Invalid registry");
         require(address(_mamoStrategyRegistry) != address(0), "Invalid strategy registry");
         require(_accountImplementation != address(0), "Invalid implementation");
 
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _grantRole(BACKEND_ROLE, backend);
-
+        mamoBackend = _mamoBackend;
         registry = _registry;
         mamoStrategyRegistry = _mamoStrategyRegistry;
         accountImplementation = _accountImplementation;
@@ -78,7 +72,8 @@ contract MamoAccountFactory is AccessControlEnumerable {
      * @param user The user to create the account for
      * @return account The address of the deployed account
      */
-    function createAccountForUser(address user) external onlyRole(BACKEND_ROLE) returns (address account) {
+    function createAccountForUser(address user) external returns (address account) {
+        require(msg.sender == mamoBackend, "Only backend can create accounts for users");
         return _createAccountForUser(user, msg.sender);
     }
 
@@ -101,7 +96,10 @@ contract MamoAccountFactory is AccessControlEnumerable {
         // Initialize the account separately after deployment
         MamoAccount(account).initialize(user, registry, mamoStrategyRegistry, accountStrategyTypeId);
 
-        // Register the account
+        // Register the account as a strategy in the MamoStrategyRegistry
+        mamoStrategyRegistry.addStrategy(user, account);
+
+        // Register the account locally
         userAccounts[user] = account;
 
         emit AccountCreated(user, account, creator);

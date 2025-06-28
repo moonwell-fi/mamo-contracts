@@ -12,6 +12,7 @@ import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
@@ -75,9 +76,7 @@ contract DeployMamoStaking is Script {
 
     function deployMamoAccountFactory(Addresses addresses, address deployer) public returns (address) {
         // Get the addresses for the initialization parameters
-        address admin = addresses.getAddress("MAMO_MULTISIG");
         address backend = addresses.getAddress("MAMO_BACKEND");
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
         AccountRegistry registry = AccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
         IMamoStrategyRegistry mamoStrategyRegistry =
             IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
@@ -97,7 +96,6 @@ contract DeployMamoStaking is Script {
         vm.startBroadcast(deployer);
         // Deploy the MamoAccountFactory
         MamoAccountFactory mamoAccountFactory = new MamoAccountFactory(
-            admin,
             backend,
             registry,
             mamoStrategyRegistry,
@@ -105,6 +103,13 @@ contract DeployMamoStaking is Script {
             2 // Account strategy type ID
         );
         vm.stopBroadcast();
+
+        // Grant BACKEND_ROLE to the factory so it can register strategies
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        MamoStrategyRegistry strategyRegistry = MamoStrategyRegistry(address(mamoStrategyRegistry));
+        vm.startPrank(admin);
+        strategyRegistry.grantRole(strategyRegistry.BACKEND_ROLE(), address(mamoAccountFactory));
+        vm.stopPrank();
 
         // Check if the mamo account factory address already exists
         string memory mamoAccountFactoryName = "MAMO_ACCOUNT_FACTORY";
