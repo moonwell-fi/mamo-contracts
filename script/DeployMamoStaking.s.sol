@@ -99,7 +99,6 @@ contract DeployMamoStaking is Script {
         MamoAccountFactory mamoAccountFactory = new MamoAccountFactory(
             admin,
             backend,
-            guardian,
             registry,
             mamoStrategyRegistry,
             accountImplementation,

@@ -59,12 +59,15 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Create test user (only address we create)
         user = makeAddr("testUser");
+    }
 
-        // Deploy a MamoAccount for the test user
+    // Helper function to deploy user account
+    function _deployUserAccount(address userAddress) internal returns (MamoAccount) {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        userAccount = MamoAccount(payable(mamoAccountFactory.createAccountForUser(user)));
+        MamoAccount account = MamoAccount(payable(mamoAccountFactory.createAccountForUser(userAddress)));
         vm.stopPrank();
+        return account;
     }
 
     // Helper function to set up and execute a deposit, returns the deposited amount
@@ -94,6 +97,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testUserCanDepositIntoStrategy() public {
+        // Deploy user account for this test
+        userAccount = _deployUserAccount(user);
+
         // Step 1: Approve the MamoStakingStrategy in AccountRegistry (backend role)
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -141,6 +147,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testRandomUserCanDepositOnBehalfOfOther() public {
+        // Deploy user account for this test
+        userAccount = _deployUserAccount(user);
+
         // Step 1: Approve the MamoStakingStrategy in AccountRegistry (backend role)
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -194,6 +203,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== UNHAPPY PATH TESTS ==========
 
     function testDepositRevertsWhenAmountIsZero() public {
+        userAccount = _deployUserAccount(user);
+
         // Setup
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -231,6 +242,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testDepositRevertsWhenContractIsPaused() public {
+        userAccount = _deployUserAccount(user);
+
         // Setup
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -262,6 +275,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testDepositRevertsWhenInsufficientBalance() public {
+        userAccount = _deployUserAccount(user);
+
         // Setup
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -287,6 +302,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testDepositRevertsWhenInsufficientAllowance() public {
+        userAccount = _deployUserAccount(user);
+
         // Setup
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -341,6 +358,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testDepositRevertsWhenStrategyNotApprovedInRegistry() public {
+        userAccount = _deployUserAccount(user);
+
         // Don't approve the strategy in AccountRegistry
 
         vm.startPrank(user);
@@ -351,6 +370,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testDepositRevertsWhenStrategyNotWhitelistedForAccount() public {
+        userAccount = _deployUserAccount(user);
+
         // Setup - approve strategy in registry but don't whitelist for account
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -372,6 +393,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testDepositRevertsWhenMultiRewardsIsPaused() public {
+        userAccount = _deployUserAccount(user);
+
         // Setup
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -405,6 +428,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== WITHDRAW TESTS - HAPPY PATH ==========
 
     function testUserCanWithdrawFullDeposit() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -425,6 +450,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testUserCanWithdrawPartialDeposit() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 withdrawAmount = 400 * 10 ** 18;
         uint256 remainingAmount = depositAmount - withdrawAmount;
@@ -449,6 +476,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== WITHDRAW TESTS - UNHAPPY PATH ==========
 
     function testWithdrawRevertsWhenAmountIsZero() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -470,6 +499,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testWithdrawRevertsWhenContractIsPaused() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -489,6 +520,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testWithdrawRevertsWhenInsufficientStakedBalance() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 withdrawAmount = 1500 * 10 ** 18; // More than deposited
 
@@ -503,6 +536,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testWithdrawRevertsWhenNotAccountOwner() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -519,6 +554,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testWithdrawSucceedsWhenMultiRewardsIsPaused() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -594,6 +631,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsReinvestModeWithMamoOnly() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 100 * 10 ** 18;
 
@@ -634,6 +673,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsReinvestModeWithCbBTCRewards() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 50 * 10 ** 18; // Add MAMO rewards too
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
@@ -704,6 +745,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsFailsWhenStrategyOwnershipMismatch() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
 
@@ -737,6 +780,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsReinvestModeWithMamoAndFees() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 100 * 10 ** 18;
         uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
@@ -803,6 +848,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsRevertsWhenNotBackendRole() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -820,6 +867,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsRevertsWhenContractPaused() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit using helper function
@@ -840,6 +889,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsDefaultsToCompoundMode() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 100 * 10 ** 18;
 
@@ -876,6 +927,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testMamoAccountHasCorrectStrategyTypeId() public {
+        userAccount = _deployUserAccount(user);
+
         // Verify the MamoAccount has the correct strategyTypeId
         assertEq(userAccount.strategyTypeId(), 2, "MamoAccount should have strategyTypeId 1");
     }
@@ -883,6 +936,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== PROCESS REWARDS TESTS - COMPOUND MODE WITH DEX SWAPS ==========
 
     function testProcessRewardsCompoundModeWithCbBTCAndDEXSwap() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 50 * 10 ** 18;
         uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
@@ -950,6 +1005,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsCompoundModeMultipleTokensDEXSwap() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 50 * 10 ** 18;
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
@@ -1017,6 +1074,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsCompoundModeZeroRewardsNoDEXSwap() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup cbBTC reward token
@@ -1052,6 +1111,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsCompoundModeVerifyDEXRouterCalls() public {
+        userAccount = _deployUserAccount(user);
+
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
 
@@ -1421,6 +1482,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== ROLE-BASED ACCESS CONTROL TESTS ==========
 
     function testBackendRoleCanProcessRewards() public {
+        userAccount = _deployUserAccount(user);
+
         _setupAndDeposit(user, address(userAccount), 1000 * 10 ** 18);
 
         address backend = addresses.getAddress("MAMO_BACKEND");
@@ -1516,6 +1579,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== COMPOUND MODE TESTS ==========
 
     function testSetCompoundModeByAccountOwner() public {
+        userAccount = _deployUserAccount(user);
+
         vm.startPrank(user);
 
         assertEq(
@@ -1532,6 +1597,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testSetCompoundModeRevertsWhenNotAccountOwner() public {
+        userAccount = _deployUserAccount(user);
+
         address attacker = makeAddr("attacker");
         vm.startPrank(attacker);
 
@@ -1551,6 +1618,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testSetCompoundModeRevertsWhenPaused() public {
+        userAccount = _deployUserAccount(user);
+
         address guardian = addresses.getAddress("MAMO_MULTISIG");
         vm.startPrank(guardian);
         mamoStakingStrategy.pause();
@@ -1567,6 +1636,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // ========== EDGE CASES AND ERROR HANDLING ==========
 
     function testDepositRevertsWhenMultiRewardsCallFails() public {
+        userAccount = _deployUserAccount(user);
+
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
         accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
@@ -1594,6 +1665,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     function testProcessRewardsHandlesZeroRewardTokensGracefully() public {
+        userAccount = _deployUserAccount(user);
+
         _setupAndDeposit(user, address(userAccount), 1000 * 10 ** 18);
 
         uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();

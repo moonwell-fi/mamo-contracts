@@ -16,7 +16,6 @@ contract MamoAccountFactory is AccessControlEnumerable {
     /// @notice Backend role for creating accounts on behalf of users
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
-
     /// @notice The AccountRegistry contract
     AccountRegistry public immutable registry;
 
