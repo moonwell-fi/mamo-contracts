@@ -95,15 +95,11 @@ contract MamoAccountFactory is AccessControlEnumerable {
         // Calculate deterministic address using CREATE2
         bytes32 salt = keccak256(abi.encodePacked(user));
 
-        // Deploy new account proxy
-        account = address(
-            new ERC1967Proxy{salt: salt}(
-                accountImplementation,
-                abi.encodeWithSelector(
-                    MamoAccount.initialize.selector, user, registry, mamoStrategyRegistry, accountStrategyTypeId
-                )
-            )
-        );
+        // Deploy new account proxy without initialization
+        account = address(new ERC1967Proxy{salt: salt}(accountImplementation, ""));
+
+        // Initialize the account separately after deployment
+        MamoAccount(account).initialize(user, registry, mamoStrategyRegistry, accountStrategyTypeId);
 
         // Register the account
         userAccounts[user] = account;

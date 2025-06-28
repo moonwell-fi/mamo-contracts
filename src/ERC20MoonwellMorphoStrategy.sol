@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
-import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
