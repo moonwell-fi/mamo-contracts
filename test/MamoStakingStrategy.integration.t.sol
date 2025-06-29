@@ -1933,4 +1933,205 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         return usdcStrategy;
     }
+
+    // ========== ACCOUNT SLIPPAGE TESTS ==========
+
+    function testSetAccountSlippageByAccountOwner() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 customSlippage = 500; // 5%
+
+        vm.startPrank(user);
+
+        // Check default account slippage (should return global slippage)
+        assertEq(mamoStakingStrategy.getAccountSlippage(address(userAccount)), 0, "Should default to global slippage");
+
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
+        assertEq(
+            mamoStakingStrategy.accountSlippageInBps(address(userAccount)),
+            customSlippage,
+            "Should set account slippage"
+        );
+        assertEq(
+            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
+            customSlippage,
+            "Should return account slippage"
+        );
+
+        vm.stopPrank();
+    }
+
+    function testSetAccountSlippageRevertsWhenNotAccountOwner() public {
+        userAccount = _deployUserAccount(user);
+
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+
+        vm.expectRevert("Not account owner");
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), 100);
+
+        vm.stopPrank();
+    }
+
+    function testSetAccountSlippageRevertsWhenAccountIsZeroAddress() public {
+        vm.startPrank(user);
+
+        vm.expectRevert("Invalid account");
+        mamoStakingStrategy.setAccountSlippage(address(0), 100);
+
+        vm.stopPrank();
+    }
+
+    function testSetAccountSlippageRevertsWhenSlippageTooHigh() public {
+        userAccount = _deployUserAccount(user);
+
+        vm.startPrank(user);
+
+        vm.expectRevert("Slippage too high");
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), 2501); // Over 25%
+
+        vm.stopPrank();
+    }
+
+    function testSetAccountSlippageRevertsWhenPaused() public {
+        userAccount = _deployUserAccount(user);
+
+        address guardian = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(guardian);
+        mamoStakingStrategy.pause();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), 100);
+
+        vm.stopPrank();
+    }
+
+    function testSetAccountSlippageEmitsEvent() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 customSlippage = 300; // 3%
+
+        vm.startPrank(user);
+
+        vm.expectEmit(true, false, false, true);
+        emit MamoStakingStrategy.AccountSlippageUpdated(address(userAccount), customSlippage);
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
+
+        vm.stopPrank();
+    }
+
+    function testGetAccountSlippageFallsBackToGlobal() public {
+        userAccount = _deployUserAccount(user);
+
+        // Set global slippage
+        uint256 globalSlippage = 200; // 2%
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.setSlippageTolerance(globalSlippage);
+        vm.stopPrank();
+
+        // Account has no custom slippage set, should return global
+        assertEq(
+            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
+            globalSlippage,
+            "Should return global slippage"
+        );
+        assertEq(mamoStakingStrategy.accountSlippageInBps(address(userAccount)), 0, "Account slippage should be 0");
+    }
+
+    function testAccountSlippageUsedInCompoundMode() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+        uint256 customSlippage = 1000; // 10% - higher than typical
+
+        // Setup cbBTC reward token for testing
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to COMPOUND mode and custom slippage
+        vm.startPrank(user);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
+        vm.stopPrank();
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
+
+        // Verify account has custom slippage set
+        assertEq(
+            mamoStakingStrategy.getAccountSlippage(address(userAccount)), customSlippage, "Should use custom slippage"
+        );
+
+        // Process rewards - should use custom slippage for swaps
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+        vm.stopPrank();
+
+        // Verify rewards were processed (swap occurred with custom slippage)
+        assertGt(earnedCbBTCRewards, 0, "Should have earned cbBTC rewards");
+        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "All cbBTC should have been swapped");
+
+        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
+        assertGt(finalStakedBalance, initialStakedBalance, "Should have staked swapped MAMO");
+    }
+
+    function testAccountSlippageAtMaximumAllowed() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 maxSlippage = 2500; // 25% - maximum allowed
+
+        vm.startPrank(user);
+
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), maxSlippage);
+        assertEq(
+            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
+            maxSlippage,
+            "Should allow maximum slippage of 25%"
+        );
+
+        vm.stopPrank();
+    }
+
+    function testAccountSlippageOverridesGlobalSlippage() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 globalSlippage = 100; // 1%
+        uint256 accountSlippage = 500; // 5%
+
+        // Set global slippage
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        mamoStakingStrategy.setSlippageTolerance(globalSlippage);
+        vm.stopPrank();
+
+        // Set account-specific slippage
+        vm.startPrank(user);
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), accountSlippage);
+        vm.stopPrank();
+
+        // Verify account slippage overrides global
+        assertEq(mamoStakingStrategy.allowedSlippageInBps(), globalSlippage, "Global slippage should be set");
+        assertEq(
+            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
+            accountSlippage,
+            "Should return account slippage, not global"
+        );
+    }
 }

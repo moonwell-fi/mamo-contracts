@@ -64,6 +64,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice Mapping of account to strategy mode
     mapping(address => StrategyMode) public accountStrategyMode;
 
+    /// @notice Mapping of account to allowed slippage in basis points
+    mapping(address => uint256) public accountSlippageInBps;
+
     /// @notice Strategy mode enum
     enum StrategyMode {
         COMPOUND, // Convert reward tokens to MAMO and restake everything
@@ -77,6 +80,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     event Compounded(address indexed account, uint256 mamoAmount);
     event Reinvested(address indexed account, uint256 mamoAmount);
     event StrategyModeUpdated(address indexed account, StrategyMode newMode);
+    event AccountSlippageUpdated(address indexed account, uint256 slippageInBps);
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
     event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
@@ -212,6 +216,21 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
+     * @notice Set slippage tolerance for an account
+     * @param account The account address
+     * @param slippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
+     */
+    function setAccountSlippage(address account, uint256 slippageInBps)
+        external
+        onlyAccountOwner(account)
+        whenNotPaused
+    {
+        require(slippageInBps <= 2500, "Slippage too high"); // Max 25%
+        accountSlippageInBps[account] = slippageInBps;
+        emit AccountSlippageUpdated(account, slippageInBps);
+    }
+
+    /**
      * @notice Deposit MAMO tokens into MultiRewards on behalf of account (permissionless)
      * @param account The account address
      * @param amount The amount of MAMO to deposit
@@ -335,7 +354,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             );
 
             // Apply slippage tolerance to get minimum amount out
-            uint256 amountOutMinimum = (amountOut * (10000 - allowedSlippageInBps)) / 10000;
+            uint256 accountSlippage = _getAccountSlippage(account);
+            uint256 amountOutMinimum = (amountOut * (10000 - accountSlippage)) / 10000;
 
             // Approve DEX router to spend reward tokens and swap using SwapRouter
             bytes memory approveData =
@@ -431,6 +451,15 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
+     * @notice Get the slippage tolerance for an account
+     * @param account The account address
+     * @return The slippage tolerance in basis points (falls back to global if not set)
+     */
+    function getAccountSlippage(address account) external view returns (uint256) {
+        return _getAccountSlippage(account);
+    }
+
+    /**
      * @notice Pause the strategy (guardian only)
      */
     function pause() external onlyRole(GUARDIAN_ROLE) {
@@ -442,6 +471,16 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      */
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
+    }
+
+    /**
+     * @notice Internal function to get the slippage tolerance for an account
+     * @param account The account address
+     * @return The slippage tolerance in basis points (falls back to global if not set)
+     */
+    function _getAccountSlippage(address account) internal view returns (uint256) {
+        uint256 accountSlippage = accountSlippageInBps[account];
+        return accountSlippage > 0 ? accountSlippage : allowedSlippageInBps;
     }
 
     /**
