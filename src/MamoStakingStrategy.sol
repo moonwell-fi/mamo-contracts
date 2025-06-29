@@ -223,15 +223,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         // Transfer MAMO from depositor to account
         mamoToken.safeTransferFrom(msg.sender, account, amount);
 
-        // Approve and stake in MultiRewards on behalf of account
-        bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), amount);
-        bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, amount);
-
-        // Call stake through the account's multicall function
-        IMulticall.Call[] memory calls = new IMulticall.Call[](2);
-        calls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
-        calls[1] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
-        MamoAccount(account).multicall(calls);
+        _stakeMamo(account, amount);
 
         emit Deposited(account, msg.sender, amount);
     }
