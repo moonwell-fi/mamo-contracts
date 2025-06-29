@@ -12,8 +12,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /**
  * @title MamoAccount
- * @notice Acts as an intermediary UUPS proxy contract that holds user stakes and enables automated reward management
- * @dev This contract inherits from Multicall for multicall functionality and is designed to be used as a proxy implementation
+ * @notice Acts as an intermediary contract that holds user stakes and enables automated reward management
+ * @dev This contract is upgradeable but restricted to whitelisted implementations registered in the MamoStrategyRegistry contract
  */
 contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuard, IMulticall {
     /**
@@ -66,12 +66,11 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
     }
 
     /**
-     * @notice Authorize upgrade to new implementation
-     * @param newImplementation The new implementation address
+     * @notice Internal function that authorizes an upgrade to a new implementation
+     * @dev Only callable by Mamo Strategy Registry contract
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {
-        // Check if the new implementation is whitelisted in MamoStrategyRegistry
-        require(mamoStrategyRegistry.whitelistedImplementations(newImplementation), "Implementation not whitelisted");
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
     }
 
     modifier onlyWhitelistedStrategy() {

@@ -115,13 +115,4 @@ contract MamoAccountFactory {
     function getAccountForUser(address user) external view returns (address) {
         return userAccounts[user];
     }
-
-    /**
-     * @notice Check if a user has an account
-     * @param user The user address
-     * @return True if the user has an account
-     */
-    function hasAccount(address user) external view returns (bool) {
-        return userAccounts[user] != address(0);
-    }
 }

@@ -6,6 +6,7 @@ import {AccountRegistry} from "@contracts/AccountRegistry.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 
+import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
 import {IPool} from "@interfaces/IPool.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
@@ -120,11 +121,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param token The reward token address to add
      * @param pool The pool address for swapping this token to MAMO
      */
-    function addRewardToken(address token, address pool)
-        external
-        onlyRole(BACKEND_ROLE)
-        whenNotPaused
-    {
+    function addRewardToken(address token, address pool) external onlyRole(BACKEND_ROLE) whenNotPaused {
         require(token != address(0), "Invalid token");
         require(pool != address(0), "Invalid pool");
         require(!isRewardToken[token], "Token already added");
@@ -239,9 +236,13 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order)
      * @dev We trust the backend to provide the correct user-owned strategies for each reward token
      */
-    function processRewards(address account, address[] calldata rewardStrategies) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function processRewards(address account, address[] calldata rewardStrategies)
+        external
+        onlyRole(BACKEND_ROLE)
+        whenNotPaused
+    {
         require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
-        
+
         CompoundMode accountMode = accountCompoundMode[account];
         if (accountMode == CompoundMode.COMPOUND) {
             _compound(account);
@@ -361,6 +362,10 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             address accountOwner = Ownable(account).owner();
             address strategyOwner = Ownable(strategyAddress).owner();
             require(accountOwner == strategyOwner, "Strategy owner mismatch");
+
+            // Validate strategy token - strategy must handle the same token as the reward token
+            IERC20MoonwellMorphoStrategy strategy = IERC20MoonwellMorphoStrategy(strategyAddress);
+            require(address(strategy.token()) == address(rewardToken), "Strategy token mismatch");
 
             // Approve strategy to spend reward tokens and deposit in a single multicall
             bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, rewardBalance);
