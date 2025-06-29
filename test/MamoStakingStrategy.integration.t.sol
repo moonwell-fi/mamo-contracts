@@ -1696,4 +1696,137 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         assertEq(multiRewards.balanceOf(address(userAccount)), initialBalance, "Balance should remain unchanged");
     }
+
+    function testProcessRewardsRevertsWithWrongStrategyToken() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Deploy a USDC strategy for the same user - this will have wrong token type
+        address usdcStrategy = _deployUSDCStrategy(user);
+
+        // Process rewards with wrong strategy (USDC strategy for cbBTC token) - should fail
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        vm.expectRevert("Strategy token mismatch");
+        address[] memory strategies = new address[](1);
+        strategies[0] = usdcStrategy; // Wrong strategy - USDC strategy for cbBTC rewards
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+        vm.stopPrank();
+    }
+
+    function testProcessRewardsRevertsWithWrongStrategyOwner() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Create another user for wrong ownership test
+        address otherUser = makeAddr("otherUser");
+
+        // Setup cbBTC reward token but with strategy owned by different user
+        address cbBTCStrategy = _setupCbBTCRewardToken(otherUser); // Different owner
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Process rewards with strategy owned by different user - should fail
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        vm.expectRevert("Strategy owner mismatch");
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy; // Strategy owned by otherUser, not user
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+        vm.stopPrank();
+    }
+
+    function testProcessRewardsSucceedsWithCorrectStrategy() public {
+        userAccount = _deployUserAccount(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC reward token with correct owner
+        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, address(userAccount), depositAmount);
+
+        // Set account to REINVEST mode
+        vm.startPrank(user);
+        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        vm.stopPrank();
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Get initial balances
+        uint256 initialMamoStaked = multiRewards.balanceOf(address(userAccount));
+        uint256 earnedCbBTC = multiRewards.earned(address(userAccount), cbBTC);
+
+        // Process rewards with correct strategy - should succeed
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy; // Correct strategy for cbBTC with correct owner
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+        vm.stopPrank();
+
+        // Verify rewards were processed successfully
+        assertGt(earnedCbBTC, 0, "Should have earned cbBTC rewards");
+        assertEq(multiRewards.balanceOf(address(userAccount)), initialMamoStaked, "MAMO staked should remain same in REINVEST mode");
+
+        // Verify cbBTC was deposited to strategy (balance should be greater than 0)
+        address mToken = addresses.getAddress("MOONWELL_cbBTC");
+        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
+        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
+        
+        assertTrue(finalMTokenBalance > 0 || finalMorphoBalance > 0, "Strategy should have received cbBTC deposits");
+    }
+
+    function _deployUSDCStrategy(address strategyOwner) internal returns (address) {
+        address usdcStrategyFactory = addresses.getAddress("USDC_STRATEGY_FACTORY");
+        
+        vm.startPrank(strategyOwner);
+        address usdcStrategy = StrategyFactory(usdcStrategyFactory).createStrategyForUser(strategyOwner);
+        vm.stopPrank();
+        
+        return usdcStrategy;
+    }
 }
