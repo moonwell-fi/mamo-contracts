@@ -61,11 +61,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice The allowed slippage in basis points (e.g., 100 = 1%)
     uint256 public allowedSlippageInBps;
 
-    /// @notice Mapping of account to compound mode
-    mapping(address => CompoundMode) public accountCompoundMode;
+    /// @notice Mapping of account to strategy mode
+    mapping(address => StrategyMode) public accountStrategyMode;
 
-    /// @notice Compound mode enum
-    enum CompoundMode {
+    /// @notice Strategy mode enum
+    enum StrategyMode {
         COMPOUND, // Convert reward tokens to MAMO and restake everything
         REINVEST // Restake MAMO, deposit other rewards to ERC20Strategy
 
@@ -73,10 +73,10 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
     event Deposited(address indexed account, address indexed depositor, uint256 amount);
     event Withdrawn(address indexed account, uint256 amount);
-    event RewardTokenProcessed(address indexed account, address indexed rewardToken, uint256 amount);
+    event RewardTokenProcessed(address indexed account, address indexed rewardToken, uint256 amount, StrategyMode mode);
     event Compounded(address indexed account, uint256 mamoAmount);
     event Reinvested(address indexed account, uint256 mamoAmount);
-    event CompoundModeUpdated(address indexed account, CompoundMode newMode);
+    event StrategyModeUpdated(address indexed account, StrategyMode newMode);
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
     event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
@@ -202,13 +202,13 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Set compound mode for an account
+     * @notice Set strategy mode for an account
      * @param account The account address
-     * @param mode The compound mode to set
+     * @param mode The strategy mode to set
      */
-    function setCompoundMode(address account, CompoundMode mode) external onlyAccountOwner(account) whenNotPaused {
-        accountCompoundMode[account] = mode;
-        emit CompoundModeUpdated(account, mode);
+    function setStrategyMode(address account, StrategyMode mode) external onlyAccountOwner(account) whenNotPaused {
+        accountStrategyMode[account] = mode;
+        emit StrategyModeUpdated(account, mode);
     }
 
     /**
@@ -269,8 +269,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     {
         _claimRewards(account);
 
-        CompoundMode accountMode = accountCompoundMode[account];
-        if (accountMode == CompoundMode.COMPOUND) {
+        StrategyMode accountMode = accountStrategyMode[account];
+        if (accountMode == StrategyMode.COMPOUND) {
             _compound(account);
         } else {
             require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
@@ -360,7 +360,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             swapCalls[1] = IMulticall.Call({target: address(dexRouter), data: swapData, value: 0});
             MamoAccount(account).multicall(swapCalls);
 
-            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
+            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance, StrategyMode.COMPOUND);
         }
 
         // Stake all MAMO
@@ -408,7 +408,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             strategyCalls[1] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
             MamoAccount(account).multicall(strategyCalls);
 
-            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
+            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance, StrategyMode.REINVEST);
         }
 
         emit Reinvested(account, mamoBalance);
