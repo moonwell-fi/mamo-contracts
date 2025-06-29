@@ -284,19 +284,54 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Internal function to compound rewards by converting all rewards to MAMO and restaking
+     * @notice Internal function to claim rewards from MultiRewards contract
      * @param account The account address
      */
-    function _compound(address account) internal {
-        // Claim rewards through account
+    function _claimRewards(address account) internal {
         bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
         IMulticall.Call[] memory calls = new IMulticall.Call[](1);
         calls[0] = IMulticall.Call({target: address(multiRewards), data: getRewardData, value: 0});
         MamoAccount(account).multicall(calls);
+    }
 
-        uint256[] memory rewardAmounts = new uint256[](rewardTokens.length);
+    /**
+     * @notice Internal function to stake MAMO tokens in MultiRewards
+     * @param account The account address
+     * @param amount The amount of MAMO to stake
+     */
+    function _stakeMamo(address account, uint256 amount) internal {
+        if (amount == 0) return;
 
-        // Process each reward token
+        bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), amount);
+        bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, amount);
+
+        IMulticall.Call[] memory calls = new IMulticall.Call[](2);
+        calls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
+        calls[1] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
+        MamoAccount(account).multicall(calls);
+    }
+
+    /**
+     * @notice Internal function to get reward amounts for all reward tokens
+     * @param account The account address
+     * @return rewardAmounts Array of reward amounts for each reward token
+     */
+    function _getRewardAmounts(address account) internal view returns (uint256[] memory rewardAmounts) {
+        rewardAmounts = new uint256[](rewardTokens.length);
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            rewardAmounts[i] = IERC20(rewardTokens[i].token).balanceOf(account);
+        }
+    }
+
+    /**
+     * @notice Internal function to compound rewards by converting all rewards to MAMO and restaking
+     * @param account The account address
+     */
+    function _compound(address account) internal {
+        _claimRewards(account);
+        uint256[] memory rewardAmounts = _getRewardAmounts(account);
+
+        // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
             uint256 rewardBalance = rewardToken.balanceOf(account);
@@ -352,16 +387,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
         // Stake all MAMO
         uint256 totalMamo = mamoToken.balanceOf(account);
-        if (totalMamo > 0) {
-            // Approve MultiRewards to spend MAMO and stake in a single multicall
-            bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), totalMamo);
-            bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, totalMamo);
-
-            IMulticall.Call[] memory mamoCalls = new IMulticall.Call[](2);
-            mamoCalls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
-            mamoCalls[1] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
-            MamoAccount(account).multicall(mamoCalls);
-        }
+        _stakeMamo(account, totalMamo);
 
         emit Compounded(account, totalMamo, rewardAmounts);
     }
@@ -372,28 +398,13 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param rewardStrategies Array of strategy addresses for each reward token
      */
     function _reinvest(address account, address[] calldata rewardStrategies) internal {
-        // Claim rewards through account
-        bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
-        IMulticall.Call[] memory calls = new IMulticall.Call[](1);
-        calls[0] = IMulticall.Call({target: address(multiRewards), data: getRewardData, value: 0});
-        MamoAccount(account).multicall(calls);
+        _claimRewards(account);
 
-        // Get MAMO balance
         uint256 mamoBalance = mamoToken.balanceOf(account);
-        uint256[] memory rewardAmounts = new uint256[](rewardTokens.length);
+        uint256[] memory rewardAmounts = _getRewardAmounts(account);
 
         // Stake MAMO
-        if (mamoBalance > 0) {
-            // Approve MultiRewards to spend MAMO and stake in a single multicall
-            bytes memory approveData =
-                abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), mamoBalance);
-            bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, mamoBalance);
-
-            IMulticall.Call[] memory mamoStakeCalls = new IMulticall.Call[](2);
-            mamoStakeCalls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
-            mamoStakeCalls[1] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
-            MamoAccount(account).multicall(mamoStakeCalls);
-        }
+        _stakeMamo(account, mamoBalance);
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
