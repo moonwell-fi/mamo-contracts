@@ -75,7 +75,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     event Withdrawn(address indexed account, uint256 amount);
     event RewardTokenProcessed(address indexed account, address indexed rewardToken, uint256 amount);
     event Compounded(address indexed account, uint256 mamoAmount);
-    event Reinvested(address indexed account, uint256 mamoAmount, uint256[] rewardAmounts);
+    event Reinvested(address indexed account, uint256 mamoAmount);
     event CompoundModeUpdated(address indexed account, CompoundMode newMode);
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
@@ -404,7 +404,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         _claimRewards(account);
 
         uint256 mamoBalance = mamoToken.balanceOf(account);
-        uint256[] memory rewardAmounts = _getRewardAmounts(account);
 
         // Stake MAMO
         _stakeMamo(account, mamoBalance);
@@ -414,9 +413,10 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
             address strategyAddress = rewardStrategies[i];
             uint256 rewardBalance = rewardToken.balanceOf(account);
-            rewardAmounts[i] = rewardBalance;
 
             if (rewardBalance == 0) continue;
+
+            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
 
             // Validate strategy ownership - strategy must be owned by the same user as the account
             address accountOwner = Ownable(account).owner();
@@ -438,7 +438,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             MamoAccount(account).multicall(strategyCalls);
         }
 
-        emit Reinvested(account, mamoBalance, rewardAmounts);
+        emit Reinvested(account, mamoBalance);
     }
 
     /**
