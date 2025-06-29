@@ -625,9 +625,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         cbBTCStrategy = _deployCbBTCStrategy(strategyOwner);
 
         vm.startPrank(backend);
-        // Add cbBTC as a reward token with the deployed strategy and pool
+        // Add cbBTC as a reward token with the pool
         address cbBTCMAMOPool = addresses.getAddress("cbBTC_MAMO_POOL");
-        mamoStakingStrategy.addRewardToken(cbBTC, cbBTCStrategy, cbBTCMAMOPool);
+        mamoStakingStrategy.addRewardToken(cbBTC, cbBTCMAMOPool);
         vm.stopPrank();
 
         return cbBTCStrategy;
@@ -660,7 +660,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards as backend
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify MAMO rewards were claimed and staked
@@ -717,7 +718,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards as backend - this should restake MAMO and deposit cbBTC to strategy
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy;
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify both rewards were earned
@@ -778,7 +781,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
         vm.expectRevert("Strategy owner mismatch");
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy;
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
     }
 
@@ -824,7 +829,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards as backend
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy;
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify MAMO was restaked
@@ -865,7 +872,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
                 "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
             )
         );
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
     }
 
@@ -887,7 +895,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
     }
 
@@ -915,7 +924,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards as backend
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify MAMO was staked (COMPOUND behavior)
@@ -978,7 +988,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards as backend - this should swap cbBTC to MAMO and compound everything
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify both rewards were earned
@@ -1041,7 +1052,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards - compound mode with DEX swaps
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify final state
@@ -1100,7 +1112,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards - should not perform any swaps since there are no rewards
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify no changes occurred
@@ -1148,7 +1161,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Process rewards - this should trigger DEX swap from cbBTC to MAMO
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         // Verify the swap occurred by checking final balances
@@ -1182,11 +1196,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
 
-        mamoStakingStrategy.addRewardToken(newToken, newStrategy, newPool);
+        mamoStakingStrategy.addRewardToken(newToken, newPool);
 
         assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 1, "Reward token count should increase");
         assertTrue(mamoStakingStrategy.isRewardToken(newToken), "Token should be marked as reward token");
-        assertEq(mamoStakingStrategy.tokenToStrategy(newToken), newStrategy, "Token strategy mapping should be correct");
+        // tokenToStrategy mapping was removed - strategy is now passed to processRewards
 
         vm.stopPrank();
     }
@@ -1196,7 +1210,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         vm.expectRevert("Invalid token");
-        mamoStakingStrategy.addRewardToken(address(0), makeAddr("strategy"), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(address(0), makeAddr("pool"));
 
         vm.stopPrank();
     }
@@ -1206,7 +1220,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         vm.expectRevert("Invalid strategy");
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), address(0), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
 
         vm.stopPrank();
     }
@@ -1216,7 +1230,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         vm.expectRevert("Invalid pool");
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), address(0));
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), address(0));
 
         vm.stopPrank();
     }
@@ -1229,10 +1243,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
 
-        mamoStakingStrategy.addRewardToken(token, strategy, pool);
+        mamoStakingStrategy.addRewardToken(token, pool);
 
         vm.expectRevert("Token already added");
-        mamoStakingStrategy.addRewardToken(token, strategy, pool);
+        mamoStakingStrategy.addRewardToken(token, pool);
 
         vm.stopPrank();
     }
@@ -1242,7 +1256,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         vm.expectRevert("Cannot add staking token as a reward token");
-        mamoStakingStrategy.addRewardToken(address(mamoToken), makeAddr("strategy"), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(address(mamoToken), makeAddr("pool"));
 
         vm.stopPrank();
     }
@@ -1255,7 +1269,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
                 "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
             )
         );
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
 
         vm.stopPrank();
     }
@@ -1270,7 +1284,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
 
         vm.stopPrank();
     }
@@ -1283,14 +1297,13 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
 
-        mamoStakingStrategy.addRewardToken(token, strategy, pool);
+        mamoStakingStrategy.addRewardToken(token, pool);
         uint256 countAfterAdd = mamoStakingStrategy.getRewardTokenCount();
 
         mamoStakingStrategy.removeRewardToken(token);
 
         assertEq(mamoStakingStrategy.getRewardTokenCount(), countAfterAdd - 1, "Reward token count should decrease");
         assertFalse(mamoStakingStrategy.isRewardToken(token), "Token should not be marked as reward token");
-        assertEq(mamoStakingStrategy.tokenToStrategy(token), address(0), "Token strategy mapping should be cleared");
 
         vm.stopPrank();
     }
@@ -1439,8 +1452,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
 
-        mamoStakingStrategy.addRewardToken(token1, strategy1, pool1);
-        mamoStakingStrategy.addRewardToken(token2, strategy2, pool2);
+        mamoStakingStrategy.addRewardToken(token1, pool1);
+        mamoStakingStrategy.addRewardToken(token2, pool2);
 
         MamoStakingStrategy.RewardToken[] memory rewardTokens = mamoStakingStrategy.getRewardTokens();
 
@@ -1450,12 +1463,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
         bool found2 = false;
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             if (rewardTokens[i].token == token1) {
-                assertEq(rewardTokens[i].strategy, strategy1, "Strategy1 should match");
                 assertEq(rewardTokens[i].pool, pool1, "Pool1 should match");
                 found1 = true;
             }
             if (rewardTokens[i].token == token2) {
-                assertEq(rewardTokens[i].strategy, strategy2, "Strategy2 should match");
                 assertEq(rewardTokens[i].pool, pool2, "Pool2 should match");
                 found2 = true;
             }
@@ -1473,10 +1484,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
 
-        mamoStakingStrategy.addRewardToken(makeAddr("token1"), makeAddr("strategy1"), makeAddr("pool1"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token1"), makeAddr("pool1"));
         assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 1, "Count should increase by 1");
 
-        mamoStakingStrategy.addRewardToken(makeAddr("token2"), makeAddr("strategy2"), makeAddr("pool2"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token2"), makeAddr("pool2"));
         assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 2, "Count should increase by 2");
 
         vm.stopPrank();
@@ -1492,7 +1503,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
 
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
 
         vm.stopPrank();
     }
@@ -1502,7 +1514,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         address token = makeAddr("testToken");
-        mamoStakingStrategy.addRewardToken(token, makeAddr("strategy"), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(token, makeAddr("pool"));
         assertTrue(mamoStakingStrategy.isRewardToken(token), "Token should be added");
 
         mamoStakingStrategy.removeRewardToken(token);
@@ -1543,7 +1555,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
                 "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
             )
         );
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("strategy"), makeAddr("pool"));
+        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
 
         vm.expectRevert(
             abi.encodeWithSignature(
@@ -1574,7 +1586,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
                 "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
             )
         );
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
 
         vm.stopPrank();
     }
@@ -1677,7 +1690,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
-        mamoStakingStrategy.processRewards(address(userAccount));
+        address[] memory strategies = new address[](0);
+        mamoStakingStrategy.processRewards(address(userAccount), strategies);
         vm.stopPrank();
 
         assertEq(multiRewards.balanceOf(address(userAccount)), initialBalance, "Balance should remain unchanged");

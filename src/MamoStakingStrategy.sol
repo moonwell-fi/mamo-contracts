@@ -43,14 +43,12 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice Reward token configuration
     struct RewardToken {
         address token;
-        address strategy;
         address pool; // Pool address for swapping this token to MAMO
     }
 
     /// @notice Dynamic reward token management
     RewardToken[] public rewardTokens;
     mapping(address => bool) public isRewardToken;
-    mapping(address => address) public tokenToStrategy;
 
     /// @notice Configurable DEX router
     ISwapRouter public dexRouter;
@@ -118,25 +116,22 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Add a reward token with its strategy and pool (backend only)
+     * @notice Add a reward token with its pool (backend only)
      * @param token The reward token address to add
-     * @param strategy The strategy contract address for this token
      * @param pool The pool address for swapping this token to MAMO
      */
-    function addRewardToken(address token, address strategy, address pool)
+    function addRewardToken(address token, address pool)
         external
         onlyRole(BACKEND_ROLE)
         whenNotPaused
     {
         require(token != address(0), "Invalid token");
-        require(strategy != address(0), "Invalid strategy");
         require(pool != address(0), "Invalid pool");
         require(!isRewardToken[token], "Token already added");
-        require(token != address(mamoToken), "Cannot add staking token as a reward token");
+        require(token != address(mamoToken), "Cannot add staking token");
 
-        rewardTokens.push(RewardToken({token: token, strategy: strategy, pool: pool}));
+        rewardTokens.push(RewardToken({token: token, pool: pool}));
         isRewardToken[token] = true;
-        tokenToStrategy[token] = strategy;
 
         emit RewardTokenAdded(token);
     }
@@ -158,7 +153,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         }
 
         isRewardToken[token] = false;
-        delete tokenToStrategy[token];
 
         emit RewardTokenRemoved(token);
     }
@@ -242,13 +236,17 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /**
      * @notice Process rewards according to the account's preferred compound mode
      * @param account The account address
+     * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order)
+     * @dev We trust the backend to provide the correct user-owned strategies for each reward token
      */
-    function processRewards(address account) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function processRewards(address account, address[] calldata rewardStrategies) external onlyRole(BACKEND_ROLE) whenNotPaused {
+        require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
+        
         CompoundMode accountMode = accountCompoundMode[account];
         if (accountMode == CompoundMode.COMPOUND) {
             _compound(account);
         } else {
-            _reinvest(account);
+            _reinvest(account, rewardStrategies);
         }
     }
 
@@ -324,8 +322,9 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /**
      * @notice Internal function to reinvest rewards by staking MAMO and depositing other rewards to Morpho strategy
      * @param account The account address
+     * @param rewardStrategies Array of strategy addresses for each reward token
      */
-    function _reinvest(address account) internal {
+    function _reinvest(address account, address[] calldata rewardStrategies) internal {
         // Claim rewards through account
         bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
         IMulticall.Call[] memory calls = new IMulticall.Call[](1);
@@ -352,7 +351,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
-            address strategyAddress = rewardTokens[i].strategy;
+            address strategyAddress = rewardStrategies[i];
             uint256 rewardBalance = rewardToken.balanceOf(account);
             rewardAmounts[i] = rewardBalance;
 
