@@ -73,7 +73,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
     event Deposited(address indexed account, address indexed depositor, uint256 amount);
     event Withdrawn(address indexed account, uint256 amount);
-    event Compounded(address indexed account, uint256 mamoAmount, uint256[] rewardAmounts);
+    event RewardTokenProcessed(address indexed account, address indexed rewardToken, uint256 amount);
+    event Compounded(address indexed account, uint256 mamoAmount);
     event Reinvested(address indexed account, uint256 mamoAmount, uint256[] rewardAmounts);
     event CompoundModeUpdated(address indexed account, CompoundMode newMode);
     event RewardTokenAdded(address indexed token);
@@ -339,6 +340,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
             if (rewardBalance == 0) continue;
 
+            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
+
             // Swap reward tokens to MAMO
             uint256 remainingReward = rewardBalance;
             if (remainingReward > 0) {
@@ -389,7 +392,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         uint256 totalMamo = mamoToken.balanceOf(account);
         _stakeMamo(account, totalMamo);
 
-        emit Compounded(account, totalMamo, rewardAmounts);
+        emit Compounded(account, totalMamo);
     }
 
     /**
