@@ -1215,7 +1215,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
-
     function testAddRewardTokenRevertsWithInvalidPool() public {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
@@ -1800,24 +1799,28 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Verify rewards were processed successfully
         assertGt(earnedCbBTC, 0, "Should have earned cbBTC rewards");
-        assertEq(multiRewards.balanceOf(address(userAccount)), initialMamoStaked, "MAMO staked should remain same in REINVEST mode");
+        assertEq(
+            multiRewards.balanceOf(address(userAccount)),
+            initialMamoStaked,
+            "MAMO staked should remain same in REINVEST mode"
+        );
 
         // Verify cbBTC was deposited to strategy (balance should be greater than 0)
         address mToken = addresses.getAddress("MOONWELL_cbBTC");
         address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
         uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
         uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
-        
+
         assertTrue(finalMTokenBalance > 0 || finalMorphoBalance > 0, "Strategy should have received cbBTC deposits");
     }
 
     function _deployUSDCStrategy(address strategyOwner) internal returns (address) {
         address usdcStrategyFactory = addresses.getAddress("USDC_STRATEGY_FACTORY");
-        
+
         vm.startPrank(strategyOwner);
         address usdcStrategy = StrategyFactory(usdcStrategyFactory).createStrategyForUser(strategyOwner);
         vm.stopPrank();
-        
+
         return usdcStrategy;
     }
 }
