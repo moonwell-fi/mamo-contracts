@@ -9,11 +9,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
- * @title AccountRegistry
+ * @title MamoAccountRegistry
  * @notice Manages caller whitelist for the staking system
  * @dev Provides two-tier strategy approval system
  */
-contract AccountRegistry is AccessControlEnumerable, Pausable {
+contract MamoAccountRegistry is AccessControlEnumerable, Pausable {
     using SafeERC20 for IERC20;
 
     /// @notice Backend role for strategy approval
@@ -89,6 +89,23 @@ contract AccountRegistry is AccessControlEnumerable, Pausable {
         IERC20(tokenAddress).safeTransfer(to, amount);
 
         emit TokenRecovered(tokenAddress, to, amount);
+    }
+
+    /**
+     * @notice Recovers ETH accidentally sent to this contract
+     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE
+     * @param to The address to send the ETH to
+     */
+    function recoverETH(address payable to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(to != address(0), "Cannot send to zero address");
+
+        uint256 balance = address(this).balance;
+        require(balance > 0, "Empty balance");
+
+        (bool success,) = to.call{value: balance}("");
+        require(success, "Transfer failed");
+
+        emit TokenRecovered(address(0), to, balance);
     }
 
     // ==================== GUARDIAN FUNCTIONS ====================

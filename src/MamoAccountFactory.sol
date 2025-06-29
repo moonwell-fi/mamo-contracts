@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {AccountRegistry} from "@contracts/AccountRegistry.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
@@ -12,8 +12,8 @@ import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
  */
 
 contract MamoAccountFactory {
-    /// @notice The AccountRegistry contract
-    AccountRegistry public immutable registry;
+    /// @notice The MamoAccountRegistry contract
+    MamoAccountRegistry public immutable registry;
 
     /// @notice The MamoStrategyRegistry contract
     IMamoStrategyRegistry public immutable mamoStrategyRegistry;
@@ -35,14 +35,14 @@ contract MamoAccountFactory {
     /**
      * @notice Constructor sets up the factory with required contracts and backend address
      * @param _mamoBackend The backend address that can create accounts for users
-     * @param _registry The AccountRegistry contract
+     * @param _registry The MamoAccountRegistry contract
      * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
      * @param _accountImplementation The MamoAccount implementation contract
      * @param _accountStrategyTypeId The strategy type ID for MamoAccount implementations
      */
     constructor(
         address _mamoBackend,
-        AccountRegistry _registry,
+        MamoAccountRegistry _registry,
         IMamoStrategyRegistry _mamoStrategyRegistry,
         address _accountImplementation,
         uint256 _accountStrategyTypeId

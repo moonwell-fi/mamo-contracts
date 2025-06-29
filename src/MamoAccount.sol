@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {AccountRegistry} from "@contracts/AccountRegistry.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMulticall} from "@interfaces/IMulticall.sol";
@@ -23,8 +23,8 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
      */
     event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
-    /// @notice The AccountRegistry contract for permission management
-    AccountRegistry public registry;
+    /// @notice The MamoAccountRegistry contract for permission management
+    MamoAccountRegistry public registry;
 
     /// @notice The MamoStrategyRegistry contract for implementation validation
     IMamoStrategyRegistry public mamoStrategyRegistry;
@@ -43,13 +43,13 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
     /**
      * @notice Initialize the account
      * @param _owner The owner of the account
-     * @param _registry The AccountRegistry contract
+     * @param _registry The MamoAccountRegistry contract
      * @param _mamoStrategyRegistry The MamoStrategyRegistry contract
      * @param _strategyTypeId The unique identifier for this account type
      */
     function initialize(
         address _owner,
-        AccountRegistry _registry,
+        MamoAccountRegistry _registry,
         IMamoStrategyRegistry _mamoStrategyRegistry,
         uint256 _strategyTypeId
     ) external initializer {
@@ -63,14 +63,6 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
 
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();
-    }
-
-    /**
-     * @notice Internal function that authorizes an upgrade to a new implementation
-     * @dev Only callable by Mamo Strategy Registry contract
-     */
-    function _authorizeUpgrade(address) internal view override {
-        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
     }
 
     modifier onlyWhitelistedStrategy() {
@@ -139,5 +131,13 @@ contract MamoAccount is Initializable, UUPSUpgradeable, OwnableUpgradeable, Reen
      */
     function renounceOwnership() public virtual override onlyOwner {
         revert("Ownership cannot be renounced in this contract");
+    }
+
+    /**
+     * @notice Internal function that authorizes an upgrade to a new implementation
+     * @dev Only callable by Mamo Strategy Registry contract
+     */
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == address(mamoStrategyRegistry), "Only Mamo Strategy Registry can call");
     }
 }

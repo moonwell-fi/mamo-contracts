@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.28;
 
-import {AccountRegistry} from "@contracts/AccountRegistry.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
@@ -21,7 +21,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title DeployMamoStaking
- * @notice Script to deploy and manage AccountRegistry, MamoAccountFactory, and MamoStakingStrategy contracts
+ * @notice Script to deploy and manage MamoAccountRegistry, MamoAccountFactory, and MamoStakingStrategy contracts
  */
 contract DeployMamoStaking is Script {
     function run() public {
@@ -41,7 +41,7 @@ contract DeployMamoStaking is Script {
         address[] memory deployedContracts = new address[](3);
 
         // Deploy contracts in dependency order
-        deployedContracts[0] = deployAccountRegistry(addresses, deployer);
+        deployedContracts[0] = deployMamoAccountRegistry(addresses, deployer);
         deployedContracts[1] = deployMamoAccountFactory(addresses, deployer);
         deployedContracts[2] = deployMamoStakingStrategy(addresses, deployer);
 
@@ -51,15 +51,15 @@ contract DeployMamoStaking is Script {
         return deployedContracts;
     }
 
-    function deployAccountRegistry(Addresses addresses, address deployer) public returns (address) {
+    function deployMamoAccountRegistry(Addresses addresses, address deployer) public returns (address) {
         // Get the addresses for the initialization parameters
         address admin = addresses.getAddress("MAMO_MULTISIG");
         address backend = addresses.getAddress("MAMO_BACKEND");
         address guardian = addresses.getAddress("MAMO_MULTISIG");
 
         vm.startBroadcast(deployer);
-        // Deploy the AccountRegistry
-        AccountRegistry accountRegistry = new AccountRegistry(admin, backend, guardian);
+        // Deploy the MamoAccountRegistry
+        MamoAccountRegistry accountRegistry = new MamoAccountRegistry(admin, backend, guardian);
         vm.stopBroadcast();
 
         // Check if the account registry address already exists
@@ -78,7 +78,7 @@ contract DeployMamoStaking is Script {
     function deployMamoAccountFactory(Addresses addresses, address deployer) public returns (address) {
         // Get the addresses for the initialization parameters
         address backend = addresses.getAddress("MAMO_BACKEND");
-        AccountRegistry registry = AccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
+        MamoAccountRegistry registry = MamoAccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
         IMamoStrategyRegistry mamoStrategyRegistry =
             IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
@@ -130,7 +130,7 @@ contract DeployMamoStaking is Script {
         address admin = addresses.getAddress("MAMO_MULTISIG");
         address backend = addresses.getAddress("MAMO_BACKEND");
         address guardian = addresses.getAddress("MAMO_MULTISIG");
-        AccountRegistry registry = AccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
+        MamoAccountRegistry registry = MamoAccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
 
         // Use MAMO instead of MAMO_TOKEN (different naming convention)
         IERC20 mamoToken = IERC20(addresses.getAddress("MAMO"));

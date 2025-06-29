@@ -7,7 +7,7 @@ import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
-import {AccountRegistry} from "@contracts/AccountRegistry.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
@@ -22,7 +22,7 @@ import {DeployMamoStaking} from "@script/DeployMamoStaking.s.sol";
 
 contract MamoStakingStrategyIntegrationTest is Test {
     Addresses public addresses;
-    AccountRegistry public accountRegistry;
+    MamoAccountRegistry public accountRegistry;
     MamoAccountFactory public mamoAccountFactory;
     MamoStakingStrategy public mamoStakingStrategy;
     MamoAccount public userAccount;
@@ -50,7 +50,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address[] memory deployedContracts = deployScript.deploy(addresses, deployer);
 
         // Set contract instances
-        accountRegistry = AccountRegistry(deployedContracts[0]);
+        accountRegistry = MamoAccountRegistry(deployedContracts[0]);
         mamoAccountFactory = MamoAccountFactory(deployedContracts[1]);
         mamoStakingStrategy = MamoStakingStrategy(deployedContracts[2]);
 

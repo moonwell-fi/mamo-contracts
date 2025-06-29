@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {AccountRegistry} from "@contracts/AccountRegistry.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
@@ -33,8 +33,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice Guardian role for emergency pause functionality
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
-    /// @notice The AccountRegistry contract for permission management
-    AccountRegistry public immutable registry;
+    /// @notice The MamoAccountRegistry contract for permission management
+    MamoAccountRegistry public immutable registry;
 
     /// @notice The MultiRewards contract for staking
     IMultiRewards public immutable multiRewards;
@@ -87,7 +87,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param admin The address to grant the DEFAULT_ADMIN_ROLE to
      * @param backend The address to grant the BACKEND_ROLE to
      * @param guardian The address to grant the GUARDIAN_ROLE to
-     * @param _registry The AccountRegistry contract
+     * @param _registry The MamoAccountRegistry contract
      * @param _multiRewards The MultiRewards contract
      * @param _mamoToken The MAMO token contract
      * @param _dexRouter The initial DEX router contract
@@ -97,7 +97,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         address admin,
         address backend,
         address guardian,
-        AccountRegistry _registry,
+        MamoAccountRegistry _registry,
         IMultiRewards _multiRewards,
         IERC20 _mamoToken,
         ISwapRouter _dexRouter,

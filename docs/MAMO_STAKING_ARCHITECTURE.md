@@ -27,7 +27,7 @@ graph TB
     ReinvestFlow --> |Restake MAMO| MultiRewards
     ReinvestFlow --> |Deposit Rewards| ERC20Strategy[🏦 ERC20MoonwellMorphoStrategy]
     
-    Registry[📋 AccountRegistry] --> |Whitelist Check| Account
+    Registry[📋 MamoAccountRegistry] --> |Whitelist Check| Account
     Backend --> |Manages Reward Tokens| Strategy
     Backend --> |Updates DEX Router| Strategy
     
