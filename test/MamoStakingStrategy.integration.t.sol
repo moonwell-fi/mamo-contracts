@@ -645,7 +645,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup MAMO rewards in MultiRewards
@@ -692,7 +692,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup MAMO rewards in MultiRewards
@@ -768,7 +768,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup cbBTC rewards in MultiRewards
@@ -803,7 +803,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup MAMO rewards in MultiRewards
@@ -964,7 +964,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Explicitly set account to COMPOUND mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
         vm.stopPrank();
 
         // Setup MAMO rewards in MultiRewards
@@ -1034,7 +1034,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to COMPOUND mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
         vm.stopPrank();
 
         // Setup rewards in MultiRewards
@@ -1102,7 +1102,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to COMPOUND mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
         vm.stopPrank();
 
         // Don't setup any rewards - so no rewards to claim or swap
@@ -1141,7 +1141,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to COMPOUND mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
         vm.stopPrank();
 
         // Setup only cbBTC rewards (no MAMO rewards to isolate the swap test)
@@ -1591,14 +1591,14 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(user);
 
         assertEq(
-            uint256(mamoStakingStrategy.accountCompoundMode(address(userAccount))), 0, "Should default to COMPOUND"
+            uint256(mamoStakingStrategy.accountStrategyMode(address(userAccount))), 0, "Should default to COMPOUND"
         );
 
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
-        assertEq(uint256(mamoStakingStrategy.accountCompoundMode(address(userAccount))), 1, "Should be set to REINVEST");
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
+        assertEq(uint256(mamoStakingStrategy.accountStrategyMode(address(userAccount))), 1, "Should be set to REINVEST");
 
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.COMPOUND);
-        assertEq(uint256(mamoStakingStrategy.accountCompoundMode(address(userAccount))), 0, "Should be set to COMPOUND");
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
+        assertEq(uint256(mamoStakingStrategy.accountStrategyMode(address(userAccount))), 0, "Should be set to COMPOUND");
 
         vm.stopPrank();
     }
@@ -1610,7 +1610,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(attacker);
 
         vm.expectRevert("Not account owner");
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
 
         vm.stopPrank();
     }
@@ -1619,7 +1619,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(user);
 
         vm.expectRevert("Invalid account");
-        mamoStakingStrategy.setCompoundMode(address(0), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(0), MamoStakingStrategy.StrategyMode.REINVEST);
 
         vm.stopPrank();
     }
@@ -1635,7 +1635,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(user);
 
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
 
         vm.stopPrank();
     }
@@ -1702,7 +1702,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup cbBTC rewards in MultiRewards
@@ -1742,7 +1742,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup cbBTC rewards in MultiRewards
@@ -1776,7 +1776,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Set account to REINVEST mode
         vm.startPrank(user);
-        mamoStakingStrategy.setCompoundMode(address(userAccount), MamoStakingStrategy.CompoundMode.REINVEST);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
         vm.stopPrank();
 
         // Setup cbBTC rewards in MultiRewards
