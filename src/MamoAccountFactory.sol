@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 /**
  * @title MamoAccountFactory

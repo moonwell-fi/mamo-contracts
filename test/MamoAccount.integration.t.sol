@@ -7,10 +7,10 @@ import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
-import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {IMulticall} from "@interfaces/IMulticall.sol";
 

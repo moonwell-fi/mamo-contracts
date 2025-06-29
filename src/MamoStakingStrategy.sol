@@ -275,6 +275,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         onlyRole(BACKEND_ROLE)
         whenNotPaused
     {
+        _claimRewards(account);
+
         CompoundMode accountMode = accountCompoundMode[account];
         if (accountMode == CompoundMode.COMPOUND) {
             _compound(account);
@@ -313,79 +315,60 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Internal function to get reward amounts for all reward tokens
-     * @param account The account address
-     * @return rewardAmounts Array of reward amounts for each reward token
-     */
-    function _getRewardAmounts(address account) internal view returns (uint256[] memory rewardAmounts) {
-        rewardAmounts = new uint256[](rewardTokens.length);
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            rewardAmounts[i] = IERC20(rewardTokens[i].token).balanceOf(account);
-        }
-    }
-
-    /**
      * @notice Internal function to compound rewards by converting all rewards to MAMO and restaking
      * @param account The account address
      */
     function _compound(address account) internal {
-        _claimRewards(account);
-        uint256[] memory rewardAmounts = _getRewardAmounts(account);
-
         // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
             uint256 rewardBalance = rewardToken.balanceOf(account);
-            rewardAmounts[i] = rewardBalance;
 
             if (rewardBalance == 0) continue;
 
-            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
-
             // Swap reward tokens to MAMO
-            uint256 remainingReward = rewardBalance;
-            if (remainingReward > 0) {
-                // Get tickSpacing from the pool
-                address poolAddress = rewardTokens[i].pool;
-                int24 tickSpacing = _getPoolTickSpacing(poolAddress);
+            // Get tickSpacing from the pool
+            address poolAddress = rewardTokens[i].pool;
+            int24 tickSpacing = _getPoolTickSpacing(poolAddress);
 
-                // Get quote from quoter to calculate minimum amount out with slippage
-                (uint256 amountOut,,,) = quoter.quoteExactInputSingle(
-                    IQuoter.QuoteExactInputSingleParams({
-                        tokenIn: address(rewardToken),
-                        tokenOut: address(mamoToken),
-                        amountIn: remainingReward,
-                        tickSpacing: tickSpacing,
-                        sqrtPriceLimitX96: 0
-                    })
-                );
-
-                // Apply slippage tolerance to get minimum amount out
-                uint256 amountOutMinimum = (amountOut * (10000 - allowedSlippageInBps)) / 10000;
-
-                // Approve DEX router to spend reward tokens and swap using SwapRouter
-                bytes memory approveData =
-                    abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
-
-                // Create swap parameters
-                ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
+            // Get quote from quoter to calculate minimum amount out with slippage
+            (uint256 amountOut,,,) = quoter.quoteExactInputSingle(
+                IQuoter.QuoteExactInputSingleParams({
                     tokenIn: address(rewardToken),
                     tokenOut: address(mamoToken),
+                    amountIn: rewardBalance,
                     tickSpacing: tickSpacing,
-                    recipient: account,
-                    deadline: block.timestamp + 300,
-                    amountIn: remainingReward,
-                    amountOutMinimum: amountOutMinimum,
-                    sqrtPriceLimitX96: 0 // No price limit
-                });
+                    sqrtPriceLimitX96: 0
+                })
+            );
 
-                bytes memory swapData = abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector, swapParams);
+            // Apply slippage tolerance to get minimum amount out
+            uint256 amountOutMinimum = (amountOut * (10000 - allowedSlippageInBps)) / 10000;
 
-                IMulticall.Call[] memory swapCalls = new IMulticall.Call[](2);
-                swapCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
-                swapCalls[1] = IMulticall.Call({target: address(dexRouter), data: swapData, value: 0});
-                MamoAccount(account).multicall(swapCalls);
-            }
+            // Approve DEX router to spend reward tokens and swap using SwapRouter
+            bytes memory approveData =
+                abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), rewardBalance);
+
+            // Create swap parameters
+            ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
+                tokenIn: address(rewardToken),
+                tokenOut: address(mamoToken),
+                tickSpacing: tickSpacing,
+                recipient: account,
+                deadline: block.timestamp + 300,
+                amountIn: rewardBalance,
+                amountOutMinimum: amountOutMinimum,
+                sqrtPriceLimitX96: 0 // No price limit
+            });
+
+            bytes memory swapData = abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector, swapParams);
+
+            IMulticall.Call[] memory swapCalls = new IMulticall.Call[](2);
+            swapCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
+            swapCalls[1] = IMulticall.Call({target: address(dexRouter), data: swapData, value: 0});
+            MamoAccount(account).multicall(swapCalls);
+
+            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
         }
 
         // Stake all MAMO
@@ -401,8 +384,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param rewardStrategies Array of strategy addresses for each reward token
      */
     function _reinvest(address account, address[] calldata rewardStrategies) internal {
-        _claimRewards(account);
-
         uint256 mamoBalance = mamoToken.balanceOf(account);
 
         // Stake MAMO
@@ -415,8 +396,6 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             uint256 rewardBalance = rewardToken.balanceOf(account);
 
             if (rewardBalance == 0) continue;
-
-            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
 
             // Validate strategy ownership - strategy must be owned by the same user as the account
             address accountOwner = Ownable(account).owner();
@@ -436,6 +415,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             strategyCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
             strategyCalls[1] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
             MamoAccount(account).multicall(strategyCalls);
+
+            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance);
         }
 
         emit Reinvested(account, mamoBalance);

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.28;
 
-import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
+import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 // MultiRewards is deployed using vm.deployCode due to Solidity version compatibility
 
