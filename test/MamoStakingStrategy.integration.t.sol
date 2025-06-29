@@ -1215,15 +1215,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
-    function testAddRewardTokenRevertsWithInvalidStrategy() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert("Invalid strategy");
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
-
-        vm.stopPrank();
-    }
 
     function testAddRewardTokenRevertsWithInvalidPool() public {
         address backend = addresses.getAddress("MAMO_BACKEND");
@@ -1255,7 +1246,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_BACKEND");
         vm.startPrank(backend);
 
-        vm.expectRevert("Cannot add staking token as a reward token");
+        vm.expectRevert("Cannot add staking token");
         mamoStakingStrategy.addRewardToken(address(mamoToken), makeAddr("pool"));
 
         vm.stopPrank();

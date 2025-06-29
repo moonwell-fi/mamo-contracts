@@ -241,12 +241,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         onlyRole(BACKEND_ROLE)
         whenNotPaused
     {
-        require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
-
         CompoundMode accountMode = accountCompoundMode[account];
         if (accountMode == CompoundMode.COMPOUND) {
             _compound(account);
         } else {
+            require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
             _reinvest(account, rewardStrategies);
         }
     }
