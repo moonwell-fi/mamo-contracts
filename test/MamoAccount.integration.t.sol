@@ -8,13 +8,11 @@ import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {AccountRegistry} from "@contracts/AccountRegistry.sol";
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoAccount} from "@contracts/MamoAccount.sol";
 import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
-import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMulticall} from "@interfaces/IMulticall.sol";
-
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {DeployMamoStaking} from "@script/DeployMamoStaking.s.sol";
 
@@ -415,23 +413,29 @@ contract MamoAccountIntegrationTest is Test {
         userAccount = _deployUserAccount(user);
 
         // Deploy a new implementation by deploying another MamoAccount contract
-        address currentImplementation = address(userAccount.mamoStrategyRegistry()); // Just use an existing contract as mock
+        MamoAccount newImplementation = new MamoAccount();
 
-        // Mock the whitelist check in strategy registry
-        vm.mockCall(
-            address(mamoStrategyRegistry),
-            abi.encodeWithSignature("whitelistedImplementations(address)", currentImplementation),
-            abi.encode(true)
-        );
+        // Get current implementation to set up the strategy ID mapping
+        address currentImplementation = ERC1967Proxy(payable(address(userAccount))).getImplementation();
+        uint256 strategyId = mamoStrategyRegistry.implementationToId(currentImplementation);
 
-        // Test that the upgrade would work if we had a valid implementation
-        // For this test, we'll just verify that the authorization works correctly
-        // We can't actually upgrade to the same implementation, so we'll test the auth path
-        vm.startPrank(user);
-        // This should not revert due to authorization but due to invalid implementation
-        vm.expectRevert(abi.encodeWithSignature("ERC1967InvalidImplementation(address)", currentImplementation));
-        userAccount.upgradeToAndCall(currentImplementation, "");
+        // Whitelist the new implementation with the same strategy ID (admin role required)
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(admin);
+        mamoStrategyRegistry.whitelistImplementation(address(newImplementation), strategyId);
         vm.stopPrank();
+
+        // Test that the upgrade works when called through the registry by the user
+        vm.startPrank(user);
+        mamoStrategyRegistry.upgradeStrategy(address(userAccount), address(newImplementation));
+        vm.stopPrank();
+
+        // Verify the implementation was updated
+        assertEq(
+            ERC1967Proxy(payable(address(userAccount))).getImplementation(),
+            address(newImplementation),
+            "Implementation should be updated"
+        );
     }
 
     function testUpgradeRevertsWithNonWhitelistedImplementation() public {
@@ -440,17 +444,10 @@ contract MamoAccountIntegrationTest is Test {
         // Create a new implementation address that's not whitelisted
         address newImplementation = makeAddr("newImplementation");
 
-        // Mock the whitelist check to return false
-        vm.mockCall(
-            address(mamoStrategyRegistry),
-            abi.encodeWithSignature("whitelistedImplementations(address)", newImplementation),
-            abi.encode(false)
-        );
-
-        // Attempt upgrade with non-whitelisted implementation
+        // Attempt upgrade with non-whitelisted implementation through the registry
         vm.startPrank(user);
-        vm.expectRevert("Implementation not whitelisted");
-        userAccount.upgradeToAndCall(newImplementation, "");
+        vm.expectRevert("Not latest implementation");
+        mamoStrategyRegistry.upgradeStrategy(address(userAccount), newImplementation);
         vm.stopPrank();
     }
 
@@ -459,10 +456,10 @@ contract MamoAccountIntegrationTest is Test {
         address attacker = makeAddr("attacker");
         address newImplementation = makeAddr("newImplementation");
 
-        // Attempt upgrade as non-owner
+        // Attempt upgrade as non-owner through the registry
         vm.startPrank(attacker);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
-        userAccount.upgradeToAndCall(newImplementation, "");
+        vm.expectRevert("Caller is not the owner of the strategy");
+        mamoStrategyRegistry.upgradeStrategy(address(userAccount), newImplementation);
         vm.stopPrank();
     }
 
