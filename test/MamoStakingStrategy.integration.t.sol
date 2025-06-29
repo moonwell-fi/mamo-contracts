@@ -13,6 +13,7 @@ import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -1812,6 +1813,115 @@ contract MamoStakingStrategyIntegrationTest is Test {
         uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
 
         assertTrue(finalMTokenBalance > 0 || finalMorphoBalance > 0, "Strategy should have received cbBTC deposits");
+    }
+
+    // ==================== QUOTER SETTER TESTS ====================
+
+    function testSetQuoterSuccessful() public {
+        address newQuoter = makeAddr("newQuoter");
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+
+        vm.startPrank(admin);
+
+        address oldQuoter = address(mamoStakingStrategy.quoter());
+        mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
+
+        assertEq(address(mamoStakingStrategy.quoter()), newQuoter, "Quoter should be updated");
+
+        vm.stopPrank();
+    }
+
+    function testSetQuoterRevertsWithInvalidQuoter() public {
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(admin);
+
+        vm.expectRevert("Invalid quoter");
+        mamoStakingStrategy.setQuoter(IQuoter(address(0)));
+
+        vm.stopPrank();
+    }
+
+    function testSetQuoterRevertsWhenNotAdminRole() public {
+        vm.startPrank(user);
+
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, bytes32(0)));
+        mamoStakingStrategy.setQuoter(IQuoter(makeAddr("newQuoter")));
+
+        vm.stopPrank();
+    }
+
+    function testSetQuoterEmitsEvent() public {
+        address newQuoter = makeAddr("newQuoter");
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+
+        vm.startPrank(admin);
+
+        vm.expectEmit(true, false, false, false);
+        emit MamoStakingStrategy.QuoterUpdated(newQuoter);
+        mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
+
+        vm.stopPrank();
+    }
+
+    // ==================== SLIPPAGE TOLERANCE SETTER TESTS ====================
+
+    function testSetSlippageToleranceSuccessful() public {
+        uint256 newSlippage = 500; // 5%
+        address backend = addresses.getAddress("MAMO_BACKEND");
+
+        vm.startPrank(backend);
+
+        uint256 oldSlippage = mamoStakingStrategy.allowedSlippageInBps();
+        mamoStakingStrategy.setSlippageTolerance(newSlippage);
+
+        assertEq(mamoStakingStrategy.allowedSlippageInBps(), newSlippage, "Slippage tolerance should be updated");
+
+        vm.stopPrank();
+    }
+
+    function testSetSlippageToleranceRevertsWithTooHighSlippage() public {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(backend);
+
+        vm.expectRevert("Slippage too high");
+        mamoStakingStrategy.setSlippageTolerance(2501); // Over 25% limit
+
+        vm.stopPrank();
+    }
+
+    function testSetSlippageToleranceRevertsWhenNotBackendRole() public {
+        vm.startPrank(user);
+
+        bytes32 backendRole = keccak256("BACKEND_ROLE");
+        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, backendRole));
+        mamoStakingStrategy.setSlippageTolerance(100);
+
+        vm.stopPrank();
+    }
+
+    function testSetSlippageToleranceEmitsEvent() public {
+        uint256 newSlippage = 200; // 2%
+        address backend = addresses.getAddress("MAMO_BACKEND");
+
+        vm.startPrank(backend);
+
+        vm.expectEmit(true, false, false, false);
+        emit MamoStakingStrategy.SlippageToleranceUpdated(newSlippage);
+        mamoStakingStrategy.setSlippageTolerance(newSlippage);
+
+        vm.stopPrank();
+    }
+
+    function testSetSlippageToleranceAtMaximumAllowed() public {
+        uint256 maxSlippage = 2500; // 25% - maximum allowed
+        address backend = addresses.getAddress("MAMO_BACKEND");
+
+        vm.startPrank(backend);
+
+        mamoStakingStrategy.setSlippageTolerance(maxSlippage);
+        assertEq(mamoStakingStrategy.allowedSlippageInBps(), maxSlippage, "Should allow maximum slippage of 25%");
+
+        vm.stopPrank();
     }
 
     function _deployUSDCStrategy(address strategyOwner) internal returns (address) {

@@ -175,6 +175,11 @@
     "isContract": true
   },
   {
+    "addr": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
+    "name": "AERODROME_QUOTER",
+    "isContract": true
+  },
+  {
     "addr": "0xe2b3aa806e56603a244bfc111c9474f7dedd03db",
     "name": "cbBTC_MAMO_POOL",
     "isContract": true

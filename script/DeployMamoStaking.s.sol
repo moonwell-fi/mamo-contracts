@@ -15,6 +15,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -137,15 +138,17 @@ contract DeployMamoStaking is Script {
         // Deploy missing components if they don't exist
         address multiRewardsAddr = deployMultiRewards(addresses, deployer, address(mamoToken));
         address dexRouterAddr = addresses.getAddress("AERODROME_ROUTER");
+        address quoterAddr = addresses.getAddress("AERODROME_QUOTER");
         address morphoStrategyAddr = deployMorphoStrategy(addresses, deployer);
 
         IMultiRewards multiRewards = IMultiRewards(multiRewardsAddr);
         ISwapRouter dexRouter = ISwapRouter(dexRouterAddr);
+        IQuoter quoter = IQuoter(quoterAddr);
 
         vm.startBroadcast(deployer);
         // Deploy the MamoStakingStrategy
         MamoStakingStrategy mamoStakingStrategy =
-            new MamoStakingStrategy(admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter);
+            new MamoStakingStrategy(admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter, quoter);
         vm.stopBroadcast();
 
         // Check if the mamo staking strategy address already exists

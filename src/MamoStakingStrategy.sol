@@ -8,6 +8,7 @@ import {MamoAccount} from "@contracts/MamoAccount.sol";
 
 import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
 import {IPool} from "@interfaces/IPool.sol";
+import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
@@ -54,6 +55,12 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice Configurable DEX router
     ISwapRouter public dexRouter;
 
+    /// @notice Quoter for getting swap quotes
+    IQuoter public quoter;
+
+    /// @notice The allowed slippage in basis points (e.g., 100 = 1%)
+    uint256 public allowedSlippageInBps;
+
     /// @notice Mapping of account to compound mode
     mapping(address => CompoundMode) public accountCompoundMode;
 
@@ -72,6 +79,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
     event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
+    event QuoterUpdated(address indexed quoter);
+    event SlippageToleranceUpdated(uint256 allowedSlippageInBps);
 
     /**
      * @notice Constructor sets up the strategy with required contracts and parameters
@@ -82,6 +91,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param _multiRewards The MultiRewards contract
      * @param _mamoToken The MAMO token contract
      * @param _dexRouter The initial DEX router contract
+     * @param _quoter The quoter contract for getting swap quotes
      */
     constructor(
         address admin,
@@ -90,7 +100,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         AccountRegistry _registry,
         IMultiRewards _multiRewards,
         IERC20 _mamoToken,
-        ISwapRouter _dexRouter
+        ISwapRouter _dexRouter,
+        IQuoter _quoter
     ) {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
@@ -99,6 +110,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         require(address(_multiRewards) != address(0), "Invalid multiRewards");
         require(address(_mamoToken) != address(0), "Invalid mamoToken");
         require(address(_dexRouter) != address(0), "Invalid dexRouter");
+        require(address(_quoter) != address(0), "Invalid quoter");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -108,6 +120,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         multiRewards = _multiRewards;
         mamoToken = _mamoToken;
         dexRouter = _dexRouter;
+        quoter = _quoter;
     }
 
     modifier onlyAccountOwner(address account) {
@@ -165,6 +178,26 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         dexRouter = newRouter;
 
         emit DEXRouterUpdated(oldRouter, address(newRouter));
+    }
+
+    /**
+     * @notice Set quoter contract (admin only)
+     * @param _quoter The quoter contract address
+     */
+    function setQuoter(IQuoter _quoter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(address(_quoter) != address(0), "Invalid quoter");
+        quoter = _quoter;
+        emit QuoterUpdated(address(_quoter));
+    }
+
+    /**
+     * @notice Set slippage tolerance (backend only)
+     * @param _allowedSlippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
+     */
+    function setSlippageTolerance(uint256 _allowedSlippageInBps) external onlyRole(BACKEND_ROLE) {
+        require(_allowedSlippageInBps <= 2500, "Slippage too high"); // Max 25%
+        allowedSlippageInBps = _allowedSlippageInBps;
+        emit SlippageToleranceUpdated(_allowedSlippageInBps);
     }
 
     /**
@@ -278,6 +311,20 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                 address poolAddress = rewardTokens[i].pool;
                 int24 tickSpacing = _getPoolTickSpacing(poolAddress);
 
+                // Get quote from quoter to calculate minimum amount out with slippage
+                (uint256 amountOut,,,) = quoter.quoteExactInputSingle(
+                    IQuoter.QuoteExactInputSingleParams({
+                        tokenIn: address(rewardToken),
+                        tokenOut: address(mamoToken),
+                        amountIn: remainingReward,
+                        tickSpacing: tickSpacing,
+                        sqrtPriceLimitX96: 0
+                    })
+                );
+
+                // Apply slippage tolerance to get minimum amount out
+                uint256 amountOutMinimum = (amountOut * (10000 - allowedSlippageInBps)) / 10000;
+
                 // Approve DEX router to spend reward tokens and swap using SwapRouter
                 bytes memory approveData =
                     abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), remainingReward);
@@ -290,7 +337,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
                     recipient: account,
                     deadline: block.timestamp + 300,
                     amountIn: remainingReward,
-                    amountOutMinimum: 0, // Accept any amount of MAMO
+                    amountOutMinimum: amountOutMinimum,
                     sqrtPriceLimitX96: 0 // No price limit
                 });
 
