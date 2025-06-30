@@ -28,11 +28,6 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
-
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployMulticall} from "@script/DeployMulticall.s.sol";
 
 /**
@@ -91,11 +86,11 @@ contract MulticallIntegrationTest is Test {
 
     // Addresses
     address public admin;
-    address public backend;
     address public compounder;
     address public guardian;
     address public deployer;
     address public mamoMultisig;
+    address public backend;
 
     // Strategy parameters
     uint256 public strategyTypeId;
@@ -129,26 +124,11 @@ contract MulticallIntegrationTest is Test {
 
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
-        backend = addresses.getAddress(config.backend);
+        backend = addresses.getAddress("MAMO_BACKEND");
         compounder = addresses.getAddress(config.compounder);
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
-
-        // todo remove this once FixIsRewardToken is executed
-        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
-        fixIsRewardToken.setAddresses(addresses);
-        fixIsRewardToken.deploy();
-        fixIsRewardToken.build();
-        fixIsRewardToken.simulate();
-        fixIsRewardToken.validate();
-
-        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
-        proposal.setAddresses(addresses);
-        proposal.deploy();
-        proposal.build();
-        proposal.simulate();
-        proposal.validate();
 
         factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
         multicall = Multicall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
@@ -169,7 +149,7 @@ contract MulticallIntegrationTest is Test {
 
     function testRenounceOwnership_Reverts() public {
         // Test that renounceOwnership always reverts when called by owner
-        vm.startPrank(backend);
+        vm.startPrank(compounder);
         vm.expectRevert("Multicall: Ownership cannot be revoked");
         multicall.renounceOwnership();
         vm.stopPrank();

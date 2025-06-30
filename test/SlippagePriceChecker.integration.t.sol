@@ -16,7 +16,6 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 contract SlippagePriceCheckerTest is Test {
@@ -77,14 +76,6 @@ contract SlippagePriceCheckerTest is Test {
         } else {
             slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         }
-
-        // todo remove this once FixIsRewardToken is executed
-        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
-        fixIsRewardToken.setAddresses(addresses);
-        fixIsRewardToken.deploy();
-        fixIsRewardToken.build();
-        fixIsRewardToken.simulate();
-        fixIsRewardToken.validate();
 
         amountInByToken[address(well)] = 300e18;
         amountInByToken[address(morpho)] = 3e18;

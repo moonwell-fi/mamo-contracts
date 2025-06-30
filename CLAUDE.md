@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Generate test coverage**: `make coverage` (generates HTML coverage report in the coverage directory)
 - **Deploy system**: `make deploy-broadcast` (deploys to Base mainnet with configured parameters)
 - **Generate TypeScript utilities**: `npm run generate-appdata` (generates app data for CowSwap integration)
+- Always look for the right command to run the test by reading the @Makefile file 
+- Always run 'forge fmt' before git commit
 
 ### Common Foundry Commands
 - **Run scripts**: `forge script script/ScriptName.s.sol:ScriptContractName --fork-url base --account <account-name> -vvv`
@@ -65,6 +67,9 @@ The project uses Foundry for testing with three primary test types:
 - **Base tests**: Common test setup and utilities (`BaseTest.t.sol`)
 
 Tests fork the Base network to interact with production dependencies like Moonwell and MetaMorpho.
+
+### Testing Best Practices
+- When calling vm.expectRevert on tests, always pass the expected revert string as a parameter
 
 ## Deployment Process
 
