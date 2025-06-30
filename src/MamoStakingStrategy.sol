@@ -80,12 +80,12 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     event Compounded(address indexed account, uint256 mamoAmount);
     event Reinvested(address indexed account, uint256 mamoAmount);
     event StrategyModeUpdated(address indexed account, StrategyMode newMode);
-    event AccountSlippageUpdated(address indexed account, uint256 slippageInBps);
+    event AccountSlippageUpdated(address indexed account, uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
     event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
-    event QuoterUpdated(address indexed quoter);
-    event SlippageToleranceUpdated(uint256 allowedSlippageInBps);
+    event QuoterUpdated(address indexed oldQuoter, address indexed newQuoter);
+    event SlippageToleranceUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
 
     /**
      * @notice Constructor sets up the strategy with required contracts and parameters
@@ -191,8 +191,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      */
     function setQuoter(IQuoter _quoter) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(address(_quoter) != address(0), "Invalid quoter");
+        emit QuoterUpdated(address(quoter), address(_quoter));
         quoter = _quoter;
-        emit QuoterUpdated(address(_quoter));
     }
 
     /**
@@ -201,8 +201,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      */
     function setSlippageTolerance(uint256 _allowedSlippageInBps) external onlyRole(BACKEND_ROLE) {
         require(_allowedSlippageInBps <= 2500, "Slippage too high"); // Max 25%
+        emit SlippageToleranceUpdated(allowedSlippageInBps, _allowedSlippageInBps);
         allowedSlippageInBps = _allowedSlippageInBps;
-        emit SlippageToleranceUpdated(_allowedSlippageInBps);
     }
 
     /**
@@ -211,8 +211,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param mode The strategy mode to set
      */
     function setStrategyMode(address account, StrategyMode mode) external onlyAccountOwner(account) whenNotPaused {
-        accountStrategyMode[account] = mode;
         emit StrategyModeUpdated(account, mode);
+        accountStrategyMode[account] = mode;
     }
 
     /**
@@ -226,8 +226,8 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
         whenNotPaused
     {
         require(slippageInBps <= 2500, "Slippage too high"); // Max 25%
+        emit AccountSlippageUpdated(account, accountSlippageInBps[account], slippageInBps);
         accountSlippageInBps[account] = slippageInBps;
-        emit AccountSlippageUpdated(account, slippageInBps);
     }
 
     /**

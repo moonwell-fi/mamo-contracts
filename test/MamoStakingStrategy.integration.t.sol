@@ -1603,6 +1603,20 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    function testSetStrategyModeEmitsEvent() public {
+        userAccount = _deployUserAccount(user);
+
+        vm.startPrank(user);
+
+        MamoStakingStrategy.StrategyMode newMode = MamoStakingStrategy.StrategyMode.REINVEST;
+
+        vm.expectEmit(true, false, false, true);
+        emit MamoStakingStrategy.StrategyModeUpdated(address(userAccount), newMode);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), newMode);
+
+        vm.stopPrank();
+    }
+
     function testSetCompoundModeRevertsWhenNotAccountOwner() public {
         userAccount = _deployUserAccount(user);
 
@@ -1856,8 +1870,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         vm.startPrank(admin);
 
-        vm.expectEmit(true, false, false, false);
-        emit MamoStakingStrategy.QuoterUpdated(newQuoter);
+        address oldQuoter = address(mamoStakingStrategy.quoter());
+        vm.expectEmit(true, true, false, false);
+        emit MamoStakingStrategy.QuoterUpdated(oldQuoter, newQuoter);
         mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
 
         vm.stopPrank();
@@ -1905,8 +1920,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         vm.startPrank(backend);
 
-        vm.expectEmit(true, false, false, false);
-        emit MamoStakingStrategy.SlippageToleranceUpdated(newSlippage);
+        uint256 oldSlippage = mamoStakingStrategy.allowedSlippageInBps();
+        vm.expectEmit(false, false, false, true);
+        emit MamoStakingStrategy.SlippageToleranceUpdated(oldSlippage, newSlippage);
         mamoStakingStrategy.setSlippageTolerance(newSlippage);
 
         vm.stopPrank();
@@ -2016,8 +2032,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         vm.startPrank(user);
 
+        uint256 oldSlippage = mamoStakingStrategy.accountSlippageInBps(address(userAccount));
         vm.expectEmit(true, false, false, true);
-        emit MamoStakingStrategy.AccountSlippageUpdated(address(userAccount), customSlippage);
+        emit MamoStakingStrategy.AccountSlippageUpdated(address(userAccount), oldSlippage, customSlippage);
         mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
 
         vm.stopPrank();
@@ -2133,5 +2150,56 @@ contract MamoStakingStrategyIntegrationTest is Test {
             accountSlippage,
             "Should return account slippage, not global"
         );
+    }
+
+    // ========== COMPREHENSIVE EVENT EMISSION TESTS ==========
+
+    function testEventEmissionsShowOldAndNewValues() public {
+        userAccount = _deployUserAccount(user);
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        address backend = addresses.getAddress("MAMO_BACKEND");
+
+        // Test setSlippageTolerance event with non-zero old value
+        vm.startPrank(backend);
+        mamoStakingStrategy.setSlippageTolerance(100); // Set initial value
+
+        uint256 oldSlippage = mamoStakingStrategy.allowedSlippageInBps();
+        uint256 newSlippage = 300;
+        vm.expectEmit(false, false, false, true);
+        emit MamoStakingStrategy.SlippageToleranceUpdated(oldSlippage, newSlippage);
+        mamoStakingStrategy.setSlippageTolerance(newSlippage);
+        vm.stopPrank();
+
+        // Test setQuoter event with non-zero old value
+        vm.startPrank(admin);
+        address oldQuoter = address(mamoStakingStrategy.quoter());
+        address newQuoter = makeAddr("newQuoter");
+        vm.expectEmit(true, true, false, false);
+        emit MamoStakingStrategy.QuoterUpdated(oldQuoter, newQuoter);
+        mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
+        vm.stopPrank();
+
+        // Test setStrategyMode event (only includes new mode since enum only has 2 options)
+        vm.startPrank(user);
+        // First set to REINVEST
+        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
+
+        // Now change back to COMPOUND and check event
+        MamoStakingStrategy.StrategyMode newMode = MamoStakingStrategy.StrategyMode.COMPOUND;
+        vm.expectEmit(true, false, false, true);
+        emit MamoStakingStrategy.StrategyModeUpdated(address(userAccount), newMode);
+        mamoStakingStrategy.setStrategyMode(address(userAccount), newMode);
+        vm.stopPrank();
+
+        // Test setAccountSlippage event with non-zero old value
+        vm.startPrank(user);
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), 200); // Set initial value
+
+        uint256 oldAccountSlippage = mamoStakingStrategy.accountSlippageInBps(address(userAccount));
+        uint256 newAccountSlippage = 600;
+        vm.expectEmit(true, false, false, true);
+        emit MamoStakingStrategy.AccountSlippageUpdated(address(userAccount), oldAccountSlippage, newAccountSlippage);
+        mamoStakingStrategy.setAccountSlippage(address(userAccount), newAccountSlippage);
+        vm.stopPrank();
     }
 }
