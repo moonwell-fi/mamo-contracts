@@ -178,5 +178,15 @@
     "addr": "0xfE2ff8927EF602DDac27E314A199D16BE6177860",
     "name": "F-MAMO",
     "isContract": true
+  },
+  {
+    "addr": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
+    "name": "AERODROME_POOL_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",
+    "name": "VIRTUAL",
+    "isContract": true
   }
 ]

@@ -15,9 +15,6 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  * @dev Deploys the FeeSplitter contract with specified tokens and recipients
  */
 contract DeployFeeSplitter is Script, Test {
-    // Token addresses as specified
-    address constant TOKEN_0 = 0x7300B37DfdfAb110d83290A29DfB31B1740219fE;
-    address constant TOKEN_1 = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
     function run() public {
         // Load the addresses from the JSON file
@@ -57,16 +54,20 @@ contract DeployFeeSplitter is Script, Test {
     function deployFeeSplitter(Addresses addresses) public returns (FeeSplitter feeSplitter) {
         vm.startBroadcast();
 
+        // Get token addresses from the addresses contract
+        address token0 = addresses.getAddress("MAMO");
+        address token1 = addresses.getAddress("VIRTUAL");
+        
         address recipient1 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
         address recipient2 = addresses.getAddress("F-MAMO"); // 70% recipient
 
         // Deploy the FeeSplitter contract with 70/30 split
-        feeSplitter = new FeeSplitter(TOKEN_0, TOKEN_1, recipient1, recipient2, 3000);
+        feeSplitter = new FeeSplitter(token0, token1, recipient1, recipient2, 3000);
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying FeeSplitter contract...")));
         console.log("FeeSplitter contract deployed at: %s", StdStyle.yellow(vm.toString(address(feeSplitter))));
-        console.log("Token 0: %s", StdStyle.yellow(vm.toString(TOKEN_0)));
-        console.log("Token 1: %s", StdStyle.yellow(vm.toString(TOKEN_1)));
+        console.log("Token 0 (MAMO): %s", StdStyle.yellow(vm.toString(token0)));
+        console.log("Token 1 (VIRTUAL): %s", StdStyle.yellow(vm.toString(token1)));
         console.log("Recipient 1 (70%%): %s", StdStyle.yellow(vm.toString(recipient1)));
         console.log("Recipient 2 (30%%): %s", StdStyle.yellow(vm.toString(recipient2)));
 
@@ -88,12 +89,14 @@ contract DeployFeeSplitter is Script, Test {
      * @param feeSplitter The deployed FeeSplitter contract
      */
     function validate(Addresses addresses, FeeSplitter feeSplitter) public view {
+        address expectedToken0 = addresses.getAddress("MAMO");
+        address expectedToken1 = addresses.getAddress("VIRTUAL");
         address expectedRecipient1 = addresses.getAddress("VIRTUALS_MULTISIG");
         address expectedRecipient2 = addresses.getAddress("F-MAMO");
 
         // Verify the tokens are set correctly
-        assertEq(feeSplitter.TOKEN_0(), TOKEN_0, "incorrect TOKEN_0");
-        assertEq(feeSplitter.TOKEN_1(), TOKEN_1, "incorrect TOKEN_1");
+        assertEq(feeSplitter.TOKEN_0(), expectedToken0, "incorrect TOKEN_0");
+        assertEq(feeSplitter.TOKEN_1(), expectedToken1, "incorrect TOKEN_1");
 
         // Verify the recipients are set correctly
         assertEq(feeSplitter.RECIPIENT_1(), expectedRecipient1, "incorrect RECIPIENT_1");
