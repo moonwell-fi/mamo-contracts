@@ -168,5 +168,10 @@
     "addr": "0x7cb24EFA3fe76650388145b9B0823De6600f1f4c",
     "name": "STRATEGY_MULTICALL",
     "isContract": true
+  },
+  {
+    "addr": "0x7cb24EFA3fe76650388145b9B0823De6600f1f4d",
+    "name": "VIRTUALS_MULTISIG",
+    "isContract": false
   }
 ]
