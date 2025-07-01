@@ -36,8 +36,8 @@ contract DeployFeeSplitter is Script, Test {
 
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== FEE SPLITTER DEPLOYMENT COMPLETE ===")));
         console.log("%s: %s", StdStyle.bold("FeeSplitter contract"), StdStyle.yellow(vm.toString(address(feeSplitter))));
-        console.log("%s: %s", StdStyle.bold("Token 0"), StdStyle.yellow(vm.toString(TOKEN_0)));
-        console.log("%s: %s", StdStyle.bold("Token 1"), StdStyle.yellow(vm.toString(TOKEN_1)));
+        console.log("%s: %s", StdStyle.bold("Token 0 (MAMO)"), StdStyle.yellow(vm.toString(feeSplitter.TOKEN_0())));
+        console.log("%s: %s", StdStyle.bold("Token 1 (VIRTUAL)"), StdStyle.yellow(vm.toString(feeSplitter.TOKEN_1())));
         console.log(
             "%s: %s", StdStyle.bold("Recipient 1 (70%)"), StdStyle.yellow(vm.toString(feeSplitter.RECIPIENT_1()))
         );

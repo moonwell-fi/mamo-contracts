@@ -12,12 +12,33 @@ import {DeployFeeSplitter} from "@script/DeployFeeSplitter.s.sol";
 
 import {console} from "forge-std/console.sol";
 
-interface IPoolFactory {
-    function createPool(address tokenA, address tokenB, bool stable) external returns (address pool);
+interface INonfungiblePositionManager {
+    struct MintParams {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        address recipient;
+        uint256 deadline;
+    }
+
+    function mint(MintParams calldata params)
+        external
+        payable
+        returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
 }
 
 interface IAgentVeToken {
     function withdraw(uint256 amount) external;
+}
+
+interface IERC721 {
+    function ownerOf(uint256 tokenId) external view returns (address owner);
 }
 
 contract VirtualLPMigration is MultisigProposal {
@@ -28,6 +49,7 @@ contract VirtualLPMigration is MultisigProposal {
     DeployFeeSplitter public immutable deployFeeSplitterScript;
     FeeSplitter public feeSplitter;
     BurnAndEarn public burnAndEarn;
+    uint256 public lpTokenId;
 
     constructor() {
         deployFeeSplitterScript = new DeployFeeSplitter();
@@ -66,7 +88,7 @@ contract VirtualLPMigration is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Deploy FeeSplitter and BurnAndEarn contracts, then withdraw from sMAMO";
+        return "Deploy FeeSplitter and BurnAndEarn contracts, withdraw from sMAMO, and mint LP position";
     }
 
     function deploy() public override {
@@ -116,31 +138,55 @@ contract VirtualLPMigration is MultisigProposal {
         // The sMAMO contract should handle the balance check internally
         uint256 balance = IERC20(SMAMO_CONTRACT).balanceOf(address(this));
         
-        if (balance > 0) {
             // Withdraw all tokens from sMAMO
             smamoContract.withdraw(balance);
             console.log("Withdrawn %s tokens from sMAMO", balance);
-        } else {
-            console.log("No tokens to withdraw from sMAMO");
-        }
         
-        // Step 4: Create pool with the tokens from FeeSplitter
-        console.log("Step 4: Creating pool with FeeSplitter tokens...");
+        // Step 4: Mint LP position with the tokens
+        console.log("Step 4: Minting LP position with tokens...");
         
         // Get token addresses from the addresses contract
         address mamo = addresses.getAddress("MAMO");
         address virtual = addresses.getAddress("VIRTUAL");
-        address poolFactory = addresses.getAddress("AERODROME_POOL_FACTORY");
+        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
         
-        IPoolFactory factory = IPoolFactory(poolFactory);
+        // Sort tokens (token0 < token1)
+        (address token0, address token1) = mamo < virtual ? (mamo, virtual) : (virtual, mamo);
         
-        // Create a volatile pool (stable = false) with the two tokens
-        address newPool = factory.createPool(mamo, virtual, false);
+        INonfungiblePositionManager manager = INonfungiblePositionManager(positionManager);
         
-        console.log("Created pool at address: %s", newPool);
-        console.log("Pool tokens: %s (MAMO) and %s (VIRTUAL)", mamo, virtual);
-        console.log("Pool type: volatile (stable = false)");
-        console.log("Pool factory: %s", poolFactory);
+        // Get token balances (assuming we have some tokens to provide liquidity)
+        uint256 amount0Desired = IERC20(token0).balanceOf(address(this));
+        uint256 amount1Desired = IERC20(token1).balanceOf(address(this));
+            // Approve tokens for the position manager
+            IERC20(token0).approve(positionManager, amount0Desired);
+            IERC20(token1).approve(positionManager, amount1Desired);
+            
+            // Mint LP position with full range (for maximum liquidity coverage)
+            INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
+                token0: token0,
+                token1: token1,
+                fee: 3000, // 0.3% fee tier
+                tickLower: -887220, // Min tick for full range
+                tickUpper: 887220,  // Max tick for full range
+                amount0Desired: amount0Desired          ,
+                amount1Desired: amount1Desired,
+                amount0Min: amount0Desired, // Exact amount of token0 (new pool)
+                amount1Min: amount1Desired, // Exact amount of token1 (new pool)
+                recipient: addresses.getAddress("MAMO_MULTISIG"), // Send LP NFT to multisig
+                deadline: block.timestamp + 3600 // 1 hour deadline
+            });
+            
+            (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = manager.mint(params);
+            
+            // Store the LP token ID for validation
+            lpTokenId = tokenId;
+            
+            console.log("Minted LP position with tokenId: %s", tokenId);
+            console.log("Liquidity: %s", liquidity);
+            console.log("Amount0 used: %s", amount0);
+            console.log("Amount1 used: %s", amount1);
+            console.log("LP NFT sent to: %s", addresses.getAddress("MAMO_MULTISIG"));
     }
 
     function simulate() public override {
@@ -149,7 +195,6 @@ contract VirtualLPMigration is MultisigProposal {
     }
 
     function validate() public view override {
-        console.log("Starting validation...");
         
         // Validate FeeSplitter deployment
         assertTrue(address(feeSplitter) != address(0), "FeeSplitter should be deployed");
@@ -170,8 +215,14 @@ contract VirtualLPMigration is MultisigProposal {
         assertTrue(burnAndEarn.feeCollector() != address(0), "BurnAndEarn should have feeCollector set");
         assertEq(burnAndEarn.feeCollector(), address(feeSplitter), "BurnAndEarn feeCollector should match FeeSplitter");
         
-        // Validate sMAMO contract interaction
-        assertTrue(SMAMO_CONTRACT != address(0), "sMAMO contract address should be valid");
+        // Validate that LP NFT was minted and transferred to multisig
+            address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+            address multisig = addresses.getAddress("MAMO_MULTISIG");
+            
+            IERC721 nftContract = IERC721(positionManager);
+            address nftOwner = nftContract.ownerOf(lpTokenId);
+            
+            assertEq(nftOwner, multisig, "LP NFT should be owned by multisig");
         
         console.log("All validations passed successfully");
     }
