@@ -38,6 +38,33 @@ interface IAgentVeToken {
     function withdraw(uint256 amount) external;
 }
 
+interface IUniswapV2Pair {
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB);
+
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+}
+
+interface IUniswapV2Router {
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB);
+}
+
 interface IERC721 {
     function ownerOf(uint256 tokenId) external view returns (address owner);
 }
@@ -138,48 +165,68 @@ contract VirtualLPMigration is MultisigProposal {
         // The sMAMO contract should handle the balance check internally
         uint256 balance = IERC20(smamoAddress).balanceOf(multisig);
 
-        // Withdraw all tokens from sMAMO
+        // Withdraw all LP tokens from sMAMO (these are Uniswap V2 LP tokens)
         smamoContract.withdraw(balance);
-        console.log("[INFO] Withdrawn %s tokens from sMAMO", balance);
+        console.log("[INFO] Withdrawn %s V2 LP tokens from sMAMO", balance);
 
-        // Check VIRTUAL token balance after withdrawal
+        // Step 3.5: Break down V2 LP tokens to get underlying VIRTUAL and MAMO tokens
+        console.log("[INFO] Step 3.5: Breaking down V2 LP tokens...");
+
         address virtualToken = addresses.getAddress("VIRTUAL");
-        uint256 virtualBalance = IERC20(virtualToken).balanceOf(multisig);
-        console.log("[INFO] VIRTUAL token balance after withdrawal: %s", virtualBalance);
+        address mamo = addresses.getAddress("MAMO");
+        address v2Router = addresses.getAddress("UNISWAP_V2_ROUTER"); // Need to add this address
+        address v2Pair = addresses.getAddress("VIRTUAL_MAMO_V2_PAIR"); // Need to add this address
+
+        // Get the V2 LP token balance (should be what we just withdrew)
+        uint256 v2LpBalance = IERC20(v2Pair).balanceOf(multisig);
+        console.log("[INFO] V2 LP token balance: %s", v2LpBalance);
+
+        // Approve the router to spend our LP tokens
+        IERC20(v2Pair).approve(v2Router, v2LpBalance);
+
+        // Remove liquidity from V2 pair to get underlying tokens
+        IUniswapV2Router router = IUniswapV2Router(v2Router);
+        (uint256 amountVirtual, uint256 amountMamo) = router.removeLiquidity(
+            virtualToken,
+            mamo,
+            v2LpBalance,
+            0, // Accept any amount of VIRTUAL
+            0, // Accept any amount of MAMO
+            multisig,
+            block.timestamp + 3600
+        );
+
+        console.log("[INFO] Removed liquidity - VIRTUAL: %s, MAMO: %s", amountVirtual, amountMamo);
 
         // Step 4: Mint LP position with the tokens
         console.log("[INFO] Step 4: Minting LP position with tokens...");
 
-        // Get token addresses from the addresses contract
-        address mamo = addresses.getAddress("MAMO");
+        // Get position manager address
         address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
-
-        // Sort tokens (token0 < token1)
-        (address token0, address token1) = mamo < virtualToken ? (mamo, virtualToken) : (virtualToken, mamo);
 
         INonfungiblePositionManager manager = INonfungiblePositionManager(positionManager);
 
-        // Get token balances (assuming we have some tokens to provide liquidity)
-        uint256 amount0Desired = IERC20(token0).balanceOf(multisig);
-        uint256 amount1Desired = IERC20(token1).balanceOf(multisig);
+        // Get token balances from multisig
+        uint256 amount0Desired = IERC20(mamo).balanceOf(multisig);
+        uint256 amount1Desired = IERC20(virtualToken).balanceOf(multisig);
 
-        console.log("[INFO] Token0 (%s) balance: %s", token0, amount0Desired);
-        console.log("[INFO] Token1 (%s) balance: %s", token1, amount1Desired);
+        console.log("[INFO] Token0 (%s) balance: %s", mamo, amount0Desired);
+        console.log("[INFO] Token1 (%s) balance: %s", virtualToken, amount1Desired);
         // Approve tokens for the position manager
         IERC20(token0).approve(positionManager, amount0Desired);
-        IERC20(token1).approve(positionManager, amount1Desired);
+        IERC20(virtualToken).approve(positionManager, amount1Desired);
 
         // Mint LP position with full range (for maximum liquidity coverage)
         INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
-            token0: token0,
-            token1: token1,
+            token0: mamo,
+            token1: virtualToken,
             tickSpacing: 200, // Standard tick spacing for 0.3% fee tier
             tickLower: -887220, // Min tick for full range
             tickUpper: 887220, // Max tick for full range
             amount0Desired: amount0Desired,
             amount1Desired: amount1Desired,
-            amount0Min: 0, // TODO
-            amount1Min: 0, // TODO
+            amount0Min: 0, // Allow slippage since this might be initial liquidity
+            amount1Min: 0, // Allow slippage since this might be initial liquidity
             recipient: addresses.getAddress("FEE_SPLITTER"), // Send LP NFT to multisig
             deadline: block.timestamp + 3600, // 1 hour deadline
             sqrtPriceX96: 79228162514264337593543950336 // 1:1 price ratio (sqrt(1) * 2^96)
@@ -227,14 +274,15 @@ contract VirtualLPMigration is MultisigProposal {
         assertEq(burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should match FeeSplitter");
 
         console.log("[INFO] Validating that LP NFT was minted and transferred to FEE_SPLITTER...");
-        // Validate that LP NFT was minted and transferred to multisig
-        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
-        address feeSplitter = addresses.getAddress("FEE_SPLITTER");
+        // Validate that LP NFT was minted and transferred to FEE_SPLITTER
+        address validationPositionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        address feeSplitterAddr = addresses.getAddress("FEE_SPLITTER");
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
 
-        IERC721 nftContract = IERC721(positionManager);
+        IERC721 nftContract = IERC721(validationPositionManager);
         address nftOwner = nftContract.ownerOf(lpTokenId);
 
-        assertEq(nftOwner, multisig, "LP NFT should be owned by FEE_SPLITTER");
+        assertEq(nftOwner, feeSplitterAddr, "LP NFT should be owned by FEE_SPLITTER");
 
         console.log("[INFO] All validations passed successfully");
     }

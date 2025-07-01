@@ -198,5 +198,15 @@
     "addr": "0x022b91ED8e85aE7CD5348F1DdaAFAa3350842Ef3",
     "name": "VIRTUALS_sMAMO",
     "isContract": true
+  },
+  {
+    "addr": "0xb7f51d070d4e05dbbc3a3697aef5405e60e013f6",
+    "name": "VIRTUAL_MAMO_V2_PAIR",
+    "isContract": true
+  },
+  {
+    "addr": "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
+    "name": "UNISWAP_V2_ROUTER",
+    "isContract": true
   }
 ]
