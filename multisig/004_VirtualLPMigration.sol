@@ -42,13 +42,8 @@ interface IERC721 {
 }
 
 contract VirtualLPMigration is MultisigProposal {
-    // sMAMO contract address
-    address public constant SMAMO_CONTRACT = 0x022b91ed8e85ae7cd5348f1ddaafaa3350842ef3;
-    
     // Deployed contracts
     DeployFeeSplitter public immutable deployFeeSplitterScript;
-    FeeSplitter public feeSplitter;
-    BurnAndEarn public burnAndEarn;
     uint256 public lpTokenId;
 
     constructor() {
@@ -92,101 +87,97 @@ contract VirtualLPMigration is MultisigProposal {
     }
 
     function deploy() public override {
-        console.log("Starting VirtualLP Migration deployment...");
-        
+        console.log("[INFO] Starting VirtualLP Migration deployment...");
+
         // Step 1: Deploy FeeSplitter contract
-        console.log("Step 1: Deploying FeeSplitter...");
-        feeSplitter = deployFeeSplitterScript.deployFeeSplitter(addresses);
-        
+        console.log("[INFO] Step 1: Deploying FeeSplitter...");
+        FeeSplitter feeSplitter = deployFeeSplitterScript.deployFeeSplitter(addresses);
+
         // Step 2: Deploy BurnAndEarn contract with FeeSplitter as feeCollector
-        console.log("Step 2: Deploying BurnAndEarn...");
-        deployBurnAndEarn();
-        
-        console.log("VirtualLP Migration deployment completed");
+        console.log("[INFO] Step 2: Deploying BurnAndEarn...");
+        deployBurnAndEarn(feeSplitter);
+
+        console.log("[INFO] VirtualLP Migration deployment completed");
     }
 
-    function deployBurnAndEarn() internal {
+    function deployBurnAndEarn(FeeSplitter feeSplitter) internal {
         vm.startBroadcast();
-        
+
         address owner = addresses.getAddress("MAMO_MULTISIG");
-        
+
         // Deploy BurnAndEarn with FeeSplitter as feeCollector and multisig as owner
-        burnAndEarn = new BurnAndEarn(address(feeSplitter), owner);
-        
+        BurnAndEarn burnAndEarn = new BurnAndEarn(address(feeSplitter), owner);
+
         console.log("BurnAndEarn deployed at: %s", address(burnAndEarn));
         console.log("Fee collector set to: %s", address(feeSplitter));
         console.log("Owner set to: %s", owner);
-        
+
         vm.stopBroadcast();
-        
+
         // Add the address to the Addresses contract
-        if (addresses.isAddressSet("BURN_AND_EARN")) {
-            addresses.changeAddress("BURN_AND_EARN", address(burnAndEarn), true);
-        } else {
-            addresses.addAddress("BURN_AND_EARN", address(burnAndEarn), true);
-        }
+        addresses.addAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP", address(burnAndEarn), true);
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         // Step 3: Withdraw all tokens from sMAMO contract
-        console.log("Step 3: Withdrawing from sMAMO contract...");
-        
-        IAgentVeToken smamoContract = IAgentVeToken(SMAMO_CONTRACT);
-        
-        // Get the current balance of this contract in sMAMO
+        console.log("[INFO] Step 3: Withdrawing from sMAMO contract...");
+
+        address smamoAddress = addresses.getAddress("VIRTUALS_sMAMO");
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        IAgentVeToken smamoContract = IAgentVeToken(smamoAddress);
+
+        // Get the current balance of the multisig in sMAMO
         // Since we need to know the balance, we'll call withdraw with the full amount
         // The sMAMO contract should handle the balance check internally
-        uint256 balance = IERC20(SMAMO_CONTRACT).balanceOf(address(this));
-        
-            // Withdraw all tokens from sMAMO
-            smamoContract.withdraw(balance);
-            console.log("Withdrawn %s tokens from sMAMO", balance);
-        
+        uint256 balance = IERC20(smamoAddress).balanceOf(multisig);
+
+        // Withdraw all tokens from sMAMO
+        smamoContract.withdraw(balance);
+        console.log("[INFO] Withdrawn %s tokens from sMAMO", balance);
+
         // Step 4: Mint LP position with the tokens
-        console.log("Step 4: Minting LP position with tokens...");
-        
+        console.log("[INFO] Step 4: Minting LP position with tokens...");
+
         // Get token addresses from the addresses contract
         address mamo = addresses.getAddress("MAMO");
-        address virtual = addresses.getAddress("VIRTUAL");
+        address virtualToken = addresses.getAddress("VIRTUAL");
         address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
-        
+
         // Sort tokens (token0 < token1)
-        (address token0, address token1) = mamo < virtual ? (mamo, virtual) : (virtual, mamo);
-        
+        (address token0, address token1) = mamo < virtualToken ? (mamo, virtualToken) : (virtualToken, mamo);
+
         INonfungiblePositionManager manager = INonfungiblePositionManager(positionManager);
-        
+
         // Get token balances (assuming we have some tokens to provide liquidity)
-        uint256 amount0Desired = IERC20(token0).balanceOf(address(this));
-        uint256 amount1Desired = IERC20(token1).balanceOf(address(this));
-            // Approve tokens for the position manager
-            IERC20(token0).approve(positionManager, amount0Desired);
-            IERC20(token1).approve(positionManager, amount1Desired);
-            
-            // Mint LP position with full range (for maximum liquidity coverage)
-            INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
-                token0: token0,
-                token1: token1,
-                fee: 3000, // 0.3% fee tier
-                tickLower: -887220, // Min tick for full range
-                tickUpper: 887220,  // Max tick for full range
-                amount0Desired: amount0Desired          ,
-                amount1Desired: amount1Desired,
-                amount0Min: amount0Desired, // Exact amount of token0 (new pool)
-                amount1Min: amount1Desired, // Exact amount of token1 (new pool)
-                recipient: addresses.getAddress("MAMO_MULTISIG"), // Send LP NFT to multisig
-                deadline: block.timestamp + 3600 // 1 hour deadline
-            });
-            
-            (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = manager.mint(params);
-            
-            // Store the LP token ID for validation
-            lpTokenId = tokenId;
-            
-            console.log("Minted LP position with tokenId: %s", tokenId);
-            console.log("Liquidity: %s", liquidity);
-            console.log("Amount0 used: %s", amount0);
-            console.log("Amount1 used: %s", amount1);
-            console.log("LP NFT sent to: %s", addresses.getAddress("MAMO_MULTISIG"));
+        uint256 amount0Desired = IERC20(token0).balanceOf(multisig);
+        uint256 amount1Desired = IERC20(token1).balanceOf(multisig);
+        // Approve tokens for the position manager
+        IERC20(token0).approve(positionManager, amount0Desired);
+        IERC20(token1).approve(positionManager, amount1Desired);
+
+        // Mint LP position with full range (for maximum liquidity coverage)
+        INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
+            token0: token0,
+            token1: token1,
+            fee: 3000, // 0.3% fee tier
+            tickLower: -887220, // Min tick for full range
+            tickUpper: 887220, // Max tick for full range
+            amount0Desired: amount0Desired,
+            amount1Desired: amount1Desired,
+            amount0Min: amount0Desired, // Exact amount of token0 (new pool)
+            amount1Min: amount1Desired, // Exact amount of token1 (new pool)
+            recipient: addresses.getAddress("MAMO_MULTISIG"), // Send LP NFT to multisig
+            deadline: block.timestamp + 3600 // 1 hour deadline
+        });
+
+        (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = manager.mint(params);
+
+        // Store the LP token ID for validation
+        lpTokenId = tokenId;
+
+        console.log("[INFO] Liquidity: %s", liquidity);
+        console.log("[INFO] Amount0 used: %s", amount0);
+        console.log("[INFO] Amount1 used: %s", amount1);
     }
 
     function simulate() public override {
@@ -195,35 +186,47 @@ contract VirtualLPMigration is MultisigProposal {
     }
 
     function validate() public view override {
-        
+        console.log("[INFO] Validating VirtualLP Migration...");
         // Validate FeeSplitter deployment
-        assertTrue(address(feeSplitter) != address(0), "FeeSplitter should be deployed");
+        address feeSplitterAddress = addresses.getAddress("FEE_SPLITTER");
         assertTrue(addresses.isAddressSet("FEE_SPLITTER"), "FeeSplitter address should be set");
-        
+
+        console.log("[INFO] Validating FeeSplitter...");
         // Validate FeeSplitter configuration using the script's validation
+        FeeSplitter feeSplitter = FeeSplitter(feeSplitterAddress);
         deployFeeSplitterScript.validate(addresses, feeSplitter);
-        
+
+        console.log("[INFO] Validating BurnAndEarn...");
         // Validate BurnAndEarn deployment
-        assertTrue(address(burnAndEarn) != address(0), "BurnAndEarn should be deployed");
-        assertTrue(addresses.isAddressSet("BURN_AND_EARN"), "BurnAndEarn address should be set");
-        
+        address burnAndEarnAddress = addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP");
+        assertTrue(addresses.isAddressSet("BURN_AND_EARN_VIRTUAL_MAMO_LP"), "BurnAndEarn address should be set");
+
+        console.log("[INFO] Validating BurnAndEarn configuration...");
         // Validate BurnAndEarn configuration
-        assertEq(burnAndEarn.feeCollector(), address(feeSplitter), "BurnAndEarn feeCollector should be FeeSplitter");
-        assertEq(burnAndEarn.owner(), addresses.getAddress("MAMO_MULTISIG"), "BurnAndEarn owner should be multisig");
-        
+        BurnAndEarn burnAndEarn = BurnAndEarn(burnAndEarnAddress);
+        assertEq(
+            burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should be FeeSplitter"
+        );
+        assertEq(
+            burnAndEarn.owner(), addresses.getAddress("MAMO_MULTISIG"), "BurnAndEarn owner should be multisig"
+        );
+
+        console.log("[INFO] Validating that contracts are linked correctly...");
         // Validate that contracts are linked correctly
-        assertTrue(burnAndEarn.feeCollector() != address(0), "BurnAndEarn should have feeCollector set");
-        assertEq(burnAndEarn.feeCollector(), address(feeSplitter), "BurnAndEarn feeCollector should match FeeSplitter");
-        
+        assertEq(
+            burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should match FeeSplitter"
+        );
+
+        console.log("[INFO] Validating that LP NFT was minted and transferred to multisig...");
         // Validate that LP NFT was minted and transferred to multisig
-            address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
-            address multisig = addresses.getAddress("MAMO_MULTISIG");
-            
-            IERC721 nftContract = IERC721(positionManager);
-            address nftOwner = nftContract.ownerOf(lpTokenId);
-            
-            assertEq(nftOwner, multisig, "LP NFT should be owned by multisig");
-        
-        console.log("All validations passed successfully");
+        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+
+        IERC721 nftContract = IERC721(positionManager);
+        address nftOwner = nftContract.ownerOf(lpTokenId);
+
+        assertEq(nftOwner, multisig, "LP NFT should be owned by multisig");
+
+        console.log("[INFO] All validations passed successfully");
     }
 }

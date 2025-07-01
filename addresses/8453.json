@@ -185,13 +185,23 @@
     "isContract": true
   },
   {
-    "addr": "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",
+    "addr": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
     "name": "VIRTUAL",
     "isContract": true
   },
   {
-    "addr": "0x827922686190790b37229fd06084350e74485b72",
+    "addr": "0x827922686190790b37229fd06084350E74485b72",
     "name": "UNISWAP_V3_POSITION_MANAGER_AERODROME",
+    "isContract": true
+  },
+  {
+    "addr": "0x022b91ED8e85aE7CD5348F1DdaAFAa3350842Ef3",
+    "name": "VIRTUALS_sMAMO",
+    "isContract": true
+  },
+  {
+    "addr": "0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519",
+    "name": "FEE_SPLITTER",
     "isContract": true
   }
 ]
