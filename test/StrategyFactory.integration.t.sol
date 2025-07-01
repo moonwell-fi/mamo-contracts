@@ -77,21 +77,6 @@ contract StrategyFactoryIntegrationTest is Test {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin; // Use admin as mamo multisig for testing
 
-        // todo remove this once FixIsRewardToken is executed
-        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
-        fixIsRewardToken.setAddresses(addresses);
-        fixIsRewardToken.deploy();
-        fixIsRewardToken.build();
-        fixIsRewardToken.simulate();
-        fixIsRewardToken.validate();
-
-        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
-        proposal.setAddresses(addresses);
-        proposal.deploy();
-        proposal.build();
-        proposal.simulate();
-        proposal.validate();
-
         factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
