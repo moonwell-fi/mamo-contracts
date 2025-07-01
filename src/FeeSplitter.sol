@@ -19,9 +19,9 @@ contract FeeSplitter {
     address public immutable TOKEN_1;
 
     // Configurable split ratios
-    uint256 public immutable RECIPIENT_1_SHARE; // splitA%
-    uint256 public immutable RECIPIENT_2_SHARE; // (100 - splitA)%
-    uint256 private constant TOTAL_SHARE = 100;
+    uint256 public immutable RECIPIENT_1_SHARE; // splitA in basis points
+    uint256 public immutable RECIPIENT_2_SHARE; // (10000 - splitA) in basis points
+    uint256 private constant TOTAL_SHARE = 10000; // 100% in basis points
 
     /// @notice Emitted when fees are split
     event FeesSplit(address indexed token, uint256 recipient1Amount, uint256 recipient2Amount);
@@ -30,9 +30,9 @@ contract FeeSplitter {
      * @notice Constructor to set the tokens, recipients, and split ratio
      * @param _token0 Address of the first token to split
      * @param _token1 Address of the second token to split
-     * @param _recipient1 Address of the first recipient (receives splitA%)
-     * @param _recipient2 Address of the second recipient (receives (100-splitA)%)
-     * @param _splitA Percentage for recipient1 (0-100)
+     * @param _recipient1 Address of the first recipient (receives splitA basis points)
+     * @param _recipient2 Address of the second recipient (receives (10000-splitA) basis points)
+     * @param _splitA Basis points for recipient1 (0-10000)
      */
     constructor(address _token0, address _token1, address _recipient1, address _recipient2, uint256 _splitA) {
         require(_token0 != address(0), "TOKEN_0 cannot be zero address");
@@ -41,19 +41,19 @@ contract FeeSplitter {
         require(_recipient2 != address(0), "RECIPIENT_2 cannot be zero address");
         require(_token0 != _token1, "Tokens must be different");
         require(_recipient1 != _recipient2, "Recipients must be different");
-        require(_splitA <= 100, "Split A cannot exceed 100%");
+        require(_splitA <= 10000, "Split A cannot exceed 10000 basis points");
 
         TOKEN_0 = _token0;
         TOKEN_1 = _token1;
         RECIPIENT_1 = _recipient1;
         RECIPIENT_2 = _recipient2;
         RECIPIENT_1_SHARE = _splitA;
-        RECIPIENT_2_SHARE = 100 - _splitA;
+        RECIPIENT_2_SHARE = 10000 - _splitA;
     }
 
     /**
      * @notice Splits the current balance of both tokens between the two recipients
-     * @dev Distributes token0 and token1 balances according to the 70/30 split ratio
+     * @dev Distributes token0 and token1 balances according to the configured split ratio
      */
     function split() external {
         _splitToken(TOKEN_0);

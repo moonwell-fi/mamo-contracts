@@ -57,11 +57,11 @@ contract DeployFeeSplitter is Script, Test {
     function deployFeeSplitter(Addresses addresses) public returns (FeeSplitter feeSplitter) {
         vm.startBroadcast();
 
-        address recipient1 = addresses.getAddress("MAMO_MULTISIG"); // 70% recipient
-        address recipient2 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
+        address recipient1 = addresses.getAddress("VIRTUALS_MULTISIG"); // 70% recipient
+        address recipient2 = addresses.getAddress("MAMO_MULTISIG"); // 30% recipient
 
         // Deploy the FeeSplitter contract with 70/30 split
-        feeSplitter = new FeeSplitter(TOKEN_0, TOKEN_1, recipient1, recipient2, 70);
+        feeSplitter = new FeeSplitter(TOKEN_0, TOKEN_1, recipient1, recipient2, 3000);
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying FeeSplitter contract...")));
         console.log("FeeSplitter contract deployed at: %s", StdStyle.yellow(vm.toString(address(feeSplitter))));
