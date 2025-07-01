@@ -177,6 +177,6 @@
   {
     "addr": "0xfE2ff8927EF602DDac27E314A199D16BE6177860",
     "name": "F-MAMO",
-    "isContract": false
+    "isContract": true
   }
 ]
