@@ -198,10 +198,5 @@
     "addr": "0x022b91ED8e85aE7CD5348F1DdaAFAa3350842Ef3",
     "name": "VIRTUALS_sMAMO",
     "isContract": true
-  },
-  {
-    "addr": "0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519",
-    "name": "FEE_SPLITTER",
-    "isContract": true
   }
 ]
