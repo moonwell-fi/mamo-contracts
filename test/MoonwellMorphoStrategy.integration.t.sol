@@ -150,20 +150,6 @@ contract MoonwellMorphoStrategyTest is Test {
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
 
-        FixIsRewardToken fixIsRewardToken = new FixIsRewardToken();
-        fixIsRewardToken.setAddresses(addresses);
-        fixIsRewardToken.deploy();
-        fixIsRewardToken.build();
-        fixIsRewardToken.simulate();
-        fixIsRewardToken.validate();
-
-        DeployFactoriesAndMulticall proposal = new DeployFactoriesAndMulticall();
-        proposal.setAddresses(addresses);
-        proposal.deploy();
-        proposal.build();
-        proposal.simulate();
-        proposal.validate();
-
         string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         StrategyFactory factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
 
