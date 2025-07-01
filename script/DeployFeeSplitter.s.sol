@@ -57,8 +57,8 @@ contract DeployFeeSplitter is Script, Test {
     function deployFeeSplitter(Addresses addresses) public returns (FeeSplitter feeSplitter) {
         vm.startBroadcast();
 
-        address recipient1 = addresses.getAddress("VIRTUALS_MULTISIG"); // 70% recipient
-        address recipient2 = addresses.getAddress("MAMO_MULTISIG"); // 30% recipient
+        address recipient1 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
+        address recipient2 = addresses.getAddress("MAMO_MULTISIG"); // 70% recipient
 
         // Deploy the FeeSplitter contract with 70/30 split
         feeSplitter = new FeeSplitter(TOKEN_0, TOKEN_1, recipient1, recipient2, 3000);
@@ -88,8 +88,8 @@ contract DeployFeeSplitter is Script, Test {
      * @param feeSplitter The deployed FeeSplitter contract
      */
     function validate(Addresses addresses, FeeSplitter feeSplitter) public view {
-        address expectedRecipient1 = addresses.getAddress("MAMO_MULTISIG");
-        address expectedRecipient2 = addresses.getAddress("VIRTUALS_MULTISIG");
+        address expectedRecipient1 = addresses.getAddress("VIRTUALS_MULTISIG");
+        address expectedRecipient2 = addresses.getAddress("MAMO_MULTISIG");
 
         // Verify the tokens are set correctly
         assertEq(feeSplitter.TOKEN_0(), TOKEN_0, "incorrect TOKEN_0");
