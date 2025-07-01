@@ -173,5 +173,10 @@
     "addr": "0xb51C52d9E5E41937B0100840b6C3CBA6f7A57A0C",
     "name": "VIRTUALS_MULTISIG",
     "isContract": false
+  },
+  {
+    "addr": "0xfE2ff8927EF602DDac27E314A199D16BE6177860",
+    "name": "F-MAMO",
+    "isContract": false
   }
 ]
