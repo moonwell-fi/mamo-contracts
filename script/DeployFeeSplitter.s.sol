@@ -60,8 +60,8 @@ contract DeployFeeSplitter is Script, Test {
         address recipient1 = addresses.getAddress("MAMO_MULTISIG"); // 70% recipient
         address recipient2 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
 
-        // Deploy the FeeSplitter contract
-        feeSplitter = new FeeSplitter(TOKEN_0, TOKEN_1, recipient1, recipient2);
+        // Deploy the FeeSplitter contract with 70/30 split
+        feeSplitter = new FeeSplitter(TOKEN_0, TOKEN_1, recipient1, recipient2, 70);
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying FeeSplitter contract...")));
         console.log("FeeSplitter contract deployed at: %s", StdStyle.yellow(vm.toString(address(feeSplitter))));

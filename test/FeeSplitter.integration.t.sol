@@ -59,6 +59,8 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
         assertEq(feeSplitter.TOKEN_1(), address(token1), "incorrect TOKEN_1");
         assertEq(feeSplitter.RECIPIENT_1(), recipient1, "incorrect RECIPIENT_1");
         assertEq(feeSplitter.RECIPIENT_2(), recipient2, "incorrect RECIPIENT_2");
+        assertEq(feeSplitter.RECIPIENT_1_SHARE(), 70, "incorrect RECIPIENT_1_SHARE");
+        assertEq(feeSplitter.RECIPIENT_2_SHARE(), 30, "incorrect RECIPIENT_2_SHARE");
     }
 
     function testConstructorValidation() public {
@@ -68,24 +70,57 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
 
         // Test zero address validation
         vm.expectRevert("TOKEN_0 cannot be zero address");
-        new FeeSplitter(address(0), address(token1), testRecipient1, testRecipient2);
+        new FeeSplitter(address(0), address(token1), testRecipient1, testRecipient2, 70);
 
         vm.expectRevert("TOKEN_1 cannot be zero address");
-        new FeeSplitter(address(token0), address(0), testRecipient1, testRecipient2);
+        new FeeSplitter(address(token0), address(0), testRecipient1, testRecipient2, 70);
 
         vm.expectRevert("RECIPIENT_1 cannot be zero address");
-        new FeeSplitter(address(token0), address(token1), address(0), testRecipient2);
+        new FeeSplitter(address(token0), address(token1), address(0), testRecipient2, 70);
 
         vm.expectRevert("RECIPIENT_2 cannot be zero address");
-        new FeeSplitter(address(token0), address(token1), testRecipient1, address(0));
+        new FeeSplitter(address(token0), address(token1), testRecipient1, address(0), 70);
 
         // Test same token validation
         vm.expectRevert("Tokens must be different");
-        new FeeSplitter(address(token0), address(token0), testRecipient1, testRecipient2);
+        new FeeSplitter(address(token0), address(token0), testRecipient1, testRecipient2, 70);
 
         // Test same recipient validation
         vm.expectRevert("Recipients must be different");
-        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient1);
+        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient1, 70);
+
+        // Test split ratio validation
+        vm.expectRevert("Split A cannot exceed 100%");
+        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 101);
+    }
+
+    function testCustomSplitRatios() public {
+        // Test different split ratios
+        address testRecipient1 = makeAddr("testRecipient1");
+        address testRecipient2 = makeAddr("testRecipient2");
+
+        // Test 50/50 split
+        FeeSplitter splitter50_50 =
+            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 50);
+        assertEq(splitter50_50.RECIPIENT_1_SHARE(), 50, "incorrect 50/50 split for recipient1");
+        assertEq(splitter50_50.RECIPIENT_2_SHARE(), 50, "incorrect 50/50 split for recipient2");
+
+        // Test 80/20 split
+        FeeSplitter splitter80_20 =
+            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 80);
+        assertEq(splitter80_20.RECIPIENT_1_SHARE(), 80, "incorrect 80/20 split for recipient1");
+        assertEq(splitter80_20.RECIPIENT_2_SHARE(), 20, "incorrect 80/20 split for recipient2");
+
+        // Test 0/100 split (all to recipient2)
+        FeeSplitter splitter0_100 = new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 0);
+        assertEq(splitter0_100.RECIPIENT_1_SHARE(), 0, "incorrect 0/100 split for recipient1");
+        assertEq(splitter0_100.RECIPIENT_2_SHARE(), 100, "incorrect 0/100 split for recipient2");
+
+        // Test 100/0 split (all to recipient1)
+        FeeSplitter splitter100_0 =
+            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 100);
+        assertEq(splitter100_0.RECIPIENT_1_SHARE(), 100, "incorrect 100/0 split for recipient1");
+        assertEq(splitter100_0.RECIPIENT_2_SHARE(), 0, "incorrect 100/0 split for recipient2");
     }
 
     function testSplitWithBothTokens() public {
