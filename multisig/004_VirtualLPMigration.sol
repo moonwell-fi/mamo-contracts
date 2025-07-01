@@ -66,7 +66,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         if (DO_DEPLOY) {
             deploy();
-            addresses.updateJson();
+            //        addresses.updateJson();
             addresses.printJSONChanges();
         }
 
@@ -98,6 +98,12 @@ contract VirtualLPMigration is MultisigProposal {
         deployBurnAndEarn(feeSplitter);
 
         console.log("[INFO] VirtualLP Migration deployment completed");
+    }
+
+    function preBuildMock() public override {
+        // Mock timestamp to be after maturity to allow sMAMO withdrawal
+        // TODO remove this
+        vm.warp(block.timestamp + 10 * 365 days);
     }
 
     function deployBurnAndEarn(FeeSplitter feeSplitter) internal {
@@ -204,18 +210,12 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] Validating BurnAndEarn configuration...");
         // Validate BurnAndEarn configuration
         BurnAndEarn burnAndEarn = BurnAndEarn(burnAndEarnAddress);
-        assertEq(
-            burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should be FeeSplitter"
-        );
-        assertEq(
-            burnAndEarn.owner(), addresses.getAddress("MAMO_MULTISIG"), "BurnAndEarn owner should be multisig"
-        );
+        assertEq(burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should be FeeSplitter");
+        assertEq(burnAndEarn.owner(), addresses.getAddress("MAMO_MULTISIG"), "BurnAndEarn owner should be multisig");
 
         console.log("[INFO] Validating that contracts are linked correctly...");
         // Validate that contracts are linked correctly
-        assertEq(
-            burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should match FeeSplitter"
-        );
+        assertEq(burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should match FeeSplitter");
 
         console.log("[INFO] Validating that LP NFT was minted and transferred to multisig...");
         // Validate that LP NFT was minted and transferred to multisig
