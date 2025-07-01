@@ -173,5 +173,25 @@
     "addr": "0x7cb24EFA3fe76650388145b9B0823De6600f1f4d",
     "name": "VIRTUALS_MULTISIG",
     "isContract": false
+  },
+  {
+    "addr": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
+    "name": "AERODROME_ROUTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
+    "name": "AERODROME_QUOTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
+    "name": "VIRTUALS_TOKEN",
+    "isContract": true
+  },
+  {
+    "addr": "0xb909F567c5c2Bb1A4271349708CC4637D7318b4A",
+    "name": "VIRTUALS_CBBTC_POOL",
+    "isContract": true
   }
 ]

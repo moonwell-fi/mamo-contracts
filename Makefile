@@ -28,4 +28,7 @@ strategy-multicall:
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
 
-.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test
+virtuals-fee-splitter:
+	forge test --fork-url base --ffi --mc VirtualsFeeSplitterIntegrationTest -vv
+
+.PHONY: test coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter virtuals-fee-splitter integration-test
