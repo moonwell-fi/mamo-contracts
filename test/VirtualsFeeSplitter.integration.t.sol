@@ -227,10 +227,9 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
         assertTrue(virtuals != address(0), "Virtuals address should not be zero");
         assertTrue(cbbtc != address(0), "cbBTC address should not be zero");
 
-        // Test getAerodromeAddresses
-        (address router, address quoter) = virtualsFeeSplitter.getAerodromeAddresses();
+        // Test getAerodromeRouter
+        address router = virtualsFeeSplitter.getAerodromeRouter();
         assertTrue(router != address(0), "Router address should not be zero");
-        assertTrue(quoter != address(0), "Quoter address should not be zero");
 
         // Test getSplitRatios
         (uint256 share1, uint256 share2) = virtualsFeeSplitter.getSplitRatios();
@@ -241,10 +240,6 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
         (uint256 slippage, uint256 maxSlippage) = virtualsFeeSplitter.getSlippage();
         assertEq(slippage, 500, "Default slippage should be 5%");
         assertEq(maxSlippage, 1000, "Max slippage should be 10%");
-
-        // Test getPoolConfig
-        int24 tickSpacing = virtualsFeeSplitter.getPoolConfig();
-        assertEq(tickSpacing, 200, "Tick spacing should be 200");
     }
 
     function testMultipleSwapAndCollectCalls() public {

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {IQuoter} from "@interfaces/IQuoter.sol";
-import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+import {ISwapRouterV2} from "@interfaces/ISwapRouterV2.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -10,7 +9,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title VirtualsFeeSplitter
  * @notice Advanced fee splitter that swaps virtuals tokens to cbBTC and distributes both MAMO and cbBTC
- * @dev Swaps virtuals to cbBTC via Aerodrome, then splits both MAMO and cbBTC 70/30 between recipients
+ * @dev Swaps virtuals to cbBTC via Aerodrome V2, then splits both MAMO and cbBTC 70/30 between recipients
  */
 contract VirtualsFeeSplitter is Ownable {
     using SafeERC20 for IERC20;
@@ -19,10 +18,10 @@ contract VirtualsFeeSplitter is Ownable {
     address private constant MAMO_TOKEN = 0x7300B37DfdfAb110d83290A29DfB31B1740219fE;
     address private constant VIRTUALS_TOKEN = 0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b;
     address private constant CBBTC_TOKEN = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address private constant WETH_TOKEN = 0x4200000000000000000000000000000000000006; // Base WETH
 
-    // Aerodrome router addresses (hardcoded constants)
-    address private constant AERODROME_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5;
-    address private constant AERODROME_QUOTER = 0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0;
+    // Aerodrome V2 router address (hardcoded constant)
+    address private constant AERODROME_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
 
     // Split ratios (hardcoded 70/30)
     uint256 private constant RECIPIENT_1_SHARE = 70; // 70%
@@ -33,9 +32,8 @@ contract VirtualsFeeSplitter is Ownable {
     address public immutable RECIPIENT_1; // 70% recipient
     address public immutable RECIPIENT_2; // 30% recipient
 
-    // Router and quoter interfaces
-    ISwapRouter private immutable aerodromeRouter;
-    IQuoter private immutable aerodromeQuoter;
+    // Router interface
+    ISwapRouterV2 private immutable aerodromeRouter;
 
     // Swap deadline buffer (5 minutes)
     uint256 private constant DEADLINE_BUFFER = 300;
@@ -44,9 +42,6 @@ contract VirtualsFeeSplitter is Ownable {
     uint256 public slippageBps = 500; // 5%
     uint256 private constant MAX_SLIPPAGE_BPS = 1000; // 10% maximum
     uint256 private constant BPS_DENOMINATOR = 10000;
-
-    // Pool configuration for VIRTUALS/cbBTC swap
-    int24 private constant TICK_SPACING = 200; // Common tick spacing for most pairs
 
     /// @notice Emitted when MAMO tokens are distributed
     event MamoDistributed(uint256 recipient1Amount, uint256 recipient2Amount);
@@ -73,8 +68,7 @@ contract VirtualsFeeSplitter is Ownable {
 
         RECIPIENT_1 = _recipient1;
         RECIPIENT_2 = _recipient2;
-        aerodromeRouter = ISwapRouter(AERODROME_ROUTER);
-        aerodromeQuoter = IQuoter(AERODROME_QUOTER);
+        aerodromeRouter = ISwapRouterV2(AERODROME_ROUTER);
 
         // Approve router to spend virtuals tokens
         IERC20(VIRTUALS_TOKEN).forceApprove(AERODROME_ROUTER, type(uint256).max);
@@ -162,34 +156,29 @@ contract VirtualsFeeSplitter is Ownable {
             return; // Nothing to swap
         }
 
-        // Get quote for the swap
-        IQuoter.QuoteExactInputSingleParams memory quoteParams = IQuoter.QuoteExactInputSingleParams({
-            tokenIn: VIRTUALS_TOKEN,
-            tokenOut: CBBTC_TOKEN,
-            amountIn: virtualsBalance,
-            tickSpacing: TICK_SPACING,
-            sqrtPriceLimitX96: 0 // No price limit
-        });
+        // Create swap path: VIRTUALS -> cbBTC
+        address[] memory path = new address[](2);
+        path[0] = VIRTUALS_TOKEN;
+        path[1] = CBBTC_TOKEN;
 
-        (uint256 quotedAmountOut,,,) = aerodromeQuoter.quoteExactInputSingle(quoteParams);
+        // Get quote for the swap using V2 getAmountsOut
+        uint256[] memory amounts = aerodromeRouter.getAmountsOut(virtualsBalance, path);
+        uint256 quotedAmountOut = amounts[1];
 
         // Calculate minimum amount out with slippage protection
         uint256 minAmountOut = (quotedAmountOut * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
 
-        // Perform the swap
+        // Perform the swap using V2 swapExactTokensForTokens
         uint256 deadline = block.timestamp + DEADLINE_BUFFER;
-        ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
-            tokenIn: VIRTUALS_TOKEN,
-            tokenOut: CBBTC_TOKEN,
-            tickSpacing: TICK_SPACING,
-            recipient: address(this),
-            deadline: deadline,
-            amountIn: virtualsBalance,
-            amountOutMinimum: minAmountOut,
-            sqrtPriceLimitX96: 0 // No price limit
-        });
+        uint256[] memory swapAmounts = aerodromeRouter.swapExactTokensForTokens(
+            virtualsBalance,
+            minAmountOut,
+            path,
+            address(this),
+            deadline
+        );
 
-        uint256 cbbtcReceived = aerodromeRouter.exactInputSingle(swapParams);
+        uint256 cbbtcReceived = swapAmounts[1];
         emit VirtualsSwapped(virtualsBalance, cbbtcReceived);
 
         // Distribute the received cbBTC
@@ -227,10 +216,10 @@ contract VirtualsFeeSplitter is Ownable {
     }
 
     /**
-     * @notice View function to get Aerodrome addresses
+     * @notice View function to get Aerodrome router address
      */
-    function getAerodromeAddresses() external pure returns (address router, address quoter) {
-        return (AERODROME_ROUTER, AERODROME_QUOTER);
+    function getAerodromeRouter() external pure returns (address router) {
+        return AERODROME_ROUTER;
     }
 
     /**
@@ -245,12 +234,5 @@ contract VirtualsFeeSplitter is Ownable {
      */
     function getSlippage() external view returns (uint256 slippageBasisPoints, uint256 maxSlippageBasisPoints) {
         return (slippageBps, MAX_SLIPPAGE_BPS);
-    }
-
-    /**
-     * @notice View function to get pool configuration
-     */
-    function getPoolConfig() external pure returns (int24 tickSpacing) {
-        return TICK_SPACING;
     }
 }

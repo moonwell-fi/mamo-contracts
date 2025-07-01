@@ -175,13 +175,8 @@
     "isContract": false
   },
   {
-    "addr": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
+    "addr": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
     "name": "AERODROME_ROUTER",
-    "isContract": true
-  },
-  {
-    "addr": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
-    "name": "AERODROME_QUOTER",
     "isContract": true
   },
   {

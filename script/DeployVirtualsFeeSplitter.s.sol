@@ -57,10 +57,9 @@ contract DeployVirtualsFeeSplitter is Script, Test {
         console.log("%s: %s", StdStyle.bold("Virtuals Token"), StdStyle.yellow(vm.toString(virtuals)));
         console.log("%s: %s", StdStyle.bold("cbBTC Token"), StdStyle.yellow(vm.toString(cbbtc)));
 
-        // Display Aerodrome addresses
-        (address router, address quoter) = virtualsFeeSplitter.getAerodromeAddresses();
+        // Display Aerodrome router address
+        address router = virtualsFeeSplitter.getAerodromeRouter();
         console.log("%s: %s", StdStyle.bold("Aerodrome Router"), StdStyle.yellow(vm.toString(router)));
-        console.log("%s: %s", StdStyle.bold("Aerodrome Quoter"), StdStyle.yellow(vm.toString(quoter)));
     }
 
     /**
@@ -132,10 +131,9 @@ contract DeployVirtualsFeeSplitter is Script, Test {
         assertTrue(virtuals != address(0), "Virtuals token address should not be zero");
         assertTrue(cbbtc != address(0), "cbBTC token address should not be zero");
 
-        // Verify Aerodrome addresses are set
-        (address router, address quoter) = virtualsFeeSplitter.getAerodromeAddresses();
+        // Verify Aerodrome router address is set
+        address router = virtualsFeeSplitter.getAerodromeRouter();
         assertTrue(router != address(0), "Aerodrome router address should not be zero");
-        assertTrue(quoter != address(0), "Aerodrome quoter address should not be zero");
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("All validation checks passed!")));
     }
