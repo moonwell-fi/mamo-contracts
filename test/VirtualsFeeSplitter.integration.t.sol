@@ -268,6 +268,195 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
         assertEq(mamoToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining MAMO");
     }
 
+    function testVirtualsDistribution() public {
+        uint256 virtualsAmount = 100e18; // 100 VIRTUALS tokens
+
+        // Deal VIRTUALS tokens to the contract
+        deal(address(virtualsToken), address(virtualsFeeSplitter), virtualsAmount);
+
+        // Record balances before
+        uint256 recipient1CbBtcBefore = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcBefore = cbBtcToken.balanceOf(recipient2);
+
+        // Call swapAndCollect (only owner can call)
+        vm.prank(owner);
+        virtualsFeeSplitter.swapAndCollect();
+
+        // Check that VIRTUALS were swapped (contract should have 0 VIRTUALS remaining)
+        assertEq(virtualsToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining VIRTUALS");
+
+        // Check cbBTC distributions
+        uint256 recipient1CbBtcAfter = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcAfter = cbBtcToken.balanceOf(recipient2);
+
+        uint256 recipient1CbBtcReceived = recipient1CbBtcAfter - recipient1CbBtcBefore;
+        uint256 recipient2CbBtcReceived = recipient2CbBtcAfter - recipient2CbBtcBefore;
+
+        // Verify some cbBTC was received
+        assertTrue(recipient1CbBtcReceived > 0, "recipient1 should receive cbBTC");
+        assertTrue(recipient2CbBtcReceived > 0, "recipient2 should receive cbBTC");
+
+        // Verify 70/30 split (allowing for small rounding errors)
+        uint256 totalCbBtcReceived = recipient1CbBtcReceived + recipient2CbBtcReceived;
+        uint256 expectedRecipient1 = (totalCbBtcReceived * 70) / 100;
+        uint256 expectedRecipient2 = totalCbBtcReceived - expectedRecipient1;
+
+        assertEq(recipient1CbBtcReceived, expectedRecipient1, "recipient1 should receive 70% of cbBTC");
+        assertEq(recipient2CbBtcReceived, expectedRecipient2, "recipient2 should receive 30% of cbBTC");
+    }
+
+    function testVirtualsDistributionWithDustAmount() public {
+        uint256 dustAmount = 1e18; // 1 VIRTUALS token (small amount)
+
+        // Deal dust amount to the contract
+        deal(address(virtualsToken), address(virtualsFeeSplitter), dustAmount);
+
+        // Record balances before
+        uint256 recipient1CbBtcBefore = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcBefore = cbBtcToken.balanceOf(recipient2);
+
+        // Call swapAndCollect (only owner can call)
+        vm.prank(owner);
+        virtualsFeeSplitter.swapAndCollect();
+
+        // Check that all VIRTUALS were swapped
+        assertEq(virtualsToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining VIRTUALS");
+
+        // Check that some cbBTC was received (even for small amounts)
+        uint256 recipient1CbBtcAfter = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcAfter = cbBtcToken.balanceOf(recipient2);
+
+        uint256 totalCbBtcReceived =
+            (recipient1CbBtcAfter - recipient1CbBtcBefore) + (recipient2CbBtcAfter - recipient2CbBtcBefore);
+
+        // Should have received some cbBTC (even if small)
+        assertTrue(totalCbBtcReceived > 0, "should receive some cbBTC for dust amount");
+    }
+
+    function testBothMamoAndVirtualsDistribution() public {
+        uint256 mamoAmount = 1000e18; // 1000 MAMO tokens
+        uint256 virtualsAmount = 50e18; // 50 VIRTUALS tokens
+
+        // Deal both tokens to the contract
+        deal(address(mamoToken), address(virtualsFeeSplitter), mamoAmount);
+        deal(address(virtualsToken), address(virtualsFeeSplitter), virtualsAmount);
+
+        // Record balances before
+        uint256 recipient1MamoBefore = mamoToken.balanceOf(recipient1);
+        uint256 recipient2MamoBefore = mamoToken.balanceOf(recipient2);
+        uint256 recipient1CbBtcBefore = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcBefore = cbBtcToken.balanceOf(recipient2);
+
+        // Call swapAndCollect (only owner can call)
+        vm.prank(owner);
+        virtualsFeeSplitter.swapAndCollect();
+
+        // Check MAMO distributions
+        uint256 recipient1MamoAfter = mamoToken.balanceOf(recipient1);
+        uint256 recipient2MamoAfter = mamoToken.balanceOf(recipient2);
+
+        uint256 recipient1MamoReceived = recipient1MamoAfter - recipient1MamoBefore;
+        uint256 recipient2MamoReceived = recipient2MamoAfter - recipient2MamoBefore;
+
+        // Verify MAMO 70/30 split
+        assertEq(recipient1MamoReceived, 700e18, "recipient1 should receive 70% of MAMO");
+        assertEq(recipient2MamoReceived, 300e18, "recipient2 should receive 30% of MAMO");
+
+        // Check VIRTUALS were swapped
+        assertEq(virtualsToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining VIRTUALS");
+
+        // Check cbBTC distributions
+        uint256 recipient1CbBtcAfter = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcAfter = cbBtcToken.balanceOf(recipient2);
+
+        uint256 recipient1CbBtcReceived = recipient1CbBtcAfter - recipient1CbBtcBefore;
+        uint256 recipient2CbBtcReceived = recipient2CbBtcAfter - recipient2CbBtcBefore;
+
+        // Verify some cbBTC was received
+        assertTrue(recipient1CbBtcReceived > 0, "recipient1 should receive cbBTC");
+        assertTrue(recipient2CbBtcReceived > 0, "recipient2 should receive cbBTC");
+
+        // Verify cbBTC 70/30 split
+        uint256 totalCbBtcReceived = recipient1CbBtcReceived + recipient2CbBtcReceived;
+        uint256 expectedCbBtcRecipient1 = (totalCbBtcReceived * 70) / 100;
+        uint256 expectedCbBtcRecipient2 = totalCbBtcReceived - expectedCbBtcRecipient1;
+
+        assertEq(recipient1CbBtcReceived, expectedCbBtcRecipient1, "recipient1 should receive 70% of cbBTC");
+        assertEq(recipient2CbBtcReceived, expectedCbBtcRecipient2, "recipient2 should receive 30% of cbBTC");
+
+        // Verify contracts are clean
+        assertEq(mamoToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining MAMO");
+        assertEq(cbBtcToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining cbBTC");
+    }
+
+    function testVirtualsSwapWithSlippageProtection() public {
+        uint256 virtualsAmount = 25e18; // 25 VIRTUALS tokens
+
+        // Set a more restrictive slippage (2%)
+        vm.prank(owner);
+        virtualsFeeSplitter.setSlippage(200); // 2%
+
+        // Deal VIRTUALS tokens to the contract
+        deal(address(virtualsToken), address(virtualsFeeSplitter), virtualsAmount);
+
+        // Record balances before
+        uint256 recipient1CbBtcBefore = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcBefore = cbBtcToken.balanceOf(recipient2);
+
+        // Call swapAndCollect - should still work with slippage protection
+        vm.prank(owner);
+        virtualsFeeSplitter.swapAndCollect();
+
+        // Check that VIRTUALS were swapped
+        assertEq(virtualsToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining VIRTUALS");
+
+        // Check that cbBTC was received
+        uint256 recipient1CbBtcAfter = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcAfter = cbBtcToken.balanceOf(recipient2);
+
+        uint256 totalCbBtcReceived =
+            (recipient1CbBtcAfter - recipient1CbBtcBefore) + (recipient2CbBtcAfter - recipient2CbBtcBefore);
+
+        assertTrue(totalCbBtcReceived > 0, "should receive cbBTC even with tight slippage");
+    }
+
+    function testMultipleVirtualsSwaps() public {
+        uint256 firstAmount = 30e18; // 30 VIRTUALS tokens
+        uint256 secondAmount = 20e18; // 20 VIRTUALS tokens
+
+        // First swap
+        deal(address(virtualsToken), address(virtualsFeeSplitter), firstAmount);
+        vm.prank(owner);
+        virtualsFeeSplitter.swapAndCollect();
+
+        // Record balances after first swap
+        uint256 recipient1CbBtcAfterFirst = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcAfterFirst = cbBtcToken.balanceOf(recipient2);
+
+        // Second swap
+        deal(address(virtualsToken), address(virtualsFeeSplitter), secondAmount);
+        vm.prank(owner);
+        virtualsFeeSplitter.swapAndCollect();
+
+        // Check that second swap also worked
+        uint256 recipient1CbBtcAfterSecond = cbBtcToken.balanceOf(recipient1);
+        uint256 recipient2CbBtcAfterSecond = cbBtcToken.balanceOf(recipient2);
+
+        // Should have received more cbBTC from second swap
+        assertTrue(
+            recipient1CbBtcAfterSecond > recipient1CbBtcAfterFirst,
+            "recipient1 should receive more cbBTC from second swap"
+        );
+        assertTrue(
+            recipient2CbBtcAfterSecond > recipient2CbBtcAfterFirst,
+            "recipient2 should receive more cbBTC from second swap"
+        );
+
+        // Contract should be clean
+        assertEq(virtualsToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining VIRTUALS");
+        assertEq(cbBtcToken.balanceOf(address(virtualsFeeSplitter)), 0, "contract should have no remaining cbBTC");
+    }
+
     function testSlippageConfiguration() public {
         // Test initial slippage
         (uint256 initialSlippage,) = virtualsFeeSplitter.getSlippage();
