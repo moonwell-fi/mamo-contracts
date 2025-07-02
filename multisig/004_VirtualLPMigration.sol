@@ -322,26 +322,6 @@ contract VirtualLPMigration is MultisigProposal {
         migrationStorage.setLpTokenId(lpTokenId);
 
         console.log("[INFO] LP token ID: %s", lpTokenId);
-
-        // Validate NFT ownership immediately after minting
-
-        address burnAndEarnAddr = addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP");
-        IERC721 nftContract = IERC721(positionManager);
-        address nftOwner = nftContract.ownerOf(lpTokenId);
-        assertEq(nftOwner, burnAndEarnAddr, "LP NFT should be owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
-        console.log("[INFO] LP NFT ownership validated - owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
-
-        // Validate that the pool was created during the mint operation
-        address calculatedPoolAddress = getPoolAddress(virtualToken, mamo);
-        console.log("[INFO] Calculated pool address: %s", calculatedPoolAddress);
-
-        // Check if the calculated pool address is a contract
-        uint256 poolCodeSize;
-        assembly {
-            poolCodeSize := extcodesize(calculatedPoolAddress)
-        }
-
-        assertTrue(poolCodeSize > 0, "Pool code size should be greater than 0");
     }
 
     function simulate() public override {
@@ -375,14 +355,35 @@ contract VirtualLPMigration is MultisigProposal {
         // Validate that contracts are linked correctly
         assertEq(burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should match FeeSplitter");
 
-        console.log("[INFO] LP NFT ownership validation completed during build phase");
+        console.log("[INFO] Validating LP NFT ownership...");
+        // Validate NFT ownership
+        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        address burnAndEarnAddr = addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP");
+        IERC721 nftContract = IERC721(positionManager);
+        uint256 lpTokenId = migrationStorage.lpTokenId();
+        address nftOwner = nftContract.ownerOf(lpTokenId);
+        assertEq(nftOwner, burnAndEarnAddr, "LP NFT should be owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
+        console.log("[INFO] LP NFT ownership validated - owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
 
         console.log("[INFO] Validating pool creation and token deposits...");
-        // Validate that the exact amounts from removeLiquidity were deposited into the pool
-        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        
+        // Validate that the pool was created during the mint operation
         address virtualToken = addresses.getAddress("VIRTUAL");
         address mamoToken = addresses.getAddress("MAMO");
-        address poolAddress = getPoolAddress(virtualToken, mamoToken);
+        address calculatedPoolAddress = getPoolAddress(virtualToken, mamoToken);
+        console.log("[INFO] Calculated pool address: %s", calculatedPoolAddress);
+
+        // Check if the calculated pool address is a contract
+        uint256 poolCodeSize;
+        assembly {
+            poolCodeSize := extcodesize(calculatedPoolAddress)
+        }
+        assertTrue(poolCodeSize > 0, "Pool code size should be greater than 0");
+        console.log("[INFO] Pool contract validated as deployed");
+        
+        // Validate that the exact amounts from removeLiquidity were deposited into the pool
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        address poolAddress = calculatedPoolAddress;
 
         // Log balances before
         console.log("[INFO] Multisig VIRTUAL balance before: %s", virtualBalanceBefore / 1e18);
@@ -413,11 +414,6 @@ contract VirtualLPMigration is MultisigProposal {
             0.01e18, // 1%
             "Pool VIRTUAL balance should match removed amount"
         );
-
-        console.log("[INFO] Pool MAMO after diff: %s", (poolMamoBalanceAfter - poolMamoBalanceBefore) / 1e18);
-        console.log("[INFO] Pool MAMO before: %s", poolMamoBalanceBefore / 1e18);
-        console.log("[INFO] Pool MAMO after: %s", poolMamoBalanceAfter / 1e18);
-        console.log("[INFO] Pool MAMO removed from Uniswap: %s", migrationStorage.removedMamoAmount() / 1e18);
 
         assertApproxEqRel(
             poolMamoBalanceAfter,
