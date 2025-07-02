@@ -253,7 +253,7 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] LP token ID: %s", lpTokenId);
 
         // Validate NFT ownership immediately after minting
-        // This is a remediation for storage variable reset between foundry bug that is reseting storage variables
+        // This is a remediation for a foundry bug that is resetting storage variables between some cheatcodes uses (from the modifier)
         // https://github.com/foundry-rs/foundry/issues/5739
         address burnAndEarnAddr = addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP");
         IERC721 nftContract = IERC721(positionManager);
