@@ -1,46 +1,35 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
-
+import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
-import {MamoAccount} from "@contracts/MamoAccount.sol";
 
 import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
+import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+
+import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IPool} from "@interfaces/IPool.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
-import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
-import {IMulticall} from "@interfaces/IMulticall.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title MamoStakingStrategy
- * @notice Executes automated reward claiming and processing logic with enhanced capabilities
- * @dev Supports multiple reward tokens, permissionless deposits, and configurable DEX routing
+ * @notice A per-user staking strategy for MAMO tokens with automated reward claiming and processing
+ * @dev This contract is designed to be used as an implementation for proxies, similar to ERC20MoonwellMorphoStrategy
  */
-contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
+contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using SafeERC20 for IERC20;
 
-    /// @notice Backend role for strategy management
-    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
-
-    /// @notice Guardian role for emergency pause functionality
-    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
-
-    /// @notice The MamoAccountRegistry contract for permission management
-    MamoAccountRegistry public immutable registry;
-
     /// @notice The MultiRewards contract for staking
-    IMultiRewards public immutable multiRewards;
+    IMultiRewards public multiRewards;
 
     /// @notice The MAMO token contract
-    IERC20 public immutable mamoToken;
+    IERC20 public mamoToken;
 
     /// @notice Reward token configuration
     struct RewardToken {
@@ -61,11 +50,11 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     /// @notice The allowed slippage in basis points (e.g., 100 = 1%)
     uint256 public allowedSlippageInBps;
 
-    /// @notice Mapping of account to strategy mode
-    mapping(address => StrategyMode) public accountStrategyMode;
+    /// @notice The user's strategy mode
+    StrategyMode public strategyMode;
 
-    /// @notice Mapping of account to allowed slippage in basis points
-    mapping(address => uint256) public accountSlippageInBps;
+    /// @notice The user's allowed slippage in basis points
+    uint256 public accountSlippageInBps;
 
     /// @notice Strategy mode enum
     enum StrategyMode {
@@ -74,64 +63,84 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
 
     }
 
-    event Deposited(address indexed account, address indexed depositor, uint256 amount);
-    event Withdrawn(address indexed account, uint256 amount);
-    event RewardTokenProcessed(address indexed account, address indexed rewardToken, uint256 amount, StrategyMode mode);
-    event Compounded(address indexed account, uint256 mamoAmount);
-    event Reinvested(address indexed account, uint256 mamoAmount);
-    event StrategyModeUpdated(address indexed account, StrategyMode newMode);
-    event AccountSlippageUpdated(address indexed account, uint256 oldSlippageInBps, uint256 newSlippageInBps);
+    event Deposited(address indexed depositor, uint256 amount);
+    event Withdrawn(uint256 amount);
+    event RewardTokenProcessed(address indexed rewardToken, uint256 amount, StrategyMode mode);
+    event Compounded(uint256 mamoAmount);
+    event Reinvested(uint256 mamoAmount);
+    event StrategyModeUpdated(StrategyMode newMode);
+    event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
     event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
     event QuoterUpdated(address indexed oldQuoter, address indexed newQuoter);
     event SlippageToleranceUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
 
-    /**
-     * @notice Constructor sets up the strategy with required contracts and parameters
-     * @param admin The address to grant the DEFAULT_ADMIN_ROLE to
-     * @param backend The address to grant the BACKEND_ROLE to
-     * @param guardian The address to grant the GUARDIAN_ROLE to
-     * @param _registry The MamoAccountRegistry contract
-     * @param _multiRewards The MultiRewards contract
-     * @param _mamoToken The MAMO token contract
-     * @param _dexRouter The initial DEX router contract
-     * @param _quoter The quoter contract for getting swap quotes
-     */
-    constructor(
-        address admin,
-        address backend,
-        address guardian,
-        MamoAccountRegistry _registry,
-        IMultiRewards _multiRewards,
-        IERC20 _mamoToken,
-        ISwapRouter _dexRouter,
-        IQuoter _quoter
-    ) {
-        require(admin != address(0), "Invalid admin address");
-        require(backend != address(0), "Invalid backend address");
-        require(guardian != address(0), "Invalid guardian address");
-        require(address(_registry) != address(0), "Invalid registry");
-        require(address(_multiRewards) != address(0), "Invalid multiRewards");
-        require(address(_mamoToken) != address(0), "Invalid mamoToken");
-        require(address(_dexRouter) != address(0), "Invalid dexRouter");
-        require(address(_quoter) != address(0), "Invalid quoter");
-
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _grantRole(BACKEND_ROLE, backend);
-        _grantRole(GUARDIAN_ROLE, guardian);
-
-        registry = _registry;
-        multiRewards = _multiRewards;
-        mamoToken = _mamoToken;
-        dexRouter = _dexRouter;
-        quoter = _quoter;
+    /// @notice Initialization parameters struct to avoid stack too deep errors
+    struct InitParams {
+        address mamoStrategyRegistry;
+        address multiRewards;
+        address mamoToken;
+        address dexRouter;
+        address quoter;
+        uint256 strategyTypeId;
+        address[] rewardTokens;
+        address[] rewardTokenPools;
+        address owner;
+        uint256 allowedSlippageInBps;
+        StrategyMode initialStrategyMode;
     }
 
-    modifier onlyAccountOwner(address account) {
-        require(account != address(0), "Invalid account");
-        require(Ownable(account).owner() == msg.sender, "Not account owner");
+    /**
+     * @notice Constructor disables initializers in the implementation contract
+     */
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @notice Restricts function access to the backend address only
+     * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
+     */
+    modifier onlyBackend() {
+        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
         _;
+    }
+
+    /**
+     * @notice Initializer function that sets all the parameters
+     * @dev This is used instead of a constructor since the contract is designed to be used with proxies
+     * @param params The initialization parameters struct
+     */
+    function initialize(InitParams calldata params) external initializer {
+        require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
+        require(params.multiRewards != address(0), "Invalid multiRewards address");
+        require(params.mamoToken != address(0), "Invalid mamoToken address");
+        require(params.dexRouter != address(0), "Invalid dexRouter address");
+        require(params.quoter != address(0), "Invalid quoter address");
+        require(params.strategyTypeId != 0, "Strategy type id not set");
+        require(params.owner != address(0), "Invalid owner address");
+        require(params.allowedSlippageInBps <= 2500, "Slippage too high");
+        require(params.rewardTokens.length == params.rewardTokenPools.length, "Reward tokens and pools length mismatch");
+
+        __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
+
+        multiRewards = IMultiRewards(params.multiRewards);
+        mamoToken = IERC20(params.mamoToken);
+        dexRouter = ISwapRouter(params.dexRouter);
+        quoter = IQuoter(params.quoter);
+        allowedSlippageInBps = params.allowedSlippageInBps;
+        strategyMode = params.initialStrategyMode;
+
+        // Initialize reward tokens
+        for (uint256 i = 0; i < params.rewardTokens.length; i++) {
+            require(params.rewardTokens[i] != address(0), "Invalid reward token");
+            require(params.rewardTokenPools[i] != address(0), "Invalid reward token pool");
+            require(params.rewardTokens[i] != address(mamoToken), "Cannot add staking token as reward");
+
+            rewardTokens.push(RewardToken({token: params.rewardTokens[i], pool: params.rewardTokenPools[i]}));
+            isRewardToken[params.rewardTokens[i]] = true;
+        }
     }
 
     /**
@@ -139,7 +148,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @param token The reward token address to add
      * @param pool The pool address for swapping this token to MAMO
      */
-    function addRewardToken(address token, address pool) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function addRewardToken(address token, address pool) external onlyBackend {
         require(token != address(0), "Invalid token");
         require(pool != address(0), "Invalid pool");
         require(!isRewardToken[token], "Token already added");
@@ -155,7 +164,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @notice Remove a reward token (backend only)
      * @param token The reward token address to remove
      */
-    function removeRewardToken(address token) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function removeRewardToken(address token) external onlyBackend {
         require(isRewardToken[token], "Token not found");
 
         // Find and remove token from array
@@ -176,7 +185,7 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @notice Update DEX router (backend only)
      * @param newRouter The new DEX router address
      */
-    function setDEXRouter(ISwapRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setDEXRouter(ISwapRouter newRouter) external onlyBackend {
         require(address(newRouter) != address(0), "Invalid router");
 
         address oldRouter = address(dexRouter);
@@ -186,10 +195,10 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Set quoter contract (admin only)
+     * @notice Set quoter contract (backend only)
      * @param _quoter The quoter contract address
      */
-    function setQuoter(IQuoter _quoter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setQuoter(IQuoter _quoter) external onlyBackend {
         require(address(_quoter) != address(0), "Invalid quoter");
         emit QuoterUpdated(address(quoter), address(_quoter));
         quoter = _quoter;
@@ -199,141 +208,104 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
      * @notice Set slippage tolerance (backend only)
      * @param _allowedSlippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
      */
-    function setSlippageTolerance(uint256 _allowedSlippageInBps) external onlyRole(BACKEND_ROLE) {
+    function setSlippageTolerance(uint256 _allowedSlippageInBps) external onlyBackend {
         require(_allowedSlippageInBps <= 2500, "Slippage too high"); // Max 25%
         emit SlippageToleranceUpdated(allowedSlippageInBps, _allowedSlippageInBps);
         allowedSlippageInBps = _allowedSlippageInBps;
     }
 
     /**
-     * @notice Set strategy mode for an account
-     * @param account The account address
+     * @notice Set strategy mode for this strategy
      * @param mode The strategy mode to set
      */
-    function setStrategyMode(address account, StrategyMode mode) external onlyAccountOwner(account) whenNotPaused {
-        emit StrategyModeUpdated(account, mode);
-        accountStrategyMode[account] = mode;
+    function setStrategyMode(StrategyMode mode) external onlyOwner {
+        emit StrategyModeUpdated(mode);
+        strategyMode = mode;
     }
 
     /**
-     * @notice Set slippage tolerance for an account
-     * @param account The account address
+     * @notice Set slippage tolerance for this strategy
      * @param slippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
      */
-    function setAccountSlippage(address account, uint256 slippageInBps)
-        external
-        onlyAccountOwner(account)
-        whenNotPaused
-    {
+    function setAccountSlippage(uint256 slippageInBps) external onlyOwner {
         require(slippageInBps <= 2500, "Slippage too high"); // Max 25%
-        emit AccountSlippageUpdated(account, accountSlippageInBps[account], slippageInBps);
-        accountSlippageInBps[account] = slippageInBps;
+        emit AccountSlippageUpdated(accountSlippageInBps, slippageInBps);
+        accountSlippageInBps = slippageInBps;
     }
 
     /**
-     * @notice Deposit MAMO tokens into MultiRewards on behalf of account (permissionless)
-     * @param account The account address
+     * @notice Deposit MAMO tokens into MultiRewards (permissionless)
      * @param amount The amount of MAMO to deposit
      */
-    function deposit(address account, uint256 amount) external whenNotPaused {
+    function deposit(uint256 amount) external {
         require(amount > 0, "Amount must be greater than 0");
-        require(account != address(0), "Invalid account");
 
-        // Transfer MAMO from depositor to account
-        mamoToken.safeTransferFrom(msg.sender, account, amount);
+        // Transfer MAMO from depositor to this contract
+        mamoToken.safeTransferFrom(msg.sender, address(this), amount);
 
-        _stakeMamo(account, amount);
+        _stakeMamo(amount);
 
-        emit Deposited(account, msg.sender, amount);
+        emit Deposited(msg.sender, amount);
     }
 
     /**
-     * @notice Withdraw MAMO tokens from MultiRewards on behalf of account
-     * @dev This function intentionally does not have the whenNotPaused modifier to ensure users can always
-     *      withdraw their funds in emergency situations, even when the contract is paused
-     * @param account The account address
+     * @notice Withdraw MAMO tokens from MultiRewards
      * @param amount The amount of MAMO to withdraw
      */
-    function withdraw(address account, uint256 amount) external onlyAccountOwner(account) {
+    function withdraw(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
-        // Call withdraw through the account's execute function
-        bytes memory withdrawData = abi.encodeWithSelector(IMultiRewards.withdraw.selector, amount);
+        // Withdraw from MultiRewards
+        multiRewards.withdraw(amount);
 
-        IMulticall.Call[] memory calls = new IMulticall.Call[](2);
-        calls[0] = IMulticall.Call({target: address(multiRewards), data: withdrawData, value: 0});
+        // Transfer withdrawn MAMO to owner
+        mamoToken.safeTransfer(msg.sender, amount);
 
-        // Transfer withdrawn MAMO to account owner
-        calls[1] = IMulticall.Call({
-            target: address(mamoToken),
-            data: abi.encodeWithSelector(IERC20.transfer.selector, msg.sender, amount),
-            value: 0
-        });
-
-        MamoAccount(account).multicall(calls);
-
-        emit Withdrawn(account, amount);
+        emit Withdrawn(amount);
     }
 
     /**
-     * @notice Process rewards according to the account's preferred compound mode
-     * @param account The account address
+     * @notice Process rewards according to the strategy's preferred compound mode
      * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order)
      * @dev We trust the backend to provide the correct user-owned strategies for each reward token
      */
-    function processRewards(address account, address[] calldata rewardStrategies)
-        external
-        onlyRole(BACKEND_ROLE)
-        whenNotPaused
-    {
-        _claimRewards(account);
+    function processRewards(address[] calldata rewardStrategies) external onlyBackend {
+        _claimRewards();
 
-        StrategyMode accountMode = accountStrategyMode[account];
-        if (accountMode == StrategyMode.COMPOUND) {
-            _compound(account);
+        if (strategyMode == StrategyMode.COMPOUND) {
+            _compound();
         } else {
             require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
-            _reinvest(account, rewardStrategies);
+            _reinvest(rewardStrategies);
         }
     }
 
     /**
      * @notice Internal function to claim rewards from MultiRewards contract
-     * @param account The account address
      */
-    function _claimRewards(address account) internal {
-        bytes memory getRewardData = abi.encodeWithSelector(IMultiRewards.getReward.selector);
-        IMulticall.Call[] memory calls = new IMulticall.Call[](1);
-        calls[0] = IMulticall.Call({target: address(multiRewards), data: getRewardData, value: 0});
-        MamoAccount(account).multicall(calls);
+    function _claimRewards() internal {
+        multiRewards.getReward();
     }
 
     /**
      * @notice Internal function to stake MAMO tokens in MultiRewards
-     * @param account The account address
      * @param amount The amount of MAMO to stake
      */
-    function _stakeMamo(address account, uint256 amount) internal {
+    function _stakeMamo(uint256 amount) internal {
         if (amount == 0) return;
 
-        bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, address(multiRewards), amount);
-        bytes memory stakeData = abi.encodeWithSelector(IMultiRewards.stake.selector, amount);
-
-        IMulticall.Call[] memory calls = new IMulticall.Call[](2);
-        calls[0] = IMulticall.Call({target: address(mamoToken), data: approveData, value: 0});
-        calls[1] = IMulticall.Call({target: address(multiRewards), data: stakeData, value: 0});
-        MamoAccount(account).multicall(calls);
+        mamoToken.forceApprove(address(multiRewards), amount);
+        multiRewards.stake(amount);
     }
 
     /**
      * @notice Internal function to compound rewards by converting all rewards to MAMO and restaking
-     * @param account The account address
      */
-    function _compound(address account) internal {
+    function _compound() internal {
         // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
-            uint256 rewardBalance = rewardToken.balanceOf(account);
+            uint256 rewardBalance = rewardToken.balanceOf(address(this));
 
             if (rewardBalance == 0) continue;
 
@@ -354,84 +326,71 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
             );
 
             // Apply slippage tolerance to get minimum amount out
-            uint256 accountSlippage = _getAccountSlippage(account);
+            uint256 accountSlippage = _getAccountSlippage();
             uint256 amountOutMinimum = (amountOut * (10000 - accountSlippage)) / 10000;
 
-            // Approve DEX router to spend reward tokens and swap using SwapRouter
-            bytes memory approveData =
-                abi.encodeWithSelector(IERC20.approve.selector, address(dexRouter), rewardBalance);
+            // Approve DEX router to spend reward tokens
+            rewardToken.forceApprove(address(dexRouter), rewardBalance);
 
             // Create swap parameters
             ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
                 tokenIn: address(rewardToken),
                 tokenOut: address(mamoToken),
                 tickSpacing: tickSpacing,
-                recipient: account,
+                recipient: address(this),
                 deadline: block.timestamp + 300,
                 amountIn: rewardBalance,
                 amountOutMinimum: amountOutMinimum,
                 sqrtPriceLimitX96: 0 // No price limit
             });
 
-            bytes memory swapData = abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector, swapParams);
+            // Execute swap
+            dexRouter.exactInputSingle(swapParams);
 
-            IMulticall.Call[] memory swapCalls = new IMulticall.Call[](2);
-            swapCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
-            swapCalls[1] = IMulticall.Call({target: address(dexRouter), data: swapData, value: 0});
-            MamoAccount(account).multicall(swapCalls);
-
-            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance, StrategyMode.COMPOUND);
+            emit RewardTokenProcessed(address(rewardToken), rewardBalance, StrategyMode.COMPOUND);
         }
 
         // Stake all MAMO
-        uint256 totalMamo = mamoToken.balanceOf(account);
-        _stakeMamo(account, totalMamo);
+        uint256 totalMamo = mamoToken.balanceOf(address(this));
+        _stakeMamo(totalMamo);
 
-        emit Compounded(account, totalMamo);
+        emit Compounded(totalMamo);
     }
 
     /**
      * @notice Internal function to reinvest rewards by staking MAMO and depositing other rewards to Morpho strategy
-     * @param account The account address
      * @param rewardStrategies Array of strategy addresses for each reward token
      */
-    function _reinvest(address account, address[] calldata rewardStrategies) internal {
-        uint256 mamoBalance = mamoToken.balanceOf(account);
+    function _reinvest(address[] calldata rewardStrategies) internal {
+        uint256 mamoBalance = mamoToken.balanceOf(address(this));
 
         // Stake MAMO
-        _stakeMamo(account, mamoBalance);
+        _stakeMamo(mamoBalance);
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
             address strategyAddress = rewardStrategies[i];
-            uint256 rewardBalance = rewardToken.balanceOf(account);
+            uint256 rewardBalance = rewardToken.balanceOf(address(this));
 
             if (rewardBalance == 0) continue;
 
-            // Validate strategy ownership - strategy must be owned by the same user as the account
-            address accountOwner = Ownable(account).owner();
+            // Validate strategy ownership - strategy must be owned by the same user as this strategy
             address strategyOwner = Ownable(strategyAddress).owner();
-            require(accountOwner == strategyOwner, "Strategy owner mismatch");
+            require(owner() == strategyOwner, "Strategy owner mismatch");
 
             // Validate strategy token - strategy must handle the same token as the reward token
             IERC20MoonwellMorphoStrategy strategy = IERC20MoonwellMorphoStrategy(strategyAddress);
             require(address(strategy.token()) == address(rewardToken), "Strategy token mismatch");
 
-            // Approve strategy to spend reward tokens and deposit in a single multicall
-            bytes memory approveData = abi.encodeWithSelector(IERC20.approve.selector, strategyAddress, rewardBalance);
-            bytes memory depositData =
-                abi.encodeWithSelector(ERC20MoonwellMorphoStrategy.deposit.selector, rewardBalance);
+            // Approve strategy to spend reward tokens and deposit
+            rewardToken.forceApprove(strategyAddress, rewardBalance);
+            strategy.deposit(rewardBalance);
 
-            IMulticall.Call[] memory strategyCalls = new IMulticall.Call[](2);
-            strategyCalls[0] = IMulticall.Call({target: address(rewardToken), data: approveData, value: 0});
-            strategyCalls[1] = IMulticall.Call({target: strategyAddress, data: depositData, value: 0});
-            MamoAccount(account).multicall(strategyCalls);
-
-            emit RewardTokenProcessed(account, address(rewardToken), rewardBalance, StrategyMode.REINVEST);
+            emit RewardTokenProcessed(address(rewardToken), rewardBalance, StrategyMode.REINVEST);
         }
 
-        emit Reinvested(account, mamoBalance);
+        emit Reinvested(mamoBalance);
     }
 
     /**
@@ -451,36 +410,19 @@ contract MamoStakingStrategy is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Get the slippage tolerance for an account
-     * @param account The account address
+     * @notice Get the slippage tolerance for this strategy
      * @return The slippage tolerance in basis points (falls back to global if not set)
      */
-    function getAccountSlippage(address account) external view returns (uint256) {
-        return _getAccountSlippage(account);
+    function getAccountSlippage() external view returns (uint256) {
+        return _getAccountSlippage();
     }
 
     /**
-     * @notice Pause the strategy (guardian only)
-     */
-    function pause() external onlyRole(GUARDIAN_ROLE) {
-        _pause();
-    }
-
-    /**
-     * @notice Unpause the strategy (guardian only)
-     */
-    function unpause() external onlyRole(GUARDIAN_ROLE) {
-        _unpause();
-    }
-
-    /**
-     * @notice Internal function to get the slippage tolerance for an account
-     * @param account The account address
+     * @notice Internal function to get the slippage tolerance for this strategy
      * @return The slippage tolerance in basis points (falls back to global if not set)
      */
-    function _getAccountSlippage(address account) internal view returns (uint256) {
-        uint256 accountSlippage = accountSlippageInBps[account];
-        return accountSlippage > 0 ? accountSlippage : allowedSlippageInBps;
+    function _getAccountSlippage() internal view returns (uint256) {
+        return accountSlippageInBps > 0 ? accountSlippageInBps : allowedSlippageInBps;
     }
 
     /**
