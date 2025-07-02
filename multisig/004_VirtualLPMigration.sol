@@ -203,8 +203,8 @@ contract VirtualLPMigration is MultisigProposal {
         uint256 virtualBalance = IERC20(virtualToken).balanceOf(multisig);
         uint256 mamoBalance = IERC20(mamo).balanceOf(multisig);
 
-        console.log("[INFO] VIRTUAL balance: %s", virtualBalance);
-        console.log("[INFO] MAMO balance: %s", mamoBalance);
+        console.log("[INFO] VIRTUAL balance: %s", virtualBalance / 1e18);
+        console.log("[INFO] MAMO balance: %s", mamoBalance / 1e18);
         // Determine token order (token0 must be < token1 in Uniswap V3)
         address token0 = virtualToken < mamo ? virtualToken : mamo;
         address token1 = virtualToken < mamo ? mamo : virtualToken;
