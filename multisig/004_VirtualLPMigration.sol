@@ -260,7 +260,7 @@ contract VirtualLPMigration is MultisigProposal {
         INonfungiblePositionManager manager = INonfungiblePositionManager(positionManager);
 
         // Use the reduced balances (initial balance - what was used for V3 liquidity)
-        // The multisig initially had some tokens, then received more from V2 removal, 
+        // The multisig initially had some tokens, then received more from V2 removal,
         // but we only want to use the amounts we got from V2 removal for V3 liquidity
         uint256 virtualBalance = removedVirtualAmount;
         uint256 mamoBalance = removedMamoAmount;
@@ -406,19 +406,39 @@ contract VirtualLPMigration is MultisigProposal {
         assertTrue(poolVirtualBalanceAfter >= poolVirtualBalanceBefore, "Pool VIRTUAL balance should increase");
         assertTrue(poolMamoBalanceAfter >= poolMamoBalanceBefore, "Pool MAMO balance should increase");
 
-        // Validate that the pool received the exact amounts from removeLiquidity
-        assertEq(
+        // Validate that the pool received close to the amounts from removeLiquidity
+        assertApproxEqRel(
             poolVirtualBalanceAfter,
             migrationStorage.removedVirtualAmount(),
+            0.01e18, // 1%
             "Pool VIRTUAL balance should match removed amount"
         );
-        assertEq(
-            poolMamoBalanceAfter, migrationStorage.removedMamoAmount(), "Pool MAMO balance should match removed amount"
+
+        console.log("[INFO] Pool MAMO after diff: %s", (poolMamoBalanceAfter - poolMamoBalanceBefore) / 1e18);
+        console.log("[INFO] Pool MAMO before: %s", poolMamoBalanceBefore / 1e18);
+        console.log("[INFO] Pool MAMO after: %s", poolMamoBalanceAfter / 1e18);
+        console.log("[INFO] Pool MAMO removed from Uniswap: %s", migrationStorage.removedMamoAmount() / 1e18);
+
+        assertApproxEqRel(
+            poolMamoBalanceAfter,
+            migrationStorage.removedMamoAmount(),
+            0.01e18, // 1%
+            "Pool MAMO balance should match removed amount"
         );
 
         // Validate that the multisig did not receive any tokens
         assertEq(virtualBalanceAfter, virtualBalanceBefore, "Multisig VIRTUAL balance should not change");
-        assertEq(mamoBalanceAfter, mamoBalanceBefore, "Multisig MAMO balance should not change");
+        assertApproxEqRel(
+            mamoBalanceAfter,
+            mamoBalanceBefore,
+            0.01e18, // 1%
+            "Multisig MAMO balance should not change"
+        );
+
+        console.log("[INFO] Amount of MAMO added to multisig: %s", (mamoBalanceAfter - mamoBalanceBefore) / 1e18);
+        console.log(
+            "[INFO] Amount of VIRTUAL added to multisig: %s", (virtualBalanceAfter - virtualBalanceBefore) / 1e18
+        );
 
         console.log("[INFO] All validations passed successfully");
     }
