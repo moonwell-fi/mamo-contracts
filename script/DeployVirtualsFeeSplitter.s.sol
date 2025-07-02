@@ -12,9 +12,15 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 /**
  * @title DeployVirtualsFeeSplitter
  * @notice Script to deploy the VirtualsFeeSplitter contract
- * @dev Deploys the VirtualsFeeSplitter contract with specified owner and recipients
+ * @dev Deploys the VirtualsFeeSplitter contract with specified owner and recipient
  */
 contract DeployVirtualsFeeSplitter is Script, Test {
+    // Token addresses for Base mainnet
+    address constant MAMO_TOKEN = 0x7300B37DfdfAb110d83290A29DfB31B1740219fE;
+    address constant VIRTUALS_TOKEN = 0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b;
+    address constant CBBTC_TOKEN = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address constant AERODROME_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -42,24 +48,17 @@ contract DeployVirtualsFeeSplitter is Script, Test {
         console.log("%s: %s", StdStyle.bold("Owner"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.owner())));
         console.log(
             "%s: %s",
-            StdStyle.bold("Recipient 1 (70%)"),
-            StdStyle.yellow(vm.toString(virtualsFeeSplitter.RECIPIENT_1()))
-        );
-        console.log(
-            "%s: %s",
-            StdStyle.bold("Recipient 2 (30%)"),
-            StdStyle.yellow(vm.toString(virtualsFeeSplitter.RECIPIENT_2()))
+            StdStyle.bold("Recipient"),
+            StdStyle.yellow(vm.toString(virtualsFeeSplitter.RECIPIENT()))
         );
 
         // Display token addresses
-        (address mamo, address virtuals, address cbbtc) = virtualsFeeSplitter.getTokenAddresses();
-        console.log("%s: %s", StdStyle.bold("MAMO Token"), StdStyle.yellow(vm.toString(mamo)));
-        console.log("%s: %s", StdStyle.bold("Virtuals Token"), StdStyle.yellow(vm.toString(virtuals)));
-        console.log("%s: %s", StdStyle.bold("cbBTC Token"), StdStyle.yellow(vm.toString(cbbtc)));
+        console.log("%s: %s", StdStyle.bold("MAMO Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.MAMO_TOKEN())));
+        console.log("%s: %s", StdStyle.bold("Virtuals Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.VIRTUALS_TOKEN())));
+        console.log("%s: %s", StdStyle.bold("cbBTC Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.CBBTC_TOKEN())));
 
         // Display Aerodrome router address
-        address router = virtualsFeeSplitter.getAerodromeRouter();
-        console.log("%s: %s", StdStyle.bold("Aerodrome Router"), StdStyle.yellow(vm.toString(router)));
+        console.log("%s: %s", StdStyle.bold("Aerodrome Router"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.AERODROME_ROUTER())));
     }
 
     /**
@@ -70,21 +69,26 @@ contract DeployVirtualsFeeSplitter is Script, Test {
     function deployVirtualsFeeSplitter(Addresses addresses) public returns (VirtualsFeeSplitter virtualsFeeSplitter) {
         vm.startBroadcast();
 
-        // Get owner and recipients from addresses
+        // Get owner and recipient from addresses
         address owner = addresses.getAddress("MAMO_MULTISIG"); // Owner of the contract
-        address recipient1 = addresses.getAddress("MAMO_MULTISIG"); // 70% recipient
-        address recipient2 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
+        address recipient = addresses.getAddress("VIRTUALS_MULTISIG"); // Single recipient
 
-        // Deploy the VirtualsFeeSplitter contract
-        virtualsFeeSplitter = new VirtualsFeeSplitter(owner, recipient1, recipient2);
+        // Deploy the VirtualsFeeSplitter contract with all constructor parameters
+        virtualsFeeSplitter = new VirtualsFeeSplitter(
+            owner,
+            recipient,
+            MAMO_TOKEN,
+            VIRTUALS_TOKEN,
+            CBBTC_TOKEN,
+            AERODROME_ROUTER
+        );
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying VirtualsFeeSplitter contract...")));
         console.log(
             "VirtualsFeeSplitter contract deployed at: %s", StdStyle.yellow(vm.toString(address(virtualsFeeSplitter)))
         );
         console.log("Owner: %s", StdStyle.yellow(vm.toString(owner)));
-        console.log("Recipient 1 (70%%): %s", StdStyle.yellow(vm.toString(recipient1)));
-        console.log("Recipient 2 (30%%): %s", StdStyle.yellow(vm.toString(recipient2)));
+        console.log("Recipient: %s", StdStyle.yellow(vm.toString(recipient)));
 
         vm.stopBroadcast();
 
@@ -105,35 +109,28 @@ contract DeployVirtualsFeeSplitter is Script, Test {
      */
     function validate(Addresses addresses, VirtualsFeeSplitter virtualsFeeSplitter) public view {
         address expectedOwner = addresses.getAddress("MAMO_MULTISIG");
-        address expectedRecipient1 = addresses.getAddress("MAMO_MULTISIG");
-        address expectedRecipient2 = addresses.getAddress("VIRTUALS_MULTISIG");
+        address expectedRecipient = addresses.getAddress("VIRTUALS_MULTISIG");
 
         // Verify the owner is set correctly
         assertEq(virtualsFeeSplitter.owner(), expectedOwner, "incorrect owner");
 
-        // Verify the recipients are set correctly
-        assertEq(virtualsFeeSplitter.RECIPIENT_1(), expectedRecipient1, "incorrect RECIPIENT_1");
-        assertEq(virtualsFeeSplitter.RECIPIENT_2(), expectedRecipient2, "incorrect RECIPIENT_2");
+        // Verify the recipient is set correctly
+        assertEq(virtualsFeeSplitter.RECIPIENT(), expectedRecipient, "incorrect RECIPIENT");
 
-        // Verify recipients are different
-        assertTrue(
-            virtualsFeeSplitter.RECIPIENT_1() != virtualsFeeSplitter.RECIPIENT_2(), "recipients should be different"
-        );
+        // Verify token addresses are set correctly
+        assertEq(virtualsFeeSplitter.MAMO_TOKEN(), MAMO_TOKEN, "incorrect MAMO token address");
+        assertEq(virtualsFeeSplitter.VIRTUALS_TOKEN(), VIRTUALS_TOKEN, "incorrect VIRTUALS token address");
+        assertEq(virtualsFeeSplitter.CBBTC_TOKEN(), CBBTC_TOKEN, "incorrect cbBTC token address");
 
-        // Verify split ratios
-        (uint256 recipient1Share, uint256 recipient2Share) = virtualsFeeSplitter.getSplitRatios();
-        assertEq(recipient1Share, 70, "incorrect recipient1 share");
-        assertEq(recipient2Share, 30, "incorrect recipient2 share");
+        // Verify Aerodrome router address is set correctly
+        assertEq(virtualsFeeSplitter.AERODROME_ROUTER(), AERODROME_ROUTER, "incorrect Aerodrome router address");
 
-        // Verify token addresses are set
-        (address mamo, address virtuals, address cbbtc) = virtualsFeeSplitter.getTokenAddresses();
-        assertTrue(mamo != address(0), "MAMO token address should not be zero");
-        assertTrue(virtuals != address(0), "Virtuals token address should not be zero");
-        assertTrue(cbbtc != address(0), "cbBTC token address should not be zero");
-
-        // Verify Aerodrome router address is set
-        address router = virtualsFeeSplitter.getAerodromeRouter();
-        assertTrue(router != address(0), "Aerodrome router address should not be zero");
+        // Verify addresses are not zero
+        assertTrue(virtualsFeeSplitter.MAMO_TOKEN() != address(0), "MAMO token address should not be zero");
+        assertTrue(virtualsFeeSplitter.VIRTUALS_TOKEN() != address(0), "Virtuals token address should not be zero");
+        assertTrue(virtualsFeeSplitter.CBBTC_TOKEN() != address(0), "cbBTC token address should not be zero");
+        assertTrue(virtualsFeeSplitter.AERODROME_ROUTER() != address(0), "Aerodrome router address should not be zero");
+        assertTrue(virtualsFeeSplitter.RECIPIENT() != address(0), "Recipient address should not be zero");
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("All validation checks passed!")));
     }
