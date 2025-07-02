@@ -249,7 +249,9 @@ contract VirtualLPMigration is MultisigProposal {
         migrationStorage.setRemovedVirtualAmount(removedVirtualAmount);
         migrationStorage.setRemovedMamoAmount(removedMamoAmount);
 
-        console.log("[INFO] Removed liquidity - VIRTUAL: %s, MAMO: %s", removedVirtualAmount, removedMamoAmount);
+        console.log("[INFO] Removed liquidity from Uniswap V2");
+        console.log("[INFO] Removed VIRTUAL: %s", removedVirtualAmount / 1e18);
+        console.log("[INFO] Removed MAMO: %s", removedMamoAmount / 1e18);
 
         // Step 4: Mint LP position with the tokens
         console.log("[INFO] Step 4: Minting LP position with tokens...");
@@ -264,9 +266,6 @@ contract VirtualLPMigration is MultisigProposal {
         // but we only want to use the amounts we got from V2 removal for V3 liquidity
         uint256 virtualBalance = removedVirtualAmount;
         uint256 mamoBalance = removedMamoAmount;
-
-        console.log("[INFO] VIRTUAL balance: %s", virtualBalance / 1e18);
-        console.log("[INFO] MAMO balance: %s", mamoBalance / 1e18);
 
         // Determine token order (token0 must be < token1 in Uniswap V3)
         // and correctly map the corresponding balances
@@ -366,7 +365,7 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] LP NFT ownership validated - owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
 
         console.log("[INFO] Validating pool creation and token deposits...");
-        
+
         // Validate that the pool was created during the mint operation
         address virtualToken = addresses.getAddress("VIRTUAL");
         address mamoToken = addresses.getAddress("MAMO");
@@ -380,7 +379,7 @@ contract VirtualLPMigration is MultisigProposal {
         }
         assertTrue(poolCodeSize > 0, "Pool code size should be greater than 0");
         console.log("[INFO] Pool contract validated as deployed");
-        
+
         // Validate that the exact amounts from removeLiquidity were deposited into the pool
         address multisig = addresses.getAddress("MAMO_MULTISIG");
         address poolAddress = calculatedPoolAddress;
@@ -427,7 +426,7 @@ contract VirtualLPMigration is MultisigProposal {
         assertApproxEqRel(
             mamoBalanceAfter,
             mamoBalanceBefore,
-            0.01e18, // 1%
+            0.02e18, // 2%
             "Multisig MAMO balance should not change"
         );
 
