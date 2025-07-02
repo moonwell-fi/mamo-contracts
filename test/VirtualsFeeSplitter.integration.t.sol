@@ -2,11 +2,13 @@
 pragma solidity 0.8.28;
 
 import {Test} from "@forge-std/Test.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {VirtualsFeeSplitter} from "@contracts/VirtualsFeeSplitter.sol";
 
 contract VirtualsFeeSplitterIntegrationTest is Test {
+    Addresses public addresses;
     VirtualsFeeSplitter public virtualsFeeSplitter;
 
     IERC20 public mamoToken;
@@ -20,10 +22,10 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
     address public testUser = makeAddr("testUser");
 
     // Token addresses for Base mainnet
-    address constant MAMO_TOKEN = 0x7300B37DfdfAb110d83290A29DfB31B1740219fE;
-    address constant VIRTUALS_TOKEN = 0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b;
-    address constant CBBTC_TOKEN = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    address constant AERODROME_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+    address public MAMO_TOKEN;
+    address public VIRTUALS_TOKEN;
+    address public CBBTC_TOKEN;
+    address public AERODROME_ROUTER;
 
     function setUp() public {
         // Fork Base mainnet
@@ -32,6 +34,18 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
         // Setup test addresses
         owner = makeAddr("owner");
         recipient = makeAddr("recipient");
+
+        // Create a new addresses instance for testing
+        string memory addressesFolderPath = "./addresses";
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+
+        addresses = new Addresses(addressesFolderPath, chainIds);
+
+        MAMO_TOKEN = addresses.getAddress("MAMO");
+        VIRTUALS_TOKEN = addresses.getAddress("VIRTUALS");
+        CBBTC_TOKEN = addresses.getAddress("cbBTC");
+        AERODROME_ROUTER = addresses.getAddress("AERODROME_ROUTER");
 
         // Deploy the contract directly with constructor parameters
         vm.prank(owner);
