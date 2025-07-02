@@ -129,12 +129,6 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] VirtualLP Migration deployment completed");
     }
 
-    function preBuildMock() public override {
-        // Mock timestamp to be after maturity to allow sMAMO withdrawal
-        // TODO remove this
-        vm.warp(block.timestamp + 10 * 365 days);
-    }
-
     function deployBurnAndEarn(FeeSplitter feeSplitter) internal {
         address owner = addresses.getAddress("F-MAMO");
         vm.startBroadcast();
