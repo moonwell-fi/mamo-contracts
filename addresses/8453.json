@@ -170,7 +170,7 @@
     "isContract": true
   },
   {
-    "addr": "0x7cb24EFA3fe76650388145b9B0823De6600f1f4d",
+    "addr": "0xb51C52d9E5E41937B0100840b6C3CBA6f7A57A0C",
     "name": "VIRTUALS_MULTISIG",
     "isContract": false
   },
@@ -187,6 +187,11 @@
   {
     "addr": "0xb909F567c5c2Bb1A4271349708CC4637D7318b4A",
     "name": "VIRTUALS_CBBTC_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0xfE2ff8927EF602DDac27E314A199D16BE6177860",
+    "name": "F-MAMO",
     "isContract": true
   }
 ]

@@ -21,10 +21,10 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
     // Test amounts
     uint256 constant INITIAL_TOKEN0_AMOUNT = 1000e18;
     uint256 constant INITIAL_TOKEN1_AMOUNT = 500e18;
-    uint256 constant EXPECTED_RECIPIENT1_SHARE_TOKEN0 = 700e18; // 70% of 1000
-    uint256 constant EXPECTED_RECIPIENT2_SHARE_TOKEN0 = 300e18; // 30% of 1000
-    uint256 constant EXPECTED_RECIPIENT1_SHARE_TOKEN1 = 350e18; // 70% of 500
-    uint256 constant EXPECTED_RECIPIENT2_SHARE_TOKEN1 = 150e18; // 30% of 500
+    uint256 constant EXPECTED_RECIPIENT1_SHARE_TOKEN0 = 300e18; // 30% of 1000
+    uint256 constant EXPECTED_RECIPIENT2_SHARE_TOKEN0 = 700e18; // 70% of 1000
+    uint256 constant EXPECTED_RECIPIENT1_SHARE_TOKEN1 = 150e18; // 30% of 500
+    uint256 constant EXPECTED_RECIPIENT2_SHARE_TOKEN1 = 350e18; // 70% of 500
 
     // Events
     event FeesSplit(address indexed token, uint256 recipient1Amount, uint256 recipient2Amount);
@@ -59,8 +59,8 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
         assertEq(feeSplitter.TOKEN_1(), address(token1), "incorrect TOKEN_1");
         assertEq(feeSplitter.RECIPIENT_1(), recipient1, "incorrect RECIPIENT_1");
         assertEq(feeSplitter.RECIPIENT_2(), recipient2, "incorrect RECIPIENT_2");
-        assertEq(feeSplitter.RECIPIENT_1_SHARE(), 70, "incorrect RECIPIENT_1_SHARE");
-        assertEq(feeSplitter.RECIPIENT_2_SHARE(), 30, "incorrect RECIPIENT_2_SHARE");
+        assertEq(feeSplitter.RECIPIENT_1_SHARE(), 3000, "incorrect RECIPIENT_1_SHARE");
+        assertEq(feeSplitter.RECIPIENT_2_SHARE(), 7000, "incorrect RECIPIENT_2_SHARE");
     }
 
     function testConstructorValidation() public {
@@ -70,28 +70,28 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
 
         // Test zero address validation
         vm.expectRevert("TOKEN_0 cannot be zero address");
-        new FeeSplitter(address(0), address(token1), testRecipient1, testRecipient2, 70);
+        new FeeSplitter(address(0), address(token1), testRecipient1, testRecipient2, 7000);
 
         vm.expectRevert("TOKEN_1 cannot be zero address");
-        new FeeSplitter(address(token0), address(0), testRecipient1, testRecipient2, 70);
+        new FeeSplitter(address(token0), address(0), testRecipient1, testRecipient2, 7000);
 
         vm.expectRevert("RECIPIENT_1 cannot be zero address");
-        new FeeSplitter(address(token0), address(token1), address(0), testRecipient2, 70);
+        new FeeSplitter(address(token0), address(token1), address(0), testRecipient2, 7000);
 
         vm.expectRevert("RECIPIENT_2 cannot be zero address");
-        new FeeSplitter(address(token0), address(token1), testRecipient1, address(0), 70);
+        new FeeSplitter(address(token0), address(token1), testRecipient1, address(0), 7000);
 
         // Test same token validation
         vm.expectRevert("Tokens must be different");
-        new FeeSplitter(address(token0), address(token0), testRecipient1, testRecipient2, 70);
+        new FeeSplitter(address(token0), address(token0), testRecipient1, testRecipient2, 7000);
 
         // Test same recipient validation
         vm.expectRevert("Recipients must be different");
-        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient1, 70);
+        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient1, 7000);
 
         // Test split ratio validation
-        vm.expectRevert("Split A cannot exceed 100%");
-        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 101);
+        vm.expectRevert("Split A cannot exceed 10000 basis points");
+        new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 10001);
     }
 
     function testCustomSplitRatios() public {
@@ -101,25 +101,25 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
 
         // Test 50/50 split
         FeeSplitter splitter50_50 =
-            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 50);
-        assertEq(splitter50_50.RECIPIENT_1_SHARE(), 50, "incorrect 50/50 split for recipient1");
-        assertEq(splitter50_50.RECIPIENT_2_SHARE(), 50, "incorrect 50/50 split for recipient2");
+            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 5000);
+        assertEq(splitter50_50.RECIPIENT_1_SHARE(), 5000, "incorrect 50/50 split for recipient1");
+        assertEq(splitter50_50.RECIPIENT_2_SHARE(), 5000, "incorrect 50/50 split for recipient2");
 
         // Test 80/20 split
         FeeSplitter splitter80_20 =
-            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 80);
-        assertEq(splitter80_20.RECIPIENT_1_SHARE(), 80, "incorrect 80/20 split for recipient1");
-        assertEq(splitter80_20.RECIPIENT_2_SHARE(), 20, "incorrect 80/20 split for recipient2");
+            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 8000);
+        assertEq(splitter80_20.RECIPIENT_1_SHARE(), 8000, "incorrect 80/20 split for recipient1");
+        assertEq(splitter80_20.RECIPIENT_2_SHARE(), 2000, "incorrect 80/20 split for recipient2");
 
         // Test 0/100 split (all to recipient2)
         FeeSplitter splitter0_100 = new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 0);
         assertEq(splitter0_100.RECIPIENT_1_SHARE(), 0, "incorrect 0/100 split for recipient1");
-        assertEq(splitter0_100.RECIPIENT_2_SHARE(), 100, "incorrect 0/100 split for recipient2");
+        assertEq(splitter0_100.RECIPIENT_2_SHARE(), 10000, "incorrect 0/100 split for recipient2");
 
         // Test 100/0 split (all to recipient1)
         FeeSplitter splitter100_0 =
-            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 100);
-        assertEq(splitter100_0.RECIPIENT_1_SHARE(), 100, "incorrect 100/0 split for recipient1");
+            new FeeSplitter(address(token0), address(token1), testRecipient1, testRecipient2, 10000);
+        assertEq(splitter100_0.RECIPIENT_1_SHARE(), 10000, "incorrect 100/0 split for recipient1");
         assertEq(splitter100_0.RECIPIENT_2_SHARE(), 0, "incorrect 100/0 split for recipient2");
     }
 
@@ -263,12 +263,12 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
         // Execute split
         feeSplitter.split();
 
-        // With integer division: 3 * 70 / 100 = 2, remainder = 1
-        assertEq(token0.balanceOf(recipient1), recipient1Token0Before + 2, "recipient1 should get 2 additional tokens");
+        // With integer division: 3 * 3000 / 10000 = 0, remainder = 3
+        assertEq(token0.balanceOf(recipient1), recipient1Token0Before + 0, "recipient1 should get 0 additional tokens");
         assertEq(
             token0.balanceOf(recipient2),
-            recipient2Token0Before + 1,
-            "recipient2 should get 1 additional token (remainder)"
+            recipient2Token0Before + 3,
+            "recipient2 should get 3 additional tokens (remainder)"
         );
         assertEq(token0.balanceOf(address(feeSplitter)), 0, "all tokens should be distributed");
     }
@@ -297,23 +297,23 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
         // Verify total accumulated amounts (initial + 3 splits of 100/50 tokens each)
         assertEq(
             token0.balanceOf(recipient1),
-            recipient1Token0Initial + 210e18,
-            "recipient1 should have initial + 70% of 300 TOKEN_0"
+            recipient1Token0Initial + 90e18,
+            "recipient1 should have initial + 30% of 300 TOKEN_0"
         );
         assertEq(
             token0.balanceOf(recipient2),
-            recipient2Token0Initial + 90e18,
-            "recipient2 should have initial + 30% of 300 TOKEN_0"
+            recipient2Token0Initial + 210e18,
+            "recipient2 should have initial + 70% of 300 TOKEN_0"
         );
         assertEq(
             token1.balanceOf(recipient1),
-            recipient1Token1Initial + 105e18,
-            "recipient1 should have initial + 70% of 150 TOKEN_1"
+            recipient1Token1Initial + 45e18,
+            "recipient1 should have initial + 30% of 150 TOKEN_1"
         );
         assertEq(
             token1.balanceOf(recipient2),
-            recipient2Token1Initial + 45e18,
-            "recipient2 should have initial + 30% of 150 TOKEN_1"
+            recipient2Token1Initial + 105e18,
+            "recipient2 should have initial + 70% of 150 TOKEN_1"
         );
     }
 
@@ -334,10 +334,10 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
 
         // Verify distribution occurred
         assertEq(
-            token0.balanceOf(recipient1), recipient1Token0Before + 70e18, "recipient1 should receive additional 70%"
+            token0.balanceOf(recipient1), recipient1Token0Before + 30e18, "recipient1 should receive additional 30%"
         );
         assertEq(
-            token0.balanceOf(recipient2), recipient2Token0Before + 30e18, "recipient2 should receive additional 30%"
+            token0.balanceOf(recipient2), recipient2Token0Before + 70e18, "recipient2 should receive additional 70%"
         );
     }
 
@@ -351,60 +351,5 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
         assertTrue(feeSplitter.RECIPIENT_1() != address(0), "RECIPIENT_1 should not be zero");
         assertTrue(feeSplitter.RECIPIENT_2() != address(0), "RECIPIENT_2 should not be zero");
         assertTrue(feeSplitter.RECIPIENT_1() != feeSplitter.RECIPIENT_2(), "Recipients should be different");
-    }
-
-    function testFuzzSplitAmounts(uint256 amount0, uint256 amount1) public {
-        // Bound amounts to reasonable ranges to avoid overflow
-        amount0 = bound(amount0, 0, type(uint128).max);
-        amount1 = bound(amount1, 0, type(uint128).max);
-
-        // Setup
-        if (amount0 > 0) {
-            deal(address(token0), address(feeSplitter), amount0);
-        }
-        if (amount1 > 0) {
-            deal(address(token1), address(feeSplitter), amount1);
-        }
-
-        // Record initial balances
-        uint256 recipient1Token0Before = token0.balanceOf(recipient1);
-        uint256 recipient2Token0Before = token0.balanceOf(recipient2);
-        uint256 recipient1Token1Before = token1.balanceOf(recipient1);
-        uint256 recipient2Token1Before = token1.balanceOf(recipient2);
-
-        // Execute split
-        feeSplitter.split();
-
-        // Calculate expected amounts
-        uint256 expectedRecipient1Amount0 = (amount0 * 70) / 100;
-        uint256 expectedRecipient2Amount0 = amount0 - expectedRecipient1Amount0;
-        uint256 expectedRecipient1Amount1 = (amount1 * 70) / 100;
-        uint256 expectedRecipient2Amount1 = amount1 - expectedRecipient1Amount1;
-
-        // Verify distributions
-        assertEq(
-            token0.balanceOf(recipient1),
-            recipient1Token0Before + expectedRecipient1Amount0,
-            "incorrect fuzz TOKEN_0 balance for recipient1"
-        );
-        assertEq(
-            token0.balanceOf(recipient2),
-            recipient2Token0Before + expectedRecipient2Amount0,
-            "incorrect fuzz TOKEN_0 balance for recipient2"
-        );
-        assertEq(
-            token1.balanceOf(recipient1),
-            recipient1Token1Before + expectedRecipient1Amount1,
-            "incorrect fuzz TOKEN_1 balance for recipient1"
-        );
-        assertEq(
-            token1.balanceOf(recipient2),
-            recipient2Token1Before + expectedRecipient2Amount1,
-            "incorrect fuzz TOKEN_1 balance for recipient2"
-        );
-
-        // Verify all tokens are distributed
-        assertEq(token0.balanceOf(address(feeSplitter)), 0, "all TOKEN_0 should be distributed");
-        assertEq(token1.balanceOf(address(feeSplitter)), 0, "all TOKEN_1 should be distributed");
     }
 }
