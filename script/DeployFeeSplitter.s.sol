@@ -15,7 +15,6 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  * @dev Deploys the FeeSplitter contract with specified tokens and recipients
  */
 contract DeployFeeSplitter is Script, Test {
-
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -57,7 +56,7 @@ contract DeployFeeSplitter is Script, Test {
         // Get token addresses from the addresses contract
         address token0 = addresses.getAddress("MAMO");
         address token1 = addresses.getAddress("VIRTUAL");
-        
+
         address recipient1 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
         address recipient2 = addresses.getAddress("F-MAMO"); // 70% recipient
 
