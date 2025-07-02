@@ -50,9 +50,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     /// @notice The allowed slippage in basis points (e.g., 100 = 1%)
     uint256 public allowedSlippageInBps;
 
-    /// @notice The user's strategy mode
-    StrategyMode public strategyMode;
-
     /// @notice The user's allowed slippage in basis points
     uint256 public accountSlippageInBps;
 
@@ -68,7 +65,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     event RewardTokenProcessed(address indexed rewardToken, uint256 amount, StrategyMode mode);
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
-    event StrategyModeUpdated(StrategyMode newMode);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
@@ -88,7 +84,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         address[] rewardTokenPools;
         address owner;
         uint256 allowedSlippageInBps;
-        StrategyMode initialStrategyMode;
     }
 
     /**
@@ -130,7 +125,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         dexRouter = ISwapRouter(params.dexRouter);
         quoter = IQuoter(params.quoter);
         allowedSlippageInBps = params.allowedSlippageInBps;
-        strategyMode = params.initialStrategyMode;
 
         // Initialize reward tokens
         for (uint256 i = 0; i < params.rewardTokens.length; i++) {
@@ -215,15 +209,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Set strategy mode for this strategy
-     * @param mode The strategy mode to set
-     */
-    function setStrategyMode(StrategyMode mode) external onlyOwner {
-        emit StrategyModeUpdated(mode);
-        strategyMode = mode;
-    }
-
-    /**
      * @notice Set slippage tolerance for this strategy
      * @param slippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
      */
@@ -265,14 +250,15 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Process rewards according to the strategy's preferred compound mode
-     * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order)
+     * @notice Process rewards according to the specified compound mode
+     * @param mode The strategy mode to use for processing rewards
+     * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order, only needed for REINVEST mode)
      * @dev We trust the backend to provide the correct user-owned strategies for each reward token
      */
-    function processRewards(address[] calldata rewardStrategies) external onlyBackend {
+    function processRewards(StrategyMode mode, address[] calldata rewardStrategies) external onlyBackend {
         _claimRewards();
 
-        if (strategyMode == StrategyMode.COMPOUND) {
+        if (mode == StrategyMode.COMPOUND) {
             _compound();
         } else {
             require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
