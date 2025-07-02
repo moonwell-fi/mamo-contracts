@@ -323,14 +323,31 @@ contract VirtualLPMigration is MultisigProposal {
         return sqrtPriceX96;
     }
 
+    /**
+     * @dev Calculates the integer square root of a number using the Babylonian method (Newton's method)
+     *
+     * This function is used in getCurrentSqrtPriceX96() to convert Uniswap V2 price ratios to V3's sqrtPriceX96 format.
+     *
+     * Price conversion process:
+     * 1. V2 price = reserve1 / reserve0 (token1 per token0)
+     * 2. V3 sqrtPriceX96 = sqrt(price) * 2^96
+     *
+     * Example: If V2 price is 4 (meaning 1 token0 = 4 token1)
+     * - sqrt(4) = 2
+     * - sqrtPriceX96 = 2 * 2^96 = 2^97
+     *
+     * @param x The number to find the square root of
+     * @return The largest integer y such that y² ≤ x
+     */
     function sqrt(uint256 x) internal pure returns (uint256) {
-        if (x == 0) return 0;
-        uint256 z = (x + 1) / 2;
-        uint256 y = x;
+        if (x == 0) return 0; // Handle edge case: sqrt(0) = 0
+        uint256 z = (x + 1) / 2; // Initial guess: (x + 1) / 2
+        uint256 y = x; // Previous guess for comparison
         while (z < y) {
-            y = z;
-            z = (x / z + z) / 2;
+            // Continue until convergence (z >= y)
+            y = z; // Save current guess as previous
+            z = (x / z + z) / 2; // Newton's formula: z = (x/z + z) / 2
         }
-        return y;
+        return y; // Return the converged square root
     }
 }
