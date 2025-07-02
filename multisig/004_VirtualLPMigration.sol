@@ -81,10 +81,30 @@ struct PoolKey {
     int24 tickSpacing;
 }
 
+// This is a remediation for a foundry bug that is resetting storage variables between some cheatcodes uses (from the modifier)
+// https://github.com/foundry-rs/foundry/issues/5739
+contract Storage {
+    uint256 public removedVirtualAmount;
+    uint256 public removedMamoAmount;
+    uint256 public lpTokenId;
+
+    function setRemovedVirtualAmount(uint256 _removedVirtualAmount) external {
+        removedVirtualAmount = _removedVirtualAmount;
+    }
+
+    function setRemovedMamoAmount(uint256 _removedMamoAmount) external {
+        removedMamoAmount = _removedMamoAmount;
+    }
+
+    function setLpTokenId(uint256 _lpTokenId) external {
+        lpTokenId = _lpTokenId;
+    }
+}
+
 contract VirtualLPMigration is MultisigProposal {
     // Deployed contracts
     DeployFeeSplitter public immutable deployFeeSplitterScript;
-    uint256 private lpTokenId;
+    Storage public migrationStorage;
 
     // Before balances for validation
     uint256 private virtualBalanceBefore;
@@ -92,13 +112,12 @@ contract VirtualLPMigration is MultisigProposal {
     uint256 private poolVirtualBalanceBefore;
     uint256 private poolMamoBalanceBefore;
 
-    // Amounts from removeLiquidity call
-    uint256 private removedVirtualAmount;
-    uint256 private removedMamoAmount;
-
     constructor() {
         deployFeeSplitterScript = new DeployFeeSplitter();
         vm.makePersistent(address(deployFeeSplitterScript));
+
+        migrationStorage = new Storage();
+        vm.makePersistent(address(migrationStorage));
     }
 
     function _initalizeAddresses() internal {
@@ -161,17 +180,10 @@ contract VirtualLPMigration is MultisigProposal {
         virtualBalanceBefore = IERC20(virtualToken).balanceOf(multisig);
         mamoBalanceBefore = IERC20(mamoToken).balanceOf(multisig);
 
-        console.log("[INFO] Multisig VIRTUAL balance before: %s", virtualBalanceBefore);
-        console.log("[INFO] Multisig MAMO balance before: %s", mamoBalanceBefore);
-
         // Calculate pool address and record pool balances before migration
         address poolAddress = getPoolAddress(virtualToken, mamoToken);
         poolVirtualBalanceBefore = IERC20(virtualToken).balanceOf(poolAddress);
         poolMamoBalanceBefore = IERC20(mamoToken).balanceOf(poolAddress);
-
-        console.log("[INFO] Pool address: %s", poolAddress);
-        console.log("[INFO] Pool VIRTUAL balance before: %s", poolVirtualBalanceBefore);
-        console.log("[INFO] Pool MAMO balance before: %s", poolMamoBalanceBefore);
     }
 
     function deployBurnAndEarn(FeeSplitter feeSplitter) internal {
@@ -224,7 +236,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         // Remove liquidity from V2 pair to get underlying tokens
         IUniswapV2Router router = IUniswapV2Router(v2Router);
-        (removedVirtualAmount, removedMamoAmount) = router.removeLiquidity(
+        (uint256 removedVirtualAmount, uint256 removedMamoAmount) = router.removeLiquidity(
             virtualToken,
             mamo,
             v2LpBalance,
@@ -233,6 +245,9 @@ contract VirtualLPMigration is MultisigProposal {
             multisig,
             block.timestamp + 3600
         );
+
+        migrationStorage.setRemovedVirtualAmount(removedVirtualAmount);
+        migrationStorage.setRemovedMamoAmount(removedMamoAmount);
 
         console.log("[INFO] Removed liquidity - VIRTUAL: %s, MAMO: %s", removedVirtualAmount, removedMamoAmount);
 
@@ -244,9 +259,11 @@ contract VirtualLPMigration is MultisigProposal {
 
         INonfungiblePositionManager manager = INonfungiblePositionManager(positionManager);
 
-        // Get token balances from multisig
-        uint256 virtualBalance = IERC20(virtualToken).balanceOf(multisig);
-        uint256 mamoBalance = IERC20(mamo).balanceOf(multisig);
+        // Use the reduced balances (initial balance - what was used for V3 liquidity)
+        // The multisig initially had some tokens, then received more from V2 removal, 
+        // but we only want to use the amounts we got from V2 removal for V3 liquidity
+        uint256 virtualBalance = removedVirtualAmount;
+        uint256 mamoBalance = removedMamoAmount;
 
         console.log("[INFO] VIRTUAL balance: %s", virtualBalance / 1e18);
         console.log("[INFO] MAMO balance: %s", mamoBalance / 1e18);
@@ -301,13 +318,13 @@ contract VirtualLPMigration is MultisigProposal {
             sqrtPriceX96: currentSqrtPriceX96 // Current market price from V2 pair
         });
 
-        (lpTokenId,,,) = manager.mint(params);
+        (uint256 lpTokenId,,,) = manager.mint(params);
+        migrationStorage.setLpTokenId(lpTokenId);
 
         console.log("[INFO] LP token ID: %s", lpTokenId);
 
         // Validate NFT ownership immediately after minting
-        // This is a remediation for a foundry bug that is resetting storage variables between some cheatcodes uses (from the modifier)
-        // https://github.com/foundry-rs/foundry/issues/5739
+
         address burnAndEarnAddr = addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP");
         IERC721 nftContract = IERC721(positionManager);
         address nftOwner = nftContract.ownerOf(lpTokenId);
@@ -324,14 +341,7 @@ contract VirtualLPMigration is MultisigProposal {
             poolCodeSize := extcodesize(calculatedPoolAddress)
         }
 
-        if (poolCodeSize > 0) {
-            console.log("[INFO] Pool contract created at calculated address: %s", calculatedPoolAddress);
-        } else {
-            console.log("[INFO] Pool not found at calculated address, checking if pool was created elsewhere");
-            // The pool might have been created but our calculation might be wrong
-            // Let's just verify that the tokens were moved (which we'll check in validate)
-            console.log("[INFO] Pool creation validation skipped - will verify token transfers in validate phase");
-        }
+        assertTrue(poolCodeSize > 0, "Pool code size should be greater than 0");
     }
 
     function simulate() public override {
@@ -374,27 +384,41 @@ contract VirtualLPMigration is MultisigProposal {
         address mamoToken = addresses.getAddress("MAMO");
         address poolAddress = getPoolAddress(virtualToken, mamoToken);
 
+        // Log balances before
+        console.log("[INFO] Multisig VIRTUAL balance before: %s", virtualBalanceBefore / 1e18);
+        console.log("[INFO] Multisig MAMO balance before: %s", mamoBalanceBefore / 1e18);
+        console.log("[INFO] Pool VIRTUAL balance before: %s", poolVirtualBalanceBefore / 1e18);
+        console.log("[INFO] Pool MAMO balance before: %s", poolMamoBalanceBefore / 1e18);
+
         // Check current balances
         uint256 virtualBalanceAfter = IERC20(virtualToken).balanceOf(multisig);
         uint256 mamoBalanceAfter = IERC20(mamoToken).balanceOf(multisig);
         uint256 poolVirtualBalanceAfter = IERC20(virtualToken).balanceOf(poolAddress);
         uint256 poolMamoBalanceAfter = IERC20(mamoToken).balanceOf(poolAddress);
 
-        // Calculate the differences
-        uint256 virtualDecrease = virtualBalanceBefore - virtualBalanceAfter;
-        uint256 mamoDecrease = mamoBalanceBefore - mamoBalanceAfter;
-        uint256 poolVirtualIncrease = poolVirtualBalanceAfter - poolVirtualBalanceBefore;
-        uint256 poolMamoIncrease = poolMamoBalanceAfter - poolMamoBalanceBefore;
+        // Log balances after
+        console.log("[INFO] Multisig VIRTUAL balance after: %s", virtualBalanceAfter / 1e18);
+        console.log("[INFO] Multisig MAMO balance after: %s", mamoBalanceAfter / 1e18);
+        console.log("[INFO] Pool VIRTUAL balance after: %s", poolVirtualBalanceAfter / 1e18);
+        console.log("[INFO] Pool MAMO balance after: %s", poolMamoBalanceAfter / 1e18);
 
-        // Validate that the exact amounts from removeLiquidity were transferred
-        assertEq(virtualDecrease, removedVirtualAmount, "Multisig VIRTUAL decrease should match removed amount");
-        assertEq(mamoDecrease, removedMamoAmount, "Multisig MAMO decrease should match removed amount");
-        assertEq(poolVirtualIncrease, removedVirtualAmount, "Pool VIRTUAL increase should match removed amount");
-        assertEq(poolMamoIncrease, removedMamoAmount, "Pool MAMO increase should match removed amount");
+        // Validate that the pool received tokens (main goal of the migration)
+        assertTrue(poolVirtualBalanceAfter >= poolVirtualBalanceBefore, "Pool VIRTUAL balance should increase");
+        assertTrue(poolMamoBalanceAfter >= poolMamoBalanceBefore, "Pool MAMO balance should increase");
 
-        console.log("[INFO] Validation passed - exact amounts transferred to pool");
-        console.log("[INFO] VIRTUAL: removed %s, transferred %s", removedVirtualAmount, poolVirtualIncrease);
-        console.log("[INFO] MAMO: removed %s, transferred %s", removedMamoAmount, poolMamoIncrease);
+        // Validate that the pool received the exact amounts from removeLiquidity
+        assertEq(
+            poolVirtualBalanceAfter,
+            migrationStorage.removedVirtualAmount(),
+            "Pool VIRTUAL balance should match removed amount"
+        );
+        assertEq(
+            poolMamoBalanceAfter, migrationStorage.removedMamoAmount(), "Pool MAMO balance should match removed amount"
+        );
+
+        // Validate that the multisig did not receive any tokens
+        assertEq(virtualBalanceAfter, virtualBalanceBefore, "Multisig VIRTUAL balance should not change");
+        assertEq(mamoBalanceAfter, mamoBalanceBefore, "Multisig MAMO balance should not change");
 
         console.log("[INFO] All validations passed successfully");
     }
@@ -475,7 +499,7 @@ contract VirtualLPMigration is MultisigProposal {
     }
 
     function getPoolAddress(address tokenA, address tokenB) internal view returns (address) {
-        address factory = addresses.getAddress("AERODROME_POOL_FACTORY");
+        address factory = addresses.getAddress("AERODROME_CL_FACTORY");
         int24 tickSpacing = 200; // Same tick spacing used in mint
         PoolKey memory key = getPoolKey(tokenA, tokenB, tickSpacing);
         return computeAddress(factory, key);
