@@ -168,7 +168,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         // Withdraw all LP tokens from sMAMO (these are Uniswap V2 LP tokens)
         smamoContract.withdraw(balance);
-        console.log("[INFO] Withdrawn %s V2 LP tokens from sMAMO", balance);
+        console.log("[INFO] Withdrawn %s V2 LP tokens from sMAMO", balance / 1e18);
 
         // Step 3.5: Break down V2 LP tokens to get underlying VIRTUAL and MAMO tokens
         console.log("[INFO] Step 3.5: Breaking down V2 LP tokens...");
@@ -180,7 +180,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         // Get the V2 LP token balance (should be what we just withdrew)
         uint256 v2LpBalance = IERC20(v2Pair).balanceOf(multisig);
-        console.log("[INFO] V2 LP token balance: %s", v2LpBalance);
+        console.log("[INFO] V2 LP token balance: %s", v2LpBalance / 1e18);
 
         // Approve the router to spend our LP tokens
         IERC20(v2Pair).approve(v2Router, v2LpBalance);
@@ -243,7 +243,7 @@ contract VirtualLPMigration is MultisigProposal {
             amount1Desired: amount1Desired,
             amount0Min: 0, // Allow slippage since this might be initial liquidity
             amount1Min: 0, // Allow slippage since this might be initial liquidity
-            recipient: addresses.getAddress("FEE_SPLITTER"), // Send LP NFT to FEE_SPLITTER
+            recipient: addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP"), // Send LP NFT to BURN_AND_EARN_VIRTUAL_MAMO_LP
             deadline: block.timestamp + 30 minutes, // 30 minutes deadline
             sqrtPriceX96: currentSqrtPriceX96 // Current market price from V2 pair
         });
@@ -255,11 +255,11 @@ contract VirtualLPMigration is MultisigProposal {
         // Validate NFT ownership immediately after minting
         // This is a remediation for storage variable reset between foundry bug that is reseting storage variables
         // https://github.com/foundry-rs/foundry/issues/5739
-        address feeSplitterAddr = addresses.getAddress("FEE_SPLITTER");
+        address burnAndEarnAddr = addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP");
         IERC721 nftContract = IERC721(positionManager);
         address nftOwner = nftContract.ownerOf(lpTokenId);
-        assertEq(nftOwner, feeSplitterAddr, "LP NFT should be owned by FEE_SPLITTER");
-        console.log("[INFO] LP NFT ownership validated - owned by FEE_SPLITTER");
+        assertEq(nftOwner, burnAndEarnAddr, "LP NFT should be owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
+        console.log("[INFO] LP NFT ownership validated - owned by BURN_AND_EARN_VIRTUAL_MAMO_LP");
     }
 
     function simulate() public override {
