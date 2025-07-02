@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BurnAndEarn} from "@contracts/BurnAndEarn.sol";
@@ -70,10 +71,30 @@ interface IERC721 {
     function ownerOf(uint256 tokenId) external view returns (address owner);
 }
 
+interface ICLFactory {
+    function implementation() external view returns (address);
+}
+
+struct PoolKey {
+    address token0;
+    address token1;
+    int24 tickSpacing;
+}
+
 contract VirtualLPMigration is MultisigProposal {
     // Deployed contracts
     DeployFeeSplitter public immutable deployFeeSplitterScript;
     uint256 private lpTokenId;
+
+    // Before balances for validation
+    uint256 private virtualBalanceBefore;
+    uint256 private mamoBalanceBefore;
+    uint256 private poolVirtualBalanceBefore;
+    uint256 private poolMamoBalanceBefore;
+
+    // Amounts from removeLiquidity call
+    uint256 private removedVirtualAmount;
+    uint256 private removedMamoAmount;
 
     constructor() {
         deployFeeSplitterScript = new DeployFeeSplitter();
@@ -129,6 +150,30 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] VirtualLP Migration deployment completed");
     }
 
+    function preBuildMock() public override {
+        console.log("[INFO] Recording before balances for validation...");
+
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        address virtualToken = addresses.getAddress("VIRTUAL");
+        address mamoToken = addresses.getAddress("MAMO");
+
+        // Record multisig balances before migration
+        virtualBalanceBefore = IERC20(virtualToken).balanceOf(multisig);
+        mamoBalanceBefore = IERC20(mamoToken).balanceOf(multisig);
+
+        console.log("[INFO] Multisig VIRTUAL balance before: %s", virtualBalanceBefore);
+        console.log("[INFO] Multisig MAMO balance before: %s", mamoBalanceBefore);
+
+        // Calculate pool address and record pool balances before migration
+        address poolAddress = getPoolAddress(virtualToken, mamoToken);
+        poolVirtualBalanceBefore = IERC20(virtualToken).balanceOf(poolAddress);
+        poolMamoBalanceBefore = IERC20(mamoToken).balanceOf(poolAddress);
+
+        console.log("[INFO] Pool address: %s", poolAddress);
+        console.log("[INFO] Pool VIRTUAL balance before: %s", poolVirtualBalanceBefore);
+        console.log("[INFO] Pool MAMO balance before: %s", poolMamoBalanceBefore);
+    }
+
     function deployBurnAndEarn(FeeSplitter feeSplitter) internal {
         address owner = addresses.getAddress("F-MAMO");
         vm.startBroadcast();
@@ -179,7 +224,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         // Remove liquidity from V2 pair to get underlying tokens
         IUniswapV2Router router = IUniswapV2Router(v2Router);
-        (uint256 amountVirtual, uint256 amountMamo) = router.removeLiquidity(
+        (removedVirtualAmount, removedMamoAmount) = router.removeLiquidity(
             virtualToken,
             mamo,
             v2LpBalance,
@@ -189,7 +234,7 @@ contract VirtualLPMigration is MultisigProposal {
             block.timestamp + 3600
         );
 
-        console.log("[INFO] Removed liquidity - VIRTUAL: %s, MAMO: %s", amountVirtual, amountMamo);
+        console.log("[INFO] Removed liquidity - VIRTUAL: %s, MAMO: %s", removedVirtualAmount, removedMamoAmount);
 
         // Step 4: Mint LP position with the tokens
         console.log("[INFO] Step 4: Minting LP position with tokens...");
@@ -205,11 +250,27 @@ contract VirtualLPMigration is MultisigProposal {
 
         console.log("[INFO] VIRTUAL balance: %s", virtualBalance / 1e18);
         console.log("[INFO] MAMO balance: %s", mamoBalance / 1e18);
+
         // Determine token order (token0 must be < token1 in Uniswap V3)
-        address token0 = virtualToken < mamo ? virtualToken : mamo;
-        address token1 = virtualToken < mamo ? mamo : virtualToken;
-        uint256 amount0Desired = virtualToken < mamo ? virtualBalance : mamoBalance;
-        uint256 amount1Desired = virtualToken < mamo ? mamoBalance : virtualBalance;
+        // and correctly map the corresponding balances
+        address token0;
+        address token1;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+
+        if (virtualToken < mamo) {
+            // VIRTUAL is token0, MAMO is token1
+            token0 = virtualToken;
+            token1 = mamo;
+            amount0Desired = virtualBalance;
+            amount1Desired = mamoBalance;
+        } else {
+            // MAMO is token0, VIRTUAL is token1
+            token0 = mamo;
+            token1 = virtualToken;
+            amount0Desired = mamoBalance;
+            amount1Desired = virtualBalance;
+        }
 
         // Approve tokens for the position manager
         IERC20(token0).approve(positionManager, amount0Desired);
@@ -287,6 +348,43 @@ contract VirtualLPMigration is MultisigProposal {
 
         console.log("[INFO] LP NFT ownership validation completed during build phase");
 
+        console.log("[INFO] Validating pool creation and token deposits...");
+        // Validate that the exact amounts from removeLiquidity were deposited into the pool
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        address virtualToken = addresses.getAddress("VIRTUAL");
+        address mamoToken = addresses.getAddress("MAMO");
+        address poolAddress = getPoolAddress(virtualToken, mamoToken);
+
+        // Verify that the pool address is a contract, not an EOA
+        uint256 poolCodeSize;
+        assembly {
+            poolCodeSize := extcodesize(poolAddress)
+        }
+        assertTrue(poolCodeSize > 0, "Pool address should be a contract, not an EOA");
+        console.log("[INFO] Pool address verified as contract: %s", poolAddress);
+
+        // Check current balances
+        uint256 virtualBalanceAfter = IERC20(virtualToken).balanceOf(multisig);
+        uint256 mamoBalanceAfter = IERC20(mamoToken).balanceOf(multisig);
+        uint256 poolVirtualBalanceAfter = IERC20(virtualToken).balanceOf(poolAddress);
+        uint256 poolMamoBalanceAfter = IERC20(mamoToken).balanceOf(poolAddress);
+
+        // Calculate the differences
+        uint256 virtualDecrease = virtualBalanceBefore - virtualBalanceAfter;
+        uint256 mamoDecrease = mamoBalanceBefore - mamoBalanceAfter;
+        uint256 poolVirtualIncrease = poolVirtualBalanceAfter - poolVirtualBalanceBefore;
+        uint256 poolMamoIncrease = poolMamoBalanceAfter - poolMamoBalanceBefore;
+
+        // Validate that the exact amounts from removeLiquidity were transferred
+        assertEq(virtualDecrease, removedVirtualAmount, "Multisig VIRTUAL decrease should match removed amount");
+        assertEq(mamoDecrease, removedMamoAmount, "Multisig MAMO decrease should match removed amount");
+        assertEq(poolVirtualIncrease, removedVirtualAmount, "Pool VIRTUAL increase should match removed amount");
+        assertEq(poolMamoIncrease, removedMamoAmount, "Pool MAMO increase should match removed amount");
+
+        console.log("[INFO] Validation passed - exact amounts transferred to pool");
+        console.log("[INFO] VIRTUAL: removed %s, transferred %s", removedVirtualAmount, poolVirtualIncrease);
+        console.log("[INFO] MAMO: removed %s, transferred %s", removedMamoAmount, poolMamoIncrease);
+
         console.log("[INFO] All validations passed successfully");
     }
 
@@ -349,5 +447,26 @@ contract VirtualLPMigration is MultisigProposal {
             z = (x / z + z) / 2; // Newton's formula: z = (x/z + z) / 2
         }
         return y; // Return the converged square root
+    }
+
+    function getPoolKey(address tokenA, address tokenB, int24 tickSpacing) internal pure returns (PoolKey memory) {
+        if (tokenA > tokenB) (tokenA, tokenB) = (tokenB, tokenA);
+        return PoolKey({token0: tokenA, token1: tokenB, tickSpacing: tickSpacing});
+    }
+
+    function computeAddress(address factory, PoolKey memory key) internal view returns (address pool) {
+        require(key.token0 < key.token1);
+        pool = Clones.predictDeterministicAddress(
+            ICLFactory(factory).implementation(),
+            keccak256(abi.encode(key.token0, key.token1, key.tickSpacing)),
+            factory
+        );
+    }
+
+    function getPoolAddress(address tokenA, address tokenB) internal view returns (address) {
+        address factory = addresses.getAddress("AERODROME_POOL_FACTORY");
+        int24 tickSpacing = 200; // Same tick spacing used in mint
+        PoolKey memory key = getPoolKey(tokenA, tokenB, tickSpacing);
+        return computeAddress(factory, key);
     }
 }
