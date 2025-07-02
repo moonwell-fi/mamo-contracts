@@ -161,7 +161,7 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
     }
 
     function testVirtualsDistribution() public {
-        uint256 virtualsAmount = 100e18; // 100 VIRTUALS tokens
+        uint256 virtualsAmount = 1000e18; // 1000 VIRTUALS tokens
 
         // Deal VIRTUALS tokens to the contract
         deal(address(virtualsToken), address(virtualsFeeSplitter), virtualsAmount);
@@ -209,8 +209,8 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
     }
 
     function testBothMamoAndVirtualsDistribution() public {
-        uint256 mamoAmount = 1000e18; // 1000 MAMO tokens
-        uint256 virtualsAmount = 50e18; // 50 VIRTUALS tokens
+        uint256 mamoAmount = 1000000e18; // 1000000 MAMO tokens
+        uint256 virtualsAmount = 2000e18; // 2000 VIRTUALS tokens
 
         // Deal both tokens to the contract
         deal(address(mamoToken), address(virtualsFeeSplitter), mamoAmount);

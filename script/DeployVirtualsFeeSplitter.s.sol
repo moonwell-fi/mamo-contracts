@@ -46,19 +46,27 @@ contract DeployVirtualsFeeSplitter is Script, Test {
             StdStyle.yellow(vm.toString(address(virtualsFeeSplitter)))
         );
         console.log("%s: %s", StdStyle.bold("Owner"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.owner())));
-        console.log(
-            "%s: %s",
-            StdStyle.bold("Recipient"),
-            StdStyle.yellow(vm.toString(virtualsFeeSplitter.RECIPIENT()))
-        );
+        console.log("%s: %s", StdStyle.bold("Recipient"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.RECIPIENT())));
 
         // Display token addresses
-        console.log("%s: %s", StdStyle.bold("MAMO Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.MAMO_TOKEN())));
-        console.log("%s: %s", StdStyle.bold("Virtuals Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.VIRTUALS_TOKEN())));
-        console.log("%s: %s", StdStyle.bold("cbBTC Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.CBBTC_TOKEN())));
+        console.log(
+            "%s: %s", StdStyle.bold("MAMO Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.MAMO_TOKEN()))
+        );
+        console.log(
+            "%s: %s",
+            StdStyle.bold("Virtuals Token"),
+            StdStyle.yellow(vm.toString(virtualsFeeSplitter.VIRTUALS_TOKEN()))
+        );
+        console.log(
+            "%s: %s", StdStyle.bold("cbBTC Token"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.CBBTC_TOKEN()))
+        );
 
         // Display Aerodrome router address
-        console.log("%s: %s", StdStyle.bold("Aerodrome Router"), StdStyle.yellow(vm.toString(virtualsFeeSplitter.AERODROME_ROUTER())));
+        console.log(
+            "%s: %s",
+            StdStyle.bold("Aerodrome Router"),
+            StdStyle.yellow(vm.toString(virtualsFeeSplitter.AERODROME_ROUTER()))
+        );
     }
 
     /**
@@ -74,14 +82,8 @@ contract DeployVirtualsFeeSplitter is Script, Test {
         address recipient = addresses.getAddress("VIRTUALS_MULTISIG"); // Single recipient
 
         // Deploy the VirtualsFeeSplitter contract with all constructor parameters
-        virtualsFeeSplitter = new VirtualsFeeSplitter(
-            owner,
-            recipient,
-            MAMO_TOKEN,
-            VIRTUALS_TOKEN,
-            CBBTC_TOKEN,
-            AERODROME_ROUTER
-        );
+        virtualsFeeSplitter =
+            new VirtualsFeeSplitter(owner, recipient, MAMO_TOKEN, VIRTUALS_TOKEN, CBBTC_TOKEN, AERODROME_ROUTER);
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying VirtualsFeeSplitter contract...")));
         console.log(

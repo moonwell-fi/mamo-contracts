@@ -160,17 +160,17 @@ contract VirtualsFeeSplitter is Ownable {
 
         // Distribute the received cbBTC
         if (cbbtcReceived > 0) {
-            _distributeCbBtc(cbbtcReceived);
+            _distributeCbBtc();
         }
     }
 
     /**
      * @notice Internal function to distribute cbBTC tokens
-     * @param amount Amount of cbBTC to distribute
      */
-    function _distributeCbBtc(uint256 amount) private {
+    function _distributeCbBtc() private {
         IERC20 cbbtcToken = IERC20(CBBTC_TOKEN);
-        cbbtcToken.safeTransfer(RECIPIENT, amount);
-        emit CbBtcDistributed(amount);
+        uint256 cbbtcBalance = cbbtcToken.balanceOf(address(this));
+        cbbtcToken.safeTransfer(RECIPIENT, cbbtcBalance);
+        emit CbBtcDistributed(cbbtcBalance);
     }
 }
