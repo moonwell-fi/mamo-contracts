@@ -175,6 +175,16 @@
     "isContract": false
   },
   {
+    "addr": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+    "name": "AERODROME_ROUTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
+    "name": "VIRTUALS",
+    "isContract": true
+  },
+  {
     "addr": "0xfE2ff8927EF602DDac27E314A199D16BE6177860",
     "name": "F-MAMO",
     "isContract": true
