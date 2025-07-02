@@ -73,7 +73,7 @@ interface IERC721 {
 contract VirtualLPMigration is MultisigProposal {
     // Deployed contracts
     DeployFeeSplitter public immutable deployFeeSplitterScript;
-    uint256 public lpTokenId;
+    uint256 private lpTokenId;
 
     constructor() {
         deployFeeSplitterScript = new DeployFeeSplitter();
@@ -251,6 +251,15 @@ contract VirtualLPMigration is MultisigProposal {
         (lpTokenId,,,) = manager.mint(params);
 
         console.log("[INFO] LP token ID: %s", lpTokenId);
+
+        // Validate NFT ownership immediately after minting
+        // This is a remediation for storage variable reset between foundry bug that is reseting storage variables
+        // https://github.com/foundry-rs/foundry/issues/5739
+        address feeSplitterAddr = addresses.getAddress("FEE_SPLITTER");
+        IERC721 nftContract = IERC721(positionManager);
+        address nftOwner = nftContract.ownerOf(lpTokenId);
+        assertEq(nftOwner, feeSplitterAddr, "LP NFT should be owned by FEE_SPLITTER");
+        console.log("[INFO] LP NFT ownership validated - owned by FEE_SPLITTER");
     }
 
     function simulate() public override {
@@ -284,18 +293,7 @@ contract VirtualLPMigration is MultisigProposal {
         // Validate that contracts are linked correctly
         assertEq(burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should match FeeSplitter");
 
-        console.log("[INFO] Validating that LP NFT was minted and transferred to FEE_SPLITTER...");
-        // Validate that LP NFT was minted and transferred to FEE_SPLITTER
-        address validationPositionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
-        address feeSplitterAddr = addresses.getAddress("FEE_SPLITTER");
-        address multisig = addresses.getAddress("MAMO_MULTISIG");
-
-        IERC721 nftContract = IERC721(validationPositionManager);
-
-        assertNotEq(lpTokenId, 0, "LP token ID should not be 0");
-        address nftOwner = nftContract.ownerOf(lpTokenId);
-
-        assertEq(nftOwner, feeSplitterAddr, "LP NFT should be owned by FEE_SPLITTER");
+        console.log("[INFO] LP NFT ownership validation completed during build phase");
 
         console.log("[INFO] All validations passed successfully");
     }
