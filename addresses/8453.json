@@ -200,13 +200,23 @@
     "isContract": true
   },
   {
-    "addr": "0xb7f51d070d4e05dbbc3a3697aef5405e60e013f6",
+    "addr": "0xB7F51D070D4e05DbBc3A3697Aef5405E60e013F6",
     "name": "VIRTUAL_MAMO_V2_PAIR",
     "isContract": true
   },
   {
-    "addr": "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
+    "addr": "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
     "name": "UNISWAP_V2_ROUTER",
+    "isContract": true
+  },
+  {
+    "addr": "0xc90F6D74f81Cb551C19d138b50456c644f9B3284",
+    "name": "FEE_SPLITTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x79c1921Fc8CD076415cBD1EBB330629F4EC7Bbd1",
+    "name": "BURN_AND_EARN_VIRTUAL_MAMO_LP",
     "isContract": true
   }
 ]

@@ -95,7 +95,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         if (DO_DEPLOY) {
             deploy();
-            //        addresses.updateJson();
+            addresses.updateJson();
             addresses.printJSONChanges();
         }
 
@@ -136,18 +136,16 @@ contract VirtualLPMigration is MultisigProposal {
     }
 
     function deployBurnAndEarn(FeeSplitter feeSplitter) internal {
+        address owner = addresses.getAddress("F-MAMO");
         vm.startBroadcast();
-
-        address owner = addresses.getAddress("F_MAMO");
 
         // Deploy BurnAndEarn with FeeSplitter as feeCollector and multisig as owner
         BurnAndEarn burnAndEarn = new BurnAndEarn(address(feeSplitter), owner);
 
+        vm.stopBroadcast();
         console.log("BurnAndEarn deployed at: %s", address(burnAndEarn));
         console.log("Fee collector set to: %s", address(feeSplitter));
         console.log("Owner set to: %s", owner);
-
-        vm.stopBroadcast();
 
         // Add the address to the Addresses contract
         addresses.addAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP", address(burnAndEarn), true);
@@ -287,7 +285,7 @@ contract VirtualLPMigration is MultisigProposal {
         // Validate BurnAndEarn configuration
         BurnAndEarn burnAndEarn = BurnAndEarn(burnAndEarnAddress);
         assertEq(burnAndEarn.feeCollector(), feeSplitterAddress, "BurnAndEarn feeCollector should be FeeSplitter");
-        assertEq(burnAndEarn.owner(), addresses.getAddress("F_MAMO"), "BurnAndEarn owner should be multisig");
+        assertEq(burnAndEarn.owner(), addresses.getAddress("F-MAMO"), "BurnAndEarn owner should be multisig");
 
         console.log("[INFO] Validating that contracts are linked correctly...");
         // Validate that contracts are linked correctly
