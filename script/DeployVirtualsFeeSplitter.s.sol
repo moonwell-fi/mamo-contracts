@@ -15,12 +15,6 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  * @dev Deploys the VirtualsFeeSplitter contract with specified owner and recipient
  */
 contract DeployVirtualsFeeSplitter is Script, Test {
-    // Token addresses for Base mainnet
-    address constant MAMO_TOKEN = 0x7300B37DfdfAb110d83290A29DfB31B1740219fE;
-    address constant VIRTUALS_TOKEN = 0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b;
-    address constant CBBTC_TOKEN = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    address constant AERODROME_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
-
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -81,9 +75,14 @@ contract DeployVirtualsFeeSplitter is Script, Test {
         address owner = addresses.getAddress("MAMO_MULTISIG"); // Owner of the contract
         address recipient = addresses.getAddress("VIRTUALS_MULTISIG"); // Single recipient
 
+        address mamoToken = addresses.getAddress("MAMO");
+        address virtualsToken = addresses.getAddress("VIRTUALS");
+        address cbbtcToken = addresses.getAddress("cbBTC");
+        address aerodromeRouter = addresses.getAddress("AERODROME_ROUTER");
+
         // Deploy the VirtualsFeeSplitter contract with all constructor parameters
         virtualsFeeSplitter =
-            new VirtualsFeeSplitter(owner, recipient, MAMO_TOKEN, VIRTUALS_TOKEN, CBBTC_TOKEN, AERODROME_ROUTER);
+            new VirtualsFeeSplitter(owner, recipient, mamoToken, virtualsToken, cbbtcToken, aerodromeRouter);
 
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying VirtualsFeeSplitter contract...")));
         console.log(
@@ -112,6 +111,10 @@ contract DeployVirtualsFeeSplitter is Script, Test {
     function validate(Addresses addresses, VirtualsFeeSplitter virtualsFeeSplitter) public view {
         address expectedOwner = addresses.getAddress("MAMO_MULTISIG");
         address expectedRecipient = addresses.getAddress("VIRTUALS_MULTISIG");
+        address mamoToken = addresses.getAddress("MAMO");
+        address virtualsToken = addresses.getAddress("VIRTUALS");
+        address cbbtcToken = addresses.getAddress("cbBTC");
+        address aerodromeRouter = addresses.getAddress("AERODROME_ROUTER");
 
         // Verify the owner is set correctly
         assertEq(virtualsFeeSplitter.owner(), expectedOwner, "incorrect owner");
@@ -120,12 +123,12 @@ contract DeployVirtualsFeeSplitter is Script, Test {
         assertEq(virtualsFeeSplitter.RECIPIENT(), expectedRecipient, "incorrect RECIPIENT");
 
         // Verify token addresses are set correctly
-        assertEq(virtualsFeeSplitter.MAMO_TOKEN(), MAMO_TOKEN, "incorrect MAMO token address");
-        assertEq(virtualsFeeSplitter.VIRTUALS_TOKEN(), VIRTUALS_TOKEN, "incorrect VIRTUALS token address");
-        assertEq(virtualsFeeSplitter.CBBTC_TOKEN(), CBBTC_TOKEN, "incorrect cbBTC token address");
+        assertEq(virtualsFeeSplitter.MAMO_TOKEN(), mamoToken, "incorrect MAMO token address");
+        assertEq(virtualsFeeSplitter.VIRTUALS_TOKEN(), virtualsToken, "incorrect VIRTUALS token address");
+        assertEq(virtualsFeeSplitter.CBBTC_TOKEN(), cbbtcToken, "incorrect cbBTC token address");
 
         // Verify Aerodrome router address is set correctly
-        assertEq(virtualsFeeSplitter.AERODROME_ROUTER(), AERODROME_ROUTER, "incorrect Aerodrome router address");
+        assertEq(virtualsFeeSplitter.AERODROME_ROUTER(), aerodromeRouter, "incorrect Aerodrome router address");
 
         // Verify addresses are not zero
         assertTrue(virtualsFeeSplitter.MAMO_TOKEN() != address(0), "MAMO token address should not be zero");

@@ -323,7 +323,7 @@ contract VirtualsFeeSplitterIntegrationTest is Test {
         // Test setting slippage too high (should revert)
         vm.prank(owner);
         vm.expectRevert("Slippage too high");
-        virtualsFeeSplitter.setSlippage(1001); // 10.01%
+        virtualsFeeSplitter.setSlippage(10001); // 100.01%
 
         // Test that non-owner cannot set slippage
         vm.prank(testUser);

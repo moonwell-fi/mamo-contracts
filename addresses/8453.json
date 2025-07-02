@@ -181,12 +181,7 @@
   },
   {
     "addr": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
-    "name": "VIRTUALS_TOKEN",
-    "isContract": true
-  },
-  {
-    "addr": "0xb909F567c5c2Bb1A4271349708CC4637D7318b4A",
-    "name": "VIRTUALS_CBBTC_POOL",
+    "name": "VIRTUALS",
     "isContract": true
   },
   {

@@ -34,7 +34,6 @@ contract VirtualsFeeSplitter is Ownable {
 
     // Slippage configuration (default 5% = 500 basis points)
     uint256 public slippageBps = 500; // 5%
-    uint256 private constant MAX_SLIPPAGE_BPS = 1000; // 10% maximum
     uint256 private constant BPS_DENOMINATOR = 10000;
 
     /// @notice Emitted when MAMO tokens are distributed
@@ -97,7 +96,7 @@ contract VirtualsFeeSplitter is Ownable {
      * @param _slippageBps New slippage in basis points (e.g., 500 = 5%)
      */
     function setSlippage(uint256 _slippageBps) external onlyOwner {
-        require(_slippageBps <= MAX_SLIPPAGE_BPS, "Slippage too high");
+        require(_slippageBps <= BPS_DENOMINATOR, "Slippage too high");
 
         uint256 oldSlippage = slippageBps;
         slippageBps = _slippageBps;
