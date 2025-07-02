@@ -51,6 +51,7 @@ interface IUniswapV2Pair {
 
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
 }
 
 interface IUniswapV2Router {
@@ -207,39 +208,49 @@ contract VirtualLPMigration is MultisigProposal {
         INonfungiblePositionManager manager = INonfungiblePositionManager(positionManager);
 
         // Get token balances from multisig
-        uint256 amount0Desired = IERC20(mamo).balanceOf(multisig);
-        uint256 amount1Desired = IERC20(virtualToken).balanceOf(multisig);
+        uint256 virtualBalance = IERC20(virtualToken).balanceOf(multisig);
+        uint256 mamoBalance = IERC20(mamo).balanceOf(multisig);
 
-        console.log("[INFO] Token0 (%s) balance: %s", mamo, amount0Desired);
-        console.log("[INFO] Token1 (%s) balance: %s", virtualToken, amount1Desired);
+        console.log("[INFO] VIRTUAL balance: %s", virtualBalance);
+        console.log("[INFO] MAMO balance: %s", mamoBalance);
+        // Determine token order (token0 must be < token1 in Uniswap V3)
+        address token0 = virtualToken < mamo ? virtualToken : mamo;
+        address token1 = virtualToken < mamo ? mamo : virtualToken;
+        uint256 amount0Desired = virtualToken < mamo ? virtualBalance : mamoBalance;
+        uint256 amount1Desired = virtualToken < mamo ? mamoBalance : virtualBalance;
+
         // Approve tokens for the position manager
         IERC20(token0).approve(positionManager, amount0Desired);
-        IERC20(virtualToken).approve(positionManager, amount1Desired);
+        IERC20(token1).approve(positionManager, amount1Desired);
+
+        // Get current market price from V2 pair using the correct token order
+        uint160 currentSqrtPriceX96 = getCurrentSqrtPriceX96(token0, token1, v2Pair);
+        console.log("[INFO] Current sqrtPriceX96: %s", currentSqrtPriceX96);
 
         // Mint LP position with full range (for maximum liquidity coverage)
+        // Use tick spacing 200 because it's the volatile token tick spacing recommended by Aerodrome
+        int24 tickSpacing = 200;
+        int24 tickLower = -887200; // Closest valid tick to min (-887220 rounded to multiple of 200)
+        int24 tickUpper = 887200; // Closest valid tick to max (887220 rounded to multiple of 200)
+
         INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
-            token0: mamo,
-            token1: virtualToken,
-            tickSpacing: 200, // Standard tick spacing for 0.3% fee tier
-            tickLower: -887220, // Min tick for full range
-            tickUpper: 887220, // Max tick for full range
+            token0: token0,
+            token1: token1,
+            tickSpacing: tickSpacing,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
             amount0Desired: amount0Desired,
             amount1Desired: amount1Desired,
             amount0Min: 0, // Allow slippage since this might be initial liquidity
             amount1Min: 0, // Allow slippage since this might be initial liquidity
-            recipient: addresses.getAddress("FEE_SPLITTER"), // Send LP NFT to multisig
-            deadline: block.timestamp + 3600, // 1 hour deadline
-            sqrtPriceX96: 79228162514264337593543950336 // 1:1 price ratio (sqrt(1) * 2^96)
+            recipient: addresses.getAddress("FEE_SPLITTER"), // Send LP NFT to FEE_SPLITTER
+            deadline: block.timestamp + 30 minutes, // 30 minutes deadline
+            sqrtPriceX96: currentSqrtPriceX96 // Current market price from V2 pair
         });
 
-        (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1) = manager.mint(params);
+        (lpTokenId,,,) = manager.mint(params);
 
-        // Store the LP token ID for validation
-        lpTokenId = tokenId;
-
-        console.log("[INFO] Liquidity: %s", liquidity);
-        console.log("[INFO] Amount0 used: %s", amount0);
-        console.log("[INFO] Amount1 used: %s", amount1);
+        console.log("[INFO] LP token ID: %s", lpTokenId);
     }
 
     function simulate() public override {
@@ -280,10 +291,56 @@ contract VirtualLPMigration is MultisigProposal {
         address multisig = addresses.getAddress("MAMO_MULTISIG");
 
         IERC721 nftContract = IERC721(validationPositionManager);
+
+        assertNotEq(lpTokenId, 0, "LP token ID should not be 0");
         address nftOwner = nftContract.ownerOf(lpTokenId);
 
         assertEq(nftOwner, feeSplitterAddr, "LP NFT should be owned by FEE_SPLITTER");
 
         console.log("[INFO] All validations passed successfully");
+    }
+
+    function getCurrentSqrtPriceX96(address token0, address token1, address pairAddress)
+        internal
+        view
+        returns (uint160)
+    {
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+
+        // Get the pair's token0 and token1 to determine order
+        address pairToken0 = pair.token0();
+        address pairToken1 = pair.token1();
+
+        uint256 price; // price = reserve1 / reserve0 (token1 per token0)
+
+        // Determine the correct reserve order based on our token order
+        if (token0 == pairToken0 && token1 == pairToken1) {
+            // Our order matches pair order: price = reserve1 / reserve0
+            price = (uint256(reserve1) * 1e18) / uint256(reserve0);
+        } else if (token0 == pairToken1 && token1 == pairToken0) {
+            // Our order is reversed from pair order: price = reserve0 / reserve1
+            price = (uint256(reserve0) * 1e18) / uint256(reserve1);
+        } else {
+            revert("Token pair mismatch");
+        }
+
+        // Calculate sqrtPriceX96 = sqrt(price) * 2^96
+        // We need to be careful with precision here
+        uint256 sqrtPrice = sqrt(price * 1e18); // sqrt of price with extra precision
+        uint160 sqrtPriceX96 = uint160((sqrtPrice * (2 ** 96)) / 1e18);
+
+        return sqrtPriceX96;
+    }
+
+    function sqrt(uint256 x) internal pure returns (uint256) {
+        if (x == 0) return 0;
+        uint256 z = (x + 1) / 2;
+        uint256 y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
+        return y;
     }
 }
