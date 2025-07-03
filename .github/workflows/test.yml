@@ -154,6 +154,9 @@ jobs:
 
       - name: Run strategy multicall tests
         run: make strategy-multicall
+      
+      - name: Run fee splitter tests
+        run: make fee-splitter
 
   usdc-price-checker:
     name: USDC Price Checker Tests

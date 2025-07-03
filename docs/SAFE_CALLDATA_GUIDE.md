@@ -32,7 +32,7 @@ tx-service enable
 0x40A2aCCbd92BCA938b02010E17A5b8929b49130D is the safe Multisend contract address.
 
 ```bash
-send_custom 0x40A2aCCbd92BCA938b02010E17A5b8929b49130D 0 $CALLDATA
+send_custom 0x40A2aCCbd92BCA938b02010E17A5b8929b49130D 0 $CALLDATA --delegate
 ```
 
 
