@@ -7,8 +7,6 @@ import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
-import {MamoAccount} from "@contracts/MamoAccount.sol";
-import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";

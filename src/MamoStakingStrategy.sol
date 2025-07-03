@@ -17,6 +17,7 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title MamoStakingStrategy
@@ -155,6 +156,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         if (mode == StrategyMode.COMPOUND) {
             _compound();
         } else {
+            MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
             require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
             _reinvest(rewardStrategies);
         }
@@ -300,7 +302,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @return The slippage tolerance in basis points (falls back to global if not set)
      */
     function _getAccountSlippage() internal view returns (uint256) {
-        return accountSlippageInBps > 0 ? accountSlippageInBps : allowedSlippageInBps;
+        return accountSlippageInBps > 0 ? accountSlippageInBps : stakingRegistry.defaultSlippageInBps();
     }
 
     /**

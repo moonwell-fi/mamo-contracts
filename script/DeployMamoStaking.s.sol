@@ -2,8 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
-import {MamoAccount} from "@contracts/MamoAccount.sol";
-import {MamoAccountFactory} from "@contracts/MamoAccountFactory.sol";
 import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 // MultiRewards is deployed using vm.deployCode due to Solidity version compatibility
@@ -21,7 +19,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title DeployMamoStaking
- * @notice Script to deploy and manage MamoAccountRegistry, MamoAccountFactory, and MamoStakingStrategy contracts
+ * @notice Script to deploy and manage MamoAccountRegistry and MamoStakingStrategy contracts
  */
 contract DeployMamoStaking is Script {
     function run() public {
@@ -38,15 +36,11 @@ contract DeployMamoStaking is Script {
     }
 
     function deploy(Addresses addresses, address deployer) public returns (address[] memory) {
-        address[] memory deployedContracts = new address[](3);
+        address[] memory deployedContracts = new address[](2);
 
         // Deploy contracts in dependency order
         deployedContracts[0] = deployMamoAccountRegistry(addresses, deployer);
-        deployedContracts[1] = deployMamoAccountFactory(addresses, deployer);
-        deployedContracts[2] = deployMamoStakingStrategy(addresses, deployer);
-
-        // Whitelist MamoAccount implementation in MamoStrategyRegistry
-        whitelistMamoAccountImplementation(addresses, deployer);
+        deployedContracts[1] = deployMamoStakingStrategy(addresses, deployer);
 
         return deployedContracts;
     }
@@ -75,55 +69,6 @@ contract DeployMamoStaking is Script {
         return address(accountRegistry);
     }
 
-    function deployMamoAccountFactory(Addresses addresses, address deployer) public returns (address) {
-        // Get the addresses for the initialization parameters
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        MamoAccountRegistry registry = MamoAccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
-        IMamoStrategyRegistry mamoStrategyRegistry =
-            IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-
-        // Deploy MamoAccount implementation if it doesn't exist
-        address accountImplementation;
-        if (addresses.isAddressSet("MAMO_ACCOUNT_IMPLEMENTATION")) {
-            accountImplementation = addresses.getAddress("MAMO_ACCOUNT_IMPLEMENTATION");
-        } else {
-            vm.startBroadcast(deployer);
-            MamoAccount impl = new MamoAccount();
-            vm.stopBroadcast();
-            accountImplementation = address(impl);
-            addresses.addAddress("MAMO_ACCOUNT_IMPLEMENTATION", accountImplementation, true);
-        }
-
-        vm.startBroadcast(deployer);
-        // Deploy the MamoAccountFactory
-        MamoAccountFactory mamoAccountFactory = new MamoAccountFactory(
-            backend,
-            registry,
-            mamoStrategyRegistry,
-            accountImplementation,
-            2 // Account strategy type ID
-        );
-        vm.stopBroadcast();
-
-        // Grant BACKEND_ROLE to the factory so it can register strategies
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        MamoStrategyRegistry strategyRegistry = MamoStrategyRegistry(address(mamoStrategyRegistry));
-        vm.startPrank(admin);
-        strategyRegistry.grantRole(strategyRegistry.BACKEND_ROLE(), address(mamoAccountFactory));
-        vm.stopPrank();
-
-        // Check if the mamo account factory address already exists
-        string memory mamoAccountFactoryName = "MAMO_ACCOUNT_FACTORY";
-        if (addresses.isAddressSet(mamoAccountFactoryName)) {
-            // Update the existing address
-            addresses.changeAddress(mamoAccountFactoryName, address(mamoAccountFactory), true);
-        } else {
-            // Add the mamo account factory address to the addresses contract
-            addresses.addAddress(mamoAccountFactoryName, address(mamoAccountFactory), true);
-        }
-
-        return address(mamoAccountFactory);
-    }
 
     function deployMamoStakingStrategy(Addresses addresses, address deployer) public returns (address) {
         // Get the addresses for the initialization parameters
@@ -202,28 +147,4 @@ contract DeployMamoStaking is Script {
         revert("No Morpho strategy implementation found");
     }
 
-    /**
-     * @notice Whitelists the MamoAccount implementation in the MamoStrategyRegistry
-     * @param addresses The addresses contract
-     * @param deployer The deployer address
-     */
-    function whitelistMamoAccountImplementation(Addresses addresses, address deployer) public {
-        // Get the MamoAccount implementation address
-        address accountImplementation = addresses.getAddress("MAMO_ACCOUNT_IMPLEMENTATION");
-        require(accountImplementation != address(0), "MamoAccount implementation not deployed");
-
-        // Get the MamoStrategyRegistry
-        IMamoStrategyRegistry mamoStrategyRegistry =
-            IMamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-
-        // Get the admin address for the registry
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-
-        // Whitelist the MamoAccount implementation with strategy type ID 1
-        vm.startPrank(admin);
-        uint256 assignedStrategyTypeId = mamoStrategyRegistry.whitelistImplementation(accountImplementation, 0);
-        vm.stopPrank();
-
-        console.log("Whitelisted MamoAccount implementation with strategy type ID:", assignedStrategyTypeId);
-    }
 }
