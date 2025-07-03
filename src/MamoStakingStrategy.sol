@@ -6,6 +6,7 @@ import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrateg
 
 import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IPool} from "@interfaces/IPool.sol";
@@ -31,24 +32,8 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     /// @notice The MAMO token contract
     IERC20 public mamoToken;
 
-    /// @notice Reward token configuration
-    struct RewardToken {
-        address token;
-        address pool; // Pool address for swapping this token to MAMO
-    }
-
-    /// @notice Dynamic reward token management
-    RewardToken[] public rewardTokens;
-    mapping(address => bool) public isRewardToken;
-
-    /// @notice Configurable DEX router
-    ISwapRouter public dexRouter;
-
-    /// @notice Quoter for getting swap quotes
-    IQuoter public quoter;
-
-    /// @notice The allowed slippage in basis points (e.g., 100 = 1%)
-    uint256 public allowedSlippageInBps;
+    /// @notice The MamoStakingRegistry for configuration
+    MamoStakingRegistry public stakingRegistry;
 
     /// @notice The user's allowed slippage in basis points
     uint256 public accountSlippageInBps;
@@ -66,22 +51,14 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
-    event RewardTokenAdded(address indexed token);
-    event RewardTokenRemoved(address indexed token);
-    event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
-    event QuoterUpdated(address indexed oldQuoter, address indexed newQuoter);
-    event SlippageToleranceUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
 
     /// @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
+        address stakingRegistry;
         address multiRewards;
         address mamoToken;
-        address dexRouter;
-        address quoter;
         uint256 strategyTypeId;
-        address[] rewardTokens;
-        address[] rewardTokenPools;
         address owner;
         uint256 allowedSlippageInBps;
     }
@@ -109,104 +86,21 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      */
     function initialize(InitParams calldata params) external initializer {
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
+        require(params.stakingRegistry != address(0), "Invalid stakingRegistry address");
         require(params.multiRewards != address(0), "Invalid multiRewards address");
         require(params.mamoToken != address(0), "Invalid mamoToken address");
-        require(params.dexRouter != address(0), "Invalid dexRouter address");
-        require(params.quoter != address(0), "Invalid quoter address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
         require(params.owner != address(0), "Invalid owner address");
         require(params.allowedSlippageInBps <= 2500, "Slippage too high");
-        require(params.rewardTokens.length == params.rewardTokenPools.length, "Reward tokens and pools length mismatch");
 
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
+        stakingRegistry = MamoStakingRegistry(params.stakingRegistry);
         multiRewards = IMultiRewards(params.multiRewards);
         mamoToken = IERC20(params.mamoToken);
-        dexRouter = ISwapRouter(params.dexRouter);
-        quoter = IQuoter(params.quoter);
-        allowedSlippageInBps = params.allowedSlippageInBps;
-
-        // Initialize reward tokens
-        for (uint256 i = 0; i < params.rewardTokens.length; i++) {
-            require(params.rewardTokens[i] != address(0), "Invalid reward token");
-            require(params.rewardTokenPools[i] != address(0), "Invalid reward token pool");
-            require(params.rewardTokens[i] != address(mamoToken), "Cannot add staking token as reward");
-
-            rewardTokens.push(RewardToken({token: params.rewardTokens[i], pool: params.rewardTokenPools[i]}));
-            isRewardToken[params.rewardTokens[i]] = true;
-        }
+        accountSlippageInBps = params.allowedSlippageInBps;
     }
 
-    /**
-     * @notice Add a reward token with its pool (backend only)
-     * @param token The reward token address to add
-     * @param pool The pool address for swapping this token to MAMO
-     */
-    function addRewardToken(address token, address pool) external onlyBackend {
-        require(token != address(0), "Invalid token");
-        require(pool != address(0), "Invalid pool");
-        require(!isRewardToken[token], "Token already added");
-        require(token != address(mamoToken), "Cannot add staking token");
-
-        rewardTokens.push(RewardToken({token: token, pool: pool}));
-        isRewardToken[token] = true;
-
-        emit RewardTokenAdded(token);
-    }
-
-    /**
-     * @notice Remove a reward token (backend only)
-     * @param token The reward token address to remove
-     */
-    function removeRewardToken(address token) external onlyBackend {
-        require(isRewardToken[token], "Token not found");
-
-        // Find and remove token from array
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (rewardTokens[i].token == token) {
-                rewardTokens[i] = rewardTokens[rewardTokens.length - 1];
-                rewardTokens.pop();
-                break;
-            }
-        }
-
-        isRewardToken[token] = false;
-
-        emit RewardTokenRemoved(token);
-    }
-
-    /**
-     * @notice Update DEX router (backend only)
-     * @param newRouter The new DEX router address
-     */
-    function setDEXRouter(ISwapRouter newRouter) external onlyBackend {
-        require(address(newRouter) != address(0), "Invalid router");
-
-        address oldRouter = address(dexRouter);
-        dexRouter = newRouter;
-
-        emit DEXRouterUpdated(oldRouter, address(newRouter));
-    }
-
-    /**
-     * @notice Set quoter contract (backend only)
-     * @param _quoter The quoter contract address
-     */
-    function setQuoter(IQuoter _quoter) external onlyBackend {
-        require(address(_quoter) != address(0), "Invalid quoter");
-        emit QuoterUpdated(address(quoter), address(_quoter));
-        quoter = _quoter;
-    }
-
-    /**
-     * @notice Set slippage tolerance (backend only)
-     * @param _allowedSlippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
-     */
-    function setSlippageTolerance(uint256 _allowedSlippageInBps) external onlyBackend {
-        require(_allowedSlippageInBps <= 2500, "Slippage too high"); // Max 25%
-        emit SlippageToleranceUpdated(allowedSlippageInBps, _allowedSlippageInBps);
-        allowedSlippageInBps = _allowedSlippageInBps;
-    }
 
     /**
      * @notice Set slippage tolerance for this strategy
@@ -288,6 +182,10 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @notice Internal function to compound rewards by converting all rewards to MAMO and restaking
      */
     function _compound() internal {
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+        ISwapRouter dexRouter = stakingRegistry.dexRouter();
+        IQuoter quoter = stakingRegistry.quoter();
+
         // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
@@ -348,6 +246,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @param rewardStrategies Array of strategy addresses for each reward token
      */
     function _reinvest(address[] calldata rewardStrategies) internal {
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
         uint256 mamoBalance = mamoToken.balanceOf(address(this));
 
         // Stake MAMO
@@ -380,20 +279,13 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Get all reward tokens
+     * @notice Get all reward tokens from the registry
      * @return Array of RewardToken structs
      */
-    function getRewardTokens() external view returns (RewardToken[] memory) {
-        return rewardTokens;
+    function getRewardTokens() external view returns (MamoStakingRegistry.RewardToken[] memory) {
+        return stakingRegistry.getRewardTokens();
     }
 
-    /**
-     * @notice Get the number of reward tokens
-     * @return The number of reward tokens
-     */
-    function getRewardTokenCount() external view returns (uint256) {
-        return rewardTokens.length;
-    }
 
     /**
      * @notice Get the slippage tolerance for this strategy
