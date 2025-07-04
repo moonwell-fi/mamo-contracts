@@ -9,7 +9,8 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
@@ -21,11 +22,13 @@ import {DeployMamoStaking} from "@script/DeployMamoStaking.s.sol";
 contract MamoStakingStrategyIntegrationTest is Test {
     Addresses public addresses;
     MamoStakingRegistry public stakingRegistry;
-    MamoStakingStrategy public mamoStakingStrategy;
+    MamoStakingStrategyFactory public stakingStrategyFactory;
+    MamoStrategyRegistry public mamoStrategyRegistry;
     IMultiRewards public multiRewards;
 
     IERC20 public mamoToken;
     address public user;
+    address public stakingStrategyImplementation;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"));
@@ -39,25 +42,150 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Get deployer address from addresses
         address deployer = addresses.getAddress("DEPLOYER_EOA");
 
-        // Create an instance of the deployment script
-        DeployMamoStaking deployScript = new DeployMamoStaking();
-
-        // Deploy contracts using the DeployMamoStaking script functions
-        address[] memory deployedContracts = deployScript.deploy(addresses, deployer);
-
-        // TODO: Set contract instances for new factory architecture
-        // stakingRegistry = MamoStakingRegistry(deployedContracts[0]);
-        // mamoStakingStrategy = MamoStakingStrategy(deployedContracts[0]);
-
-        // Get MAMO token and MultiRewards from addresses
+        // Get existing contract instances from addresses
+        mamoStrategyRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         mamoToken = IERC20(addresses.getAddress("MAMO"));
-        multiRewards = IMultiRewards(addresses.getAddress("MULTI_REWARDS"));
 
-        // Create test user (only address we create)
+        // Deploy MamoStakingRegistry (required for the factory)
+        vm.startPrank(deployer);
+        stakingRegistry = new MamoStakingRegistry(
+            addresses.getAddress("MAMO_MULTISIG"), // admin
+            addresses.getAddress("MAMO_BACKEND"), // backend
+            addresses.getAddress("MAMO_MULTISIG"), // guardian
+            address(mamoToken), // MAMO token
+            addresses.getAddress("AERODROME_ROUTER"), // DEX router
+            addresses.getAddress("AERODROME_QUOTER"), // quoter
+            100 // 1% default slippage
+        );
+
+        // Deploy MultiRewards contract
+        bytes memory multiRewardsArgs = abi.encode(addresses.getAddress("MAMO_MULTISIG"), address(mamoToken));
+        address multiRewardsAddr = vm.deployCode("MultiRewards.sol:MultiRewards", multiRewardsArgs);
+        multiRewards = IMultiRewards(multiRewardsAddr);
+
+        // Deploy MamoStakingStrategy implementation
+        stakingStrategyImplementation = address(new MamoStakingStrategy());
+
+        vm.stopPrank();
+
+        // Use the admin to whitelist the implementation and grant backend role to the backend address
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        address backend = addresses.getAddress("MAMO_BACKEND");
+        vm.startPrank(admin);
+        mamoStrategyRegistry.whitelistImplementation(stakingStrategyImplementation, 2);
+        // Grant BACKEND_ROLE to the backend address (assuming the role constant is keccak256("BACKEND_ROLE"))
+        bytes32 BACKEND_ROLE = keccak256("BACKEND_ROLE");
+        mamoStrategyRegistry.grantRole(BACKEND_ROLE, backend);
+        vm.stopPrank();
+
+        vm.startPrank(deployer);
+
+        // Deploy MamoStakingStrategyFactory
+        stakingStrategyFactory = new MamoStakingStrategyFactory(
+            address(mamoStrategyRegistry), // mamoStrategyRegistry
+            backend, // mamoBackend (use the same backend we granted role to)
+            address(stakingRegistry), // stakingRegistry
+            address(multiRewards), // multiRewards
+            address(mamoToken), // mamoToken
+            stakingStrategyImplementation, // strategyImplementation
+            2, // strategyTypeId (assuming 2 for staking)
+            100 // defaultSlippageInBps (1%)
+        );
+
+        vm.stopPrank();
+
+        // Grant BACKEND_ROLE to the factory so it can register strategies
+        vm.startPrank(admin);
+        mamoStrategyRegistry.grantRole(BACKEND_ROLE, address(stakingStrategyFactory));
+        vm.stopPrank();
+
+        // Create test user
         user = makeAddr("testUser");
     }
 
-    // TODO: Update tests for new factory-based architecture
+    /**
+     * @notice Helper function to deploy a strategy for a user
+     * @param userAddress The address of the user to create the strategy for
+     * @return strategy The deployed strategy instance
+     */
+    function _deployUserStrategy(address userAddress) internal returns (MamoStakingStrategy) {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+
+        vm.startPrank(backend);
+        address strategyAddress = stakingStrategyFactory.createStrategy(userAddress);
+        vm.stopPrank();
+
+        return MamoStakingStrategy(payable(strategyAddress));
+    }
+
+    /**
+     * @notice Helper function to deploy a strategy for a user with default slippage
+     * @param userAddress The address of the user to create the strategy for
+     * @param slippageInBps Unused parameter (kept for compatibility)
+     * @return strategy The deployed strategy instance
+     */
+    function _deployUserStrategyWithSlippage(address userAddress, uint256 slippageInBps)
+        internal
+        returns (MamoStakingStrategy)
+    {
+        address backend = addresses.getAddress("MAMO_BACKEND");
+
+        vm.startPrank(backend);
+        address strategyAddress = stakingStrategyFactory.createStrategyForUser(userAddress);
+        vm.stopPrank();
+
+        return MamoStakingStrategy(payable(strategyAddress));
+    }
+
+    /**
+     * @notice Helper function to setup and execute a deposit
+     * @param depositor The address making the deposit
+     * @param strategy The strategy to deposit into
+     * @param amount The amount to deposit
+     */
+    function _setupAndDeposit(address depositor, MamoStakingStrategy strategy, uint256 amount) internal {
+        // Give tokens to depositor and approve
+        deal(address(mamoToken), depositor, amount);
+        vm.startPrank(depositor);
+        mamoToken.approve(address(strategy), amount);
+
+        // Execute deposit
+        strategy.deposit(amount);
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test that we can deploy a strategy for a user
+     */
+    function testDeployStrategyForUser() public {
+        // Deploy strategy for user
+        MamoStakingStrategy strategy = _deployUserStrategy(user);
+
+        // Verify strategy was deployed correctly
+        assertEq(strategy.owner(), user);
+        assertEq(address(strategy.mamoToken()), address(mamoToken));
+        assertEq(address(strategy.multiRewards()), address(multiRewards));
+        assertEq(address(strategy.stakingRegistry()), address(stakingRegistry));
+
+        // Verify strategy is registered in the MamoStrategyRegistry
+        assertTrue(mamoStrategyRegistry.isUserStrategy(user, address(strategy)));
+    }
+
+    /**
+     * @notice Test that user can deposit into their strategy
+     */
+    function testUserCanDepositIntoStrategy() public {
+        // Deploy strategy for user
+        MamoStakingStrategy strategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000e18;
+
+        // Execute deposit
+        _setupAndDeposit(user, strategy, depositAmount);
+
+        // Verify the deposit was successful
+        assertEq(multiRewards.balanceOf(address(strategy)), depositAmount);
+    }
 
     /*
     // Helper function to set up and execute a deposit, returns the deposited amount

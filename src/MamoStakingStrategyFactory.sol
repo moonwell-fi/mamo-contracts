@@ -108,16 +108,11 @@ contract MamoStakingStrategyFactory {
      * @notice Creates a new MamoStakingStrategy for a specified user
      * @dev Only callable by accounts with the BACKEND_ROLE and the user address
      * @param user The address of the user to create the strategy for
-     * @param allowedSlippageInBps Custom slippage for this user (0 to use default)
      * @return strategy The address of the newly created strategy
      */
-    function createStrategyForUser(address user, uint256 allowedSlippageInBps) public returns (address strategy) {
+    function createStrategyForUser(address user) public returns (address strategy) {
         require(user != address(0), "Invalid user address");
         require(msg.sender == mamoBackend || msg.sender == user, "Only backend or user can create strategy");
-
-        // Use default slippage if not specified
-        uint256 slippage = allowedSlippageInBps == 0 ? defaultSlippageInBps : allowedSlippageInBps;
-        require(slippage <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
 
         // Check if strategy already exists (only check by user, not slippage)
         require(!strategyExists(user), "Strategy already exists");
@@ -140,7 +135,7 @@ contract MamoStakingStrategyFactory {
                 mamoToken: mamoToken,
                 strategyTypeId: strategyTypeId,
                 owner: user,
-                allowedSlippageInBps: slippage
+                allowedSlippageInBps: defaultSlippageInBps
             })
         );
 
@@ -159,6 +154,6 @@ contract MamoStakingStrategyFactory {
      * @return strategy The address of the newly created strategy
      */
     function createStrategy(address user) external returns (address strategy) {
-        return createStrategyForUser(user, 0);
+        return createStrategyForUser(user);
     }
 }
