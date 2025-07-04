@@ -4,9 +4,9 @@ pragma solidity 0.8.28;
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 
+import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
-import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IPool} from "@interfaces/IPool.sol";
@@ -15,9 +15,10 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title MamoStakingStrategy
@@ -101,7 +102,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         mamoToken = IERC20(params.mamoToken);
         accountSlippageInBps = params.allowedSlippageInBps;
     }
-
 
     /**
      * @notice Set slippage tolerance for this strategy
@@ -287,7 +287,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     function getRewardTokens() external view returns (MamoStakingRegistry.RewardToken[] memory) {
         return stakingRegistry.getRewardTokens();
     }
-
 
     /**
      * @notice Get the slippage tolerance for this strategy

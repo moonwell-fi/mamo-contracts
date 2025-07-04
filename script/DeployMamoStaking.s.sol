@@ -2,8 +2,9 @@
 pragma solidity ^0.8.28;
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
-import {MamoAccountRegistry} from "@contracts/MamoAccountRegistry.sol";
+import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
+import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 // MultiRewards is deployed using vm.deployCode due to Solidity version compatibility
 
 import {Script} from "@forge-std/Script.sol";
@@ -19,7 +20,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title DeployMamoStaking
- * @notice Script to deploy and manage MamoAccountRegistry and MamoStakingStrategy contracts
+ * @notice Script to deploy and manage MamoStakingRegistry and MamoStakingStrategy contracts
  */
 contract DeployMamoStaking is Script {
     function run() public {
@@ -39,74 +40,51 @@ contract DeployMamoStaking is Script {
         address[] memory deployedContracts = new address[](2);
 
         // Deploy contracts in dependency order
-        deployedContracts[0] = deployMamoAccountRegistry(addresses, deployer);
-        deployedContracts[1] = deployMamoStakingStrategy(addresses, deployer);
+        deployedContracts[0] = deployMamoStakingStrategyFactory(addresses, deployer);
 
         return deployedContracts;
     }
 
-    function deployMamoAccountRegistry(Addresses addresses, address deployer) public returns (address) {
+    function deployMamoStakingStrategyFactory(Addresses addresses, address deployer) public returns (address) {
         // Get the addresses for the initialization parameters
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-
-        vm.startBroadcast(deployer);
-        // Deploy the MamoAccountRegistry
-        MamoAccountRegistry accountRegistry = new MamoAccountRegistry(admin, backend, guardian);
-        vm.stopBroadcast();
-
-        // Check if the account registry address already exists
-        string memory accountRegistryName = "ACCOUNT_REGISTRY";
-        if (addresses.isAddressSet(accountRegistryName)) {
-            // Update the existing address
-            addresses.changeAddress(accountRegistryName, address(accountRegistry), true);
-        } else {
-            // Add the account registry address to the addresses contract
-            addresses.addAddress(accountRegistryName, address(accountRegistry), true);
-        }
-
-        return address(accountRegistry);
-    }
-
-
-    function deployMamoStakingStrategy(Addresses addresses, address deployer) public returns (address) {
-        // Get the addresses for the initialization parameters
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        MamoAccountRegistry registry = MamoAccountRegistry(addresses.getAddress("ACCOUNT_REGISTRY"));
-
-        // Use MAMO instead of MAMO_TOKEN (different naming convention)
-        IERC20 mamoToken = IERC20(addresses.getAddress("MAMO"));
+        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
+        address mamoBackend = addresses.getAddress("MAMO_BACKEND");
+        address stakingRegistry = addresses.getAddress("STAKING_REGISTRY");
+        address mamoToken = addresses.getAddress("MAMO");
+        address strategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY_IMPLEMENTATION");
 
         // Deploy missing components if they don't exist
-        address multiRewardsAddr = deployMultiRewards(addresses, deployer, address(mamoToken));
-        address dexRouterAddr = addresses.getAddress("AERODROME_ROUTER");
-        address quoterAddr = addresses.getAddress("AERODROME_QUOTER");
-        address morphoStrategyAddr = deployMorphoStrategy(addresses, deployer);
+        address multiRewardsAddr = deployMultiRewards(addresses, deployer, mamoToken);
 
-        IMultiRewards multiRewards = IMultiRewards(multiRewardsAddr);
-        ISwapRouter dexRouter = ISwapRouter(dexRouterAddr);
-        IQuoter quoter = IQuoter(quoterAddr);
+        // Strategy configuration
+        uint256 strategyTypeId = 2; // Assuming staking strategy type ID is 2
+        uint256 defaultSlippageInBps = 100; // 1% default slippage
 
         vm.startBroadcast(deployer);
-        // Deploy the MamoStakingStrategy
-        MamoStakingStrategy mamoStakingStrategy =
-            new MamoStakingStrategy(admin, backend, guardian, registry, multiRewards, mamoToken, dexRouter, quoter);
+        // Deploy the MamoStakingStrategyFactory
+        MamoStakingStrategyFactory factory = new MamoStakingStrategyFactory(
+            mamoStrategyRegistry,
+            mamoBackend,
+            stakingRegistry,
+            multiRewardsAddr,
+            mamoToken,
+            strategyImplementation,
+            strategyTypeId,
+            defaultSlippageInBps
+        );
         vm.stopBroadcast();
 
-        // Check if the mamo staking strategy address already exists
-        string memory mamoStakingStrategyName = "MAMO_STAKING_STRATEGY";
-        if (addresses.isAddressSet(mamoStakingStrategyName)) {
+        // Check if the factory address already exists
+        string memory factoryName = "MAMO_STAKING_STRATEGY_FACTORY";
+        if (addresses.isAddressSet(factoryName)) {
             // Update the existing address
-            addresses.changeAddress(mamoStakingStrategyName, address(mamoStakingStrategy), true);
+            addresses.changeAddress(factoryName, address(factory), true);
         } else {
-            // Add the mamo staking strategy address to the addresses contract
-            addresses.addAddress(mamoStakingStrategyName, address(mamoStakingStrategy), true);
+            // Add the factory address to the addresses contract
+            addresses.addAddress(factoryName, address(factory), true);
         }
 
-        return address(mamoStakingStrategy);
+        return address(factory);
     }
 
     function deployMultiRewards(Addresses addresses, address deployer, address stakingToken) public returns (address) {
@@ -129,22 +107,4 @@ contract DeployMamoStaking is Script {
         }
         return multiRewardsAddr;
     }
-
-    function deployMorphoStrategy(Addresses addresses, address deployer) public returns (address) {
-        // Check if MorphoStrategy already exists
-        if (addresses.isAddressSet("MORPHO_STRATEGY")) {
-            return addresses.getAddress("MORPHO_STRATEGY");
-        }
-
-        // Use the existing implementation from addresses
-        if (addresses.isAddressSet("MOONWELL_MORPHO_STRATEGY_IMPL")) {
-            address implementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
-            return implementation;
-        }
-
-        // If no implementation exists, we need to deploy one
-        // For now, return the existing implementation address
-        revert("No Morpho strategy implementation found");
-    }
-
 }
