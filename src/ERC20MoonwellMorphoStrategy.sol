@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
-import {IDEXRouter} from "@interfaces/IDEXRouter.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
@@ -38,7 +37,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
-    /// @notice The maximum allowed slippage in basis points
+    /// @notice The maximum allowed  slippage in basis points
     uint256 public constant MAX_SLIPPAGE_IN_BPS = 2500; // 25% in basis points
 
     /// @notice The maximum allowed compound fee in basis points

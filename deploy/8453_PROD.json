@@ -1,7 +1,7 @@
 {
   "admin": "MAMO_MULTISIG",
   "allowedSlippageInBps": 100,
-  "backend": "MAMO_BACKEND",
+  "backend": "STRATEGY_MULTICALL",
   "chainId": 8453,
   "compounder": "MAMO_COMPOUNDER",
   "compoundFee": 500,

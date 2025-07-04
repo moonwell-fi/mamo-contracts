@@ -25,14 +25,6 @@ interface IMulticall {
         uint256 value;
     }
 
-    /* VIEW FUNCTIONS */
-
-    /**
-     * @notice Returns the owner of the contract
-     * @return The address of the owner
-     */
-    function owner() external view returns (address);
-
     /**
      * @notice Executes a sequence of arbitrary calls to contracts
      * @param calls Array of Call structs containing target, data, and value for each call
