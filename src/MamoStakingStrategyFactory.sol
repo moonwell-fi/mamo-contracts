@@ -83,12 +83,10 @@ contract MamoStakingStrategyFactory {
     /**
      * @notice Computes the deterministic address for a user's strategy
      * @param user The address of the user
-     * @param allowedSlippageInBps Custom slippage for this user (0 to use default)
      * @return strategy The deterministic address where the strategy will be deployed
      */
-    function computeStrategyAddress(address user, uint256 allowedSlippageInBps) public view returns (address) {
-        uint256 slippage = allowedSlippageInBps == 0 ? defaultSlippageInBps : allowedSlippageInBps;
-        bytes32 salt = keccak256(abi.encodePacked(user, slippage));
+    function computeStrategyAddress(address user) public view returns (address) {
+        bytes32 salt = keccak256(abi.encodePacked(user));
 
         bytes memory bytecode =
             abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(strategyImplementation, ""));
@@ -97,32 +95,13 @@ contract MamoStakingStrategyFactory {
     }
 
     /**
-     * @notice Computes the deterministic address for a user's strategy with default slippage
+     * @notice Checks if a strategy already exists for a user
      * @param user The address of the user
-     * @return strategy The deterministic address where the strategy will be deployed
-     */
-    function computeStrategyAddress(address user) external view returns (address) {
-        return computeStrategyAddress(user, 0);
-    }
-
-    /**
-     * @notice Checks if a strategy already exists for a user with given slippage
-     * @param user The address of the user
-     * @param allowedSlippageInBps Custom slippage for this user (0 to use default)
      * @return exists True if the strategy already exists, false otherwise
      */
-    function strategyExists(address user, uint256 allowedSlippageInBps) public view returns (bool) {
-        address strategyAddress = computeStrategyAddress(user, allowedSlippageInBps);
+    function strategyExists(address user) public view returns (bool) {
+        address strategyAddress = computeStrategyAddress(user);
         return strategyAddress.code.length > 0;
-    }
-
-    /**
-     * @notice Checks if a strategy already exists for a user with default slippage
-     * @param user The address of the user
-     * @return exists True if the strategy already exists, false otherwise
-     */
-    function strategyExists(address user) external view returns (bool) {
-        return strategyExists(user, 0);
     }
 
     /**
@@ -140,11 +119,11 @@ contract MamoStakingStrategyFactory {
         uint256 slippage = allowedSlippageInBps == 0 ? defaultSlippageInBps : allowedSlippageInBps;
         require(slippage <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
 
-        // Check if strategy already exists
-        require(!strategyExists(user, allowedSlippageInBps), "Strategy already exists");
+        // Check if strategy already exists (only check by user, not slippage)
+        require(!strategyExists(user), "Strategy already exists");
 
-        // Generate salt for deterministic deployment
-        bytes32 salt = keccak256(abi.encodePacked(user, slippage));
+        // Generate salt for deterministic deployment (only user address)
+        bytes32 salt = keccak256(abi.encodePacked(user));
 
         // Deploy the proxy using CREATE2 with deterministic address
         bytes memory bytecode =
