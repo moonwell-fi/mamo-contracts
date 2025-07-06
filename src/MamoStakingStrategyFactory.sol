@@ -98,16 +98,6 @@ contract MamoStakingStrategyFactory is AccessControl {
     }
 
     /**
-     * @notice Checks if a strategy already exists for a user
-     * @param user The address of the user
-     * @return exists True if the strategy already exists, false otherwise
-     */
-    function strategyExists(address user) public view returns (bool) {
-        address strategyAddress = computeStrategyAddress(user);
-        return strategyAddress.code.length > 0;
-    }
-
-    /**
      * @notice Creates a new MamoStakingStrategy for a specified user
      * @dev Only callable by accounts with the BACKEND_ROLE and the user address
      * @param user The address of the user to create the strategy for
@@ -117,8 +107,9 @@ contract MamoStakingStrategyFactory is AccessControl {
         require(user != address(0), "Invalid user address");
         require(hasRole(BACKEND_ROLE, msg.sender) || msg.sender == user, "Only backend or user can create strategy");
 
-        // Check if strategy already exists (only check by user, not slippage)
-        require(!strategyExists(user), "Strategy already exists");
+        address strategyAddress = computeStrategyAddress(user);
+        // Check if strategy already exists
+        require(strategyAddress.code.length == 0, "Strategy already exists");
 
         // Generate salt for deterministic deployment (only user address)
         bytes32 salt = keccak256(abi.encodePacked(user));

@@ -177,17 +177,6 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
         assertEq(computedAddress, actualAddress, "Computed address should match actual deployment");
     }
 
-    // ========== STRATEGY EXISTENCE TESTS ==========
-
-    function testStrategyExistsReturnsFalseInitially() public {
-        assertFalse(stakingStrategyFactory.strategyExists(user), "Strategy should not exist initially");
-    }
-
-    function testStrategyExistsReturnsTrueAfterCreation() public {
-        _deployUserStrategy(user);
-        assertTrue(stakingStrategyFactory.strategyExists(user), "Strategy should exist after creation");
-    }
-
     // ========== ROLE-BASED ACCESS TESTS ==========
 
     function testStakingRegistryRoleBasedAccess() public {

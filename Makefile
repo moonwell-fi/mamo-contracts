@@ -26,7 +26,7 @@ strategy-multicall:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MulticallIntegrationTest
 
 mamo-staking:
-	forge test --fork-url base --ffi --mc MamoStakingStrategyIntegrationTest -vvvvv
+	forge test --fork-url base --ffi --mc MamoStakingStrategyIntegrationTest -vvv
 
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv

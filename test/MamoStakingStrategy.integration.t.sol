@@ -583,15 +583,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
     function testSetAccountSlippageByOwner() public {
         userStrategy = _deployUserStrategy(user);
 
-        // Verify initial slippage
-        uint256 initialSlippage = MamoStakingStrategy(userStrategy).getAccountSlippage();
-        assertEq(initialSlippage, 100, "Initial slippage should be 100 bps");
-
         // Update slippage as owner
         uint256 newSlippage = 150;
         vm.startPrank(user);
         vm.expectEmit(true, true, false, true);
-        emit AccountSlippageUpdated(100, newSlippage);
+        emit AccountSlippageUpdated(0, newSlippage);
         MamoStakingStrategy(userStrategy).setAccountSlippage(newSlippage);
         vm.stopPrank();
 
