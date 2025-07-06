@@ -23,6 +23,9 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
     /// @notice Guardian role for emergency pause functionality
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
+    /// @notice The maximum allowed  slippage in basis points
+    uint256 public constant MAX_SLIPPAGE_IN_BPS = 2500; // 25% in basis points
+
     /// @notice Reward token configuration
     struct RewardToken {
         address token;
@@ -77,7 +80,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         require(_mamoToken != address(0), "Invalid MAMO token address");
         require(_dexRouter != address(0), "Invalid DEX router address");
         require(_quoter != address(0), "Invalid quoter address");
-        require(_defaultSlippageInBps <= 2500, "Default slippage too high");
+        require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Default slippage too high");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -185,7 +188,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
      * @param _defaultSlippageInBps The default slippage tolerance in basis points (e.g., 100 = 1%)
      */
     function setDefaultSlippage(uint256 _defaultSlippageInBps) external onlyRole(BACKEND_ROLE) whenNotPaused {
-        require(_defaultSlippageInBps <= 2500, "Slippage too high"); // Max 25%
+        require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage too high");
 
         uint256 oldSlippage = defaultSlippageInBps;
         defaultSlippageInBps = _defaultSlippageInBps;

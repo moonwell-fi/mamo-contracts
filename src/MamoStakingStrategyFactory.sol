@@ -137,8 +137,7 @@ contract MamoStakingStrategyFactory is AccessControl {
                 multiRewards: multiRewards,
                 mamoToken: mamoToken,
                 strategyTypeId: strategyTypeId,
-                owner: user,
-                allowedSlippageInBps: defaultSlippageInBps
+                owner: user
             })
         );
 

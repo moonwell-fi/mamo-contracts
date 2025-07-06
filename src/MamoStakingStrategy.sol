@@ -62,7 +62,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         address mamoToken;
         uint256 strategyTypeId;
         address owner;
-        uint256 allowedSlippageInBps;
     }
 
     /**
@@ -93,14 +92,12 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         require(params.mamoToken != address(0), "Invalid mamoToken address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
         require(params.owner != address(0), "Invalid owner address");
-        require(params.allowedSlippageInBps <= 2500, "Slippage too high");
 
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
         stakingRegistry = MamoStakingRegistry(params.stakingRegistry);
         multiRewards = IMultiRewards(params.multiRewards);
         mamoToken = IERC20(params.mamoToken);
-        accountSlippageInBps = params.allowedSlippageInBps;
     }
 
     /**
@@ -108,7 +105,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @param slippageInBps The slippage tolerance in basis points (e.g., 100 = 1%)
      */
     function setAccountSlippage(uint256 slippageInBps) external onlyOwner {
-        require(slippageInBps <= 2500, "Slippage too high"); // Max 25%
+        require(slippageInBps <= stakingRegistry.MAX_SLIPPAGE_IN_BPS(), "Slippage too high");
         emit AccountSlippageUpdated(accountSlippageInBps, slippageInBps);
         accountSlippageInBps = slippageInBps;
     }
