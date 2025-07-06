@@ -49,9 +49,9 @@ contract DeployMamoStaking is Script {
         // Get the addresses for the initialization parameters
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
-        address stakingRegistry = addresses.getAddress("STAKING_REGISTRY");
+        address stakingRegistry = addresses.getAddress("MAMO_STAKING_REGISTRY");
         address mamoToken = addresses.getAddress("MAMO");
-        address strategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY_IMPLEMENTATION");
+        address strategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
         // Deploy missing components if they don't exist
         address multiRewardsAddr = deployMultiRewards(addresses, deployer, mamoToken);
@@ -89,8 +89,8 @@ contract DeployMamoStaking is Script {
 
     function deployMultiRewards(Addresses addresses, address deployer, address stakingToken) public returns (address) {
         // Check if MultiRewards already exists
-        if (addresses.isAddressSet("MULTI_REWARDS")) {
-            return addresses.getAddress("MULTI_REWARDS");
+        if (addresses.isAddressSet("MAMO_MULTI_REWARDS")) {
+            return addresses.getAddress("MAMO_MULTI_REWARDS");
         }
 
         address owner = addresses.getAddress("MAMO_MULTISIG");
@@ -100,10 +100,10 @@ contract DeployMamoStaking is Script {
         address multiRewardsAddr = vm.deployCode("MultiRewards.sol:MultiRewards", constructorArgs);
         vm.stopBroadcast();
 
-        if (addresses.isAddressSet("MULTI_REWARDS")) {
-            addresses.changeAddress("MULTI_REWARDS", multiRewardsAddr, true);
+        if (addresses.isAddressSet("MAMO_MULTI_REWARDS")) {
+            addresses.changeAddress("MAMO_MULTI_REWARDS", multiRewardsAddr, true);
         } else {
-            addresses.addAddress("MULTI_REWARDS", multiRewardsAddr, true);
+            addresses.addAddress("MAMO_MULTI_REWARDS", multiRewardsAddr, true);
         }
         return multiRewardsAddr;
     }
