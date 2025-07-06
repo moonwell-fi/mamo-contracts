@@ -230,8 +230,13 @@
     "isContract": true
   },
   {
-    "addr": "0xe2b3aa806e56603a244bfc111c9474f7dedd03db",
+    "addr": "0xE2B3aA806e56603a244bFc111c9474F7DeDD03db",
     "name": "cbBTC_MAMO_POOL",
     "isContract": true
+  },
+  {
+    "addr": "0x1A3ae2b72a21c443a189235C15bcBCa9C81c3a7c",
+    "name": "MAMO_STAKING_BACKEND",
+    "isContract": false
   }
 ]

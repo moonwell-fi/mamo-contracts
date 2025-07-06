@@ -198,7 +198,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             // Swap reward tokens to MAMO
             // Get tickSpacing from the pool
             address poolAddress = rewardTokens[i].pool;
-            int24 tickSpacing = _getPoolTickSpacing(poolAddress);
+            int24 tickSpacing = IPool(poolAddress).tickSpacing();
 
             // Get quote from quoter to calculate minimum amount out with slippage
             (uint256 amountOut,,,) = quoter.quoteExactInputSingle(
@@ -212,7 +212,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             );
 
             // Apply slippage tolerance to get minimum amount out
-            uint256 accountSlippage = _getAccountSlippage();
+            uint256 accountSlippage = getAccountSlippage();
             uint256 amountOutMinimum = (amountOut * (10000 - accountSlippage)) / 10000;
 
             // Approve DEX router to spend reward tokens
@@ -292,24 +292,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @notice Get the slippage tolerance for this strategy
      * @return The slippage tolerance in basis points (falls back to global if not set)
      */
-    function getAccountSlippage() external view returns (uint256) {
-        return _getAccountSlippage();
-    }
-
-    /**
-     * @notice Internal function to get the slippage tolerance for this strategy
-     * @return The slippage tolerance in basis points (falls back to global if not set)
-     */
-    function _getAccountSlippage() internal view returns (uint256) {
+    function getAccountSlippage() public view returns (uint256) {
         return accountSlippageInBps > 0 ? accountSlippageInBps : stakingRegistry.defaultSlippageInBps();
-    }
-
-    /**
-     * @notice Internal function to get the tick spacing from a pool contract
-     * @param pool The pool address
-     * @return tickSpacing The pool tick spacing
-     */
-    function _getPoolTickSpacing(address pool) internal view returns (int24 tickSpacing) {
-        tickSpacing = IPool(pool).tickSpacing();
     }
 }

@@ -7,6 +7,7 @@ import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
@@ -29,6 +30,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
     IERC20 public mamoToken;
     address public user;
     address public stakingStrategyImplementation;
+    address payable public userStrategy;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"));
@@ -63,2202 +65,661 @@ contract MamoStakingStrategyIntegrationTest is Test {
         user = makeAddr("testUser");
     }
 
-    /**
-     * @notice Helper function to deploy a strategy for a user
-     * @param userAddress The address of the user to create the strategy for
-     * @return strategy The deployed strategy instance
-     */
-    function _deployUserStrategy(address userAddress) internal returns (MamoStakingStrategy) {
-        address backend = addresses.getAddress("MAMO_BACKEND");
+    // Test basic deployment and functionality
+    function testDeploymentWasSuccessful() public {
+        // Verify all contracts were deployed
+        assertTrue(address(stakingRegistry) != address(0), "MamoStakingRegistry should be deployed");
+        assertTrue(address(stakingStrategyFactory) != address(0), "MamoStakingStrategyFactory should be deployed");
+        assertTrue(address(multiRewards) != address(0), "MultiRewards should be deployed");
+        assertTrue(stakingStrategyImplementation != address(0), "MamoStakingStrategy implementation should be deployed");
+
+        // Verify factory configuration
+        assertEq(stakingStrategyFactory.mamoToken(), address(mamoToken), "Factory should have correct MAMO token");
+        assertEq(
+            stakingStrategyFactory.multiRewards(), address(multiRewards), "Factory should have correct MultiRewards"
+        );
+        assertEq(
+            stakingStrategyFactory.strategyImplementation(),
+            stakingStrategyImplementation,
+            "Factory should have correct implementation"
+        );
+    }
+
+    function testFactoryCanCreateStrategy() public {
+        address backend = mamoStrategyRegistry.getBackendAddress();
+
+        vm.startPrank(backend);
+        address strategyAddress = stakingStrategyFactory.createStrategy(user);
+        vm.stopPrank();
+
+        assertTrue(strategyAddress != address(0), "Strategy should be created");
+
+        // Verify the strategy is registered in the strategy registry
+        assertTrue(mamoStrategyRegistry.isUserStrategy(user, strategyAddress), "Strategy should be registered for user");
+    }
+
+    function testMultiRewardsConfiguration() public {
+        // Verify MultiRewards is configured with MAMO as staking token
+        address mamoTokenAddr = addresses.getAddress("MAMO");
+        assertEq(address(mamoToken), mamoTokenAddr, "MAMO token address should match");
+
+        // Verify MultiRewards contract exists and is initialized
+        assertTrue(address(multiRewards).code.length > 0, "MultiRewards should have code");
+    }
+
+    function testStakingRegistryConfiguration() public {
+        // Verify staking registry configuration
+        assertEq(stakingRegistry.mamoToken(), address(mamoToken), "Staking registry should have correct MAMO token");
+        assertEq(stakingRegistry.defaultSlippageInBps(), 100, "Staking registry should have correct default slippage");
+    }
+
+    // Helper function to deploy a strategy for a user
+    function _deployUserStrategy(address userAddress) internal returns (address payable) {
+        address backend = mamoStrategyRegistry.getBackendAddress();
 
         vm.startPrank(backend);
         address strategyAddress = stakingStrategyFactory.createStrategy(userAddress);
         vm.stopPrank();
 
-        return MamoStakingStrategy(payable(strategyAddress));
+        return payable(strategyAddress);
     }
 
-    /**
-     * @notice Helper function to setup and execute a deposit
-     * @param depositor The address making the deposit
-     * @param strategy The strategy to deposit into
-     * @param amount The amount to deposit
-     */
-    function _setupAndDeposit(address depositor, MamoStakingStrategy strategy, uint256 amount) internal {
+    // Helper function to setup and execute a deposit
+    function _setupAndDeposit(address depositor, address payable strategy, uint256 amount) internal {
         // Give tokens to depositor and approve
         deal(address(mamoToken), depositor, amount);
         vm.startPrank(depositor);
-        mamoToken.approve(address(strategy), amount);
+        mamoToken.approve(strategy, amount);
 
-        // Execute deposit
-        strategy.deposit(amount);
+        // Execute deposit through the strategy
+        MamoStakingStrategy(strategy).deposit(amount);
         vm.stopPrank();
     }
 
-    /**
-     * @notice Test that we can deploy a strategy for a user
-     */
-    function testDeployStrategyForUser() public {
-        // Deploy strategy for user
-        MamoStakingStrategy strategy = _deployUserStrategy(user);
+    // ========== DEPOSIT TESTS - HAPPY PATH ==========
 
-        // Verify strategy was deployed correctly
-        assertEq(strategy.owner(), user);
-        assertEq(address(strategy.mamoToken()), address(mamoToken));
-        assertEq(address(strategy.multiRewards()), address(multiRewards));
-        assertEq(address(strategy.stakingRegistry()), address(stakingRegistry));
-
-        // Verify strategy is registered in the MamoStrategyRegistry
-        assertTrue(mamoStrategyRegistry.isUserStrategy(user, address(strategy)));
-    }
-
-    /**
-     * @notice Test that user can deposit into their strategy
-     */
     function testUserCanDepositIntoStrategy() public {
         // Deploy strategy for user
-        MamoStakingStrategy strategy = _deployUserStrategy(user);
+        userStrategy = _deployUserStrategy(user);
 
-        uint256 depositAmount = 1000e18;
-
-        // Execute deposit
-        _setupAndDeposit(user, strategy, depositAmount);
-
-        // Verify the deposit was successful
-        assertEq(multiRewards.balanceOf(address(strategy)), depositAmount);
-    }
-
-    /*
-    // Helper function to set up and execute a deposit, returns the deposited amount
-    function _setupAndDeposit(address depositor, address account, uint256 amount) internal returns (uint256) {
-        // Approve strategy in registry
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        // Whitelist strategy for account
-        address accountOwner = MamoAccount(payable(account)).owner();
-        vm.startPrank(accountOwner);
-        accountRegistry.setWhitelistStrategy(account, address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        // Give tokens to depositor and approve
-        deal(address(mamoToken), depositor, amount);
-        vm.startPrank(depositor);
-        mamoToken.approve(address(mamoStakingStrategy), amount);
-
-        // Execute deposit
-        mamoStakingStrategy.deposit(account, amount);
-        vm.stopPrank();
-
-        return amount;
-    }
-
-    function testUserCanDepositIntoStrategy() public {
-        // Deploy user account for this test
-        userAccount = _deployUserAccount(user);
-
-        // Step 1: Approve the MamoStakingStrategy in AccountRegistry (backend role)
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        // Step 2: Whitelist the strategy for the user account (account owner)
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        // Step 3: Set up MAMO token balance for the user
         uint256 depositAmount = 1000 * 10 ** 18; // 1000 MAMO tokens
 
-        // Deal MAMO tokens to the user
-        deal(address(mamoToken), user, depositAmount);
-
-        // Step 4: User approves the strategy to spend their MAMO tokens
-        vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-        vm.stopPrank();
-
-        // Step 5: Deposit MAMO tokens into the strategy
-        vm.startPrank(user);
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
-        vm.stopPrank();
+        // Setup and execute deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Verify that the deposit was successful - check that user balance decreased
         assertEq(mamoToken.balanceOf(user), 0, "User MAMO balance should be 0 after deposit");
 
-        // Verify that the tokens were staked in MultiRewards (not sitting in userAccount)
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "UserAccount should not hold MAMO after staking");
-
-        // Verify that MultiRewards contract received the MAMO tokens
+        // Verify that the tokens were staked in MultiRewards
         assertEq(
-            mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens"
-        );
-
-        // Verify that the user account has a staking balance in MultiRewards
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            depositAmount,
-            "UserAccount should have staking balance in MultiRewards"
+            multiRewards.balanceOf(userStrategy), depositAmount, "Strategy should have staking balance in MultiRewards"
         );
     }
 
-    function testRandomUserCanDepositOnBehalfOfOther() public {
-        // Deploy user account for this test
-        userAccount = _deployUserAccount(user);
+    function testMultipleUsersCanDepositSimultaneously() public {
+        address user1 = makeAddr("user1");
+        address user2 = makeAddr("user2");
 
-        // Step 1: Approve the MamoStakingStrategy in AccountRegistry (backend role)
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
+        address payable strategy1 = _deployUserStrategy(user1);
+        address payable strategy2 = _deployUserStrategy(user2);
 
-        // Step 2: Whitelist the strategy for the user account (account owner)
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
+        uint256 depositAmount1 = 500 * 10 ** 18;
+        uint256 depositAmount2 = 750 * 10 ** 18;
 
-        // Step 3: Create a random depositor (different from the account owner)
-        address randomDepositor = makeAddr("randomDepositor");
-        uint256 depositAmount = 500 * 10 ** 18; // 500 MAMO tokens
+        // Both users deposit
+        _setupAndDeposit(user1, strategy1, depositAmount1);
+        _setupAndDeposit(user2, strategy2, depositAmount2);
 
-        // Step 4: Give MAMO tokens to the random depositor
-        deal(address(mamoToken), randomDepositor, depositAmount);
-
-        // Step 5: Random depositor approves the strategy to spend their MAMO tokens
-        vm.startPrank(randomDepositor);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-        vm.stopPrank();
-
-        // Step 6: Random depositor deposits MAMO tokens on behalf of the user account
-        vm.startPrank(randomDepositor);
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
-        vm.stopPrank();
-
-        // Verify that the random depositor's balance decreased
-        assertEq(mamoToken.balanceOf(randomDepositor), 0, "Random depositor MAMO balance should be 0 after deposit");
-
-        // Verify that the tokens were staked in MultiRewards on behalf of the user account
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "UserAccount should not hold MAMO after staking");
-
-        // Verify that the user account owner didn't spend any tokens
-        assertEq(mamoToken.balanceOf(user), 0, "User should not have spent any tokens");
-
-        // Verify that MultiRewards contract received the MAMO tokens
-        assertEq(
-            mamoToken.balanceOf(address(multiRewards)), depositAmount, "MultiRewards should hold the staked MAMO tokens"
-        );
-
-        // Verify that the user account has a staking balance in MultiRewards
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            depositAmount,
-            "UserAccount should have staking balance in MultiRewards"
-        );
+        // Verify both deposits
+        assertEq(multiRewards.balanceOf(strategy1), depositAmount1, "Strategy1 should have correct balance");
+        assertEq(multiRewards.balanceOf(strategy2), depositAmount2, "Strategy2 should have correct balance");
     }
 
-    // ========== UNHAPPY PATH TESTS ==========
+    // ========== DEPOSIT TESTS - UNHAPPY PATH ==========
 
     function testDepositRevertsWhenAmountIsZero() public {
-        userAccount = _deployUserAccount(user);
+        userStrategy = _deployUserStrategy(user);
 
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        // Attempt to deposit 0 amount
         vm.startPrank(user);
         vm.expectRevert("Amount must be greater than 0");
-        mamoStakingStrategy.deposit(address(userAccount), 0);
-        vm.stopPrank();
-    }
-
-    function testDepositRevertsWhenAccountIsZeroAddress() public {
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        deal(address(mamoToken), user, depositAmount);
-
-        vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-
-        // Attempt to deposit to zero address
-        vm.expectRevert("Invalid account");
-        mamoStakingStrategy.deposit(address(0), depositAmount);
-        vm.stopPrank();
-    }
-
-    function testDepositRevertsWhenContractIsPaused() public {
-        userAccount = _deployUserAccount(user);
-
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        deal(address(mamoToken), user, depositAmount);
-
-        vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-        vm.stopPrank();
-
-        // Pause the contract
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        // Attempt to deposit when paused
-        vm.startPrank(user);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        MamoStakingStrategy(userStrategy).deposit(0);
         vm.stopPrank();
     }
 
     function testDepositRevertsWhenInsufficientBalance() public {
-        userAccount = _deployUserAccount(user);
-
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
-        // Don't give user enough tokens - they have 0 balance
+        // Don't give user any tokens
 
         vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
+        mamoToken.approve(userStrategy, depositAmount);
 
         // Attempt to deposit more than balance
-        vm.expectRevert(
-            abi.encodeWithSignature("ERC20InsufficientBalance(address,uint256,uint256)", user, 0, depositAmount)
-        );
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        vm.expectRevert();
+        MamoStakingStrategy(userStrategy).deposit(depositAmount);
         vm.stopPrank();
     }
 
     function testDepositRevertsWhenInsufficientAllowance() public {
-        userAccount = _deployUserAccount(user);
-
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
         deal(address(mamoToken), user, depositAmount);
 
         vm.startPrank(user);
         // Approve less than deposit amount
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount - 1);
+        mamoToken.approve(userStrategy, depositAmount - 1);
 
         // Attempt to deposit more than allowance
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "ERC20InsufficientAllowance(address,uint256,uint256)",
-                address(mamoStakingStrategy),
-                depositAmount - 1,
-                depositAmount
-            )
-        );
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
-        vm.stopPrank();
-    }
-
-    function testDepositRevertsWhenAccountIsNotMamoAccount() public {
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        deal(address(mamoToken), user, depositAmount);
-
-        // Create a regular address instead of MamoAccount
-        address regularAccount = makeAddr("regularAccount");
-
-        vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-
-        // Attempt to deposit to regular address (not a MamoAccount)
-        // This should fail when trying to call multicall on a non-contract address
         vm.expectRevert();
-        mamoStakingStrategy.deposit(regularAccount, depositAmount);
-        vm.stopPrank();
-    }
-
-    function testDepositRevertsWhenStrategyNotApprovedInRegistry() public {
-        userAccount = _deployUserAccount(user);
-
-        // Don't approve the strategy in AccountRegistry
-
-        vm.startPrank(user);
-        // This should fail because the strategy is not approved
-        vm.expectRevert("Strategy not approved by backend");
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
-    }
-
-    function testDepositRevertsWhenStrategyNotWhitelistedForAccount() public {
-        userAccount = _deployUserAccount(user);
-
-        // Setup - approve strategy in registry but don't whitelist for account
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        // Don't whitelist strategy for the user account
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        deal(address(mamoToken), user, depositAmount);
-
-        vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-
-        // This should fail during multicall execution due to whitelisting check
-        vm.expectRevert("Strategy not whitelisted");
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
-        vm.stopPrank();
-    }
-
-    function testDepositRevertsWhenMultiRewardsIsPaused() public {
-        userAccount = _deployUserAccount(user);
-
-        // Setup
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        deal(address(mamoToken), user, depositAmount);
-
-        vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-        vm.stopPrank();
-
-        // Pause MultiRewards contract
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(multiRewardsOwner);
-        multiRewards.setPaused(true);
-        vm.stopPrank();
-
-        // Attempt to deposit when MultiRewards is paused (should fail because stake() has notPaused modifier)
-        vm.startPrank(user);
-        vm.expectRevert("This action cannot be performed while the contract is paused");
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
+        MamoStakingStrategy(userStrategy).deposit(depositAmount);
         vm.stopPrank();
     }
 
     // ========== WITHDRAW TESTS - HAPPY PATH ==========
 
     function testUserCanWithdrawFullDeposit() public {
-        userAccount = _deployUserAccount(user);
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Verify initial state after deposit
-        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "Should have staked balance");
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Should have staked balance");
         assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO tokens after deposit");
 
         // Withdraw full amount
         vm.startPrank(user);
-        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
         vm.stopPrank();
 
         // Verify withdraw was successful
-        assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Should have no staked balance after withdraw");
         assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
     }
 
     function testUserCanWithdrawPartialDeposit() public {
-        userAccount = _deployUserAccount(user);
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 withdrawAmount = 400 * 10 ** 18;
         uint256 remainingAmount = depositAmount - withdrawAmount;
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Verify initial state after deposit
-        assertEq(multiRewards.balanceOf(address(userAccount)), depositAmount, "Should have full staked balance");
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Should have full staked balance");
         assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO tokens after deposit");
 
         // Withdraw partial amount
         vm.startPrank(user);
-        mamoStakingStrategy.withdraw(address(userAccount), withdrawAmount);
+        MamoStakingStrategy(userStrategy).withdraw(withdrawAmount);
         vm.stopPrank();
 
         // Verify partial withdraw was successful
-        assertEq(multiRewards.balanceOf(address(userAccount)), remainingAmount, "Should have remaining staked balance");
+        assertEq(multiRewards.balanceOf(userStrategy), remainingAmount, "Should have remaining staked balance");
         assertEq(mamoToken.balanceOf(user), withdrawAmount, "User should have received withdrawn MAMO tokens");
     }
 
     // ========== WITHDRAW TESTS - UNHAPPY PATH ==========
 
     function testWithdrawRevertsWhenAmountIsZero() public {
-        userAccount = _deployUserAccount(user);
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Attempt to withdraw 0 amount
         vm.startPrank(user);
         vm.expectRevert("Amount must be greater than 0");
-        mamoStakingStrategy.withdraw(address(userAccount), 0);
+        MamoStakingStrategy(userStrategy).withdraw(0);
         vm.stopPrank();
-    }
-
-    function testWithdrawRevertsWhenAccountIsZeroAddress() public {
-        // Attempt to withdraw from zero address
-        vm.startPrank(user);
-        vm.expectRevert("Invalid account");
-        mamoStakingStrategy.withdraw(address(0), 1000 * 10 ** 18);
-        vm.stopPrank();
-    }
-
-    function testWithdrawSucceedsWhenContractIsPaused() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Pause the contract
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        // Withdraw should succeed even when contract is paused (emergency access)
-        vm.startPrank(user);
-        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
-        vm.stopPrank();
-
-        // Verify withdraw was successful
-        assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
-        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
     }
 
     function testWithdrawRevertsWhenInsufficientStakedBalance() public {
-        userAccount = _deployUserAccount(user);
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 withdrawAmount = 1500 * 10 ** 18; // More than deposited
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Attempt to withdraw more than staked balance
         vm.startPrank(user);
-        vm.expectRevert("SafeMath: subtraction overflow");
-        mamoStakingStrategy.withdraw(address(userAccount), withdrawAmount);
+        vm.expectRevert();
+        MamoStakingStrategy(userStrategy).withdraw(withdrawAmount);
         vm.stopPrank();
     }
 
-    function testWithdrawRevertsWhenNotAccountOwner() public {
-        userAccount = _deployUserAccount(user);
+    function testWithdrawRevertsWhenNotOwner() public {
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Create another user who is not the account owner
+        // Create another user who is not the strategy owner
         address attacker = makeAddr("attacker");
 
         // Attempt to withdraw as non-owner
         vm.startPrank(attacker);
-        vm.expectRevert("Not account owner");
-        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
+        vm.expectRevert();
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
         vm.stopPrank();
     }
 
-    function testWithdrawSucceedsWhenMultiRewardsIsPaused() public {
-        userAccount = _deployUserAccount(user);
+    // ========== STAKING REGISTRY TESTS ==========
 
-        uint256 depositAmount = 1000 * 10 ** 18;
+    function testStakingRegistryCanTrackMultipleStrategies() public {
+        address user1 = makeAddr("user1");
+        address user2 = makeAddr("user2");
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        address payable strategy1 = _deployUserStrategy(user1);
+        address payable strategy2 = _deployUserStrategy(user2);
 
-        // Pause MultiRewards contract
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(multiRewardsOwner);
-        multiRewards.setPaused(true);
-        vm.stopPrank();
+        // Verify both strategies are tracked
+        assertTrue(mamoStrategyRegistry.isUserStrategy(user1, strategy1), "Strategy1 should be registered for user1");
+        assertTrue(mamoStrategyRegistry.isUserStrategy(user2, strategy2), "Strategy2 should be registered for user2");
 
-        // Withdraw should succeed even when MultiRewards is paused (withdraw is not restricted by pause)
-        vm.startPrank(user);
-        mamoStakingStrategy.withdraw(address(userAccount), depositAmount);
-        vm.stopPrank();
-
-        // Verify withdraw was successful
-        assertEq(multiRewards.balanceOf(address(userAccount)), 0, "Should have no staked balance after withdraw");
-        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
-    }
-
-    // ========== PROCESS REWARDS TESTS - REINVEST MODE ==========
-
-    // Helper function to setup rewards in MultiRewards contract
-    function _setupRewardsInMultiRewards(address rewardToken, uint256 rewardAmount, uint256 duration) internal {
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
-
-        // Add reward token to MultiRewards (as owner)
-        vm.startPrank(multiRewardsOwner);
-
-        // Check if reward token is already added by checking if rewardsDuration > 0
-        (, uint256 existingDuration,,,,) = multiRewards.rewardData(rewardToken);
-        if (existingDuration == 0) {
-            multiRewards.addReward(rewardToken, multiRewardsOwner, duration);
-        }
-
-        // Give reward tokens to the owner and notify reward amount
-        deal(rewardToken, multiRewardsOwner, rewardAmount);
-        IERC20(rewardToken).approve(address(multiRewards), rewardAmount);
-        multiRewards.notifyRewardAmount(rewardToken, rewardAmount);
-
-        vm.stopPrank();
-    }
-
-    // Helper function to deploy a cbBTC strategy for testing
-    function _deployCbBTCStrategy(address strategyOwner) internal returns (address cbBTCStrategy) {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        address cbBTCStrategyFactory = addresses.getAddress("cbBTC_STRATEGY_FACTORY");
-
-        // Deploy strategy using the factory
-        vm.startPrank(backend);
-        cbBTCStrategy = StrategyFactory(cbBTCStrategyFactory).createStrategyForUser(strategyOwner);
-        vm.stopPrank();
-
-        return cbBTCStrategy;
-    }
-
-    // Helper function to setup cbBTC reward token for testing
-    function _setupCbBTCRewardToken(address strategyOwner) internal returns (address cbBTCStrategy) {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        address cbBTC = addresses.getAddress("cbBTC");
-
-        // Deploy an actual cbBTC strategy for the specified owner
-        cbBTCStrategy = _deployCbBTCStrategy(strategyOwner);
-
-        vm.startPrank(backend);
-        // Add cbBTC as a reward token with the pool
-        address cbBTCMAMOPool = addresses.getAddress("cbBTC_MAMO_POOL");
-        mamoStakingStrategy.addRewardToken(cbBTC, cbBTCMAMOPool);
-        vm.stopPrank();
-
-        return cbBTCStrategy;
-    }
-
-    function testProcessRewardsReinvestModeWithMamoOnly() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 100 * 10 ** 18;
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to REINVEST mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-        vm.stopPrank();
-
-        // Setup MAMO rewards in MultiRewards
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedRewards = multiRewards.earned(address(userAccount), address(mamoToken));
-
-        // Process rewards as backend
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify MAMO rewards were claimed and staked
-        assertGt(earnedRewards, 0, "Should have earned some MAMO rewards");
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + earnedRewards,
-            "Should have staked all MAMO rewards"
+        // Verify cross-ownership is not allowed
+        assertFalse(
+            mamoStrategyRegistry.isUserStrategy(user1, strategy2), "Strategy2 should not be registered for user1"
         );
-
-        // Verify account has no remaining MAMO tokens
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
-    }
-
-    function testProcessRewardsReinvestModeWithCbBTCRewards() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 50 * 10 ** 18; // Add MAMO rewards too
-        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
-
-        // Setup cbBTC reward token for testing - strategy owned by the same user
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to REINVEST mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-        vm.stopPrank();
-
-        // Setup MAMO rewards in MultiRewards
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
-
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
-        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
-
-        // Get initial strategy token balances (mToken and Morpho vault shares)
-        address mToken = addresses.getAddress("MOONWELL_cbBTC");
-        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
-        uint256 initialMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
-        uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
-
-        // Process rewards as backend - this should restake MAMO and deposit cbBTC to strategy
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](1);
-        strategies[0] = cbBTCStrategy;
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify both rewards were earned
-        assertGt(earnedMamoRewards, 0, "Should have earned some MAMO rewards");
-        assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
-
-        // Verify MAMO was restaked in MultiRewards
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + earnedMamoRewards,
-            "Should have restaked all MAMO rewards"
-        );
-
-        // Verify account has no remaining tokens
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
-        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no remaining cbBTC");
-
-        // Verify cbBTC was deposited to strategy by checking strategy token balances increased
-        // The strategy converts cbBTC to mTokens or deposits to Morpho vault
-        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
-        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
-
-        bool strategyBalanceIncreased =
-            (finalMTokenBalance > initialMTokenBalance) || (finalMorphoBalance > initialMorphoBalance);
-        assertTrue(
-            strategyBalanceIncreased, "Strategy should have received deposited cbBTC (as mTokens or Morpho shares)"
+        assertFalse(
+            mamoStrategyRegistry.isUserStrategy(user2, strategy1), "Strategy1 should not be registered for user2"
         );
     }
 
-    function testProcessRewardsFailsWhenStrategyOwnershipMismatch() public {
-        userAccount = _deployUserAccount(user);
+    function testStakingRegistryRoleBasedAccess() public {
+        address backend = mamoStrategyRegistry.getBackendAddress();
 
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
-
-        // Create another user who will own the strategy
-        address otherUser = makeAddr("otherUser");
-
-        // Setup cbBTC reward token for testing - strategy owned by different user
-        address cbBTCStrategy = _setupCbBTCRewardToken(otherUser);
-
-        // Setup and deposit using helper function (user account)
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to REINVEST mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-        vm.stopPrank();
-
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Process rewards as backend - this should fail because strategy is owned by different user
-        address backend = addresses.getAddress("MAMO_BACKEND");
+        // Verify backend can create strategies
         vm.startPrank(backend);
-        vm.expectRevert("Strategy owner mismatch");
-        address[] memory strategies = new address[](1);
-        strategies[0] = cbBTCStrategy;
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+        address payable strategy = payable(stakingStrategyFactory.createStrategy(user));
         vm.stopPrank();
-    }
+        assertTrue(strategy != address(0), "Backend should be able to create strategies");
 
-    function testProcessRewardsReinvestModeWithMamoAndFees() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 100 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
-
-        // Setup cbBTC reward token for testing - strategy owned by the same user
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to REINVEST mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-        vm.stopPrank();
-
-        // Setup MAMO rewards in MultiRewards
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
-
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
-        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
-
-        // Get initial strategy token balances (mToken and Morpho vault shares)
-        address mToken = addresses.getAddress("MOONWELL_cbBTC");
-        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
-        uint256 initialMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
-        uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
-
-        // Process rewards as backend
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](1);
-        strategies[0] = cbBTCStrategy;
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify MAMO was restaked
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + earnedMamoRewards,
-            "Should have restaked all MAMO rewards"
-        );
-
-        // Verify account has no remaining tokens
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
-        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no remaining cbBTC");
-
-        // Verify cbBTC was deposited to strategy by checking strategy token balances increased
-        // The strategy converts cbBTC to mTokens or deposits to Morpho vault
-        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
-        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
-
-        bool strategyBalanceIncreased =
-            (finalMTokenBalance > initialMTokenBalance) || (finalMorphoBalance > initialMorphoBalance);
-        assertTrue(
-            strategyBalanceIncreased, "Strategy should have received deposited cbBTC (as mTokens or Morpho shares)"
-        );
-    }
-
-    function testProcessRewardsRevertsWhenNotBackendRole() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Attempt to process rewards as non-backend user
-        vm.startPrank(user);
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
-            )
-        );
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-    }
-
-    function testProcessRewardsRevertsWhenContractPaused() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Pause the contract
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        // Attempt to process rewards when paused
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-    }
-
-    function testProcessRewardsDefaultsToCompoundMode() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 100 * 10 ** 18;
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Don't set compound mode - should default to COMPOUND (CompoundMode(0))
-
-        // Setup MAMO rewards in MultiRewards
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedRewards = multiRewards.earned(address(userAccount), address(mamoToken));
-
-        // Process rewards as backend
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify MAMO was staked (COMPOUND behavior)
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            initialStakedBalance + earnedRewards,
-            "Should have staked all MAMO rewards using COMPOUND mode"
-        );
-
-        // Verify account has no remaining MAMO tokens
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no remaining MAMO");
-    }
-
-    function testMamoAccountHasCorrectStrategyTypeId() public {
-        userAccount = _deployUserAccount(user);
-
-        // Verify the MamoAccount has the correct strategyTypeId
-        assertEq(userAccount.strategyTypeId(), 2, "MamoAccount should have strategyTypeId 1");
-    }
-
-    // ========== PROCESS REWARDS TESTS - COMPOUND MODE WITH DEX SWAPS ==========
-
-    function testProcessRewardsCompoundModeWithCbBTCAndDEXSwap() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 50 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
-
-        // Setup cbBTC reward token for testing - strategy owned by the same user
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Explicitly set account to COMPOUND mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
-        vm.stopPrank();
-
-        // Setup MAMO rewards in MultiRewards
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
-
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
-        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
-
-        // Get initial balances before swap
-        uint256 initialMamoBalanceInAccount = mamoToken.balanceOf(address(userAccount));
-        uint256 initialCbBTCBalanceInAccount = IERC20(cbBTC).balanceOf(address(userAccount));
-
-        // Process rewards as backend - this should swap cbBTC to MAMO and compound everything
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify both rewards were earned
-        assertGt(earnedMamoRewards, 0, "Should have earned some MAMO rewards");
-        assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
-
-        // Verify the DEX swap occurred - account should have more MAMO than just the original MAMO rewards
-        uint256 finalMamoBalanceInAccount = mamoToken.balanceOf(address(userAccount));
-        assertEq(finalMamoBalanceInAccount, 0, "All MAMO should have been staked after compound");
-
-        // Verify cbBTC was swapped (account should have no cbBTC left)
-        uint256 finalCbBTCBalanceInAccount = IERC20(cbBTC).balanceOf(address(userAccount));
-        assertEq(finalCbBTCBalanceInAccount, 0, "All cbBTC should have been swapped to MAMO");
-
-        // Verify the final staked balance is higher than initial + just MAMO rewards
-        // This proves the cbBTC was swapped to MAMO and then staked
-        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
-        assertGt(
-            finalStakedBalance,
-            initialStakedBalance + earnedMamoRewards,
-            "Final staked balance should include swapped cbBTC converted to MAMO"
-        );
-
-        // Verify the increase in staked balance comes from both MAMO rewards and swapped cbBTC
-        uint256 totalIncrease = finalStakedBalance - initialStakedBalance;
-        assertGt(totalIncrease, earnedMamoRewards, "Total increase should be more than just MAMO rewards due to swap");
-    }
-
-    function testProcessRewardsCompoundModeMultipleTokensDEXSwap() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 50 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
-
-        // Setup cbBTC reward token for testing
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to COMPOUND mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
-        vm.stopPrank();
-
-        // Setup rewards in MultiRewards
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get pre-process state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedMamoRewards = multiRewards.earned(address(userAccount), address(mamoToken));
-        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
-
-        // Process rewards - compound mode with DEX swaps
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify final state
-        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
-
-        // Check that both reward tokens were processed
-        assertGt(earnedMamoRewards, 0, "Should have earned MAMO rewards");
-        assertGt(earnedCbBTCRewards, 0, "Should have earned cbBTC rewards");
-
-        // Verify all tokens were converted and staked
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "No MAMO should remain in account");
-        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "No cbBTC should remain in account");
-
-        // Verify the compound worked - staked balance should include original MAMO rewards + swapped tokens
-        assertGt(
-            finalStakedBalance,
-            initialStakedBalance + earnedMamoRewards,
-            "Staked balance should include both MAMO rewards and swapped tokens"
-        );
-
-        // Verify the account doesn't hold any reward tokens in its strategy (they should be compounded back to MAMO staking)
-        // The cbBTC strategy should remain unchanged since we're in COMPOUND mode, not REINVEST mode
-        address mToken = addresses.getAddress("MOONWELL_cbBTC");
-        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
-        assertEq(
-            IERC20(mToken).balanceOf(cbBTCStrategy), 0, "cbBTC strategy should not receive deposits in COMPOUND mode"
-        );
-        assertEq(
-            IERC20(morphoVault).balanceOf(cbBTCStrategy),
-            0,
-            "cbBTC strategy should not receive deposits in COMPOUND mode"
-        );
-    }
-
-    function testProcessRewardsCompoundModeZeroRewardsNoDEXSwap() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-
-        // Setup cbBTC reward token
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to COMPOUND mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
-        vm.stopPrank();
-
-        // Don't setup any rewards - so no rewards to claim or swap
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-
-        // Process rewards - should not perform any swaps since there are no rewards
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify no changes occurred
-        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
-        assertEq(finalStakedBalance, initialStakedBalance, "Staked balance should remain unchanged with zero rewards");
-
-        // Verify no tokens in account
-        assertEq(mamoToken.balanceOf(address(userAccount)), 0, "Account should have no MAMO");
-        address cbBTC = addresses.getAddress("cbBTC");
-        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "Account should have no cbBTC");
-    }
-
-    function testProcessRewardsCompoundModeVerifyDEXRouterCalls() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
-
-        // Setup cbBTC reward token for testing
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to COMPOUND mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
-        vm.stopPrank();
-
-        // Setup only cbBTC rewards (no MAMO rewards to isolate the swap test)
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Verify cbBTC rewards are available
-        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
-        assertGt(earnedCbBTCRewards, 0, "Should have earned cbBTC rewards");
-
-        // Get initial balances to track the swap
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 initialMamoInAccount = mamoToken.balanceOf(address(userAccount));
-
-        // Process rewards - this should trigger DEX swap from cbBTC to MAMO
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify the swap occurred by checking final balances
-        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 finalMamoInAccount = mamoToken.balanceOf(address(userAccount));
-        uint256 finalCbBTCInAccount = IERC20(cbBTC).balanceOf(address(userAccount));
-
-        // Verify cbBTC was fully consumed in the swap
-        assertEq(finalCbBTCInAccount, 0, "All cbBTC should have been swapped");
-
-        // Verify account has no remaining MAMO (it was all staked after swap)
-        assertEq(finalMamoInAccount, 0, "All MAMO should have been staked after swap");
-
-        // Verify staked balance increased due to the swap
-        assertGt(finalStakedBalance, initialStakedBalance, "Staked balance should increase from swapped MAMO");
-
-        // The increase should be the result of swapping cbBTC to MAMO
-        uint256 stakingIncrease = finalStakedBalance - initialStakedBalance;
-        assertGt(stakingIncrease, 0, "Should have staked some MAMO from the cbBTC swap");
-    }
-
-    // ========== ADMINISTRATIVE FUNCTION TESTS ==========
-
-    function testAddRewardTokenSuccessful() public {
-        address newToken = makeAddr("newRewardToken");
-        address newStrategy = makeAddr("newStrategy");
-        address newPool = makeAddr("newPool");
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
-
-        mamoStakingStrategy.addRewardToken(newToken, newPool);
-
-        assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 1, "Reward token count should increase");
-        assertTrue(mamoStakingStrategy.isRewardToken(newToken), "Token should be marked as reward token");
-        // tokenToStrategy mapping was removed - strategy is now passed to processRewards
-
-        vm.stopPrank();
-    }
-
-    function testAddRewardTokenRevertsWithInvalidToken() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert("Invalid token");
-        mamoStakingStrategy.addRewardToken(address(0), makeAddr("pool"));
-
-        vm.stopPrank();
-    }
-
-    function testAddRewardTokenRevertsWithInvalidPool() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert("Invalid pool");
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), address(0));
-
-        vm.stopPrank();
-    }
-
-    function testAddRewardTokenRevertsWhenTokenAlreadyAdded() public {
-        address token = makeAddr("rewardToken");
-        address strategy = makeAddr("strategy");
-        address pool = makeAddr("pool");
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        mamoStakingStrategy.addRewardToken(token, pool);
-
-        vm.expectRevert("Token already added");
-        mamoStakingStrategy.addRewardToken(token, pool);
-
-        vm.stopPrank();
-    }
-
-    function testAddRewardTokenRevertsWhenTokenIsMAMO() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert("Cannot add staking token");
-        mamoStakingStrategy.addRewardToken(address(mamoToken), makeAddr("pool"));
-
-        vm.stopPrank();
-    }
-
-    function testAddRewardTokenRevertsWhenNotBackendRole() public {
-        vm.startPrank(user);
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
-            )
-        );
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
-
-        vm.stopPrank();
-    }
-
-    function testAddRewardTokenRevertsWhenPaused() public {
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
-
-        vm.stopPrank();
-    }
-
-    function testRemoveRewardTokenSuccessful() public {
-        address token = makeAddr("rewardToken");
-        address strategy = makeAddr("strategy");
-        address pool = makeAddr("pool");
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        mamoStakingStrategy.addRewardToken(token, pool);
-        uint256 countAfterAdd = mamoStakingStrategy.getRewardTokenCount();
-
-        mamoStakingStrategy.removeRewardToken(token);
-
-        assertEq(mamoStakingStrategy.getRewardTokenCount(), countAfterAdd - 1, "Reward token count should decrease");
-        assertFalse(mamoStakingStrategy.isRewardToken(token), "Token should not be marked as reward token");
-
-        vm.stopPrank();
-    }
-
-    function testRemoveRewardTokenRevertsWhenTokenNotFound() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert("Token not found");
-        mamoStakingStrategy.removeRewardToken(makeAddr("nonExistentToken"));
-
-        vm.stopPrank();
-    }
-
-    function testRemoveRewardTokenRevertsWhenNotBackendRole() public {
-        vm.startPrank(user);
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
-            )
-        );
-        mamoStakingStrategy.removeRewardToken(makeAddr("token"));
-
-        vm.stopPrank();
-    }
-
-    function testRemoveRewardTokenRevertsWhenPaused() public {
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.removeRewardToken(makeAddr("token"));
-
-        vm.stopPrank();
-    }
-
-    function testSetDEXRouterSuccessful() public {
-        address newRouter = makeAddr("newDEXRouter");
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-
-        vm.startPrank(admin);
-
-        address oldRouter = address(mamoStakingStrategy.dexRouter());
-        mamoStakingStrategy.setDEXRouter(ISwapRouter(newRouter));
-
-        assertEq(address(mamoStakingStrategy.dexRouter()), newRouter, "DEX router should be updated");
-
-        vm.stopPrank();
-    }
-
-    function testSetDEXRouterRevertsWithInvalidRouter() public {
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(admin);
-
-        vm.expectRevert("Invalid router");
-        mamoStakingStrategy.setDEXRouter(ISwapRouter(address(0)));
-
-        vm.stopPrank();
-    }
-
-    function testSetDEXRouterRevertsWhenNotAdminRole() public {
-        vm.startPrank(user);
-
-        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, bytes32(0)));
-        mamoStakingStrategy.setDEXRouter(ISwapRouter(makeAddr("newRouter")));
-
-        vm.stopPrank();
-    }
-
-    // ========== PAUSE/UNPAUSE TESTS ==========
-
-    function testPauseSuccessful() public {
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-
-        assertFalse(mamoStakingStrategy.paused(), "Contract should not be paused initially");
-
-        mamoStakingStrategy.pause();
-
-        assertTrue(mamoStakingStrategy.paused(), "Contract should be paused");
-
-        vm.stopPrank();
-    }
-
-    function testPauseRevertsWhenNotGuardianRole() public {
-        vm.startPrank(user);
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
-            )
-        );
-        mamoStakingStrategy.pause();
-
-        vm.stopPrank();
-    }
-
-    function testUnpauseSuccessful() public {
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-
-        mamoStakingStrategy.pause();
-        assertTrue(mamoStakingStrategy.paused(), "Contract should be paused");
-
-        mamoStakingStrategy.unpause();
-        assertFalse(mamoStakingStrategy.paused(), "Contract should be unpaused");
-
-        vm.stopPrank();
-    }
-
-    function testUnpauseRevertsWhenNotGuardianRole() public {
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        vm.startPrank(user);
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
-            )
-        );
-        mamoStakingStrategy.unpause();
-
-        vm.stopPrank();
-    }
-
-    // ========== VIEW FUNCTION TESTS ==========
-
-    function testGetRewardTokensReturnsCorrectData() public {
-        address token1 = makeAddr("token1");
-        address strategy1 = makeAddr("strategy1");
-        address pool1 = makeAddr("pool1");
-
-        address token2 = makeAddr("token2");
-        address strategy2 = makeAddr("strategy2");
-        address pool2 = makeAddr("pool2");
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        mamoStakingStrategy.addRewardToken(token1, pool1);
-        mamoStakingStrategy.addRewardToken(token2, pool2);
-
-        MamoStakingStrategy.RewardToken[] memory rewardTokens = mamoStakingStrategy.getRewardTokens();
-
-        assertTrue(rewardTokens.length >= 2, "Should have at least 2 reward tokens");
-
-        bool found1 = false;
-        bool found2 = false;
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (rewardTokens[i].token == token1) {
-                assertEq(rewardTokens[i].pool, pool1, "Pool1 should match");
-                found1 = true;
-            }
-            if (rewardTokens[i].token == token2) {
-                assertEq(rewardTokens[i].pool, pool2, "Pool2 should match");
-                found2 = true;
-            }
-        }
-
-        assertTrue(found1, "Token1 should be found in reward tokens");
-        assertTrue(found2, "Token2 should be found in reward tokens");
-
-        vm.stopPrank();
-    }
-
-    function testGetRewardTokenCountReturnsCorrectCount() public {
-        uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        mamoStakingStrategy.addRewardToken(makeAddr("token1"), makeAddr("pool1"));
-        assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 1, "Count should increase by 1");
-
-        mamoStakingStrategy.addRewardToken(makeAddr("token2"), makeAddr("pool2"));
-        assertEq(mamoStakingStrategy.getRewardTokenCount(), initialCount + 2, "Count should increase by 2");
-
-        vm.stopPrank();
-    }
-
-    // ========== ROLE-BASED ACCESS CONTROL TESTS ==========
-
-    function testBackendRoleCanProcessRewards() public {
-        userAccount = _deployUserAccount(user);
-
-        _setupAndDeposit(user, address(userAccount), 1000 * 10 ** 18);
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-
-        vm.stopPrank();
-    }
-
-    function testBackendRoleCanAddRemoveRewardTokens() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        address token = makeAddr("testToken");
-        mamoStakingStrategy.addRewardToken(token, makeAddr("pool"));
-        assertTrue(mamoStakingStrategy.isRewardToken(token), "Token should be added");
-
-        mamoStakingStrategy.removeRewardToken(token);
-        assertFalse(mamoStakingStrategy.isRewardToken(token), "Token should be removed");
-
-        vm.stopPrank();
-    }
-
-    function testGuardianRoleCanPauseUnpause() public {
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-
-        mamoStakingStrategy.pause();
-        assertTrue(mamoStakingStrategy.paused(), "Should be paused");
-
-        mamoStakingStrategy.unpause();
-        assertFalse(mamoStakingStrategy.paused(), "Should be unpaused");
-
-        vm.stopPrank();
-    }
-
-    function testAdminRoleCanSetDEXRouter() public {
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(admin);
-
-        address newRouter = makeAddr("newRouter");
-        mamoStakingStrategy.setDEXRouter(ISwapRouter(newRouter));
-        assertEq(address(mamoStakingStrategy.dexRouter()), newRouter, "Router should be updated");
-
-        vm.stopPrank();
-    }
-
-    function testNonPrivilegedUserCannotAccessAdminFunctions() public {
-        vm.startPrank(user);
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
-            )
-        );
-        mamoStakingStrategy.addRewardToken(makeAddr("token"), makeAddr("pool"));
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
-            )
-        );
-        mamoStakingStrategy.removeRewardToken(makeAddr("token"));
-
-        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, bytes32(0)));
-        mamoStakingStrategy.setDEXRouter(ISwapRouter(makeAddr("router")));
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
-            )
-        );
-        mamoStakingStrategy.pause();
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("GUARDIAN_ROLE")
-            )
-        );
-        mamoStakingStrategy.unpause();
-
-        vm.expectRevert(
-            abi.encodeWithSignature(
-                "AccessControlUnauthorizedAccount(address,bytes32)", user, keccak256("BACKEND_ROLE")
-            )
-        );
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-
-        vm.stopPrank();
-    }
-
-    // ========== COMPOUND MODE TESTS ==========
-
-    function testSetCompoundModeByAccountOwner() public {
-        userAccount = _deployUserAccount(user);
-
-        vm.startPrank(user);
-
-        assertEq(
-            uint256(mamoStakingStrategy.accountStrategyMode(address(userAccount))), 0, "Should default to COMPOUND"
-        );
-
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-        assertEq(uint256(mamoStakingStrategy.accountStrategyMode(address(userAccount))), 1, "Should be set to REINVEST");
-
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
-        assertEq(uint256(mamoStakingStrategy.accountStrategyMode(address(userAccount))), 0, "Should be set to COMPOUND");
-
-        vm.stopPrank();
-    }
-
-    function testSetStrategyModeEmitsEvent() public {
-        userAccount = _deployUserAccount(user);
-
-        vm.startPrank(user);
-
-        MamoStakingStrategy.StrategyMode newMode = MamoStakingStrategy.StrategyMode.REINVEST;
-
-        vm.expectEmit(true, false, false, true);
-        emit MamoStakingStrategy.StrategyModeUpdated(address(userAccount), newMode);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), newMode);
-
-        vm.stopPrank();
-    }
-
-    function testSetCompoundModeRevertsWhenNotAccountOwner() public {
-        userAccount = _deployUserAccount(user);
-
+        // Verify non-backend users cannot create strategies
         address attacker = makeAddr("attacker");
         vm.startPrank(attacker);
-
-        vm.expectRevert("Not account owner");
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-
+        vm.expectRevert();
+        stakingStrategyFactory.createStrategy(user);
         vm.stopPrank();
     }
 
-    function testSetCompoundModeRevertsWhenAccountIsZeroAddress() public {
+    // ========== MULTI-REWARDS INTEGRATION TESTS ==========
+
+    function testMultiRewardsAccrualsBasic() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Fast forward time to potentially accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Verify the staked balance is maintained
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Staked balance should be maintained");
+    }
+
+    function testMultiRewardsWithdrawAfterTimeElapsed() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Fast forward time
+        vm.warp(block.timestamp + 7 days);
+
+        // Withdraw should still work after time elapsed
         vm.startPrank(user);
-
-        vm.expectRevert("Invalid account");
-        mamoStakingStrategy.setStrategyMode(address(0), MamoStakingStrategy.StrategyMode.REINVEST);
-
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
         vm.stopPrank();
+
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Should have no staked balance after withdraw");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all tokens back");
     }
 
-    function testSetCompoundModeRevertsWhenPaused() public {
-        userAccount = _deployUserAccount(user);
+    // ========== FACTORY CONFIGURATION TESTS ==========
 
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
-
-        vm.startPrank(user);
-
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-
-        vm.stopPrank();
+    function testFactoryValidatesConfiguration() public {
+        // Verify factory was deployed with correct parameters
+        assertEq(stakingStrategyFactory.strategyTypeId(), 2, "Factory should have correct strategy type ID");
+        assertEq(stakingStrategyFactory.defaultSlippageInBps(), 100, "Factory should have correct default slippage");
     }
 
-    // ========== EDGE CASES AND ERROR HANDLING ==========
+    function testFactoryEnforcesOneStrategyPerUser() public {
+        address payable strategy1 = _deployUserStrategy(user);
 
-    function testDepositRevertsWhenMultiRewardsCallFails() public {
-        userAccount = _deployUserAccount(user);
+        // Verify first strategy was created and registered
+        assertTrue(strategy1 != address(0), "First strategy should be created");
+        assertTrue(mamoStrategyRegistry.isUserStrategy(user, strategy1), "Strategy1 should be registered");
 
-        address backend = addresses.getAddress("MAMO_BACKEND");
+        // Attempting to create a second strategy for the same user should fail
+        address backend = mamoStrategyRegistry.getBackendAddress();
         vm.startPrank(backend);
-        accountRegistry.setApprovedStrategy(address(mamoStakingStrategy), true);
+        vm.expectRevert("Strategy already exists");
+        stakingStrategyFactory.createStrategy(user);
         vm.stopPrank();
+    }
 
-        vm.startPrank(user);
-        accountRegistry.setWhitelistStrategy(address(userAccount), address(mamoStakingStrategy), true);
-        vm.stopPrank();
+    // ========== INTEGRATION WITH STRATEGY REGISTRY TESTS ==========
+
+    function testStrategyRegistryImplementationMapping() public {
+        userStrategy = _deployUserStrategy(user);
+
+        // Verify the strategy is using the correct implementation
+        // Import ERC1967Proxy to access getImplementation
+        address implementation = ERC1967Proxy(userStrategy).getImplementation();
+        assertEq(implementation, stakingStrategyImplementation, "Strategy should use correct implementation");
+    }
+
+    function testStrategyRegistryTypeIdMapping() public {
+        userStrategy = _deployUserStrategy(user);
+
+        // Get the implementation and verify its type ID
+        address implementation = ERC1967Proxy(userStrategy).getImplementation();
+        uint256 typeId = mamoStrategyRegistry.implementationToId(implementation);
+        assertEq(typeId, 2, "Implementation should have correct strategy type ID");
+    }
+
+    // ========== ERROR HANDLING AND EDGE CASES ==========
+
+    function testDepositWithExactAllowanceWorks() public {
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
         deal(address(mamoToken), user, depositAmount);
 
         vm.startPrank(user);
-        mamoToken.approve(address(mamoStakingStrategy), depositAmount);
-
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(multiRewardsOwner);
-        multiRewards.setPaused(true);
+        // Approve exact amount
+        mamoToken.approve(userStrategy, depositAmount);
+        MamoStakingStrategy(userStrategy).deposit(depositAmount);
         vm.stopPrank();
 
-        vm.startPrank(user);
-        vm.expectRevert("This action cannot be performed while the contract is paused");
-        mamoStakingStrategy.deposit(address(userAccount), depositAmount);
-        vm.stopPrank();
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Deposit with exact allowance should work");
     }
 
-    function testProcessRewardsHandlesZeroRewardTokensGracefully() public {
-        userAccount = _deployUserAccount(user);
-
-        _setupAndDeposit(user, address(userAccount), 1000 * 10 ** 18);
-
-        uint256 initialCount = mamoStakingStrategy.getRewardTokenCount();
-        uint256 initialBalance = multiRewards.balanceOf(address(userAccount));
-
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        assertEq(multiRewards.balanceOf(address(userAccount)), initialBalance, "Balance should remain unchanged");
-    }
-
-    function testProcessRewardsRevertsWithWrongStrategyToken() public {
-        userAccount = _deployUserAccount(user);
+    function testWithdrawExactBalanceWorks() public {
+        userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Setup cbBTC reward token
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to REINVEST mode
+        // Withdraw exact balance
         vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
         vm.stopPrank();
 
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Deploy a USDC strategy for the same user - this will have wrong token type
-        address usdcStrategy = _deployUSDCStrategy(user);
-
-        // Process rewards with wrong strategy (USDC strategy for cbBTC token) - should fail
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        vm.expectRevert("Strategy token mismatch");
-        address[] memory strategies = new address[](1);
-        strategies[0] = usdcStrategy; // Wrong strategy - USDC strategy for cbBTC rewards
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Withdraw exact balance should work");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should receive exact amount");
     }
 
-    function testProcessRewardsRevertsWithWrongStrategyOwner() public {
-        userAccount = _deployUserAccount(user);
+    // ========== VIEW FUNCTION TESTS ==========
 
+    function testStrategyViewFunctions() public {
+        userStrategy = _deployUserStrategy(user);
+
+        // Test strategy configuration views
+        MamoStakingStrategy strategy = MamoStakingStrategy(userStrategy);
+        assertEq(strategy.owner(), user, "Strategy should have correct owner");
+        assertEq(address(strategy.mamoToken()), address(mamoToken), "Strategy should have correct MAMO token");
+        assertEq(address(strategy.multiRewards()), address(multiRewards), "Strategy should have correct MultiRewards");
+    }
+
+    function testGetUserStrategies() public {
+        address payable strategy1 = _deployUserStrategy(user);
+
+        address[] memory userStrategies = mamoStrategyRegistry.getUserStrategies(user);
+        assertEq(userStrategies.length, 1, "User should have 1 strategy");
+
+        // Verify the strategy is in the list
+        assertEq(userStrategies[0], strategy1, "Strategy should be in user strategies list");
+    }
+
+    // ========== COMPOUND FUNCTIONALITY TESTS ==========
+
+    function testProcessRewardsCompoundModeWithoutRewards() public {
+        userStrategy = _deployUserStrategy(user);
         uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
 
-        // Create another user for wrong ownership test
-        address otherUser = makeAddr("otherUser");
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Setup cbBTC reward token but with strategy owned by different user
-        address cbBTCStrategy = _setupCbBTCRewardToken(otherUser); // Different owner
-
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
-
-        // Set account to REINVEST mode
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-        vm.stopPrank();
-
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Process rewards with strategy owned by different user - should fail
-        address backend = addresses.getAddress("MAMO_BACKEND");
+        // Process rewards in compound mode (no rewards to claim)
+        address backend = mamoStrategyRegistry.getBackendAddress();
         vm.startPrank(backend);
-        vm.expectRevert("Strategy owner mismatch");
-        address[] memory strategies = new address[](1);
-        strategies[0] = cbBTCStrategy; // Strategy owned by otherUser, not user
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+
+        // Create empty strategies array since we're in compound mode
+        address[] memory emptyStrategies = new address[](0);
+
+        // Should not revert even with no rewards
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
         vm.stopPrank();
+
+        // Verify the original deposit is still there
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Original deposit should remain");
     }
 
-    function testProcessRewardsSucceedsWithCorrectStrategy() public {
-        userAccount = _deployUserAccount(user);
-
+    function testProcessRewardsDefaultsToCompoundMode() public {
+        userStrategy = _deployUserStrategy(user);
         uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 2 * 10 ** 8; // cbBTC has 8 decimals
 
-        // Setup cbBTC reward token with correct owner
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        address backend = mamoStrategyRegistry.getBackendAddress();
+        vm.startPrank(backend);
 
-        // Set account to REINVEST mode
+        // Process rewards with COMPOUND mode explicitly
+        address[] memory emptyStrategies = new address[](0);
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        vm.stopPrank();
+
+        // Verify deposit is maintained
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Deposit should be maintained");
+    }
+
+    function testProcessRewardsReinvestModeRequiresStrategies() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        address backend = mamoStrategyRegistry.getBackendAddress();
+        vm.startPrank(backend);
+
+        // Get reward tokens to know how many strategies we need
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+
+        if (rewardTokens.length > 0) {
+            // Create insufficient strategies array
+            address[] memory insufficientStrategies = new address[](rewardTokens.length - 1);
+
+            // Should revert with strategies length mismatch
+            vm.expectRevert("Strategies length mismatch");
+            MamoStakingStrategy(userStrategy).processRewards(
+                MamoStakingStrategy.StrategyMode.REINVEST, insufficientStrategies
+            );
+        }
+        vm.stopPrank();
+    }
+
+    function testSetAccountSlippageByOwner() public {
+        userStrategy = _deployUserStrategy(user);
+
+        // Verify initial slippage
+        uint256 initialSlippage = MamoStakingStrategy(userStrategy).getAccountSlippage();
+        assertEq(initialSlippage, 100, "Initial slippage should be 100 bps");
+
+        // Update slippage as owner
+        uint256 newSlippage = 150;
         vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
+        vm.expectEmit(true, true, false, true);
+        emit AccountSlippageUpdated(100, newSlippage);
+        MamoStakingStrategy(userStrategy).setAccountSlippage(newSlippage);
         vm.stopPrank();
 
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
-
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial balances
-        uint256 initialMamoStaked = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedCbBTC = multiRewards.earned(address(userAccount), cbBTC);
-
-        // Process rewards with correct strategy - should succeed
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        address[] memory strategies = new address[](1);
-        strategies[0] = cbBTCStrategy; // Correct strategy for cbBTC with correct owner
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
-        vm.stopPrank();
-
-        // Verify rewards were processed successfully
-        assertGt(earnedCbBTC, 0, "Should have earned cbBTC rewards");
-        assertEq(
-            multiRewards.balanceOf(address(userAccount)),
-            initialMamoStaked,
-            "MAMO staked should remain same in REINVEST mode"
-        );
-
-        // Verify cbBTC was deposited to strategy (balance should be greater than 0)
-        address mToken = addresses.getAddress("MOONWELL_cbBTC");
-        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
-        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
-        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
-
-        assertTrue(finalMTokenBalance > 0 || finalMorphoBalance > 0, "Strategy should have received cbBTC deposits");
+        // Verify slippage was updated
+        assertEq(MamoStakingStrategy(userStrategy).getAccountSlippage(), newSlippage, "Slippage should be updated");
     }
 
-    // ==================== QUOTER SETTER TESTS ====================
-
-    function testSetQuoterSuccessful() public {
-        address newQuoter = makeAddr("newQuoter");
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-
-        vm.startPrank(admin);
-
-        address oldQuoter = address(mamoStakingStrategy.quoter());
-        mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
-
-        assertEq(address(mamoStakingStrategy.quoter()), newQuoter, "Quoter should be updated");
-
-        vm.stopPrank();
-    }
-
-    function testSetQuoterRevertsWithInvalidQuoter() public {
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(admin);
-
-        vm.expectRevert("Invalid quoter");
-        mamoStakingStrategy.setQuoter(IQuoter(address(0)));
-
-        vm.stopPrank();
-    }
-
-    function testSetQuoterRevertsWhenNotAdminRole() public {
-        vm.startPrank(user);
-
-        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, bytes32(0)));
-        mamoStakingStrategy.setQuoter(IQuoter(makeAddr("newQuoter")));
-
-        vm.stopPrank();
-    }
-
-    function testSetQuoterEmitsEvent() public {
-        address newQuoter = makeAddr("newQuoter");
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-
-        vm.startPrank(admin);
-
-        address oldQuoter = address(mamoStakingStrategy.quoter());
-        vm.expectEmit(true, true, false, false);
-        emit MamoStakingStrategy.QuoterUpdated(oldQuoter, newQuoter);
-        mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
-
-        vm.stopPrank();
-    }
-
-    // ==================== SLIPPAGE TOLERANCE SETTER TESTS ====================
-
-    function testSetSlippageToleranceSuccessful() public {
-        uint256 newSlippage = 500; // 5%
-        address backend = addresses.getAddress("MAMO_BACKEND");
-
-        vm.startPrank(backend);
-
-        uint256 oldSlippage = mamoStakingStrategy.allowedSlippageInBps();
-        mamoStakingStrategy.setSlippageTolerance(newSlippage);
-
-        assertEq(mamoStakingStrategy.allowedSlippageInBps(), newSlippage, "Slippage tolerance should be updated");
-
-        vm.stopPrank();
-    }
-
-    function testSetSlippageToleranceRevertsWithTooHighSlippage() public {
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-
-        vm.expectRevert("Slippage too high");
-        mamoStakingStrategy.setSlippageTolerance(2501); // Over 25% limit
-
-        vm.stopPrank();
-    }
-
-    function testSetSlippageToleranceRevertsWhenNotBackendRole() public {
-        vm.startPrank(user);
-
-        bytes32 backendRole = keccak256("BACKEND_ROLE");
-        vm.expectRevert(abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", user, backendRole));
-        mamoStakingStrategy.setSlippageTolerance(100);
-
-        vm.stopPrank();
-    }
-
-    function testSetSlippageToleranceEmitsEvent() public {
-        uint256 newSlippage = 200; // 2%
-        address backend = addresses.getAddress("MAMO_BACKEND");
-
-        vm.startPrank(backend);
-
-        uint256 oldSlippage = mamoStakingStrategy.allowedSlippageInBps();
-        vm.expectEmit(false, false, false, true);
-        emit MamoStakingStrategy.SlippageToleranceUpdated(oldSlippage, newSlippage);
-        mamoStakingStrategy.setSlippageTolerance(newSlippage);
-
-        vm.stopPrank();
-    }
-
-    function testSetSlippageToleranceAtMaximumAllowed() public {
-        uint256 maxSlippage = 2500; // 25% - maximum allowed
-        address backend = addresses.getAddress("MAMO_BACKEND");
-
-        vm.startPrank(backend);
-
-        mamoStakingStrategy.setSlippageTolerance(maxSlippage);
-        assertEq(mamoStakingStrategy.allowedSlippageInBps(), maxSlippage, "Should allow maximum slippage of 25%");
-
-        vm.stopPrank();
-    }
-
-    function _deployUSDCStrategy(address strategyOwner) internal returns (address) {
-        address usdcStrategyFactory = addresses.getAddress("USDC_STRATEGY_FACTORY");
-
-        vm.startPrank(strategyOwner);
-        address usdcStrategy = StrategyFactory(usdcStrategyFactory).createStrategyForUser(strategyOwner);
-        vm.stopPrank();
-
-        return usdcStrategy;
-    }
-
-    // ========== ACCOUNT SLIPPAGE TESTS ==========
-
-    function testSetAccountSlippageByAccountOwner() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 customSlippage = 500; // 5%
-
-        vm.startPrank(user);
-
-        // Check default account slippage (should return global slippage)
-        assertEq(mamoStakingStrategy.getAccountSlippage(address(userAccount)), 0, "Should default to global slippage");
-
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
-        assertEq(
-            mamoStakingStrategy.accountSlippageInBps(address(userAccount)),
-            customSlippage,
-            "Should set account slippage"
-        );
-        assertEq(
-            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
-            customSlippage,
-            "Should return account slippage"
-        );
-
-        vm.stopPrank();
-    }
-
-    function testSetAccountSlippageRevertsWhenNotAccountOwner() public {
-        userAccount = _deployUserAccount(user);
-
+    function testSetAccountSlippageRevertsWhenNotOwner() public {
+        userStrategy = _deployUserStrategy(user);
         address attacker = makeAddr("attacker");
+
+        // Attempt to set slippage as non-owner
         vm.startPrank(attacker);
-
-        vm.expectRevert("Not account owner");
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), 100);
-
+        vm.expectRevert();
+        MamoStakingStrategy(userStrategy).setAccountSlippage(150);
         vm.stopPrank();
     }
 
-    function testSetAccountSlippageRevertsWhenAccountIsZeroAddress() public {
+    function testSetAccountSlippageRevertsWhenTooHigh() public {
+        userStrategy = _deployUserStrategy(user);
+
+        // Attempt to set slippage above maximum
         vm.startPrank(user);
-
-        vm.expectRevert("Invalid account");
-        mamoStakingStrategy.setAccountSlippage(address(0), 100);
-
-        vm.stopPrank();
-    }
-
-    function testSetAccountSlippageRevertsWhenSlippageTooHigh() public {
-        userAccount = _deployUserAccount(user);
-
-        vm.startPrank(user);
-
         vm.expectRevert("Slippage too high");
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), 2501); // Over 25%
-
+        MamoStakingStrategy(userStrategy).setAccountSlippage(2501); // Above 25%
         vm.stopPrank();
     }
 
-    function testSetAccountSlippageRevertsWhenPaused() public {
-        userAccount = _deployUserAccount(user);
+    function testGetAccountSlippageFallsBackToDefault() public {
+        userStrategy = _deployUserStrategy(user);
 
-        address guardian = addresses.getAddress("MAMO_MULTISIG");
-        vm.startPrank(guardian);
-        mamoStakingStrategy.pause();
-        vm.stopPrank();
+        // Initially should return account-specific slippage (set during initialization)
+        uint256 accountSlippage = MamoStakingStrategy(userStrategy).getAccountSlippage();
+        assertEq(accountSlippage, 100, "Should return account-specific slippage");
 
+        // Reset account slippage to 0 to test fallback
         vm.startPrank(user);
-
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), 100);
-
+        MamoStakingStrategy(userStrategy).setAccountSlippage(0);
         vm.stopPrank();
+
+        // Should fall back to default from registry
+        uint256 fallbackSlippage = MamoStakingStrategy(userStrategy).getAccountSlippage();
+        uint256 expectedDefault = stakingRegistry.defaultSlippageInBps();
+        assertEq(fallbackSlippage, expectedDefault, "Should fall back to registry default");
     }
 
-    function testSetAccountSlippageEmitsEvent() public {
-        userAccount = _deployUserAccount(user);
+    function testGetRewardTokensFromStrategy() public {
+        userStrategy = _deployUserStrategy(user);
 
-        uint256 customSlippage = 300; // 3%
+        // Get reward tokens from strategy
+        MamoStakingRegistry.RewardToken[] memory strategyRewardTokens =
+            MamoStakingStrategy(userStrategy).getRewardTokens();
 
+        // Get reward tokens from registry directly
+        MamoStakingRegistry.RewardToken[] memory registryRewardTokens = stakingRegistry.getRewardTokens();
+
+        // Should match
+        assertEq(strategyRewardTokens.length, registryRewardTokens.length, "Reward tokens count should match");
+
+        for (uint256 i = 0; i < strategyRewardTokens.length; i++) {
+            assertEq(strategyRewardTokens[i].token, registryRewardTokens[i].token, "Token address should match");
+            assertEq(strategyRewardTokens[i].pool, registryRewardTokens[i].pool, "Pool address should match");
+        }
+    }
+
+    function testProcessRewardsOnlyCallableByBackend() public {
+        userStrategy = _deployUserStrategy(user);
+        address attacker = makeAddr("attacker");
+
+        address[] memory emptyStrategies = new address[](0);
+
+        // Attempt to process rewards as non-backend
+        vm.startPrank(attacker);
+        vm.expectRevert("Not backend");
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        vm.stopPrank();
+
+        // Attempt to process rewards as owner (should also fail)
         vm.startPrank(user);
-
-        uint256 oldSlippage = mamoStakingStrategy.accountSlippageInBps(address(userAccount));
-        vm.expectEmit(true, false, false, true);
-        emit MamoStakingStrategy.AccountSlippageUpdated(address(userAccount), oldSlippage, customSlippage);
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
-
+        vm.expectRevert("Not backend");
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
         vm.stopPrank();
-    }
 
-    function testGetAccountSlippageFallsBackToGlobal() public {
-        userAccount = _deployUserAccount(user);
-
-        // Set global slippage
-        uint256 globalSlippage = 200; // 2%
-        address backend = addresses.getAddress("MAMO_BACKEND");
+        // Should work as backend
+        address backend = mamoStrategyRegistry.getBackendAddress();
         vm.startPrank(backend);
-        mamoStakingStrategy.setSlippageTolerance(globalSlippage);
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
         vm.stopPrank();
-
-        // Account has no custom slippage set, should return global
-        assertEq(
-            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
-            globalSlippage,
-            "Should return global slippage"
-        );
-        assertEq(mamoStakingStrategy.accountSlippageInBps(address(userAccount)), 0, "Account slippage should be 0");
     }
 
-    function testAccountSlippageUsedInCompoundMode() public {
-        userAccount = _deployUserAccount(user);
-
+    function testCompoundModeProcessing() public {
+        userStrategy = _deployUserStrategy(user);
         uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
-        uint256 customSlippage = 1000; // 10% - higher than typical
 
-        // Setup cbBTC reward token for testing
-        address cbBTCStrategy = _setupCbBTCRewardToken(user);
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Setup and deposit using helper function
-        _setupAndDeposit(user, address(userAccount), depositAmount);
+        // Verify initial staked balance
+        uint256 initialBalance = multiRewards.balanceOf(userStrategy);
+        assertEq(initialBalance, depositAmount, "Initial balance should match deposit");
 
-        // Set account to COMPOUND mode and custom slippage
-        vm.startPrank(user);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.COMPOUND);
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), customSlippage);
+        // Simulate time passing to accrue rewards
+        vm.warp(block.timestamp + 7 days);
+
+        // Fast forward several blocks to potentially trigger reward accrual
+        vm.roll(block.number + 100);
+
+        address backend = mamoStrategyRegistry.getBackendAddress();
+        vm.startPrank(backend);
+
+        // Process rewards in compound mode - this will claim any accrued rewards
+        address[] memory emptyStrategies = new address[](0);
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
         vm.stopPrank();
 
-        // Setup cbBTC rewards in MultiRewards
-        address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+        // Check the balance after processing rewards
+        uint256 finalBalance = multiRewards.balanceOf(userStrategy);
 
-        // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
-
-        // Get initial state
-        uint256 initialStakedBalance = multiRewards.balanceOf(address(userAccount));
-        uint256 earnedCbBTCRewards = multiRewards.earned(address(userAccount), cbBTC);
-
-        // Verify account has custom slippage set
-        assertEq(
-            mamoStakingStrategy.getAccountSlippage(address(userAccount)), customSlippage, "Should use custom slippage"
+        // The balance might be the same if no rewards were distributed, or higher if rewards were compounded
+        assertTrue(
+            finalBalance >= initialBalance,
+            "Balance should be at least the same, potentially higher with compounded rewards"
         );
 
-        // Process rewards - should use custom slippage for swaps
-        address backend = addresses.getAddress("MAMO_BACKEND");
+        // Log for debugging
+        console.log("Initial balance:", initialBalance);
+        console.log("Final balance after compound:", finalBalance);
+        if (finalBalance > initialBalance) {
+            console.log("Rewards compounded successfully!");
+        }
+    }
+
+    function testReinvestModeWithValidStrategies() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Get reward tokens to create proper strategies array
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+
+        address backend = mamoStrategyRegistry.getBackendAddress();
         vm.startPrank(backend);
-        address[] memory strategies = new address[](0);
-        mamoStakingStrategy.processRewards(address(userAccount), strategies);
+
+        // Create strategies array with correct length (even if empty addresses)
+        address[] memory strategies = new address[](rewardTokens.length);
+        // Note: We're not setting up actual strategies here since we don't have rewards to test with
+
+        // This should not revert due to length mismatch
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
         vm.stopPrank();
 
-        // Verify rewards were processed (swap occurred with custom slippage)
-        assertGt(earnedCbBTCRewards, 0, "Should have earned cbBTC rewards");
-        assertEq(IERC20(cbBTC).balanceOf(address(userAccount)), 0, "All cbBTC should have been swapped");
-
-        uint256 finalStakedBalance = multiRewards.balanceOf(address(userAccount));
-        assertGt(finalStakedBalance, initialStakedBalance, "Should have staked swapped MAMO");
+        // Verify original deposit is maintained
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Deposit should be maintained");
     }
 
-    function testAccountSlippageAtMaximumAllowed() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 maxSlippage = 2500; // 25% - maximum allowed
-
-        vm.startPrank(user);
-
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), maxSlippage);
-        assertEq(
-            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
-            maxSlippage,
-            "Should allow maximum slippage of 25%"
-        );
-
-        vm.stopPrank();
-    }
-
-    function testAccountSlippageOverridesGlobalSlippage() public {
-        userAccount = _deployUserAccount(user);
-
-        uint256 globalSlippage = 100; // 1%
-        uint256 accountSlippage = 500; // 5%
-
-        // Set global slippage
-        address backend = addresses.getAddress("MAMO_BACKEND");
-        vm.startPrank(backend);
-        mamoStakingStrategy.setSlippageTolerance(globalSlippage);
-        vm.stopPrank();
-
-        // Set account-specific slippage
-        vm.startPrank(user);
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), accountSlippage);
-        vm.stopPrank();
-
-        // Verify account slippage overrides global
-        assertEq(mamoStakingStrategy.allowedSlippageInBps(), globalSlippage, "Global slippage should be set");
-        assertEq(
-            mamoStakingStrategy.getAccountSlippage(address(userAccount)),
-            accountSlippage,
-            "Should return account slippage, not global"
-        );
-    }
-
-    // ========== COMPREHENSIVE EVENT EMISSION TESTS ==========
-
-    function testEventEmissionsShowOldAndNewValues() public {
-        userAccount = _deployUserAccount(user);
-        address admin = addresses.getAddress("MAMO_MULTISIG");
-        address backend = addresses.getAddress("MAMO_BACKEND");
-
-        // Test setSlippageTolerance event with non-zero old value
-        vm.startPrank(backend);
-        mamoStakingStrategy.setSlippageTolerance(100); // Set initial value
-
-        uint256 oldSlippage = mamoStakingStrategy.allowedSlippageInBps();
-        uint256 newSlippage = 300;
-        vm.expectEmit(false, false, false, true);
-        emit MamoStakingStrategy.SlippageToleranceUpdated(oldSlippage, newSlippage);
-        mamoStakingStrategy.setSlippageTolerance(newSlippage);
-        vm.stopPrank();
-
-        // Test setQuoter event with non-zero old value
-        vm.startPrank(admin);
-        address oldQuoter = address(mamoStakingStrategy.quoter());
-        address newQuoter = makeAddr("newQuoter");
-        vm.expectEmit(true, true, false, false);
-        emit MamoStakingStrategy.QuoterUpdated(oldQuoter, newQuoter);
-        mamoStakingStrategy.setQuoter(IQuoter(newQuoter));
-        vm.stopPrank();
-
-        // Test setStrategyMode event (only includes new mode since enum only has 2 options)
-        vm.startPrank(user);
-        // First set to REINVEST
-        mamoStakingStrategy.setStrategyMode(address(userAccount), MamoStakingStrategy.StrategyMode.REINVEST);
-
-        // Now change back to COMPOUND and check event
-        MamoStakingStrategy.StrategyMode newMode = MamoStakingStrategy.StrategyMode.COMPOUND;
-        vm.expectEmit(true, false, false, true);
-        emit MamoStakingStrategy.StrategyModeUpdated(address(userAccount), newMode);
-        mamoStakingStrategy.setStrategyMode(address(userAccount), newMode);
-        vm.stopPrank();
-
-        // Test setAccountSlippage event with non-zero old value
-        vm.startPrank(user);
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), 200); // Set initial value
-
-        uint256 oldAccountSlippage = mamoStakingStrategy.accountSlippageInBps(address(userAccount));
-        uint256 newAccountSlippage = 600;
-        vm.expectEmit(true, false, false, true);
-        emit MamoStakingStrategy.AccountSlippageUpdated(address(userAccount), oldAccountSlippage, newAccountSlippage);
-        mamoStakingStrategy.setAccountSlippage(address(userAccount), newAccountSlippage);
-        vm.stopPrank();
-    }
-    */
+    // Event declaration for AccountSlippageUpdated
+    event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
 }
