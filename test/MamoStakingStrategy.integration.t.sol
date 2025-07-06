@@ -758,11 +758,25 @@ contract MamoStakingStrategyIntegrationTest is Test {
         return cbBTCStrategy;
     }
 
-    // Helper function to simulate reward distribution (simplified for testing)
-    function _setupRewardsInMultiRewards(address rewardToken, uint256 amount) internal {
-        // Give reward tokens to the strategy contract to simulate earned rewards
-        // In real scenario, these would be earned through staking
-        deal(rewardToken, address(userStrategy), amount);
+    // Helper function to setup rewards in MultiRewards contract
+    function _setupRewardsInMultiRewards(address rewardToken, uint256 rewardAmount, uint256 duration) internal {
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+
+        // Add reward token to MultiRewards (as owner)
+        vm.startPrank(multiRewardsOwner);
+
+        // Check if reward token is already added by checking if rewardsDuration > 0
+        (, uint256 existingDuration,,,,) = multiRewards.rewardData(rewardToken);
+        if (existingDuration == 0) {
+            multiRewards.addReward(rewardToken, multiRewardsOwner, duration);
+        }
+
+        // Give reward tokens to the owner and notify reward amount
+        deal(rewardToken, multiRewardsOwner, rewardAmount);
+        IERC20(rewardToken).approve(address(multiRewards), rewardAmount);
+        multiRewards.notifyRewardAmount(rewardToken, rewardAmount);
+
+        vm.stopPrank();
     }
 
     // ========== REINVEST MODE TESTS ==========
@@ -780,19 +794,26 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup and deposit using helper function
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Simulate rewards being earned by giving tokens to the strategy
-        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount);
+        // Setup MAMO rewards in MultiRewards
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount, 7 days);
 
+        // Setup cbBTC rewards in MultiRewards
         address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount);
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
 
         // Get initial state
         uint256 initialStakedBalance = multiRewards.balanceOf(userStrategy);
-        uint256 initialCbBTCBalance = IERC20(cbBTC).balanceOf(userStrategy);
+        uint256 earnedMamoRewards = multiRewards.earned(userStrategy, address(mamoToken));
+        uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
 
-        // Verify rewards are available
-        assertEq(mamoToken.balanceOf(userStrategy), mamoRewardAmount, "Should have MAMO rewards");
-        assertEq(IERC20(cbBTC).balanceOf(userStrategy), cbBTCRewardAmount, "Should have cbBTC rewards");
+        // Get initial strategy token balances (mToken and Morpho vault shares)
+        address mToken = addresses.getAddress("MOONWELL_cbBTC");
+        address morphoVault = addresses.getAddress("cbBTC_METAMORPHO_VAULT");
+        uint256 initialMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
 
         // Process rewards as backend in reinvest mode
         address backend = mamoStrategyRegistry.getBackendAddress();
@@ -805,21 +826,31 @@ contract MamoStakingStrategyIntegrationTest is Test {
         MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
         vm.stopPrank();
 
+        // Verify both rewards were earned
+        assertGt(earnedMamoRewards, 0, "Should have earned some MAMO rewards");
+        assertGt(earnedCbBTCRewards, 0, "Should have earned some cbBTC rewards");
+
         // Verify MAMO was restaked in MultiRewards
         assertEq(
             multiRewards.balanceOf(userStrategy),
-            initialStakedBalance + mamoRewardAmount,
-            "Should have restaked MAMO rewards"
+            initialStakedBalance + earnedMamoRewards,
+            "Should have restaked all MAMO rewards"
         );
-
-        // Verify cbBTC was deposited to the cbBTC strategy
-        // The exact verification depends on the cbBTC strategy implementation
-        // For now, verify the strategy contract received the cbBTC
-        assertTrue(IERC20(cbBTC).balanceOf(cbBTCStrategy) > 0, "cbBTC strategy should have received tokens");
 
         // Verify the staking strategy has no remaining reward tokens
         assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy should have no remaining MAMO");
         assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Strategy should have no remaining cbBTC");
+
+        // Verify cbBTC was deposited to strategy by checking strategy token balances increased
+        // The strategy converts cbBTC to mTokens or deposits to Morpho vault
+        uint256 finalMTokenBalance = IERC20(mToken).balanceOf(cbBTCStrategy);
+        uint256 finalMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
+
+        bool strategyBalanceIncreased =
+            (finalMTokenBalance > initialMTokenBalance) || (finalMorphoBalance > initialMorphoBalance);
+        assertTrue(
+            strategyBalanceIncreased, "Strategy should have received deposited cbBTC (as mTokens or Morpho shares)"
+        );
     }
 
     function testProcessRewardsFailsWhenStrategyOwnershipMismatch() public {
@@ -837,9 +868,12 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup and deposit using helper function (user's staking strategy)
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Simulate cbBTC rewards
+        // Setup cbBTC rewards in MultiRewards
         address cbBTC = addresses.getAddress("cbBTC");
-        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount);
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
 
         // Process rewards as backend - this should fail because cbBTC strategy is owned by different user
         address backend = mamoStrategyRegistry.getBackendAddress();
