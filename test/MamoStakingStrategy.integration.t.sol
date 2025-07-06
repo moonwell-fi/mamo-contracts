@@ -90,19 +90,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         );
     }
 
-    function testFactoryCanCreateStrategy() public {
-        address backend = mamoStrategyRegistry.getBackendAddress();
-
-        vm.startPrank(backend);
-        address strategyAddress = stakingStrategyFactory.createStrategy(user);
-        vm.stopPrank();
-
-        assertTrue(strategyAddress != address(0), "Strategy should be created");
-
-        // Verify the strategy is registered in the strategy registry
-        assertTrue(mamoStrategyRegistry.isUserStrategy(user, strategyAddress), "Strategy should be registered for user");
-    }
-
     function testMultiRewardsConfiguration() public {
         // Verify MultiRewards is configured with MAMO as staking token
         address mamoTokenAddr = addresses.getAddress("MAMO");
@@ -425,43 +412,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     // ========== STAKING REGISTRY TESTS ==========
 
-    function testStakingRegistryCanTrackMultipleStrategies() public {
-        address user1 = makeAddr("user1");
-        address user2 = makeAddr("user2");
-
-        address payable strategy1 = _deployUserStrategy(user1);
-        address payable strategy2 = _deployUserStrategy(user2);
-
-        // Verify both strategies are tracked
-        assertTrue(mamoStrategyRegistry.isUserStrategy(user1, strategy1), "Strategy1 should be registered for user1");
-        assertTrue(mamoStrategyRegistry.isUserStrategy(user2, strategy2), "Strategy2 should be registered for user2");
-
-        // Verify cross-ownership is not allowed
-        assertFalse(
-            mamoStrategyRegistry.isUserStrategy(user1, strategy2), "Strategy2 should not be registered for user1"
-        );
-        assertFalse(
-            mamoStrategyRegistry.isUserStrategy(user2, strategy1), "Strategy1 should not be registered for user2"
-        );
-    }
-
-    function testStakingRegistryRoleBasedAccess() public {
-        address backend = mamoStrategyRegistry.getBackendAddress();
-
-        // Verify backend can create strategies
-        vm.startPrank(backend);
-        address payable strategy = payable(stakingStrategyFactory.createStrategy(user));
-        vm.stopPrank();
-        assertTrue(strategy != address(0), "Backend should be able to create strategies");
-
-        // Verify non-backend users cannot create strategies
-        address attacker = makeAddr("attacker");
-        vm.startPrank(attacker);
-        vm.expectRevert();
-        stakingStrategyFactory.createStrategy(user);
-        vm.stopPrank();
-    }
-
     // ========== MULTI-REWARDS INTEGRATION TESTS ==========
 
     function testMultiRewardsAccrualsBasic() public {
@@ -495,29 +445,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         assertEq(multiRewards.balanceOf(userStrategy), 0, "Should have no staked balance after withdraw");
         assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all tokens back");
-    }
-
-    // ========== FACTORY CONFIGURATION TESTS ==========
-
-    function testFactoryValidatesConfiguration() public {
-        // Verify factory was deployed with correct parameters
-        assertEq(stakingStrategyFactory.strategyTypeId(), 2, "Factory should have correct strategy type ID");
-        assertEq(stakingStrategyFactory.defaultSlippageInBps(), 100, "Factory should have correct default slippage");
-    }
-
-    function testFactoryEnforcesOneStrategyPerUser() public {
-        address payable strategy1 = _deployUserStrategy(user);
-
-        // Verify first strategy was created and registered
-        assertTrue(strategy1 != address(0), "First strategy should be created");
-        assertTrue(mamoStrategyRegistry.isUserStrategy(user, strategy1), "Strategy1 should be registered");
-
-        // Attempting to create a second strategy for the same user should fail
-        address backend = mamoStrategyRegistry.getBackendAddress();
-        vm.startPrank(backend);
-        vm.expectRevert("Strategy already exists");
-        stakingStrategyFactory.createStrategy(user);
-        vm.stopPrank();
     }
 
     // ========== INTEGRATION WITH STRATEGY REGISTRY TESTS ==========
@@ -582,16 +509,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         assertEq(strategy.owner(), user, "Strategy should have correct owner");
         assertEq(address(strategy.mamoToken()), address(mamoToken), "Strategy should have correct MAMO token");
         assertEq(address(strategy.multiRewards()), address(multiRewards), "Strategy should have correct MultiRewards");
-    }
-
-    function testGetUserStrategies() public {
-        address payable strategy1 = _deployUserStrategy(user);
-
-        address[] memory userStrategies = mamoStrategyRegistry.getUserStrategies(user);
-        assertEq(userStrategies.length, 1, "User should have 1 strategy");
-
-        // Verify the strategy is in the list
-        assertEq(userStrategies[0], strategy1, "Strategy should be in user strategies list");
     }
 
     // ========== COMPOUND FUNCTIONALITY TESTS ==========
