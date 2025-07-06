@@ -66,40 +66,24 @@ contract MamoStakingDeployment is MultisigProposal {
         address mamoToken = addresses.getAddress("MAMO");
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
         address quoter = addresses.getAddress("AERODROME_QUOTER");
+        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
 
-        vm.startPrank(deployer);
+        vm.startBroadcast(deployer);
 
-        // 1. Deploy MamoStakingRegistry
         mamoStakingRegistry = address(
-            new MamoStakingRegistry(admin, backend, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
+            new MamoStakingRegistry(admin, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
         );
-        addresses.addAddress("MAMO_STAKING_REGISTRY", mamoStakingRegistry, true);
 
-        // 2. Deploy MultiRewards contract
         bytes memory multiRewardsArgs = abi.encode(admin, mamoToken);
         multiRewards = vm.deployCode("MultiRewards.sol:MultiRewards", multiRewardsArgs);
-        addresses.addAddress("MAMO_MULTI_REWARDS", multiRewards, true);
 
-        // 3. Deploy MamoStakingStrategy implementation
         mamoStakingStrategy = address(new MamoStakingStrategy());
-        addresses.addAddress("MAMO_STAKING_STRATEGY", mamoStakingStrategy, true);
 
-        vm.stopPrank();
-
-        // 4. Whitelist the implementation in the MamoStrategyRegistry (requires admin)
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        vm.startPrank(admin);
-        MamoStrategyRegistry(mamoStrategyRegistry).whitelistImplementation(mamoStakingStrategy, STRATEGY_TYPE_ID);
-        vm.stopPrank();
-
-        // 5. Deploy MamoStakingStrategyFactory
-        // Use the same backend as the MamoStrategyRegistry for consistency
-        address strategyRegistryBackend = MamoStrategyRegistry(mamoStrategyRegistry).getBackendAddress();
-        vm.startPrank(deployer);
         mamoStakingStrategyFactory = address(
             new MamoStakingStrategyFactory(
+                admin,
                 mamoStrategyRegistry,
-                strategyRegistryBackend,
+                backend,
                 mamoStakingRegistry,
                 multiRewards,
                 mamoToken,
@@ -108,23 +92,33 @@ contract MamoStakingDeployment is MultisigProposal {
                 DEFAULT_SLIPPAGE_IN_BPS
             )
         );
+
+        address cbBTC = addresses.getAddress("cbBTC");
+        address cbBTCMamoPool = addresses.getAddress("cbBTC_MAMO_POOL");
+        MamoStakingRegistry(mamoStakingRegistry).addRewardToken(cbBTC, cbBTCMamoPool);
+
+        vm.stopBroadcast();
+
+        addresses.addAddress("MAMO_STAKING_STRATEGY", mamoStakingStrategy, true);
+        addresses.addAddress("MAMO_STAKING_REGISTRY", mamoStakingRegistry, true);
+        addresses.addAddress("MAMO_MULTI_REWARDS", multiRewards, true);
         addresses.addAddress("MAMO_STAKING_STRATEGY_FACTORY", mamoStakingStrategyFactory, true);
-        vm.stopPrank();
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
-        // Get the MamoStrategyRegistry contract
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-
-        // Get deployed contract addresses
         address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
 
-        // Grant BACKEND_ROLE to the MamoStakingStrategyFactory so it can register strategies
         registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
+        MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, STRATEGY_TYPE_ID);
 
-        // Grant BACKEND_ROLE to the MAMO_BACKEND for testing and management operations
-        address mamoBackend = addresses.getAddress("MAMO_BACKEND");
-        registry.grantRole(registry.BACKEND_ROLE(), mamoBackend);
+        address admin = addresses.getAddress("MAMO_MULTISIG");
+        address mamoBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address deployer = addresses.getAddress("DEPLOYER_EOA");
+        MamoStakingRegistry stakingRegistryContract = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));
+
+        stakingRegistryContract.grantRole(stakingRegistryContract.BACKEND_ROLE(), mamoBackend);
+        stakingRegistryContract.revokeRole(stakingRegistryContract.BACKEND_ROLE(), deployer);
     }
 
     function simulate() public override {
@@ -147,17 +141,6 @@ contract MamoStakingDeployment is MultisigProposal {
 
         console.log("Validating MAMO staking deployment...");
 
-        // 1. Validate that all contracts were deployed
-        assertTrue(addresses.isAddressSet("MAMO_STAKING_REGISTRY"), "MamoStakingRegistry should be deployed");
-        assertTrue(addresses.isAddressSet("MAMO_MULTI_REWARDS"), "MultiRewards should be deployed");
-        assertTrue(
-            addresses.isAddressSet("MAMO_STAKING_STRATEGY"), "MamoStakingStrategy implementation should be deployed"
-        );
-        assertTrue(
-            addresses.isAddressSet("MAMO_STAKING_STRATEGY_FACTORY"), "MamoStakingStrategyFactory should be deployed"
-        );
-
-        // 2. Validate MamoStakingRegistry configuration
         MamoStakingRegistry stakingRegistryContract = MamoStakingRegistry(stakingRegistry);
         assertEq(
             stakingRegistryContract.mamoToken(), expectedMamoToken, "MamoStakingRegistry should have correct MAMO token"
@@ -176,16 +159,17 @@ contract MamoStakingDeployment is MultisigProposal {
             "MamoStakingRegistry should have correct backend"
         );
 
-        // 3. Validate MamoStakingStrategyFactory configuration
         MamoStakingStrategyFactory factoryContract = MamoStakingStrategyFactory(stakingStrategyFactory);
         assertEq(
             factoryContract.mamoStrategyRegistry(),
             mamoStrategyRegistry,
             "Factory should have correct strategy registry"
         );
-        // Factory should use the same backend as the strategy registry
-        address expectedFactoryBackend = MamoStrategyRegistry(mamoStrategyRegistry).getBackendAddress();
-        assertEq(factoryContract.mamoBackend(), expectedFactoryBackend, "Factory should have correct backend");
+        address expectedFactoryBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        assertTrue(
+            factoryContract.hasRole(factoryContract.BACKEND_ROLE(), expectedFactoryBackend),
+            "Factory should have BACKEND_ROLE for expected backend"
+        );
         assertEq(factoryContract.stakingRegistry(), stakingRegistry, "Factory should have correct staking registry");
         assertEq(factoryContract.multiRewards(), multiRewardsAddr, "Factory should have correct MultiRewards address");
         assertEq(factoryContract.mamoToken(), expectedMamoToken, "Factory should have correct MAMO token");
@@ -201,7 +185,6 @@ contract MamoStakingDeployment is MultisigProposal {
             "Factory should have correct default slippage"
         );
 
-        // 4. Validate MamoStrategyRegistry configuration
         MamoStrategyRegistry registryContract = MamoStrategyRegistry(mamoStrategyRegistry);
         assertTrue(
             registryContract.whitelistedImplementations(stakingStrategyImpl),
@@ -222,12 +205,9 @@ contract MamoStakingDeployment is MultisigProposal {
             "Factory should have BACKEND_ROLE"
         );
 
-        // 5. Validate contract code existence
         assertTrue(stakingRegistry.code.length > 0, "MamoStakingRegistry should have code");
         assertTrue(multiRewardsAddr.code.length > 0, "MultiRewards should have code");
         assertTrue(stakingStrategyImpl.code.length > 0, "MamoStakingStrategy implementation should have code");
         assertTrue(stakingStrategyFactory.code.length > 0, "MamoStakingStrategyFactory should have code");
-
-        console.log("All validations passed successfully!");
     }
 }

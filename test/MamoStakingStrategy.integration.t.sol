@@ -18,6 +18,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
 
 contract MamoStakingStrategyIntegrationTest is Test {
@@ -26,6 +27,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
     MamoStakingStrategyFactory public stakingStrategyFactory;
     MamoStrategyRegistry public mamoStrategyRegistry;
     IMultiRewards public multiRewards;
+    StrategyFactory public cbBTCStrategyFactory;
 
     IERC20 public mamoToken;
     address public user;
@@ -60,6 +62,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         stakingStrategyFactory = MamoStakingStrategyFactory(addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"));
         multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
         stakingStrategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY");
+
+        // Get the cbBTC strategy factory for testing reward distribution
+        cbBTCStrategyFactory = StrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
 
         // Create test user
         user = makeAddr("testUser");
@@ -115,7 +120,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     // Helper function to deploy a strategy for a user
     function _deployUserStrategy(address userAddress) internal returns (address payable) {
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
         vm.startPrank(backend);
         address strategyAddress = stakingStrategyFactory.createStrategy(userAddress);
@@ -137,6 +142,50 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     // ========== DEPOSIT TESTS - HAPPY PATH ==========
+
+    function testRandomUserCanDepositOnBehalfOfOwner() public {
+        // Deploy strategy for user
+        userStrategy = _deployUserStrategy(user);
+
+        // Create a random depositor (different from the strategy owner)
+        address randomDepositor = makeAddr("randomDepositor");
+        uint256 depositAmount = 500 * 10 ** 18; // 500 MAMO tokens
+
+        // Give MAMO tokens to the random depositor
+        deal(address(mamoToken), randomDepositor, depositAmount);
+
+        // Random depositor approves the strategy to spend their MAMO tokens
+        vm.startPrank(randomDepositor);
+        mamoToken.approve(userStrategy, depositAmount);
+
+        // Random depositor deposits MAMO tokens into the user's strategy
+        MamoStakingStrategy(userStrategy).deposit(depositAmount);
+        vm.stopPrank();
+
+        // Verify that the random depositor's balance decreased
+        assertEq(mamoToken.balanceOf(randomDepositor), 0, "Random depositor MAMO balance should be 0 after deposit");
+
+        // Verify that the strategy owner didn't spend any tokens
+        assertEq(mamoToken.balanceOf(user), 0, "Strategy owner should not have spent any tokens");
+
+        // Verify that the tokens were staked in MultiRewards
+        assertEq(
+            multiRewards.balanceOf(userStrategy), depositAmount, "Strategy should have staking balance in MultiRewards"
+        );
+
+        // Verify that only the strategy owner can withdraw
+        vm.startPrank(randomDepositor);
+        vm.expectRevert();
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
+        vm.stopPrank();
+
+        // But the strategy owner can withdraw the deposited funds
+        vm.startPrank(user);
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
+        vm.stopPrank();
+
+        assertEq(mamoToken.balanceOf(user), depositAmount, "Strategy owner should receive the withdrawn tokens");
+    }
 
     function testUserCanDepositIntoStrategy() public {
         // Deploy strategy for user
@@ -176,6 +225,45 @@ contract MamoStakingStrategyIntegrationTest is Test {
     }
 
     // ========== DEPOSIT TESTS - UNHAPPY PATH ==========
+
+    function testDepositRevertsWhenMultiRewardsIsPaused() public {
+        // Deploy strategy for user
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        deal(address(mamoToken), user, depositAmount);
+
+        vm.startPrank(user);
+        mamoToken.approve(userStrategy, depositAmount);
+        vm.stopPrank();
+
+        // Pause MultiRewards contract using its owner (MAMO_MULTISIG)
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multiRewardsOwner);
+        multiRewards.setPaused(true);
+        vm.stopPrank();
+
+        // Attempt to deposit when MultiRewards is paused (should fail because stake() has notPaused modifier)
+        vm.startPrank(user);
+        vm.expectRevert("This action cannot be performed while the contract is paused");
+        MamoStakingStrategy(userStrategy).deposit(depositAmount);
+        vm.stopPrank();
+
+        // Verify that MultiRewards can be unpaused and deposits work again
+        vm.startPrank(multiRewardsOwner);
+        multiRewards.setPaused(false);
+        vm.stopPrank();
+
+        // Now deposit should work
+        vm.startPrank(user);
+        MamoStakingStrategy(userStrategy).deposit(depositAmount);
+        vm.stopPrank();
+
+        // Verify deposit was successful
+        assertEq(
+            multiRewards.balanceOf(userStrategy), depositAmount, "Strategy should have staking balance after unpause"
+        );
+    }
 
     function testDepositRevertsWhenAmountIsZero() public {
         userStrategy = _deployUserStrategy(user);
@@ -263,6 +351,30 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Verify partial withdraw was successful
         assertEq(multiRewards.balanceOf(userStrategy), remainingAmount, "Should have remaining staked balance");
         assertEq(mamoToken.balanceOf(user), withdrawAmount, "User should have received withdrawn MAMO tokens");
+    }
+
+    function testWithdrawSucceedsWhenMultiRewardsIsPaused() public {
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Pause MultiRewards contract
+        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multiRewardsOwner);
+        multiRewards.setPaused(true);
+        vm.stopPrank();
+
+        // Withdraw should succeed even when MultiRewards is paused (withdraw is not restricted by pause)
+        vm.startPrank(user);
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount);
+        vm.stopPrank();
+
+        // Verify withdraw was successful
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Should have no staked balance after withdraw");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
     }
 
     // ========== WITHDRAW TESTS - UNHAPPY PATH ==========
@@ -718,6 +830,114 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Verify original deposit is maintained
         assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Deposit should be maintained");
+    }
+
+    // Helper function to setup cbBTC strategy for a user
+    function _setupCbBTCStrategy(address userAddress) internal returns (address) {
+        // Create a cbBTC strategy for the user using the factory
+        // Check if the cbBTC factory has a different backend or use the user directly
+        address cbBTCBackend = addresses.getAddress("MAMO_BACKEND");
+
+        vm.startPrank(cbBTCBackend);
+        address cbBTCStrategy = cbBTCStrategyFactory.createStrategyForUser(userAddress);
+        vm.stopPrank();
+
+        return cbBTCStrategy;
+    }
+
+    // Helper function to simulate reward distribution (simplified for testing)
+    function _setupRewardsInMultiRewards(address rewardToken, uint256 amount) internal {
+        // Give reward tokens to the strategy contract to simulate earned rewards
+        // In real scenario, these would be earned through staking
+        deal(rewardToken, address(userStrategy), amount);
+    }
+
+    // ========== REINVEST MODE TESTS ==========
+
+    function testProcessRewardsReinvestModeWithCbBTCRewards() public {
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 mamoRewardAmount = 50 * 10 ** 18; // Add MAMO rewards
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC strategy for the same user
+        address cbBTCStrategy = _setupCbBTCStrategy(user);
+
+        // Setup and deposit using helper function
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Simulate rewards being earned by giving tokens to the strategy
+        _setupRewardsInMultiRewards(address(mamoToken), mamoRewardAmount);
+
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount);
+
+        // Get initial state
+        uint256 initialStakedBalance = multiRewards.balanceOf(userStrategy);
+        uint256 initialCbBTCBalance = IERC20(cbBTC).balanceOf(userStrategy);
+
+        // Verify rewards are available
+        assertEq(mamoToken.balanceOf(userStrategy), mamoRewardAmount, "Should have MAMO rewards");
+        assertEq(IERC20(cbBTC).balanceOf(userStrategy), cbBTCRewardAmount, "Should have cbBTC rewards");
+
+        // Process rewards as backend in reinvest mode
+        address backend = mamoStrategyRegistry.getBackendAddress();
+        vm.startPrank(backend);
+
+        // Create strategies array for reinvest mode (cbBTC strategy for cbBTC rewards)
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy;
+
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
+        vm.stopPrank();
+
+        // Verify MAMO was restaked in MultiRewards
+        assertEq(
+            multiRewards.balanceOf(userStrategy),
+            initialStakedBalance + mamoRewardAmount,
+            "Should have restaked MAMO rewards"
+        );
+
+        // Verify cbBTC was deposited to the cbBTC strategy
+        // The exact verification depends on the cbBTC strategy implementation
+        // For now, verify the strategy contract received the cbBTC
+        assertTrue(IERC20(cbBTC).balanceOf(cbBTCStrategy) > 0, "cbBTC strategy should have received tokens");
+
+        // Verify the staking strategy has no remaining reward tokens
+        assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy should have no remaining MAMO");
+        assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Strategy should have no remaining cbBTC");
+    }
+
+    function testProcessRewardsFailsWhenStrategyOwnershipMismatch() public {
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Create another user who will own the cbBTC strategy
+        address otherUser = makeAddr("otherUser");
+
+        // Setup cbBTC strategy owned by different user
+        address cbBTCStrategy = _setupCbBTCStrategy(otherUser);
+
+        // Setup and deposit using helper function (user's staking strategy)
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Simulate cbBTC rewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount);
+
+        // Process rewards as backend - this should fail because cbBTC strategy is owned by different user
+        address backend = mamoStrategyRegistry.getBackendAddress();
+        vm.startPrank(backend);
+
+        address[] memory strategies = new address[](1);
+        strategies[0] = cbBTCStrategy;
+
+        vm.expectRevert("Strategy owner mismatch");
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
+        vm.stopPrank();
     }
 
     // Event declaration for AccountSlippageUpdated

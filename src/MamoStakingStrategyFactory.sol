@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {ERC1967Proxy} from "./ERC1967Proxy.sol";
 import {MamoStakingStrategy} from "./MamoStakingStrategy.sol";
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 
 /**
@@ -11,13 +12,15 @@ import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
  * @notice Factory contract for creating new MamoStakingStrategy instances
  * @dev Creates proxies pointing to the MamoStakingStrategy implementation
  */
-contract MamoStakingStrategyFactory {
+contract MamoStakingStrategyFactory is AccessControl {
     /// @notice The maximum allowed slippage in basis points
     uint256 public constant MAX_SLIPPAGE_IN_BPS = 2500; // 25% in basis points
 
+    /// @notice Backend role for strategy creation operations
+    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
+
     // Strategy parameters
     address public immutable mamoStrategyRegistry;
-    address public immutable mamoBackend;
     address public immutable stakingRegistry;
     address public immutable multiRewards;
     address public immutable mamoToken;
@@ -33,8 +36,9 @@ contract MamoStakingStrategyFactory {
 
     /**
      * @notice Constructor that initializes the factory with all required parameters
+     * @param _admin Address to grant the DEFAULT_ADMIN_ROLE to
      * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract
-     * @param _mamoBackend Address of the Mamo backend
+     * @param _mamoBackend Address of the Mamo backend (will be granted BACKEND_ROLE)
      * @param _stakingRegistry Address of the MamoStakingRegistry
      * @param _multiRewards Address of the MultiRewards contract
      * @param _mamoToken Address of the MAMO token
@@ -43,6 +47,7 @@ contract MamoStakingStrategyFactory {
      * @param _defaultSlippageInBps The default slippage in basis points
      */
     constructor(
+        address _admin,
         address _mamoStrategyRegistry,
         address _mamoBackend,
         address _stakingRegistry,
@@ -52,6 +57,7 @@ contract MamoStakingStrategyFactory {
         uint256 _strategyTypeId,
         uint256 _defaultSlippageInBps
     ) {
+        require(_admin != address(0), "Invalid admin address");
         require(_mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(_mamoBackend != address(0), "Invalid mamoBackend address");
         require(_stakingRegistry != address(0), "Invalid stakingRegistry address");
@@ -61,8 +67,11 @@ contract MamoStakingStrategyFactory {
         require(_strategyTypeId != 0, "Strategy type id not set");
         require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
 
+        // Set up roles
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        _grantRole(BACKEND_ROLE, _mamoBackend);
+
         mamoStrategyRegistry = _mamoStrategyRegistry;
-        mamoBackend = _mamoBackend;
         stakingRegistry = _stakingRegistry;
         multiRewards = _multiRewards;
         mamoToken = _mamoToken;
@@ -72,12 +81,6 @@ contract MamoStakingStrategyFactory {
 
         // Initialize the MamoStrategyRegistry reference
         mamoStrategyRegistryInterface = IMamoStrategyRegistry(_mamoStrategyRegistry);
-
-        // Validate that the implementation is whitelisted
-        require(
-            mamoStrategyRegistryInterface.whitelistedImplementations(_strategyImplementation),
-            "Implementation not whitelisted"
-        );
     }
 
     /**
@@ -112,7 +115,7 @@ contract MamoStakingStrategyFactory {
      */
     function createStrategyForUser(address user) public returns (address strategy) {
         require(user != address(0), "Invalid user address");
-        require(msg.sender == mamoBackend || msg.sender == user, "Only backend or user can create strategy");
+        require(hasRole(BACKEND_ROLE, msg.sender) || msg.sender == user, "Only backend or user can create strategy");
 
         // Check if strategy already exists (only check by user, not slippage)
         require(!strategyExists(user), "Strategy already exists");

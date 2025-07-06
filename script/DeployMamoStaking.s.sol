@@ -62,7 +62,9 @@ contract DeployMamoStaking is Script {
 
         vm.startBroadcast(deployer);
         // Deploy the MamoStakingStrategyFactory
+        address admin = addresses.getAddress("MAMO_MULTISIG");
         MamoStakingStrategyFactory factory = new MamoStakingStrategyFactory(
+            admin,
             mamoStrategyRegistry,
             mamoBackend,
             stakingRegistry,
