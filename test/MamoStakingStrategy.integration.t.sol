@@ -1034,6 +1034,45 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    function testProcessRewardsFailsWhenStrategyNotRegistered() public {
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC strategy owned by the same user but not in registry
+        address cbBTCStrategy = _setupCbBTCStrategy(user);
+
+        // Test with a fake address that simulates an unregistered strategy
+        // We'll create a simple contract that pretends to be a strategy but isn't registered
+        address fakeStrategy = makeAddr("fakeStrategy");
+
+        // Mock the strategy to return the correct owner and token
+        vm.mockCall(fakeStrategy, abi.encodeWithSignature("owner()"), abi.encode(user));
+        vm.mockCall(fakeStrategy, abi.encodeWithSignature("token()"), abi.encode(addresses.getAddress("cbBTC")));
+
+        // Setup and deposit using helper function (user's staking strategy)
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Process rewards as backend - this should fail because strategy is not registered
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        vm.startPrank(stakingBackend);
+
+        address[] memory strategies = new address[](1);
+        strategies[0] = fakeStrategy;
+
+        vm.expectRevert("Strategy not registered");
+        MamoStakingStrategy(userStrategy).reinvest(strategies);
+        vm.stopPrank();
+    }
+
     // Event declarations
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event Withdrawn(uint256 amount);

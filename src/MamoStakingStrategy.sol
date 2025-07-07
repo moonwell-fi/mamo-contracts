@@ -255,6 +255,9 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             address strategyOwner = Ownable(strategyAddress).owner();
             require(owner() == strategyOwner, "Strategy owner mismatch");
 
+            // Validate strategy is whitelisted in the registry
+            require(mamoStrategyRegistry.isUserStrategy(owner(), strategyAddress), "Strategy not registered");
+
             // Validate strategy token - strategy must handle the same token as the reward token
             IERC20MoonwellMorphoStrategy strategy = IERC20MoonwellMorphoStrategy(strategyAddress);
             require(address(strategy.token()) == address(rewardToken), "Strategy token mismatch");
