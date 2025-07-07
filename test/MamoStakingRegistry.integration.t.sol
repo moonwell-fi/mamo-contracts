@@ -6,7 +6,7 @@ import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
-import {MockPool} from "@test/mocks/MockPool.sol";
+import {MockPool} from "./mocks/MockPool.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
