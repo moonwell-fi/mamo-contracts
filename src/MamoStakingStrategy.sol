@@ -42,8 +42,8 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
 
     event Deposited(address indexed depositor, uint256 amount);
     event Withdrawn(uint256 amount);
-    event RewardTokenCompounded(address indexed rewardToken, uint256 amount);
-    event RewardTokenReinvested(address indexed rewardToken, uint256 amount);
+    event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
+    event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
@@ -213,10 +213,10 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
                 sqrtPriceLimitX96: 0 // No price limit
             });
 
-            // Execute swap
-            dexRouter.exactInputSingle(swapParams);
+            // Execute swap and capture actual amount out
+            uint256 actualAmountOut = dexRouter.exactInputSingle(swapParams);
 
-            emit RewardTokenCompounded(address(rewardToken), rewardBalance);
+            emit CompoundRewardTokenProcessed(address(rewardToken), rewardBalance, actualAmountOut);
         }
 
         // Stake all MAMO
@@ -263,7 +263,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             rewardToken.forceApprove(strategyAddress, rewardBalance);
             strategy.deposit(rewardBalance);
 
-            emit RewardTokenReinvested(address(rewardToken), rewardBalance);
+            emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
         }
 
         emit Reinvested(mamoBalance);

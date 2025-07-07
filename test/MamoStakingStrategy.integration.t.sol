@@ -764,6 +764,134 @@ contract MamoStakingStrategyIntegrationTest is Test {
         }
     }
 
+    function testCompoundModeEmitsCorrectEvents() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Setup cbBTC rewards in MultiRewards to have actual rewards to compound
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Verify we have some rewards to compound
+        uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
+        if (earnedCbBTCRewards > 0) {
+            address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+            vm.startPrank(backend);
+
+            // Expect the new CompoundRewardTokenProcessed event with amountIn and amountOut
+            vm.expectEmit(true, false, false, false);
+            emit CompoundRewardTokenProcessed(cbBTC, 0, 0); // amounts will be checked separately
+
+            MamoStakingStrategy(userStrategy).compound();
+            vm.stopPrank();
+        }
+    }
+
+    function testReinvestModeEmitsCorrectEvents() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+
+        // Setup cbBTC strategy for the same user
+        address cbBTCStrategy = _setupCbBTCStrategy(user);
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue rewards
+        vm.warp(block.timestamp + 1 days);
+
+        // Verify we have some rewards to reinvest
+        uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
+        if (earnedCbBTCRewards > 0) {
+            address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+            vm.startPrank(backend);
+
+            // Get reward tokens to create strategies array
+            MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+            address[] memory strategies = new address[](rewardTokens.length);
+
+            // Find cbBTC index and set the strategy
+            for (uint256 i = 0; i < rewardTokens.length; i++) {
+                if (rewardTokens[i].token == cbBTC) {
+                    strategies[i] = cbBTCStrategy;
+                    break;
+                }
+            }
+
+            // Expect the new ReinvestRewardTokenProcessed event (only amountIn, no amountOut)
+            vm.expectEmit(true, false, false, false);
+            emit ReinvestRewardTokenProcessed(cbBTC, 0); // amount will be checked separately
+
+            MamoStakingStrategy(userStrategy).reinvest(strategies);
+            vm.stopPrank();
+        }
+    }
+
+    function testEventParametersAreAccurate() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+        uint256 cbBTCRewardAmount = 5 * 10 ** 8; // Larger amount for better testing
+
+        // Setup and deposit
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Setup cbBTC rewards in MultiRewards
+        address cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
+
+        // Fast forward time to accrue substantial rewards
+        vm.warp(block.timestamp + 2 days);
+
+        uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
+
+        if (earnedCbBTCRewards > 1000) {
+            // Only test if we have meaningful rewards
+            address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+            vm.startPrank(backend);
+
+            // Record events manually to verify parameters
+            vm.recordLogs();
+
+            MamoStakingStrategy(userStrategy).compound();
+
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+
+            // Find CompoundRewardTokenProcessed event
+            bool foundEvent = false;
+            for (uint256 i = 0; i < logs.length; i++) {
+                if (logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")) {
+                    foundEvent = true;
+
+                    // Decode event data
+                    address eventRewardToken = address(uint160(uint256(logs[i].topics[1])));
+                    (uint256 amountIn, uint256 amountOut) = abi.decode(logs[i].data, (uint256, uint256));
+
+                    // Verify event parameters
+                    assertEq(eventRewardToken, cbBTC, "Event should emit correct reward token");
+                    assertTrue(amountIn > 0, "Event should emit non-zero amountIn");
+                    assertTrue(amountOut > 0, "Event should emit non-zero amountOut");
+
+                    break;
+                }
+            }
+
+            assertTrue(foundEvent, "CompoundRewardTokenProcessed event should be emitted");
+            vm.stopPrank();
+        }
+    }
+
     // Helper function to setup cbBTC strategy for a user
     function _setupCbBTCStrategy(address userAddress) internal returns (address) {
         // Create a cbBTC strategy for the user using the factory
@@ -909,4 +1037,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
     // Event declarations
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event Withdrawn(uint256 amount);
+    event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
+    event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
 }
