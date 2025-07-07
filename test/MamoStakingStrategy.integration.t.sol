@@ -572,11 +572,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
-        // Create empty strategies array since we're in compound mode
-        address[] memory emptyStrategies = new address[](0);
-
         // Should not revert even with no rewards
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
 
         // Verify the original deposit is still there
@@ -594,8 +591,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         // Process rewards with COMPOUND mode explicitly
-        address[] memory emptyStrategies = new address[](0);
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
 
         // Verify deposit is maintained
@@ -621,9 +617,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
             // Should revert with strategies length mismatch
             vm.expectRevert("Strategies length mismatch");
-            MamoStakingStrategy(userStrategy).processRewards(
-                MamoStakingStrategy.StrategyMode.REINVEST, insufficientStrategies
-            );
+            MamoStakingStrategy(userStrategy).reinvest(insufficientStrategies);
         }
         vm.stopPrank();
     }
@@ -699,7 +693,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address[] memory strategies = new address[](registryRewardTokens.length);
 
         // This should not revert, indicating strategy correctly uses registry for reward tokens
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
+        MamoStakingStrategy(userStrategy).reinvest(strategies);
         vm.stopPrank();
 
         // Verify original deposit is maintained
@@ -710,24 +704,22 @@ contract MamoStakingStrategyIntegrationTest is Test {
         userStrategy = _deployUserStrategy(user);
         address attacker = makeAddr("attacker");
 
-        address[] memory emptyStrategies = new address[](0);
-
         // Attempt to process rewards as non-backend
         vm.startPrank(attacker);
         vm.expectRevert("Not backend");
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
 
         // Attempt to process rewards as owner (should also fail)
         vm.startPrank(user);
         vm.expectRevert("Not backend");
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
 
         // Should work as backend
         address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
     }
 
@@ -752,8 +744,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(backend);
 
         // Process rewards in compound mode - this will claim any accrued rewards
-        address[] memory emptyStrategies = new address[](0);
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
+        MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
 
         // Check the balance after processing rewards
@@ -851,7 +842,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         address[] memory strategies = new address[](1);
         strategies[0] = cbBTCStrategy;
 
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
+        MamoStakingStrategy(userStrategy).reinvest(strategies);
         vm.stopPrank();
 
         // Verify both rewards were earned
@@ -911,7 +902,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         strategies[0] = cbBTCStrategy;
 
         vm.expectRevert("Strategy owner mismatch");
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
+        MamoStakingStrategy(userStrategy).reinvest(strategies);
         vm.stopPrank();
     }
 

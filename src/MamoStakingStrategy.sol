@@ -40,16 +40,10 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     /// @notice The user's allowed slippage in basis points
     uint256 public accountSlippageInBps;
 
-    /// @notice Strategy mode enum
-    enum StrategyMode {
-        COMPOUND, // Convert reward tokens to MAMO and restake everything
-        REINVEST // Restake MAMO, deposit other rewards to ERC20Strategy
-
-    }
-
     event Deposited(address indexed depositor, uint256 amount);
     event Withdrawn(uint256 amount);
-    event RewardTokenProcessed(address indexed rewardToken, uint256 amount, StrategyMode mode);
+    event RewardTokenCompounded(address indexed rewardToken, uint256 amount);
+    event RewardTokenReinvested(address indexed rewardToken, uint256 amount);
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
@@ -167,38 +161,12 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Process rewards according to the specified compound mode
-     * @param mode The strategy mode to use for processing rewards
-     * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order, only needed for REINVEST mode)
-     * @dev We trust the backend to provide the correct user-owned strategies for each reward token
+     * @notice Compound all available rewards by converting them to MAMO and restaking
+     * @dev Claims rewards and then compounds them. Can be called independently.
      */
-    function processRewards(StrategyMode mode, address[] calldata rewardStrategies) external onlyBackend {
+    function compound() external onlyBackend {
         multiRewards.getReward();
 
-        if (mode == StrategyMode.COMPOUND) {
-            _compound();
-        } else {
-            MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
-            require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
-            _reinvest(rewardStrategies);
-        }
-    }
-
-    /**
-     * @notice Internal function to stake MAMO tokens in MultiRewards
-     * @param amount The amount of MAMO to stake
-     */
-    function _stakeMamo(uint256 amount) internal {
-        if (amount == 0) return;
-
-        mamoToken.forceApprove(address(multiRewards), amount);
-        multiRewards.stake(amount);
-    }
-
-    /**
-     * @notice Internal function to compound rewards by converting all rewards to MAMO and restaking
-     */
-    function _compound() internal {
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
         ISwapRouter dexRouter = stakingRegistry.dexRouter();
         IQuoter quoter = stakingRegistry.quoter();
@@ -248,7 +216,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             // Execute swap
             dexRouter.exactInputSingle(swapParams);
 
-            emit RewardTokenProcessed(address(rewardToken), rewardBalance, StrategyMode.COMPOUND);
+            emit RewardTokenCompounded(address(rewardToken), rewardBalance);
         }
 
         // Stake all MAMO
@@ -259,11 +227,16 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Internal function to reinvest rewards by staking MAMO and depositing other rewards to Morpho strategy
-     * @param rewardStrategies Array of strategy addresses for each reward token
+     * @notice Reinvest rewards by staking MAMO and depositing other rewards to ERC20 strategies
+     * @param rewardStrategies Array of strategy addresses for each reward token (must match rewardTokens order)
+     * @dev Claims rewards and then reinvests them. We trust the backend to provide correct user-owned strategies.
      */
-    function _reinvest(address[] calldata rewardStrategies) internal {
+    function reinvest(address[] calldata rewardStrategies) external onlyBackend {
+        multiRewards.getReward();
+
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+        require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
+
         uint256 mamoBalance = mamoToken.balanceOf(address(this));
 
         // Stake MAMO
@@ -290,9 +263,20 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             rewardToken.forceApprove(strategyAddress, rewardBalance);
             strategy.deposit(rewardBalance);
 
-            emit RewardTokenProcessed(address(rewardToken), rewardBalance, StrategyMode.REINVEST);
+            emit RewardTokenReinvested(address(rewardToken), rewardBalance);
         }
 
         emit Reinvested(mamoBalance);
+    }
+
+    /**
+     * @notice Internal function to stake MAMO tokens in MultiRewards
+     * @param amount The amount of MAMO to stake
+     */
+    function _stakeMamo(uint256 amount) internal {
+        if (amount == 0) return;
+
+        mamoToken.forceApprove(address(multiRewards), amount);
+        multiRewards.stake(amount);
     }
 }
