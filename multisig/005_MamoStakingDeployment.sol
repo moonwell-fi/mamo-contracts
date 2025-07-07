@@ -139,8 +139,6 @@ contract MamoStakingDeployment is MultisigProposal {
         address expectedBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
         address expectedMamoToken = addresses.getAddress("MAMO");
 
-        console.log("Validating MAMO staking deployment...");
-
         MamoStakingRegistry stakingRegistryContract = MamoStakingRegistry(stakingRegistry);
         assertEq(
             stakingRegistryContract.mamoToken(), expectedMamoToken, "MamoStakingRegistry should have correct MAMO token"

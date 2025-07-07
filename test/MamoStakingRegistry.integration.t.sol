@@ -170,16 +170,15 @@ contract MamoStakingRegistryIntegrationTest is Test {
         stakingRegistry.addRewardToken(rewardToken1, pool1);
         vm.stopPrank();
 
-        // Update its pool
-        address newPool = makeAddr("newPool");
+        // Update its pool to pool2 (which is a real contract)
         vm.startPrank(backend);
         vm.expectEmit(true, true, true, true);
-        emit RewardTokenPoolUpdated(rewardToken1, pool1, newPool);
-        stakingRegistry.updateRewardTokenPool(rewardToken1, newPool);
+        emit RewardTokenPoolUpdated(rewardToken1, pool1, pool2);
+        stakingRegistry.updateRewardTokenPool(rewardToken1, pool2);
         vm.stopPrank();
 
         // Verify update
-        assertEq(stakingRegistry.getRewardTokenPool(rewardToken1), newPool, "Pool should be updated");
+        assertEq(stakingRegistry.getRewardTokenPool(rewardToken1), pool2, "Pool should be updated");
     }
 
     // ========== REWARD TOKEN MANAGEMENT TESTS - UNHAPPY PATH ==========
