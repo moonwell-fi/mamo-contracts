@@ -6,6 +6,7 @@ import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
+import {MockPool} from "@test/mocks/MockPool.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
@@ -58,11 +59,15 @@ contract MamoStakingRegistryIntegrationTest is Test {
         guardian = addresses.getAddress("MAMO_MULTISIG"); // Same as admin
         mamoToken = addresses.getAddress("MAMO");
 
-        // Create test addresses for additional reward tokens
-        rewardToken1 = makeAddr("rewardToken1");
-        rewardToken2 = makeAddr("rewardToken2");
-        pool1 = makeAddr("pool1");
-        pool2 = makeAddr("pool2");
+        // Create mock contracts for testing
+        rewardToken1 = addresses.getAddress("USDC"); // Use real token contract
+        rewardToken2 = addresses.getAddress("WETH"); // Use real token contract
+
+        // Deploy mock pool contracts
+        MockPool mockPool1 = new MockPool(rewardToken1, mamoToken);
+        MockPool mockPool2 = new MockPool(rewardToken2, mamoToken);
+        pool1 = address(mockPool1);
+        pool2 = address(mockPool2);
     }
 
     // ========== DEPLOYMENT TESTS ==========
@@ -282,6 +287,67 @@ contract MamoStakingRegistryIntegrationTest is Test {
 
         vm.expectRevert("Pool cannot be same as token");
         stakingRegistry.updateRewardTokenPool(rewardToken1, rewardToken1);
+        vm.stopPrank();
+    }
+
+    function testUpdateRewardTokenPoolRevertsWhenPoolIsMAMOToken() public {
+        // Add token first
+        vm.startPrank(backend);
+        stakingRegistry.addRewardToken(rewardToken1, pool1);
+
+        vm.expectRevert("Pool cannot be MAMO token");
+        stakingRegistry.updateRewardTokenPool(rewardToken1, mamoToken);
+        vm.stopPrank();
+    }
+
+    function testUpdateRewardTokenPoolRevertsWhenPoolAlreadySet() public {
+        // Add token first
+        vm.startPrank(backend);
+        stakingRegistry.addRewardToken(rewardToken1, pool1);
+
+        vm.expectRevert("Pool already set");
+        stakingRegistry.updateRewardTokenPool(rewardToken1, pool1);
+        vm.stopPrank();
+    }
+
+    function testUpdateRewardTokenPoolRevertsWhenPoolNotContract() public {
+        // Use cbBTC which is already added during deployment
+        address realToken = addresses.getAddress("cbBTC");
+
+        // Try to update to an EOA (non-contract)
+        address eoaAddress = makeAddr("eoaAddress");
+        vm.startPrank(backend);
+        vm.expectRevert("Pool must be a contract");
+        stakingRegistry.updateRewardTokenPool(realToken, eoaAddress);
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenPoolIsMAMOToken() public {
+        vm.startPrank(backend);
+        vm.expectRevert("Pool cannot be MAMO token");
+        stakingRegistry.addRewardToken(rewardToken1, mamoToken);
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenTokenNotContract() public {
+        // Try to add an EOA as token
+        address eoaToken = makeAddr("eoaToken");
+        address realPool = addresses.getAddress("cbBTC");
+
+        vm.startPrank(backend);
+        vm.expectRevert("Token must be a contract");
+        stakingRegistry.addRewardToken(eoaToken, realPool);
+        vm.stopPrank();
+    }
+
+    function testAddRewardTokenRevertsWhenPoolNotContract() public {
+        // Try to add an EOA as pool - use WETH since cbBTC is already added in deployment
+        address realToken = addresses.getAddress("WETH");
+        address eoaPool = makeAddr("eoaPool");
+
+        vm.startPrank(backend);
+        vm.expectRevert("Pool must be a contract");
+        stakingRegistry.addRewardToken(realToken, eoaPool);
         vm.stopPrank();
     }
 

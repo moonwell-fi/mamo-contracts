@@ -105,6 +105,21 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         require(!isRewardToken[token], "Token already added");
         require(token != mamoToken, "Cannot add MAMO token as reward");
         require(pool != token, "Pool cannot be same as token");
+        require(pool != mamoToken, "Pool cannot be MAMO token");
+
+        // Validate that the token address is a contract
+        uint256 tokenCodeSize;
+        assembly {
+            tokenCodeSize := extcodesize(token)
+        }
+        require(tokenCodeSize > 0, "Token must be a contract");
+
+        // Validate that the pool address is a contract
+        uint256 poolCodeSize;
+        assembly {
+            poolCodeSize := extcodesize(pool)
+        }
+        require(poolCodeSize > 0, "Pool must be a contract");
 
         rewardTokenToIndex[token] = rewardTokens.length;
         rewardTokens.push(RewardToken({token: token, pool: pool}));
@@ -147,9 +162,19 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         require(isRewardToken[token], "Token not found");
         require(newPool != address(0), "Invalid pool");
         require(newPool != token, "Pool cannot be same as token");
+        require(newPool != mamoToken, "Pool cannot be MAMO token");
 
         uint256 index = rewardTokenToIndex[token];
         address oldPool = rewardTokens[index].pool;
+        require(newPool != oldPool, "Pool already set");
+
+        // Validate that the new pool address is a contract
+        uint256 codeSize;
+        assembly {
+            codeSize := extcodesize(newPool)
+        }
+        require(codeSize > 0, "Pool must be a contract");
+
         rewardTokens[index].pool = newPool;
 
         emit RewardTokenPoolUpdated(token, oldPool, newPool);
