@@ -106,6 +106,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      */
     function setAccountSlippage(uint256 slippageInBps) external onlyOwner {
         require(slippageInBps <= stakingRegistry.MAX_SLIPPAGE_IN_BPS(), "Slippage too high");
+
         emit AccountSlippageUpdated(accountSlippageInBps, slippageInBps);
         accountSlippageInBps = slippageInBps;
     }
@@ -147,6 +148,22 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         mamoToken.safeTransfer(msg.sender, amount);
 
         emit Withdrawn(amount);
+    }
+
+    /**
+     * @notice Withdraw all staked MAMO tokens from MultiRewards
+     */
+    function withdrawAll() external onlyOwner {
+        uint256 stakedBalance = multiRewards.balanceOf(address(this));
+        require(stakedBalance > 0, "No tokens to withdraw");
+
+        // Withdraw all from MultiRewards
+        multiRewards.withdraw(stakedBalance);
+
+        // Transfer all withdrawn MAMO to owner
+        mamoToken.safeTransfer(msg.sender, stakedBalance);
+
+        emit Withdrawn(stakedBalance);
     }
 
     /**

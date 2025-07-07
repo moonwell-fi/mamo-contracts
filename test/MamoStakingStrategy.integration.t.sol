@@ -499,6 +499,54 @@ contract MamoStakingStrategyIntegrationTest is Test {
         assertEq(mamoToken.balanceOf(user), depositAmount, "User should receive exact amount");
     }
 
+    function testWithdrawAllWorks() public {
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Verify initial state
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Should have staked balance");
+        assertEq(mamoToken.balanceOf(user), 0, "User should have no MAMO after deposit");
+
+        // Withdraw all using withdrawAll function
+        vm.startPrank(user);
+        vm.expectEmit(true, false, false, true);
+        emit Withdrawn(depositAmount);
+        MamoStakingStrategy(userStrategy).withdrawAll();
+        vm.stopPrank();
+
+        // Verify withdraw all was successful
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Should have no staked balance after withdrawAll");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "User should have received all MAMO tokens back");
+    }
+
+    function testWithdrawAllRevertsWhenNoTokensToWithdraw() public {
+        userStrategy = _deployUserStrategy(user);
+
+        // Attempt to withdrawAll when no tokens are staked
+        vm.startPrank(user);
+        vm.expectRevert("No tokens to withdraw");
+        MamoStakingStrategy(userStrategy).withdrawAll();
+        vm.stopPrank();
+    }
+
+    function testWithdrawAllRevertsWhenNotOwner() public {
+        userStrategy = _deployUserStrategy(user);
+
+        uint256 depositAmount = 1000 * 10 ** 18;
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        // Create another user who is not the strategy owner
+        address attacker = makeAddr("attacker");
+
+        // Attempt to withdrawAll as non-owner
+        vm.startPrank(attacker);
+        vm.expectRevert();
+        MamoStakingStrategy(userStrategy).withdrawAll();
+        vm.stopPrank();
+    }
+
     // ========== VIEW FUNCTION TESTS ==========
 
     function testStrategyViewFunctions() public {
@@ -867,6 +915,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
     }
 
-    // Event declaration for AccountSlippageUpdated
+    // Event declarations
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
+    event Withdrawn(uint256 amount);
 }
