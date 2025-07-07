@@ -76,7 +76,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
      */
     modifier onlyBackend() {
-        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        require(stakingRegistry.hasRole(stakingRegistry.BACKEND_ROLE(), msg.sender), "Not backend");
         _;
     }
 
@@ -108,6 +108,14 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         require(slippageInBps <= stakingRegistry.MAX_SLIPPAGE_IN_BPS(), "Slippage too high");
         emit AccountSlippageUpdated(accountSlippageInBps, slippageInBps);
         accountSlippageInBps = slippageInBps;
+    }
+
+    /**
+     * @notice Get the slippage tolerance for this strategy
+     * @return The slippage tolerance in basis points (falls back to global if not set)
+     */
+    function getAccountSlippage() public view returns (uint256) {
+        return accountSlippageInBps > 0 ? accountSlippageInBps : stakingRegistry.defaultSlippageInBps();
     }
 
     /**
@@ -148,7 +156,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      * @dev We trust the backend to provide the correct user-owned strategies for each reward token
      */
     function processRewards(StrategyMode mode, address[] calldata rewardStrategies) external onlyBackend {
-        _claimRewards();
+        multiRewards.getReward();
 
         if (mode == StrategyMode.COMPOUND) {
             _compound();
@@ -157,13 +165,6 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
             _reinvest(rewardStrategies);
         }
-    }
-
-    /**
-     * @notice Internal function to claim rewards from MultiRewards contract
-     */
-    function _claimRewards() internal {
-        multiRewards.getReward();
     }
 
     /**
@@ -254,10 +255,11 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
-            address strategyAddress = rewardStrategies[i];
             uint256 rewardBalance = rewardToken.balanceOf(address(this));
 
             if (rewardBalance == 0) continue;
+
+            address strategyAddress = rewardStrategies[i];
 
             // Validate strategy ownership - strategy must be owned by the same user as this strategy
             address strategyOwner = Ownable(strategyAddress).owner();
@@ -275,21 +277,5 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         }
 
         emit Reinvested(mamoBalance);
-    }
-
-    /**
-     * @notice Get all reward tokens from the registry
-     * @return Array of RewardToken structs
-     */
-    function getRewardTokens() external view returns (MamoStakingRegistry.RewardToken[] memory) {
-        return stakingRegistry.getRewardTokens();
-    }
-
-    /**
-     * @notice Get the slippage tolerance for this strategy
-     * @return The slippage tolerance in basis points (falls back to global if not set)
-     */
-    function getAccountSlippage() public view returns (uint256) {
-        return accountSlippageInBps > 0 ? accountSlippageInBps : stakingRegistry.defaultSlippageInBps();
     }
 }

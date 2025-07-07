@@ -521,7 +521,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Process rewards in compound mode (no rewards to claim)
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
         // Create empty strategies array since we're in compound mode
@@ -542,7 +542,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup and deposit
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
         // Process rewards with COMPOUND mode explicitly
@@ -561,7 +561,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup and deposit
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
         // Get reward tokens to know how many strategies we need
@@ -634,23 +634,28 @@ contract MamoStakingStrategyIntegrationTest is Test {
         assertEq(fallbackSlippage, expectedDefault, "Should fall back to registry default");
     }
 
-    function testGetRewardTokensFromStrategy() public {
+    function testStrategyUsesRegistryForRewardTokens() public {
         userStrategy = _deployUserStrategy(user);
 
-        // Get reward tokens from strategy
-        MamoStakingRegistry.RewardToken[] memory strategyRewardTokens =
-            MamoStakingStrategy(userStrategy).getRewardTokens();
+        // Deploy strategy first, then test that processRewards works with registry reward tokens
+        uint256 depositAmount = 1000 * 10 ** 18;
+        _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Get reward tokens from registry directly
+        // Get reward tokens from registry
         MamoStakingRegistry.RewardToken[] memory registryRewardTokens = stakingRegistry.getRewardTokens();
 
-        // Should match
-        assertEq(strategyRewardTokens.length, registryRewardTokens.length, "Reward tokens count should match");
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        vm.startPrank(backend);
 
-        for (uint256 i = 0; i < strategyRewardTokens.length; i++) {
-            assertEq(strategyRewardTokens[i].token, registryRewardTokens[i].token, "Token address should match");
-            assertEq(strategyRewardTokens[i].pool, registryRewardTokens[i].pool, "Pool address should match");
-        }
+        // Create strategies array with correct length for reinvest mode
+        address[] memory strategies = new address[](registryRewardTokens.length);
+
+        // This should not revert, indicating strategy correctly uses registry for reward tokens
+        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
+        vm.stopPrank();
+
+        // Verify original deposit is maintained
+        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Deposit should be maintained");
     }
 
     function testProcessRewardsOnlyCallableByBackend() public {
@@ -672,7 +677,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
 
         // Should work as backend
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
         MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.COMPOUND, emptyStrategies);
         vm.stopPrank();
@@ -695,7 +700,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Fast forward several blocks to potentially trigger reward accrual
         vm.roll(block.number + 100);
 
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
         // Process rewards in compound mode - this will claim any accrued rewards
@@ -718,31 +723,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         if (finalBalance > initialBalance) {
             console.log("Rewards compounded successfully!");
         }
-    }
-
-    function testReinvestModeWithValidStrategies() public {
-        userStrategy = _deployUserStrategy(user);
-        uint256 depositAmount = 1000 * 10 ** 18;
-
-        // Setup and deposit
-        _setupAndDeposit(user, userStrategy, depositAmount);
-
-        // Get reward tokens to create proper strategies array
-        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
-
-        address backend = mamoStrategyRegistry.getBackendAddress();
-        vm.startPrank(backend);
-
-        // Create strategies array with correct length (even if empty addresses)
-        address[] memory strategies = new address[](rewardTokens.length);
-        // Note: We're not setting up actual strategies here since we don't have rewards to test with
-
-        // This should not revert due to length mismatch
-        MamoStakingStrategy(userStrategy).processRewards(MamoStakingStrategy.StrategyMode.REINVEST, strategies);
-        vm.stopPrank();
-
-        // Verify original deposit is maintained
-        assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Deposit should be maintained");
     }
 
     // Helper function to setup cbBTC strategy for a user
@@ -816,7 +796,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
 
         // Process rewards as backend in reinvest mode
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
         // Create strategies array for reinvest mode (cbBTC strategy for cbBTC rewards)
@@ -876,7 +856,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.warp(block.timestamp + 1 days);
 
         // Process rewards as backend - this should fail because cbBTC strategy is owned by different user
-        address backend = mamoStrategyRegistry.getBackendAddress();
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
 
         address[] memory strategies = new address[](1);
