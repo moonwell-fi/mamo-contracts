@@ -317,6 +317,15 @@ contract MamoStakingRegistryIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    function testSetDEXRouterRevertsWhenSameRouter() public {
+        address currentRouter = address(stakingRegistry.dexRouter());
+
+        vm.startPrank(backend);
+        vm.expectRevert("Router already set");
+        stakingRegistry.setDEXRouter(ISwapRouter(currentRouter));
+        vm.stopPrank();
+    }
+
     function testSetQuoter() public {
         address newQuoter = makeAddr("newQuoter");
         address oldQuoter = address(stakingRegistry.quoter());
@@ -344,6 +353,15 @@ contract MamoStakingRegistryIntegrationTest is Test {
         vm.startPrank(randomUser);
         vm.expectRevert();
         stakingRegistry.setQuoter(IQuoter(newQuoter));
+        vm.stopPrank();
+    }
+
+    function testSetQuoterRevertsWhenSameQuoter() public {
+        address currentQuoter = address(stakingRegistry.quoter());
+
+        vm.startPrank(backend);
+        vm.expectRevert("Quoter already set");
+        stakingRegistry.setQuoter(IQuoter(currentQuoter));
         vm.stopPrank();
     }
 

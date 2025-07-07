@@ -163,6 +163,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
      */
     function setDEXRouter(ISwapRouter newRouter) external onlyRole(BACKEND_ROLE) whenNotPaused {
         require(address(newRouter) != address(0), "Invalid router");
+        require(address(newRouter) != address(dexRouter), "Router already set");
 
         address oldRouter = address(dexRouter);
         dexRouter = newRouter;
@@ -176,6 +177,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
      */
     function setQuoter(IQuoter _quoter) external onlyRole(BACKEND_ROLE) whenNotPaused {
         require(address(_quoter) != address(0), "Invalid quoter");
+        require(address(_quoter) != address(quoter), "Quoter already set");
 
         address oldQuoter = address(quoter);
         quoter = _quoter;
