@@ -104,6 +104,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         require(pool != address(0), "Invalid pool");
         require(!isRewardToken[token], "Token already added");
         require(token != mamoToken, "Cannot add MAMO token as reward");
+        require(pool != token, "Pool cannot be same as token");
 
         rewardTokenToIndex[token] = rewardTokens.length;
         rewardTokens.push(RewardToken({token: token, pool: pool}));
@@ -145,6 +146,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
     function updateRewardTokenPool(address token, address newPool) external onlyRole(BACKEND_ROLE) whenNotPaused {
         require(isRewardToken[token], "Token not found");
         require(newPool != address(0), "Invalid pool");
+        require(newPool != token, "Pool cannot be same as token");
 
         uint256 index = rewardTokenToIndex[token];
         address oldPool = rewardTokens[index].pool;
