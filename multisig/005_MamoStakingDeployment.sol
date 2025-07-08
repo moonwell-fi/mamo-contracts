@@ -74,7 +74,7 @@ contract MamoStakingDeployment is MultisigProposal {
             new MamoStakingRegistry(admin, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
         );
 
-        bytes memory multiRewardsArgs = abi.encode(admin, mamoToken);
+        bytes memory multiRewardsArgs = abi.encode(addresses.getAddress("F-MAMO"), mamoToken);
         multiRewards = vm.deployCode("MultiRewards.sol:MultiRewards", multiRewardsArgs);
 
         mamoStakingStrategy = address(new MamoStakingStrategy());
@@ -139,6 +139,7 @@ contract MamoStakingDeployment is MultisigProposal {
         address expectedBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
         address expectedMamoToken = addresses.getAddress("MAMO");
 
+        // Check MamoStakingRegistry
         MamoStakingRegistry stakingRegistryContract = MamoStakingRegistry(stakingRegistry);
         assertEq(
             stakingRegistryContract.mamoToken(), expectedMamoToken, "MamoStakingRegistry should have correct MAMO token"
@@ -157,6 +158,7 @@ contract MamoStakingDeployment is MultisigProposal {
             "MamoStakingRegistry should have correct backend"
         );
 
+        // Check MamoStakingStrategyFactory
         MamoStakingStrategyFactory factoryContract = MamoStakingStrategyFactory(stakingStrategyFactory);
         assertEq(
             factoryContract.mamoStrategyRegistry(),
@@ -183,6 +185,7 @@ contract MamoStakingDeployment is MultisigProposal {
             "Factory should have correct default slippage"
         );
 
+        // Check MamoStrategyRegistry
         MamoStrategyRegistry registryContract = MamoStrategyRegistry(mamoStrategyRegistry);
         assertTrue(
             registryContract.whitelistedImplementations(stakingStrategyImpl),
@@ -203,9 +206,12 @@ contract MamoStakingDeployment is MultisigProposal {
             "Factory should have BACKEND_ROLE"
         );
 
-        assertTrue(stakingRegistry.code.length > 0, "MamoStakingRegistry should have code");
-        assertTrue(multiRewardsAddr.code.length > 0, "MultiRewards should have code");
+        MultiRewards multiRewardsContract = MultiRewards(multiRewardsAddr);
+        assertEq(multiRewardsContract.owner(), addresses.getAddress("F-MAMO"), "MultiRewards should have correct owner");
+        assertEq(
+            multiRewardsContract.stakingToken(), expectedMamoToken, "MultiRewards should have correct staking token"
+        );
+
         assertTrue(stakingStrategyImpl.code.length > 0, "MamoStakingStrategy implementation should have code");
-        assertTrue(stakingStrategyFactory.code.length > 0, "MamoStakingStrategyFactory should have code");
     }
 }
