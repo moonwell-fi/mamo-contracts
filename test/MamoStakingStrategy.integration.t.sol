@@ -224,8 +224,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         mamoToken.approve(userStrategy, depositAmount);
         vm.stopPrank();
 
-        // Pause MultiRewards contract using its owner (MAMO_MULTISIG)
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        // Pause MultiRewards contract using its owner (F-MAMO)
+        address multiRewardsOwner = addresses.getAddress("F-MAMO");
         vm.startPrank(multiRewardsOwner);
         multiRewards.setPaused(true);
         vm.stopPrank();
@@ -349,7 +349,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Pause MultiRewards contract
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        address multiRewardsOwner = addresses.getAddress("F-MAMO");
         vm.startPrank(multiRewardsOwner);
         multiRewards.setPaused(true);
         vm.stopPrank();
@@ -984,7 +984,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     // Helper function to setup rewards in MultiRewards contract
     function _setupRewardsInMultiRewards(address rewardToken, uint256 rewardAmount, uint256 duration) internal {
-        address multiRewardsOwner = addresses.getAddress("MAMO_MULTISIG");
+        address multiRewardsOwner = addresses.getAddress("F-MAMO");
 
         // Add reward token to MultiRewards (as owner)
         vm.startPrank(multiRewardsOwner);
