@@ -145,17 +145,30 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Withdraw all staked MAMO tokens from MultiRewards
+     * @notice Withdraw all staked MAMO tokens from MultiRewards and claim rewards
      */
     function withdrawAll() external onlyOwner {
         uint256 stakedBalance = multiRewards.balanceOf(address(this));
         require(stakedBalance > 0, "No tokens to withdraw");
 
-        // Withdraw all from MultiRewards
-        multiRewards.withdraw(stakedBalance);
+        // Exit from MultiRewards (withdraws all staked tokens and claims rewards)
+        multiRewards.exit();
 
-        // Transfer all withdrawn MAMO to owner
-        mamoToken.safeTransfer(msg.sender, stakedBalance);
+        // Transfer all MAMO tokens (original stake + any MAMO rewards) to owner
+        uint256 mamoBalance = mamoToken.balanceOf(address(this));
+        if (mamoBalance > 0) {
+            mamoToken.safeTransfer(msg.sender, mamoBalance);
+        }
+
+        // Transfer all claimed reward tokens to owner
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            IERC20 rewardToken = IERC20(rewardTokens[i].token);
+            uint256 rewardBalance = rewardToken.balanceOf(address(this));
+            if (rewardBalance > 0) {
+                rewardToken.safeTransfer(msg.sender, rewardBalance);
+            }
+        }
 
         emit Withdrawn(stakedBalance);
     }
