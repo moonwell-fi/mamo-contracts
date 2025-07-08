@@ -5,6 +5,7 @@ import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
@@ -206,7 +207,7 @@ contract MamoStakingDeployment is MultisigProposal {
             "Factory should have BACKEND_ROLE"
         );
 
-        MultiRewards multiRewardsContract = MultiRewards(multiRewardsAddr);
+        IMultiRewards multiRewardsContract = IMultiRewards(multiRewardsAddr);
         assertEq(multiRewardsContract.owner(), addresses.getAddress("F-MAMO"), "MultiRewards should have correct owner");
         assertEq(
             multiRewardsContract.stakingToken(), expectedMamoToken, "MultiRewards should have correct staking token"
