@@ -617,8 +617,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Verify withdraw all was successful
         assertEq(multiRewards.balanceOf(userStrategy), 0, "Should have no staked balance after withdrawAll");
 
-        // Verify user received original deposit + MAMO rewards
-        uint256 expectedMamoTotal = depositAmount + earnedMamoRewards;
         assertEq(mamoToken.balanceOf(user), expectedMamoTotal, "User should have received original MAMO + MAMO rewards");
 
         // Verify cbBTC rewards were transferred to user
