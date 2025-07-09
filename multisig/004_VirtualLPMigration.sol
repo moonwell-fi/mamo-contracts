@@ -173,7 +173,7 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] Recording before balances for validation...");
 
         address multisig = addresses.getAddress("MAMO_MULTISIG");
-        address virtualToken = addresses.getAddress("VIRTUAL");
+        address virtualToken = addresses.getAddress("VIRTUALS");
         address mamoToken = addresses.getAddress("MAMO");
 
         // Record multisig balances before migration
@@ -219,10 +219,10 @@ contract VirtualLPMigration is MultisigProposal {
         smamoContract.withdraw(balance);
         console.log("[INFO] Withdrawn %s V2 LP tokens from sMAMO", balance / 1e18);
 
-        // Step 3.5: Break down V2 LP tokens to get underlying VIRTUAL and MAMO tokens
+        // Step 3.5: Break down V2 LP tokens to get underlying VIRTUALS and MAMO tokens
         console.log("[INFO] Step 3.5: Breaking down V2 LP tokens...");
 
-        address virtualToken = addresses.getAddress("VIRTUAL");
+        address virtualToken = addresses.getAddress("VIRTUALS");
         address mamo = addresses.getAddress("MAMO");
         address v2Router = addresses.getAddress("UNISWAP_V2_ROUTER"); // Need to add this address
         address v2Pair = addresses.getAddress("VIRTUAL_MAMO_V2_PAIR"); // Need to add this address
@@ -240,7 +240,7 @@ contract VirtualLPMigration is MultisigProposal {
             virtualToken,
             mamo,
             v2LpBalance,
-            0, // Accept any amount of VIRTUAL
+            0, // Accept any amount of VIRTUALS
             0, // Accept any amount of MAMO
             multisig,
             block.timestamp + 3600
@@ -250,7 +250,7 @@ contract VirtualLPMigration is MultisigProposal {
         migrationStorage.setRemovedMamoAmount(removedMamoAmount);
 
         console.log("[INFO] Removed liquidity from Uniswap V2");
-        console.log("[INFO] Removed VIRTUAL: %s", removedVirtualAmount / 1e18);
+        console.log("[INFO] Removed VIRTUALS: %s", removedVirtualAmount / 1e18);
         console.log("[INFO] Removed MAMO: %s", removedMamoAmount / 1e18);
 
         // Step 4: Mint LP position with the tokens
@@ -275,13 +275,13 @@ contract VirtualLPMigration is MultisigProposal {
         uint256 amount1Desired;
 
         if (virtualToken < mamo) {
-            // VIRTUAL is token0, MAMO is token1
+            // VIRTUALS is token0, MAMO is token1
             token0 = virtualToken;
             token1 = mamo;
             amount0Desired = virtualBalance;
             amount1Desired = mamoBalance;
         } else {
-            // MAMO is token0, VIRTUAL is token1
+            // MAMO is token0, VIRTUALS is token1
             token0 = mamo;
             token1 = virtualToken;
             amount0Desired = mamoBalance;
@@ -367,7 +367,7 @@ contract VirtualLPMigration is MultisigProposal {
         console.log("[INFO] Validating pool creation and token deposits...");
 
         // Validate that the pool was created during the mint operation
-        address virtualToken = addresses.getAddress("VIRTUAL");
+        address virtualToken = addresses.getAddress("VIRTUALS");
         address mamoToken = addresses.getAddress("MAMO");
         address calculatedPoolAddress = getPoolAddress(virtualToken, mamoToken);
         console.log("[INFO] Calculated pool address: %s", calculatedPoolAddress);
@@ -385,9 +385,9 @@ contract VirtualLPMigration is MultisigProposal {
         address poolAddress = calculatedPoolAddress;
 
         // Log balances before
-        console.log("[INFO] Multisig VIRTUAL balance before: %s", virtualBalanceBefore / 1e18);
+        console.log("[INFO] Multisig VIRTUALS balance before: %s", virtualBalanceBefore / 1e18);
         console.log("[INFO] Multisig MAMO balance before: %s", mamoBalanceBefore / 1e18);
-        console.log("[INFO] Pool VIRTUAL balance before: %s", poolVirtualBalanceBefore / 1e18);
+        console.log("[INFO] Pool VIRTUALS balance before: %s", poolVirtualBalanceBefore / 1e18);
         console.log("[INFO] Pool MAMO balance before: %s", poolMamoBalanceBefore / 1e18);
 
         // Check current balances
@@ -397,13 +397,13 @@ contract VirtualLPMigration is MultisigProposal {
         uint256 poolMamoBalanceAfter = IERC20(mamoToken).balanceOf(poolAddress);
 
         // Log balances after
-        console.log("[INFO] Multisig VIRTUAL balance after: %s", virtualBalanceAfter / 1e18);
+        console.log("[INFO] Multisig VIRTUALS balance after: %s", virtualBalanceAfter / 1e18);
         console.log("[INFO] Multisig MAMO balance after: %s", mamoBalanceAfter / 1e18);
-        console.log("[INFO] Pool VIRTUAL balance after: %s", poolVirtualBalanceAfter / 1e18);
+        console.log("[INFO] Pool VIRTUALS balance after: %s", poolVirtualBalanceAfter / 1e18);
         console.log("[INFO] Pool MAMO balance after: %s", poolMamoBalanceAfter / 1e18);
 
         // Validate that the pool received tokens (main goal of the migration)
-        assertTrue(poolVirtualBalanceAfter >= poolVirtualBalanceBefore, "Pool VIRTUAL balance should increase");
+        assertTrue(poolVirtualBalanceAfter >= poolVirtualBalanceBefore, "Pool VIRTUALS balance should increase");
         assertTrue(poolMamoBalanceAfter >= poolMamoBalanceBefore, "Pool MAMO balance should increase");
 
         // Validate that the pool received close to the amounts from removeLiquidity
@@ -411,7 +411,7 @@ contract VirtualLPMigration is MultisigProposal {
             poolVirtualBalanceAfter,
             migrationStorage.removedVirtualAmount(),
             0.01e18, // 1%
-            "Pool VIRTUAL balance should match removed amount"
+            "Pool VIRTUALS balance should match removed amount"
         );
 
         assertApproxEqRel(
@@ -422,7 +422,7 @@ contract VirtualLPMigration is MultisigProposal {
         );
 
         // Validate that the multisig did not receive any tokens
-        assertEq(virtualBalanceAfter, virtualBalanceBefore, "Multisig VIRTUAL balance should not change");
+        assertEq(virtualBalanceAfter, virtualBalanceBefore, "Multisig VIRTUALS balance should not change");
         assertApproxEqRel(
             mamoBalanceAfter,
             mamoBalanceBefore,
@@ -432,7 +432,7 @@ contract VirtualLPMigration is MultisigProposal {
 
         console.log("[INFO] Amount of MAMO added to multisig: %s", (mamoBalanceAfter - mamoBalanceBefore) / 1e18);
         console.log(
-            "[INFO] Amount of VIRTUAL added to multisig: %s", (virtualBalanceAfter - virtualBalanceBefore) / 1e18
+            "[INFO] Amount of VIRTUALS added to multisig: %s", (virtualBalanceAfter - virtualBalanceBefore) / 1e18
         );
 
         console.log("[INFO] All validations passed successfully");

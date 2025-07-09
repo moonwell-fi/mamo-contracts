@@ -36,7 +36,7 @@ contract DeployFeeSplitter is Script, Test {
         console.log("\n%s\n", StdStyle.bold(StdStyle.blue("=== FEE SPLITTER DEPLOYMENT COMPLETE ===")));
         console.log("%s: %s", StdStyle.bold("FeeSplitter contract"), StdStyle.yellow(vm.toString(address(feeSplitter))));
         console.log("%s: %s", StdStyle.bold("Token 0 (MAMO)"), StdStyle.yellow(vm.toString(feeSplitter.TOKEN_0())));
-        console.log("%s: %s", StdStyle.bold("Token 1 (VIRTUAL)"), StdStyle.yellow(vm.toString(feeSplitter.TOKEN_1())));
+        console.log("%s: %s", StdStyle.bold("Token 1 (VIRTUALS)"), StdStyle.yellow(vm.toString(feeSplitter.TOKEN_1())));
         console.log(
             "%s: %s", StdStyle.bold("Recipient 1 (70%)"), StdStyle.yellow(vm.toString(feeSplitter.RECIPIENT_1()))
         );
@@ -55,7 +55,7 @@ contract DeployFeeSplitter is Script, Test {
 
         // Get token addresses from the addresses contract
         address token0 = addresses.getAddress("MAMO");
-        address token1 = addresses.getAddress("VIRTUAL");
+        address token1 = addresses.getAddress("VIRTUALS");
 
         address recipient1 = addresses.getAddress("VIRTUALS_MULTISIG"); // 30% recipient
         address recipient2 = addresses.getAddress("F-MAMO"); // 70% recipient
@@ -66,7 +66,7 @@ contract DeployFeeSplitter is Script, Test {
         console.log("\n%s", StdStyle.bold(StdStyle.green("Step 1: Deploying FeeSplitter contract...")));
         console.log("FeeSplitter contract deployed at: %s", StdStyle.yellow(vm.toString(address(feeSplitter))));
         console.log("Token 0 (MAMO): %s", StdStyle.yellow(vm.toString(token0)));
-        console.log("Token 1 (VIRTUAL): %s", StdStyle.yellow(vm.toString(token1)));
+        console.log("Token 1 (VIRTUALS): %s", StdStyle.yellow(vm.toString(token1)));
         console.log("Recipient 1 (70%%): %s", StdStyle.yellow(vm.toString(recipient1)));
         console.log("Recipient 2 (30%%): %s", StdStyle.yellow(vm.toString(recipient2)));
 
@@ -89,7 +89,7 @@ contract DeployFeeSplitter is Script, Test {
      */
     function validate(Addresses addresses, FeeSplitter feeSplitter) public view {
         address expectedToken0 = addresses.getAddress("MAMO");
-        address expectedToken1 = addresses.getAddress("VIRTUAL");
+        address expectedToken1 = addresses.getAddress("VIRTUALS");
         address expectedRecipient1 = addresses.getAddress("VIRTUALS_MULTISIG");
         address expectedRecipient2 = addresses.getAddress("F-MAMO");
 

@@ -186,7 +186,7 @@
   },
   {
     "addr": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
-    "name": "VIRTUAL",
+    "name": "VIRTUALS",
     "isContract": true
   },
   {
@@ -238,5 +238,35 @@
     "addr": "0x1A3ae2b72a21c443a189235C15bcBCa9C81c3a7c",
     "name": "MAMO_STAKING_BACKEND",
     "isContract": false
+  },
+  {
+    "addr": "0xd8100E6A8fD9d58F31C537b4420b732ba00B5157",
+    "name": "MAMO_STAKING_STRATEGY",
+    "isContract": true
+  },
+  {
+    "addr": "0xf196481065Ab728EA84648830b606207aa3B5D0D",
+    "name": "MAMO_STAKING_REGISTRY",
+    "isContract": true
+  },
+  {
+    "addr": "0xf13D09eD3cbdD1C930d4de74808de1f33B6b3D4f",
+    "name": "MAMO_MULTI_REWARDS",
+    "isContract": true
+  },
+  {
+    "addr": "0x877de3630D3B1316D6Ad9E25A36ca2AAe3fc17eA",
+    "name": "MAMO_STAKING_STRATEGY_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x614236501dc12B14f3a99E2af8A84DFa92eF248A",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x35a1dd94e958d6B13Abaf069C0A9cE98704Bca58",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_VIRTUALS",
+    "isContract": true
   }
 ]
