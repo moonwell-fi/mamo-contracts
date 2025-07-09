@@ -41,7 +41,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     uint256 public accountSlippageInBps;
 
     event Deposited(address indexed depositor, uint256 amount);
-    event Withdrawn(uint256 amount);
+    event Withdrawn(address indexed token, uint256 amount);
     event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
     event Compounded(uint256 mamoAmount);
@@ -141,7 +141,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         // Transfer withdrawn MAMO to owner
         mamoToken.safeTransfer(msg.sender, amount);
 
-        emit Withdrawn(amount);
+        emit Withdrawn(address(mamoToken), amount);
     }
 
     /**
@@ -158,6 +158,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         uint256 mamoBalance = mamoToken.balanceOf(address(this));
         if (mamoBalance > 0) {
             mamoToken.safeTransfer(msg.sender, mamoBalance);
+            emit Withdrawn(address(mamoToken), mamoBalance);
         }
 
         // Transfer all claimed reward tokens to owner
@@ -167,10 +168,9 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             uint256 rewardBalance = rewardToken.balanceOf(address(this));
             if (rewardBalance > 0) {
                 rewardToken.safeTransfer(msg.sender, rewardBalance);
+                emit Withdrawn(address(rewardToken), rewardBalance);
             }
         }
-
-        emit Withdrawn(stakedBalance);
     }
 
     /**

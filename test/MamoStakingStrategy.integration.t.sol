@@ -512,7 +512,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Withdraw all using withdrawAll function
         vm.startPrank(user);
         vm.expectEmit(true, false, false, true);
-        emit Withdrawn(depositAmount);
+        emit Withdrawn(address(mamoToken), depositAmount);
         MamoStakingStrategy(userStrategy).withdrawAll();
         vm.stopPrank();
 
@@ -599,8 +599,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Withdraw all using withdrawAll function (which now uses exit)
         vm.startPrank(user);
-        vm.expectEmit(true, false, false, true);
-        emit Withdrawn(depositAmount);
+        // Note: withdrawAll will emit multiple Withdrawn events - one for MAMO and one for each reward token
+        // We don't test for specific events here as amounts depend on rewards earned
         MamoStakingStrategy(userStrategy).withdrawAll();
         vm.stopPrank();
 
@@ -1152,7 +1152,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
     // Event declarations
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
-    event Withdrawn(uint256 amount);
+    event Withdrawn(address indexed token, uint256 amount);
     event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
 }
