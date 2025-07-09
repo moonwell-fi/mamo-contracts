@@ -607,11 +607,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.expectEmit(true, false, false, true);
         emit Withdrawn(address(mamoToken), expectedMamoTotal);
         
-        // Then expect the cbBTC withdrawal event if there are rewards
-        if (earnedCbBTCRewards > 0) {
-            vm.expectEmit(true, false, false, true);
-            emit Withdrawn(cbBTC, earnedCbBTCRewards);
-        }
+        // Then expect the cbBTC withdrawal event
+        vm.expectEmit(true, false, false, true);
+        emit Withdrawn(cbBTC, earnedCbBTCRewards);
         
         MamoStakingStrategy(userStrategy).withdrawAll();
         vm.stopPrank();
@@ -624,12 +622,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
         assertEq(mamoToken.balanceOf(user), expectedMamoTotal, "User should have received original MAMO + MAMO rewards");
 
         // Verify cbBTC rewards were transferred to user
-        if (earnedCbBTCRewards > 0) {
-            uint256 finalCbBTCBalance = IERC20(cbBTC).balanceOf(user);
-            assertEq(
-                finalCbBTCBalance, initialCbBTCBalance + earnedCbBTCRewards, "User should have received cbBTC rewards"
-            );
-        }
+        uint256 finalCbBTCBalance = IERC20(cbBTC).balanceOf(user);
+        assertEq(finalCbBTCBalance, initialCbBTCBalance + earnedCbBTCRewards, "User should have received cbBTC rewards");
 
         // Verify strategy has no remaining reward tokens
         assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy should have no remaining MAMO");
@@ -695,15 +689,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.startPrank(user);
         
         // Expect Withdrawn events for each reward token
-        if (earnedMamoRewards > 0) {
-            vm.expectEmit(true, false, false, true);
-            emit Withdrawn(address(mamoToken), earnedMamoRewards);
-        }
+        vm.expectEmit(true, false, false, true);
+        emit Withdrawn(address(mamoToken), earnedMamoRewards);
         
-        if (earnedCbBTCRewards > 0) {
-            vm.expectEmit(true, false, false, true);
-            emit Withdrawn(cbBTC, earnedCbBTCRewards);
-        }
+        vm.expectEmit(true, false, false, true);
+        emit Withdrawn(cbBTC, earnedCbBTCRewards);
         
         MamoStakingStrategy(userStrategy).withdrawRewards();
         vm.stopPrank();
@@ -712,15 +702,11 @@ contract MamoStakingStrategyIntegrationTest is Test {
         assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Staked balance should remain unchanged");
 
         // Verify rewards were claimed and transferred
-        if (earnedMamoRewards > 0) {
-            uint256 finalMamoBalance = mamoToken.balanceOf(user);
-            assertEq(finalMamoBalance, initialMamoBalance + earnedMamoRewards, "User should have received MAMO rewards");
-        }
+        uint256 finalMamoBalance = mamoToken.balanceOf(user);
+        assertEq(finalMamoBalance, initialMamoBalance + earnedMamoRewards, "User should have received MAMO rewards");
 
-        if (earnedCbBTCRewards > 0) {
-            uint256 finalCbBTCBalance = IERC20(cbBTC).balanceOf(user);
-            assertEq(finalCbBTCBalance, initialCbBTCBalance + earnedCbBTCRewards, "User should have received cbBTC rewards");
-        }
+        uint256 finalCbBTCBalance = IERC20(cbBTC).balanceOf(user);
+        assertEq(finalCbBTCBalance, initialCbBTCBalance + earnedCbBTCRewards, "User should have received cbBTC rewards");
 
         // Verify strategy has no remaining reward tokens
         assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy should have no remaining MAMO rewards");
