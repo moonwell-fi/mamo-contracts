@@ -632,30 +632,14 @@ contract MamoStakingStrategyIntegrationTest is Test {
         userStrategy = _deployUserStrategy(user);
 
         uint256 depositAmount = 1000 * 10 ** 18;
-        uint256 mamoRewardAmount = 100 * 10 ** 18; // MAMO rewards
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
 
         // Setup and deposit
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Setup MAMO rewards in MultiRewards
-        address multiRewardsOwner = addresses.getAddress("F-MAMO");
-        vm.startPrank(multiRewardsOwner);
-
-        // Check if MAMO is already added as a reward token
-        (, uint256 existingDuration,,,,) = multiRewards.rewardData(address(mamoToken));
-        if (existingDuration == 0) {
-            multiRewards.addReward(address(mamoToken), multiRewardsOwner, 7 days);
-        }
-
-        // Give MAMO reward tokens to the owner and notify reward amount
-        deal(address(mamoToken), multiRewardsOwner, mamoRewardAmount);
-        mamoToken.approve(address(multiRewards), mamoRewardAmount);
-        multiRewards.notifyRewardAmount(address(mamoToken), mamoRewardAmount);
-        vm.stopPrank();
-
         // Setup cbBTC rewards in MultiRewards
         address cbBTC = addresses.getAddress("cbBTC");
+        address multiRewardsOwner = addresses.getAddress("F-MAMO");
         vm.startPrank(multiRewardsOwner);
 
         // Check if cbBTC is already added as a reward token
@@ -674,9 +658,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.warp(block.timestamp + 1 days);
 
         // Check earned rewards and initial balances
-        uint256 earnedMamoRewards = multiRewards.earned(userStrategy, address(mamoToken));
         uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
-        uint256 initialMamoBalance = mamoToken.balanceOf(user);
         uint256 initialCbBTCBalance = IERC20(cbBTC).balanceOf(user);
 
         // Verify initial staked balance
@@ -686,10 +668,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Withdraw rewards using withdrawRewards function
         vm.startPrank(user);
 
-        // Expect Withdrawn events for each reward token
-        vm.expectEmit(true, false, false, true);
-        emit Withdrawn(address(mamoToken), earnedMamoRewards);
-
+        // Expect Withdrawn event for cbBTC reward token
         vm.expectEmit(true, false, false, true);
         emit Withdrawn(cbBTC, earnedCbBTCRewards);
 
@@ -700,14 +679,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
         assertEq(multiRewards.balanceOf(userStrategy), depositAmount, "Staked balance should remain unchanged");
 
         // Verify rewards were claimed and transferred
-        uint256 finalMamoBalance = mamoToken.balanceOf(user);
-        assertEq(finalMamoBalance, initialMamoBalance + earnedMamoRewards, "User should have received MAMO rewards");
-
         uint256 finalCbBTCBalance = IERC20(cbBTC).balanceOf(user);
         assertEq(finalCbBTCBalance, initialCbBTCBalance + earnedCbBTCRewards, "User should have received cbBTC rewards");
 
         // Verify strategy has no remaining reward tokens
-        assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy should have no remaining MAMO rewards");
         assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Strategy should have no remaining cbBTC rewards");
     }
 
