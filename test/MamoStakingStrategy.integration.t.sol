@@ -599,18 +599,18 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Withdraw all using withdrawAll function (which now uses exit)
         vm.startPrank(user);
-        
+
         // Expect multiple Withdrawn events - one for MAMO and one for each reward token
         uint256 expectedMamoTotal = depositAmount + earnedMamoRewards;
-        
+
         // First expect the MAMO withdrawal event
         vm.expectEmit(true, false, false, true);
         emit Withdrawn(address(mamoToken), expectedMamoTotal);
-        
+
         // Then expect the cbBTC withdrawal event
         vm.expectEmit(true, false, false, true);
         emit Withdrawn(cbBTC, earnedCbBTCRewards);
-        
+
         MamoStakingStrategy(userStrategy).withdrawAll();
         vm.stopPrank();
 
@@ -643,13 +643,13 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup MAMO rewards in MultiRewards
         address multiRewardsOwner = addresses.getAddress("F-MAMO");
         vm.startPrank(multiRewardsOwner);
-        
+
         // Check if MAMO is already added as a reward token
         (, uint256 existingDuration,,,,) = multiRewards.rewardData(address(mamoToken));
         if (existingDuration == 0) {
             multiRewards.addReward(address(mamoToken), multiRewardsOwner, 7 days);
         }
-        
+
         // Give MAMO reward tokens to the owner and notify reward amount
         deal(address(mamoToken), multiRewardsOwner, mamoRewardAmount);
         mamoToken.approve(address(multiRewards), mamoRewardAmount);
@@ -659,13 +659,13 @@ contract MamoStakingStrategyIntegrationTest is Test {
         // Setup cbBTC rewards in MultiRewards
         address cbBTC = addresses.getAddress("cbBTC");
         vm.startPrank(multiRewardsOwner);
-        
+
         // Check if cbBTC is already added as a reward token
         (, uint256 existingCbBTCDuration,,,,) = multiRewards.rewardData(cbBTC);
         if (existingCbBTCDuration == 0) {
             multiRewards.addReward(cbBTC, multiRewardsOwner, 7 days);
         }
-        
+
         // Give cbBTC reward tokens to the owner and notify reward amount
         deal(cbBTC, multiRewardsOwner, cbBTCRewardAmount);
         IERC20(cbBTC).approve(address(multiRewards), cbBTCRewardAmount);
@@ -687,14 +687,14 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Withdraw rewards using withdrawRewards function
         vm.startPrank(user);
-        
+
         // Expect Withdrawn events for each reward token
         vm.expectEmit(true, false, false, true);
         emit Withdrawn(address(mamoToken), earnedMamoRewards);
-        
+
         vm.expectEmit(true, false, false, true);
         emit Withdrawn(cbBTC, earnedCbBTCRewards);
-        
+
         MamoStakingStrategy(userStrategy).withdrawRewards();
         vm.stopPrank();
 
