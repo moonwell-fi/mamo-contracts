@@ -599,8 +599,20 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Withdraw all using withdrawAll function (which now uses exit)
         vm.startPrank(user);
-        // Note: withdrawAll will emit multiple Withdrawn events - one for MAMO and one for each reward token
-        // We don't test for specific events here as amounts depend on rewards earned
+        
+        // Expect multiple Withdrawn events - one for MAMO and one for each reward token
+        uint256 expectedMamoTotal = depositAmount + earnedMamoRewards;
+        
+        // First expect the MAMO withdrawal event
+        vm.expectEmit(true, false, false, true);
+        emit Withdrawn(address(mamoToken), expectedMamoTotal);
+        
+        // Then expect the cbBTC withdrawal event if there are rewards
+        if (earnedCbBTCRewards > 0) {
+            vm.expectEmit(true, false, false, true);
+            emit Withdrawn(cbBTC, earnedCbBTCRewards);
+        }
+        
         MamoStakingStrategy(userStrategy).withdrawAll();
         vm.stopPrank();
 
