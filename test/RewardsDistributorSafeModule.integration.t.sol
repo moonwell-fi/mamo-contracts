@@ -9,11 +9,10 @@ import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.
 import {ISafe} from "../src/interfaces/ISafe.sol";
 import {SigHelper} from "./utils/SigHelper.sol";
 import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
+import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
 
 import {ModuleManager} from "../lib/safe-smart-account/contracts/base/ModuleManager.sol";
 import {SafeProxyFactory} from "../lib/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
-
-import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
 
 contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
     ISafe public safe;
@@ -53,7 +52,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
 
         mamoToken = IERC20(addresses.getAddress("MAMO"));
         cbBtcToken = IERC20(addresses.getAddress("cbBTC"));
-        admin = addresses.getAddress("MAMO_BACKEND");
+        admin = addresses.getAddress("F-MAMO");
 
         owners = new address[](OWNER_COUNT);
         owners[0] = vm.addr(pk1);

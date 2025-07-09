@@ -54,9 +54,9 @@ contract MamoStakingRegistryIntegrationTest is Test {
         stakingRegistry = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));
 
         // Get key addresses
-        admin = addresses.getAddress("MAMO_MULTISIG");
+        admin = addresses.getAddress("F-MAMO");
         backend = addresses.getAddress("MAMO_STAKING_BACKEND");
-        guardian = addresses.getAddress("MAMO_MULTISIG"); // Same as admin
+        guardian = addresses.getAddress("F-MAMO"); // Same as admin
         mamoToken = addresses.getAddress("MAMO");
 
         // Create mock contracts for testing
