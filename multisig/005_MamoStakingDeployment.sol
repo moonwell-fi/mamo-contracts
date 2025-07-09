@@ -77,7 +77,7 @@ contract MamoStakingDeployment is MultisigProposal {
         vm.startBroadcast(deployer);
 
         mamoStakingRegistry = address(
-            new MamoStakingRegistry(admin, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
+            new MamoStakingRegistry(deployer, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
         );
 
         bytes memory multiRewardsArgs = abi.encode(admin, mamoToken);
@@ -110,6 +110,19 @@ contract MamoStakingDeployment is MultisigProposal {
             )
         );
 
+        MamoStakingRegistry(mamoStakingRegistry).grantRole(
+            MamoStakingRegistry(mamoStakingRegistry).BACKEND_ROLE(), backend
+        );
+        MamoStakingRegistry(mamoStakingRegistry).revokeRole(
+            MamoStakingRegistry(mamoStakingRegistry).BACKEND_ROLE(), deployer
+        );
+        MamoStakingRegistry(mamoStakingRegistry).grantRole(
+            MamoStakingRegistry(mamoStakingRegistry).DEFAULT_ADMIN_ROLE(), admin
+        );
+        MamoStakingRegistry(mamoStakingRegistry).revokeRole(
+            MamoStakingRegistry(mamoStakingRegistry).DEFAULT_ADMIN_ROLE(), deployer
+        ); // revoke deployer from admin role
+
         vm.stopBroadcast();
 
         addresses.addAddress("MAMO_STAKING_STRATEGY", mamoStakingStrategy, true);
@@ -126,13 +139,6 @@ contract MamoStakingDeployment is MultisigProposal {
         registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
         // This will assign strategy type id to 2
         MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, 0);
-
-        address mamoBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
-        address deployer = addresses.getAddress("DEPLOYER_EOA");
-        MamoStakingRegistry stakingRegistryContract = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));
-
-        stakingRegistryContract.grantRole(stakingRegistryContract.BACKEND_ROLE(), mamoBackend);
-        stakingRegistryContract.revokeRole(stakingRegistryContract.BACKEND_ROLE(), deployer);
     }
 
     function simulate() public override {
@@ -293,7 +299,7 @@ contract MamoStakingDeployment is MultisigProposal {
 
         // Validate MultiRewards address registry entry matches deployment
         assertEq(
-            addresses.getAddress("MULTI_REWARDS"),
+            addresses.getAddress("MAMO_MULTI_REWARDS"),
             multiRewardsAddr,
             "Address registry: MultiRewards entry should match deployed address"
         );
@@ -309,11 +315,7 @@ contract MamoStakingDeployment is MultisigProposal {
             stakingRegistry,
             "Address registry: MAMO_STAKING_REGISTRY should be registered"
         );
-        assertEq(
-            addresses.getAddress("MAMO_MULTI_REWARDS"),
-            multiRewardsAddr,
-            "Address registry: MAMO_MULTI_REWARDS should be registered"
-        );
+
         assertEq(
             addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"),
             stakingStrategyFactory,
