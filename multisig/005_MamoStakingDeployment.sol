@@ -68,7 +68,7 @@ contract MamoStakingDeployment is MultisigProposal {
         address admin = addresses.getAddress("F-MAMO"); // admin of rewards distributor safe modules
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
-        address guardian = addresses.getAddress("MAMO_MULTISIG"); // Use multisig as guardian
+        address guardian = addresses.getAddress("F-MAMO"); // Use multisig as guardian
         address mamoToken = addresses.getAddress("MAMO");
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
         address quoter = addresses.getAddress("AERODROME_QUOTER");
@@ -77,15 +77,7 @@ contract MamoStakingDeployment is MultisigProposal {
         vm.startBroadcast(deployer);
 
         mamoStakingRegistry = address(
-            new MamoStakingRegistry(
-                addresses.getAddress("MAMO_MULTISIG"), // admin of staking registry is MAMO_MULTISIG
-                deployer,
-                guardian,
-                mamoToken,
-                dexRouter,
-                quoter,
-                DEFAULT_SLIPPAGE_IN_BPS
-            )
+            new MamoStakingRegistry(admin, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
         );
 
         bytes memory multiRewardsArgs = abi.encode(admin, mamoToken);
@@ -95,7 +87,7 @@ contract MamoStakingDeployment is MultisigProposal {
 
         mamoStakingStrategyFactory = address(
             new MamoStakingStrategyFactory(
-                addresses.getAddress("MAMO_MULTISIG"), // admin of staking strategy factory is MAMO_MULTISIG
+                admin,
                 mamoStrategyRegistry,
                 backend,
                 mamoStakingRegistry,
@@ -132,7 +124,8 @@ contract MamoStakingDeployment is MultisigProposal {
         address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
 
         registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
-        MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, STRATEGY_TYPE_ID);
+        // This will assign strategy type id to 2
+        MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, 0);
 
         address mamoBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
         address deployer = addresses.getAddress("DEPLOYER_EOA");
@@ -171,7 +164,7 @@ contract MamoStakingDeployment is MultisigProposal {
         );
         assertTrue(
             stakingRegistryContract.hasRole(
-                stakingRegistryContract.DEFAULT_ADMIN_ROLE(), addresses.getAddress("MAMO_MULTISIG")
+                stakingRegistryContract.DEFAULT_ADMIN_ROLE(), addresses.getAddress("F-MAMO")
             ),
             "MamoStakingRegistry should have correct admin"
         );
@@ -265,6 +258,71 @@ contract MamoStakingDeployment is MultisigProposal {
 
         assertTrue(
             rewardsDistributorMamoCbbtcAddr.code.length > 0, "MAMO/cbBTC RewardsDistributorSafeModule should have code"
+        );
+
+        // Validate RewardsDistributorSafeModule notify delay
+        assertEq(
+            mamoCbbtcModule.notifyDelay(), DEFAULT_NOTIFY_DELAY, "MAMO/cbBTC module should have correct notify delay"
+        );
+
+        // Validate RewardsDistributorSafeModule state
+        assertEq(
+            uint256(mamoCbbtcModule.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.UNINITIALIZED),
+            "MAMO/cbBTC module should start in UNINITIALIZED state"
+        );
+
+        // Validate that RewardsDistributorSafeModule is not paused
+        assertFalse(mamoCbbtcModule.paused(), "MAMO/cbBTC module should not be paused initially");
+
+        // Validate cbBTC is added as reward token in MamoStakingRegistry
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistryContract.getRewardTokens();
+        bool cbBTCFound = false;
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardTokens[i].token == addresses.getAddress("cbBTC")) {
+                cbBTCFound = true;
+                assertEq(
+                    rewardTokens[i].pool,
+                    addresses.getAddress("cbBTC_MAMO_POOL"),
+                    "cbBTC should have correct pool in registry"
+                );
+                break;
+            }
+        }
+        assertTrue(cbBTCFound, "cbBTC should be added as reward token in staking registry");
+
+        // Validate MultiRewards address registry entry matches deployment
+        assertEq(
+            addresses.getAddress("MULTI_REWARDS"),
+            multiRewardsAddr,
+            "Address registry: MultiRewards entry should match deployed address"
+        );
+
+        // Validate all contract addresses are properly registered
+        assertEq(
+            addresses.getAddress("MAMO_STAKING_STRATEGY"),
+            stakingStrategyImpl,
+            "Address registry: MAMO_STAKING_STRATEGY should be registered"
+        );
+        assertEq(
+            addresses.getAddress("MAMO_STAKING_REGISTRY"),
+            stakingRegistry,
+            "Address registry: MAMO_STAKING_REGISTRY should be registered"
+        );
+        assertEq(
+            addresses.getAddress("MAMO_MULTI_REWARDS"),
+            multiRewardsAddr,
+            "Address registry: MAMO_MULTI_REWARDS should be registered"
+        );
+        assertEq(
+            addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"),
+            stakingStrategyFactory,
+            "Address registry: MAMO_STAKING_STRATEGY_FACTORY should be registered"
+        );
+        assertEq(
+            addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"),
+            rewardsDistributorMamoCbbtcAddr,
+            "Address registry: REWARDS_DISTRIBUTOR_MAMO_CBBTC should be registered"
         );
     }
 }
