@@ -200,9 +200,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
     function testFactoryHasCorrectRoles() public {
         // Verify factory has correct role assignments
         assertTrue(
-            stakingStrategyFactory.hasRole(
-                stakingStrategyFactory.DEFAULT_ADMIN_ROLE(), addresses.getAddress("MAMO_MULTISIG")
-            ),
+            stakingStrategyFactory.hasRole(stakingStrategyFactory.DEFAULT_ADMIN_ROLE(), addresses.getAddress("F-MAMO")),
             "Factory should have correct admin"
         );
 
