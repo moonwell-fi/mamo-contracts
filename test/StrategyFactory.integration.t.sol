@@ -9,7 +9,6 @@ import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 
@@ -23,7 +22,6 @@ import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract StrategyFactoryIntegrationTest is Test {
@@ -72,7 +70,7 @@ contract StrategyFactoryIntegrationTest is Test {
 
         // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
-        backend = addresses.getAddress(config.backend);
+        backend = addresses.getAddress("MAMO_BACKEND");
         guardian = addresses.getAddress(config.guardian);
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin; // Use admin as mamo multisig for testing

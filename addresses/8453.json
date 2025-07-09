@@ -218,5 +218,25 @@
     "addr": "0x79c1921Fc8CD076415cBD1EBB330629F4EC7Bbd1",
     "name": "BURN_AND_EARN_VIRTUAL_MAMO_LP",
     "isContract": true
+  },
+  {
+    "addr": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
+    "name": "AERODROME_ROUTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
+    "name": "AERODROME_QUOTER",
+    "isContract": true
+  },
+  {
+    "addr": "0xE2B3aA806e56603a244bFc111c9474F7DeDD03db",
+    "name": "cbBTC_MAMO_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x1A3ae2b72a21c443a189235C15bcBCa9C81c3a7c",
+    "name": "MAMO_STAKING_BACKEND",
+    "isContract": false
   }
 ]

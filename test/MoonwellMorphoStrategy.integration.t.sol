@@ -31,9 +31,6 @@ import {MockERC20} from "./MockERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
-import {FixIsRewardToken} from "@multisig/002_FixIsRewardToken.sol";
-import {DeployFactoriesAndMulticall} from "@multisig/003_DeployFactoriesAndMulticall.sol";
-
 /**
  * @title MockRejectETH
  * @notice A mock contract that rejects all ETH transfers
