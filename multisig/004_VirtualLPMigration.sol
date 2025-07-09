@@ -225,7 +225,7 @@ contract VirtualLPMigration is MultisigProposal {
         address virtualToken = addresses.getAddress("VIRTUALS");
         address mamo = addresses.getAddress("MAMO");
         address v2Router = addresses.getAddress("UNISWAP_V2_ROUTER"); // Need to add this address
-        address v2Pair = addresses.getAddress("VIRTUAL_MAMO_V2_PAIR"); // Need to add this address
+        address v2Pair = addresses.getAddress("VIRTUALS_MAMO_V2_PAIR"); // Need to add this address
 
         // Get the V2 LP token balance (should be what we just withdrew)
         uint256 v2LpBalance = IERC20(v2Pair).balanceOf(multisig);

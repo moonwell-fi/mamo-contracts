@@ -21,7 +21,6 @@ contract MamoStakingDeployment is MultisigProposal {
     address public mamoStakingStrategyFactory;
     address public multiRewards;
     address public rewardsDistributorMamoCbbtc;
-    address public rewardsDistributorMamoVirtuals;
 
     // Constants for deployment
     uint256 public constant STRATEGY_TYPE_ID = 2; // Strategy type ID for staking strategies
@@ -62,7 +61,7 @@ contract MamoStakingDeployment is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy MAMO staking system: MamoStakingRegistry, MultiRewards, MamoStakingStrategy implementation, MamoStakingStrategyFactory, and RewardsDistributorSafeModules";
+        "Deploy MAMO staking system: MamoStakingRegistry, MultiRewards, MamoStakingStrategy implementation, MamoStakingStrategyFactory, and RewardsDistributorSafeModule";
     }
 
     function deploy() public override {
@@ -119,20 +118,6 @@ contract MamoStakingDeployment is MultisigProposal {
             )
         );
 
-        // Deploy RewardsDistributorSafeModule for MAMO/VIRTUALS pair
-        address virtualsToken = addresses.getAddress("VIRTUALS");
-        rewardsDistributorMamoVirtuals = address(
-            new RewardsDistributorSafeModule(
-                payable(admin),
-                multiRewards,
-                mamoToken,
-                virtualsToken,
-                admin,
-                DEFAULT_REWARD_DURATION,
-                DEFAULT_NOTIFY_DELAY
-            )
-        );
-
         vm.stopBroadcast();
 
         addresses.addAddress("MAMO_STAKING_STRATEGY", mamoStakingStrategy, true);
@@ -140,7 +125,6 @@ contract MamoStakingDeployment is MultisigProposal {
         addresses.addAddress("MAMO_MULTI_REWARDS", multiRewards, true);
         addresses.addAddress("MAMO_STAKING_STRATEGY_FACTORY", mamoStakingStrategyFactory, true);
         addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC", rewardsDistributorMamoCbbtc, true);
-        addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS", rewardsDistributorMamoVirtuals, true);
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -252,14 +236,9 @@ contract MamoStakingDeployment is MultisigProposal {
 
         assertTrue(stakingStrategyImpl.code.length > 0, "MamoStakingStrategy implementation should have code");
 
-        // Validate RewardsDistributorSafeModule contracts
+        // Validate RewardsDistributorSafeModule contract
         address rewardsDistributorMamoCbbtcAddr = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
-        address rewardsDistributorMamoVirtualsAddr = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS");
-
         RewardsDistributorSafeModule mamoCbbtcModule = RewardsDistributorSafeModule(rewardsDistributorMamoCbbtcAddr);
-        RewardsDistributorSafeModule mamoVirtualsModule =
-            RewardsDistributorSafeModule(rewardsDistributorMamoVirtualsAddr);
-
         address expectedAdmin = addresses.getAddress("F-MAMO");
 
         // Validate MAMO/cbBTC module
@@ -284,38 +263,8 @@ contract MamoStakingDeployment is MultisigProposal {
             "MAMO/cbBTC module should have correct reward duration"
         );
 
-        // Validate MAMO/VIRTUALS module
-        assertEq(
-            address(mamoVirtualsModule.safe()), expectedAdmin, "MAMO/VIRTUALS module should have correct Safe address"
-        );
-        assertEq(
-            address(mamoVirtualsModule.multiRewards()),
-            multiRewardsAddr,
-            "MAMO/VIRTUALS module should have correct MultiRewards address"
-        );
-        assertEq(
-            address(mamoVirtualsModule.token1()),
-            expectedMamoToken,
-            "MAMO/VIRTUALS module should have correct token1 (MAMO)"
-        );
-        assertEq(
-            address(mamoVirtualsModule.token2()),
-            addresses.getAddress("VIRTUALS"),
-            "MAMO/VIRTUALS module should have correct token2 (VIRTUALS)"
-        );
-        assertEq(mamoVirtualsModule.admin(), expectedAdmin, "MAMO/VIRTUALS module should have correct admin");
-        assertEq(
-            mamoVirtualsModule.rewardDuration(),
-            DEFAULT_REWARD_DURATION,
-            "MAMO/VIRTUALS module should have correct reward duration"
-        );
-
         assertTrue(
             rewardsDistributorMamoCbbtcAddr.code.length > 0, "MAMO/cbBTC RewardsDistributorSafeModule should have code"
-        );
-        assertTrue(
-            rewardsDistributorMamoVirtualsAddr.code.length > 0,
-            "MAMO/VIRTUALS RewardsDistributorSafeModule should have code"
         );
     }
 }
