@@ -174,6 +174,26 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
+     * @notice Withdraw all available rewards without affecting staked balance
+     * @dev Claims all reward tokens and transfers them to the owner
+     */
+    function withdrawRewards() external onlyOwner {
+        multiRewards.getReward();
+
+        MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
+
+        // Loop through all reward tokens and transfer to owner
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            IERC20 rewardToken = IERC20(rewardTokens[i].token);
+            uint256 rewardBalance = rewardToken.balanceOf(address(this));
+            if (rewardBalance > 0) {
+                rewardToken.safeTransfer(msg.sender, rewardBalance);
+                emit Withdrawn(address(rewardToken), rewardBalance);
+            }
+        }
+    }
+
+    /**
      * @notice Compound all available rewards by converting them to MAMO and restaking
      * @dev Claims rewards and then compounds them. Can be called independently.
      */
