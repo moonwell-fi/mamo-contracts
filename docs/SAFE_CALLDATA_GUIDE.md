@@ -29,10 +29,10 @@ tx-service enable
 
 ## Send Transaction
 
-0x40A2aCCbd92BCA938b02010E17A5b8929b49130D is the safe Multisend contract address.
+0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761 is the safe Multisend contract address.
 
 ```bash
-send_custom 0x40A2aCCbd92BCA938b02010E17A5b8929b49130D 0 $CALLDATA --delegate
+send_custom 0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761 0 $CALLDATA --delegate
 ```
 
 

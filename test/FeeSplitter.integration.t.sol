@@ -345,7 +345,7 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
         // This test verifies that the deploy script works correctly
         // Since setUp() already uses the deploy script, we just need to verify the deployment is correct
         assertEq(feeSplitter.TOKEN_0(), addresses.getAddress("MAMO"), "incorrect TOKEN_0 from deploy script");
-        assertEq(feeSplitter.TOKEN_1(), addresses.getAddress("VIRTUAL"), "incorrect TOKEN_1 from deploy script");
+        assertEq(feeSplitter.TOKEN_1(), addresses.getAddress("VIRTUALS"), "incorrect TOKEN_1 from deploy script");
 
         // Verify that recipients are set to valid addresses (they might differ based on current addresses.json)
         assertTrue(feeSplitter.RECIPIENT_1() != address(0), "RECIPIENT_1 should not be zero");

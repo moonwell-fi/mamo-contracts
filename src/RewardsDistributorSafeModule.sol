@@ -29,14 +29,14 @@ contract RewardsDistributorSafeModule is Pausable {
 
     /**
      * @notice Struct representing pending reward distribution
-     * @param amountBTC Amount of BTC tokens to distribute as rewards
-     * @param amountMAMO Amount of MAMO tokens to distribute as rewards
+     * @param amountToken1 Amount of token1 tokens to distribute as rewards
+     * @param amountToken2 Amount of token2 tokens to distribute as rewards
      * @param notifyAfter Timestamp after which rewards can be notified
      * @param isNotified Whether the rewards have been notified
      */
     struct PendingRewards {
-        uint256 amountBTC;
-        uint256 amountMAMO;
+        uint256 amountToken1;
+        uint256 amountToken2;
         uint256 notifyAfter;
         bool isNotified;
     }
@@ -72,11 +72,11 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @notice The MultiRewards contract interface
     IMultiRewards public immutable multiRewards;
 
-    /// @notice The MAMO token contract
-    IERC20 public immutable mamoToken;
+    /// @notice The token1 contract
+    IERC20 public immutable token1;
 
-    /// @notice The BTC token contract
-    IERC20 public immutable btcToken;
+    /// @notice The token2 contract
+    IERC20 public immutable token2;
 
     /////////////////////////// STATE VARIABLES //////////////////////////
 
@@ -112,16 +112,16 @@ contract RewardsDistributorSafeModule is Pausable {
     event NotifyDelayUpdated(uint256 oldNotifyDelay, uint256 newNotifyDelay);
 
     /// @notice Emitted when new rewards are added to the pending state
-    /// @param amountBTC The amount of BTC tokens to distribute as rewards
-    /// @param amountMAMO The amount of MAMO tokens to distribute as rewards
+    /// @param amountToken1 The amount of token1 tokens to distribute as rewards
+    /// @param amountToken2 The amount of token2 tokens to distribute as rewards
     /// @param notifyAfter The timestamp after which rewards can be executed
-    event RewardAdded(uint256 amountBTC, uint256 amountMAMO, uint256 notifyAfter);
+    event RewardAdded(uint256 amountToken1, uint256 amountToken2, uint256 notifyAfter);
 
     /// @notice Emitted when pending rewards are successfully executed
-    /// @param mamoAmount The amount of MAMO tokens distributed
-    /// @param btcAmount The amount of BTC tokens distributed
+    /// @param token1Amount The amount of token1 tokens distributed
+    /// @param token2Amount The amount of token2 tokens distributed
     /// @param notifiedAt The timestamp when rewards were notified
-    event RewardsNotified(uint256 mamoAmount, uint256 btcAmount, uint256 notifiedAt);
+    event RewardsNotified(uint256 token1Amount, uint256 token2Amount, uint256 notifiedAt);
 
     //////////////////////////////// MODIFIERS ////////////////////////////////
 
@@ -143,32 +143,32 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @dev Sets up all immutable contract references and initial state variables
     /// @param _safe The address of the Safe smart account this module will be attached to
     /// @param _multiRewards The address of the MultiRewards contract for reward distribution
-    /// @param _mamoToken The address of the MAMO ERC20 token contract
-    /// @param _btcToken The address of the BTC ERC20 token contract
+    /// @param _token1 The address of the token1 ERC20 token contract
+    /// @param _token2 The address of the token2 ERC20 token contract
     /// @param _admin The address that will have admin privileges for this module
     /// @param _rewardDuration The initial reward duration in seconds for time-locked execution
     /// @param _notifyDelay The initial notify delay in seconds for time-locked execution
     constructor(
         address payable _safe,
         address _multiRewards,
-        address _mamoToken,
-        address _btcToken,
+        address _token1,
+        address _token2,
         address _admin,
         uint256 _rewardDuration,
         uint256 _notifyDelay
     ) {
         require(_safe != address(0), "Invalid Safe address");
         require(_multiRewards != address(0), "Invalid MultiRewards address");
-        require(_mamoToken != address(0), "Invalid MAMO token address");
-        require(_btcToken != address(0), "Invalid BTC token address");
+        require(_token1 != address(0), "Invalid token1 address");
+        require(_token2 != address(0), "Invalid token2 address");
         require(_admin != address(0), "Invalid admin address");
         require(_rewardDuration > 0, "Invalid reward duration");
         require(_notifyDelay > 0, "Invalid notify delay");
 
         safe = ISafe(_safe);
         multiRewards = IMultiRewards(_multiRewards);
-        mamoToken = IERC20(_mamoToken);
-        btcToken = IERC20(_btcToken);
+        token1 = IERC20(_token1);
+        token2 = IERC20(_token2);
         admin = _admin;
         rewardDuration = _rewardDuration;
         notifyDelay = _notifyDelay;
@@ -183,44 +183,44 @@ contract RewardsDistributorSafeModule is Pausable {
     function notifyRewards() external whenNotPaused {
         require(getCurrentState() == RewardState.PENDING_EXECUTION, "Rewards not in pending state");
 
-        uint256 mamoAmount = pendingRewards.amountMAMO;
+        uint256 token1Amount = pendingRewards.amountToken1;
 
-        if (mamoAmount > 0) {
-            require(mamoToken.balanceOf(address(safe)) >= mamoAmount, "Insufficient MAMO balance");
+        if (token1Amount > 0) {
+            require(token1.balanceOf(address(safe)) >= token1Amount, "Insufficient token1 balance");
 
-            _approveTokenFromSafe(address(mamoToken), address(multiRewards), mamoAmount);
+            _approveTokenFromSafe(address(token1), address(multiRewards), token1Amount);
 
-            (address rewardsDistributor,,,,,) = multiRewards.rewardData(address(mamoToken));
+            (address rewardsDistributor,,,,,) = multiRewards.rewardData(address(token1));
             if (rewardsDistributor == address(0)) {
-                _addRewardFromSafe(address(mamoToken), rewardDuration);
+                _addRewardFromSafe(address(token1), rewardDuration);
             } else {
-                _setRewardDurationFromSafe(address(mamoToken), rewardDuration);
+                _setRewardDurationFromSafe(address(token1), rewardDuration);
             }
 
-            _notifyRewardAmountFromSafe(address(mamoToken), mamoAmount);
+            _notifyRewardAmountFromSafe(address(token1), token1Amount);
         }
 
-        uint256 btcAmount = pendingRewards.amountBTC;
+        uint256 token2Amount = pendingRewards.amountToken2;
 
-        if (btcAmount > 0) {
-            require(btcToken.balanceOf(address(safe)) >= btcAmount, "Insufficient BTC balance");
+        if (token2Amount > 0) {
+            require(token2.balanceOf(address(safe)) >= token2Amount, "Insufficient token2 balance");
 
-            _approveTokenFromSafe(address(btcToken), address(multiRewards), btcAmount);
+            _approveTokenFromSafe(address(token2), address(multiRewards), token2Amount);
 
-            (address rewardsDistributor,,,,,) = multiRewards.rewardData(address(btcToken));
+            (address rewardsDistributor,,,,,) = multiRewards.rewardData(address(token2));
             if (rewardsDistributor == address(0)) {
-                _addRewardFromSafe(address(btcToken), rewardDuration);
+                _addRewardFromSafe(address(token2), rewardDuration);
             } else {
-                _setRewardDurationFromSafe(address(btcToken), rewardDuration);
+                _setRewardDurationFromSafe(address(token2), rewardDuration);
             }
 
-            _notifyRewardAmountFromSafe(address(btcToken), btcAmount);
+            _notifyRewardAmountFromSafe(address(token2), token2Amount);
         }
 
         pendingRewards.isNotified = true; // state machine transition to EXECUTED
         pendingRewards.notifyAfter = block.timestamp + notifyDelay;
 
-        emit RewardsNotified(mamoAmount, btcAmount, block.timestamp);
+        emit RewardsNotified(token1Amount, token2Amount, block.timestamp);
     }
 
     //////////////////////////////// VIEW FUNCTIONS ////////////////////////////////
@@ -256,28 +256,28 @@ contract RewardsDistributorSafeModule is Pausable {
     /// @dev Transitions the contract from UNINITIALIZED or EXECUTED to PENDING_EXECUTION state
     /// @dev Validates execution time and ensures previous rewards are executed before setting new ones
     /// @dev Uses centralized state validation through getCurrentState() function
-    /// @param amountBTC The amount of BTC tokens to distribute as rewards
-    /// @param amountMAMO The amount of MAMO tokens to distribute as rewards
-    function addRewards(uint256 amountBTC, uint256 amountMAMO) external onlyAdmin whenNotPaused {
+    /// @param amountToken1 The amount of token1 tokens to distribute as rewards
+    /// @param amountToken2 The amount of token2 tokens to distribute as rewards
+    function addRewards(uint256 amountToken1, uint256 amountToken2) external onlyAdmin whenNotPaused {
         require(
             getCurrentState() == RewardState.EXECUTED || getCurrentState() == RewardState.UNINITIALIZED,
             "Pending rewards waiting to be executed"
         );
 
-        require(mamoToken.balanceOf(address(safe)) >= amountMAMO, "Insufficient MAMO balance");
-        require(btcToken.balanceOf(address(safe)) >= amountBTC, "Insufficient BTC balance");
+        require(token1.balanceOf(address(safe)) >= amountToken1, "Insufficient token1 balance");
+        require(token2.balanceOf(address(safe)) >= amountToken2, "Insufficient token2 balance");
 
-        require(amountBTC > 0 || amountMAMO > 0, "Invalid reward amount");
+        require(amountToken1 > 0 || amountToken2 > 0, "Invalid reward amount");
 
         if (pendingRewards.notifyAfter == 0) {
             pendingRewards.notifyAfter = 1; // set to 1 at first time to change state to PENDING_EXECUTION
         }
 
-        pendingRewards.amountBTC = amountBTC;
-        pendingRewards.amountMAMO = amountMAMO;
+        pendingRewards.amountToken1 = amountToken1;
+        pendingRewards.amountToken2 = amountToken2;
         pendingRewards.isNotified = false;
 
-        emit RewardAdded(amountBTC, amountMAMO, pendingRewards.notifyAfter);
+        emit RewardAdded(amountToken1, amountToken2, pendingRewards.notifyAfter);
     }
 
     //////////////////////////////// ONLY SAFE ////////////////////////////////
@@ -291,13 +291,13 @@ contract RewardsDistributorSafeModule is Pausable {
     }
 
     /// @notice Updates the reward duration for both reward tokens
-    /// @dev Validates duration bounds and updates both MAMO and BTC token durations
+    /// @dev Validates duration bounds and updates both token1 and token2 durations
     /// @param newDuration The new duration in seconds for reward distribution
     function setRewardDuration(uint256 newDuration) external onlySafe {
         require(newDuration >= MIN_REWARDS_DURATION && newDuration <= MAX_REWARDS_DURATION, "Invalid reward duration");
 
-        multiRewards.setRewardsDuration(address(mamoToken), newDuration);
-        multiRewards.setRewardsDuration(address(btcToken), newDuration);
+        multiRewards.setRewardsDuration(address(token1), newDuration);
+        multiRewards.setRewardsDuration(address(token2), newDuration);
 
         emit RewardDurationUpdated(rewardDuration, newDuration);
         rewardDuration = newDuration;

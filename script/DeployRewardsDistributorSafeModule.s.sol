@@ -20,27 +20,6 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
     uint256 public constant DEFAULT_REWARD_DURATION = 7 days;
     uint256 public constant DEFAULT_NOTIFY_DELAY = 7 days;
 
-    function run() public {
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-
-        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
-
-        address multiRewards = deployMultiRewards(addresses, payable(addresses.getAddress("MAMO_MULTISIG")));
-        address rewardsModule =
-            deployRewardsDistributorSafeModule(addresses, payable(addresses.getAddress("MAMO_MULTISIG")));
-
-        validateDeployment(addresses, multiRewards, rewardsModule);
-
-        addresses.updateJson();
-        addresses.printJSONChanges();
-
-        console.log(
-            "\n%s\n", StdStyle.bold(StdStyle.blue("=== REWARDS DISTRIBUTOR SAFE MODULE DEPLOYMENT COMPLETE ==="))
-        );
-    }
-
     /**
      * @notice Deploy the MultiRewards contract
      * @param addresses The addresses contract for dependency injection
@@ -71,26 +50,32 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
     /**
      * @notice Deploy the RewardsDistributorSafeModule contract
      * @param addresses The addresses contract for dependency injection
+     * @param safe The Safe contract address
+     * @param token1 The first reward token address
+     * @param token2 The second reward token address
      * @return rewardsModule The deployed RewardsDistributorSafeModule contract address
      */
-    function deployRewardsDistributorSafeModule(Addresses addresses, address payable safe)
-        public
-        returns (address rewardsModule)
-    {
+    function deployRewardsDistributorSafeModule(
+        Addresses addresses,
+        address payable safe,
+        address token1,
+        address token2
+    ) public returns (address rewardsModule) {
         console.log(
             "\n%s", StdStyle.bold(StdStyle.green("Phase 2: Deploying RewardsDistributorSafeModule contract..."))
         );
 
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
         address multiRewards = addresses.getAddress("MAMO_STAKING");
-        address mamoToken = addresses.getAddress("MAMO");
-        address btcToken = addresses.getAddress("cbBTC");
+
+        console.log("Using token1: %s", StdStyle.yellow(vm.toString(token1)));
+        console.log("Using token2: %s", StdStyle.yellow(vm.toString(token2)));
 
         vm.startBroadcast();
 
         rewardsModule = address(
             new RewardsDistributorSafeModule(
-                safe, multiRewards, mamoToken, btcToken, mamoBackend, DEFAULT_REWARD_DURATION, DEFAULT_NOTIFY_DELAY
+                safe, multiRewards, token1, token2, mamoBackend, DEFAULT_REWARD_DURATION, DEFAULT_NOTIFY_DELAY
             )
         );
 
@@ -111,13 +96,19 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
      * @param addresses The addresses contract
      * @param multiRewards The deployed MultiRewards contract address
      * @param rewardsModule The deployed RewardsDistributorSafeModule contract address
+     * @param token1 The first reward token address
+     * @param token2 The second reward token address
      */
-    function validateDeployment(Addresses addresses, address multiRewards, address rewardsModule) public view {
+    function validateDeployment(
+        Addresses addresses,
+        address multiRewards,
+        address rewardsModule,
+        address token1,
+        address token2
+    ) public view {
         console.log("\n%s", StdStyle.bold(StdStyle.green("Phase 3: Validating deployment...")));
 
-        address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
-        address mamoToken = addresses.getAddress("MAMO");
-        address btcToken = addresses.getAddress("cbBTC");
+        address mamoMultisig = addresses.getAddress("F-MAMO");
 
         // Validate MultiRewards contract
         IMultiRewards multiRewardsContract = IMultiRewards(multiRewards);
@@ -129,8 +120,8 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
 
         assertEq(address(moduleContract.safe()), mamoMultisig, "RewardsModule: incorrect Safe address");
         assertEq(address(moduleContract.multiRewards()), multiRewards, "RewardsModule: incorrect MultiRewards address");
-        assertEq(address(moduleContract.mamoToken()), mamoToken, "RewardsModule: incorrect MAMO token address");
-        assertEq(address(moduleContract.btcToken()), btcToken, "RewardsModule: incorrect BTC token address");
+        assertEq(address(moduleContract.token1()), token1, "RewardsModule: incorrect token1 address");
+        assertEq(address(moduleContract.token2()), token2, "RewardsModule: incorrect token2 address");
         assertEq(moduleContract.admin(), mamoMultisig, "RewardsModule: incorrect admin address");
         assertEq(moduleContract.rewardDuration(), DEFAULT_REWARD_DURATION, "RewardsModule: incorrect reward duration");
 
