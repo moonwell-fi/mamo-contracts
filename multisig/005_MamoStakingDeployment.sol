@@ -15,13 +15,6 @@ import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 import {console} from "forge-std/console.sol";
 
 contract MamoStakingDeployment is MultisigProposal {
-    // Deployed contract addresses - will be set during deployment
-    address public mamoStakingRegistry;
-    address public mamoStakingStrategy;
-    address public mamoStakingStrategyFactory;
-    address public multiRewards;
-    address public rewardsDistributorMamoCbbtc;
-
     // Constants for deployment
     uint256 public constant STRATEGY_TYPE_ID = 2; // Strategy type ID for staking strategies
     uint256 public constant DEFAULT_SLIPPAGE_IN_BPS = 100; // 1% default slippage
@@ -73,18 +66,17 @@ contract MamoStakingDeployment is MultisigProposal {
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
         address quoter = addresses.getAddress("AERODROME_QUOTER");
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
+        address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
         vm.startBroadcast(deployer);
 
-        mamoStakingRegistry = address(
+        address mamoStakingRegistry = address(
             new MamoStakingRegistry(deployer, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
         );
 
-        multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
+        address mamoStakingStrategy = address(new MamoStakingStrategy());
 
-        mamoStakingStrategy = address(new MamoStakingStrategy());
-
-        mamoStakingStrategyFactory = address(
+        address mamoStakingStrategyFactory = address(
             new MamoStakingStrategyFactory(
                 admin,
                 mamoStrategyRegistry,
@@ -103,7 +95,7 @@ contract MamoStakingDeployment is MultisigProposal {
         MamoStakingRegistry(mamoStakingRegistry).addRewardToken(cbBTC, cbBTCMamoPool);
 
         // Deploy RewardsDistributorSafeModule for MAMO/cbBTC pair
-        rewardsDistributorMamoCbbtc = address(
+        address rewardsDistributorMamoCbbtc = address(
             new RewardsDistributorSafeModule(
                 payable(admin), multiRewards, mamoToken, cbBTC, admin, DEFAULT_REWARD_DURATION, DEFAULT_NOTIFY_DELAY
             )
@@ -133,6 +125,7 @@ contract MamoStakingDeployment is MultisigProposal {
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
+        address mamoStakingStrategy = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
         registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
         // This will assign strategy type id to 2
