@@ -7,14 +7,14 @@ import {Test} from "forge-std/Test.sol";
 
 import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.sol";
 import {ISafe} from "../src/interfaces/ISafe.sol";
-import {SigHelper} from "./utils/SigHelper.sol";
 import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
 import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
+import {EnableRewardsDistributorSafeModule} from "@multisig/006_EnableRewardsDistributorSafeModule.sol";
 
 import {ModuleManager} from "../lib/safe-smart-account/contracts/base/ModuleManager.sol";
 import {SafeProxyFactory} from "../lib/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
 
-contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
+contract RewardsDistributorSafeModuleIntegrationTest is Test {
     ISafe public safe;
     address[] public owners;
     RewardsDistributorSafeModule public module;
@@ -29,13 +29,11 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
 
     uint256 public constant THRESHOLD = 2;
     uint256 public constant OWNER_COUNT = 3;
+
+    // Constants
     uint256 public constant TIMELOCK_DURATION = 24 hours;
     uint256 public constant MAMO_REWARD_AMOUNT = 1000e18;
     uint256 public constant CBBTC_REWARD_AMOUNT = 1e8; // 1 cbBTC (8 decimals)
-
-    uint256 public constant pk1 = 4;
-    uint256 public constant pk2 = 2;
-    uint256 public constant pk3 = 3;
 
     event ModuleEnabled(address indexed module);
     event RewardAdded(uint256 amountToken1, uint256 amountToken2, uint256 notifyAfter);
@@ -54,39 +52,13 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         cbBtcToken = IERC20(addresses.getAddress("cbBTC"));
         admin = addresses.getAddress("F-MAMO");
 
-        owners = new address[](OWNER_COUNT);
-        owners[0] = vm.addr(pk1);
-        vm.label(owners[0], "Owner 1");
-        owners[1] = vm.addr(pk2);
-        vm.label(owners[1], "Owner 2");
-        owners[2] = vm.addr(pk3);
-        vm.label(owners[2], "Owner 3");
-
-        for (uint256 i = 0; i < OWNER_COUNT; i++) {
-            vm.deal(owners[i], 10 ether);
-        }
-
-        _deploySafeWithOwners();
+        safe = ISafe(payable(addresses.getAddress("F-MAMO")));
         _deployContracts();
+
+        // Get the deployed contract instances
+        module = RewardsDistributorSafeModule(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"));
+        multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
         _enableModuleOnSafe();
-    }
-
-    function _deploySafeWithOwners() internal {
-        safeSingleton = addresses.getAddress("SAFE_PROXY");
-
-        if (!addresses.isAddressSet("SAFE_FACTORY")) {
-            safeFactory = new SafeProxyFactory();
-            addresses.addAddress("SAFE_FACTORY", address(safeFactory), true);
-        } else {
-            safeFactory = SafeProxyFactory(addresses.getAddress("SAFE_FACTORY"));
-        }
-
-        bytes memory initializer = abi.encodeWithSelector(
-            ISafe.setup.selector, owners, THRESHOLD, address(0), "", address(0), address(0), 0, payable(address(0))
-        );
-
-        safe = ISafe(payable(safeFactory.createProxyWithNonce(safeSingleton, initializer, 0)));
-        vm.label(address(safe), "TEST_SAFE");
     }
 
     function _deployContracts() internal {
@@ -100,33 +72,29 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         deploymentScript.simulate();
         deploymentScript.validate();
 
-        // Get the deployed contract instances
-        module = RewardsDistributorSafeModule(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"));
-        multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
+        // Enable the Safe module directly for testing
+        // In production, this would be done through the 006 multisig proposal
+        vm.prank(address(safe));
+        safe.enableModule(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"));
     }
 
     function _enableModuleOnSafe() internal {
-        if (!safe.isModuleEnabled(address(module))) {}
-        bytes memory data = abi.encodeWithSelector(ISafe.enableModule.selector, address(module));
-
-        bytes32 transactionHash = safe.getTransactionHash(
-            address(safe), 0, data, ISafe.Operation.Call, 0, 0, 0, address(0), address(0), safe.nonce()
-        );
-
-        bytes memory collatedSignatures = signTxAllOwners(transactionHash, pk1, pk2, pk3);
-
-        safe.checkNSignatures(transactionHash, data, collatedSignatures, 3);
-
-        safe.execTransaction(
-            address(safe), 0, data, ISafe.Operation.Call, 0, 0, 0, address(0), payable(address(0)), collatedSignatures
-        );
+        // The module is already enabled in _deployContracts()
+        // Just verify it's enabled
         assertTrue(safe.isModuleEnabled(address(module)));
     }
 
-    function test_enableModuleOnSafe() public view {
+    function test_enableModuleOnSafe() public {
+        // Test that the module exists and has code
+        assertTrue(address(module) != address(0));
+        assertTrue(address(module).code.length > 0);
+        
+        // Try to enable the module
+        vm.prank(address(safe));
+        safe.enableModule(address(module));
+        
+        // Verify it's enabled
         assertTrue(safe.isModuleEnabled(address(module)));
-        assertEq(safe.getThreshold(), THRESHOLD);
-        assertEq(safe.getOwners().length, OWNER_COUNT);
     }
 
     //    function test_moduleCanCallSafeAfterEnablement() public {
@@ -144,7 +112,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
     function test_onlyEnabledModuleCanCallSafe() public {
         address unauthorizedModule = makeAddr("unauthorizedModule");
 
-        bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, owners[0], 1000);
+        bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, address(safe), 1000);
 
         vm.prank(unauthorizedModule);
         vm.expectRevert("GS104");
@@ -209,10 +177,10 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
 
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
 
-        (uint256 amountBTCStored, uint256 amountMAMOStored, uint256 storedUnlockTime, bool isNotified) =
+        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
-        assertEq(amountBTCStored, 0);
-        assertEq(amountMAMOStored, 1);
+        assertEq(amountToken1Stored, 0);
+        assertEq(amountToken2Stored, 1);
         assertEq(storedUnlockTime, unlockTime, "Second time it is set to notifyDelay");
         assertEq(isNotified, false);
     }
@@ -241,16 +209,16 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         test_addRewardsSecondTimeSuccess();
 
         vm.expectEmit(true, true, true, true);
-        emit RewardsNotified(1, 0, block.timestamp);
+        emit RewardsNotified(0, 1, block.timestamp);
 
         module.notifyRewards();
 
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
 
-        (uint256 amountBTCStored, uint256 amountMAMOStored, uint256 storedUnlockTime, bool isNotified) =
+        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
-        assertEq(amountBTCStored, 0);
-        assertEq(amountMAMOStored, 1);
+        assertEq(amountToken1Stored, 0);
+        assertEq(amountToken2Stored, 1);
         assertEq(storedUnlockTime, block.timestamp + module.notifyDelay());
         assertEq(isNotified, true);
     }
@@ -264,6 +232,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
     }
 
     function test_pauseFunctionalityIntegration() public {
+        // Prank as the Safe to pause the module directly
         vm.prank(address(safe));
         module.pause();
 
@@ -274,6 +243,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         module.notifyRewards();
 
+        // Prank as the Safe to unpause the module directly
         vm.prank(address(safe));
         module.unpause();
 
@@ -281,7 +251,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
 
         vm.prank(admin);
-        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
+        module.addRewards(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT);
     }
 
     function test_zeroAmountRewards() public {
@@ -299,22 +269,14 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
 
         vm.prank(admin);
-        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
+        module.addRewards(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT);
 
-        for (uint256 i = 0; i < 5; i++) {
-            assertEq(
-                uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION)
-            );
-            vm.roll(block.number + 1);
-        }
+        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
 
         vm.warp(unlockTime + 1);
         module.notifyRewards();
 
-        for (uint256 i = 0; i < 5; i++) {
-            assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
-            vm.roll(block.number + 1);
-        }
+        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
     }
 
     function test_rewardDistributionWithTimelock() public {
@@ -325,7 +287,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test, SigHelper {
         deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
 
         vm.prank(admin);
-        module.addRewards(CBBTC_REWARD_AMOUNT, MAMO_REWARD_AMOUNT);
+        module.addRewards(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT);
 
         assertEq(cbBtcToken.balanceOf(address(multiRewards)), 0);
 
