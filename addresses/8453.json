@@ -243,5 +243,25 @@
     "addr": "0xEC9aBc51Bf7D7A91a60C32Dea861f8029b1A7791",
     "name": "MAMO_MULTI_REWARDS",
     "isContract": true
+  },
+  {
+    "addr": "0x7240519388ACD7632FF38753F514fcC993AbED09",
+    "name": "MAMO_STAKING_STRATEGY",
+    "isContract": true
+  },
+  {
+    "addr": "0xeC2fa154343958A8912a2e2BCcDCdFd74362DFa3",
+    "name": "MAMO_STAKING_REGISTRY",
+    "isContract": true
+  },
+  {
+    "addr": "0xd7C3f474761B9A0ca4a8634570E8DCD4f5c92239",
+    "name": "MAMO_STAKING_STRATEGY_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0xFAbe701fdD289E0b1938238c48eDe86b02757f85",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_CBBTC",
+    "isContract": true
   }
 ]
