@@ -45,9 +45,9 @@ contract EnableRewardsDistributorSafeModule is MultisigProposal {
         return "Enable RewardsDistributorSafeModule on the F-MAMO Safe multisig";
     }
 
-    function deploy() public override {
-        // No deployment needed - the module was deployed in 005
-        // This proposal only enables the module on the Safe
+    function getOperations() public view override returns (uint8[] memory operations) {
+        operations = new uint8[](1);
+        operations[0] = 1; // DelegateCall operation for enableModule
     }
 
     function build() public override buildModifier(addresses.getAddress("F-MAMO")) {
@@ -55,9 +55,7 @@ contract EnableRewardsDistributorSafeModule is MultisigProposal {
         address rewardsDistributorModule = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
 
         // Enable the RewardsDistributorSafeModule on the Safe
-        if (!safe.isModuleEnabled(rewardsDistributorModule)) {
-            safe.enableModule(rewardsDistributorModule);
-        }
+        safe.enableModule(rewardsDistributorModule);
     }
 
     function simulate() public override {

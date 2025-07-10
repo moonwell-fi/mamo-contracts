@@ -58,7 +58,6 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
         // Get the deployed contract instances
         module = RewardsDistributorSafeModule(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"));
         multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
-        _enableModuleOnSafe();
     }
 
     function _deployContracts() internal {
@@ -72,28 +71,19 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
         deploymentScript.simulate();
         deploymentScript.validate();
 
-        // Enable the Safe module directly for testing
-        // In production, this would be done through the 006 multisig proposal
-        vm.prank(address(safe));
-        safe.enableModule(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"));
-    }
-
-    function _enableModuleOnSafe() internal {
-        // The module is already enabled in _deployContracts()
-        // Just verify it's enabled
-        assertTrue(safe.isModuleEnabled(address(module)));
+        // Enable the RewardsDistributorSafeModule on the Safe
+        EnableRewardsDistributorSafeModule enableModuleScript = new EnableRewardsDistributorSafeModule();
+        enableModuleScript.setAddresses(addresses);
+        enableModuleScript.deploy();
+        enableModuleScript.build();
+        enableModuleScript.simulate();
+        enableModuleScript.validate();
     }
 
     function test_enableModuleOnSafe() public {
         // Test that the module exists and has code
         assertTrue(address(module) != address(0));
         assertTrue(address(module).code.length > 0);
-        
-        // Try to enable the module
-        vm.prank(address(safe));
-        safe.enableModule(address(module));
-        
-        // Verify it's enabled
         assertTrue(safe.isModuleEnabled(address(module)));
     }
 
