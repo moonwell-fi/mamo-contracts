@@ -80,8 +80,7 @@ contract MamoStakingDeployment is MultisigProposal {
             new MamoStakingRegistry(deployer, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
         );
 
-        bytes memory multiRewardsArgs = abi.encode(admin, mamoToken);
-        multiRewards = vm.deployCode("MultiRewards.sol:MultiRewards", multiRewardsArgs);
+        multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
         mamoStakingStrategy = address(new MamoStakingStrategy());
 
@@ -127,7 +126,6 @@ contract MamoStakingDeployment is MultisigProposal {
 
         addresses.addAddress("MAMO_STAKING_STRATEGY", mamoStakingStrategy, true);
         addresses.addAddress("MAMO_STAKING_REGISTRY", mamoStakingRegistry, true);
-        addresses.addAddress("MAMO_MULTI_REWARDS", multiRewards, true);
         addresses.addAddress("MAMO_STAKING_STRATEGY_FACTORY", mamoStakingStrategyFactory, true);
         addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC", rewardsDistributorMamoCbbtc, true);
     }

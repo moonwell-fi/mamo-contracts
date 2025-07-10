@@ -45,7 +45,7 @@ contract EnableRewardsDistributorSafeModule is MultisigProposal {
         return "Enable RewardsDistributorSafeModule on the F-MAMO Safe multisig";
     }
 
-    function getOperations() public view override returns (uint8[] memory operations) {
+    function getOperations() public pure override returns (uint8[] memory operations) {
         operations = new uint8[](1);
         operations[0] = 1; // DelegateCall operation for enableModule
     }
