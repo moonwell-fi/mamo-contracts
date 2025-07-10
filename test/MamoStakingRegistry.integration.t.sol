@@ -10,7 +10,6 @@ import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
-import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -39,15 +38,6 @@ contract MamoStakingRegistryIntegrationTest is Test {
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
-
-        // Use the multisig deployment script to deploy all contracts
-        MamoStakingDeployment deploymentScript = new MamoStakingDeployment();
-        deploymentScript.setAddresses(addresses);
-
-        // Deploy the staking system
-        deploymentScript.build();
-        deploymentScript.simulate();
-        deploymentScript.validate();
 
         // Get the deployed registry
         stakingRegistry = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));

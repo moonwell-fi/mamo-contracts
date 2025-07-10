@@ -8,8 +8,6 @@ import {Test} from "forge-std/Test.sol";
 import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.sol";
 import {ISafe} from "../src/interfaces/ISafe.sol";
 import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
-import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
-import {EnableRewardsDistributorSafeModule} from "@multisig/006_EnableRewardsDistributorSafeModule.sol";
 
 import {ModuleManager} from "../lib/safe-smart-account/contracts/base/ModuleManager.sol";
 import {SafeProxyFactory} from "../lib/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
@@ -53,29 +51,10 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
         admin = addresses.getAddress("F-MAMO");
 
         safe = ISafe(payable(addresses.getAddress("F-MAMO")));
-        _deployContracts();
 
         // Get the deployed contract instances
         module = RewardsDistributorSafeModule(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC"));
         multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
-    }
-
-    function _deployContracts() internal {
-        // Use the multisig deployment script to deploy all contracts
-        MamoStakingDeployment deploymentScript = new MamoStakingDeployment();
-        deploymentScript.setAddresses(addresses);
-
-        // Call the individual functions instead of run()
-        deploymentScript.build();
-        deploymentScript.simulate();
-        deploymentScript.validate();
-
-        // Enable the RewardsDistributorSafeModule on the Safe
-        EnableRewardsDistributorSafeModule enableModuleScript = new EnableRewardsDistributorSafeModule();
-        enableModuleScript.setAddresses(addresses);
-        enableModuleScript.build();
-        enableModuleScript.simulate();
-        enableModuleScript.validate();
     }
 
     function test_enableModuleOnSafe() public {

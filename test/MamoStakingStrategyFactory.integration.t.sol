@@ -16,8 +16,6 @@ import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {MamoStakingDeployment} from "@multisig/005_MamoStakingDeployment.sol";
-
 contract MamoStakingStrategyFactoryIntegrationTest is Test {
     Addresses public addresses;
     MamoStakingRegistry public stakingRegistry;
@@ -41,15 +39,6 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
         // Get existing contract instances from addresses
         mamoStrategyRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         mamoToken = IERC20(addresses.getAddress("MAMO"));
-
-        // Use the multisig deployment script to deploy all contracts
-        MamoStakingDeployment deploymentScript = new MamoStakingDeployment();
-        deploymentScript.setAddresses(addresses);
-
-        // Call the individual functions instead of run()
-        deploymentScript.build();
-        deploymentScript.simulate();
-        deploymentScript.validate();
 
         // Get the deployed contract instances
         stakingRegistry = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));
