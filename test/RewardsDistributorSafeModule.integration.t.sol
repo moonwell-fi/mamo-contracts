@@ -66,7 +66,6 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
         deploymentScript.setAddresses(addresses);
 
         // Call the individual functions instead of run()
-        deploymentScript.deploy();
         deploymentScript.build();
         deploymentScript.simulate();
         deploymentScript.validate();
@@ -74,7 +73,6 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
         // Enable the RewardsDistributorSafeModule on the Safe
         EnableRewardsDistributorSafeModule enableModuleScript = new EnableRewardsDistributorSafeModule();
         enableModuleScript.setAddresses(addresses);
-        enableModuleScript.deploy();
         enableModuleScript.build();
         enableModuleScript.simulate();
         enableModuleScript.validate();

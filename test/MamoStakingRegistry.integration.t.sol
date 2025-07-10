@@ -45,7 +45,6 @@ contract MamoStakingRegistryIntegrationTest is Test {
         deploymentScript.setAddresses(addresses);
 
         // Deploy the staking system
-        deploymentScript.deploy();
         deploymentScript.build();
         deploymentScript.simulate();
         deploymentScript.validate();

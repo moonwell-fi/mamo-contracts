@@ -52,7 +52,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
         deploymentScript.setAddresses(addresses);
 
         // Call the individual functions instead of run()
-        deploymentScript.deploy();
         deploymentScript.build();
         deploymentScript.simulate();
         deploymentScript.validate();
