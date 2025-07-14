@@ -648,6 +648,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Check earned rewards and initial balances
         uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
+        console.log("earnedCbBTCRewards", earnedCbBTCRewards);
         uint256 initialCbBTCBalance = IERC20(cbBTC).balanceOf(user);
 
         // Verify initial staked balance
@@ -656,6 +657,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Withdraw rewards using withdrawRewards function
         vm.startPrank(user);
+
+        deal(cbBTC, userStrategy, 1);
 
         // Expect Withdrawn event for cbBTC reward token
         vm.expectEmit(true, false, false, true);
@@ -1077,7 +1080,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 mamoRewardAmount = 50 * 10 ** 18; // Add MAMO rewards
-        uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
+        uint256 cbBTCRewardAmount = 10 * 10 ** 8; // cbBTC has 8 decimals - increased for better precision
 
         // Setup cbBTC strategy for the same user
         address cbBTCStrategy = _setupCbBTCStrategy(user);
@@ -1211,6 +1214,9 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         address[] memory strategies = new address[](1);
         strategies[0] = fakeStrategy;
+
+        // mock rewards
+        deal(cbBTC, userStrategy, 1);
 
         vm.expectRevert("Strategy not registered");
         MamoStakingStrategy(userStrategy).reinvest(strategies);
