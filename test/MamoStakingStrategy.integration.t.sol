@@ -1203,7 +1203,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
 
         // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(block.timestamp + 7 days);
 
         // Process rewards as backend - this should fail because strategy is not registered
         address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
@@ -1211,9 +1211,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         address[] memory strategies = new address[](1);
         strategies[0] = fakeStrategy;
-
-        // mock rewards
-        deal(cbBTC, userStrategy, 1);
 
         vm.expectRevert("Strategy not registered");
         MamoStakingStrategy(userStrategy).reinvest(strategies);
