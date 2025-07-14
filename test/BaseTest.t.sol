@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {TransferFeeCollector} from "../multisig/007_TransferFeeCollector.sol";
+import {ChangeMamoStakingBackendRole} from "../multisig/f-mamo/001_ChangeMamoStakingBackendRole.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
@@ -9,7 +9,7 @@ import {DeployConfig} from "@script/DeployConfig.sol";
 abstract contract BaseTest is Test {
     Addresses public addresses;
     DeployConfig public config;
-    TransferFeeCollector public proposal;
+    ChangeMamoStakingBackendRole public proposal;
 
     address public admin;
     address public backend;
@@ -37,7 +37,7 @@ abstract contract BaseTest is Test {
         multisig = addresses.getAddress("MAMO_MULTISIG");
 
         // Create and execute the multisig proposal
-        proposal = new TransferFeeCollector();
+        proposal = new ChangeMamoStakingBackendRole();
 
         // Deploy any necessary contracts
         proposal.deploy();
