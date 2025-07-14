@@ -579,7 +579,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
 
         // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(block.timestamp + 7 days);
 
         // Check earned rewards before withdrawal
         uint256 earnedMamoRewards = multiRewards.earned(userStrategy, address(mamoToken));
@@ -644,11 +644,10 @@ contract MamoStakingStrategyIntegrationTest is Test {
         vm.stopPrank();
 
         // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(block.timestamp + 7 days);
 
         // Check earned rewards and initial balances
         uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
-        console.log("earnedCbBTCRewards", earnedCbBTCRewards);
         uint256 initialCbBTCBalance = IERC20(cbBTC).balanceOf(user);
 
         // Verify initial staked balance
@@ -657,8 +656,6 @@ contract MamoStakingStrategyIntegrationTest is Test {
 
         // Withdraw rewards using withdrawRewards function
         vm.startPrank(user);
-
-        deal(cbBTC, userStrategy, 1);
 
         // Expect Withdrawn event for cbBTC reward token
         vm.expectEmit(true, false, false, true);
@@ -1167,7 +1164,7 @@ contract MamoStakingStrategyIntegrationTest is Test {
         _setupRewardsInMultiRewards(cbBTC, cbBTCRewardAmount, 7 days);
 
         // Fast forward time to accrue rewards
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(block.timestamp + 7 days);
 
         // Process rewards as backend - this should fail because cbBTC strategy is owned by different user
         address backend = addresses.getAddress("MAMO_STAKING_BACKEND");

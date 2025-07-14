@@ -155,7 +155,6 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
     function test_notifyRewards() public {
         test_addRewardsFirstTime();
 
-        // check mamo multirewards balance before notify
         uint256 mamoBalanceBeforeNotify = mamoToken.balanceOf(address(multiRewards));
 
         vm.expectEmit(true, true, true, true);
