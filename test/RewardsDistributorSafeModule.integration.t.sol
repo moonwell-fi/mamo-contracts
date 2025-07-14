@@ -100,10 +100,10 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
-        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT);
-        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT);
-        assertEq(storedUnlockTime, 1, "First time it is set to 1"); // first time it is set to 1
-        assertEq(isNotified, false);
+        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
+        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
+        assertEq(storedUnlockTime, 1, "First time it is set to 1");
+        assertEq(isNotified, false, "Is notified should be false");
     }
 
     function test_addRewardsSecondTimeFailIfNotNotified() public {
@@ -155,21 +155,32 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
     function test_notifyRewards() public {
         test_addRewardsFirstTime();
 
+        // check mamo multirewards balance before notify
+        uint256 mamoBalanceBeforeNotify = mamoToken.balanceOf(address(multiRewards));
+
         vm.expectEmit(true, true, true, true);
         emit RewardsNotified(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT, block.timestamp);
 
         module.notifyRewards();
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
-        assertEq(mamoToken.balanceOf(address(multiRewards)), MAMO_REWARD_AMOUNT);
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.EXECUTED),
+            "State must be EXECUTED"
+        );
+        assertEq(
+            mamoToken.balanceOf(address(multiRewards)),
+            mamoBalanceBeforeNotify + MAMO_REWARD_AMOUNT,
+            "Mamo balance should be the same"
+        );
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
 
-        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT);
-        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT);
-        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay());
-        assertEq(isNotified, true);
+        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
+        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
+        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay(), "Unlock time should be the same");
+        assertEq(isNotified, true, "Is notified should be true");
     }
 
     function test_notifyRewardsSecondTime() public {
@@ -180,7 +191,11 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
 
         module.notifyRewards();
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.EXECUTED),
+            "State must be EXECUTED"
+        );
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
