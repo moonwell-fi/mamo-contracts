@@ -53,8 +53,11 @@ contract TransferFeeCollector is MultisigProposal {
         BurnAndEarn burnAndEarn = BurnAndEarn(burnAndEarnAddress);
 
         address fMamoAddress = addresses.getAddress("F-MAMO");
+        address oldOwner = addresses.getAddress("MAMO_MULTISIG");
 
         assertEq(burnAndEarn.feeCollector(), fMamoAddress, "Fee collector should be set to F-MAMO");
         assertEq(burnAndEarn.owner(), fMamoAddress, "Owner should be transferred to F-MAMO");
+        assertFalse(burnAndEarn.owner() == oldOwner, "Old owner should no longer have ownership");
+        assertFalse(burnAndEarn.feeCollector() == oldOwner, "Old owner should no longer have ownership");
     }
 }
