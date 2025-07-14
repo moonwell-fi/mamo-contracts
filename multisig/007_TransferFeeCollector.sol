@@ -26,10 +26,6 @@ contract TransferFeeCollector is MultisigProposal {
         return "Transfer BurnAndEarn setFeeCollector and ownership to F-MAMO";
     }
 
-    function deploy() public override {
-        // No deployment needed for this proposal
-    }
-
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         // Get the BurnAndEarn contract
         address burnAndEarnAddress = addresses.getAddress("BURN_AND_EARN");
@@ -40,7 +36,7 @@ contract TransferFeeCollector is MultisigProposal {
 
         // Set the fee collector to F-MAMO
         burnAndEarn.setFeeCollector(fMamoAddress);
-        
+
         // Transfer ownership to F-MAMO
         burnAndEarn.transferOwnership(fMamoAddress);
     }
@@ -55,9 +51,9 @@ contract TransferFeeCollector is MultisigProposal {
         // Verify the fee collector has been set to F-MAMO
         address burnAndEarnAddress = addresses.getAddress("BURN_AND_EARN");
         BurnAndEarn burnAndEarn = BurnAndEarn(burnAndEarnAddress);
-        
+
         address fMamoAddress = addresses.getAddress("F-MAMO");
-        
+
         assertEq(burnAndEarn.feeCollector(), fMamoAddress, "Fee collector should be set to F-MAMO");
         assertEq(burnAndEarn.owner(), fMamoAddress, "Owner should be transferred to F-MAMO");
     }
