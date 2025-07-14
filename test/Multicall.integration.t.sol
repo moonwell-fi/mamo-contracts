@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Addresses} from "@fps/addresses/Addresses.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -9,7 +9,6 @@ import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {Multicall} from "@contracts/Multicall.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 
-import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
@@ -72,8 +71,7 @@ contract MaliciousReentrantContract {
     }
 }
 
-contract MulticallIntegrationTest is Test {
-    Addresses public addresses;
+contract MulticallIntegrationTest is BaseTest {
     Multicall public multicall;
     StrategyFactory public factory;
     MamoStrategyRegistry public registry;
@@ -86,11 +84,11 @@ contract MulticallIntegrationTest is Test {
 
     // Addresses
     address public admin;
+    address public backend;
     address public compounder;
     address public guardian;
     address public deployer;
     address public mamoMultisig;
-    address public backend;
 
     // Strategy parameters
     uint256 public strategyTypeId;
@@ -100,16 +98,10 @@ contract MulticallIntegrationTest is Test {
     // Events
     event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
-    function setUp() public {
+    function setUp() public override {
         // workaround to make test contract work with mappings
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
-
-        // Create a new addresses instance for testing
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        super.setUp();
 
         // Load configurations
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));

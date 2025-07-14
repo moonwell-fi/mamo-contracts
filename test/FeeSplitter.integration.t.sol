@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import "@forge-std/Test.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 
 import {FeeSplitter} from "@contracts/FeeSplitter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DeployFeeSplitter} from "@script/DeployFeeSplitter.s.sol";
 
-import {Addresses} from "@fps/addresses/Addresses.sol";
-
-contract FeeSplitterIntegrationTest is DeployFeeSplitter {
+contract FeeSplitterIntegrationTest is BaseTest, DeployFeeSplitter {
     FeeSplitter public feeSplitter;
     IERC20 public token0;
     IERC20 public token1;
-    Addresses public addresses;
 
     address public recipient1;
     address public recipient2;
@@ -29,13 +26,8 @@ contract FeeSplitterIntegrationTest is DeployFeeSplitter {
     // Events
     event FeesSplit(address indexed token, uint256 recipient1Amount, uint256 recipient2Amount);
 
-    function setUp() public {
-        // Load the addresses from the JSON file
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         // Check if FeeSplitter already exists, otherwise deploy it
         if (addresses.isAddressSet("FEE_SPLITTER")) {
