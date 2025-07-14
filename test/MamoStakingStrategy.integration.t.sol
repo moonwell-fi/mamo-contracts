@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Test} from "@forge-std/Test.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 
 import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
-import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
@@ -20,8 +19,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 
-contract MamoStakingStrategyIntegrationTest is Test {
-    Addresses public addresses;
+contract MamoStakingStrategyIntegrationTest is BaseTest {
     MamoStakingRegistry public stakingRegistry;
     MamoStakingStrategyFactory public stakingStrategyFactory;
     MamoStrategyRegistry public mamoStrategyRegistry;
@@ -33,14 +31,8 @@ contract MamoStakingStrategyIntegrationTest is Test {
     address public stakingStrategyImplementation;
     address payable public userStrategy;
 
-    function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"));
-
-        // Create addresses instance
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         // Get existing contract instances from addresses
         mamoStrategyRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));

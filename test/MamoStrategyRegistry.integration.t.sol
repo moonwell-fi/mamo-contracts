@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {BaseTest} from "./BaseTest.t.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
-import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
-import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 
@@ -39,21 +38,15 @@ contract MockStrategy is BaseStrategy {
     }
 }
 
-contract MamoStrategyRegistryIntegrationTest is Test {
+contract MamoStrategyRegistryIntegrationTest is BaseTest {
     MamoStrategyRegistry public registry;
-    Addresses public addresses;
 
     address public admin;
     address public backend;
     address public guardian;
 
-    function setUp() public {
-        // Create a new addresses instance for testing
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         // Get the environment from command line arguments or use default
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));

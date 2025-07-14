@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Test} from "forge-std/Test.sol";
 
 import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.sol";
 import {ISafe} from "../src/interfaces/ISafe.sol";
@@ -12,14 +11,13 @@ import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
 import {ModuleManager} from "../lib/safe-smart-account/contracts/base/ModuleManager.sol";
 import {SafeProxyFactory} from "../lib/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
 
-contract RewardsDistributorSafeModuleIntegrationTest is Test {
+contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
     ISafe public safe;
     address[] public owners;
     RewardsDistributorSafeModule public module;
     IMultiRewards public multiRewards;
     IERC20 public mamoToken;
     IERC20 public cbBtcToken;
-    Addresses public addresses;
     address public admin;
 
     SafeProxyFactory public safeFactory;
@@ -37,14 +35,8 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
     event RewardAdded(uint256 amountToken1, uint256 amountToken2, uint256 notifyAfter);
     event RewardsNotified(uint256 token1Amount, uint256 token2Amount, uint256 notifiedAt);
 
-    function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"));
-
-        // Create addresses instance
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         mamoToken = IERC20(addresses.getAddress("MAMO"));
         cbBtcToken = IERC20(addresses.getAddress("cbBTC"));
