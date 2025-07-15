@@ -88,7 +88,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
 
     // Helper function to deploy a strategy for a user
     function _deployUserStrategy(address userAddress) internal returns (address payable) {
-        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
         vm.startPrank(backend);
         address strategyAddress = stakingStrategyFactory.createStrategy(userAddress);
