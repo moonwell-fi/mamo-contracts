@@ -154,6 +154,9 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
 
         uint256 mamoBalanceBeforeNotify = mamoToken.balanceOf(address(multiRewards));
 
+        (,, uint256 storedUnlockTime,) = module.pendingRewards();
+        vm.warp(storedUnlockTime + 1);
+
         vm.expectEmit(true, true, true, true);
         emit RewardsNotified(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT, block.timestamp);
 
@@ -170,12 +173,12 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
             "Mamo balance should be the same"
         );
 
-        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
+        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime2, bool isNotified) =
             module.pendingRewards();
 
         assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
         assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
-        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay(), "Unlock time should be the same");
+        assertEq(storedUnlockTime2, block.timestamp + module.notifyDelay(), "Unlock time should be the same");
         assertEq(isNotified, true, "Is notified should be true");
     }
 
