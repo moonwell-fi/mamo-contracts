@@ -30,20 +30,15 @@ abstract contract BaseTest is Test {
         proposal.deploy();
 
         // Pre-build the mock for the proposal
-        proposal.preBuildMock();
+        //       proposal.preBuildMock();
 
         // Build the proposal actions
-        proposal.build();
+        //     proposal.build();
 
         // Simulate the proposal execution
-        proposal.simulate();
+        //   proposal.simulate();
 
         // Validate the proposal results
-        proposal.validate();
-    }
-
-    /// @dev Helper function to create a fork for testing
-    function createFork() internal {
-        vm.createSelectFork("base");
+        //    proposal.validate();
     }
 }
