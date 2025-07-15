@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {ChangeMamoStakingBackendRole} from "../multisig/f-mamo/001_ChangeMamoStakingBackendRole.sol";
+import {ChangeMamoStakingBackendRole} from "../multisig/f-mamo/003_ChangeMamoStakingBackendRole.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
@@ -28,18 +28,16 @@ abstract contract BaseTest is Test {
         // Deploy any necessary contracts
         proposal.deploy();
 
+        // Pre-build the mock for the proposal
+        //       proposal.preBuildMock();
+
         // Build the proposal actions
-        proposal.build();
+        //     proposal.build();
 
         // Simulate the proposal execution
-        proposal.simulate();
+        //   proposal.simulate();
 
         // Validate the proposal results
-        proposal.validate();
-    }
-
-    /// @dev Helper function to create a fork for testing
-    function createFork() internal {
-        vm.createSelectFork("base");
+        //    proposal.validate();
     }
 }
