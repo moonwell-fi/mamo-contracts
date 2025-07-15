@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Test} from "@forge-std/Test.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 import {console} from "@forge-std/console.sol";
-import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {MockPool} from "./mocks/MockPool.sol";
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
@@ -13,8 +12,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract MamoStakingRegistryIntegrationTest is Test {
-    Addresses public addresses;
+contract MamoStakingRegistryIntegrationTest is BaseTest {
     MamoStakingRegistry public stakingRegistry;
 
     address public admin;
@@ -30,14 +28,8 @@ contract MamoStakingRegistryIntegrationTest is Test {
     uint256 public constant DEFAULT_SLIPPAGE = 100; // 1%
     uint256 public constant MAX_SLIPPAGE = 2500; // 25%
 
-    function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"));
-
-        // Create addresses instance
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         // Get the deployed registry
         stakingRegistry = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));

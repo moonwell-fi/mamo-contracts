@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Addresses} from "@addresses/Addresses.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Test} from "forge-std/Test.sol";
 
 import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.sol";
 import {ISafe} from "../src/interfaces/ISafe.sol";
@@ -12,14 +11,13 @@ import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
 import {ModuleManager} from "../lib/safe-smart-account/contracts/base/ModuleManager.sol";
 import {SafeProxyFactory} from "../lib/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
 
-contract RewardsDistributorSafeModuleIntegrationTest is Test {
+contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
     ISafe public safe;
     address[] public owners;
     RewardsDistributorSafeModule public module;
     IMultiRewards public multiRewards;
     IERC20 public mamoToken;
     IERC20 public cbBtcToken;
-    Addresses public addresses;
     address public admin;
 
     SafeProxyFactory public safeFactory;
@@ -37,14 +35,8 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
     event RewardAdded(uint256 amountToken1, uint256 amountToken2, uint256 notifyAfter);
     event RewardsNotified(uint256 token1Amount, uint256 token2Amount, uint256 notifiedAt);
 
-    function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"));
-
-        // Create addresses instance
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         mamoToken = IERC20(addresses.getAddress("MAMO"));
         cbBtcToken = IERC20(addresses.getAddress("cbBTC"));
@@ -100,10 +92,10 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
-        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT);
-        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT);
-        assertEq(storedUnlockTime, 1, "First time it is set to 1"); // first time it is set to 1
-        assertEq(isNotified, false);
+        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
+        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
+        assertEq(storedUnlockTime, 1, "First time it is set to 1");
+        assertEq(isNotified, false, "Is notified should be false");
     }
 
     function test_addRewardsSecondTimeFailIfNotNotified() public {
@@ -155,21 +147,31 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
     function test_notifyRewards() public {
         test_addRewardsFirstTime();
 
+        uint256 mamoBalanceBeforeNotify = mamoToken.balanceOf(address(multiRewards));
+
         vm.expectEmit(true, true, true, true);
         emit RewardsNotified(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT, block.timestamp);
 
         module.notifyRewards();
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
-        assertEq(mamoToken.balanceOf(address(multiRewards)), MAMO_REWARD_AMOUNT);
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.EXECUTED),
+            "State must be EXECUTED"
+        );
+        assertEq(
+            mamoToken.balanceOf(address(multiRewards)),
+            mamoBalanceBeforeNotify + MAMO_REWARD_AMOUNT,
+            "Mamo balance should be the same"
+        );
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();
 
-        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT);
-        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT);
-        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay());
-        assertEq(isNotified, true);
+        assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
+        assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
+        assertEq(storedUnlockTime, block.timestamp + module.notifyDelay(), "Unlock time should be the same");
+        assertEq(isNotified, true, "Is notified should be true");
     }
 
     function test_notifyRewardsSecondTime() public {
@@ -180,7 +182,11 @@ contract RewardsDistributorSafeModuleIntegrationTest is Test {
 
         module.notifyRewards();
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.EXECUTED),
+            "State must be EXECUTED"
+        );
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified) =
             module.pendingRewards();

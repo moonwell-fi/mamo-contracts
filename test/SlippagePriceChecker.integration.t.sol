@@ -3,10 +3,8 @@ pragma solidity 0.8.28;
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 
+import {BaseTest} from "./BaseTest.t.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
-import {Test} from "@forge-std/Test.sol";
-import {console} from "@forge-std/console.sol";
-import {Addresses} from "@fps/addresses/Addresses.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
@@ -18,9 +16,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
-contract SlippagePriceCheckerTest is Test {
+contract SlippagePriceCheckerTest is BaseTest {
     ISlippagePriceChecker public slippagePriceChecker;
-    Addresses public addresses;
 
     // Contracts from Base network
     ERC20 public underlying;
@@ -41,15 +38,11 @@ contract SlippagePriceCheckerTest is Test {
     address public chainlinkWellUsd;
     address public chainlinkBtcUsd;
 
-    function setUp() public {
+    function setUp() public override {
+        super.setUp();
+
         // workaround to make test contract work with mappings
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
-        // Initialize addresses
-
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Get the environment from command line arguments or use default
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
@@ -171,14 +164,9 @@ contract SlippagePriceCheckerTest is Test {
             DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
             uint256 amountIn = amountInByToken[addresses.getAddress(rewardToken.token)];
 
-            console.log("=== DEBUGGING CALCULATION ===");
-            console.log("Token:", rewardToken.token);
-            console.log("AmountIn:", amountIn);
-
             uint256 slippagePriceCheckerOut = slippagePriceChecker.getExpectedOut(
                 amountIn, addresses.getAddress(rewardToken.token), address(underlying)
             );
-            console.log("SlippagePriceChecker result:", slippagePriceCheckerOut);
 
             assertTrue(slippagePriceCheckerOut > 0, "Expected output should be greater than zero");
 
@@ -194,8 +182,6 @@ contract SlippagePriceCheckerTest is Test {
                 expectedOutFromChainlink = priceFeed.reverse
                     ? (expectedOutFromChainlink * scaleAnswerBy) / chainlinkPrice
                     : (expectedOutFromChainlink * chainlinkPrice) / scaleAnswerBy;
-
-                console.log("After feed", j, ":", expectedOutFromChainlink);
             }
 
             uint256 fromTokenDecimals = 18; // TODO move this to assetConfig
@@ -204,16 +190,11 @@ contract SlippagePriceCheckerTest is Test {
             // Apply decimal adjustment AFTER all price feed calculations (same as SlippagePriceChecker)
             if (fromTokenDecimals > toTokenDecimals) {
                 uint256 divisor = 10 ** (fromTokenDecimals - toTokenDecimals);
-                console.log("Dividing by:", divisor);
                 expectedOutFromChainlink = expectedOutFromChainlink / divisor;
             } else if (fromTokenDecimals < toTokenDecimals) {
                 uint256 multiplier = 10 ** (toTokenDecimals - fromTokenDecimals);
-                console.log("Multiplying by:", multiplier);
                 expectedOutFromChainlink = expectedOutFromChainlink * multiplier;
             }
-
-            console.log("Final test calculation:", expectedOutFromChainlink);
-            console.log("SlippagePriceChecker result:", slippagePriceCheckerOut);
 
             assertEq(slippagePriceCheckerOut, expectedOutFromChainlink, "Expected output should match chainlink price");
         }
