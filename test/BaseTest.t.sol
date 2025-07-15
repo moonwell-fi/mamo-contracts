@@ -23,6 +23,9 @@ abstract contract BaseTest is Test {
         // Create and execute the multisig proposal
         proposal = new InitiateStakingRewards();
 
+        // Set the addresses for the proposal
+        proposal.setAddresses(addresses);
+
         // Deploy any necessary contracts
         proposal.deploy();
 
