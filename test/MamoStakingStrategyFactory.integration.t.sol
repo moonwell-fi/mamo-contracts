@@ -72,7 +72,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
     // ========== STRATEGY CREATION TESTS ==========
 
     function testFactoryCanCreateStrategy() public {
-        address stakingBackend = addresses.getAddress("STRATEGY_MULTICALL");
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
         vm.startPrank(stakingBackend);
         address strategyAddress = stakingStrategyFactory.createStrategy(user);
@@ -92,7 +92,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
         assertTrue(mamoStrategyRegistry.isUserStrategy(user, strategy1), "Strategy1 should be registered");
 
         // Attempting to create a second strategy for the same user should fail
-        address stakingBackend = addresses.getAddress("STRATEGY_MULTICALL");
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(stakingBackend);
         vm.expectRevert("Strategy already exists");
         stakingStrategyFactory.createStrategy(user);
@@ -110,7 +110,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
     }
 
     function testCreateStrategyRevertsForInvalidUser() public {
-        address stakingBackend = addresses.getAddress("STRATEGY_MULTICALL");
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
         vm.startPrank(stakingBackend);
         vm.expectRevert("Invalid user address");
@@ -149,7 +149,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
     function testComputedAddressMatchesActualDeployment() public {
         address computedAddress = stakingStrategyFactory.computeStrategyAddress(user);
 
-        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
         vm.startPrank(backend);
         address actualAddress = stakingStrategyFactory.createStrategy(user);
         vm.stopPrank();
@@ -160,7 +160,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
     // ========== ROLE-BASED ACCESS TESTS ==========
 
     function testStakingRegistryRoleBasedAccess() public {
-        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
         // Verify backend can create strategies
         vm.startPrank(backend);
@@ -186,7 +186,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
 
         assertTrue(
             stakingStrategyFactory.hasRole(
-                stakingStrategyFactory.BACKEND_ROLE(), addresses.getAddress("STRATEGY_MULTICALL")
+                stakingStrategyFactory.BACKEND_ROLE(), addresses.getAddress("MAMO_STAKING_BACKEND")
             ),
             "Factory should have correct backend role"
         );
@@ -294,7 +294,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
 
     // Helper function to deploy a strategy for a user
     function _deployUserStrategy(address userAddress) internal returns (address payable) {
-        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
         vm.startPrank(backend);
         address strategyAddress = stakingStrategyFactory.createStrategy(userAddress);
