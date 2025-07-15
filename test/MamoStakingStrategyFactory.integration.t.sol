@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Test} from "@forge-std/Test.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 
 import {Vm} from "@forge-std/Vm.sol";
 import {console} from "@forge-std/console.sol";
-import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
@@ -16,8 +15,7 @@ import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract MamoStakingStrategyFactoryIntegrationTest is Test {
-    Addresses public addresses;
+contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
     MamoStakingRegistry public stakingRegistry;
     MamoStakingStrategyFactory public stakingStrategyFactory;
     MamoStrategyRegistry public mamoStrategyRegistry;
@@ -27,14 +25,8 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
     address public user;
     address public stakingStrategyImplementation;
 
-    function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"));
-
-        // Create addresses instance
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         // Get existing contract instances from addresses
         mamoStrategyRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
@@ -80,9 +72,9 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
     // ========== STRATEGY CREATION TESTS ==========
 
     function testFactoryCanCreateStrategy() public {
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
-        vm.startPrank(backend);
+        vm.startPrank(stakingBackend);
         address strategyAddress = stakingStrategyFactory.createStrategy(user);
         vm.stopPrank();
 
@@ -100,8 +92,8 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
         assertTrue(mamoStrategyRegistry.isUserStrategy(user, strategy1), "Strategy1 should be registered");
 
         // Attempting to create a second strategy for the same user should fail
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
-        vm.startPrank(backend);
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        vm.startPrank(stakingBackend);
         vm.expectRevert("Strategy already exists");
         stakingStrategyFactory.createStrategy(user);
         vm.stopPrank();
@@ -118,9 +110,9 @@ contract MamoStakingStrategyFactoryIntegrationTest is Test {
     }
 
     function testCreateStrategyRevertsForInvalidUser() public {
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
 
-        vm.startPrank(backend);
+        vm.startPrank(stakingBackend);
         vm.expectRevert("Invalid user address");
         stakingStrategyFactory.createStrategy(address(0));
         vm.stopPrank();

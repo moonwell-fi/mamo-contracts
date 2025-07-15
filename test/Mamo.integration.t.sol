@@ -1,7 +1,7 @@
 // spdx-license-identifier: busl-1.1
 pragma solidity 0.8.28;
 
-import "@forge-std/Test.sol";
+import {BaseTest} from "./BaseTest.t.sol";
 
 import {MAMO} from "@contracts/Mamo.sol";
 import {IERC7802} from "@contracts/interfaces/IERC7802.sol";
@@ -9,24 +9,15 @@ import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MamoDeployScript} from "@script/MamoDeploy.s.sol";
 
-import {Addresses} from "@fps/addresses/Addresses.sol";
-
-contract MamoIntegrationTest is MamoDeployScript {
+contract MamoIntegrationTest is BaseTest, MamoDeployScript {
     MAMO public mamo;
-
-    Addresses public addresses;
 
     // Constants
     string public constant NAME = "Mamo";
     string public constant SYMBOL = "MAMO";
 
-    function setUp() public {
-        // Load the addresses from the JSON file
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid; // Use the current chain ID
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
+    function setUp() public override {
+        super.setUp();
 
         if (addresses.isAddressSet("MAMO")) {
             mamo = MAMO(addresses.getAddress("MAMO"));
