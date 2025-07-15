@@ -36,7 +36,7 @@ contract MamoStakingRegistryIntegrationTest is BaseTest {
 
         // Get key addresses
         admin = addresses.getAddress("F-MAMO");
-        backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        backend = addresses.getAddress("STRATEGY_MULTICALL");
         guardian = addresses.getAddress("F-MAMO"); // Same as admin
         mamoToken = addresses.getAddress("MAMO");
 

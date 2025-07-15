@@ -705,7 +705,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         _setupAndDeposit(user, userStrategy, depositAmount);
 
         // Process rewards in compound mode (no rewards to claim)
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         // Should not revert even with no rewards
@@ -723,7 +723,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Setup and deposit
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         // Process rewards with COMPOUND mode explicitly
@@ -741,7 +741,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Setup and deposit
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         // Get reward tokens to know how many strategies we need
@@ -822,7 +822,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Get reward tokens from registry
         MamoStakingRegistry.RewardToken[] memory registryRewardTokens = stakingRegistry.getRewardTokens();
 
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         // Create strategies array with correct length for reinvest mode
@@ -853,7 +853,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.stopPrank();
 
         // Should work as backend
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
         MamoStakingStrategy(userStrategy).compound();
         vm.stopPrank();
@@ -876,7 +876,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Fast forward several blocks to potentially trigger reward accrual
         vm.roll(block.number + 100);
 
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         // Process rewards in compound mode - this will claim any accrued rewards
@@ -918,7 +918,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Verify we have some rewards to compound
         uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
         if (earnedCbBTCRewards > 0) {
-            address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+            address backend = addresses.getAddress("STRATEGY_MULTICALL");
             vm.startPrank(backend);
 
             // Expect the new CompoundRewardTokenProcessed event with amountIn and amountOut
@@ -951,7 +951,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Verify we have some rewards to reinvest
         uint256 earnedCbBTCRewards = multiRewards.earned(userStrategy, cbBTC);
         if (earnedCbBTCRewards > 0) {
-            address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+            address backend = addresses.getAddress("STRATEGY_MULTICALL");
             vm.startPrank(backend);
 
             // Get reward tokens to create strategies array
@@ -994,7 +994,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
 
         if (earnedCbBTCRewards > 1000) {
             // Only test if we have meaningful rewards
-            address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+            address backend = addresses.getAddress("STRATEGY_MULTICALL");
             vm.startPrank(backend);
 
             // Record events manually to verify parameters
@@ -1099,7 +1099,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         uint256 initialMorphoBalance = IERC20(morphoVault).balanceOf(cbBTCStrategy);
 
         // Process rewards as backend in reinvest mode
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         // Create strategies array for reinvest mode (cbBTC strategy for cbBTC rewards)
@@ -1159,7 +1159,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.warp(block.timestamp + 7 days);
 
         // Process rewards as backend - this should fail because cbBTC strategy is owned by different user
-        address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
 
         address[] memory strategies = new address[](1);
@@ -1198,7 +1198,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.warp(block.timestamp + 7 days);
 
         // Process rewards as backend - this should fail because strategy is not registered
-        address stakingBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
+        address stakingBackend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(stakingBackend);
 
         address[] memory strategies = new address[](1);
