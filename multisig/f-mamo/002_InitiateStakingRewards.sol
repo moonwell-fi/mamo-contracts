@@ -12,8 +12,8 @@ import {console} from "forge-std/console.sol";
 
 contract InitiateStakingRewards is MultisigProposal {
     // Hardcoded reward amounts for each token
-    uint256 public immutable MAMO_REWARD_AMOUNT = 100_000e18;
-    uint256 public immutable CBBTC_REWARD_AMOUNT = 0.1e8;
+    uint256 public immutable MAMO_REWARD_AMOUNT = 425_959e18;
+    uint256 public immutable CBBTC_REWARD_AMOUNT = 0.1835e8;
 
     uint256 public cbBTCBalance;
     uint256 public mamoBalance;
