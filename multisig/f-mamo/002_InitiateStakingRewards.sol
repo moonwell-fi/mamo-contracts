@@ -106,9 +106,7 @@ contract InitiateStakingRewards is MultisigProposal {
         );
 
         console.log("Staking rewards successfully initiated and notified");
-        console.log("Verified that attempting to notify again properly reverts");
-        console.log("Verified that tokens were transferred to MAMO_MULTI_REWARDS contract");
-        console.log("MAMO balance in MultiRewards:", mamoBalance);
-        console.log("cbBTC balance in MultiRewards:", cbBTCBalance);
+        console.log("MAMO reward amount:", mamoBalanceAfter - mamoBalance);
+        console.log("cbBTC reward amount:", cbBTCBalanceAfter - cbBTCBalance);
     }
 }
