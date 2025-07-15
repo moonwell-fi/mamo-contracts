@@ -29,6 +29,9 @@ abstract contract BaseTest is Test {
         // Deploy any necessary contracts
         proposal.deploy();
 
+        // Pre-build the mock for the proposal
+        proposal.preBuildMock();
+
         // Build the proposal actions
         proposal.build();
 

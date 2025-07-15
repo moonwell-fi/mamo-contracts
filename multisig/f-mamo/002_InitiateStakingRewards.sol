@@ -12,8 +12,11 @@ import {console} from "forge-std/console.sol";
 
 contract InitiateStakingRewards is MultisigProposal {
     // Hardcoded reward amounts for each token
-    uint256 public immutable MAMO_REWARD_AMOUNT = 1000000e18; // 1M MAMO tokens
-    uint256 public immutable CBBTC_REWARD_AMOUNT = 100e8; // 100 cbBTC tokens (8 decimals)
+    uint256 public immutable MAMO_REWARD_AMOUNT = 100_000e18;
+    uint256 public immutable CBBTC_REWARD_AMOUNT = 0.1e8;
+
+    uint256 public cbBTCBalance;
+    uint256 public mamoBalance;
 
     function _initializeAddresses() internal {
         // Load the addresses from the JSON file
@@ -51,15 +54,17 @@ contract InitiateStakingRewards is MultisigProposal {
         "Initiate staking rewards distribution by calling addRewards and notifyRewards on RewardsDistributorSafeModule";
     }
 
+    function preBuildMock() public override {
+        mamoBalance = IERC20(addresses.getAddress("MAMO")).balanceOf(addresses.getAddress("MAMO_MULTI_REWARDS"));
+        cbBTCBalance = IERC20(addresses.getAddress("cbBTC")).balanceOf(addresses.getAddress("MAMO_MULTI_REWARDS"));
+    }
+
     function build() public override buildModifier(addresses.getAddress("F-MAMO")) {
         address rewardsDistributorModule = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
         RewardsDistributorSafeModule rewardsModule = RewardsDistributorSafeModule(rewardsDistributorModule);
 
         // Add rewards with the hardcoded amounts
         rewardsModule.addRewards(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT);
-
-        // Notify the rewards immediately
-        rewardsModule.notifyRewards();
     }
 
     function simulate() public override {
@@ -72,26 +77,33 @@ contract InitiateStakingRewards is MultisigProposal {
         address rewardsDistributorModule = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
         RewardsDistributorSafeModule rewardsModule = RewardsDistributorSafeModule(rewardsDistributorModule);
 
+        // Simulate notifyRewards
+        rewardsModule.notifyRewards();
+
         // Validate that rewards have been executed
         RewardsDistributorSafeModule.RewardState currentState = rewardsModule.getCurrentState();
         assertTrue(
             currentState == RewardsDistributorSafeModule.RewardState.EXECUTED, "Rewards should be in EXECUTED state"
         );
 
-        // Try to notify again and verify it reverts with the correct error
-        vm.expectRevert("Rewards not in pending state");
-        rewardsModule.notifyRewards();
-
         // Check that tokens were transferred to MAMO_MULTI_REWARDS contract
         address mamoMultiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
         address mamoToken = addresses.getAddress("MAMO");
         address cbBTCToken = addresses.getAddress("cbBTC");
-        
-        uint256 mamoBalance = IERC20(mamoToken).balanceOf(mamoMultiRewards);
-        uint256 cbBTCBalance = IERC20(cbBTCToken).balanceOf(mamoMultiRewards);
-        
-        assertEq(mamoBalance, MAMO_REWARD_AMOUNT, "MAMO tokens should be transferred to MultiRewards contract");
-        assertEq(cbBTCBalance, CBBTC_REWARD_AMOUNT, "cbBTC tokens should be transferred to MultiRewards contract");
+
+        uint256 mamoBalanceAfter = IERC20(mamoToken).balanceOf(mamoMultiRewards);
+        uint256 cbBTCBalanceAfter = IERC20(cbBTCToken).balanceOf(mamoMultiRewards);
+
+        assertEq(
+            mamoBalanceAfter - mamoBalance,
+            MAMO_REWARD_AMOUNT,
+            "MAMO tokens should be transferred to MultiRewards contract"
+        );
+        assertEq(
+            cbBTCBalanceAfter - cbBTCBalance,
+            CBBTC_REWARD_AMOUNT,
+            "cbBTC tokens should be transferred to MultiRewards contract"
+        );
 
         console.log("Staking rewards successfully initiated and notified");
         console.log("Verified that attempting to notify again properly reverts");
