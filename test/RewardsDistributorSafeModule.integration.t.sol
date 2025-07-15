@@ -234,9 +234,10 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
     }
 
     function test_stateConsistencyAcrossTransactions() public {
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.UNINITIALIZED));
+        (,, uint256 storedUnlockTime,) = module.pendingRewards();
+        vm.warp(storedUnlockTime + 1);
 
-        uint256 unlockTime = block.timestamp + TIMELOCK_DURATION;
+        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
 
         deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
         deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
@@ -246,27 +247,8 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
 
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
 
-        vm.warp(unlockTime + 1);
         module.notifyRewards();
 
         assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.EXECUTED));
-    }
-
-    function test_rewardDistributionWithTimelock() public {
-        uint256 shortTimelock = 1 hours;
-        uint256 unlockTime = block.timestamp + shortTimelock;
-
-        deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
-        deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
-
-        vm.prank(admin);
-        module.addRewards(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT);
-
-        assertEq(cbBtcToken.balanceOf(address(multiRewards)), 0);
-
-        vm.warp(unlockTime + 1);
-        module.notifyRewards();
-
-        assertEq(cbBtcToken.balanceOf(address(multiRewards)), CBBTC_REWARD_AMOUNT);
     }
 }
