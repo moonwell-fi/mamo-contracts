@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {TransferFeeCollector} from "../multisig/007_TransferFeeCollector.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
+import {InitiateStakingRewards} from "../multisig/f-mamo/002_InitiateStakingRewards.sol";
+
 abstract contract BaseTest is Test {
     Addresses public addresses;
-    TransferFeeCollector public proposal;
+    InitiateStakingRewards public proposal;
 
     function setUp() public virtual {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
@@ -20,7 +21,7 @@ abstract contract BaseTest is Test {
         addresses = new Addresses(addressesFolderPath, chainIds);
 
         // Create and execute the multisig proposal
-        proposal = new TransferFeeCollector();
+        proposal = new InitiateStakingRewards();
 
         // Deploy any necessary contracts
         proposal.deploy();
