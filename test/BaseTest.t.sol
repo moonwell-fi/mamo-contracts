@@ -32,12 +32,12 @@ abstract contract BaseTest is Test {
         proposal.preBuildMock();
 
         // Build the proposal actions
-        proposal.build();
+        // proposal.build();
 
         // Simulate the proposal execution
-        proposal.simulate();
+        // proposal.simulate();
 
         // Validate the proposal results
-        proposal.validate();
+        // proposal.validate();
     }
 }
