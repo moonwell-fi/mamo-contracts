@@ -437,7 +437,7 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         return Math.min(block.timestamp, rewardData[_rewardsToken].periodFinish);
     }
 
-    function rewardPerToken(address _rewardsToken) public returns (uint256) {
+    function rewardPerToken(address _rewardsToken) public view returns (uint256) {
         if (_totalSupply == 0) {
             return rewardData[_rewardsToken].rewardPerTokenStored;
         }

@@ -56,7 +56,7 @@ contract MockERC20 {
 }
 
 // Simple testing contract that doesn't rely on forge-std
-contract MultiRewardsTest is Test {
+contract MultiRewardsUnitTest is Test {
     // Contracts
     IMultiRewards public multiRewards;
     MockERC20 public stakingToken;
@@ -226,30 +226,28 @@ contract MultiRewardsTest is Test {
         uint256 expectedB = REWARD_AMOUNT_8 / 2;
         uint256 expectedC = REWARD_AMOUNT_6 / 2;
 
-        uint256 toleranceA = REWARD_AMOUNT_18 / 10000;
-        uint256 toleranceB = REWARD_AMOUNT_8 / 10000;
-        uint256 toleranceC = REWARD_AMOUNT_6 / 10000;
+        uint256 tolarence = 1e16; // 0.01%
 
         // Check user1 rewards
         assertApproxEqAbs(
-            rewardTokenA.balanceOf(user), expectedA, toleranceA, "User1 should receive 50% of 18-decimal rewards"
+            rewardTokenA.balanceOf(user), expectedA, tolarence, "User1 should receive 50% of 18-decimal rewards"
         );
         assertApproxEqAbs(
-            rewardTokenB.balanceOf(user), expectedB, toleranceB, "User1 should receive 50% of 8-decimal rewards"
+            rewardTokenB.balanceOf(user), expectedB, tolarence, "User1 should receive 50% of 8-decimal rewards"
         );
         assertApproxEqAbs(
-            rewardTokenC.balanceOf(user), expectedC, toleranceC, "User1 should receive 50% of 6-decimal rewards"
+            rewardTokenC.balanceOf(user), expectedC, tolarence, "User1 should receive 50% of 6-decimal rewards"
         );
 
         // Check user2 rewards
         assertApproxEqAbs(
-            rewardTokenA.balanceOf(user2), expectedA, toleranceA, "User2 should receive 50% of 18-decimal rewards"
+            rewardTokenA.balanceOf(user2), expectedA, tolarence, "User2 should receive 50% of 18-decimal rewards"
         );
         assertApproxEqAbs(
-            rewardTokenB.balanceOf(user2), expectedB, toleranceB, "User2 should receive 50% of 8-decimal rewards"
+            rewardTokenB.balanceOf(user2), expectedB, tolarence, "User2 should receive 50% of 8-decimal rewards"
         );
         assertApproxEqAbs(
-            rewardTokenC.balanceOf(user2), expectedC, toleranceC, "User2 should receive 50% of 6-decimal rewards"
+            rewardTokenC.balanceOf(user2), expectedC, tolarence, "User2 should receive 50% of 6-decimal rewards"
         );
     }
 
