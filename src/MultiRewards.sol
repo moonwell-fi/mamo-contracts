@@ -82,6 +82,13 @@ interface IERC20 {
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
 
     /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5,05` (`505 / 10 ** 2`).
+     */
+    function decimals() external view returns (uint8);
+
+    /**
      * @dev Emitted when `value` tokens are moved from one account (`from`) to
      * another (`to`).
      *
@@ -430,20 +437,22 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         return Math.min(block.timestamp, rewardData[_rewardsToken].periodFinish);
     }
 
-    function rewardPerToken(address _rewardsToken) public view returns (uint256) {
+    function rewardPerToken(address _rewardsToken) public returns (uint256) {
         if (_totalSupply == 0) {
             return rewardData[_rewardsToken].rewardPerTokenStored;
         }
+        uint256 precision = 10 ** uint256(IERC20(_rewardsToken).decimals());
         return rewardData[_rewardsToken].rewardPerTokenStored.add(
             lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime).mul(
                 rewardData[_rewardsToken].rewardRate
-            ).mul(1e18).div(_totalSupply)
+            ).mul(precision).div(_totalSupply)
         );
     }
 
-    function earned(address account, address _rewardsToken) public view returns (uint256) {
+    function earned(address account, address _rewardsToken) public returns (uint256) {
+        uint256 precision = 10 ** uint256(IERC20(_rewardsToken).decimals());
         return _balances[account].mul(rewardPerToken(_rewardsToken).sub(userRewardPerTokenPaid[account][_rewardsToken]))
-            .div(1e18).add(rewards[account][_rewardsToken]);
+            .div(precision).add(rewards[account][_rewardsToken]);
     }
 
     function getRewardForDuration(address _rewardsToken) external view returns (uint256) {

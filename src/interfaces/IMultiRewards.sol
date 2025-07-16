@@ -41,7 +41,7 @@ interface IMultiRewards {
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
     function lastTimeRewardApplicable(address _rewardsToken) external view returns (uint256);
-    function rewardPerToken(address _rewardsToken) external view returns (uint256);
+    function rewardPerToken(address _rewardsToken) external returns (uint256);
     function earned(address account, address _rewardsToken) external view returns (uint256);
     function getRewardForDuration(address _rewardsToken) external view returns (uint256);
 
