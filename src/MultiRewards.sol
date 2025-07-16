@@ -441,7 +441,22 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         if (_totalSupply == 0) {
             return rewardData[_rewardsToken].rewardPerTokenStored;
         }
-        uint256 precision = 10 ** uint256(IERC20(_rewardsToken).decimals());
+
+        // Normalize decimal precision: scale by 1e18 to maintain consistent precision
+        // similar to Compound v2's mantissa approach
+        uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
+        uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
+
+        // Use 1e18 as base precision (mantissa) and adjust for token decimal differences
+        uint256 precision = 1e18;
+        if (rewardTokenDecimals != stakingTokenDecimals) {
+            if (rewardTokenDecimals > stakingTokenDecimals) {
+                precision = precision.div(10 ** (rewardTokenDecimals - stakingTokenDecimals));
+            } else {
+                precision = precision.mul(10 ** (stakingTokenDecimals - rewardTokenDecimals));
+            }
+        }
+
         return rewardData[_rewardsToken].rewardPerTokenStored.add(
             lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime).mul(
                 rewardData[_rewardsToken].rewardRate
@@ -449,8 +464,21 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         );
     }
 
-    function earned(address account, address _rewardsToken) public returns (uint256) {
-        uint256 precision = 10 ** uint256(IERC20(_rewardsToken).decimals());
+    function earned(address account, address _rewardsToken) public view returns (uint256) {
+        // Use the same decimal normalization as rewardPerToken function
+        uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
+        uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
+
+        // Use 1e18 as base precision (mantissa) and adjust for token decimal differences
+        uint256 precision = 1e18;
+        if (rewardTokenDecimals != stakingTokenDecimals) {
+            if (rewardTokenDecimals > stakingTokenDecimals) {
+                precision = precision.div(10 ** (rewardTokenDecimals - stakingTokenDecimals));
+            } else {
+                precision = precision.mul(10 ** (stakingTokenDecimals - rewardTokenDecimals));
+            }
+        }
+
         return _balances[account].mul(rewardPerToken(_rewardsToken).sub(userRewardPerTokenPaid[account][_rewardsToken]))
             .div(precision).add(rewards[account][_rewardsToken]);
     }
