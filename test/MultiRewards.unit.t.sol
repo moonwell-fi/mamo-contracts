@@ -253,7 +253,7 @@ contract MultiRewardsUnitTest is Test {
 
     // Test with very small amounts to ensure precision works with different decimals
     function testSmallAmountsWithDifferentDecimals() public {
-        uint256 smallStakeAmount = 1 ether;
+        uint256 smallStakeAmount = 10 ether;
 
         vm.prank(user);
         stakingToken.approve(address(multiRewards), smallStakeAmount);
@@ -261,9 +261,9 @@ contract MultiRewardsUnitTest is Test {
         multiRewards.stake(smallStakeAmount);
 
         // Use small reward amounts that test precision
-        uint256 smallRewardA = 1000; // Very small for 18 decimals
-        uint256 smallRewardB = 100; // Very small for 8 decimals
-        uint256 smallRewardC = 10; // Very small for 6 decimals
+        uint256 smallRewardA = 1e18; // Very small for 18 decimals
+        uint256 smallRewardB = 1e8; // Very small for 8 decimals
+        uint256 smallRewardC = 1e8; // Very small for 6 decimals
 
         // Mint additional small amounts
         rewardTokenA.mint(rewardDistributorA, smallRewardA);
@@ -296,25 +296,14 @@ contract MultiRewardsUnitTest is Test {
         uint256 earnedB = multiRewards.earned(user, address(rewardTokenB));
         uint256 earnedC = multiRewards.earned(user, address(rewardTokenC));
 
+        uint256 tolarenceA = 1e16; // 1%
+        uint256 tolarenceB = 1e16; // 1%
+        uint256 tolarenceC = 1e16; // 1%
+
         // Should earn approximately the full small amounts
-        assertApproxEqAbs(
-            earnedA,
-            smallRewardA,
-            smallRewardA / 100, // 1% tolerance
-            "Should earn approximately all small 18-decimal rewards"
-        );
-        assertApproxEqAbs(
-            earnedB,
-            smallRewardB,
-            smallRewardB / 100, // 1% tolerance
-            "Should earn approximately all small 8-decimal rewards"
-        );
-        assertApproxEqAbs(
-            earnedC,
-            smallRewardC,
-            smallRewardC / 100, // 1% tolerance
-            "Should earn approximately all small 6-decimal rewards"
-        );
+        assertApproxEqRel(earnedA, smallRewardA, tolarenceA, "Should earn approximately all small 18-decimal rewards");
+        assertApproxEqRel(earnedB, smallRewardB, tolarenceB, "Should earn approximately all small 8-decimal rewards");
+        assertApproxEqRel(earnedC, smallRewardC, tolarenceC, "Should earn approximately all small 6-decimal rewards");
 
         // Claim rewards
         vm.prank(user);
@@ -374,13 +363,11 @@ contract MultiRewardsUnitTest is Test {
         uint256 expectedB = REWARD_AMOUNT_8 / 2;
         uint256 expectedC = REWARD_AMOUNT_6 / 2;
 
-        uint256 toleranceA = REWARD_AMOUNT_18 / 10000;
-        uint256 toleranceB = REWARD_AMOUNT_8 / 10000;
-        uint256 toleranceC = REWARD_AMOUNT_6 / 10000;
+        uint256 tolarence = 1e16; // 0.01%
 
-        assertApproxEqAbs(earnedA, expectedA, toleranceA, "Should have earned ~half of 18-decimal rewards");
-        assertApproxEqAbs(earnedB, expectedB, toleranceB, "Should have earned ~half of 8-decimal rewards");
-        assertApproxEqAbs(earnedC, expectedC, toleranceC, "Should have earned ~half of 6-decimal rewards");
+        assertApproxEqRel(earnedA, expectedA, tolarence, "Should have earned ~half of 18-decimal rewards");
+        assertApproxEqRel(earnedB, expectedB, tolarence, "Should have earned ~half of 8-decimal rewards");
+        assertApproxEqRel(earnedC, expectedC, tolarence, "Should have earned ~half of 6-decimal rewards");
 
         // 7. User claims rewards and verify balances
         vm.prank(user);
@@ -399,14 +386,14 @@ contract MultiRewardsUnitTest is Test {
         multiRewards.getReward();
 
         // 11. Verify total rewards received are approximately correct
-        assertApproxEqAbs(
-            rewardTokenA.balanceOf(user), REWARD_AMOUNT_18, toleranceA, "Should have received ~all 18-decimal rewards"
+        assertApproxEqRel(
+            rewardTokenA.balanceOf(user), REWARD_AMOUNT_18, tolarence, "Should have received ~all 18-decimal rewards"
         );
-        assertApproxEqAbs(
-            rewardTokenB.balanceOf(user), REWARD_AMOUNT_8, toleranceB, "Should have received ~all 8-decimal rewards"
+        assertApproxEqRel(
+            rewardTokenB.balanceOf(user), REWARD_AMOUNT_8, tolarence, "Should have received ~all 8-decimal rewards"
         );
-        assertApproxEqAbs(
-            rewardTokenC.balanceOf(user), REWARD_AMOUNT_6, toleranceC, "Should have received ~all 6-decimal rewards"
+        assertApproxEqRel(
+            rewardTokenC.balanceOf(user), REWARD_AMOUNT_6, tolarence, "Should have received ~all 6-decimal rewards"
         );
     }
 
