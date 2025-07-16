@@ -151,18 +151,10 @@ contract MultiRewardsUnitTest is Test {
         uint256 earnedB = multiRewards.earned(user, address(rewardTokenB));
         uint256 earnedC = multiRewards.earned(user, address(rewardTokenC));
 
-        console.log("earnedA", earnedA);
-        console.log("earnedB", earnedB);
-        console.log("earnedC", earnedC);
-
         // Expected rewards should be approximately half of the total
         uint256 expectedA = REWARD_AMOUNT_18 / 2;
         uint256 expectedB = REWARD_AMOUNT_8 / 2;
         uint256 expectedC = REWARD_AMOUNT_6 / 2;
-
-        console.log("expectedA", expectedA);
-        console.log("expectedB", expectedB);
-        console.log("expectedC", expectedC);
 
         // Use tolerance for rounding errors
         uint256 tolarence = 1e16; // 0.01%
