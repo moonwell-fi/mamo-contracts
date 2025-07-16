@@ -263,5 +263,15 @@
     "addr": "0xFAbe701fdD289E0b1938238c48eDe86b02757f85",
     "name": "REWARDS_DISTRIBUTOR_MAMO_CBBTC",
     "isContract": true
+  },
+  {
+    "addr": "0x28aF629a9F3ECE3c8D9F0b7cCf6349708CeC8cFb",
+    "name": "UNISWAP_V3_QUOTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x4408E7932715E83a3e5C5379933637e46526452C",
+    "name": "P-MAMO",
+    "isContract": true
   }
 ]
