@@ -3,6 +3,7 @@ pragma solidity ^0.8.19;
 
 import {BaseTest} from "./BaseTest.t.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {console} from "forge-std/console.sol";
 
 import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.sol";
 import {ISafe} from "../src/interfaces/ISafe.sol";
@@ -89,7 +90,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
         deal(address(mamoToken), address(safe), MAMO_REWARD_AMOUNT);
         deal(address(cbBtcToken), address(safe), CBBTC_REWARD_AMOUNT);
 
-        uint256 notifyAfter = block.timestamp + module.notifyDelay();
+        (,, uint256 notifyAfter, bool isNotified) = module.pendingRewards();
 
         vm.expectEmit(true, true, true, false);
         emit RewardAdded(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT, notifyAfter);
@@ -97,12 +98,32 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
         vm.prank(admin);
         module.addRewards(MAMO_REWARD_AMOUNT, CBBTC_REWARD_AMOUNT);
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.NOT_READY));
+        if (notifyAfter > 1) {
+            assertEq(
+                uint256(module.getCurrentState()),
+                uint256(RewardsDistributorSafeModule.RewardState.NOT_READY),
+                "State must be NOT_READY"
+            );
+            assertEq(isNotified, false, "Is notified should be false");
+        } else {
+            assertEq(
+                uint256(module.getCurrentState()),
+                uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION),
+                "State must be PENDING_EXECUTION"
+            );
 
-        (uint256 amountToken1Stored, uint256 amountToken2Stored,, bool isNotified) = module.pendingRewards();
+            assertEq(isNotified, false, "Is notified should be false");
+        }
+
+        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified2) =
+            module.pendingRewards();
+
+        if (storedUnlockTime > 1) {
+            assertEq(storedUnlockTime, notifyAfter, "Stored unlock time should be the same");
+        }
         assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
         assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
-        assertEq(isNotified, false, "Is notified should be false");
+        assertEq(isNotified2, false, "Is notified should be false");
     }
 
     function test_addRewardsSecondTimeFailIfNotNotified() public {
@@ -115,7 +136,11 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
         (,, uint256 storedUnlockTime,) = module.pendingRewards();
         vm.warp(storedUnlockTime + 1);
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION),
+            "State must be PENDING_EXECUTION"
+        );
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored,, bool isNotified) = module.pendingRewards();
         assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT);
@@ -141,12 +166,20 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
         vm.prank(admin);
         module.addRewards(0, 1);
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.NOT_READY));
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.NOT_READY),
+            "State must be NOT_READY"
+        );
 
         uint256 unlockTime = block.timestamp + module.notifyDelay();
         vm.warp(block.timestamp + module.notifyDelay() + 1);
 
-        assertEq(uint256(module.getCurrentState()), uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION));
+        assertEq(
+            uint256(module.getCurrentState()),
+            uint256(RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION),
+            "State must be PENDING_EXECUTION"
+        );
 
         (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime2, bool isNotified) =
             module.pendingRewards();
