@@ -3,7 +3,6 @@ pragma solidity ^0.8.19;
 
 import {BaseTest} from "./BaseTest.t.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {console} from "forge-std/console.sol";
 
 import {RewardsDistributorSafeModule} from "../src/RewardsDistributorSafeModule.sol";
 import {ISafe} from "../src/interfaces/ISafe.sol";
@@ -115,11 +114,12 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
             assertEq(isNotified, false, "Is notified should be false");
         }
 
-        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 storedUnlockTime, bool isNotified2) =
+        (uint256 amountToken1Stored, uint256 amountToken2Stored, uint256 notifyAfter2, bool isNotified2) =
             module.pendingRewards();
 
-        if (storedUnlockTime > 1) {
-            assertEq(storedUnlockTime, notifyAfter, "Stored unlock time should be the same");
+        if (notifyAfter > 1) {
+            // if notifyAfter is greater than 1, then notifyAfter2 should not change
+            assertEq(notifyAfter, notifyAfter2, "Stored unlock time should be the same");
         }
         assertEq(amountToken1Stored, MAMO_REWARD_AMOUNT, "Mamo amount should be the same");
         assertEq(amountToken2Stored, CBBTC_REWARD_AMOUNT, "CBBTC amount should be the same");
