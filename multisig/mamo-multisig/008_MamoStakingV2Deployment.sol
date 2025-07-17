@@ -65,8 +65,8 @@ contract MamoStakingV2Deployment is MultisigProposal {
         address mamoToken = addresses.getAddress("MAMO");
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
         address quoter = addresses.getAddress("AERODROME_QUOTER");
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY_V2");
-        address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS_V2");
+        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
+        address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
         vm.startBroadcast(deployer);
 
@@ -116,18 +116,18 @@ contract MamoStakingV2Deployment is MultisigProposal {
 
         vm.stopBroadcast();
 
-        addresses.addAddress("MAMO_STAKING_STRATEGY_V2", mamoStakingStrategy, true);
-        addresses.addAddress("MAMO_STAKING_REGISTRY_V2", mamoStakingRegistry, true);
-        addresses.addAddress("MAMO_STAKING_STRATEGY_FACTORY_V2", mamoStakingStrategyFactory, true);
-        addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC_V2", rewardsDistributorMamoCbbtc, true);
+        addresses.changeAddress("MAMO_STAKING_STRATEGY", mamoStakingStrategy, true);
+        addresses.changeAddress("MAMO_STAKING_REGISTRY", mamoStakingRegistry, true);
+        addresses.changeAddress("MAMO_STAKING_STRATEGY_FACTORY", mamoStakingStrategyFactory, true);
+        addresses.changeAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC", rewardsDistributorMamoCbbtc, true);
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
-        MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY_V2"));
-        address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_V2");
-        address mamoStakingStrategy = addresses.getAddress("MAMO_STAKING_STRATEGY_V2");
+        MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
+        address mamoStakingStrategy = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
-        registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
+        registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory)
         // This will assign strategy type id to 3
         MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, 0);
     }
@@ -139,11 +139,11 @@ contract MamoStakingV2Deployment is MultisigProposal {
 
     function validate() public view override {
         // Get contract addresses
-        address stakingRegistry = addresses.getAddress("MAMO_STAKING_REGISTRY_V2");
-        address multiRewardsAddr = addresses.getAddress("MAMO_MULTI_REWARDS_V2");
-        address stakingStrategyImpl = addresses.getAddress("MAMO_STAKING_STRATEGY_V2");
-        address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_V2");
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY_V2");
+        address stakingRegistry = addresses.getAddress("MAMO_STAKING_REGISTRY");
+        address multiRewardsAddr = addresses.getAddress("MAMO_MULTI_REWARDS");
+        address stakingStrategyImpl = addresses.getAddress("MAMO_STAKING_STRATEGY");
+        address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
+        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
 
         // Get expected addresses
         address expectedBackend = addresses.getAddress("STRATEGY_MULTICALL");
