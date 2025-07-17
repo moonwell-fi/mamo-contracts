@@ -22,7 +22,7 @@ contract DeployMulticall is Script {
         address multiRewards = deploy(addresses);
         vm.stopBroadcast();
 
-        addresses.addAddress("MAMO_MULTI_REWARDS", multiRewards, true);
+        addresses.addAddress("MAMO_MULTI_REWARDS_V2", multiRewards, true);
         addresses.updateJson();
         addresses.printJSONChanges();
     }
