@@ -10,7 +10,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  * @title DeployMulticall
  * @notice Script to deploy and manage Multicall contract
  */
-contract DeployMulticall is Script {
+contract DeployMultiRewards is Script {
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
@@ -22,7 +22,7 @@ contract DeployMulticall is Script {
         address multiRewards = deploy(addresses);
         vm.stopBroadcast();
 
-        addresses.addAddress("MAMO_MULTI_REWARDS_V2", multiRewards, true);
+        addresses.changeAddress("MAMO_MULTI_REWARDS", multiRewards, true);
         addresses.updateJson();
         addresses.printJSONChanges();
     }
