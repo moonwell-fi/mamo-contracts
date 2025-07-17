@@ -127,7 +127,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
         address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
         address mamoStakingStrategy = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
-        registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory)
+        registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
         // This will assign strategy type id to 3
         MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, 0);
     }
