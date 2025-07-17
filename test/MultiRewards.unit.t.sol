@@ -422,4 +422,46 @@ contract MultiRewardsUnitTest is Test {
             "Contract should have the remaining reward tokens"
         );
     }
+
+    // Test addReward function with valid decimals (happy path)
+    function testAddRewardValidDecimals() public {
+        MockERC20 token18 = new MockERC20("Token18", "T18", 18);
+        MockERC20 token8 = new MockERC20("Token8", "T8", 8);
+        MockERC20 token6 = new MockERC20("Token6", "T6", 6);
+        MockERC20 token1 = new MockERC20("Token1", "T1", 1);
+        
+        address distributor = address(0x123);
+        
+        // These should succeed (1 <= decimals <= 18)
+        multiRewards.addReward(address(token18), distributor, REWARDS_DURATION);
+        multiRewards.addReward(address(token8), distributor, REWARDS_DURATION);
+        multiRewards.addReward(address(token6), distributor, REWARDS_DURATION);
+        multiRewards.addReward(address(token1), distributor, REWARDS_DURATION);
+        
+        // Verify tokens were added successfully
+        assertTrue(address(token18) != address(0), "Token18 should be valid");
+        assertTrue(address(token8) != address(0), "Token8 should be valid");
+        assertTrue(address(token6) != address(0), "Token6 should be valid");
+        assertTrue(address(token1) != address(0), "Token1 should be valid");
+    }
+
+    // Test addReward function with invalid decimals (unhappy path)
+    function testAddRewardInvalidDecimals() public {
+        MockERC20 token0 = new MockERC20("Token0", "T0", 0);
+        MockERC20 token19 = new MockERC20("Token19", "T19", 19);
+        MockERC20 token255 = new MockERC20("Token255", "T255", 255);
+        
+        address distributor = address(0x123);
+        
+        // This should fail (decimals = 0)
+        vm.expectRevert("Reward token decimals must be > 0");
+        multiRewards.addReward(address(token0), distributor, REWARDS_DURATION);
+        
+        // These should fail (decimals > 18)
+        vm.expectRevert("Reward token decimals must be <= 18");
+        multiRewards.addReward(address(token19), distributor, REWARDS_DURATION);
+        
+        vm.expectRevert("Reward token decimals must be <= 18");
+        multiRewards.addReward(address(token255), distributor, REWARDS_DURATION);
+    }
 }

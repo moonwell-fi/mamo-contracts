@@ -418,6 +418,8 @@ contract MultiRewards is ReentrancyGuard, Pausable {
 
     function addReward(address _rewardsToken, address _rewardsDistributor, uint256 _rewardsDuration) public onlyOwner {
         require(rewardData[_rewardsToken].rewardsDuration == 0);
+        require(IERC20(_rewardsToken).decimals() > 0, "Reward token decimals must be > 0");
+        require(IERC20(_rewardsToken).decimals() <= 18, "Reward token decimals must be <= 18");
         rewardTokens.push(_rewardsToken);
         rewardData[_rewardsToken].rewardsDistributor = _rewardsDistributor;
         rewardData[_rewardsToken].rewardsDuration = _rewardsDuration;
@@ -445,6 +447,7 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         // Normalize decimal precision: scale by 1e18 to maintain consistent precision
         // similar to Compound v2's mantissa approach
         uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
+
         uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
 
         // Use 1e18 as base precision (mantissa) and adjust for token decimal differences
