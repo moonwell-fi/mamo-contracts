@@ -464,4 +464,281 @@ contract MultiRewardsUnitTest is Test {
         vm.expectRevert("Reward token decimals must be <= 18");
         multiRewards.addReward(address(token255), distributor, REWARDS_DURATION);
     }
+
+    // Test reward token with minimum decimals (1) while staking token has 18 decimals
+    function testRewardTokenMinDecimals() public {
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        address distributor = address(0x999);
+
+        // Add reward token with 1 decimal to existing contract (staking token has 18)
+        multiRewards.addReward(address(rewardToken1), distributor, REWARDS_DURATION);
+
+        uint256 stakeAmount = 100 ether; // 18 decimals
+        uint256 rewardAmount = 6048000; // 1 decimal = 604800.0 actual value (enough for 1 per second)
+
+        // Mint and approve tokens
+        stakingToken.mint(user, stakeAmount);
+        rewardToken1.mint(distributor, rewardAmount);
+
+        vm.prank(user);
+        stakingToken.approve(address(multiRewards), stakeAmount);
+        vm.prank(distributor);
+        rewardToken1.approve(address(multiRewards), rewardAmount);
+
+        // User stakes
+        vm.prank(user);
+        multiRewards.stake(stakeAmount);
+
+        // Notify reward amount
+        vm.prank(distributor);
+        multiRewards.notifyRewardAmount(address(rewardToken1), rewardAmount);
+
+        // Fast forward to end of rewards period
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        // Check earned rewards
+        uint256 earned = multiRewards.earned(user, address(rewardToken1));
+
+        // Should earn approximately all rewards
+        uint256 tolerance = 1e16; // 1%
+        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all rewards with 1-decimal token");
+
+        // Claim rewards
+        vm.prank(user);
+        multiRewards.getReward();
+
+        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 1-decimal rewards");
+        assertApproxEqRel(rewardToken1.balanceOf(user), rewardAmount, tolerance, "Should receive correct amount");
+    }
+
+    // Test reward token with maximum decimals (18) while staking token has 18 decimals
+    function testRewardTokenMaxDecimals() public {
+        MockERC20 rewardToken18 = new MockERC20("Reward18", "RWD18", 18);
+        address distributor = address(0x888);
+
+        // Add reward token with 18 decimals to existing contract (staking token has 18)
+        multiRewards.addReward(address(rewardToken18), distributor, REWARDS_DURATION);
+
+        uint256 stakeAmount = 100 ether; // 18 decimals
+        uint256 rewardAmount = 1000 ether; // 18 decimals
+
+        // Mint and approve tokens
+        stakingToken.mint(user, stakeAmount);
+        rewardToken18.mint(distributor, rewardAmount);
+
+        vm.prank(user);
+        stakingToken.approve(address(multiRewards), stakeAmount);
+        vm.prank(distributor);
+        rewardToken18.approve(address(multiRewards), rewardAmount);
+
+        // User stakes
+        vm.prank(user);
+        multiRewards.stake(stakeAmount);
+
+        // Notify reward amount
+        vm.prank(distributor);
+        multiRewards.notifyRewardAmount(address(rewardToken18), rewardAmount);
+
+        // Fast forward to end of rewards period
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        // Check earned rewards
+        uint256 earned = multiRewards.earned(user, address(rewardToken18));
+
+        // Should earn approximately all rewards
+        uint256 tolerance = 1e16; // 1%
+        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all rewards with 18-decimal token");
+
+        // Claim rewards
+        vm.prank(user);
+        multiRewards.getReward();
+
+        assertTrue(rewardToken18.balanceOf(user) > 0, "Should receive 18-decimal rewards");
+        assertApproxEqRel(rewardToken18.balanceOf(user), rewardAmount, tolerance, "Should receive correct amount");
+    }
+
+    // Test multiple reward tokens with boundary decimal values (1, 18) and 18-decimal staking token
+    function testMultipleRewardTokensBoundaryDecimals() public {
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        MockERC20 rewardToken18 = new MockERC20("Reward18", "RWD18", 18);
+
+        address distributor1 = address(0x111);
+        address distributor18 = address(0x222);
+
+        // Add both reward tokens
+        multiRewards.addReward(address(rewardToken1), distributor1, REWARDS_DURATION);
+        multiRewards.addReward(address(rewardToken18), distributor18, REWARDS_DURATION);
+
+        uint256 stakeAmount = 100 ether; // 18 decimals
+        uint256 rewardAmount1 = 3024000; // 1 decimal = 302400.0 actual value (enough for meaningful rewards)
+        uint256 rewardAmount18 = 1000 ether; // 18 decimals
+
+        // Mint and approve tokens
+        stakingToken.mint(user, stakeAmount);
+        rewardToken1.mint(distributor1, rewardAmount1);
+        rewardToken18.mint(distributor18, rewardAmount18);
+
+        vm.prank(user);
+        stakingToken.approve(address(multiRewards), stakeAmount);
+        vm.prank(distributor1);
+        rewardToken1.approve(address(multiRewards), rewardAmount1);
+        vm.prank(distributor18);
+        rewardToken18.approve(address(multiRewards), rewardAmount18);
+
+        // User stakes
+        vm.prank(user);
+        multiRewards.stake(stakeAmount);
+
+        // Notify reward amounts
+        vm.prank(distributor1);
+        multiRewards.notifyRewardAmount(address(rewardToken1), rewardAmount1);
+        vm.prank(distributor18);
+        multiRewards.notifyRewardAmount(address(rewardToken18), rewardAmount18);
+
+        // Fast forward to end of rewards period
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        // Check earned rewards
+        uint256 earned1 = multiRewards.earned(user, address(rewardToken1));
+        uint256 earned18 = multiRewards.earned(user, address(rewardToken18));
+
+        // Should earn approximately all rewards for both tokens
+        uint256 tolerance = 1e16; // 1%
+        assertApproxEqRel(earned1, rewardAmount1, tolerance, "Should earn all 1-decimal rewards");
+        assertApproxEqRel(earned18, rewardAmount18, tolerance, "Should earn all 18-decimal rewards");
+
+        // Claim rewards
+        vm.prank(user);
+        multiRewards.getReward();
+
+        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 1-decimal rewards");
+        assertTrue(rewardToken18.balanceOf(user) > 0, "Should receive 18-decimal rewards");
+        assertApproxEqRel(
+            rewardToken1.balanceOf(user), rewardAmount1, tolerance, "Should receive correct 1-decimal amount"
+        );
+        assertApproxEqRel(
+            rewardToken18.balanceOf(user), rewardAmount18, tolerance, "Should receive correct 18-decimal amount"
+        );
+    }
+
+    // Test reward token with very small amounts and minimum decimals
+    function testRewardTokenMinDecimalsSmallAmounts() public {
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        address distributor = address(0x777);
+
+        multiRewards.addReward(address(rewardToken1), distributor, REWARDS_DURATION);
+
+        uint256 stakeAmount = 1 ether; // 18 decimals
+        uint256 rewardAmount = 6048000; // 1 decimal = 604800.0 actual value (minimum for non-zero reward rate)
+
+        // Mint and approve tokens
+        stakingToken.mint(user, stakeAmount);
+        rewardToken1.mint(distributor, rewardAmount);
+
+        vm.prank(user);
+        stakingToken.approve(address(multiRewards), stakeAmount);
+        vm.prank(distributor);
+        rewardToken1.approve(address(multiRewards), rewardAmount);
+
+        // User stakes
+        vm.prank(user);
+        multiRewards.stake(stakeAmount);
+
+        // Notify reward amount
+        vm.prank(distributor);
+        multiRewards.notifyRewardAmount(address(rewardToken1), rewardAmount);
+
+        // Fast forward to end of rewards period
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        // Check earned rewards
+        uint256 earned = multiRewards.earned(user, address(rewardToken1));
+
+        // Should earn the small reward amount
+        assertTrue(earned > 0, "Should earn non-zero rewards with small 1-decimal amount");
+
+        // Should earn approximately all rewards
+        uint256 tolerance = 1e16; // 1%
+        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all 1-decimal rewards");
+
+        // Claim rewards
+        vm.prank(user);
+        multiRewards.getReward();
+
+        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 1-decimal rewards");
+    }
+
+    // Test multiple users with boundary decimal reward tokens
+    function testMultipleUsersBoundaryDecimalRewards() public {
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        MockERC20 rewardToken18 = new MockERC20("Reward18", "RWD18", 18);
+
+        address distributor1 = address(0x333);
+        address distributor18 = address(0x444);
+
+        multiRewards.addReward(address(rewardToken1), distributor1, REWARDS_DURATION);
+        multiRewards.addReward(address(rewardToken18), distributor18, REWARDS_DURATION);
+
+        uint256 stakeAmount = 50 ether; // Same for both users
+        uint256 rewardAmount1 = 6048000; // 1 decimal = 604800.0 actual value (enough for meaningful rewards)
+        uint256 rewardAmount18 = 2000 ether; // 18 decimals
+
+        // Mint and approve tokens for both users
+        stakingToken.mint(user, stakeAmount);
+        stakingToken.mint(user2, stakeAmount);
+        rewardToken1.mint(distributor1, rewardAmount1);
+        rewardToken18.mint(distributor18, rewardAmount18);
+
+        vm.prank(user);
+        stakingToken.approve(address(multiRewards), stakeAmount);
+        vm.prank(user2);
+        stakingToken.approve(address(multiRewards), stakeAmount);
+        vm.prank(distributor1);
+        rewardToken1.approve(address(multiRewards), rewardAmount1);
+        vm.prank(distributor18);
+        rewardToken18.approve(address(multiRewards), rewardAmount18);
+
+        // Both users stake
+        vm.prank(user);
+        multiRewards.stake(stakeAmount);
+        vm.prank(user2);
+        multiRewards.stake(stakeAmount);
+
+        // Notify reward amounts
+        vm.prank(distributor1);
+        multiRewards.notifyRewardAmount(address(rewardToken1), rewardAmount1);
+        vm.prank(distributor18);
+        multiRewards.notifyRewardAmount(address(rewardToken18), rewardAmount18);
+
+        // Fast forward to end of rewards period
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        // Check earned rewards for both users
+        uint256 earned1_user1 = multiRewards.earned(user, address(rewardToken1));
+        uint256 earned18_user1 = multiRewards.earned(user, address(rewardToken18));
+        uint256 earned1_user2 = multiRewards.earned(user2, address(rewardToken1));
+        uint256 earned18_user2 = multiRewards.earned(user2, address(rewardToken18));
+
+        // Each user should earn half of each reward type
+        uint256 expected1 = rewardAmount1 / 2;
+        uint256 expected18 = rewardAmount18 / 2;
+        uint256 tolerance = 1e16; // 1%
+
+        assertApproxEqRel(earned1_user1, expected1, tolerance, "User1 should earn half of 1-decimal rewards");
+        assertApproxEqRel(earned18_user1, expected18, tolerance, "User1 should earn half of 18-decimal rewards");
+        assertApproxEqRel(earned1_user2, expected1, tolerance, "User2 should earn half of 1-decimal rewards");
+        assertApproxEqRel(earned18_user2, expected18, tolerance, "User2 should earn half of 18-decimal rewards");
+
+        // Both users claim rewards
+        vm.prank(user);
+        multiRewards.getReward();
+        vm.prank(user2);
+        multiRewards.getReward();
+
+        // Verify both users received their rewards
+        assertTrue(rewardToken1.balanceOf(user) > 0, "User1 should receive 1-decimal rewards");
+        assertTrue(rewardToken18.balanceOf(user) > 0, "User1 should receive 18-decimal rewards");
+        assertTrue(rewardToken1.balanceOf(user2) > 0, "User2 should receive 1-decimal rewards");
+        assertTrue(rewardToken18.balanceOf(user2) > 0, "User2 should receive 18-decimal rewards");
+    }
 }
