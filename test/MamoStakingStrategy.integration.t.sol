@@ -445,7 +445,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Get the implementation and verify its type ID
         address implementation = ERC1967Proxy(userStrategy).getImplementation();
         uint256 typeId = mamoStrategyRegistry.implementationToId(implementation);
-        assertEq(typeId, 2, "Implementation should have correct strategy type ID");
+        assertEq(typeId, 3, "Implementation should have correct strategy type ID");
     }
 
     // ========== ERROR HANDLING AND EDGE CASES ==========
