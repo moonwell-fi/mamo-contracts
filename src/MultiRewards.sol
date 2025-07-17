@@ -439,26 +439,32 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         return Math.min(block.timestamp, rewardData[_rewardsToken].periodFinish);
     }
 
+    function _calculateDecimalPrecision(address _rewardsToken) private view returns (uint256) {
+        uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
+        uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
+
+        uint256 precision = 1e18;
+        if (rewardTokenDecimals != stakingTokenDecimals) {
+            uint256 decimalDifference;
+            if (rewardTokenDecimals > stakingTokenDecimals) {
+                decimalDifference = rewardTokenDecimals - stakingTokenDecimals;
+                require(decimalDifference <= 18, "Decimal difference too large");
+                precision = precision.div(10 ** decimalDifference);
+            } else {
+                decimalDifference = stakingTokenDecimals - rewardTokenDecimals;
+                require(decimalDifference <= 18, "Decimal difference too large");
+                precision = precision.mul(10 ** decimalDifference);
+            }
+        }
+        return precision;
+    }
+
     function rewardPerToken(address _rewardsToken) public view returns (uint256) {
         if (_totalSupply == 0) {
             return rewardData[_rewardsToken].rewardPerTokenStored;
         }
 
-        // Normalize decimal precision: scale by 1e18 to maintain consistent precision
-        // similar to Compound v2's mantissa approach
-        uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
-
-        uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
-
-        // Use 1e18 as base precision (mantissa) and adjust for token decimal differences
-        uint256 precision = 1e18;
-        if (rewardTokenDecimals != stakingTokenDecimals) {
-            if (rewardTokenDecimals > stakingTokenDecimals) {
-                precision = precision.div(10 ** (rewardTokenDecimals - stakingTokenDecimals));
-            } else {
-                precision = precision.mul(10 ** (stakingTokenDecimals - rewardTokenDecimals));
-            }
-        }
+        uint256 precision = _calculateDecimalPrecision(_rewardsToken);
 
         return rewardData[_rewardsToken].rewardPerTokenStored.add(
             lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime).mul(
@@ -468,19 +474,7 @@ contract MultiRewards is ReentrancyGuard, Pausable {
     }
 
     function earned(address account, address _rewardsToken) public view returns (uint256) {
-        // Use the same decimal normalization as rewardPerToken function
-        uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
-        uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
-
-        // Use 1e18 as base precision (mantissa) and adjust for token decimal differences
-        uint256 precision = 1e18;
-        if (rewardTokenDecimals != stakingTokenDecimals) {
-            if (rewardTokenDecimals > stakingTokenDecimals) {
-                precision = precision.div(10 ** (rewardTokenDecimals - stakingTokenDecimals));
-            } else {
-                precision = precision.mul(10 ** (stakingTokenDecimals - rewardTokenDecimals));
-            }
-        }
+        uint256 precision = _calculateDecimalPrecision(_rewardsToken);
 
         return _balances[account].mul(rewardPerToken(_rewardsToken).sub(userRewardPerTokenPaid[account][_rewardsToken]))
             .div(precision).add(rewards[account][_rewardsToken]);

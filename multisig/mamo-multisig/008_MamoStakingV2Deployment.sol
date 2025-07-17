@@ -61,6 +61,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
         address admin = addresses.getAddress("F-MAMO"); // admin of rewards distributor safe modules
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address backendFactory = addresses.getAddress("MAMO_STAKING_BACKEND");
         address guardian = addresses.getAddress("F-MAMO"); // Use multisig as guardian
         address mamoToken = addresses.getAddress("MAMO");
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
@@ -80,7 +81,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
             new MamoStakingStrategyFactory(
                 admin,
                 mamoStrategyRegistry,
-                backend,
+                backendFactory,
                 mamoStakingRegistry,
                 multiRewards,
                 mamoToken,
@@ -177,7 +178,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
             mamoStrategyRegistry,
             "Factory should have correct strategy registry"
         );
-        address expectedFactoryBackend = addresses.getAddress("STRATEGY_MULTICALL");
+        address expectedFactoryBackend = addresses.getAddress("MAMO_STAKING_BACKEND");
         assertTrue(
             factoryContract.hasRole(factoryContract.BACKEND_ROLE(), expectedFactoryBackend),
             "Factory should have BACKEND_ROLE for expected backend"
