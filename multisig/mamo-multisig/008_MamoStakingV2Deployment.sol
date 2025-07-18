@@ -70,7 +70,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
         address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
         // get current addresses
-        address mamoStakingDeprecate = addresses.getAddress("MAMO_STAKING");
+        address mamoStakingDeprecate = addresses.getAddress("MAMO_STAKING_STRATEGY");
         address mamoStakingRegistryDeprecate = addresses.getAddress("MAMO_STAKING_REGISTRY");
         address mamoStakingStrategyFactoryDeprecate = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
         address rewardsDistributorMamoCbbtcDeprecate = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
@@ -143,7 +143,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
         registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
         // This will assign strategy type id to 3
         MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, 0);
-        
+
         // Remove backend role from deprecated staking factory
         registry.revokeRole(registry.BACKEND_ROLE(), deprecatedStakingStrategyFactory);
     }
@@ -233,7 +233,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
             registryContract.hasRole(registryContract.BACKEND_ROLE(), stakingStrategyFactory),
             "Factory should have BACKEND_ROLE"
         );
-        
+
         // Validate that deprecated factory no longer has backend role
         address deprecatedStakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED");
         assertFalse(
