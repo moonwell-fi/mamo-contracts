@@ -298,5 +298,10 @@
     "addr": "0xFAbe701fdD289E0b1938238c48eDe86b02757f85",
     "name": "REWARDS_DISTRIBUTOR_MAMO_CBBTC_DEPRECATED",
     "isContract": true
+  },
+  {
+    "addr": "0x6f85D661961c9A265776E2A3CCFcdf3a542d6Da2",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_VIRTUALS",
+    "isContract": true
   }
 ]

@@ -20,6 +20,20 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
     uint256 public constant DEFAULT_REWARD_DURATION = 7 days;
     uint256 public constant DEFAULT_NOTIFY_DELAY = 7 days;
 
+    function run() public {
+        string memory addressesFolderPath = "./addresses";
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid; // Use the current chain ID
+        Addresses addresses = new Addresses(addressesFolderPath, chainIds);
+
+        deploy(addresses);
+
+        validate(addresses);
+
+        addresses.printJSONChanges();
+        addresses.updateJson();
+    }
+
     /**
      * @notice Deploy the RewardsDistributorSafeModule contract
      * @param addresses The addresses contract for dependency injection
