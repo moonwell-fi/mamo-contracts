@@ -418,11 +418,32 @@ contract MultiRewards is ReentrancyGuard, Pausable {
 
     function addReward(address _rewardsToken, address _rewardsDistributor, uint256 _rewardsDuration) public onlyOwner {
         require(rewardData[_rewardsToken].rewardsDuration == 0);
-        require(IERC20(_rewardsToken).decimals() > 0, "Reward token decimals must be > 0");
+        require(IERC20(_rewardsToken).decimals() > 5, "Reward token decimals must be > 0");
         require(IERC20(_rewardsToken).decimals() <= 18, "Reward token decimals must be <= 18");
         rewardTokens.push(_rewardsToken);
         rewardData[_rewardsToken].rewardsDistributor = _rewardsDistributor;
         rewardData[_rewardsToken].rewardsDuration = _rewardsDuration;
+    }
+
+    function removeReward(address _rewardsToken) public onlyOwner {
+        require(rewardData[_rewardsToken].rewardsDuration != 0, "Reward token not found");
+        require(block.timestamp > rewardData[_rewardsToken].periodFinish, "Reward period still active");
+
+        // Find and remove the token from the array
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardTokens[i] == _rewardsToken) {
+                // Move the last element to the position of the element to be removed
+                rewardTokens[i] = rewardTokens[rewardTokens.length - 1];
+                // Remove the last element
+                rewardTokens.pop();
+                break;
+            }
+        }
+
+        // Clear the reward data
+        delete rewardData[_rewardsToken];
+
+        emit RewardRemoved(_rewardsToken);
     }
 
     /* ========== VIEWS ========== */
@@ -585,4 +606,5 @@ contract MultiRewards is ReentrancyGuard, Pausable {
     event RewardPaid(address indexed user, address indexed rewardsToken, uint256 reward);
     event RewardsDurationUpdated(address token, uint256 newDuration);
     event Recovered(address token, uint256 amount);
+    event RewardRemoved(address indexed token);
 }

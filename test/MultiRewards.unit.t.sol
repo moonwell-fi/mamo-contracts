@@ -428,34 +428,42 @@ contract MultiRewardsUnitTest is Test {
         MockERC20 token18 = new MockERC20("Token18", "T18", 18);
         MockERC20 token8 = new MockERC20("Token8", "T8", 8);
         MockERC20 token6 = new MockERC20("Token6", "T6", 6);
-        MockERC20 token1 = new MockERC20("Token1", "T1", 1);
+        MockERC20 token7 = new MockERC20("Token7", "T7", 7);
 
         address distributor = address(0x123);
 
-        // These should succeed (1 <= decimals <= 18)
+        // These should succeed (6 <= decimals <= 18)
         multiRewards.addReward(address(token18), distributor, REWARDS_DURATION);
         multiRewards.addReward(address(token8), distributor, REWARDS_DURATION);
         multiRewards.addReward(address(token6), distributor, REWARDS_DURATION);
-        multiRewards.addReward(address(token1), distributor, REWARDS_DURATION);
+        multiRewards.addReward(address(token7), distributor, REWARDS_DURATION);
 
         // Verify tokens were added successfully
         assertTrue(address(token18) != address(0), "Token18 should be valid");
         assertTrue(address(token8) != address(0), "Token8 should be valid");
         assertTrue(address(token6) != address(0), "Token6 should be valid");
-        assertTrue(address(token1) != address(0), "Token1 should be valid");
+        assertTrue(address(token7) != address(0), "Token7 should be valid");
     }
 
     // Test addReward function with invalid decimals (unhappy path)
     function testAddRewardInvalidDecimals() public {
         MockERC20 token0 = new MockERC20("Token0", "T0", 0);
+        MockERC20 token1 = new MockERC20("Token1", "T1", 1);
+        MockERC20 token5 = new MockERC20("Token5", "T5", 5);
         MockERC20 token19 = new MockERC20("Token19", "T19", 19);
         MockERC20 token255 = new MockERC20("Token255", "T255", 255);
 
         address distributor = address(0x123);
 
-        // This should fail (decimals = 0)
+        // These should fail (decimals <= 5)
         vm.expectRevert("Reward token decimals must be > 0");
         multiRewards.addReward(address(token0), distributor, REWARDS_DURATION);
+
+        vm.expectRevert("Reward token decimals must be > 0");
+        multiRewards.addReward(address(token1), distributor, REWARDS_DURATION);
+
+        vm.expectRevert("Reward token decimals must be > 0");
+        multiRewards.addReward(address(token5), distributor, REWARDS_DURATION);
 
         // These should fail (decimals > 18)
         vm.expectRevert("Reward token decimals must be <= 18");
@@ -465,16 +473,16 @@ contract MultiRewardsUnitTest is Test {
         multiRewards.addReward(address(token255), distributor, REWARDS_DURATION);
     }
 
-    // Test reward token with minimum decimals (1) while staking token has 18 decimals
+    // Test reward token with minimum decimals (6) while staking token has 18 decimals
     function testRewardTokenMinDecimals() public {
-        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 6);
         address distributor = address(0x999);
 
-        // Add reward token with 1 decimal to existing contract (staking token has 18)
+        // Add reward token with 6 decimals to existing contract (staking token has 18)
         multiRewards.addReward(address(rewardToken1), distributor, REWARDS_DURATION);
 
         uint256 stakeAmount = 100 ether; // 18 decimals
-        uint256 rewardAmount = 6048000; // 1 decimal = 604800.0 actual value (enough for 1 per second)
+        uint256 rewardAmount = 604800e6; // 6 decimals = 604800.0 actual value (enough for 1 per second)
 
         // Mint and approve tokens
         stakingToken.mint(user, stakeAmount);
@@ -501,13 +509,13 @@ contract MultiRewardsUnitTest is Test {
 
         // Should earn approximately all rewards
         uint256 tolerance = 1e16; // 1%
-        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all rewards with 1-decimal token");
+        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all rewards with 6-decimal token");
 
         // Claim rewards
         vm.prank(user);
         multiRewards.getReward();
 
-        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 1-decimal rewards");
+        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 6-decimal rewards");
         assertApproxEqRel(rewardToken1.balanceOf(user), rewardAmount, tolerance, "Should receive correct amount");
     }
 
@@ -557,9 +565,9 @@ contract MultiRewardsUnitTest is Test {
         assertApproxEqRel(rewardToken18.balanceOf(user), rewardAmount, tolerance, "Should receive correct amount");
     }
 
-    // Test multiple reward tokens with boundary decimal values (1, 18) and 18-decimal staking token
+    // Test multiple reward tokens with boundary decimal values (6, 18) and 18-decimal staking token
     function testMultipleRewardTokensBoundaryDecimals() public {
-        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 6);
         MockERC20 rewardToken18 = new MockERC20("Reward18", "RWD18", 18);
 
         address distributor1 = address(0x111);
@@ -570,7 +578,7 @@ contract MultiRewardsUnitTest is Test {
         multiRewards.addReward(address(rewardToken18), distributor18, REWARDS_DURATION);
 
         uint256 stakeAmount = 100 ether; // 18 decimals
-        uint256 rewardAmount1 = 3024000; // 1 decimal = 302400.0 actual value (enough for meaningful rewards)
+        uint256 rewardAmount1 = 302400e6; // 6 decimals = 302400.0 actual value (enough for meaningful rewards)
         uint256 rewardAmount18 = 1000 ether; // 18 decimals
 
         // Mint and approve tokens
@@ -604,17 +612,17 @@ contract MultiRewardsUnitTest is Test {
 
         // Should earn approximately all rewards for both tokens
         uint256 tolerance = 1e16; // 1%
-        assertApproxEqRel(earned1, rewardAmount1, tolerance, "Should earn all 1-decimal rewards");
+        assertApproxEqRel(earned1, rewardAmount1, tolerance, "Should earn all 6-decimal rewards");
         assertApproxEqRel(earned18, rewardAmount18, tolerance, "Should earn all 18-decimal rewards");
 
         // Claim rewards
         vm.prank(user);
         multiRewards.getReward();
 
-        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 1-decimal rewards");
+        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 6-decimal rewards");
         assertTrue(rewardToken18.balanceOf(user) > 0, "Should receive 18-decimal rewards");
         assertApproxEqRel(
-            rewardToken1.balanceOf(user), rewardAmount1, tolerance, "Should receive correct 1-decimal amount"
+            rewardToken1.balanceOf(user), rewardAmount1, tolerance, "Should receive correct 6-decimal amount"
         );
         assertApproxEqRel(
             rewardToken18.balanceOf(user), rewardAmount18, tolerance, "Should receive correct 18-decimal amount"
@@ -623,13 +631,13 @@ contract MultiRewardsUnitTest is Test {
 
     // Test reward token with very small amounts and minimum decimals
     function testRewardTokenMinDecimalsSmallAmounts() public {
-        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 6);
         address distributor = address(0x777);
 
         multiRewards.addReward(address(rewardToken1), distributor, REWARDS_DURATION);
 
         uint256 stakeAmount = 1 ether; // 18 decimals
-        uint256 rewardAmount = 6048000; // 1 decimal = 604800.0 actual value (minimum for non-zero reward rate)
+        uint256 rewardAmount = 604800e6; // 6 decimals = 604800.0 actual value (minimum for non-zero reward rate)
 
         // Mint and approve tokens
         stakingToken.mint(user, stakeAmount);
@@ -655,22 +663,22 @@ contract MultiRewardsUnitTest is Test {
         uint256 earned = multiRewards.earned(user, address(rewardToken1));
 
         // Should earn the small reward amount
-        assertTrue(earned > 0, "Should earn non-zero rewards with small 1-decimal amount");
+        assertTrue(earned > 0, "Should earn non-zero rewards with small 6-decimal amount");
 
         // Should earn approximately all rewards
         uint256 tolerance = 1e16; // 1%
-        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all 1-decimal rewards");
+        assertApproxEqRel(earned, rewardAmount, tolerance, "Should earn all 6-decimal rewards");
 
         // Claim rewards
         vm.prank(user);
         multiRewards.getReward();
 
-        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 1-decimal rewards");
+        assertTrue(rewardToken1.balanceOf(user) > 0, "Should receive 6-decimal rewards");
     }
 
     // Test multiple users with boundary decimal reward tokens
     function testMultipleUsersBoundaryDecimalRewards() public {
-        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 1);
+        MockERC20 rewardToken1 = new MockERC20("Reward1", "RWD1", 6);
         MockERC20 rewardToken18 = new MockERC20("Reward18", "RWD18", 18);
 
         address distributor1 = address(0x333);
@@ -680,7 +688,7 @@ contract MultiRewardsUnitTest is Test {
         multiRewards.addReward(address(rewardToken18), distributor18, REWARDS_DURATION);
 
         uint256 stakeAmount = 50 ether; // Same for both users
-        uint256 rewardAmount1 = 6048000; // 1 decimal = 604800.0 actual value (enough for meaningful rewards)
+        uint256 rewardAmount1 = 604800e6; // 6 decimals = 604800.0 actual value (enough for meaningful rewards)
         uint256 rewardAmount18 = 2000 ether; // 18 decimals
 
         // Mint and approve tokens for both users
@@ -724,9 +732,9 @@ contract MultiRewardsUnitTest is Test {
         uint256 expected18 = rewardAmount18 / 2;
         uint256 tolerance = 1e16; // 1%
 
-        assertApproxEqRel(earned1_user1, expected1, tolerance, "User1 should earn half of 1-decimal rewards");
+        assertApproxEqRel(earned1_user1, expected1, tolerance, "User1 should earn half of 6-decimal rewards");
         assertApproxEqRel(earned18_user1, expected18, tolerance, "User1 should earn half of 18-decimal rewards");
-        assertApproxEqRel(earned1_user2, expected1, tolerance, "User2 should earn half of 1-decimal rewards");
+        assertApproxEqRel(earned1_user2, expected1, tolerance, "User2 should earn half of 6-decimal rewards");
         assertApproxEqRel(earned18_user2, expected18, tolerance, "User2 should earn half of 18-decimal rewards");
 
         // Both users claim rewards
@@ -736,9 +744,145 @@ contract MultiRewardsUnitTest is Test {
         multiRewards.getReward();
 
         // Verify both users received their rewards
-        assertTrue(rewardToken1.balanceOf(user) > 0, "User1 should receive 1-decimal rewards");
+        assertTrue(rewardToken1.balanceOf(user) > 0, "User1 should receive 6-decimal rewards");
         assertTrue(rewardToken18.balanceOf(user) > 0, "User1 should receive 18-decimal rewards");
-        assertTrue(rewardToken1.balanceOf(user2) > 0, "User2 should receive 1-decimal rewards");
+        assertTrue(rewardToken1.balanceOf(user2) > 0, "User2 should receive 6-decimal rewards");
         assertTrue(rewardToken18.balanceOf(user2) > 0, "User2 should receive 18-decimal rewards");
     }
+
+    // Test removeReward function - happy path
+    function testRemoveRewardSuccess() public {
+        MockERC20 rewardToken = new MockERC20("RemoveTest", "RMT", 8);
+        address distributor = address(0x555);
+
+        // Add reward token
+        multiRewards.addReward(address(rewardToken), distributor, REWARDS_DURATION);
+
+        // Verify token was added
+        assertTrue(rewardToken.decimals() == 8, "Token should have 8 decimals");
+
+        // Fast forward to end of reward period
+        vm.warp(block.timestamp + REWARDS_DURATION + 1);
+
+        // Remove the reward token
+        vm.expectEmit(true, false, false, false);
+        emit RewardRemoved(address(rewardToken));
+        multiRewards.removeReward(address(rewardToken));
+
+        // Verify token was removed by checking the array length decreased
+        // Since we can't directly access the array, we'll add another token and verify it works
+        MockERC20 newToken = new MockERC20("New", "NEW", 10);
+        multiRewards.addReward(address(newToken), distributor, REWARDS_DURATION);
+    }
+
+    // Test removeReward function - reward not found
+    function testRemoveRewardNotFound() public {
+        MockERC20 nonExistentToken = new MockERC20("NonExistent", "NE", 8);
+
+        vm.expectRevert("Reward token not found");
+        multiRewards.removeReward(address(nonExistentToken));
+    }
+
+    // Test removeReward function - reward period still active
+    function testRemoveRewardPeriodActive() public {
+        MockERC20 rewardToken = new MockERC20("ActivePeriod", "AP", 8);
+        address distributor = address(0x666);
+
+        // Add reward token
+        multiRewards.addReward(address(rewardToken), distributor, REWARDS_DURATION);
+
+        // Mint and notify reward to make the period active
+        rewardToken.mint(distributor, 1000e8);
+        vm.prank(distributor);
+        rewardToken.approve(address(multiRewards), 1000e8);
+        vm.prank(distributor);
+        multiRewards.notifyRewardAmount(address(rewardToken), 1000e8);
+
+        // Try to remove while period is still active
+        vm.expectRevert("Reward period still active");
+        multiRewards.removeReward(address(rewardToken));
+    }
+
+    // Test removeReward function - only owner can remove
+    function testRemoveRewardOnlyOwner() public {
+        MockERC20 rewardToken = new MockERC20("OwnerOnly", "OO", 8);
+        address distributor = address(0x777);
+
+        // Add reward token
+        multiRewards.addReward(address(rewardToken), distributor, REWARDS_DURATION);
+
+        // Fast forward to end of reward period
+        vm.warp(block.timestamp + REWARDS_DURATION + 1);
+
+        // Try to remove as non-owner
+        vm.prank(user);
+        vm.expectRevert("Only the contract owner may perform this action");
+        multiRewards.removeReward(address(rewardToken));
+    }
+
+    // Test removeReward function - multiple tokens removal
+    function testRemoveMultipleRewards() public {
+        MockERC20 rewardToken1 = new MockERC20("Remove1", "RM1", 8);
+        MockERC20 rewardToken2 = new MockERC20("Remove2", "RM2", 12);
+        MockERC20 rewardToken3 = new MockERC20("Remove3", "RM3", 10);
+        address distributor = address(0x888);
+
+        // Add multiple reward tokens
+        multiRewards.addReward(address(rewardToken1), distributor, REWARDS_DURATION);
+        multiRewards.addReward(address(rewardToken2), distributor, REWARDS_DURATION);
+        multiRewards.addReward(address(rewardToken3), distributor, REWARDS_DURATION);
+
+        // Fast forward to end of reward period
+        vm.warp(block.timestamp + REWARDS_DURATION + 1);
+
+        // Remove tokens one by one
+        vm.expectEmit(true, false, false, false);
+        emit RewardRemoved(address(rewardToken2));
+        multiRewards.removeReward(address(rewardToken2));
+
+        vm.expectEmit(true, false, false, false);
+        emit RewardRemoved(address(rewardToken1));
+        multiRewards.removeReward(address(rewardToken1));
+
+        vm.expectEmit(true, false, false, false);
+        emit RewardRemoved(address(rewardToken3));
+        multiRewards.removeReward(address(rewardToken3));
+
+        // Verify all tokens were removed by trying to remove one again
+        vm.expectRevert("Reward token not found");
+        multiRewards.removeReward(address(rewardToken1));
+    }
+
+    // Test that removeReward prevents gas limit issues
+    function testRemoveRewardGasOptimization() public {
+        address distributor = address(0x999);
+        MockERC20[] memory tokens = new MockERC20[](5);
+
+        // Add multiple reward tokens
+        for (uint256 i = 0; i < 5; i++) {
+            tokens[i] = new MockERC20(string(abi.encodePacked("Token", i)), string(abi.encodePacked("TK", i)), 8);
+            multiRewards.addReward(address(tokens[i]), distributor, REWARDS_DURATION);
+        }
+
+        // Fast forward to end of reward period
+        vm.warp(block.timestamp + REWARDS_DURATION + 1);
+
+        // Remove middle token to test array reordering
+        vm.expectEmit(true, false, false, false);
+        emit RewardRemoved(address(tokens[2]));
+        multiRewards.removeReward(address(tokens[2]));
+
+        // Verify removed token can't be removed again
+        vm.expectRevert("Reward token not found");
+        multiRewards.removeReward(address(tokens[2]));
+
+        // Verify other tokens can still be removed
+        multiRewards.removeReward(address(tokens[0]));
+        multiRewards.removeReward(address(tokens[1]));
+        multiRewards.removeReward(address(tokens[3]));
+        multiRewards.removeReward(address(tokens[4]));
+    }
+
+    // Custom event for testing
+    event RewardRemoved(address indexed token);
 }

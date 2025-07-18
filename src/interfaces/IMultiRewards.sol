@@ -18,6 +18,7 @@ interface IMultiRewards {
     event RewardPaid(address indexed user, address indexed rewardsToken, uint256 reward);
     event RewardsDurationUpdated(address token, uint256 newDuration);
     event Recovered(address token, uint256 amount);
+    event RewardRemoved(address indexed token);
     event OwnerNominated(address newOwner);
     event OwnerChanged(address oldOwner, address newOwner);
     event PauseChanged(bool isPaused);
@@ -50,6 +51,7 @@ interface IMultiRewards {
     function acceptOwnership() external;
     function setPaused(bool _paused) external;
     function addReward(address _rewardsToken, address _rewardsDistributor, uint256 _rewardsDuration) external;
+    function removeReward(address _rewardsToken) external;
     function setRewardsDistributor(address _rewardsToken, address _rewardsDistributor) external;
     function stake(uint256 amount) external;
     function withdraw(uint256 amount) external;
