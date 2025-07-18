@@ -240,7 +240,7 @@
     "isContract": false
   },
   {
-    "addr": "0xEC9aBc51Bf7D7A91a60C32Dea861f8029b1A7791",
+    "addr": "0x7855B0821401Ab078f6Cf457dEAFae775fF6c7A3",
     "name": "MAMO_MULTI_REWARDS",
     "isContract": true
   },
@@ -272,6 +272,11 @@
   {
     "addr": "0x4408E7932715E83a3e5C5379933637e46526452C",
     "name": "P-MAMO",
+    "isContract": true
+  },
+  {
+    "addr": "0xEC9aBc51Bf7D7A91a60C32Dea861f8029b1A7791",
+    "name": "MAMO_MULTI_REWARDS_DEPRECATED",
     "isContract": true
   }
 ]
