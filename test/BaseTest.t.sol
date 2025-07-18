@@ -32,7 +32,7 @@ abstract contract BaseTest is Test {
         proposal.setAddresses(addresses);
 
         // Deploy any necessary contracts
-        proposal.deploy();
+        //proposal.deploy();
 
         // Pre-build the mock for the proposal
         proposal.preBuildMock();
