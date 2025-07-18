@@ -69,6 +69,12 @@ contract MamoStakingV2Deployment is MultisigProposal {
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
+        // get current addresses
+        address mamoStakingDeprecate = addresses.getAddress("MAMO_STAKING");
+        address mamoStakingRegistryDeprecate = addresses.getAddress("MAMO_STAKING_REGISTRY");
+        address mamoStakingStrategyFactoryDeprecate = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
+        address rewardsDistributorMamoCbbtcDeprecate = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
+
         vm.startBroadcast(deployer);
 
         address mamoStakingRegistry = address(
@@ -121,16 +127,25 @@ contract MamoStakingV2Deployment is MultisigProposal {
         addresses.changeAddress("MAMO_STAKING_REGISTRY", mamoStakingRegistry, true);
         addresses.changeAddress("MAMO_STAKING_STRATEGY_FACTORY", mamoStakingStrategyFactory, true);
         addresses.changeAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC", rewardsDistributorMamoCbbtc, true);
+
+        addresses.addAddress("MAMO_STAKING_DEPRECATED", mamoStakingDeprecate, true);
+        addresses.addAddress("MAMO_STAKING_REGISTRY_DEPRECATED", mamoStakingRegistryDeprecate, true);
+        addresses.addAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED", mamoStakingStrategyFactoryDeprecate, true);
+        addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC_DEPRECATED", rewardsDistributorMamoCbbtcDeprecate, true);
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         address stakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY");
         address mamoStakingStrategy = addresses.getAddress("MAMO_STAKING_STRATEGY");
+        address deprecatedStakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED");
 
         registry.grantRole(registry.BACKEND_ROLE(), stakingStrategyFactory);
         // This will assign strategy type id to 3
         MamoStrategyRegistry(registry).whitelistImplementation(mamoStakingStrategy, 0);
+        
+        // Remove backend role from deprecated staking factory
+        registry.revokeRole(registry.BACKEND_ROLE(), deprecatedStakingStrategyFactory);
     }
 
     function simulate() public override {
@@ -217,6 +232,13 @@ contract MamoStakingV2Deployment is MultisigProposal {
         assertTrue(
             registryContract.hasRole(registryContract.BACKEND_ROLE(), stakingStrategyFactory),
             "Factory should have BACKEND_ROLE"
+        );
+        
+        // Validate that deprecated factory no longer has backend role
+        address deprecatedStakingStrategyFactory = addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED");
+        assertFalse(
+            registryContract.hasRole(registryContract.BACKEND_ROLE(), deprecatedStakingStrategyFactory),
+            "Deprecated factory should not have BACKEND_ROLE"
         );
 
         IMultiRewards multiRewardsContract = IMultiRewards(multiRewardsAddr);
