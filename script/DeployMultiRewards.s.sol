@@ -18,11 +18,14 @@ contract DeployMultiRewards is Script {
         chainIds[0] = block.chainid; // Use the current chain ID
         Addresses addresses = new Addresses(addressesFolderPath, chainIds);
 
+        address oldMultiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
+
         vm.startBroadcast();
         address multiRewards = deploy(addresses);
         vm.stopBroadcast();
 
         addresses.changeAddress("MAMO_MULTI_REWARDS", multiRewards, true);
+        addresses.addAddress("MAMO_MULTI_REWARDS_DEPRECATED", oldMultiRewards, true);
         addresses.updateJson();
         addresses.printJSONChanges();
     }
