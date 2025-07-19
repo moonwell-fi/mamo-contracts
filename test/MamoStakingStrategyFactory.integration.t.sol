@@ -65,7 +65,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
 
     function testFactoryValidatesConfiguration() public {
         // Verify factory was deployed with correct parameters
-        assertEq(stakingStrategyFactory.strategyTypeId(), 2, "Factory should have correct strategy type ID");
+        assertEq(stakingStrategyFactory.strategyTypeId(), 3, "Factory should have correct strategy type ID");
         assertEq(stakingStrategyFactory.defaultSlippageInBps(), 100, "Factory should have correct default slippage");
     }
 
@@ -208,7 +208,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
         // Get the implementation and verify its type ID
         address implementation = ERC1967Proxy(userStrategy).getImplementation();
         uint256 typeId = mamoStrategyRegistry.implementationToId(implementation);
-        assertEq(typeId, 2, "Implementation should have correct strategy type ID");
+        assertEq(typeId, 3, "Implementation should have correct strategy type ID");
     }
 
     function testStakingRegistryCanTrackMultipleStrategies() public {
@@ -258,7 +258,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
         address payable userStrategy = _deployUserStrategy(user);
 
         MamoStakingStrategy strategy = MamoStakingStrategy(userStrategy);
-        assertEq(strategy.strategyTypeId(), 2, "Strategy should have correct type ID");
+        assertEq(strategy.strategyTypeId(), 3, "Strategy should have correct type ID");
     }
 
     // ========== EDGE CASES AND ERROR HANDLING ==========
@@ -287,7 +287,7 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
             stakingStrategyImplementation,
             "Implementation should be correct"
         );
-        assertEq(stakingStrategyFactory.strategyTypeId(), 2, "Strategy type ID should be correct");
+        assertEq(stakingStrategyFactory.strategyTypeId(), 3, "Strategy type ID should be correct");
     }
 
     // ========== HELPER FUNCTIONS ==========
