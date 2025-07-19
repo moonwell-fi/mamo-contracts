@@ -21,18 +21,13 @@ abstract contract BaseTest is Test {
 
         addresses = new Addresses(addressesFolderPath, chainIds);
 
-        // Deploy new MultiRewards contract
-        deployMultiRewards = new DeployMultiRewards();
-        address multiRewards = deployMultiRewards.deploy(addresses);
-        addresses.changeAddress("MAMO_MULTI_REWARDS", multiRewards, true);
-
         // Create and execute the multisig proposal
         proposal = new MamoStakingV2Deployment();
         // Set the addresses for the proposal
         proposal.setAddresses(addresses);
 
         // Deploy any necessary contracts
-        proposal.deploy();
+        //proposal.deploy();
 
         // Pre-build the mock for the proposal
         proposal.preBuildMock();
