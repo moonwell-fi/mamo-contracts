@@ -29,16 +29,16 @@ This campaign distributes both MAMO and cbBTC tokens as weekly rewards.
    uint256 cbbtcAmount = 0.1e8;     // 0.1 cbBTC (8 decimals)
    ```
 
-2. **Add Rewards**
-
-This should be done before Tuesday 8 AM
+2. **Add Rewards** (Before Tuesday 8 AM)
    ```solidity
    // Called by admin (F-MAMO address)
    module.addRewards(mamoAmount, cbbtcAmount);
    ```
 
+3. **Wait 24 Hours**
+   Check `pendingRewards()` to see when the rewards can be executed (notifyAfter)
+
 4. **Execute Rewards**
-Check `pendingRewards()` to see when the rewards can be executed (notifyAfter)
 
    ```solidity
    // Anyone can call this after time lock expires
