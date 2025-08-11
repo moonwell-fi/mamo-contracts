@@ -82,6 +82,13 @@ interface IERC20 {
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
 
     /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5,05` (`505 / 10 ** 2`).
+     */
+    function decimals() external view returns (uint8);
+
+    /**
      * @dev Emitted when `value` tokens are moved from one account (`from`) to
      * another (`to`).
      *
@@ -411,9 +418,32 @@ contract MultiRewards is ReentrancyGuard, Pausable {
 
     function addReward(address _rewardsToken, address _rewardsDistributor, uint256 _rewardsDuration) public onlyOwner {
         require(rewardData[_rewardsToken].rewardsDuration == 0);
+        require(IERC20(_rewardsToken).decimals() > 5, "Reward token decimals must be > 0");
+        require(IERC20(_rewardsToken).decimals() <= 18, "Reward token decimals must be <= 18");
         rewardTokens.push(_rewardsToken);
         rewardData[_rewardsToken].rewardsDistributor = _rewardsDistributor;
         rewardData[_rewardsToken].rewardsDuration = _rewardsDuration;
+    }
+
+    function removeReward(address _rewardsToken) public onlyOwner {
+        require(rewardData[_rewardsToken].rewardsDuration != 0, "Reward token not found");
+        require(block.timestamp > rewardData[_rewardsToken].periodFinish, "Reward period still active");
+
+        // Find and remove the token from the array
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardTokens[i] == _rewardsToken) {
+                // Move the last element to the position of the element to be removed
+                rewardTokens[i] = rewardTokens[rewardTokens.length - 1];
+                // Remove the last element
+                rewardTokens.pop();
+                break;
+            }
+        }
+
+        // Clear the reward data
+        delete rewardData[_rewardsToken];
+
+        emit RewardRemoved(_rewardsToken);
     }
 
     /* ========== VIEWS ========== */
@@ -430,20 +460,45 @@ contract MultiRewards is ReentrancyGuard, Pausable {
         return Math.min(block.timestamp, rewardData[_rewardsToken].periodFinish);
     }
 
+    function _calculateDecimalPrecision(address _rewardsToken) private view returns (uint256) {
+        uint256 rewardTokenDecimals = uint256(IERC20(_rewardsToken).decimals());
+        uint256 stakingTokenDecimals = uint256(stakingToken.decimals());
+
+        uint256 precision = 1e18;
+        if (rewardTokenDecimals != stakingTokenDecimals) {
+            uint256 decimalDifference;
+            if (rewardTokenDecimals > stakingTokenDecimals) {
+                decimalDifference = rewardTokenDecimals - stakingTokenDecimals;
+                require(decimalDifference <= 18, "Decimal difference too large");
+                precision = precision.div(10 ** decimalDifference);
+            } else {
+                decimalDifference = stakingTokenDecimals - rewardTokenDecimals;
+                require(decimalDifference <= 18, "Decimal difference too large");
+                precision = precision.mul(10 ** decimalDifference);
+            }
+        }
+        return precision;
+    }
+
     function rewardPerToken(address _rewardsToken) public view returns (uint256) {
         if (_totalSupply == 0) {
             return rewardData[_rewardsToken].rewardPerTokenStored;
         }
+
+        uint256 precision = _calculateDecimalPrecision(_rewardsToken);
+
         return rewardData[_rewardsToken].rewardPerTokenStored.add(
             lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime).mul(
                 rewardData[_rewardsToken].rewardRate
-            ).mul(1e18).div(_totalSupply)
+            ).mul(precision).div(_totalSupply)
         );
     }
 
     function earned(address account, address _rewardsToken) public view returns (uint256) {
+        uint256 precision = _calculateDecimalPrecision(_rewardsToken);
+
         return _balances[account].mul(rewardPerToken(_rewardsToken).sub(userRewardPerTokenPaid[account][_rewardsToken]))
-            .div(1e18).add(rewards[account][_rewardsToken]);
+            .div(precision).add(rewards[account][_rewardsToken]);
     }
 
     function getRewardForDuration(address _rewardsToken) external view returns (uint256) {
@@ -551,4 +606,5 @@ contract MultiRewards is ReentrancyGuard, Pausable {
     event RewardPaid(address indexed user, address indexed rewardsToken, uint256 reward);
     event RewardsDurationUpdated(address token, uint256 newDuration);
     event Recovered(address token, uint256 amount);
+    event RewardRemoved(address indexed token);
 }
