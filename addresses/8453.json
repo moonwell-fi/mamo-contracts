@@ -300,8 +300,13 @@
     "isContract": true
   },
   {
-    "addr": "0x6f85D661961c9A265776E2A3CCFcdf3a542d6Da2",
+    "addr": "0x30a182da0c30c7a59D37D447663eC0Ae04fC2E09",
     "name": "REWARDS_DISTRIBUTOR_MAMO_VIRTUALS",
+    "isContract": true
+  },
+  {
+    "addr": "0x6f85D661961c9A265776E2A3CCFcdf3a542d6Da2",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_VIRTUALS_DEPRECATED",
     "isContract": true
   }
 ]

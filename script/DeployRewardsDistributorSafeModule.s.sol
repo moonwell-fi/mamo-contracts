@@ -40,6 +40,7 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
      * @return rewardsModule The deployed RewardsDistributorSafeModule contract address
      */
     function deploy(Addresses addresses) public returns (address rewardsModule) {
+        address currentRewardsModule = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS");
         address safe = addresses.getAddress("F-MAMO"); // admin of rewards distributor safe modules
         address mamoToken = addresses.getAddress("MAMO");
         address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
@@ -58,6 +59,7 @@ contract DeployRewardsDistributorSafeModule is Script, Test {
 
         if (addresses.isAddressSet("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS")) {
             addresses.changeAddress("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS", rewardsModule, true);
+            addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS_DEPRECATED", currentRewardsModule, true);
         } else {
             addresses.addAddress("REWARDS_DISTRIBUTOR_MAMO_VIRTUALS", rewardsModule, true);
         }
