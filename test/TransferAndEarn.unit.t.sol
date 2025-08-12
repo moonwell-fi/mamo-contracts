@@ -11,7 +11,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract MockNonfungiblePositionManager {
     mapping(uint256 => address) public ownerOfMapping;
-    mapping(uint256 => PositionInfo) public positions;
+    mapping(uint256 => PositionInfo) public positionsMapping;
 
     struct PositionInfo {
         address token0;
@@ -23,11 +23,33 @@ contract MockNonfungiblePositionManager {
     }
 
     function setPosition(uint256 tokenId, address token0, address token1) external {
-        positions[tokenId] = PositionInfo(token0, token1);
+        positionsMapping[tokenId] = PositionInfo(token0, token1);
     }
 
     function ownerOf(uint256 tokenId) external view returns (address) {
         return ownerOfMapping[tokenId];
+    }
+
+    function positions(uint256 tokenId)
+        external
+        view
+        returns (
+            uint96 nonce,
+            address operator,
+            address token0,
+            address token1,
+            uint24 fee,
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        )
+    {
+        PositionInfo memory position = positionsMapping[tokenId];
+        return (0, address(0), position.token0, position.token1, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     function collect(INonfungiblePositionManager.CollectParams calldata params)
@@ -38,9 +60,9 @@ contract MockNonfungiblePositionManager {
         amount1 = 50e6; // Mock token1 amount
 
         // Mock transfer tokens to recipient
-        if (positions[params.tokenId].token0 != address(0)) {
-            MockERC20(positions[params.tokenId].token0).mint(params.recipient, amount0);
-            MockERC20(positions[params.tokenId].token1).mint(params.recipient, amount1);
+        if (positionsMapping[params.tokenId].token0 != address(0)) {
+            MockERC20(positionsMapping[params.tokenId].token0).mint(params.recipient, amount0);
+            MockERC20(positionsMapping[params.tokenId].token1).mint(params.recipient, amount1);
         }
     }
 
@@ -77,6 +99,7 @@ contract TransferAndEarnUnitTest is Test {
 
     uint256 public constant TOKEN_ID_1 = 1;
     uint256 public constant TOKEN_ID_2 = 2;
+    address public constant POSITION_MANAGER_ADDRESS = 0x827922686190790b37229fd06084350E74485b72;
 
     event NFTTransferred(uint256 indexed tokenId, address indexed recipient);
 
@@ -92,17 +115,21 @@ contract TransferAndEarnUnitTest is Test {
 
         // Override the immutable position manager using vm.etch before deploying
         bytes memory mockCode = address(mockPositionManager).code;
-        vm.etch(0x827922686190790b37229fd06084350E74485b72, mockCode);
+        vm.etch(POSITION_MANAGER_ADDRESS, mockCode);
 
         // Deploy TransferAndEarn contract
         vm.prank(owner);
         transferAndEarn = new TransferAndEarn(feeCollector, owner);
 
-        // Set up mock data
-        mockPositionManager.setOwner(TOKEN_ID_1, address(transferAndEarn));
-        mockPositionManager.setOwner(TOKEN_ID_2, address(transferAndEarn));
-        mockPositionManager.setPosition(TOKEN_ID_1, address(mockToken0), address(mockToken1));
-        mockPositionManager.setPosition(TOKEN_ID_2, address(mockToken0), address(mockToken1));
+        // Set up mock data - need to call on the etched address
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setOwner(TOKEN_ID_1, address(transferAndEarn));
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setOwner(TOKEN_ID_2, address(transferAndEarn));
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setPosition(
+            TOKEN_ID_1, address(mockToken0), address(mockToken1)
+        );
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setPosition(
+            TOKEN_ID_2, address(mockToken0), address(mockToken1)
+        );
 
         vm.label(address(transferAndEarn), "TransferAndEarn");
         vm.label(owner, "Owner");
@@ -139,6 +166,7 @@ contract TransferAndEarnUnitTest is Test {
     }
 
     function testOnERC721ReceivedFromPositionManager() public {
+        vm.prank(POSITION_MANAGER_ADDRESS);
         bytes4 selector = transferAndEarn.onERC721Received(address(0), address(0), TOKEN_ID_1, "");
         assertEq(selector, transferAndEarn.onERC721Received.selector, "incorrect selector returned");
     }
@@ -163,7 +191,7 @@ contract TransferAndEarnUnitTest is Test {
     }
 
     function testAddNotOwnedByContractFails() public {
-        mockPositionManager.setOwner(TOKEN_ID_1, user);
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setOwner(TOKEN_ID_1, user);
 
         vm.expectRevert("this contract doesn't have the LP NFT");
         transferAndEarn.add(TOKEN_ID_1);
@@ -216,7 +244,11 @@ contract TransferAndEarnUnitTest is Test {
         transferAndEarn.transfer(TOKEN_ID_1);
 
         assertFalse(transferAndEarn.lockedPositions(TOKEN_ID_1), "position should be unlocked");
-        assertEq(mockPositionManager.ownerOf(TOKEN_ID_1), owner, "NFT should be transferred to owner");
+        assertEq(
+            MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).ownerOf(TOKEN_ID_1),
+            owner,
+            "NFT should be transferred to owner"
+        );
     }
 
     function testTransferNotLockedFails() public {
@@ -251,8 +283,16 @@ contract TransferAndEarnUnitTest is Test {
 
         assertFalse(transferAndEarn.lockedPositions(TOKEN_ID_1), "position 1 should be unlocked");
         assertFalse(transferAndEarn.lockedPositions(TOKEN_ID_2), "position 2 should be unlocked");
-        assertEq(mockPositionManager.ownerOf(TOKEN_ID_1), owner, "NFT 1 should be transferred to owner");
-        assertEq(mockPositionManager.ownerOf(TOKEN_ID_2), owner, "NFT 2 should be transferred to owner");
+        assertEq(
+            MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).ownerOf(TOKEN_ID_1),
+            owner,
+            "NFT 1 should be transferred to owner"
+        );
+        assertEq(
+            MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).ownerOf(TOKEN_ID_2),
+            owner,
+            "NFT 2 should be transferred to owner"
+        );
     }
 
     function testTransferManyUnauthorizedFails() public {
