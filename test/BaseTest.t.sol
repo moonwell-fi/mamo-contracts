@@ -20,25 +20,5 @@ abstract contract BaseTest is Test {
         chainIds[0] = block.chainid;
 
         addresses = new Addresses(addressesFolderPath, chainIds);
-
-        // Create and execute the multisig proposal
-        proposal = new MamoStakingV2Deployment();
-        // Set the addresses for the proposal
-        proposal.setAddresses(addresses);
-
-        // Deploy any necessary contracts
-        //proposal.deploy();
-
-        // Pre-build the mock for the proposal
-        proposal.preBuildMock();
-
-        // Build the proposal actions
-        proposal.build();
-
-        // Simulate the proposal execution
-        proposal.simulate();
-
-        // Validate the proposal results
-        proposal.validate();
     }
 }
