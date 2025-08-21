@@ -142,6 +142,17 @@ contract TransferAndEarnUnitTest is Test {
         assertEq(transferAndEarn.owner(), owner, "incorrect owner");
     }
 
+    function testConstructorZeroFeeCollectorFails() public {
+        vm.prank(owner);
+        vm.expectRevert("Fee collector cannot be zero");
+        new TransferAndEarn(address(0), owner);
+    }
+
+    function testConstructorZeroOwnerFails() public {
+        vm.expectRevert();
+        new TransferAndEarn(feeCollector, address(0));
+    }
+
     function testSetFeeCollector() public {
         address newFeeCollector = makeAddr("newFeeCollector");
 

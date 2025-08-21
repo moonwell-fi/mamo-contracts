@@ -19,6 +19,8 @@ contract TransferAndEarn is ITransferAndEarn, IERC721Receiver, Ownable {
         INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
 
     constructor(address _feeCollector, address _owner) Ownable(_owner) {
+        require(_feeCollector != address(0), "Fee collector cannot be zero");
+        require(_owner != address(0), "Owner cannot be zero");
         feeCollector = _feeCollector;
     }
 
