@@ -303,5 +303,15 @@
     "addr": "0x95B0D21bBc973A6aEc501026260e26D333b94d80",
     "name": "TRANSFER_AND_EARN",
     "isContract": true
+  },
+  {
+    "addr": "0x30a182da0c30c7a59D37D447663eC0Ae04fC2E09",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_VIRTUALS",
+    "isContract": true
+  },
+  {
+    "addr": "0x6f85D661961c9A265776E2A3CCFcdf3a542d6Da2",
+    "name": "REWARDS_DISTRIBUTOR_MAMO_VIRTUALS_DEPRECATED",
+    "isContract": true
   }
 ]
