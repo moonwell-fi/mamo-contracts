@@ -18,6 +18,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 contract DeployTransferAndEarn is Script, Test {
     /// @notice Salt for CREATE2 deployment to ensure same address across chains
     bytes32 public constant SALT = keccak256("MAMO_TRANSFER_AND_EARN_V1");
+
     function run() public {
         // Load the addresses from the JSON file
         string memory addressesFolderPath = "./addresses";
