@@ -14,11 +14,13 @@ sort_imports = true
 [rpc_endpoints]
 localhost = "http://127.0.0.1:8545"
 base = { endpoint= "${BASE_RPC_URL}", retries = 3, retry_backoff = 1000 }
+bnb = { endpoint= "${BNB_RPC_URL}", retries = 3, retry_backoff = 1000 }
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
 [etherscan]
 base = { key = "${BASESCAN_API_KEY}", url= "https://api.basescan.org/api" }
+bnb = { key = "${BNBSCAN_API_KEY}", url= "https://api.bscscan.com/api" }
 
 [profile.lint]
 exclude_lints = ["mixed-case-function", "asm-keccak256", "mixed-case-variable", "screaming-snake-case-immutable"]
