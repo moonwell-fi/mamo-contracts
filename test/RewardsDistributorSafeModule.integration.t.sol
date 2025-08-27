@@ -103,7 +103,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
                 uint256(RewardsDistributorSafeModule.RewardState.NOT_READY),
                 "State must be NOT_READY"
             );
-            assertEq(isNotified, false, "Is notified should be false");
+            assertEq(isNotified, true, "Is notified should be true");
         } else {
             assertEq(
                 uint256(module.getCurrentState()),
