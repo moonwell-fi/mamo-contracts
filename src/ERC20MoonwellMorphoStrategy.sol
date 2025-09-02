@@ -15,6 +15,15 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
+interface IMerkleDistributor {
+    function claim(
+        address[] calldata accounts,
+        address[] calldata rewardTokens,
+        uint256[] calldata rewardAmounts,
+        bytes32[] calldata proofs
+    ) external;
+}
+
 /**
  * @title ERC20MoonwellMorphoStrategy
  * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
@@ -96,6 +105,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // @notice Emitted when the fee recipient is updated
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
+
+    // @notice Emitted when rewards are claimed
+    event RewardsClaimed(address indexed campaign, address[] rewardTokens, uint256[] rewardAmounts);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -300,6 +312,33 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         depositInternal(totalTokenBalance);
 
         emit PositionUpdated(splitMoonwell, splitMorpho);
+    }
+
+    /**
+     * @notice Claims rewards from a campaign on behalf of a user
+     * @dev Only callable by the backend address
+     * @param campaign The address of the campaign
+     * @param rewardTokens The addresses of the reward tokens
+     * @param rewardAmounts The amounts of the reward tokens
+     * @param proofs The proofs of the reward tokens
+     */
+    function claimRewards(
+        address campaign,
+        address[] calldata rewardTokens,
+        uint256[] calldata rewardAmounts,
+        bytes32[] calldata proofs
+    ) external onlyBackend {
+        require(rewardTokens.length == rewardAmounts.length, "Reward tokens and amounts length mismatch");
+        require(rewardTokens.length == proofs.length, "Reward tokens and proofs length mismatch");
+
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            address[] memory accounts = new address[](1);
+            accounts[0] = address(this);
+
+            IMerkleDistributor(campaign).claim(accounts, rewardTokens, rewardAmounts, proofs);
+        }
+
+        emit RewardsClaimed(campaign, rewardTokens, rewardAmounts);
     }
 
     /**
