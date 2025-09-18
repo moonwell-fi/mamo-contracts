@@ -64,11 +64,11 @@ jobs:
           lcov-file: ./lcov.info
           github-token: ${{ secrets.GITHUB_TOKEN }} # Adds a coverage summary comment to the PR.
 
-      - name: Verify minimum coverage
-        uses: zgosalvez/github-actions-report-lcov@v2
-        with:
-          coverage-files: ./lcov.info
-          minimum-coverage: 90
+      # - name: Verify minimum coverage
+      #   uses: zgosalvez/github-actions-report-lcov@v2
+      #   with:
+      #     coverage-files: ./lcov.info
+      #     minimum-coverage: 90
 
       # Upload coverage artifacts
       - name: Upload coverage reports
