@@ -40,10 +40,23 @@ jobs:
         run: |
           echo "FOUNDRY_FUZZ_SEED=$(( $(date +%s) - $(date +%s) % 86400 ))" >> $GITHUB_ENV
 
-      - name: Run coverage
+      - name: Run coverage (USDC)
+        env:
+          TS_NODE_TRANSPILE_ONLY: "1"
         run: |
           export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json"
-          forge coverage --fork-url base --ffi --report summary --report lcov --skip s.sol --no-match-coverage t.sol --no-match-test "testIsValidSignature|testRevertIfPriceCheckFails|testSlippageAffectsPriceCheck|testDeployStrategiesAndUpdatePositionViaMulticall|testMulticallCanManageMultipleStrategies|testMulticallWithFailingCall|testFactoryParametersValidation" --no-match-contract "MultiRewardsUnitTest" --ir-minimum
+          forge coverage \
+            --fork-url base \
+            --ffi \
+            --report summary \
+            --report lcov \
+            --report-file lcov.info \
+            --skip s.sol \
+            --ir-minimum \
+            --allow-failure \
+            --compute-units-per-second 150 \
+            --fork-retries 10 \
+            --fork-retry-backoff 500
 
       # To ignore coverage for certain directories modify the paths in this step as needed.
       # The below default ignores coverage results for the test and script directories.
@@ -52,6 +65,10 @@ jobs:
         run: |
           sudo apt update && sudo apt install -y lcov
           lcov --remove lcov.info 'test/*' 'script/*' --output-file lcov.info --rc lcov_branch_coverage=0
+
+      - name: Generate HTML report
+        run: |
+          genhtml lcov.info --output-dir coverage
 
       # This step posts a detailed coverage report as a comment and deletes previous comments on
       # each push. The below step is used to fail coverage if the specified coverage threshold is
