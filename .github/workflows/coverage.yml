@@ -43,7 +43,7 @@ jobs:
       - name: Run coverage
         run: |
           export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json"
-          forge coverage --fork-url base --ffi --report summary --report lcov --skip s.sol --no-match-coverage t.sol --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|MultiRewardsUnitTest" --ir-minimum
+          forge coverage --fork-url base --ffi --report summary --report lcov --skip s.sol --no-match-coverage t.sol --no-match-test "testIsValidSignature|testRevertIfPriceCheckFails|testSlippageAffectsPriceCheck|testDeployStrategiesAndUpdatePositionViaMulticall|testMulticallCanManageMultipleStrategies|testMulticallWithFailingCall|testFactoryParametersValidation" --no-match-contract "MultiRewardsUnitTest" --ir-minimum
 
       # To ignore coverage for certain directories modify the paths in this step as needed.
       # The below default ignores coverage results for the test and script directories.
