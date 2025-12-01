@@ -368,5 +368,15 @@
     "addr": "0x959d187D8E6115816a69c29b4809DE8A2Aa680e6",
     "name": "DROP_AUTOMATION",
     "isContract": true
+  },
+  {
+    "addr": "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1",
+    "isContract": true,
+    "name": "WETH_METAMORPHO_VAULT"
+  },
+  {
+    "addr": "0x628ff693426583D9a7FB391E54366292F509D457",
+    "name": "MOONWELL_WETH",
+    "isContract": true
   }
 ]

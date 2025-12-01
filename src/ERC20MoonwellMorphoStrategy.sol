@@ -4,9 +4,11 @@ pragma solidity 0.8.28;
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
+
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {WETH9} from "@interfaces/IWETH.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -54,6 +56,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /// @notice The address of the Cow contracts Vault Relayer contract that needs token approval for executing trades
     address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
+
+    /// @notice The address of the WETH token
+    address public constant WETH = 0x4200000000000000000000000000000000000006;
 
     // @notice Reference to the Moonwell mToken contract
     IMToken public mToken;
@@ -541,5 +546,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         }
 
         return string(hexString);
+    }
+
+    /**
+     * @notice Allows the contract to receive ETH
+     * @dev In the case where token == WETH, wrap back to WETH (for WETH mToken redemption)
+     */
+    receive() external payable override {
+        if (msg.value > 0 && address(token) == WETH) {
+            WETH9(WETH).deposit{value: msg.value}();
+        }
     }
 }
