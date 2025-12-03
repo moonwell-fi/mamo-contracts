@@ -19,9 +19,6 @@ cbbtc-strategy:
 weth-strategy:
 	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
 
-weth-strategy-integration:
-	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && export DO_PRINT=false && forge test --fork-url base --ffi --mc WETHStrategyIntegrationTest -vvvv
-
 usdc-price-checker:
 	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi --mc SlippagePriceCheckerTest -vvv
 

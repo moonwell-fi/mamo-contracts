@@ -16,6 +16,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
+// TODO: remove this after new implementation is deployed
+import {WhitelistWETHStrategyImplementation} from "@multisig/mamo-multisig/010_WhitelistWETHStrategyImplementation.sol";
+
 contract SlippagePriceCheckerTest is BaseTest {
     ISlippagePriceChecker public slippagePriceChecker;
 
@@ -44,16 +47,24 @@ contract SlippagePriceCheckerTest is BaseTest {
         // workaround to make test contract work with mappings
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
+        // Load asset configuration from environment
+        string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
+        assetConfig = new DeployAssetConfig(assetConfigPath).getConfig();
+
+        // TODO: remove this after new implementation is deployed
+        if (keccak256(abi.encodePacked(assetConfig.token)) == keccak256(abi.encodePacked("WETH"))) {
+            WhitelistWETHStrategyImplementation whitelistWETHStrategyImplementation =
+                new WhitelistWETHStrategyImplementation();
+            whitelistWETHStrategyImplementation.run();
+            addresses = whitelistWETHStrategyImplementation.addresses();
+        }
+
         // Get the environment from command line arguments or use default
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
 
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
-
-        // Load asset configuration from environment
-        string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
-        assetConfig = new DeployAssetConfig(assetConfigPath).getConfig();
 
         // Get the addresses from the addresses contract
         owner = addresses.getAddress(config.admin);
