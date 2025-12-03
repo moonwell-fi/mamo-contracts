@@ -35,5 +35,6 @@
         }
       ]
     }
-  ]
+  ],
+  "strategyImplementation": "MOONWELL_MORPHO_STRATEGY_IMPL"
 }

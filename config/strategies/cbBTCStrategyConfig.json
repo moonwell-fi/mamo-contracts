@@ -45,5 +45,6 @@
     "strategyTypeId": 1
   },
   "symbol": "cbBTC",
-  "token": "cbBTC"
+  "token": "cbBTC",
+  "strategyImplementation": "MOONWELL_MORPHO_STRATEGY_IMPL"
 }
