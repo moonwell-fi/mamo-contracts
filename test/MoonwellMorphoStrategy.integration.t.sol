@@ -87,7 +87,6 @@ contract MoonwellMorphoStrategyTest is Test {
 
     DeployConfig.DeploymentConfig public config;
     DeployAssetConfig.Config public assetConfig;
-    uint256 public strategyTypeId;
 
     function setUp() public {
         // workaround to make test contract work with mappings
@@ -141,21 +140,7 @@ contract MoonwellMorphoStrategyTest is Test {
             addresses.changeAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
         }
 
-        ERC20MoonwellMorphoStrategy implementation;
-
-        if (addresses.isAddressSet(assetConfig.strategyImplementation)) {
-            implementation =
-                ERC20MoonwellMorphoStrategy(payable(addresses.getAddress(assetConfig.strategyImplementation)));
-            strategyTypeId = assetConfig.strategyParams.strategyTypeId;
-        } else {
-            // Deploy the strategy implementation
-            implementation = new ERC20MoonwellMorphoStrategy();
-            addresses.addAddress(assetConfig.strategyImplementation, address(implementation), true);
-
-            // Whitelist the implementation
-            vm.prank(admin);
-            strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
-        }
+        require(addresses.isAddressSet(assetConfig.strategyImplementation), "Strategy implementation not deployed");
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
