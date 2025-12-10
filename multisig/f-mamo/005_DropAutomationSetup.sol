@@ -143,7 +143,7 @@ contract DropAutomationSetup is MultisigProposal {
         address rewardsDistributorModule = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
         address burnAndEarnAddress = addresses.getAddress("BURN_AND_EARN");
         address mamoMultisig = addresses.getAddress("MAMO_MULTISIG");
-        address gelatoSender = addresses.getAddress("GELATO_SENDER");
+        address adityaEOA = addresses.getAddress("ADITYA_EOA");
         address fMamoSafe = addresses.getAddress("F-MAMO");
 
         // Validate DropAutomation deployment
@@ -159,8 +159,8 @@ contract DropAutomationSetup is MultisigProposal {
         );
         assertEq(
             dropAutomationContract.dedicatedMsgSender(),
-            gelatoSender,
-            "DropAutomation dedicatedMsgSender should be GELATO_SENDER"
+            adityaEOA,
+            "DropAutomation dedicatedMsgSender should be ADITYA_EOA"
         );
 
         // Validate RewardsDistributorSafeModule admin transfer

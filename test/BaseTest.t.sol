@@ -20,5 +20,6 @@ abstract contract BaseTest is Test {
         chainIds[0] = block.chainid;
 
         addresses = new Addresses(addressesFolderPath, chainIds);
+        vm.makePersistent(address(addresses));
     }
 }
