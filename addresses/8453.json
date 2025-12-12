@@ -375,6 +375,11 @@
     "name": "WETH_METAMORPHO_VAULT"
   },
   {
+    "addr": "0xf4D70D2fd1DE59ff34aA0350263ba742cb94b1c8",
+    "name": "ADITYA_EOA",
+    "isContract": false
+  },
+  {
     "addr": "0x628ff693426583D9a7FB391E54366292F509D457",
     "name": "MOONWELL_WETH",
     "isContract": true
