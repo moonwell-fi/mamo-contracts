@@ -223,7 +223,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     function withdraw(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
 
-        require(_getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
+        require(_getTotalBalance() >= amount, "Withdrawal amount exceeds available balance in strategy");
 
         // Check if we have enough tokens in the contract
         uint256 tokenBalance = token.balanceOf(address(this));
@@ -348,7 +348,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Sets a new fee recipient address
-     * @dev Only callable by the strategy owner
+     * @dev Only callable by the backend address
      * @param _newFeeRecipient The new fee recipient address
      */
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {

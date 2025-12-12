@@ -62,6 +62,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     // Events
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
+    event Withdraw(address indexed asset, uint256 amount);
 
     Addresses public addresses;
 
@@ -391,6 +392,39 @@ contract MoonwellMorphoStrategyTest is Test {
             depositAmount,
             deltaThreshold,
             "Strategy balance should remain unchanged"
+        );
+    }
+
+    function testOwnerCanWithdrawEntireBalance() public {
+        // First deposit funds
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+
+        // Record initial owner balance (should be 0 after deposit)
+        uint256 ownerBalanceBefore = underlying.balanceOf(owner);
+        assertEq(ownerBalanceBefore, 0, "Owner's balance should be 0 after deposit");
+
+        uint256 strategyBalanceBefore = getTotalBalance(address(strategy));
+        assertApproxEqAbs(
+            strategyBalanceBefore, depositAmount, deltaThreshold, "Strategy should have the deposited amount"
+        );
+
+        uint256 exactBalance = getTotalBalance(address(strategy));
+        vm.expectEmit(true, false, false, true, address(strategy));
+        emit Withdraw(address(underlying), exactBalance);
+
+        strategy.withdraw(exactBalance);
+        vm.stopPrank();
+
+        uint256 ownerBalanceAfter = underlying.balanceOf(owner);
+        assertEq(
+            ownerBalanceAfter - ownerBalanceBefore,
+            exactBalance,
+            "Owner should have received exactly the requested amount"
         );
     }
 

@@ -59,7 +59,7 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy and whitelist new ERC20MoonwellMorphoStrategy implementation for token type 1, with support for WETH";
+        "Deploy and whitelist new ERC20MoonwellMorphoStrategy implementation for token type 3, with support for WETH";
     }
 
     function deploy() public override {
