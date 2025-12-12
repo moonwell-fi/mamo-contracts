@@ -63,28 +63,18 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
     }
 
     function deploy() public override {
+        if (addresses.isAddressSet(strategyImplementation)) {
+            return;
+        }
+
+        // Deploy new strategy implementation
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         vm.startBroadcast(deployer);
 
-        // Deploy new strategy implementation
         address newImplementation = address(new ERC20MoonwellMorphoStrategy());
         vm.stopBroadcast();
 
-        if (addresses.isAddressSet(strategyImplementation)) {
-            address oldAddress = addresses.getAddress(strategyImplementation);
-            string memory oldImplementation = string(abi.encodePacked(strategyImplementation, "_DEPRECATED"));
-
-            // Keep the latest deprecated implementation
-            if (addresses.isAddressSet(oldImplementation)) {
-                addresses.changeAddress(oldImplementation, oldAddress, true);
-            } else {
-                addresses.addAddress(oldImplementation, oldAddress, true);
-            }
-
-            addresses.changeAddress(strategyImplementation, newImplementation, true);
-        } else {
-            addresses.addAddress(strategyImplementation, newImplementation, true);
-        }
+        addresses.addAddress(strategyImplementation, newImplementation, true);
 
         // Deploy WETH strategy factory
         strategyFactoryDeployer.deployStrategyFactory(addresses, deployAssetConfigWeth.getConfig(), deployer);
