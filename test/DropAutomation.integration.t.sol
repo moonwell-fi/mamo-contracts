@@ -46,7 +46,7 @@ contract DropAutomationIntegrationTest is BaseTest {
 
         // Get addresses we need
         owner = addresses.getAddress("F-MAMO");
-        dedicatedSender = addresses.getAddress("GELATO_SENDER");
+        dedicatedSender = addresses.getAddress("ADITYA_EOA");
 
         // Use the 005_DropAutomationSetup script to deploy and configure
         DropAutomationSetup setupScript = new DropAutomationSetup();

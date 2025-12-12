@@ -26,8 +26,8 @@ contract ERC20StrategyV2Test is BaseTest {
     MamoStrategyRegistry public registry;
 
     function setUp() public override {
-        vm.createSelectFork({urlOrAlias: "base", blockNumber: 36224833});
         super.setUp();
+        vm.createSelectFork({urlOrAlias: "base", blockNumber: 36224833});
 
         // create account with old implementation
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY_DEPRECATED";

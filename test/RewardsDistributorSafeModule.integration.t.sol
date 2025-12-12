@@ -40,7 +40,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
 
         mamoToken = IERC20(addresses.getAddress("MAMO"));
         cbBtcToken = IERC20(addresses.getAddress("cbBTC"));
-        admin = addresses.getAddress("F-MAMO");
+        admin = addresses.getAddress("DROP_AUTOMATION");
 
         safe = ISafe(payable(addresses.getAddress("F-MAMO")));
 
