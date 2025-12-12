@@ -371,8 +371,8 @@
   },
   {
     "addr": "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1",
-    "isContract": true,
-    "name": "WETH_METAMORPHO_VAULT"
+    "name": "WETH_METAMORPHO_VAULT",
+    "isContract": true
   },
   {
     "addr": "0xf4D70D2fd1DE59ff34aA0350263ba742cb94b1c8",
@@ -387,6 +387,16 @@
   {
     "addr": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
     "name": "CHAINLINK_ETH_USD",
+    "isContract": true
+  },
+  {
+    "addr": "0x5f3e87812be1B5191f8a7575457d4821301BC619",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL_V2",
+    "isContract": true
+  },
+  {
+    "addr": "0xE30a1503E8E548b56dcF7f536DE1AF05de355A97",
+    "name": "WETH_STRATEGY_FACTORY",
     "isContract": true
   }
 ]
