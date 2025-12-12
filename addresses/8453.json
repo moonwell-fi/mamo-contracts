@@ -390,14 +390,13 @@
     "isContract": true
   },
   {
-          "addr": "0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7", 
-          "isContract": true,
-          "name": "MOONWELL_MORPHO_STRATEGY_IMPL_V2"
-},
+    "addr": "0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL_V2",
+    "isContract": true
+  },
   {
-          "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28", 
-          "isContract": true,
-          "name": "WETH_STRATEGY_FACTORY"
-}
-
+    "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
+    "name": "WETH_STRATEGY_FACTORY",
+    "isContract": true
+  }
 ]
