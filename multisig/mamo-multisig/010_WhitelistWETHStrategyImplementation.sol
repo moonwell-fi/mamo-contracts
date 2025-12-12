@@ -16,10 +16,10 @@ import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
  * @notice Multisig proposal to whitelist a new strategy implementation for WETH accounts.
  *         The new implementation includes receive() function that wraps any received ETH to WETH
  * @dev This script will deploy a new ERC20MoonwellMorphoStrategy implementation and whitelist it
- *      for strategy type ID 2, which is used for WETH strategy.
+ *      for strategy type ID 4, which is used for WETH strategy.
  */
 contract WhitelistWETHStrategyImplementation is MultisigProposal {
-    uint256 public constant STRATEGY_TYPE_ID = 3;
+    uint256 public constant STRATEGY_TYPE_ID = 4;
     DeployAssetConfig public immutable deployAssetConfigWeth;
     StrategyFactoryDeployer public immutable strategyFactoryDeployer;
     string public strategyImplementation;
@@ -59,7 +59,7 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy and whitelist new ERC20MoonwellMorphoStrategy implementation for token type 3, with support for WETH";
+        "Deploy and whitelist new ERC20MoonwellMorphoStrategy implementation for token type 4, with support for WETH";
     }
 
     function deploy() public override {
