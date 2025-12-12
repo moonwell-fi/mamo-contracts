@@ -388,5 +388,16 @@
     "addr": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
     "name": "CHAINLINK_ETH_USD",
     "isContract": true
-  }
+  },
+  {
+          "addr": "0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7", 
+          "isContract": true,
+          "name": "MOONWELL_MORPHO_STRATEGY_IMPL_V2"
+},
+  {
+          "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28", 
+          "isContract": true,
+          "name": "WETH_STRATEGY_FACTORY"
+}
+
 ]
