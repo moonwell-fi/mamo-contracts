@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
+import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
@@ -19,7 +20,7 @@ import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
  *      for strategy type ID 4, which is used for WETH strategy.
  */
 contract WhitelistWETHStrategyImplementation is MultisigProposal {
-    uint256 public constant STRATEGY_TYPE_ID = 4;
+    uint256 public immutable strategyTypeId;
     DeployAssetConfig public immutable deployAssetConfigWeth;
     StrategyFactoryDeployer public immutable strategyFactoryDeployer;
     string public strategyImplementation;
@@ -34,6 +35,7 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
         vm.makePersistent(address(strategyFactoryDeployer));
 
         strategyImplementation = deployAssetConfigWeth.getConfig().strategyImplementation;
+        strategyTypeId = deployAssetConfigWeth.getConfig().strategyParams.strategyTypeId;
     }
 
     function run() public override {
@@ -80,6 +82,16 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
         strategyFactoryDeployer.deployStrategyFactory(addresses, deployAssetConfigWeth.getConfig(), deployer);
     }
 
+    function preBuildMock() public view override {
+        MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+
+        // Make sure the nextStrategyTypeId() matches the config
+        assertEq(registry.nextStrategyTypeId(), strategyTypeId);
+
+        // Make sure that the strategy type id does not have an implementation
+        assertEq(registry.latestImplementationById(strategyTypeId), address(0));
+    }
+
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         // Get the strategy registry
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
@@ -87,9 +99,9 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
         // Get the new implementation address
         address newImplementation = addresses.getAddress(strategyImplementation);
 
-        // Whitelist the new implementation for strategy type ID 3
-        // This will update latestImplementationById[3] to point to the new implementation
-        registry.whitelistImplementation(newImplementation, STRATEGY_TYPE_ID);
+        // Whitelist the new implementation for strategy type
+        // This will update latestImplementationById to point to the new implementation
+        registry.whitelistImplementation(newImplementation, strategyTypeId);
 
         // give the backend role to the new factories
         registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress("WETH_STRATEGY_FACTORY"));
@@ -152,18 +164,18 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
         // Validate that the new implementation is whitelisted
         assertTrue(registry.whitelistedImplementations(newImplementation), "New implementation should be whitelisted");
 
-        // Validate that the new implementation is registered for strategy type 3
+        // Validate that the new implementation is registered for strategy type
         assertEq(
             registry.implementationToId(newImplementation),
-            STRATEGY_TYPE_ID,
+            strategyTypeId,
             "Implementation should have correct strategy type ID"
         );
 
-        // Validate that strategy type 3 now points to the new implementation
+        // Validate that strategy type now points to the new implementation
         assertEq(
-            registry.latestImplementationById(STRATEGY_TYPE_ID),
+            registry.latestImplementationById(strategyTypeId),
             newImplementation,
-            "Latest implementation for type 1 should be updated"
+            "Latest implementation for type should be updated"
         );
 
         // Validate that the new factories have the backend role
@@ -171,6 +183,118 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
 
         // Validate reward token configurations
         _validateRewardTokens();
+
+        assertEq(
+            StrategyFactory(addresses.getAddress("WETH_STRATEGY_FACTORY")).strategyTypeId(),
+            strategyTypeId
+        );
+
+        // Validate factory storage variables against config
+        _validateFactoryConfig();
+    }
+
+    function _validateFactoryConfig() internal view {
+        StrategyFactory factory = StrategyFactory(addresses.getAddress("WETH_STRATEGY_FACTORY"));
+        DeployAssetConfig.Config memory config = deployAssetConfigWeth.getConfig();
+
+        // Validate strategy parameters from config
+        assertEq(
+            factory.splitMToken(),
+            config.strategyParams.splitMToken,
+            "Factory splitMToken should match config"
+        );
+
+        assertEq(
+            factory.splitVault(),
+            config.strategyParams.splitVault,
+            "Factory splitVault should match config"
+        );
+
+        assertEq(
+            factory.hookGasLimit(),
+            config.strategyParams.hookGasLimit,
+            "Factory hookGasLimit should match config"
+        );
+
+        assertEq(
+            factory.allowedSlippageInBps(),
+            config.strategyParams.allowedSlippageInBps,
+            "Factory allowedSlippageInBps should match config"
+        );
+
+        assertEq(
+            factory.compoundFee(),
+            config.strategyParams.compoundFee,
+            "Factory compoundFee should match config"
+        );
+
+        assertEq(
+            factory.strategyTypeId(),
+            config.strategyParams.strategyTypeId,
+            "Factory strategyTypeId should match config"
+        );
+
+        // Validate addresses
+        assertEq(
+            factory.mamoStrategyRegistry(),
+            addresses.getAddress("MAMO_STRATEGY_REGISTRY"),
+            "Factory mamoStrategyRegistry should match registry address"
+        );
+
+        assertEq(
+            factory.mamoBackend(),
+            addresses.getAddress("MAMO_BACKEND"),
+            "Factory mamoBackend should match backend address"
+        );
+
+        assertEq(
+            factory.mToken(),
+            addresses.getAddress(config.moonwellMarket),
+            "Factory mToken should match configured moonwell market"
+        );
+
+        assertEq(
+            factory.metaMorphoVault(),
+            addresses.getAddress(config.metamorphoVault),
+            "Factory metaMorphoVault should match configured vault"
+        );
+
+        assertEq(
+            factory.token(),
+            addresses.getAddress(config.token),
+            "Factory token should match configured token"
+        );
+
+        assertEq(
+            factory.slippagePriceChecker(),
+            addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
+            "Factory slippagePriceChecker should match price checker proxy"
+        );
+
+        assertEq(
+            factory.strategyImplementation(),
+            addresses.getAddress(config.strategyImplementation),
+            "Factory strategyImplementation should match configured implementation"
+        );
+
+        assertEq(
+            factory.feeRecipient(),
+            addresses.getAddress("MAMO_MULTISIG"),
+            "Factory feeRecipient should be MAMO_MULTISIG"
+        );
+
+        // Validate reward tokens (hardcoded to xWELL_PROXY and MORPHO in StrategyFactoryDeployer)
+        assertEq(
+            factory.rewardTokens(0),
+            addresses.getAddress("xWELL_PROXY"),
+            "Factory reward token 0 should be xWELL_PROXY"
+        );
+
+        assertEq(
+            factory.rewardTokens(1),
+            addresses.getAddress("MORPHO"),
+            "Factory reward token 1 should be MORPHO"
+        );
     }
 
     function _validateRewardTokens() internal view {
