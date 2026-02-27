@@ -91,18 +91,15 @@ Existing slots 0-61 preserved. New slots appended:
 | 57 | `compoundFee` | kept |
 | 58 | `feeRecipient` | kept |
 | 59 | `hookGasLimit` | kept |
-| 60 | `venues` (Venue[]) | **deprecated** — kept for storage compat, no longer written to |
-| 61 | `migrated` (bool) | kept |
-| 62 | `marketRegistry` (IMarketRegistry) | **new** |
-| 63 | `marketSplitBps` (mapping(uint256 => uint256)) | **new** — marketIndex => splitBps |
-| 64 | `migratedToRegistry` (bool) | **new** |
+| 60 | `marketRegistry` (IMarketRegistry) | **new** |
+| 61 | `marketSplitBps` (mapping(uint256 => uint256)) | **new** — marketIndex => splitBps |
 
 ## Initialization Paths
 
 ### Fresh deployment (new factory)
 
 ```
-MultiVenueStrategyFactory.createStrategyForUser(user)
+MultiMarketStrategyFactory.createStrategyForUser(user)
   -> proxy = new ERC1967Proxy(impl, "")
   -> strategy.initialize(InitParams{ ..., marketRegistry, defaultSplitBps })
      -> sets marketRegistry, copies splits to marketSplitBps mapping
@@ -122,14 +119,14 @@ Step 2: owner or backend -> strategy.migrateV1ToMarketRegistry(marketRegistryAdd
   -> sets migrated = true, migratedToRegistry = true
 ```
 
-### Upgrade of existing v2 proxy (already has venues[])
+### Upgrade of existing v2 proxy (already has markets[])
 
 ```
 Step 1: user -> registry.upgradeStrategy(strategy, newImpl)
 Step 2: owner or backend -> strategy.migrateToMarketRegistry(marketRegistryAddr)
   [reinitializer(3)]
   -> sets marketRegistry
-  -> copies venues[i].splitBps -> marketSplitBps[i]
+  -> copies markets[i].splitBps -> marketSplitBps[i]
   -> sets migratedToRegistry = true
 ```
 
@@ -174,9 +171,6 @@ Sums idle tokens + each active market's underlying balance via `balanceOfUnderly
 2. Backend calls `updatePosition()` on affected strategies with new splits excluding deactivated market
 3. `_withdrawAllFromMarkets` withdraws from ALL markets (including inactive) — funds are never stuck
 
-## Registry Changes (MamoStrategyRegistry)
-
-**None.** Not upgradeable. `upgradeStrategy` continues to pass empty bytes.
 
 ## Files
 
@@ -184,11 +178,11 @@ Sums idle tokens + each active market's underlying balance via `balanceOfUnderly
 |------|--------|-------------|
 | `src/interfaces/IMarketRegistry.sol` | CREATE | Interface, MarketType enum, RegistryMarket struct |
 | `src/MarketRegistry.sol` | CREATE | Centralized market storage per strategyTypeId |
-| `src/ERC20MoonwellMorphoStrategy.sol` | MODIFY | New storage (62-64), refactor reads to use registry, remove addVenue/deactivateVenue, add migration fns, update InitParams |
-| `src/MultiVenueStrategyFactory.sol` | MODIFY | Replace VenueInit[] with marketRegistry + defaultSplitBps |
+| `src/ERC20MoonwellMorphoStrategy.sol` | MODIFY | New storage (62-64), refactor reads to use registry, remove addMarket/deactivateMarket, add migration fns, update InitParams |
+| `src/MultiMarketStrategyFactory.sol` | MODIFY | Replace MarketInit[] with marketRegistry + defaultSplitBps |
 | `src/MamoStrategyRegistry.sol` | NO CHANGES | Not upgradeable |
 | `test/MarketRegistry.t.sol` | CREATE | Unit tests |
-| `test/MultiVenueStrategy.integration.t.sol` | MODIFY | Deploy MarketRegistry in setUp |
+| `test/MultiMarketStrategy.integration.t.sol` | MODIFY | Deploy MarketRegistry in setUp |
 | `test/MoonwellMorphoStrategy.integration.t.sol` | MODIFY | Deploy MarketRegistry in setUp |
 
 ## Risks & Mitigations
