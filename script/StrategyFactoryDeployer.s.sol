@@ -117,7 +117,7 @@ contract StrategyFactoryDeployer is Script {
         address mToken = addresses.getAddress(assetConfig.moonwellMarket);
         address metaMorphoVault = addresses.getAddress(assetConfig.metamorphoVault);
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
+        address strategyImplementation = addresses.getAddress(assetConfig.strategyImplementation);
         address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
         address underlying = addresses.getAddress(assetConfig.token);
 
