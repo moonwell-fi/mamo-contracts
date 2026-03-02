@@ -31,9 +31,6 @@ import {MockERC20} from "./MockERC20.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
-// TODO: remove this after new implementation is deployed
-import {WhitelistWETHStrategyImplementation} from "@multisig/mamo-multisig/010_WhitelistWETHStrategyImplementation.sol";
-
 /**
  * @title MockRejectETH
  * @notice A mock contract that rejects all ETH transfers
@@ -97,12 +94,6 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesFolderPath, chainIds);
-
-        // TODO: remove this after new implementation is deployed
-        WhitelistWETHStrategyImplementation whitelistWETHStrategyImplementation =
-            new WhitelistWETHStrategyImplementation();
-        whitelistWETHStrategyImplementation.run();
-        addresses = whitelistWETHStrategyImplementation.addresses();
 
         // Get the environment from command line arguments or use default
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
