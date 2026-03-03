@@ -4,8 +4,10 @@ pragma solidity 0.8.28;
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
+
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
@@ -24,12 +26,27 @@ interface IMerkleDistributor {
     ) external;
 }
 
+/// @notice Used by updatePosition to set new splits (address-keyed)
+struct MarketSplitUpdate {
+    address market;
+    uint256 splitBps;
+}
+
+/// @notice Composite view struct returned by getMarkets()
+struct Market {
+    address target;
+    MarketType marketType;
+    bool active;
+    uint256 splitBps;
+}
+
 /**
  * @title ERC20MoonwellMorphoStrategy
- * @notice A strategy contract for ERC20 tokens that splits deposits between Moonwell core market and Moonwell Vaults
+ * @notice A strategy contract for ERC20 tokens that splits deposits across N Moonwell markets and M ERC4626 vaults
  * @notice IMPORTANT: This contract does not support fee-on-transfer tokens. Using such tokens will result in
  *         unexpected behavior and potential loss of funds.
- * @dev This contract is designed to be used as an implementation for proxies
+ * @dev This contract is designed to be used as an implementation for proxies.
+ *      Market definitions are read from MarketRegistry. Per-market splits are stored locally keyed by address.
  */
 contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using GPv2Order for GPv2Order.Data;
@@ -46,7 +63,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Total basis points used for split calculations (100%)
     uint256 public constant SPLIT_TOTAL = 10000; // 100% in basis points
 
-    /// @notice The maximum allowed  slippage in basis points
+    /// @notice The maximum allowed slippage in basis points
     uint256 public constant MAX_SLIPPAGE_IN_BPS = 2500; // 25% in basis points
 
     /// @notice The maximum allowed compound fee in basis points
@@ -55,62 +72,78 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /// @notice The address of the Cow contracts Vault Relayer contract that needs token approval for executing trades
     address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
 
-    // @notice Reference to the Moonwell mToken contract
+    /// @notice Maximum number of markets allowed per strategy
+    uint256 public constant MAX_MARKETS = 10;
+
+    // ==================== STORAGE LAYOUT ====================
+    // Slots 0-49: BaseStrategy (mamoStrategyRegistry, strategyTypeId, __gap[48])
+
+    // Slot 50: DEPRECATED — old mToken (value preserved for migration)
     IMToken public mToken;
 
-    // @notice Reference to the MetaMorpho Vault contract
+    // Slot 51: DEPRECATED — old metaMorphoVault
     IERC4626 public metaMorphoVault;
 
-    // @notice Reference to the ERC20 token contract
+    // Slot 52: token (kept)
     IERC20 public token;
 
-    /// @notice Reference to the swap checker contract used to validate swap prices
+    // Slot 53: slippagePriceChecker (kept)
     ISlippagePriceChecker public slippagePriceChecker;
 
-    // @notice Percentage of funds allocated to Moonwell mToken in basis points
+    // Slot 54: DEPRECATED — old splitMToken (value preserved for migration)
     uint256 public splitMToken;
 
-    // @notice Percentage of funds allocated to MetaMorpho Vault in basis points
+    // Slot 55: DEPRECATED — old splitVault (value preserved for migration)
     uint256 public splitVault;
 
-    // @notice The allowed slippage in basis points (e.g., 100 = 1%)
-    // @dev Used to calculate the minimum acceptable output amount for swaps
+    // Slot 56: allowedSlippageInBps (kept)
     uint256 public allowedSlippageInBps;
 
-    // @notice The compound fee in basis points (e.g., 100 = 1%)
+    // Slot 57: compoundFee (kept)
     uint256 public compoundFee;
 
-    /// @notice The fee recipient address
+    // Slot 58: feeRecipient (kept)
     address public feeRecipient;
 
-    /// @notice The hook gas limit
+    // Slot 59: hookGasLimit (kept)
     uint256 public hookGasLimit;
 
+    // ==================== NEW STORAGE (appended after slot 59) ====================
+
+    // Slot 60: marketRegistry
+    IMarketRegistry public marketRegistry;
+
+    // Slot 61: per-market splits keyed by market address
+    mapping(address => uint256) public marketSplitBps;
+
     // Events
-    // @notice Emitted when funds are deposited into the strategy
     event Deposit(address indexed asset, uint256 amount);
-
-    // Events
-    // @notice Emitted when funds are deposited into the strategy
     event DepositIdle(address indexed asset, uint256 amount);
-
-    // @notice Emitted when funds are withdrawn from the strategy
     event Withdraw(address indexed asset, uint256 amount);
-
-    // @notice Emitted when the position split is updated
-    event PositionUpdated(uint256 splitMoonwell, uint256 splitMorpho);
-
-    // @notice Emitted when the slippage tolerance is updated
+    event PositionUpdated(MarketSplitUpdate[] updates);
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
-
-    // @notice Emitted when the fee recipient is updated
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
-
-    // @notice Emitted when rewards are claimed
     event RewardsClaimed(address[] rewardTokens, uint256[] rewardAmounts);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
+        address mamoStrategyRegistry;
+        address mamoBackend;
+        address token;
+        address slippagePriceChecker;
+        address feeRecipient;
+        uint256 strategyTypeId;
+        address[] rewardTokens;
+        address owner;
+        uint256 hookGasLimit;
+        uint256 allowedSlippageInBps;
+        uint256 compoundFee;
+        address marketRegistry;
+        uint256[] defaultSplitBps;
+    }
+
+    /// @notice Legacy initialization parameters for backwards compatibility
+    struct LegacyInitParams {
         address mamoStrategyRegistry;
         address mamoBackend;
         address mToken;
@@ -130,10 +163,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
-    /**
-     * @notice Restricts function access to the backend address only
-     * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
-     */
     modifier onlyBackend() {
         require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
         _;
@@ -142,12 +171,53 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // ==================== INITIALIZER ====================
 
     /**
-     * @notice Initializer function that sets all the parameters and grants appropriate roles
-     * @dev This is used instead of a constructor since the contract is designed to be used with proxies
-     * @dev Only the backend address specified in params can call this function
+     * @notice Initializer for new deployments using MarketRegistry
      * @param params The initialization parameters struct
      */
     function initialize(InitParams calldata params) external initializer {
+        require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
+        require(params.mamoBackend != address(0), "Invalid mamoBackend address");
+        require(params.token != address(0), "Invalid token address");
+        require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
+        require(params.strategyTypeId != 0, "Strategy type id not set");
+        require(params.feeRecipient != address(0), "Invalid fee recipient address");
+        require(params.hookGasLimit > 0, "Invalid hook gas limit");
+        require(params.allowedSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
+        require(params.compoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
+        require(params.marketRegistry != address(0), "Invalid market registry address");
+
+        __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
+
+        token = IERC20(params.token);
+        slippagePriceChecker = ISlippagePriceChecker(params.slippagePriceChecker);
+        allowedSlippageInBps = params.allowedSlippageInBps;
+        compoundFee = params.compoundFee;
+        feeRecipient = params.feeRecipient;
+        hookGasLimit = params.hookGasLimit;
+        marketRegistry = IMarketRegistry(params.marketRegistry);
+
+        // Read markets from registry and apply default splits
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(params.strategyTypeId);
+        require(regMarkets.length > 0, "No markets in registry");
+        require(params.defaultSplitBps.length == regMarkets.length, "Split count must match market count");
+
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            require(regMarkets[i].active, "Market not active");
+            marketSplitBps[regMarkets[i].target] = params.defaultSplitBps[i];
+        }
+        _validateTotalSplit();
+
+        // Approve CowSwap for each reward token
+        for (uint256 i = 0; i < params.rewardTokens.length; i++) {
+            _approveCowSwap(params.rewardTokens[i], type(uint256).max);
+        }
+    }
+
+    /**
+     * @notice Legacy initializer for backwards compatibility with existing factories
+     * @param params The legacy initialization parameters struct
+     */
+    function initializeLegacy(LegacyInitParams calldata params) external initializer {
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(params.mamoBackend != address(0), "Invalid mamoBackend address");
         require(params.mToken != address(0), "Invalid mToken address");
@@ -161,14 +231,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(params.allowedSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
         require(params.compoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
 
-        // Set state variables
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
         mToken = IMToken(params.mToken);
         metaMorphoVault = IERC4626(params.metaMorphoVault);
         token = IERC20(params.token);
         slippagePriceChecker = ISlippagePriceChecker(params.slippagePriceChecker);
-
         allowedSlippageInBps = params.allowedSlippageInBps;
         compoundFee = params.compoundFee;
         splitMToken = params.splitMToken;
@@ -177,30 +245,45 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         hookGasLimit = params.hookGasLimit;
 
         // Approve CowSwap for each reward token
-        if (params.rewardTokens.length > 0) {
-            for (uint256 i = 0; i < params.rewardTokens.length; i++) {
-                _approveCowSwap(params.rewardTokens[i], type(uint256).max);
-            }
+        for (uint256 i = 0; i < params.rewardTokens.length; i++) {
+            _approveCowSwap(params.rewardTokens[i], type(uint256).max);
         }
+    }
+
+    /**
+     * @notice Migration function for v1 strategies to MarketRegistry
+     * @dev Self-contained: reads mToken/metaMorphoVault/splitMToken/splitVault from own storage.
+     *      Validates each address is registered and active in the MarketRegistry.
+     * @param _marketRegistry The address of the MarketRegistry contract
+     */
+    function migrateV1ToMarketRegistry(address _marketRegistry) external reinitializer(2) {
+        require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
+        require(_marketRegistry != address(0), "Invalid market registry address");
+
+        marketRegistry = IMarketRegistry(_marketRegistry);
+
+        // Self-contained migration: read from own storage
+        if (splitMToken > 0 && address(mToken) != address(0)) {
+            marketSplitBps[address(mToken)] = splitMToken;
+            require(marketRegistry.isMarketActive(strategyTypeId, address(mToken)), "mToken not active in registry");
+        }
+        if (splitVault > 0 && address(metaMorphoVault) != address(0)) {
+            marketSplitBps[address(metaMorphoVault)] = splitVault;
+            require(
+                marketRegistry.isMarketActive(strategyTypeId, address(metaMorphoVault)),
+                "metaMorphoVault not active in registry"
+            );
+        }
+
+        _validateTotalSplit();
     }
 
     // ==================== OWNER FUNCTIONS ====================
 
-    /**
-     * @notice Approves the vault relayer to spend a specific token
-     * @dev Only callable by the user who owns this strategy
-     * @param tokenAddress The address of the token to approve
-     * @param amount The amount of tokens to approve
-     */
     function approveCowSwap(address tokenAddress, uint256 amount) public onlyOwner {
         _approveCowSwap(tokenAddress, amount);
     }
 
-    /**
-     * @notice Sets a new slippage tolerance value
-     * @dev Only callable by the strategy owner
-     * @param _newSlippageInBps The new slippage tolerance in basis points (e.g., 100 = 1%)
-     */
     function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
         require(_newSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
 
@@ -210,42 +293,21 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Withdraws funds from the strategy
-     * @notice This function assumes that the exact `amount` of tokens is transferred to the user.
-     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
      * @dev Only callable by the user who owns this strategy
      * @param amount The amount to withdraw
      */
     function withdraw(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
-
         require(_getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
 
-        // Check if we have enough tokens in the contract
         uint256 tokenBalance = token.balanceOf(address(this));
 
-        // If we don't have enough tokens, withdraw from contractss
         if (tokenBalance < amount) {
             uint256 amountNeeded = amount - tokenBalance;
-
-            uint256 withdrawFromMoonwell = (amountNeeded * splitMToken) / SPLIT_TOTAL;
-
-            // Withdraw from Moonwell if needed
-            if (withdrawFromMoonwell > 0) {
-                require(mToken.redeemUnderlying(withdrawFromMoonwell) == 0, "Failed to redeem mToken");
-            }
-
-            uint256 withdrawFromMetaMorpho = (amountNeeded * splitVault) / SPLIT_TOTAL;
-
-            // Withdraw from MetaMorpho if needed
-            if (withdrawFromMetaMorpho > 0) {
-                metaMorphoVault.withdraw(withdrawFromMetaMorpho, address(this), address(this));
-            }
+            _withdrawProRata(amountNeeded);
         }
 
-        // Verify we have enough tokens now
         require(token.balanceOf(address(this)) >= amount, "Withdrawal failed: insufficient funds");
-
-        // Transfer tokens to the owner
         token.safeTransfer(msg.sender, amount);
 
         emit Withdraw(address(token), amount);
@@ -256,25 +318,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      */
     function withdrawAll() external onlyOwner {
-        // Get current balances
-        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
-        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
+        _withdrawAllFromMarkets();
 
-        // Withdraw from Moonwell if needed
-        if (mTokenBalance > 0) {
-            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
-        }
-
-        // Withdraw from MetaMorpho if needed
-        if (vaultBalance > 0) {
-            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
-        }
-
-        // Get final token balance
         uint256 finalBalance = token.balanceOf(address(this));
         require(finalBalance > 0, "No tokens to withdraw");
 
-        // Transfer all tokens to the owner
         token.safeTransfer(msg.sender, finalBalance);
 
         emit Withdraw(address(token), finalBalance);
@@ -283,46 +331,36 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // ==================== BACKEND FUNCTIONS ====================
 
     /**
-     * @notice Updates the position in the strategy
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param splitMoonwell The first split parameter (basis points) for Moonwell
-     * @param splitMorpho The second split parameter (basis points) for MetaMorpho
+     * @notice Updates the position across markets with new splits (address-keyed)
+     * @param updates Array of market address + new splitBps pairs
      */
-    function updatePosition(uint256 splitMoonwell, uint256 splitMorpho) external onlyBackend {
-        require(splitMoonwell + splitMorpho == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
-
-        // Withdraw from Moonwell
-        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
-        if (mTokenBalance > 0) {
-            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
-        }
-
-        // Withdraw from MetaMorpho
-        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
-        if (vaultBalance > 0) {
-            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
-        }
+    function updatePosition(MarketSplitUpdate[] calldata updates) external onlyBackend {
+        // Withdraw everything from all markets
+        _withdrawAllFromMarkets();
 
         uint256 totalTokenBalance = token.balanceOf(address(this));
         require(totalTokenBalance > 0, "Nothing to rebalance");
 
-        // Update the split parameters
-        splitMToken = splitMoonwell;
-        splitVault = splitMorpho;
+        // Zero out all splits first
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            marketSplitBps[regMarkets[i].target] = 0;
+        }
 
-        // Deposit into MetaMorpho Vault and Moonwell MToken after update split parameters
+        // Apply new splits from updates
+        for (uint256 i = 0; i < updates.length; i++) {
+            require(marketRegistry.isMarketActive(strategyTypeId, updates[i].market), "Market not active in registry");
+            marketSplitBps[updates[i].market] = updates[i].splitBps;
+        }
+
+        _validateTotalSplit();
+
+        // Re-deposit via depositInternal
         depositInternal(totalTokenBalance);
 
-        emit PositionUpdated(splitMoonwell, splitMorpho);
+        emit PositionUpdated(updates);
     }
 
-    /**
-     * @notice Claims rewards from Merkle protocol distributor on behalf of a user
-     * @dev Only callable by the backend address
-     * @param rewardTokens The addresses of the reward tokens
-     * @param rewardAmounts The amounts of the reward tokens
-     * @param proofs The proofs of the reward tokens
-     */
     function claimRewards(
         address[] calldata rewardTokens,
         uint256[] calldata rewardAmounts,
@@ -341,11 +379,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         emit RewardsClaimed(rewardTokens, rewardAmounts);
     }
 
-    /**
-     * @notice Sets a new fee recipient address
-     * @dev Only callable by the strategy owner
-     * @param _newFeeRecipient The new fee recipient address
-     */
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
         require(_newFeeRecipient != address(0), "Invalid fee recipient address");
 
@@ -355,35 +388,19 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // ==================== PERMISSIONLESS FUNCTIONS ====================
 
-    /**
-     * @notice Deposits funds into the strategy
-     * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
-     *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
-     * @dev Only callable by the user who owns this strategy
-     * @param amount The amount of tokens to deposit
-     */
     function deposit(uint256 amount) external {
         require(amount > 0, "Amount must be greater than 0");
 
-        // Transfer tokens from the owner to this contract
         token.safeTransferFrom(msg.sender, address(this), amount);
-
-        // Deposit the funds according to the current split
         depositInternal(amount);
 
         emit Deposit(address(token), amount);
     }
 
-    /**
-     * @notice Deposits any token funds currently in the contract into the strategies based on the split
-     * @dev This function is permissionless and can be called by anyone
-     * @return amount The amount of tokens deposited
-     */
     function depositIdleTokens() external returns (uint256) {
         uint256 tokenBalance = token.balanceOf(address(this));
         require(tokenBalance > 0, "No tokens to deposit");
 
-        // Deposit the funds according to the current split
         depositInternal(tokenBalance);
 
         emit DepositIdle(address(token), tokenBalance);
@@ -393,8 +410,35 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // ======================= VIEW FUNCTIONS ==========================
 
+    /**
+     * @notice Returns all markets with their local splits (composite view)
+     * @return Array of Market structs combining registry data + local splits
+     */
+    function getMarkets() external view returns (Market[] memory) {
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        Market[] memory result = new Market[](regMarkets.length);
+
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            result[i] = Market({
+                target: regMarkets[i].target,
+                marketType: regMarkets[i].marketType,
+                active: regMarkets[i].active,
+                splitBps: marketSplitBps[regMarkets[i].target]
+            });
+        }
+
+        return result;
+    }
+
+    /**
+     * @notice Returns the number of markets from the registry
+     */
+    function getMarketCount() external view returns (uint256) {
+        return marketRegistry.getMarketCount(strategyTypeId);
+    }
+
     /// @param orderDigest The EIP-712 signing digest derived from the order
-    /// @param encodedOrder Bytes-encoded order information, originally created by an off-chain bot. Created by concatening the order data (in the form of GPv2Order.Data), the price checker address, and price checker data.
+    /// @param encodedOrder Bytes-encoded order information
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory _order = abi.decode(encodedOrder, (GPv2Order.Data));
 
@@ -426,22 +470,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
 
-        // The pre-hook must target the sellToken contract and execute a transferFrom call
-        // that moves the fee amount from this strategy contract to the fee recipient.
-
         uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
 
-        // Convert bytes to hex string
         bytes memory preHookCalldata =
             abi.encodeWithSelector(IERC20.transferFrom.selector, address(this), feeRecipient, feeAmount);
 
-        // Add the 0x prefix to the callData
         string memory preHookCalldataStr = string.concat("0x", _bytesToHexString(preHookCalldata));
 
-        // Use lowercase for addresses to match what's generated by the TypeScript code
         string memory targetAddress = Strings.toHexString(uint160(address(_order.sellToken)), 20);
 
-        // Construct the expected appData JSON with keys in alphabetical order
         string memory expectedAppData = string(
             abi.encodePacked(
                 '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
@@ -475,65 +512,147 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // ==================== INTERNAL FUNCTIONS ====================
 
     /**
-     * @notice Internal function to deposit tokens according to the current split
+     * @notice Internal function to deposit tokens according to current market splits
      * @param amount The amount of tokens to deposit
      */
     function depositInternal(uint256 amount) internal {
-        // Calculate target amounts for each contracts
-        uint256 targetMoonwell = (amount * splitMToken) / SPLIT_TOTAL;
-        uint256 targetMetaMorpho = (amount * splitVault) / SPLIT_TOTAL;
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        uint256 deposited = 0;
 
-        // Deposit into each contracts according to the split
-        if (targetMoonwell > 0) {
-            token.forceApprove(address(mToken), targetMoonwell);
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            if (!regMarkets[i].active) continue;
 
-            // Mint mToken with token
-            require(mToken.mint(targetMoonwell) == 0, "MToken mint failed");
-        }
+            uint256 split = marketSplitBps[regMarkets[i].target];
+            if (split == 0) continue;
 
-        if (targetMetaMorpho > 0) {
-            token.forceApprove(address(metaMorphoVault), targetMetaMorpho);
+            uint256 marketAmount;
+            // Give remainder to last active market to avoid dust
+            if (i == regMarkets.length - 1) {
+                marketAmount = amount - deposited;
+            } else {
+                marketAmount = (amount * split) / SPLIT_TOTAL;
+            }
 
-            // Deposit token into MetaMorpho
-            metaMorphoVault.deposit(targetMetaMorpho, address(this));
+            if (marketAmount == 0) continue;
+
+            _depositToMarket(regMarkets[i], marketAmount);
+            deposited += marketAmount;
         }
     }
 
     /**
-     * @notice Gets the total balance of tokens across both contractss
-     * @return The total balance in tokens
+     * @notice Deposits tokens into a specific market
+     */
+    function _depositToMarket(RegistryMarket memory market, uint256 amount) internal {
+        if (market.marketType == MarketType.MOONWELL) {
+            token.forceApprove(market.target, amount);
+            require(IMToken(market.target).mint(amount) == 0, "MToken mint failed");
+        } else {
+            token.forceApprove(market.target, amount);
+            IERC4626(market.target).deposit(amount, address(this));
+        }
+    }
+
+    /**
+     * @notice Withdraws pro-rata from active markets based on their split
+     * @param amountNeeded The total amount of underlying tokens needed
+     */
+    function _withdrawProRata(uint256 amountNeeded) internal {
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            if (!regMarkets[i].active) continue;
+
+            uint256 split = marketSplitBps[regMarkets[i].target];
+            if (split == 0) continue;
+
+            uint256 withdrawAmount = (amountNeeded * split) / SPLIT_TOTAL;
+            if (withdrawAmount == 0) continue;
+
+            if (regMarkets[i].marketType == MarketType.MOONWELL) {
+                require(IMToken(regMarkets[i].target).redeemUnderlying(withdrawAmount) == 0, "Failed to redeem mToken");
+            } else {
+                IERC4626(regMarkets[i].target).withdraw(withdrawAmount, address(this), address(this));
+            }
+        }
+    }
+
+    /**
+     * @notice Withdraws all funds from all markets (including inactive, to recover stuck funds)
+     */
+    function _withdrawAllFromMarkets() internal {
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            _withdrawFromMarket(regMarkets[i]);
+        }
+    }
+
+    /**
+     * @notice Withdraws all funds from a single market
+     */
+    function _withdrawFromMarket(RegistryMarket memory market) internal {
+        if (market.marketType == MarketType.MOONWELL) {
+            uint256 mTokenBalance = IERC20(market.target).balanceOf(address(this));
+            if (mTokenBalance > 0) {
+                require(IMToken(market.target).redeem(mTokenBalance) == 0, "Failed to redeem mToken");
+            }
+        } else {
+            uint256 shareBalance = IERC4626(market.target).balanceOf(address(this));
+            if (shareBalance > 0) {
+                IERC4626(market.target).redeem(shareBalance, address(this), address(this));
+            }
+        }
+    }
+
+    /**
+     * @notice Gets the total balance of tokens across all markets + idle
+     * @return The total balance in underlying tokens
      */
     function _getTotalBalance() internal returns (uint256) {
-        uint256 shareBalance = metaMorphoVault.balanceOf(address(this));
-        uint256 vaultBalance = shareBalance > 0 ? metaMorphoVault.convertToAssets(shareBalance) : 0;
+        uint256 total = token.balanceOf(address(this));
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
 
-        return vaultBalance + mToken.balanceOfUnderlying(address(this)) + token.balanceOf(address(this));
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            if (!regMarkets[i].active) continue;
+
+            if (regMarkets[i].marketType == MarketType.MOONWELL) {
+                total += IMToken(regMarkets[i].target).balanceOfUnderlying(address(this));
+            } else {
+                uint256 shares = IERC4626(regMarkets[i].target).balanceOf(address(this));
+                if (shares > 0) {
+                    total += IERC4626(regMarkets[i].target).convertToAssets(shares);
+                }
+            }
+        }
+
+        return total;
     }
 
     /**
-     * @notice Internal function to approve the vault relayer to spend a specific token
-     * @param tokenAddress The address of the token to approve
-     * @param amount The amount of tokens to approve
+     * @notice Validates that active market splits sum to SPLIT_TOTAL
      */
-    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
-        // Check if the token has a configuration in the swap checker
-        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
+    function _validateTotalSplit() internal view {
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        uint256 total = 0;
 
-        // Approve the vault relayer unlimited
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            if (regMarkets[i].active) {
+                total += marketSplitBps[regMarkets[i].target];
+            }
+        }
+        require(total == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
+    }
+
+    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
+        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
         IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
     }
 
-    /**
-     * @notice Converts bytes to a hex string
-     * @param _bytes The bytes to convert
-     * @return A string representation of the bytes in hex format
-     */
     function _bytesToHexString(bytes memory _bytes) internal pure returns (string memory) {
-        // Create a new bytes array for the hex string (each byte becomes 2 hex chars)
         bytes memory hexString = new bytes(_bytes.length * 2);
         bytes memory hexChars = "0123456789abcdef";
 
-        // Convert all bytes to their hex representation
         for (uint256 i = 0; i < _bytes.length; i++) {
             uint8 value = uint8(_bytes[i]);
             hexString[i * 2] = hexChars[value >> 4];

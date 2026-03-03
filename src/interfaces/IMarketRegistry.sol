@@ -18,7 +18,7 @@ struct RegistryMarket {
  * @title IMarketRegistry
  * @notice Interface for the centralized market registry
  * @dev Stores market definitions per strategyTypeId. Strategies read markets from here
- *      and maintain their own per-market splits locally.
+ *      and maintain their own per-market splits locally (keyed by market address).
  */
 interface IMarketRegistry {
     /// @notice Adds a new market for a strategy type
@@ -27,10 +27,10 @@ interface IMarketRegistry {
     /// @param marketType The type of market
     function addMarket(uint256 strategyTypeId, address target, MarketType marketType) external;
 
-    /// @notice Deactivates a market (soft-delete)
+    /// @notice Deactivates a market by address (soft-delete)
     /// @param strategyTypeId The strategy type
-    /// @param marketIndex The index of the market to deactivate
-    function deactivateMarket(uint256 strategyTypeId, uint256 marketIndex) external;
+    /// @param target The address of the market to deactivate
+    function deactivateMarket(uint256 strategyTypeId, address target) external;
 
     /// @notice Returns all markets for a strategy type
     /// @param strategyTypeId The strategy type
@@ -42,17 +42,17 @@ interface IMarketRegistry {
     /// @return The number of markets
     function getMarketCount(uint256 strategyTypeId) external view returns (uint256);
 
-    /// @notice Returns whether a market is active
+    /// @notice Returns whether a market is active by address
     /// @param strategyTypeId The strategy type
-    /// @param marketIndex The index of the market
+    /// @param target The address of the market
     /// @return True if the market is active
-    function isMarketActive(uint256 strategyTypeId, uint256 marketIndex) external view returns (bool);
+    function isMarketActive(uint256 strategyTypeId, address target) external view returns (bool);
 
-    /// @notice Returns a single market
+    /// @notice Returns a single market by address
     /// @param strategyTypeId The strategy type
-    /// @param marketIndex The index of the market
+    /// @param target The address of the market
     /// @return The RegistryMarket struct
-    function getMarket(uint256 strategyTypeId, uint256 marketIndex) external view returns (RegistryMarket memory);
+    function getMarket(uint256 strategyTypeId, address target) external view returns (RegistryMarket memory);
 
     /// @notice Pauses the contract
     function pause() external;

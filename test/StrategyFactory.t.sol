@@ -39,7 +39,7 @@ contract MockERC20MoonwellMorphoStrategy {
     address public mamoStrategyRegistry;
     uint256 public strategyTypeId;
 
-    struct InitParams {
+    struct LegacyInitParams {
         address mamoStrategyRegistry;
         address mamoBackend;
         address mToken;
@@ -57,7 +57,7 @@ contract MockERC20MoonwellMorphoStrategy {
         uint256 compoundFee;
     }
 
-    function initialize(InitParams memory params) external {
+    function initializeLegacy(LegacyInitParams memory params) external {
         require(!initialized, "Already initialized");
         initialized = true;
         owner = params.owner;

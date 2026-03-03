@@ -9,7 +9,8 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 /**
  * @title MarketRegistry
  * @notice Centralized registry for market definitions per strategyTypeId
- * @dev Markets are append-only (indices are stable). Deactivation is a soft-delete.
+ * @dev Markets are append-only (indices are stable for enumeration). Deactivation is a soft-delete.
+ *      External API is address-based. Internal array provides enumeration for strategies.
  *      Same access control pattern as MamoStrategyRegistry.
  */
 contract MarketRegistry is IMarketRegistry, AccessControlEnumerable, Pausable {
@@ -22,12 +23,15 @@ contract MarketRegistry is IMarketRegistry, AccessControlEnumerable, Pausable {
     /// @notice Maximum number of markets per strategyTypeId
     uint256 public constant MAX_MARKETS = 10;
 
-    /// @notice Markets per strategyTypeId (append-only)
+    /// @notice Markets per strategyTypeId (append-only array for enumeration)
     mapping(uint256 => RegistryMarket[]) private _markets;
 
+    /// @notice Address-to-index lookup: strategyTypeId => target => array index + 1 (0 means not registered)
+    mapping(uint256 => mapping(address => uint256)) private _marketIndex;
+
     // Events
-    event MarketAdded(uint256 indexed strategyTypeId, uint256 indexed marketIndex, address target, MarketType marketType);
-    event MarketDeactivated(uint256 indexed strategyTypeId, uint256 indexed marketIndex, address target);
+    event MarketAdded(uint256 indexed strategyTypeId, address indexed target, MarketType marketType);
+    event MarketDeactivated(uint256 indexed strategyTypeId, address indexed target);
 
     constructor(address admin, address backend, address guardian) {
         require(admin != address(0), "Invalid admin address");
@@ -50,25 +54,27 @@ contract MarketRegistry is IMarketRegistry, AccessControlEnumerable, Pausable {
         require(strategyTypeId != 0, "Invalid strategy type id");
         require(target != address(0), "Invalid market target");
         require(_markets[strategyTypeId].length < MAX_MARKETS, "Too many markets");
+        require(_marketIndex[strategyTypeId][target] == 0, "Market already registered");
 
         _markets[strategyTypeId].push(RegistryMarket({target: target, marketType: marketType, active: true}));
 
-        uint256 marketIndex = _markets[strategyTypeId].length - 1;
-        emit MarketAdded(strategyTypeId, marketIndex, target, marketType);
+        // Store index + 1 (so 0 means "not registered")
+        _marketIndex[strategyTypeId][target] = _markets[strategyTypeId].length;
+
+        emit MarketAdded(strategyTypeId, target, marketType);
     }
 
     /// @inheritdoc IMarketRegistry
-    function deactivateMarket(uint256 strategyTypeId, uint256 marketIndex)
-        external
-        onlyRole(BACKEND_ROLE)
-        whenNotPaused
-    {
-        require(marketIndex < _markets[strategyTypeId].length, "Invalid market index");
-        require(_markets[strategyTypeId][marketIndex].active, "Market already inactive");
+    function deactivateMarket(uint256 strategyTypeId, address target) external onlyRole(BACKEND_ROLE) whenNotPaused {
+        uint256 indexPlusOne = _marketIndex[strategyTypeId][target];
+        require(indexPlusOne != 0, "Market not registered");
 
-        _markets[strategyTypeId][marketIndex].active = false;
+        uint256 index = indexPlusOne - 1;
+        require(_markets[strategyTypeId][index].active, "Market already inactive");
 
-        emit MarketDeactivated(strategyTypeId, marketIndex, _markets[strategyTypeId][marketIndex].target);
+        _markets[strategyTypeId][index].active = false;
+
+        emit MarketDeactivated(strategyTypeId, target);
     }
 
     // ==================== VIEW FUNCTIONS ====================
@@ -84,15 +90,17 @@ contract MarketRegistry is IMarketRegistry, AccessControlEnumerable, Pausable {
     }
 
     /// @inheritdoc IMarketRegistry
-    function isMarketActive(uint256 strategyTypeId, uint256 marketIndex) external view returns (bool) {
-        require(marketIndex < _markets[strategyTypeId].length, "Invalid market index");
-        return _markets[strategyTypeId][marketIndex].active;
+    function isMarketActive(uint256 strategyTypeId, address target) external view returns (bool) {
+        uint256 indexPlusOne = _marketIndex[strategyTypeId][target];
+        require(indexPlusOne != 0, "Market not registered");
+        return _markets[strategyTypeId][indexPlusOne - 1].active;
     }
 
     /// @inheritdoc IMarketRegistry
-    function getMarket(uint256 strategyTypeId, uint256 marketIndex) external view returns (RegistryMarket memory) {
-        require(marketIndex < _markets[strategyTypeId].length, "Invalid market index");
-        return _markets[strategyTypeId][marketIndex];
+    function getMarket(uint256 strategyTypeId, address target) external view returns (RegistryMarket memory) {
+        uint256 indexPlusOne = _marketIndex[strategyTypeId][target];
+        require(indexPlusOne != 0, "Market not registered");
+        return _markets[strategyTypeId][indexPlusOne - 1];
     }
 
     // ==================== GUARDIAN FUNCTIONS ====================

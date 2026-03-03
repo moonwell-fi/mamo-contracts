@@ -12,6 +12,13 @@
     "compoundFee": 500,
     "strategyTypeId": 1
   },
+  "markets": [
+    {
+      "target": "MOONWELL_USDC",
+      "marketType": "MOONWELL",
+      "splitBps": 10000
+    }
+  ],
   "rewardTokens": [
     {
       "token": "xWELL_PROXY",
