@@ -288,6 +288,67 @@ contract MultiMarketStrategyTest is Test {
         assertLe(underlying.balanceOf(address(strategy)), 1, "No idle tokens should remain");
     }
 
+    function testDepositWithDeactivatedLastMarket() public {
+        // First deposit so updatePosition has something to rebalance
+        uint256 seedAmount = 100 * 10 ** 6;
+        deal(address(underlying), owner, seedAmount);
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), seedAmount);
+        strategy.deposit(seedAmount);
+        vm.stopPrank();
+
+        // Deactivate the last market in the array (metaMorphoVault) and rebalance to 100% Moonwell
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
+
+        MarketSplitUpdate[] memory updates = new MarketSplitUpdate[](1);
+        updates[0] = MarketSplitUpdate({market: address(mToken), splitBps: 10000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+
+        // Now deposit — the last array entry is inactive, remainder should go to mToken
+        uint256 depositAmount = 1000 * 10 ** 6;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // All funds should be in Moonwell
+        uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertGt(mTokenBalance, depositAmount, "Moonwell should have all funds");
+        assertLe(underlying.balanceOf(address(strategy)), 1, "No idle tokens should remain");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "MetaMorpho should have no shares");
+    }
+
+    function testUpdatePositionAfterMarketDeactivation() public {
+        uint256 depositAmount = 1000 * 10 ** 6;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Deactivate metaMorphoVault
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
+
+        // Rebalance to 100% Moonwell — withdrawAll should still drain inactive vault
+        MarketSplitUpdate[] memory updates = new MarketSplitUpdate[](1);
+        updates[0] = MarketSplitUpdate({market: address(mToken), splitBps: 10000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+
+        // All funds should be in Moonwell now
+        uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(mTokenBalance, depositAmount, 1e3, "Moonwell should have all funds after rebalance");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "MetaMorpho should be drained");
+    }
+
     // ==================== WITHDRAW TESTS ====================
 
     function testWithdrawFromMultipleMarkets() public {
@@ -386,6 +447,29 @@ contract MultiMarketStrategyTest is Test {
 
         vm.prank(backend);
         vm.expectRevert(); // Market not registered / not active in registry
+        strategy.updatePosition(updates);
+    }
+
+    function testRevertUpdatePositionDeactivatedMarket() public {
+        uint256 depositAmount = 1000 * 10 ** 6;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Deactivate metaMorphoVault in the registry
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
+
+        // Try to allocate to the deactivated market
+        MarketSplitUpdate[] memory updates = new MarketSplitUpdate[](2);
+        updates[0] = MarketSplitUpdate({market: address(mToken), splitBps: 5000});
+        updates[1] = MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 5000});
+
+        vm.prank(backend);
+        vm.expectRevert("Market not active in registry");
         strategy.updatePosition(updates);
     }
 
