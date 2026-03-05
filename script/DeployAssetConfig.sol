@@ -24,6 +24,13 @@ contract DeployAssetConfig is Test {
         string metamorphoVault;
         StrategyParams strategyParams;
         RewardToken[] rewardTokens;
+        MarketConfig[] markets;
+    }
+
+    struct MarketConfig {
+        string marketType;
+        uint256 splitBps;
+        string target;
     }
 
     struct StrategyParams {
@@ -143,6 +150,16 @@ contract DeployAssetConfig is Test {
 
             for (uint256 i = 0; i < rewardTokens.length; i++) {
                 config.rewardTokens.push(rewardTokens[i]);
+            }
+        }
+
+        // Parse markets array
+        if (configData.keyExists(".markets")) {
+            bytes memory marketsData = configData.parseRaw(".markets");
+            MarketConfig[] memory markets = abi.decode(marketsData, (MarketConfig[]));
+
+            for (uint256 i = 0; i < markets.length; i++) {
+                config.markets.push(markets[i]);
             }
         }
     }

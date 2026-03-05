@@ -519,6 +519,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
         uint256 deposited = 0;
 
+        // Find the last active market with nonzero split for remainder handling
+        uint256 lastActiveIdx = type(uint256).max;
+        for (uint256 i = regMarkets.length; i > 0; i--) {
+            if (regMarkets[i - 1].active && marketSplitBps[regMarkets[i - 1].target] > 0) {
+                lastActiveIdx = i - 1;
+                break;
+            }
+        }
+
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (!regMarkets[i].active) continue;
 
@@ -527,7 +536,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
             uint256 marketAmount;
             // Give remainder to last active market to avoid dust
-            if (i == regMarkets.length - 1) {
+            if (i == lastActiveIdx) {
                 marketAmount = amount - deposited;
             } else {
                 marketAmount = (amount * split) / SPLIT_TOTAL;
