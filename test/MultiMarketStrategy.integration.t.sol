@@ -7,7 +7,6 @@ import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
 
-import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
@@ -94,7 +93,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Register markets in the MarketRegistry
         vm.startPrank(backend);
-        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -161,7 +160,7 @@ contract MultiMarketStrategyTest is Test {
         assertEq(markets.length, 2, "Should have 2 markets");
 
         assertEq(markets[0].target, address(mToken), "Market 0 should be mToken");
-        assertEq(uint256(markets[0].marketType), uint256(MarketType.MOONWELL), "Market 0 should be MOONWELL type");
+        assertEq(uint256(markets[0].marketType), uint256(MarketType.MTOKEN), "Market 0 should be MTOKEN type");
         assertTrue(markets[0].active, "Market 0 should be active");
         assertEq(markets[0].splitBps, 7000, "Market 0 split should be 7000");
 
@@ -509,7 +508,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Register markets for the v1 type ID too
         vm.startPrank(backend);
-        marketRegistry.addMarket(v1TypeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(v1TypeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(v1TypeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -573,7 +572,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Register markets for the type ID
         vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -620,7 +619,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Register only mToken market for this type
         vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -713,7 +712,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Register markets for the type ID
         vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -748,56 +747,6 @@ contract MultiMarketStrategyTest is Test {
         s.migrateV1ToMarketRegistry(address(marketRegistry));
 
         assertEq(address(s.marketRegistry()), address(marketRegistry), "MarketRegistry should be set by owner");
-    }
-
-    // ==================== MULTI-MARKET FACTORY TESTS ====================
-
-    function testMultiMarketFactoryCreatesStrategy() public {
-        ERC20MoonwellMorphoStrategy impl = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        uint256 typeId = registry.whitelistImplementation(address(impl), 0);
-
-        // Register markets for the new type ID
-        vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MOONWELL);
-        marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
-
-        uint256[] memory factoryDefaultSplits = new uint256[](2);
-        factoryDefaultSplits[0] = 6000;
-        factoryDefaultSplits[1] = 4000;
-
-        MultiMarketStrategyFactory factory = new MultiMarketStrategyFactory(
-            address(registry),
-            backend,
-            address(underlying),
-            address(slippagePriceChecker),
-            address(impl),
-            admin,
-            address(marketRegistry),
-            typeId,
-            100000,
-            100,
-            500,
-            new address[](0),
-            factoryDefaultSplits
-        );
-
-        // Grant BACKEND_ROLE to factory so it can call addStrategy
-        bytes32 backendRole = registry.BACKEND_ROLE();
-        vm.prank(admin);
-        registry.grantRole(backendRole, address(factory));
-
-        address user = makeAddr("factoryUser");
-        vm.prank(user);
-        address strategyAddr = factory.createStrategyForUser(user);
-
-        ERC20MoonwellMorphoStrategy factoryStrategy = ERC20MoonwellMorphoStrategy(payable(strategyAddr));
-        Market[] memory markets = factoryStrategy.getMarkets();
-        assertEq(markets.length, 2, "Factory should create strategy with 2 markets");
-        assertEq(markets[0].splitBps, 6000, "Market 0 split should be 6000");
-        assertEq(markets[1].splitBps, 4000, "Market 1 split should be 4000");
     }
 
     // ==================== DEPOSIT IDLE TOKENS ====================

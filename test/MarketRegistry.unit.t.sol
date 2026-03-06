@@ -56,20 +56,20 @@ contract MarketRegistryTest is Test {
     function testAddMarket() public {
         vm.prank(backend);
         vm.expectEmit(true, true, false, true);
-        emit MarketAdded(strategyTypeId, mToken, MarketType.MOONWELL);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        emit MarketAdded(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
 
         assertEq(registry.getMarketCount(strategyTypeId), 1);
 
         RegistryMarket memory market = registry.getMarket(strategyTypeId, mToken);
         assertEq(market.target, mToken);
-        assertEq(uint256(market.marketType), uint256(MarketType.MOONWELL));
+        assertEq(uint256(market.marketType), uint256(MarketType.MTOKEN));
         assertTrue(market.active);
     }
 
     function testAddMultipleMarkets() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         registry.addMarket(strategyTypeId, vault, MarketType.ERC4626);
         vm.stopPrank();
 
@@ -83,46 +83,46 @@ contract MarketRegistryTest is Test {
 
     function testRevertAddMarketDuplicate() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
 
         vm.expectRevert("Market already registered");
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         vm.stopPrank();
     }
 
     function testRevertAddMarketTooMany() public {
         vm.startPrank(backend);
         for (uint256 i = 0; i < 10; i++) {
-            registry.addMarket(strategyTypeId, address(uint160(100 + i)), MarketType.MOONWELL);
+            registry.addMarket(strategyTypeId, address(uint160(100 + i)), MarketType.MTOKEN);
         }
 
         vm.expectRevert("Too many markets");
-        registry.addMarket(strategyTypeId, makeAddr("extra"), MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, makeAddr("extra"), MarketType.MTOKEN);
         vm.stopPrank();
     }
 
     function testRevertAddMarketZeroTarget() public {
         vm.prank(backend);
         vm.expectRevert("Invalid market target");
-        registry.addMarket(strategyTypeId, address(0), MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, address(0), MarketType.MTOKEN);
     }
 
     function testRevertAddMarketZeroStrategyTypeId() public {
         vm.prank(backend);
         vm.expectRevert("Invalid strategy type id");
-        registry.addMarket(0, mToken, MarketType.MOONWELL);
+        registry.addMarket(0, mToken, MarketType.MTOKEN);
     }
 
     function testRevertAddMarketNotBackend() public {
         vm.prank(admin);
         vm.expectRevert();
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
     }
 
     function testAddMarketDifferentStrategyTypes() public {
         vm.startPrank(backend);
-        registry.addMarket(1, mToken, MarketType.MOONWELL);
-        registry.addMarket(2, mToken, MarketType.MOONWELL);
+        registry.addMarket(1, mToken, MarketType.MTOKEN);
+        registry.addMarket(2, mToken, MarketType.MTOKEN);
         vm.stopPrank();
 
         assertEq(registry.getMarketCount(1), 1);
@@ -133,7 +133,7 @@ contract MarketRegistryTest is Test {
 
     function testDeactivateMarket() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
 
         vm.expectEmit(true, true, false, true);
         emit MarketDeactivated(strategyTypeId, mToken);
@@ -151,7 +151,7 @@ contract MarketRegistryTest is Test {
 
     function testRevertDeactivateMarketAlreadyInactive() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         registry.deactivateMarket(strategyTypeId, mToken);
 
         vm.expectRevert("Market already inactive");
@@ -161,7 +161,7 @@ contract MarketRegistryTest is Test {
 
     function testRevertDeactivateMarketNotBackend() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         vm.stopPrank();
 
         vm.prank(admin);
@@ -171,7 +171,7 @@ contract MarketRegistryTest is Test {
 
     function testDeactivateDoesNotAffectOtherMarkets() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         registry.addMarket(strategyTypeId, vault, MarketType.ERC4626);
         registry.deactivateMarket(strategyTypeId, mToken);
         vm.stopPrank();
@@ -207,9 +207,9 @@ contract MarketRegistryTest is Test {
         address market3 = makeAddr("market3");
 
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, market1, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, market1, MarketType.MTOKEN);
         registry.addMarket(strategyTypeId, market2, MarketType.ERC4626);
-        registry.addMarket(strategyTypeId, market3, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, market3, MarketType.MTOKEN);
         vm.stopPrank();
 
         RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
@@ -226,12 +226,12 @@ contract MarketRegistryTest is Test {
 
         vm.prank(backend);
         vm.expectRevert();
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
     }
 
     function testPauseBlocksDeactivateMarket() public {
         vm.prank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
 
         vm.prank(guardian);
         registry.pause();
@@ -249,7 +249,7 @@ contract MarketRegistryTest is Test {
         registry.unpause();
 
         vm.prank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         assertEq(registry.getMarketCount(strategyTypeId), 1);
     }
 
@@ -270,7 +270,7 @@ contract MarketRegistryTest is Test {
 
     function testViewFunctionsWorkWhilePaused() public {
         vm.prank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MOONWELL);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
 
         vm.prank(guardian);
         registry.pause();

@@ -149,7 +149,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Register markets in MarketRegistry (always register both)
         vm.startPrank(backend);
-        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -1457,7 +1457,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Register markets for the new strategyTypeId
         vm.startPrank(backend);
-        marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
@@ -2126,7 +2126,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Register markets for the new strategyTypeId
         vm.startPrank(backend);
-        marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MOONWELL);
+        marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
         marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 

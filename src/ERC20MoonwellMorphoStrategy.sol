@@ -142,7 +142,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256[] defaultSplitBps;
     }
 
-    /// @notice Legacy initialization parameters for backwards compatibility
     struct LegacyInitParams {
         address mamoStrategyRegistry;
         address mamoBackend;
@@ -553,7 +552,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @notice Deposits tokens into a specific market
      */
     function _depositToMarket(RegistryMarket memory market, uint256 amount) internal {
-        if (market.marketType == MarketType.MOONWELL) {
+        if (market.marketType == MarketType.MTOKEN) {
             token.forceApprove(market.target, amount);
             require(IMToken(market.target).mint(amount) == 0, "MToken mint failed");
         } else {
@@ -578,7 +577,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
             uint256 withdrawAmount = (amountNeeded * split) / SPLIT_TOTAL;
             if (withdrawAmount == 0) continue;
 
-            if (regMarkets[i].marketType == MarketType.MOONWELL) {
+            if (regMarkets[i].marketType == MarketType.MTOKEN) {
                 require(IMToken(regMarkets[i].target).redeemUnderlying(withdrawAmount) == 0, "Failed to redeem mToken");
             } else {
                 IERC4626(regMarkets[i].target).withdraw(withdrawAmount, address(this), address(this));
@@ -601,7 +600,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @notice Withdraws all funds from a single market
      */
     function _withdrawFromMarket(RegistryMarket memory market) internal {
-        if (market.marketType == MarketType.MOONWELL) {
+        if (market.marketType == MarketType.MTOKEN) {
             uint256 mTokenBalance = IERC20(market.target).balanceOf(address(this));
             if (mTokenBalance > 0) {
                 require(IMToken(market.target).redeem(mTokenBalance) == 0, "Failed to redeem mToken");
@@ -625,7 +624,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (!regMarkets[i].active) continue;
 
-            if (regMarkets[i].marketType == MarketType.MOONWELL) {
+            if (regMarkets[i].marketType == MarketType.MTOKEN) {
                 total += IMToken(regMarkets[i].target).balanceOfUnderlying(address(this));
             } else {
                 uint256 shares = IERC4626(regMarkets[i].target).balanceOf(address(this));

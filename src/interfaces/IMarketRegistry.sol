@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-/// @notice Market type: Moonwell (Compound-fork mToken) or ERC4626 vault
+/// @notice Market type: mToken (Compound-fork) or ERC4626 vault
 enum MarketType {
-    MOONWELL,
+    MTOKEN,
     ERC4626
 }
 
