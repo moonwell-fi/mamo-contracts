@@ -40,8 +40,6 @@ contract StrategyFactoryIntegrationTest is BaseTest {
 
     // Strategy parameters
     uint256 public strategyTypeId;
-    uint256 public splitMToken;
-    uint256 public splitVault;
 
     function setUp() public override {
         // workaround to make test contract work with mappings
@@ -70,8 +68,6 @@ contract StrategyFactoryIntegrationTest is BaseTest {
         factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
-        splitMToken = assetConfig.strategyParams.splitMToken;
-        splitVault = assetConfig.strategyParams.splitVault;
         strategyTypeId = assetConfig.strategyParams.strategyTypeId;
     }
 
@@ -82,8 +78,6 @@ contract StrategyFactoryIntegrationTest is BaseTest {
         // Test that the factory has the correct parameters
         assertEq(factory.mamoStrategyRegistry(), address(registry), "Registry address mismatch");
         assertEq(factory.mamoBackend(), backend, "Backend address mismatch");
-        assertEq(factory.splitMToken(), splitMToken, "Split mToken mismatch");
-        assertEq(factory.splitVault(), splitVault, "Split vault mismatch");
         assertEq(factory.strategyTypeId(), strategyTypeId, "Strategy type ID mismatch");
     }
 
@@ -192,15 +186,8 @@ contract StrategyFactoryIntegrationTest is BaseTest {
         // Test that factory parameters are correctly set during deployment
         assertEq(factory.mamoStrategyRegistry(), address(registry), "Registry address should match");
         assertEq(factory.mamoBackend(), backend, "Backend address should match");
-        assertEq(factory.mToken(), addresses.getAddress(assetConfig.moonwellMarket), "mToken address should match");
-        assertEq(
-            factory.metaMorphoVault(),
-            addresses.getAddress(assetConfig.metamorphoVault),
-            "MetaMorpho vault should match"
-        );
         assertEq(factory.token(), addresses.getAddress(assetConfig.token), "Token address should match");
         assertEq(factory.feeRecipient(), admin, "Fee recipient should match");
-        assertEq(factory.splitMToken() + factory.splitVault(), 10000, "Splits should add up to 10000");
         assertEq(factory.strategyTypeId(), strategyTypeId, "Strategy type ID should match");
         assertTrue(factory.hookGasLimit() > 0, "Hook gas limit should be positive");
         assertTrue(factory.allowedSlippageInBps() <= 1000, "Slippage should be within bounds");

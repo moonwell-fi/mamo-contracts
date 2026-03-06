@@ -39,25 +39,23 @@ contract MockERC20MoonwellMorphoStrategy {
     address public mamoStrategyRegistry;
     uint256 public strategyTypeId;
 
-    struct LegacyInitParams {
+    struct InitParams {
         address mamoStrategyRegistry;
         address mamoBackend;
-        address mToken;
-        address metaMorphoVault;
         address token;
         address slippagePriceChecker;
         address feeRecipient;
-        uint256 splitMToken;
-        uint256 splitVault;
         uint256 strategyTypeId;
         address[] rewardTokens;
         address owner;
         uint256 hookGasLimit;
         uint256 allowedSlippageInBps;
         uint256 compoundFee;
+        address marketRegistry;
+        uint256[] defaultSplitBps;
     }
 
-    function initializeLegacy(LegacyInitParams memory params) external {
+    function initialize(InitParams memory params) external {
         require(!initialized, "Already initialized");
         initialized = true;
         owner = params.owner;
@@ -73,35 +71,36 @@ contract StrategyFactoryTest is Test {
 
     // Test addresses
     address public mamoBackend;
-    address public mToken;
-    address public metaMorphoVault;
     address public token;
     address public slippagePriceChecker;
     address public feeRecipient;
+    address public marketRegistry;
     address public user;
 
     // Test parameters
-    uint256 public constant SPLIT_M_TOKEN = 6000; // 60%
-    uint256 public constant SPLIT_VAULT = 4000; // 40%
     uint256 public constant STRATEGY_TYPE_ID = 1;
     uint256 public constant HOOK_GAS_LIMIT = 500000;
     uint256 public constant ALLOWED_SLIPPAGE_IN_BPS = 100; // 1%
     uint256 public constant COMPOUND_FEE = 200; // 2%
     address[] public rewardTokens;
+    uint256[] public defaultSplitBps;
 
     function setUp() public {
         // Create test addresses
         mamoBackend = makeAddr("mamoBackend");
-        mToken = makeAddr("mToken");
-        metaMorphoVault = makeAddr("metaMorphoVault");
         token = makeAddr("token");
         slippagePriceChecker = makeAddr("slippagePriceChecker");
         feeRecipient = makeAddr("feeRecipient");
+        marketRegistry = makeAddr("marketRegistry");
         user = makeAddr("user");
 
         // Setup reward tokens
         rewardTokens.push(makeAddr("rewardToken1"));
         rewardTokens.push(makeAddr("rewardToken2"));
+
+        // Setup default splits
+        defaultSplitBps.push(6000);
+        defaultSplitBps.push(4000);
 
         // Deploy mock contracts
         mockRegistry = new MockMamoStrategyRegistry();
@@ -114,42 +113,35 @@ contract StrategyFactoryTest is Test {
         factory = new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
     // ==================== CONSTRUCTOR TESTS ====================
 
     function testConstructorSuccess() public view {
-        // Verify all immutable variables are set correctly
         assertEq(factory.mamoStrategyRegistry(), address(mockRegistry));
         assertEq(factory.mamoBackend(), mamoBackend);
-        assertEq(factory.mToken(), mToken);
-        assertEq(factory.metaMorphoVault(), metaMorphoVault);
         assertEq(factory.token(), token);
         assertEq(factory.slippagePriceChecker(), slippagePriceChecker);
         assertEq(factory.strategyImplementation(), address(mockStrategyImpl));
         assertEq(factory.feeRecipient(), feeRecipient);
-        assertEq(factory.splitMToken(), SPLIT_M_TOKEN);
-        assertEq(factory.splitVault(), SPLIT_VAULT);
+        assertEq(factory.marketRegistry(), marketRegistry);
         assertEq(factory.strategyTypeId(), STRATEGY_TYPE_ID);
         assertEq(factory.hookGasLimit(), HOOK_GAS_LIMIT);
         assertEq(factory.allowedSlippageInBps(), ALLOWED_SLIPPAGE_IN_BPS);
         assertEq(factory.compoundFee(), COMPOUND_FEE);
 
-        // Verify reward tokens are stored correctly
         assertEq(factory.rewardTokens(0), rewardTokens[0]);
         assertEq(factory.rewardTokens(1), rewardTokens[1]);
     }
@@ -157,21 +149,19 @@ contract StrategyFactoryTest is Test {
     function testRevertIfInvalidMamoStrategyRegistryAddress() public {
         vm.expectRevert("Invalid mamoStrategyRegistry address");
         new StrategyFactory(
-            address(0), // Invalid address
+            address(0),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -179,62 +169,18 @@ contract StrategyFactoryTest is Test {
         vm.expectRevert("Invalid mamoBackend address");
         new StrategyFactory(
             address(mockRegistry),
-            address(0), // Invalid address
-            mToken,
-            metaMorphoVault,
+            address(0),
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
-        );
-    }
-
-    function testRevertIfInvalidMTokenAddress() public {
-        vm.expectRevert("Invalid mToken address");
-        new StrategyFactory(
-            address(mockRegistry),
-            mamoBackend,
-            address(0), // Invalid address
-            metaMorphoVault,
-            token,
-            slippagePriceChecker,
-            address(mockStrategyImpl),
-            feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
-            STRATEGY_TYPE_ID,
-            HOOK_GAS_LIMIT,
-            ALLOWED_SLIPPAGE_IN_BPS,
-            COMPOUND_FEE,
-            rewardTokens
-        );
-    }
-
-    function testRevertIfInvalidMetaMorphoVaultAddress() public {
-        vm.expectRevert("Invalid metaMorphoVault address");
-        new StrategyFactory(
-            address(mockRegistry),
-            mamoBackend,
-            mToken,
-            address(0), // Invalid address
-            token,
-            slippagePriceChecker,
-            address(mockStrategyImpl),
-            feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
-            STRATEGY_TYPE_ID,
-            HOOK_GAS_LIMIT,
-            ALLOWED_SLIPPAGE_IN_BPS,
-            COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -243,19 +189,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
-            address(0), // Invalid address
+            address(0),
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -264,19 +208,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
-            address(0), // Invalid address
+            address(0),
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -285,19 +227,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
-            address(0), // Invalid address
+            address(0),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -306,40 +246,59 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
-            address(0), // Invalid address
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            address(0),
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
-    function testRevertIfInvalidSplitParameters() public {
-        vm.expectRevert("Split parameters must add up to 10000");
+    function testRevertIfInvalidMarketRegistryAddress() public {
+        vm.expectRevert("Invalid marketRegistry address");
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            5000, // These don't add up to 10000
-            4000,
+            address(0),
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
+        );
+    }
+
+    function testRevertIfInvalidSplitParameters() public {
+        uint256[] memory badSplits = new uint256[](2);
+        badSplits[0] = 5000;
+        badSplits[1] = 4000; // Total 9000, not 10000
+
+        vm.expectRevert("Splits must add up to 10000");
+        new StrategyFactory(
+            address(mockRegistry),
+            mamoBackend,
+            token,
+            slippagePriceChecker,
+            address(mockStrategyImpl),
+            feeRecipient,
+            marketRegistry,
+            STRATEGY_TYPE_ID,
+            HOOK_GAS_LIMIT,
+            ALLOWED_SLIPPAGE_IN_BPS,
+            COMPOUND_FEE,
+            rewardTokens,
+            badSplits
         );
     }
 
@@ -348,19 +307,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
-            0, // Invalid strategy type ID
+            marketRegistry,
+            0,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -369,19 +326,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
-            0, // Invalid hook gas limit
+            0,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -390,19 +345,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
-            1001, // Exceeds MAX_SLIPPAGE_IN_BPS (1000)
+            1001,
             COMPOUND_FEE,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -411,19 +364,17 @@ contract StrategyFactoryTest is Test {
         new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
-            1001, // Exceeds MAX_COMPOUND_FEE (1000)
-            rewardTokens
+            1001,
+            rewardTokens,
+            defaultSplitBps
         );
     }
 
@@ -433,54 +384,41 @@ contract StrategyFactoryTest is Test {
         StrategyFactory factoryWithEmptyRewards = new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             ALLOWED_SLIPPAGE_IN_BPS,
             COMPOUND_FEE,
-            emptyRewardTokens
+            emptyRewardTokens,
+            defaultSplitBps
         );
 
-        // Should not revert and factory should be deployed successfully
         assertTrue(address(factoryWithEmptyRewards) != address(0));
     }
 
     // ==================== createStrategyForUser TESTS ====================
 
     function testCreateStrategyForUserSuccess() public {
-        // Expect the StrategyCreated event to be emitted
-        // Check first indexed parameter (user) but not second (strategy address since we don't know it yet)
         vm.expectEmit(true, false, false, false);
-        emit StrategyFactory.StrategyCreated(user, address(0)); // address(0) is placeholder for strategy
+        emit StrategyFactory.StrategyCreated(user, address(0));
 
-        // Call createStrategyForUser as backend
         vm.prank(mamoBackend);
         address strategyAddress = factory.createStrategyForUser(user);
 
-        // Verify strategy was created successfully
         assertTrue(strategyAddress != address(0), "Strategy address should not be zero");
-
-        // Verify the strategy was registered in the mock registry
         assertTrue(mockRegistry.userStrategies(user, strategyAddress), "Strategy should be registered for user");
     }
 
     function testCreateStrategyForUserInitializesCorrectly() public {
-        // Create strategy as backend
         vm.prank(mamoBackend);
         address strategyAddress = factory.createStrategyForUser(user);
 
-        // Cast to the mock strategy to check initialization
         MockERC20MoonwellMorphoStrategy strategy = MockERC20MoonwellMorphoStrategy(strategyAddress);
 
-        // Since we're using a proxy, we need to check the implementation
-        // The proxy will forward calls to the implementation
         assertTrue(strategy.initialized(), "Strategy should be initialized");
         assertEq(strategy.owner(), user, "Strategy owner should be set correctly");
         assertEq(strategy.mamoStrategyRegistry(), address(mockRegistry), "Registry should be set correctly");
@@ -491,47 +429,33 @@ contract StrategyFactoryTest is Test {
         address user1 = makeAddr("user1");
         address user2 = makeAddr("user2");
 
-        // Create strategies for different users as backend
         vm.startPrank(mamoBackend);
         address strategy1 = factory.createStrategyForUser(user1);
         address strategy2 = factory.createStrategyForUser(user2);
         vm.stopPrank();
 
-        // Verify strategies are different
         assertTrue(strategy1 != strategy2, "Strategies for different users should be different");
-
-        // Verify both strategies are registered correctly
         assertTrue(mockRegistry.userStrategies(user1, strategy1), "Strategy 1 should be registered for user 1");
         assertTrue(mockRegistry.userStrategies(user2, strategy2), "Strategy 2 should be registered for user 2");
-
-        // Verify cross-ownership is not set
         assertFalse(mockRegistry.userStrategies(user1, strategy2), "User 1 should not own strategy 2");
         assertFalse(mockRegistry.userStrategies(user2, strategy1), "User 2 should not own strategy 1");
     }
 
     function testCreateStrategyForUserMultipleStrategiesPerUser() public {
-        // Create multiple strategies for the same user as backend
         vm.startPrank(mamoBackend);
         address strategy1 = factory.createStrategyForUser(user);
         address strategy2 = factory.createStrategyForUser(user);
         vm.stopPrank();
 
-        // Verify strategies are different
         assertTrue(strategy1 != strategy2, "Multiple strategies for same user should be different");
-
-        // Verify both strategies are registered for the user
         assertTrue(mockRegistry.userStrategies(user, strategy1), "Strategy 1 should be registered for user");
         assertTrue(mockRegistry.userStrategies(user, strategy2), "Strategy 2 should be registered for user");
     }
 
     function testRevertWhenRegistryAddStrategyFails() public {
-        // Set up the mock registry to fail on addStrategy
         mockRegistry.setShouldRevertOnAddStrategy(true);
 
-        // Expect the call to revert with the registry error
         vm.expectRevert("Registry add strategy failed");
-
-        // Try to create a strategy as backend
         vm.prank(mamoBackend);
         factory.createStrategyForUser(user);
     }
@@ -539,7 +463,6 @@ contract StrategyFactoryTest is Test {
     // ==================== ACCESS CONTROL TESTS ====================
 
     function testCreateStrategyForUserAsUser() public {
-        // User can create strategy for themselves
         vm.prank(user);
         address strategyAddress = factory.createStrategyForUser(user);
 
@@ -566,30 +489,26 @@ contract StrategyFactoryTest is Test {
     // ==================== EDGE CASES ====================
 
     function testCreateStrategyWithZeroUserAddress() public {
-        // This should revert now since the factory validates user address
         vm.expectRevert("Invalid user address");
         vm.prank(mamoBackend);
         factory.createStrategyForUser(address(0));
     }
 
     function testCreateStrategyWithMaximumValidParameters() public {
-        // Test with maximum valid slippage and compound fee
         StrategyFactory maxParamsFactory = new StrategyFactory(
             address(mockRegistry),
             mamoBackend,
-            mToken,
-            metaMorphoVault,
             token,
             slippagePriceChecker,
             address(mockStrategyImpl),
             feeRecipient,
-            SPLIT_M_TOKEN,
-            SPLIT_VAULT,
+            marketRegistry,
             STRATEGY_TYPE_ID,
             HOOK_GAS_LIMIT,
             1000, // MAX_SLIPPAGE_IN_BPS
             1000, // MAX_COMPOUND_FEE
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
 
         vm.prank(mamoBackend);

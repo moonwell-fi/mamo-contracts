@@ -22,6 +22,41 @@ import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+/// @dev Test-only contract that simulates v1 legacy initialization for migration tests.
+///      The production strategy no longer has initializeLegacy, but we need to populate
+///      the deprecated storage slots (mToken, metaMorphoVault, splitMToken, splitVault)
+///      to test migrateV1ToMarketRegistry.
+contract LegacyV1Strategy is ERC20MoonwellMorphoStrategy {
+    function initializeLegacyForTest(
+        address _mamoStrategyRegistry,
+        address _mToken,
+        address _metaMorphoVault,
+        address _token,
+        address _slippagePriceChecker,
+        address _feeRecipient,
+        uint256 _splitMToken,
+        uint256 _splitVault,
+        uint256 _strategyTypeId,
+        address _owner,
+        uint256 _hookGasLimit,
+        uint256 _allowedSlippageInBps,
+        uint256 _compoundFee
+    ) external initializer {
+        __BaseStrategy_init(_mamoStrategyRegistry, _strategyTypeId, _owner);
+
+        mToken = IMToken(_mToken);
+        metaMorphoVault = IERC4626(_metaMorphoVault);
+        token = IERC20(_token);
+        slippagePriceChecker = ISlippagePriceChecker(_slippagePriceChecker);
+        allowedSlippageInBps = _allowedSlippageInBps;
+        compoundFee = _compoundFee;
+        splitMToken = _splitMToken;
+        splitVault = _splitVault;
+        feeRecipient = _feeRecipient;
+        hookGasLimit = _hookGasLimit;
+    }
+}
+
 contract MultiMarketStrategyTest is Test {
     Addresses public addresses;
 
@@ -499,44 +534,45 @@ contract MultiMarketStrategyTest is Test {
 
     // ==================== MIGRATION TESTS ====================
 
-    function testMigrationFromLegacyToMarketRegistry() public {
-        // Deploy v1 strategy using legacy init (no marketRegistry)
-        ERC20MoonwellMorphoStrategy v1Impl = new ERC20MoonwellMorphoStrategy();
+    function _deployLegacyStrategy(uint256 _splitMToken, uint256 _splitVault)
+        internal
+        returns (ERC20MoonwellMorphoStrategy s, uint256 typeId)
+    {
+        LegacyV1Strategy v1Impl = new LegacyV1Strategy();
 
         vm.prank(admin);
-        uint256 v1TypeId = registry.whitelistImplementation(address(v1Impl), 0);
+        typeId = registry.whitelistImplementation(address(v1Impl), 0);
 
-        // Register markets for the v1 type ID too
         vm.startPrank(backend);
-        marketRegistry.addMarket(v1TypeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(v1TypeId, address(metaMorphoVault), MarketType.ERC4626);
+        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
+        marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
 
         vm.startPrank(backend);
-        ERC1967Proxy proxyV1 = new ERC1967Proxy(address(v1Impl), "");
-        ERC20MoonwellMorphoStrategy legacyStrategy = ERC20MoonwellMorphoStrategy(payable(address(proxyV1)));
+        ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");
+        s = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
 
-        legacyStrategy.initializeLegacy(
-            ERC20MoonwellMorphoStrategy.LegacyInitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                splitMToken: 7000,
-                splitVault: 3000,
-                strategyTypeId: v1TypeId,
-                rewardTokens: new address[](0),
-                owner: owner,
-                hookGasLimit: 100000,
-                allowedSlippageInBps: 100,
-                compoundFee: 500
-            })
+        LegacyV1Strategy(payable(address(s))).initializeLegacyForTest(
+            address(registry),
+            address(mToken),
+            address(metaMorphoVault),
+            address(underlying),
+            address(slippagePriceChecker),
+            admin,
+            _splitMToken,
+            _splitVault,
+            typeId,
+            owner,
+            100000,
+            100,
+            500
         );
-        registry.addStrategy(owner, address(legacyStrategy));
+        registry.addStrategy(owner, address(s));
         vm.stopPrank();
+    }
+
+    function testMigrationFromLegacyToMarketRegistry() public {
+        (ERC20MoonwellMorphoStrategy legacyStrategy,) = _deployLegacyStrategy(7000, 3000);
 
         // Legacy strategy should not have marketRegistry set
         assertEq(address(legacyStrategy.marketRegistry()), address(0), "Legacy init should not set marketRegistry");
@@ -564,43 +600,9 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testMigrateV1ToMarketRegistryRevertsOnSecondCall() public {
-        // Deploy v1 strategy using legacy init
-        ERC20MoonwellMorphoStrategy v1Impl = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        uint256 typeId = registry.whitelistImplementation(address(v1Impl), 0);
-
-        // Register markets for the type ID
-        vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
+        (ERC20MoonwellMorphoStrategy s,) = _deployLegacyStrategy(7000, 3000);
 
         vm.startPrank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");
-        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        s.initializeLegacy(
-            ERC20MoonwellMorphoStrategy.LegacyInitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                splitMToken: 7000,
-                splitVault: 3000,
-                strategyTypeId: typeId,
-                rewardTokens: new address[](0),
-                owner: owner,
-                hookGasLimit: 100000,
-                allowedSlippageInBps: 100,
-                compoundFee: 500
-            })
-        );
-        registry.addStrategy(owner, address(s));
-
         // First migration should succeed
         s.migrateV1ToMarketRegistry(address(marketRegistry));
 
@@ -611,43 +613,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testMigrationWith100PercentMoonwell() public {
-        // Legacy init with 100% Moonwell, 0% vault
-        ERC20MoonwellMorphoStrategy impl = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        uint256 typeId = registry.whitelistImplementation(address(impl), 0);
-
-        // Register only mToken market for this type
-        vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
-
-        vm.startPrank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(impl), "");
-        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        s.initializeLegacy(
-            ERC20MoonwellMorphoStrategy.LegacyInitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                splitMToken: 10000,
-                splitVault: 0,
-                strategyTypeId: typeId,
-                rewardTokens: new address[](0),
-                owner: owner,
-                hookGasLimit: 100000,
-                allowedSlippageInBps: 100,
-                compoundFee: 500
-            })
-        );
-        registry.addStrategy(owner, address(s));
-        vm.stopPrank();
+        (ERC20MoonwellMorphoStrategy s,) = _deployLegacyStrategy(10000, 0);
 
         // Verify legacy storage
         assertEq(s.splitMToken(), 10000, "splitMToken should be 10000");
@@ -665,37 +631,7 @@ contract MultiMarketStrategyTest is Test {
     // ==================== MIGRATION ACCESS CONTROL ====================
 
     function testRevertMigrateNotOwnerOrBackend() public {
-        // Deploy legacy strategy
-        ERC20MoonwellMorphoStrategy v1Impl = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        uint256 typeId = registry.whitelistImplementation(address(v1Impl), 0);
-
-        vm.startPrank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");
-        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        s.initializeLegacy(
-            ERC20MoonwellMorphoStrategy.LegacyInitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                splitMToken: 7000,
-                splitVault: 3000,
-                strategyTypeId: typeId,
-                rewardTokens: new address[](0),
-                owner: owner,
-                hookGasLimit: 100000,
-                allowedSlippageInBps: 100,
-                compoundFee: 500
-            })
-        );
-        registry.addStrategy(owner, address(s));
-        vm.stopPrank();
+        (ERC20MoonwellMorphoStrategy s,) = _deployLegacyStrategy(7000, 3000);
 
         address randomUser = makeAddr("randomUser");
         vm.prank(randomUser);
@@ -704,43 +640,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testMigrateByOwnerSucceeds() public {
-        // Deploy legacy strategy
-        ERC20MoonwellMorphoStrategy v1Impl = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        uint256 typeId = registry.whitelistImplementation(address(v1Impl), 0);
-
-        // Register markets for the type ID
-        vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
-
-        vm.startPrank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");
-        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        s.initializeLegacy(
-            ERC20MoonwellMorphoStrategy.LegacyInitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                splitMToken: 7000,
-                splitVault: 3000,
-                strategyTypeId: typeId,
-                rewardTokens: new address[](0),
-                owner: owner,
-                hookGasLimit: 100000,
-                allowedSlippageInBps: 100,
-                compoundFee: 500
-            })
-        );
-        registry.addStrategy(owner, address(s));
-        vm.stopPrank();
+        (ERC20MoonwellMorphoStrategy s,) = _deployLegacyStrategy(7000, 3000);
 
         // Owner can call migrateV1ToMarketRegistry
         vm.prank(owner);

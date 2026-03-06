@@ -39,68 +39,38 @@ contract StrategyFactoryDeployer is Script {
         uint256 strategyTypeId,
         address deployer
     ) public returns (address) {
-        // Get the addresses for the initialization parameters
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address mamoBackend = addresses.getAddress("MAMO_BACKEND");
-        address mToken = addresses.getAddress("MOONWELL_USDC");
-        address metaMorphoVault = addresses.getAddress("USDC_METAMORPHO_VAULT");
-        address underlying = addresses.getAddress("USDC");
-        address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
-        // TODO: change this to the fee recipient address
-        address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
-
-        // Get reward token addresses
-        address well = addresses.getAddress("xWELL_PROXY");
-        address morpho = addresses.getAddress("MORPHO");
-
-        // Create reward tokens array
         address[] memory rewardTokens = new address[](2);
-        rewardTokens[0] = well;
-        rewardTokens[1] = morpho;
+        rewardTokens[0] = addresses.getAddress("xWELL_PROXY");
+        rewardTokens[1] = addresses.getAddress("MORPHO");
 
-        console.log("config.splitMToken", config.splitMToken);
-        console.log("config.splitVault", config.splitVault);
-        console.log("config.hookGasLimit", config.hookGasLimit);
-        console.log("config.allowedSlippageInBps", config.allowedSlippageInBps);
-        console.log("config.compoundFee", config.compoundFee);
+        uint256[] memory defaultSplitBps = new uint256[](2);
+        defaultSplitBps[0] = config.splitMToken;
+        defaultSplitBps[1] = config.splitVault;
 
         vm.startBroadcast(deployer);
 
-        // Deploy the USDCStrategyFactory
         StrategyFactory factory = new StrategyFactory(
-            mamoStrategyRegistry,
-            mamoBackend,
-            mToken,
-            metaMorphoVault,
-            underlying,
-            slippagePriceChecker,
-            strategyImplementation,
-            feeRecipient,
-            config.splitMToken,
-            config.splitVault,
+            addresses.getAddress("MAMO_STRATEGY_REGISTRY"),
+            addresses.getAddress("MAMO_BACKEND"),
+            addresses.getAddress("USDC"),
+            addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
+            addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL"),
+            addresses.getAddress("MAMO_MULTISIG"),
+            addresses.getAddress("MARKET_REGISTRY"),
             strategyTypeId,
             config.hookGasLimit,
             config.allowedSlippageInBps,
             config.compoundFee,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
 
         vm.stopBroadcast();
 
-        // Check if the factory address already exists
         string memory factoryName = "USDC_STRATEGY_FACTORY";
         if (addresses.isAddressSet(factoryName)) {
-            // Save old address
-            address oldAddress = addresses.getAddress(factoryName);
-
-            // Update the existing address
             addresses.changeAddress(factoryName, address(factory), true);
-
-            // Add old address with _DEPRECATED suffix
-            //addresses.addAddress(string(abi.encodePacked(factoryName, "_DEPRECATED")), oldAddress, true);
         } else {
-            // Add the factory address to the addresses contract
             addresses.addAddress(factoryName, address(factory), true);
         }
 
@@ -111,57 +81,38 @@ contract StrategyFactoryDeployer is Script {
         public
         returns (address)
     {
-        // Get the addresses for the initialization parameters
-        address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address mamoBackend = addresses.getAddress("MAMO_BACKEND");
-        address mToken = addresses.getAddress(assetConfig.moonwellMarket);
-        address metaMorphoVault = addresses.getAddress(assetConfig.metamorphoVault);
-        address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
-        address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
-        address underlying = addresses.getAddress(assetConfig.token);
-
-        // Get reward token addresses
         address[] memory rewardTokens = new address[](2);
         rewardTokens[0] = addresses.getAddress("xWELL_PROXY");
         rewardTokens[1] = addresses.getAddress("MORPHO");
 
+        uint256[] memory defaultSplitBps = new uint256[](2);
+        defaultSplitBps[0] = assetConfig.strategyParams.splitMToken;
+        defaultSplitBps[1] = assetConfig.strategyParams.splitVault;
+
         vm.startBroadcast(deployer);
 
-        // Deploy the StrategyFactory
         StrategyFactory factory = new StrategyFactory(
-            mamoStrategyRegistry,
-            mamoBackend,
-            mToken,
-            metaMorphoVault,
-            underlying,
-            slippagePriceChecker,
-            strategyImplementation,
-            feeRecipient,
-            assetConfig.strategyParams.splitMToken,
-            assetConfig.strategyParams.splitVault,
+            addresses.getAddress("MAMO_STRATEGY_REGISTRY"),
+            addresses.getAddress("MAMO_BACKEND"),
+            addresses.getAddress(assetConfig.token),
+            addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
+            addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL"),
+            addresses.getAddress("MAMO_MULTISIG"),
+            addresses.getAddress("MARKET_REGISTRY"),
             assetConfig.strategyParams.strategyTypeId,
             assetConfig.strategyParams.hookGasLimit,
             assetConfig.strategyParams.allowedSlippageInBps,
             assetConfig.strategyParams.compoundFee,
-            rewardTokens
+            rewardTokens,
+            defaultSplitBps
         );
 
         vm.stopBroadcast();
 
-        // Check if the factory address already exists
         string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         if (addresses.isAddressSet(factoryName)) {
-            // Save old address
-            address oldAddress = addresses.getAddress(factoryName);
-
-            // Update the existing address
             addresses.changeAddress(factoryName, address(factory), true);
-
-            // Add old address with _DEPRECATED suffix
-            //addresses.addAddress(string(abi.encodePacked(factoryName, "_DEPRECATED")), oldAddress, true);
         } else {
-            // Add the factory address to the addresses contract
             addresses.addAddress(factoryName, address(factory), true);
         }
 

@@ -142,24 +142,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256[] defaultSplitBps;
     }
 
-    struct LegacyInitParams {
-        address mamoStrategyRegistry;
-        address mamoBackend;
-        address mToken;
-        address metaMorphoVault;
-        address token;
-        address slippagePriceChecker;
-        address feeRecipient;
-        uint256 splitMToken;
-        uint256 splitVault;
-        uint256 strategyTypeId;
-        address[] rewardTokens;
-        address owner;
-        uint256 hookGasLimit;
-        uint256 allowedSlippageInBps;
-        uint256 compoundFee;
-    }
-
     address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
     modifier onlyBackend() {
@@ -205,43 +187,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
             marketSplitBps[regMarkets[i].target] = params.defaultSplitBps[i];
         }
         _validateTotalSplit();
-
-        // Approve CowSwap for each reward token
-        for (uint256 i = 0; i < params.rewardTokens.length; i++) {
-            _approveCowSwap(params.rewardTokens[i], type(uint256).max);
-        }
-    }
-
-    /**
-     * @notice Legacy initializer for backwards compatibility with existing factories
-     * @param params The legacy initialization parameters struct
-     */
-    function initializeLegacy(LegacyInitParams calldata params) external initializer {
-        require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
-        require(params.mamoBackend != address(0), "Invalid mamoBackend address");
-        require(params.mToken != address(0), "Invalid mToken address");
-        require(params.metaMorphoVault != address(0), "Invalid metaMorphoVault address");
-        require(params.token != address(0), "Invalid token address");
-        require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
-        require(params.strategyTypeId != 0, "Strategy type id not set");
-        require(params.feeRecipient != address(0), "Invalid fee recipient address");
-        require(params.splitMToken + params.splitVault == 10000, "Split parameters must add up to 10000");
-        require(params.hookGasLimit > 0, "Invalid hook gas limit");
-        require(params.allowedSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
-        require(params.compoundFee <= MAX_COMPOUND_FEE, "Compound fee exceeds maximum");
-
-        __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
-
-        mToken = IMToken(params.mToken);
-        metaMorphoVault = IERC4626(params.metaMorphoVault);
-        token = IERC20(params.token);
-        slippagePriceChecker = ISlippagePriceChecker(params.slippagePriceChecker);
-        allowedSlippageInBps = params.allowedSlippageInBps;
-        compoundFee = params.compoundFee;
-        splitMToken = params.splitMToken;
-        splitVault = params.splitVault;
-        feeRecipient = params.feeRecipient;
-        hookGasLimit = params.hookGasLimit;
 
         // Approve CowSwap for each reward token
         for (uint256 i = 0; i < params.rewardTokens.length; i++) {
