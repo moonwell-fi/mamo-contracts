@@ -26,20 +26,6 @@ interface IMerkleDistributor {
     ) external;
 }
 
-/// @notice Used by updatePosition to set new splits (address-keyed)
-struct MarketSplitUpdate {
-    address market;
-    uint256 splitBps;
-}
-
-/// @notice Composite view struct returned by getMarkets()
-struct Market {
-    address target;
-    MarketType marketType;
-    bool active;
-    uint256 splitBps;
-}
-
 /**
  * @title ERC20MoonwellMorphoStrategy
  * @notice A strategy contract for ERC20 tokens that splits deposits across N Moonwell markets and M ERC4626 vaults
@@ -74,6 +60,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /// @notice Maximum number of markets allowed per strategy
     uint256 public constant MAX_MARKETS = 10;
+
+    /// @notice The Merkle protocol distributor address for reward claims
+    address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
     // ==================== STORAGE LAYOUT ====================
     // Slots 0-49: BaseStrategy (mamoStrategyRegistry, strategyTypeId, __gap[48])
@@ -142,7 +131,19 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         uint256[] defaultSplitBps;
     }
 
-    address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
+    /// @notice Used by updatePosition to set new splits (address-keyed)
+    struct MarketSplitUpdate {
+        address market;
+        uint256 splitBps;
+    }
+
+    /// @notice Composite view struct returned by getMarkets()
+    struct Market {
+        address target;
+        MarketType marketType;
+        bool active;
+        uint256 splitBps;
+    }
 
     modifier onlyBackend() {
         require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
