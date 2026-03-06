@@ -4,8 +4,12 @@ test:
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
 
+# Default strategy config for integration tests that require it.
+# Override by invoking: make coverage ASSET_CONFIG_PATH=./config/strategies/cbBTCStrategyConfig.json
+ASSET_CONFIG_PATH ?= ./config/strategies/USDCStrategyConfig.json
+
 coverage:
-	forge coverage --fork-url base --ffi --report lcov --skip s.sol --no-match-coverage t.sol --ir-minimum -vvv && genhtml lcov.info --branch-coverage --output-dir coverage
+	ASSET_CONFIG_PATH=$(ASSET_CONFIG_PATH) forge coverage --fork-url base --ffi --report lcov --skip s.sol --ir-minimum -vvv && genhtml lcov.info --branch-coverage --output-dir coverage
 
 deploy-broadcast:
 	export DEPLOY_ENV="8453_PROD" && forge script script/DeploySystem.s.sol:DeploySystem --fork-url base --account mamo-test --verify --slow -vvvvv --broadcast --sender   0xDca82E03057329f53Ed4173429D46B0511E46Fb8
