@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
-import {ERC20MoonwellMorphoStrategy, Market} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
@@ -144,7 +144,7 @@ contract MultiMarketStrategyFactoryTest is Test {
         address strategyAddr = factory.createStrategyForUser(user);
 
         ERC20MoonwellMorphoStrategy factoryStrategy = ERC20MoonwellMorphoStrategy(payable(strategyAddr));
-        Market[] memory markets = factoryStrategy.getMarkets();
+        ERC20MoonwellMorphoStrategy.Market[] memory markets = factoryStrategy.getMarkets();
         assertEq(markets.length, 2, "Factory should create strategy with 2 markets");
         assertEq(markets[0].splitBps, 6000, "Market 0 split should be 6000");
         assertEq(markets[1].splitBps, 4000, "Market 1 split should be 4000");

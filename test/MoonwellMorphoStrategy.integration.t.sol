@@ -8,7 +8,7 @@ import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
-import {ERC20MoonwellMorphoStrategy, Market, MarketSplitUpdate} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
@@ -247,16 +247,16 @@ contract MoonwellMorphoStrategyTest is Test {
     function _buildUpdatePositionArray(uint256 mTokenSplit, uint256 vaultSplit)
         private
         view
-        returns (MarketSplitUpdate[] memory)
+        returns (ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory)
     {
         if (vaultSplit > 0) {
-            MarketSplitUpdate[] memory updates = new MarketSplitUpdate[](2);
-            updates[0] = MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
-            updates[1] = MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
+            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+            updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
+            updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
             return updates;
         } else {
-            MarketSplitUpdate[] memory updates = new MarketSplitUpdate[](1);
-            updates[0] = MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
+            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
+            updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
             return updates;
         }
     }
@@ -771,7 +771,7 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify initial split via markets
-        Market[] memory marketsBefore = strategy.getMarkets();
+        ERC20MoonwellMorphoStrategy.Market[] memory marketsBefore = strategy.getMarkets();
         assertEq(marketsBefore[0].splitBps, splitMToken, "Initial mToken market split should match config");
 
         // Verify initial balances match the expected split
@@ -806,7 +806,7 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify markets were updated
-        Market[] memory marketsAfter = strategy.getMarkets();
+        ERC20MoonwellMorphoStrategy.Market[] memory marketsAfter = strategy.getMarkets();
         assertEq(marketsAfter[0].splitBps, newSplitMToken, "mToken market split should be updated to 7000 (70%)");
         assertEq(marketsAfter[1].splitBps, newSplitVault, "Vault market split should be updated to 3000 (30%)");
 

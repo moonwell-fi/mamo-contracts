@@ -1,13 +1,11 @@
-    // SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
 
-import {WhitelistNewStrategyImplementation} from "../multisig/mamo-multisig/009_WhitelistNewStrategyImplementation.sol";
-
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -25,6 +23,8 @@ contract ERC20StrategyV2Test is BaseTest {
     ERC20MoonwellMorphoStrategy public newImplementation;
     MamoStrategyRegistry public registry;
 
+    uint256 public constant STRATEGY_TYPE_ID = 1;
+
     function setUp() public override {
         super.setUp();
         vm.createSelectFork({urlOrAlias: "base", blockNumber: 36224833});
@@ -32,8 +32,11 @@ contract ERC20StrategyV2Test is BaseTest {
         // create account with old implementation
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY_DEPRECATED";
         string memory cbbtcFactoryName = "cbBTC_STRATEGY_FACTORY_DEPRECATED";
-        StrategyFactory usdcFactory = StrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
-        StrategyFactory cbbtcFactory = StrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
+        // The on-chain deprecated factories have createStrategyForUser(address) with the same selector
+        MultiMarketStrategyFactory usdcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
+        MultiMarketStrategyFactory cbbtcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
 
         owner = makeAddr("owner");
         backend = addresses.getAddress("STRATEGY_MULTICALL");
@@ -54,16 +57,18 @@ contract ERC20StrategyV2Test is BaseTest {
             cbbtcStrategyProxy.getImplementation(), addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL_DEPRECATED")
         );
 
-        WhitelistNewStrategyImplementation whitelistNewStrategyImplementation = new WhitelistNewStrategyImplementation();
-        whitelistNewStrategyImplementation.setAddresses(addresses);
-        whitelistNewStrategyImplementation.deploy();
-        whitelistNewStrategyImplementation.build();
-        whitelistNewStrategyImplementation.simulate();
-        whitelistNewStrategyImplementation.validate();
-
-        newImplementation = ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
-
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+
+        // Deploy new implementation and whitelist it (inlined from old 009 multisig script)
+        address deployer = addresses.getAddress("DEPLOYER_EOA");
+        vm.startPrank(deployer);
+        newImplementation = new ERC20MoonwellMorphoStrategy();
+        vm.stopPrank();
+
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multisig);
+        registry.whitelistImplementation(address(newImplementation), STRATEGY_TYPE_ID);
+        vm.stopPrank();
     }
 
     function testUpgrade() public {
@@ -178,8 +183,10 @@ contract ERC20StrategyV2Test is BaseTest {
     function test_FactoryCanCreateStrategy() public {
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY";
         string memory cbbtcFactoryName = "cbBTC_STRATEGY_FACTORY";
-        StrategyFactory usdcFactory = StrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
-        StrategyFactory cbbtcFactory = StrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
+        MultiMarketStrategyFactory usdcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
+        MultiMarketStrategyFactory cbbtcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
 
         vm.startPrank(owner);
         usdcFactory.createStrategyForUser(owner);

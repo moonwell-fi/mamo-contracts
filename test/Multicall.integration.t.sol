@@ -7,7 +7,7 @@ import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrateg
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 
 import {Multicall} from "@contracts/Multicall.sol";
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 
 import {console} from "@forge-std/console.sol";
 
@@ -15,7 +15,6 @@ import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 
 import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
-import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
@@ -73,7 +72,7 @@ contract MaliciousReentrantContract {
 
 contract MulticallIntegrationTest is BaseTest {
     Multicall public multicall;
-    StrategyFactory public factory;
+    MultiMarketStrategyFactory public factory;
     MamoStrategyRegistry public registry;
     ERC20MoonwellMorphoStrategy public implementation;
     ISlippagePriceChecker public slippagePriceChecker;
@@ -122,7 +121,7 @@ contract MulticallIntegrationTest is BaseTest {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
 
-        factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
+        factory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
         multicall = Multicall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
