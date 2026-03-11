@@ -281,4 +281,88 @@ contract MarketRegistryTest is Test {
         registry.getMarkets(strategyTypeId);
         registry.getMarket(strategyTypeId, mToken);
     }
+
+    // ==================== EDGE CASE TESTS ====================
+
+    function testZeroMarketsReturnsEmptyArray() public view {
+        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        assertEq(markets.length, 0);
+        assertEq(registry.getMarketCount(strategyTypeId), 0);
+    }
+
+    function testAllMarketsDeactivated() public {
+        vm.startPrank(backend);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(strategyTypeId, vault, MarketType.ERC4626);
+
+        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.deactivateMarket(strategyTypeId, vault);
+        vm.stopPrank();
+
+        // Count stays the same (append-only), but both are inactive
+        assertEq(registry.getMarketCount(strategyTypeId), 2);
+        assertFalse(registry.isMarketActive(strategyTypeId, mToken));
+        assertFalse(registry.isMarketActive(strategyTypeId, vault));
+
+        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        assertFalse(markets[0].active);
+        assertFalse(markets[1].active);
+    }
+
+    function testMaxMarketsGas() public {
+        vm.startPrank(backend);
+        for (uint256 i = 0; i < 10; i++) {
+            registry.addMarket(strategyTypeId, address(uint160(100 + i)), MarketType.MTOKEN);
+        }
+        vm.stopPrank();
+
+        // Verify all 10 markets are accessible
+        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        assertEq(markets.length, 10);
+
+        // Verify getMarketCount
+        assertEq(registry.getMarketCount(strategyTypeId), 10);
+    }
+
+    function testInvalidEnumValueRevertsAtAbiLevel() public {
+        // Solidity 0.8+ validates enum values at ABI decoding level
+        // Passing an out-of-range uint (e.g. 2 for a 2-variant enum) reverts automatically
+        vm.prank(backend);
+        (bool success,) = address(registry).call(
+            abi.encodeWithSelector(MarketRegistry.addMarket.selector, strategyTypeId, mToken, uint8(99))
+        );
+        assertFalse(success, "Should revert for invalid enum value");
+    }
+
+    function testDeactivateAndQueryMarketState() public {
+        vm.startPrank(backend);
+        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.deactivateMarket(strategyTypeId, mToken);
+        vm.stopPrank();
+
+        // getMarket should still return the market (it exists, just inactive)
+        RegistryMarket memory market = registry.getMarket(strategyTypeId, mToken);
+        assertEq(market.target, mToken);
+        assertFalse(market.active);
+    }
+
+    function testMultipleStrategyTypesIndependent() public {
+        uint256 typeA = 1;
+        uint256 typeB = 2;
+
+        vm.startPrank(backend);
+        registry.addMarket(typeA, mToken, MarketType.MTOKEN);
+        registry.addMarket(typeB, vault, MarketType.ERC4626);
+
+        // Deactivating in typeA doesn't affect typeB
+        registry.deactivateMarket(typeA, mToken);
+        vm.stopPrank();
+
+        assertFalse(registry.isMarketActive(typeA, mToken));
+        assertTrue(registry.isMarketActive(typeB, vault));
+
+        // typeB still has 1 market, typeA still has 1 (just inactive)
+        assertEq(registry.getMarketCount(typeA), 1);
+        assertEq(registry.getMarketCount(typeB), 1);
+    }
 }

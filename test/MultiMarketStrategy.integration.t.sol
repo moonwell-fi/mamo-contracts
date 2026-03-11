@@ -509,7 +509,7 @@ contract MultiMarketStrategyTest is Test {
         updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 5000});
 
         vm.prank(backend);
-        vm.expectRevert("Market not active in registry");
+        vm.expectRevert("Market not registered or not active");
         strategy.updatePosition(updates);
     }
 

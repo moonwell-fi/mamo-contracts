@@ -298,7 +298,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Apply new splits from updates
         for (uint256 i = 0; i < updates.length; i++) {
-            require(marketRegistry.isMarketActive(strategyTypeId, updates[i].market), "Market not active in registry");
+            require(
+                marketRegistry.isMarketActive(strategyTypeId, updates[i].market), "Market not registered or not active"
+            );
             marketSplitBps[updates[i].market] = updates[i].splitBps;
         }
 

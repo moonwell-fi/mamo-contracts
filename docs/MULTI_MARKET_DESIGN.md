@@ -46,7 +46,7 @@ Splits are stored as `mapping(address => uint256)` rather than `mapping(uint256 
 
 ```solidity
 // Defined in IMarketRegistry.sol (single source of truth)
-enum MarketType { MOONWELL, ERC4626 }
+enum MarketType { MTOKEN, ERC4626 }
 
 // Stored in MarketRegistry per strategyTypeId
 struct RegistryMarket {
