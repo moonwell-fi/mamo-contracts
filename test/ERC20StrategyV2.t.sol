@@ -181,6 +181,9 @@ contract ERC20StrategyV2Test is BaseTest {
     }
 
     function test_FactoryCanCreateStrategy() public {
+        // Re-fork at latest to ensure factories have BACKEND_ROLE
+        vm.createSelectFork({urlOrAlias: "base"});
+
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY";
         string memory cbbtcFactoryName = "cbBTC_STRATEGY_FACTORY";
         MultiMarketStrategyFactory usdcFactory =

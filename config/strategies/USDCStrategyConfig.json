@@ -15,8 +15,13 @@
   "markets": [
     {
       "target": "MOONWELL_USDC",
-      "marketType": "MOONWELL",
+      "marketType": "MTOKEN",
       "splitBps": 10000
+    },
+    {
+      "target": "USDC_METAMORPHO_VAULT",
+      "marketType": "ERC4626",
+      "splitBps": 0
     }
   ],
   "rewardTokens": [

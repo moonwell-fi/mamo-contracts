@@ -24,7 +24,7 @@ contract MultiMarketStrategyFactoryDeployer is Script {
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
         address underlying = addresses.getAddress(assetConfig.token);
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address strategyImplementation = addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL");
+        address strategyImplementation = addresses.getAddress(assetConfig.strategyImplementation);
         address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
         address marketRegistryAddr = addresses.getAddress("MARKET_REGISTRY");
 

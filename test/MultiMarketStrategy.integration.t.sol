@@ -5,13 +5,11 @@ import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
-
-import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
-import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
@@ -21,6 +19,8 @@ import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {DeployMultiMarketSystem} from "../multisig/mamo-multisig/011_DeployMultiMarketSystem.sol";
 
 /// @dev Test-only contract that simulates v1 legacy initialization for migration tests.
 ///      The production strategy no longer has initializeLegacy, but we need to populate
@@ -81,22 +81,20 @@ contract MultiMarketStrategyTest is Test {
     function setUp() public {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        // Run the multi-market deployment proposal
+        DeployMultiMarketSystem proposal = new DeployMultiMarketSystem();
+        vm.makePersistent(address(proposal));
+        proposal.run();
+
+        // Get addresses and config from proposal
+        addresses = proposal.addresses();
+        assetConfig = proposal.deployAssetConfig().getConfig();
+        strategyTypeId = proposal.strategyTypeId();
 
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
-
-        string memory assetConfigPath =
-            vm.envOr("ASSET_CONFIG_PATH", string("config/strategies/USDCStrategyConfig.json"));
-
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
-
-        DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
-        assetConfig = assetConfigDeploy.getConfig();
 
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
@@ -107,102 +105,38 @@ contract MultiMarketStrategyTest is Test {
         underlying = IERC20(addresses.getAddress(assetConfig.token));
         mToken = IMToken(addresses.getAddress(assetConfig.moonwellMarket));
         metaMorphoVault = IERC4626(addresses.getAddress(assetConfig.metamorphoVault));
+        slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
 
-        if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
-            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
-        } else {
-            _setupSlippagePriceChecker();
-        }
+        registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        marketRegistry = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
 
-        // Deploy fresh registry for isolation
-        registry = new MamoStrategyRegistry(admin, backend, guardian);
+        // Create strategy for owner using the deployed factory
+        string memory factoryKey = string(abi.encodePacked(assetConfig.token, "_MULTI_MARKET_STRATEGY_FACTORY"));
+        MultiMarketStrategyFactory factory = MultiMarketStrategyFactory(addresses.getAddress(factoryKey));
 
-        // Deploy MarketRegistry and register markets
-        marketRegistry = new MarketRegistry(admin, backend, guardian);
-
-        // Deploy a new implementation and whitelist it
-        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
-
-        // Register markets in the MarketRegistry
-        vm.startPrank(backend);
-        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
-
-        // Deploy strategy with 2 markets: 70% Moonwell, 30% MetaMorpho
-        uint256[] memory defaultSplitBps = new uint256[](2);
-        defaultSplitBps[0] = 7000;
-        defaultSplitBps[1] = 3000;
-
-        // Deploy proxy and initialize
-        vm.startPrank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), "");
-        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        strategy.initialize(
-            ERC20MoonwellMorphoStrategy.InitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                strategyTypeId: strategyTypeId,
-                rewardTokens: new address[](0),
-                owner: owner,
-                hookGasLimit: 100000,
-                allowedSlippageInBps: 100,
-                compoundFee: 500,
-                marketRegistry: address(marketRegistry),
-                defaultSplitBps: defaultSplitBps
-            })
-        );
-
-        registry.addStrategy(owner, address(strategy));
-        vm.stopPrank();
+        vm.prank(owner);
+        strategy = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(owner)));
 
         vm.warp(block.timestamp + 1 minutes);
-    }
-
-    function _setupSlippagePriceChecker() private {
-        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
-
-        vm.startPrank(deployer);
-        for (uint256 i = 0; i < config.rewardTokens.length; i++) {
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-                new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
-            configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-                chainlinkFeed: addresses.getAddress(config.rewardTokens[i].priceFeed),
-                reverse: config.rewardTokens[i].reverse,
-                heartbeat: config.rewardTokens[i].heartbeat
-            });
-
-            slippagePriceChecker.addTokenConfiguration(
-                address(addresses.getAddress(config.rewardTokens[i].token)), address(underlying), configs
-            );
-        }
-        vm.stopPrank();
     }
 
     // ==================== INITIALIZATION TESTS ====================
 
     function testInitializationWithMultipleMarkets() public view {
         ERC20MoonwellMorphoStrategy.Market[] memory markets = strategy.getMarkets();
-        assertEq(markets.length, 2, "Should have 2 markets");
+        assertEq(markets.length, assetConfig.markets.length, "Market count should match config");
 
         assertEq(markets[0].target, address(mToken), "Market 0 should be mToken");
         assertEq(uint256(markets[0].marketType), uint256(MarketType.MTOKEN), "Market 0 should be MTOKEN type");
         assertTrue(markets[0].active, "Market 0 should be active");
-        assertEq(markets[0].splitBps, 7000, "Market 0 split should be 7000");
+        assertEq(markets[0].splitBps, assetConfig.markets[0].splitBps, "Market 0 split should match config");
 
-        assertEq(markets[1].target, address(metaMorphoVault), "Market 1 should be metaMorphoVault");
-        assertEq(uint256(markets[1].marketType), uint256(MarketType.ERC4626), "Market 1 should be ERC4626 type");
-        assertTrue(markets[1].active, "Market 1 should be active");
-        assertEq(markets[1].splitBps, 3000, "Market 1 split should be 3000");
+        if (markets.length > 1) {
+            assertEq(markets[1].target, address(metaMorphoVault), "Market 1 should be metaMorphoVault");
+            assertEq(uint256(markets[1].marketType), uint256(MarketType.ERC4626), "Market 1 should be ERC4626 type");
+            assertTrue(markets[1].active, "Market 1 should be active");
+            assertEq(markets[1].splitBps, assetConfig.markets[1].splitBps, "Market 1 split should match config");
+        }
 
         assertEq(address(strategy.marketRegistry()), address(marketRegistry), "MarketRegistry should be set");
     }
@@ -301,7 +235,12 @@ contract MultiMarketStrategyTest is Test {
     // ==================== DEPOSIT TESTS ====================
 
     function testDepositDistributesAcrossMarkets() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        // Rebalance to 70/30 split for multi-market testing
+        _rebalanceTo7030();
+
+        uint256 totalBefore = _getTotalBalance();
+
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -309,14 +248,17 @@ contract MultiMarketStrategyTest is Test {
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
-        // Verify Moonwell got ~70%
-        uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
-        assertApproxEqAbs(mTokenBalance, (depositAmount * 7000) / 10000, 1e3, "Moonwell should have ~70%");
+        uint256 totalExpected = totalBefore + depositAmount;
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
 
-        // Verify MetaMorpho got ~30%
+        // Verify Moonwell got ~70% of total balance (seed + deposit)
+        uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(mTokenBalance, (totalExpected * 7000) / 10000, delta, "Moonwell should have ~70%");
+
+        // Verify MetaMorpho got ~30% of total balance
         uint256 vaultShares = metaMorphoVault.balanceOf(address(strategy));
         uint256 vaultBalance = metaMorphoVault.convertToAssets(vaultShares);
-        assertApproxEqAbs(vaultBalance, (depositAmount * 3000) / 10000, 1e3, "MetaMorpho should have ~30%");
+        assertApproxEqAbs(vaultBalance, (totalExpected * 3000) / 10000, delta, "MetaMorpho should have ~30%");
 
         // Verify no idle tokens remain (or minimal dust)
         assertLe(underlying.balanceOf(address(strategy)), 1, "No idle tokens should remain");
@@ -531,8 +473,18 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testMarketSplitBpsByAddress() public view {
-        assertEq(strategy.marketSplitBps(address(mToken)), 7000, "mToken split should be 7000");
-        assertEq(strategy.marketSplitBps(address(metaMorphoVault)), 3000, "metaMorphoVault split should be 3000");
+        assertEq(
+            strategy.marketSplitBps(address(mToken)),
+            assetConfig.markets[0].splitBps,
+            "mToken split should match config"
+        );
+        if (assetConfig.markets.length > 1) {
+            assertEq(
+                strategy.marketSplitBps(address(metaMorphoVault)),
+                assetConfig.markets[1].splitBps,
+                "metaMorphoVault split should match config"
+            );
+        }
     }
 
     function testMarketRegistryAddress() public view {
@@ -659,18 +611,44 @@ contract MultiMarketStrategyTest is Test {
     // ==================== DEPOSIT IDLE TOKENS ====================
 
     function testDepositIdleTokensDistributesAcrossMarkets() public {
-        uint256 idleAmount = 500 * 10 ** 6;
+        // Rebalance to 70/30 split for multi-market testing
+        _rebalanceTo7030();
+
+        uint256 totalBefore = _getTotalBalance();
+
+        uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
         deal(address(underlying), address(strategy), idleAmount);
 
         strategy.depositIdleTokens();
 
+        uint256 totalExpected = totalBefore + idleAmount;
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
         assertLe(underlying.balanceOf(address(strategy)), 1, "No idle tokens should remain");
 
         uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
-        assertApproxEqAbs(mTokenBalance, (idleAmount * 7000) / 10000, 1e3, "Moonwell should have ~70%");
+        assertApproxEqAbs(mTokenBalance, (totalExpected * 7000) / 10000, delta, "Moonwell should have ~70%");
     }
 
     // ==================== HELPERS ====================
+
+    function _rebalanceTo7030() internal {
+        // Seed the strategy with some tokens so updatePosition can rebalance
+        uint256 seedAmount = 100 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, seedAmount);
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), seedAmount);
+        strategy.deposit(seedAmount);
+        vm.stopPrank();
+
+        // Update to 70/30 split
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+        updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 7000});
+        updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 3000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+    }
 
     function _getTotalBalance() internal returns (uint256) {
         uint256 metaMorphoShares = metaMorphoVault.balanceOf(address(strategy));

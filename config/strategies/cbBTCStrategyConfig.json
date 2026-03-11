@@ -47,8 +47,13 @@
   "markets": [
     {
       "target": "MOONWELL_cbBTC",
-      "marketType": "MOONWELL",
+      "marketType": "MTOKEN",
       "splitBps": 10000
+    },
+    {
+      "target": "cbBTC_METAMORPHO_VAULT",
+      "marketType": "ERC4626",
+      "splitBps": 0
     }
   ],
   "symbol": "cbBTC",

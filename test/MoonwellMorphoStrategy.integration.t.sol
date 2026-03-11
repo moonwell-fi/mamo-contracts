@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {DeployConfig} from "@script/DeployConfig.sol";
-import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -12,8 +11,8 @@ import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrateg
 
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 
-import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
@@ -32,6 +31,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 
+import {DeployMultiMarketSystem} from "../multisig/mamo-multisig/011_DeployMultiMarketSystem.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 /**
@@ -92,27 +92,23 @@ contract MoonwellMorphoStrategyTest is Test {
     DeployAssetConfig.Config public assetConfig;
 
     function setUp() public {
-        // workaround to make test contract work with mappings
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        // Run the multi-market deployment proposal
+        DeployMultiMarketSystem proposal = new DeployMultiMarketSystem();
+        vm.makePersistent(address(proposal));
+        proposal.run();
 
-        // Get the environment from command line arguments or use default
+        // Get addresses and config from proposal
+        addresses = proposal.addresses();
+        assetConfig = proposal.deployAssetConfig().getConfig();
+        strategyTypeId = proposal.strategyTypeId();
+
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
-
-        string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
-
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
 
-        DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
-        assetConfig = assetConfigDeploy.getConfig();
-
-        // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
         guardian = addresses.getAddress(config.guardian);
@@ -123,101 +119,25 @@ contract MoonwellMorphoStrategyTest is Test {
         well = IERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress(assetConfig.moonwellMarket));
         metaMorphoVault = IERC4626(addresses.getAddress(assetConfig.metamorphoVault));
+        slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
 
-        if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
-            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
-        } else {
-            _setupSlippagePriceChecker();
-        }
-
-        if (addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
-            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        } else {
-            registry = new MamoStrategyRegistry(admin, backend, guardian);
-            addresses.changeAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
-        }
-
-        // Deploy MarketRegistry
-        marketRegistry = new MarketRegistry(admin, backend, guardian);
-
-        // Always deploy fresh implementation for testing
-        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
-
-        vm.prank(admin);
-        strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
+        registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        marketRegistry = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
-
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
-        // Register markets in MarketRegistry (always register both)
-        vm.startPrank(backend);
-        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
+        // Create strategy for owner using the deployed factory
+        string memory factoryKey = string(abi.encodePacked(assetConfig.token, "_MULTI_MARKET_STRATEGY_FACTORY"));
+        MultiMarketStrategyFactory factory = MultiMarketStrategyFactory(addresses.getAddress(factoryKey));
 
-        // Build default split bps array
-        uint256[] memory defaultSplitBps = _buildDefaultSplitBps();
-
-        // Deploy strategy proxy and initialize directly
-        vm.startPrank(backend);
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), "");
-        strategy = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
-
-        // Build reward tokens from asset config
-        address[] memory rewardTokenAddrs = new address[](assetConfig.rewardTokens.length);
-        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
-            rewardTokenAddrs[i] = addresses.getAddress(assetConfig.rewardTokens[i].token);
-        }
-
-        strategy.initialize(
-            ERC20MoonwellMorphoStrategy.InitParams({
-                mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
-                token: address(underlying),
-                slippagePriceChecker: address(slippagePriceChecker),
-                feeRecipient: admin,
-                strategyTypeId: strategyTypeId,
-                rewardTokens: rewardTokenAddrs,
-                owner: owner,
-                hookGasLimit: assetConfig.strategyParams.hookGasLimit,
-                allowedSlippageInBps: assetConfig.strategyParams.allowedSlippageInBps,
-                compoundFee: assetConfig.strategyParams.compoundFee,
-                marketRegistry: address(marketRegistry),
-                defaultSplitBps: defaultSplitBps
-            })
-        );
-
-        registry.addStrategy(owner, address(strategy));
-        vm.stopPrank();
+        vm.prank(owner);
+        strategy = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(owner)));
 
         deltaThreshold = assetConfig.decimals == 18 ? 1e9 : 1e3;
 
         vm.warp(block.timestamp + 1 minutes);
-    }
-
-    function _setupSlippagePriceChecker() private {
-        // Deploy the SlippagePriceChecker using the script
-        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
-
-        vm.startPrank(deployer);
-        for (uint256 i = 0; i < config.rewardTokens.length; i++) {
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-                new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
-            configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-                chainlinkFeed: addresses.getAddress(config.rewardTokens[i].priceFeed),
-                reverse: config.rewardTokens[i].reverse,
-                heartbeat: config.rewardTokens[i].heartbeat
-            });
-
-            slippagePriceChecker.addTokenConfiguration(
-                address(addresses.getAddress(config.rewardTokens[i].token)), address(underlying), configs
-            );
-        }
-        vm.stopPrank();
     }
 
     function _getInitData(uint256 _strategyTypeId) private view returns (bytes memory) {
