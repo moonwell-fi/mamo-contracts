@@ -56,9 +56,13 @@ contract MoonwellMorphoStrategyTest is Test {
 
     // Magic value returned by isValidSignature for valid orders
     bytes4 private constant MAGIC_VALUE = 0x1626ba7e;
+    address public constant WETH_ADDRESS = 0x4200000000000000000000000000000000000006; // Base WETH
+
+    uint256 public deltaThreshold;
 
     // Events
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
+    event Withdraw(address indexed asset, uint256 amount);
 
     Addresses public addresses;
 
@@ -82,10 +86,10 @@ contract MoonwellMorphoStrategyTest is Test {
 
     uint256 public splitMToken;
     uint256 public splitVault;
+    uint256 public strategyTypeId;
 
     DeployConfig.DeploymentConfig public config;
     DeployAssetConfig.Config public assetConfig;
-    uint256 public strategyTypeId;
 
     function setUp() public {
         // workaround to make test contract work with mappings
@@ -188,6 +192,8 @@ contract MoonwellMorphoStrategyTest is Test {
         registry.addStrategy(owner, address(strategy));
         vm.stopPrank();
 
+        deltaThreshold = assetConfig.decimals == 18 ? 1e9 : 1e3;
+
         vm.warp(block.timestamp + 1 minutes);
     }
 
@@ -250,12 +256,15 @@ contract MoonwellMorphoStrategyTest is Test {
         returns (ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory)
     {
         if (vaultSplit > 0) {
-            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+                new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
             updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
-            updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
+            updates[1] =
+                ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
             return updates;
         } else {
-            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
+            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+                new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
             updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
             return updates;
         }
@@ -263,7 +272,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testOwnerCanDepositFunds() public {
         // Mint USDC to the owner
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         // Verify the owner has the USDC balance
@@ -283,7 +292,10 @@ contract MoonwellMorphoStrategyTest is Test {
         // Verify the deposit was successful
         uint256 finalBalance = getTotalBalance(address(strategy));
         assertApproxEqAbs(
-            finalBalance - initialBalance, depositAmount, 1e3, "Strategy balance should increase by deposit amount"
+            finalBalance - initialBalance,
+            depositAmount,
+            deltaThreshold,
+            "Strategy balance should increase by deposit amount"
         );
 
         // Verify the owner's USDC balance decreased
@@ -296,14 +308,20 @@ contract MoonwellMorphoStrategyTest is Test {
         // Verify mToken balance
         uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
         assertApproxEqAbs(
-            mTokenBalance, expectedMTokenAmount, 1e3, "mToken balance should match expected amount based on split"
+            mTokenBalance,
+            expectedMTokenAmount,
+            deltaThreshold,
+            "mToken balance should match expected amount based on split"
         );
 
         // Verify vault balance
         uint256 vaultShares = metaMorphoVault.balanceOf(address(strategy));
         uint256 vaultBalance = metaMorphoVault.convertToAssets(vaultShares);
         assertApproxEqAbs(
-            vaultBalance, expectedVaultAmount, 1e3, "Vault balance should match expected amount based on split"
+            vaultBalance,
+            expectedVaultAmount,
+            deltaThreshold,
+            "Vault balance should match expected amount based on split"
         );
     }
 
@@ -312,7 +330,7 @@ contract MoonwellMorphoStrategyTest is Test {
         address nonOwner = makeAddr("nonOwner");
 
         // Mint USDC to the non-owner
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), nonOwner, depositAmount);
 
         // Verify the non-owner has the USDC balance
@@ -332,7 +350,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testOwnerCanWithdrawFunds() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -342,7 +360,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Verify initial balances
         assertEq(underlying.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
         uint256 strategyBalance = getTotalBalance(address(strategy));
-        assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
+        assertApproxEqAbs(strategyBalance, depositAmount, deltaThreshold, "Strategy should have the deposited amount");
 
         // Withdraw half of the funds
         uint256 withdrawAmount = depositAmount / 2;
@@ -351,7 +369,10 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify the owner received the withdrawn funds
         assertApproxEqAbs(
-            underlying.balanceOf(owner), withdrawAmount, 1e3, "Owner should have received the withdrawn amount"
+            underlying.balanceOf(owner),
+            withdrawAmount,
+            deltaThreshold,
+            "Owner should have received the withdrawn amount"
         );
 
         // Verify the strategy's balance decreased
@@ -359,7 +380,7 @@ contract MoonwellMorphoStrategyTest is Test {
         assertApproxEqAbs(
             newStrategyBalance,
             strategyBalance - withdrawAmount,
-            1e3,
+            deltaThreshold,
             "Strategy balance should decrease by withdrawn amount"
         );
 
@@ -369,17 +390,21 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify mToken balance
         uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
-        assertApproxEqAbs(mTokenBalance, expectedMTokenAmount, 1e3, "mToken balance should be updated after withdrawal");
+        assertApproxEqAbs(
+            mTokenBalance, expectedMTokenAmount, deltaThreshold, "mToken balance should be updated after withdrawal"
+        );
 
         // Verify vault balance
         uint256 vaultShares = metaMorphoVault.balanceOf(address(strategy));
         uint256 vaultBalance = metaMorphoVault.convertToAssets(vaultShares);
-        assertApproxEqAbs(vaultBalance, expectedVaultAmount, 1e3, "Vault balance should be updated after withdrawal");
+        assertApproxEqAbs(
+            vaultBalance, expectedVaultAmount, deltaThreshold, "Vault balance should be updated after withdrawal"
+        );
     }
 
     function testRevertIfNonOwnerWithdraw() public {
         // First deposit funds as the owner
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -401,13 +426,16 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(
-            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+            getTotalBalance(address(strategy)),
+            depositAmount,
+            deltaThreshold,
+            "Strategy balance should remain unchanged"
         );
     }
 
     function testRevertIfWithdrawAmountTooLarge() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -424,13 +452,16 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(
-            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+            getTotalBalance(address(strategy)),
+            depositAmount,
+            deltaThreshold,
+            "Strategy balance should remain unchanged"
         );
     }
 
     function testRevertIfWithdrawAmountIsZero() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -447,13 +478,16 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(
-            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+            getTotalBalance(address(strategy)),
+            depositAmount,
+            deltaThreshold,
+            "Strategy balance should remain unchanged"
         );
     }
 
     function testRevertIfDepositAmountIsZero() public {
         // Mint USDC to the owner
-        uint256 initialBalance = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 initialBalance = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, initialBalance);
 
         // Attempt to deposit zero amount
@@ -471,7 +505,9 @@ contract MoonwellMorphoStrategyTest is Test {
         assertEq(underlying.balanceOf(owner), initialBalance, "Owner's USDC balance should remain unchanged");
 
         // Verify the strategy balance remains unchanged
-        assertApproxEqAbs(getTotalBalance(address(strategy)), 0, 1e3, "Strategy balance should remain unchanged");
+        assertApproxEqAbs(
+            getTotalBalance(address(strategy)), 0, deltaThreshold, "Strategy balance should remain unchanged"
+        );
     }
 
     function testOwnerCanRecoverERC20() public {
@@ -667,7 +703,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testOwnerCanWithdrawAll() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -677,14 +713,16 @@ contract MoonwellMorphoStrategyTest is Test {
         // Verify initial balances
         assertEq(underlying.balanceOf(owner), 0, "Owner's USDC balance should be 0 after deposit");
         uint256 strategyBalance = getTotalBalance(address(strategy));
-        assertApproxEqAbs(strategyBalance, depositAmount, 1e3, "Strategy should have the deposited amount");
+        assertApproxEqAbs(strategyBalance, depositAmount, deltaThreshold, "Strategy should have the deposited amount");
 
         // Call withdrawAll
         strategy.withdrawAll();
         vm.stopPrank();
 
         // Verify the owner received all funds
-        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+        assertApproxEqAbs(
+            underlying.balanceOf(owner), depositAmount, deltaThreshold, "Owner should have received all funds"
+        );
 
         // Verify the strategy's balance is now 0
         assertEq(getTotalBalance(address(strategy)), 0, "Strategy balance should be 0");
@@ -696,7 +734,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfNonOwnerWithdrawAll() public {
         // First deposit funds as the owner
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -715,7 +753,10 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Verify the strategy balance remains unchanged
         assertApproxEqAbs(
-            getTotalBalance(address(strategy)), depositAmount, 1e3, "Strategy balance should remain unchanged"
+            getTotalBalance(address(strategy)),
+            depositAmount,
+            deltaThreshold,
+            "Strategy balance should remain unchanged"
         );
     }
 
@@ -732,7 +773,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testWithdrawAllWithDifferentSplits() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -750,7 +791,9 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify the owner received all funds
-        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, 1e3, "Owner should have received all funds");
+        assertApproxEqAbs(
+            underlying.balanceOf(owner), depositAmount, deltaThreshold, "Owner should have received all funds"
+        );
 
         // Verify the strategy's balance is now 0
         assertEq(getTotalBalance(address(strategy)), 0, "Strategy balance should be 0");
@@ -762,7 +805,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testBackendCanUpdatePosition() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -786,14 +829,14 @@ contract MoonwellMorphoStrategyTest is Test {
         assertApproxEqAbs(
             initialMTokenBalance,
             expectedInitialMTokenBalance,
-            1e3,
+            deltaThreshold,
             "Initial mToken balance should match expected amount based on split"
         );
 
         assertApproxEqAbs(
             initialVaultBalance,
             expectedInitialVaultBalance,
-            1e3,
+            deltaThreshold,
             "Initial vault balance should match expected amount based on split"
         );
 
@@ -821,14 +864,18 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 expectedMTokenBalance = (totalBalance * newSplitMToken) / 10000;
         uint256 expectedVaultBalance = (totalBalance * newSplitVault) / 10000;
 
-        assertApproxEqAbs(newMTokenBalance, expectedMTokenBalance, 1e3, "mToken balance should reflect the new split");
+        assertApproxEqAbs(
+            newMTokenBalance, expectedMTokenBalance, deltaThreshold, "mToken balance should reflect the new split"
+        );
 
-        assertApproxEqAbs(newVaultBalance, expectedVaultBalance, 1e3, "Vault balance should reflect the new split");
+        assertApproxEqAbs(
+            newVaultBalance, expectedVaultBalance, deltaThreshold, "Vault balance should reflect the new split"
+        );
     }
 
     function testRevertIfNonBackendUpdatePosition() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -848,7 +895,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfInvalidSplitParameters() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -875,7 +922,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testDepositIdleTokens() public {
         // Mint USDC directly to the strategy contract (simulating tokens received from elsewhere)
-        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC (6 decimals)
+        uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
         deal(address(underlying), address(strategy), idleAmount);
 
         // Verify the strategy has the idle tokens
@@ -906,7 +953,7 @@ contract MoonwellMorphoStrategyTest is Test {
         assertApproxEqAbs(
             newMTokenBalance - initialMTokenBalance,
             expectedMTokenAmount,
-            1e3,
+            deltaThreshold,
             "mToken balance should increase by expected amount"
         );
 
@@ -916,7 +963,7 @@ contract MoonwellMorphoStrategyTest is Test {
         assertApproxEqAbs(
             newVaultBalance - initialVaultBalance,
             expectedVaultAmount,
-            1e3,
+            deltaThreshold,
             "Vault balance should increase by expected amount"
         );
     }
@@ -932,7 +979,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testDepositIdleTokensReturnValue() public {
         // Mint USDC to the strategy contract directly
-        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
+        uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
         deal(address(underlying), address(strategy), idleAmount);
 
         // Call depositIdleTokens and check the return value
@@ -949,7 +996,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testDepositIdleTokensWithDifferentSplit() public {
         // First deposit some funds to have a non-zero balance
-        uint256 initialDeposit = 1000 * 10 ** 6; // 1000 USDC
+        uint256 initialDeposit = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, initialDeposit);
 
         vm.startPrank(owner);
@@ -965,7 +1012,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.updatePosition(_buildUpdatePositionArray(newSplitMToken, newSplitVault));
 
         // Mint USDC directly to the strategy contract
-        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
+        uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
         deal(address(underlying), address(strategy), idleAmount);
 
         // Check balances before depositing idle tokens
@@ -985,7 +1032,7 @@ contract MoonwellMorphoStrategyTest is Test {
         assertApproxEqAbs(
             newMTokenBalance - initialMTokenBalance,
             expectedMTokenAmount,
-            1e3,
+            deltaThreshold,
             "mToken balance should increase by expected amount with new split"
         );
 
@@ -995,14 +1042,14 @@ contract MoonwellMorphoStrategyTest is Test {
         assertApproxEqAbs(
             newVaultBalance - initialVaultBalance,
             expectedVaultAmount,
-            1e3,
+            deltaThreshold,
             "Vault balance should increase by expected amount with new split"
         );
     }
 
     function testAnyoneCanCallDepositIdleTokens() public {
         // Mint USDC directly to the strategy contract
-        uint256 idleAmount = 500 * 10 ** 6; // 500 USDC
+        uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
         deal(address(underlying), address(strategy), idleAmount);
 
         // Create various addresses to test
@@ -1124,7 +1171,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes; // 24 hours from now
-        uint256 buyAmount = 1000 * 10 ** 6; // Mock buy amount
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals; // Mock buy amount
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1158,7 +1205,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1191,7 +1238,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Set validTo to less than 5 minutes in the future
         uint32 validTo = uint32(block.timestamp) + 4 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1223,7 +1270,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1255,7 +1302,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1287,7 +1334,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1354,7 +1401,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         // Create a different receiver address
         address differentReceiver = makeAddr("differentReceiver");
@@ -1389,7 +1436,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1421,7 +1468,7 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.approveCowSwap(address(well), type(uint256).max);
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1725,7 +1772,7 @@ contract MoonwellMorphoStrategyTest is Test {
             sellToken: underlying, // This should be rejected
             buyToken: well,
             receiver: address(strategy),
-            sellAmount: 1000 * 10 ** 6,
+            sellAmount: 1000 * 10 ** assetConfig.decimals,
             buyAmount: 100 * 10 ** 18,
             validTo: validTo,
             appData: bytes32(0),
@@ -1766,7 +1813,7 @@ contract MoonwellMorphoStrategyTest is Test {
             buyToken: underlying,
             receiver: address(strategy),
             sellAmount: 100 * 10 ** 18,
-            buyAmount: 1000 * 10 ** 6,
+            buyAmount: 1000 * 10 ** assetConfig.decimals,
             validTo: uint32(block.timestamp + maxValidTime + 1 hours), // Too far in the future
             appData: bytes32(0),
             feeAmount: 0,
@@ -1875,7 +1922,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Set validTo to more than 24 hours in the future
         uint32 validTo = uint32(block.timestamp) + 25 hours; // 25 hours from now
-        uint256 buyAmount = 1000 * 10 ** 6;
+        uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -2175,7 +2222,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfMTokenRedeemFails() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -2202,7 +2249,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfWithdrawAllMTokenRedeemFails() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -2231,7 +2278,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfUpdatePositionMTokenRedeemFails() public {
         // First deposit funds
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -2257,7 +2304,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfMTokenMintFails() public {
         // Prepare for deposit
-        uint256 depositAmount = 1000 * 10 ** 6; // 1000 USDC (6 decimals)
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         // Mock the mint function to fail
@@ -2323,6 +2370,103 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Clear the mocks
         vm.clearMockedCalls();
+    }
+
+    /**
+     * @notice Test that WETH strategy can receive ETH and automatically wraps it
+     * @dev When ETH is sent to a WETH strategy, it should:
+     *      1. Accept the ETH transfer
+     *      2. Automatically wrap it to WETH
+     *      3. Increase the contract's WETH balance by the sent amount
+     */
+    function testReceiveETHAndWrap() public {
+        // Skip this test if not testing WETH strategy
+        if (keccak256(abi.encodePacked(assetConfig.token)) != keccak256(abi.encodePacked("WETH"))) {
+            vm.skip(true);
+        }
+
+        uint256 testEthAmount = 1 ether;
+        vm.deal(owner, testEthAmount);
+
+        // Record initial WETH balance
+        uint256 initialWethBalance = IERC20(WETH_ADDRESS).balanceOf(address(strategy));
+
+        // Send ETH to the strategy
+        vm.prank(owner);
+        (bool success,) = address(strategy).call{value: testEthAmount}("");
+        assertTrue(success, "ETH transfer should succeed");
+
+        // Verify WETH balance increased
+        uint256 finalWethBalance = IERC20(WETH_ADDRESS).balanceOf(address(strategy));
+        assertEq(
+            finalWethBalance - initialWethBalance,
+            testEthAmount,
+            "WETH balance should increase by the amount of ETH sent"
+        );
+
+        // Verify contract has no remaining ETH
+        assertEq(address(strategy).balance, 0, "Strategy should have zero ETH balance after wrapping");
+    }
+
+    /**
+     * @notice Test that owner can withdraw funds from the strategy, when the underlying token is WETH
+     */
+    function testOwnerCanWithdrawFundsWETH() public {
+        // Skip this test if not testing WETH strategy
+        if (keccak256(abi.encodePacked(assetConfig.token)) != keccak256(abi.encodePacked("WETH"))) {
+            vm.skip(true);
+        }
+
+        uint256 depositAmount = 10 ether;
+        deal(WETH_ADDRESS, owner, depositAmount);
+
+        vm.startPrank(owner);
+        IERC20(WETH_ADDRESS).approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+
+        assertEq(IERC20(WETH_ADDRESS).balanceOf(owner), 0, "Owner's WETH balance should be 0 after deposit");
+        uint256 strategyBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(strategyBalance, depositAmount, 1e15, "Strategy should have the deposited amount");
+
+        uint256 withdrawAmount = depositAmount / 2;
+        uint256 ethBalanceBefore = address(strategy).balance;
+        strategy.withdraw(withdrawAmount);
+        vm.stopPrank();
+
+        assertApproxEqAbs(
+            IERC20(WETH_ADDRESS).balanceOf(owner),
+            withdrawAmount,
+            1e15,
+            "Owner should have received the withdrawn amount in WETH"
+        );
+
+        // Verify no ETH is stuck in the contract (all ETH should be wrapped back to WETH)
+        uint256 ethBalanceAfter = address(strategy).balance;
+        assertEq(ethBalanceAfter, ethBalanceBefore, "Strategy should have no additional ETH after withdrawal");
+
+        // Verify the strategy's balance decreased
+        uint256 newStrategyBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(
+            newStrategyBalance,
+            strategyBalance - withdrawAmount,
+            1e15,
+            "Strategy balance should decrease by withdrawn amount"
+        );
+
+        // Verify the protocol balances reflect the withdrawal
+        uint256 expectedMTokenAmount = ((depositAmount - withdrawAmount) * splitMToken) / 10000;
+        uint256 expectedVaultAmount = ((depositAmount - withdrawAmount) * splitVault) / 10000;
+
+        // Verify mToken balance
+        uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
+        assertApproxEqAbs(
+            mTokenBalance, expectedMTokenAmount, 1e15, "mToken balance should be updated after withdrawal"
+        );
+
+        // Verify vault balance
+        uint256 vaultShares = metaMorphoVault.balanceOf(address(strategy));
+        uint256 vaultBalance = metaMorphoVault.convertToAssets(vaultShares);
+        assertApproxEqAbs(vaultBalance, expectedVaultAmount, 1e15, "Vault balance should be updated after withdrawal");
     }
 
     function parseUint(string memory json, string memory key) internal pure returns (uint256) {

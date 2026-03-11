@@ -34,7 +34,7 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     /**
      * @notice Allows the contract to receive ETH
      */
-    receive() external payable {}
+    receive() external payable virtual {}
 
     /**
      * @notice Recovers ERC20 tokens accidentally sent to this contract

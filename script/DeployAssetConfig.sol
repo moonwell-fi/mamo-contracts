@@ -22,6 +22,7 @@ contract DeployAssetConfig is Test {
         string token;
         string moonwellMarket;
         string metamorphoVault;
+        string strategyImplementation;
         StrategyParams strategyParams;
         RewardToken[] rewardTokens;
         MarketConfig[] markets;
@@ -142,6 +143,7 @@ contract DeployAssetConfig is Test {
             abi.decode(vm.parseJson(configData, ".strategyParams.compoundFee"), (uint256));
         config.strategyParams.strategyTypeId =
             abi.decode(vm.parseJson(configData, ".strategyParams.strategyTypeId"), (uint256));
+        config.strategyImplementation = abi.decode(vm.parseJson(configData, ".strategyImplementation"), (string));
 
         // Parse reward tokens array using parseRaw for better control
         if (configData.keyExists(".rewardTokens")) {

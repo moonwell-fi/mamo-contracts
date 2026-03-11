@@ -1,6 +1,7 @@
 .env
 .vscode
 *.local.md
+.DS_Store
 
 # Foundry files
 cache/
@@ -10,7 +11,7 @@ lcov.info
 node_modules/
 /broadcast
 
-# LLM's 
+# LLM's
 .roo/
 .claude/settings.local.json
 memory-bank/

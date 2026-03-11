@@ -9,6 +9,7 @@ import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {WETH9} from "@interfaces/IWETH.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -63,6 +64,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /// @notice The Merkle protocol distributor address for reward claims
     address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
+
+    /// @notice The address of the WETH token
+    address public constant WETH = 0x4200000000000000000000000000000000000006;
 
     // ==================== STORAGE LAYOUT ====================
     // Slots 0-49: BaseStrategy (mamoStrategyRegistry, strategyTypeId, __gap[48])
@@ -243,7 +247,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      */
     function withdraw(uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
-        require(_getTotalBalance() > amount, "Withdrawal amount exceeds available balance in strategy");
+        require(_getTotalBalance() >= amount, "Withdrawal amount exceeds available balance in strategy");
 
         uint256 tokenBalance = token.balanceOf(address(this));
 
@@ -614,5 +618,15 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         }
 
         return string(hexString);
+    }
+
+    /**
+     * @notice Allows the contract to receive ETH
+     * @dev In the case where token == WETH, wrap back to WETH (for WETH mToken redemption)
+     */
+    receive() external payable override {
+        if (msg.value > 0 && address(token) == WETH) {
+            WETH9(WETH).deposit{value: msg.value}();
+        }
     }
 }
