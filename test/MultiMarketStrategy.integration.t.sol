@@ -335,7 +335,8 @@ contract MultiMarketStrategyTest is Test {
         vm.prank(backend);
         marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
 
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 10000});
 
         vm.prank(backend);
@@ -371,7 +372,8 @@ contract MultiMarketStrategyTest is Test {
         marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
 
         // Rebalance to 100% Moonwell — withdrawAll should still drain inactive vault
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 10000});
 
         vm.prank(backend);
@@ -430,7 +432,8 @@ contract MultiMarketStrategyTest is Test {
         vm.stopPrank();
 
         // Rebalance to 50/50
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 5000});
         updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 5000});
 
@@ -457,7 +460,8 @@ contract MultiMarketStrategyTest is Test {
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 6000});
         updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 5000}); // 110% total
 
@@ -476,7 +480,8 @@ contract MultiMarketStrategyTest is Test {
         vm.stopPrank();
 
         address fakeMarket = makeAddr("fakeMarket");
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: fakeMarket, splitBps: 10000});
 
         vm.prank(backend);
@@ -498,7 +503,8 @@ contract MultiMarketStrategyTest is Test {
         marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
 
         // Try to allocate to the deactivated market
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 5000});
         updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 5000});
 
@@ -508,7 +514,8 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testRevertUpdatePositionNotBackend() public {
-        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates = new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
+        ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
+            new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
         updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 5000});
         updates[1] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 5000});
 

@@ -6,8 +6,8 @@ import {BaseTest} from "./BaseTest.t.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 
-import {Multicall} from "@contracts/Multicall.sol";
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
+import {Multicall} from "@contracts/Multicall.sol";
 
 import {console} from "@forge-std/console.sol";
 
