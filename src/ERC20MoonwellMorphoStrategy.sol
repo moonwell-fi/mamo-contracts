@@ -117,6 +117,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
     event RewardsClaimed(address[] rewardTokens, uint256[] rewardAmounts);
+    event MarketRegistryMigrated(address indexed marketRegistry);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -225,6 +226,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         }
 
         _validateTotalSplit();
+
+        emit MarketRegistryMigrated(_marketRegistry);
     }
 
     // ==================== OWNER FUNCTIONS ====================

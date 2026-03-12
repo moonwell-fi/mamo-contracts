@@ -541,6 +541,8 @@ contract MultiMarketStrategyTest is Test {
         assertEq(legacyStrategy.splitVault(), 3000, "splitVault should be 3000");
 
         // Now migrate to MarketRegistry
+        vm.expectEmit(true, false, false, false);
+        emit ERC20MoonwellMorphoStrategy.MarketRegistryMigrated(address(marketRegistry));
         vm.prank(backend);
         legacyStrategy.migrateV1ToMarketRegistry(address(marketRegistry));
 
