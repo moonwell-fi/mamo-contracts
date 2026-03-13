@@ -219,6 +219,7 @@ contract DeployMultiMarketSystem is MultisigProposal {
         if (hash == keccak256("MOONWELL") || hash == keccak256("MTOKEN")) {
             return MarketType.MTOKEN;
         }
+        require(hash == keccak256("ERC4626"), "Unknown market type");
         return MarketType.ERC4626;
     }
 

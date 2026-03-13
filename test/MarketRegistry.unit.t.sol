@@ -4,7 +4,10 @@ pragma solidity 0.8.28;
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 
 import {Test} from "@forge-std/Test.sol";
+
 import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract MarketRegistryTest is Test {
     MarketRegistry public registry;
@@ -114,8 +117,11 @@ contract MarketRegistryTest is Test {
     }
 
     function testRevertAddMarketNotBackend() public {
+        bytes32 backendRole = registry.BACKEND_ROLE();
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, backendRole)
+        );
         vm.prank(admin);
-        vm.expectRevert();
         registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
     }
 
@@ -164,8 +170,11 @@ contract MarketRegistryTest is Test {
         registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
         vm.stopPrank();
 
+        bytes32 backendRole = registry.BACKEND_ROLE();
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, backendRole)
+        );
         vm.prank(admin);
-        vm.expectRevert();
         registry.deactivateMarket(strategyTypeId, mToken);
     }
 
@@ -225,7 +234,7 @@ contract MarketRegistryTest is Test {
         registry.pause();
 
         vm.prank(backend);
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
     }
 
@@ -237,7 +246,7 @@ contract MarketRegistryTest is Test {
         registry.pause();
 
         vm.prank(backend);
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         registry.deactivateMarket(strategyTypeId, mToken);
     }
 
@@ -254,8 +263,11 @@ contract MarketRegistryTest is Test {
     }
 
     function testRevertPauseNotGuardian() public {
+        bytes32 guardianRole = registry.GUARDIAN_ROLE();
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, backend, guardianRole)
+        );
         vm.prank(backend);
-        vm.expectRevert();
         registry.pause();
     }
 
@@ -263,8 +275,11 @@ contract MarketRegistryTest is Test {
         vm.prank(guardian);
         registry.pause();
 
+        bytes32 guardianRole = registry.GUARDIAN_ROLE();
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, backend, guardianRole)
+        );
         vm.prank(backend);
-        vm.expectRevert();
         registry.unpause();
     }
 
