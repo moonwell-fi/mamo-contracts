@@ -1422,11 +1422,13 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.prank(admin);
         uint256 _strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
-        // Register markets for the new strategyTypeId
-        vm.startPrank(backend);
-        marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
+        // Register markets for the new strategyTypeId (skip if already registered from proposal)
+        if (marketRegistry.getMarketCount(_strategyTypeId) == 0) {
+            vm.startPrank(backend);
+            marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
+            vm.stopPrank();
+        }
 
         uint256[] memory defaultSplitBps = _buildDefaultSplitBps();
 
@@ -2091,11 +2093,13 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.prank(admin);
         uint256 _strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
 
-        // Register markets for the new strategyTypeId
-        vm.startPrank(backend);
-        marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
+        // Register markets for the new strategyTypeId (skip if already registered from proposal)
+        if (marketRegistry.getMarketCount(_strategyTypeId) == 0) {
+            vm.startPrank(backend);
+            marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
+            vm.stopPrank();
+        }
 
         // Create reward tokens array
         address[] memory rewardTokens = new address[](1);
