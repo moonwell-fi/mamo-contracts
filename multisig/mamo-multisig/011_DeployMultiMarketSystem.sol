@@ -16,8 +16,8 @@ import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
  * @title DeployMultiMarketSystem
  * @notice Multisig proposal to deploy the multi-market strategy system:
  *         MarketRegistry, new strategy implementation, and MultiMarketStrategyFactory.
- * @dev Parameterized by ASSET_CONFIG_PATH env var. Run once per asset to create
- *      a new strategy type with its own markets and factory.
+ * @dev Parameterized by ASSET_CONFIG_PATH env var. Run once per asset to upgrade
+ *      an existing strategy type with multi-market support.
  */
 contract DeployMultiMarketSystem is MultisigProposal {
     DeployAssetConfig public immutable deployAssetConfig;
@@ -65,14 +65,8 @@ contract DeployMultiMarketSystem is MultisigProposal {
         DeployAssetConfig.Config memory cfg = deployAssetConfig.getConfig();
         address deployer = addresses.getAddress("DEPLOYER_EOA");
 
-        MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-
-        // Find the next available strategy type ID
-        // nextStrategyTypeId may not be incremented if previous types were assigned explicitly
-        strategyTypeId = registry.nextStrategyTypeId();
-        while (registry.latestImplementationById(strategyTypeId) != address(0)) {
-            strategyTypeId++;
-        }
+        // Use the existing strategy type ID from config (upgrade, not new type)
+        strategyTypeId = cfg.strategyParams.strategyTypeId;
 
         vm.startBroadcast(deployer);
 
@@ -131,7 +125,8 @@ contract DeployMultiMarketSystem is MultisigProposal {
 
     function preBuildMock() public view override {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        assertEq(registry.latestImplementationById(strategyTypeId), address(0), "Type already has implementation");
+        // Existing type should already have an implementation (we're upgrading it)
+        assertTrue(registry.latestImplementationById(strategyTypeId) != address(0), "Type should already exist");
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -216,7 +211,7 @@ contract DeployMultiMarketSystem is MultisigProposal {
 
     function _parseMarketType(string memory typeStr) internal pure returns (MarketType) {
         bytes32 hash = keccak256(bytes(typeStr));
-        if (hash == keccak256("MOONWELL") || hash == keccak256("MTOKEN")) {
+        if (hash == keccak256("MTOKEN")) {
             return MarketType.MTOKEN;
         }
         require(hash == keccak256("ERC4626"), "Unknown market type");
