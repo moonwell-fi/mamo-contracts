@@ -2,10 +2,10 @@
 pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
-import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
+import {IMamoMultiMarketStrategy} from "@interfaces/IMamoMultiMarketStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
@@ -23,7 +23,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title MamoStakingStrategy
  * @notice A per-user staking strategy for MAMO tokens with automated reward claiming and processing
- * @dev This contract is designed to be used as an implementation for proxies, similar to ERC20MoonwellMorphoStrategy
+ * @dev This contract is designed to be used as an implementation for proxies, similar to MamoMultiMarketStrategy
  */
 contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using SafeERC20 for IERC20;
@@ -292,7 +292,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             require(mamoStrategyRegistry.isUserStrategy(owner(), strategyAddress), "Strategy not registered");
 
             // Validate strategy token - strategy must handle the same token as the reward token
-            IERC20MoonwellMorphoStrategy strategy = IERC20MoonwellMorphoStrategy(strategyAddress);
+            IMamoMultiMarketStrategy strategy = IMamoMultiMarketStrategy(strategyAddress);
             require(address(strategy.token()) == address(rewardToken), "Strategy token mismatch");
 
             // Approve strategy to spend reward tokens and deposit

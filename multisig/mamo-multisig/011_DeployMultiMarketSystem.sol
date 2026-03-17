@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
@@ -82,7 +82,7 @@ contract DeployMultiMarketSystem is MultisigProposal {
 
         // 2. Deploy new strategy implementation (one per asset/type)
         if (!addresses.isAddressSet(implKey)) {
-            address newImpl = address(new ERC20MoonwellMorphoStrategy());
+            address newImpl = address(new MamoMultiMarketStrategy());
             addresses.addAddress(implKey, newImpl, true);
         }
 

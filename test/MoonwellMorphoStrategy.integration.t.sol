@@ -7,7 +7,7 @@ import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
@@ -67,7 +67,7 @@ contract MoonwellMorphoStrategyTest is Test {
     Addresses public addresses;
 
     // Contracts
-    ERC20MoonwellMorphoStrategy public strategy;
+    MamoMultiMarketStrategy public strategy;
     MamoStrategyRegistry public registry;
     MarketRegistry public marketRegistry;
     ISlippagePriceChecker public slippagePriceChecker;
@@ -133,7 +133,7 @@ contract MoonwellMorphoStrategyTest is Test {
         MultiMarketStrategyFactory factory = MultiMarketStrategyFactory(addresses.getAddress(factoryKey));
 
         vm.prank(owner);
-        strategy = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(owner)));
+        strategy = MamoMultiMarketStrategy(payable(factory.createStrategyForUser(owner)));
 
         deltaThreshold = assetConfig.decimals == 18 ? 1e9 : 1e3;
 
@@ -144,8 +144,8 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256[] memory defaultSplitBps = _buildDefaultSplitBps();
 
         return abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
                 token: address(underlying),
@@ -173,19 +173,19 @@ contract MoonwellMorphoStrategyTest is Test {
     function _buildUpdatePositionArray(uint256 mTokenSplit, uint256 vaultSplit)
         private
         view
-        returns (ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory)
+        returns (MamoMultiMarketStrategy.MarketSplitUpdate[] memory)
     {
         if (vaultSplit > 0) {
-            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
-                new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](2);
-            updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
+            MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates =
+                new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+            updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
             updates[1] =
-                ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
+                MamoMultiMarketStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
             return updates;
         } else {
-            ERC20MoonwellMorphoStrategy.MarketSplitUpdate[] memory updates =
-                new ERC20MoonwellMorphoStrategy.MarketSplitUpdate[](1);
-            updates[0] = ERC20MoonwellMorphoStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
+            MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates =
+                new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
+            updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
             return updates;
         }
     }
@@ -734,7 +734,7 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify initial split via markets
-        ERC20MoonwellMorphoStrategy.Market[] memory marketsBefore = strategy.getMarkets();
+        MamoMultiMarketStrategy.Market[] memory marketsBefore = strategy.getMarkets();
         assertEq(marketsBefore[0].splitBps, splitMToken, "Initial mToken market split should match config");
 
         // Verify initial balances match the expected split
@@ -769,7 +769,7 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
 
         // Verify markets were updated
-        ERC20MoonwellMorphoStrategy.Market[] memory marketsAfter = strategy.getMarkets();
+        MamoMultiMarketStrategy.Market[] memory marketsAfter = strategy.getMarkets();
         assertEq(marketsAfter[0].splitBps, newSplitMToken, "mToken market split should be updated to 7000 (70%)");
         assertEq(marketsAfter[1].splitBps, newSplitVault, "Vault market split should be updated to 3000 (30%)");
 
@@ -1416,7 +1416,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfInvalidInitializationParameters() public {
         // Deploy a new implementation
-        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
 
         // Whitelist the implementation
         vm.prank(admin);
@@ -1434,8 +1434,8 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Test with invalid mamoStrategyRegistry
         bytes memory invalidRegistryData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(0), // Invalid address
                 mamoBackend: backend,
                 token: address(underlying),
@@ -1462,8 +1462,8 @@ contract MoonwellMorphoStrategyTest is Test {
         badSplits[1] = 3000;
 
         bytes memory invalidSplitData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
                 token: address(underlying),
@@ -1486,8 +1486,8 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Test with invalid hook gas limit
         bytes memory invalidHookGasData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
                 token: address(underlying),
@@ -1818,7 +1818,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
-        ERC20MoonwellMorphoStrategy newImplementation = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy();
 
         // Create an unauthorized address
         address unauthorizedAddress = makeAddr("unauthorized");
@@ -2087,7 +2087,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testInitializeWithRewardTokens() public {
         // Deploy a new implementation for testing initialization
-        ERC20MoonwellMorphoStrategy newImpl = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy();
 
         // Whitelist the implementation
         vm.prank(admin);
@@ -2114,8 +2114,8 @@ contract MoonwellMorphoStrategyTest is Test {
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(newImpl),
             abi.encodeWithSelector(
-                ERC20MoonwellMorphoStrategy.initialize.selector,
-                ERC20MoonwellMorphoStrategy.InitParams({
+                MamoMultiMarketStrategy.initialize.selector,
+                MamoMultiMarketStrategy.InitParams({
                     mamoStrategyRegistry: address(registry),
                     mamoBackend: backend,
                     token: address(underlying),
@@ -2133,7 +2133,7 @@ contract MoonwellMorphoStrategyTest is Test {
             )
         );
 
-        ERC20MoonwellMorphoStrategy strategyWithRewards = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
+        MamoMultiMarketStrategy strategyWithRewards = MamoMultiMarketStrategy(payable(address(proxy)));
 
         // Verify the strategy was initialized properly
         assertEq(strategyWithRewards.owner(), owner);

@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
@@ -40,7 +40,7 @@ contract MultiMarketStrategyFactoryTest is Test {
     DeployConfig.DeploymentConfig public config;
     DeployAssetConfig.Config public assetConfig;
     uint256 public strategyTypeId;
-    ERC20MoonwellMorphoStrategy public implementation;
+    MamoMultiMarketStrategy public implementation;
 
     function setUp() public {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
@@ -81,7 +81,7 @@ contract MultiMarketStrategyFactoryTest is Test {
         registry = new MamoStrategyRegistry(admin, backend, guardian);
         marketRegistry = new MarketRegistry(admin, backend, guardian);
 
-        implementation = new ERC20MoonwellMorphoStrategy();
+        implementation = new MamoMultiMarketStrategy();
 
         vm.prank(admin);
         strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
@@ -143,8 +143,8 @@ contract MultiMarketStrategyFactoryTest is Test {
         vm.prank(user);
         address strategyAddr = factory.createStrategyForUser(user);
 
-        ERC20MoonwellMorphoStrategy factoryStrategy = ERC20MoonwellMorphoStrategy(payable(strategyAddr));
-        ERC20MoonwellMorphoStrategy.Market[] memory markets = factoryStrategy.getMarkets();
+        MamoMultiMarketStrategy factoryStrategy = MamoMultiMarketStrategy(payable(strategyAddr));
+        MamoMultiMarketStrategy.Market[] memory markets = factoryStrategy.getMarkets();
         assertEq(markets.length, 2, "Factory should create strategy with 2 markets");
         assertEq(markets[0].splitBps, 6000, "Market 0 split should be 6000");
         assertEq(markets[1].splitBps, 4000, "Market 1 split should be 4000");

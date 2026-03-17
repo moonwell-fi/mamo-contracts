@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {ERC1967Proxy} from "./ERC1967Proxy.sol";
-import {ERC20MoonwellMorphoStrategy} from "./ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "./MamoMultiMarketStrategy.sol";
 
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
 import {IMarketRegistry} from "./interfaces/IMarketRegistry.sol";
@@ -10,7 +10,7 @@ import {IMarketRegistry} from "./interfaces/IMarketRegistry.sol";
 /**
  * @title MultiMarketStrategyFactory
  * @notice Factory contract for creating new multi-market strategy instances
- * @dev Creates proxies pointing to the ERC20MoonwellMorphoStrategy implementation.
+ * @dev Creates proxies pointing to the MamoMultiMarketStrategy implementation.
  *      Reads market definitions from MarketRegistry, stores default split allocations.
  */
 contract MultiMarketStrategyFactory {
@@ -107,8 +107,8 @@ contract MultiMarketStrategyFactory {
         ERC1967Proxy proxy = new ERC1967Proxy(strategyImplementation, "");
         strategy = address(proxy);
 
-        ERC20MoonwellMorphoStrategy(payable(strategy)).initialize(
-            ERC20MoonwellMorphoStrategy.InitParams({
+        MamoMultiMarketStrategy(payable(strategy)).initialize(
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
                 token: token,

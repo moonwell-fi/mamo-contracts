@@ -4,10 +4,10 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title IERC20MoonwellMorphoStrategy
- * @notice Interface for the ERC20MoonwellMorphoStrategy contract
+ * @title IMamoMultiMarketStrategy
+ * @notice Interface for the MamoMultiMarketStrategy contract
  */
-interface IERC20MoonwellMorphoStrategy {
+interface IMamoMultiMarketStrategy {
     /**
      * @notice Gets the underlying token of the strategy
      * @return The underlying ERC20 token

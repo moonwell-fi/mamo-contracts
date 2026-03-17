@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -18,9 +18,9 @@ contract ERC20StrategyV2Test is BaseTest {
     address public backend;
     ERC1967Proxy public usdcStrategyProxy;
     ERC1967Proxy public cbbtcStrategyProxy;
-    ERC20MoonwellMorphoStrategy public usdcStrategy;
-    ERC20MoonwellMorphoStrategy public cbbtcStrategy;
-    ERC20MoonwellMorphoStrategy public newImplementation;
+    MamoMultiMarketStrategy public usdcStrategy;
+    MamoMultiMarketStrategy public cbbtcStrategy;
+    MamoMultiMarketStrategy public newImplementation;
     MamoStrategyRegistry public registry;
 
     uint256 public constant STRATEGY_TYPE_ID = 1;
@@ -44,8 +44,8 @@ contract ERC20StrategyV2Test is BaseTest {
         vm.startPrank(owner);
         usdcStrategyProxy = ERC1967Proxy(payable(usdcFactory.createStrategyForUser(owner)));
         cbbtcStrategyProxy = ERC1967Proxy(payable(cbbtcFactory.createStrategyForUser(owner)));
-        usdcStrategy = ERC20MoonwellMorphoStrategy(payable(address(usdcStrategyProxy)));
-        cbbtcStrategy = ERC20MoonwellMorphoStrategy(payable(address(cbbtcStrategyProxy)));
+        usdcStrategy = MamoMultiMarketStrategy(payable(address(usdcStrategyProxy)));
+        cbbtcStrategy = MamoMultiMarketStrategy(payable(address(cbbtcStrategyProxy)));
         vm.stopPrank();
 
         vm.warp(block.timestamp + 1 minutes);
@@ -62,7 +62,7 @@ contract ERC20StrategyV2Test is BaseTest {
         // Deploy new implementation and whitelist it (inlined from old 009 multisig script)
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         vm.startPrank(deployer);
-        newImplementation = new ERC20MoonwellMorphoStrategy();
+        newImplementation = new MamoMultiMarketStrategy();
         vm.stopPrank();
 
         address multisig = addresses.getAddress("MAMO_MULTISIG");
@@ -104,7 +104,7 @@ contract ERC20StrategyV2Test is BaseTest {
 
         vm.expectCall(merkleDistributor, abi.encodeWithSignature("claim(address[],address[],uint256[],bytes32[][])"));
         vm.expectEmit(true, true, true, true);
-        emit ERC20MoonwellMorphoStrategy.RewardsClaimed(rewardTokens, rewardAmounts);
+        emit MamoMultiMarketStrategy.RewardsClaimed(rewardTokens, rewardAmounts);
 
         vm.startPrank(backend);
         usdcStrategy.claimRewards(rewardTokens, rewardAmounts, proofs);

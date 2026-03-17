@@ -28,14 +28,14 @@ interface IMerkleDistributor {
 }
 
 /**
- * @title ERC20MoonwellMorphoStrategy
+ * @title MamoMultiMarketStrategy
  * @notice A strategy contract for ERC20 tokens that splits deposits across N Moonwell markets and M ERC4626 vaults
  * @notice IMPORTANT: This contract does not support fee-on-transfer tokens. Using such tokens will result in
  *         unexpected behavior and potential loss of funds.
  * @dev This contract is designed to be used as an implementation for proxies.
  *      Market definitions are read from MarketRegistry. Per-market splits are stored locally keyed by address.
  */
-contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
+contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
 
