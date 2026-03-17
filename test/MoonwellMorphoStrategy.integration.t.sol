@@ -101,8 +101,12 @@ contract MoonwellMorphoStrategyTest is Test {
 
         // Get addresses and config from proposal
         addresses = proposal.addresses();
-        assetConfig = proposal.deployAssetConfig().getConfig();
-        strategyTypeId = proposal.strategyTypeId();
+        string memory assetConfigPath =
+            vm.envOr("ASSET_CONFIG_PATH", string("config/strategies/USDCStrategyConfig.json"));
+        DeployAssetConfig assetCfg = new DeployAssetConfig(assetConfigPath);
+        assetConfig = assetCfg.getConfig();
+        uint256 assetIndex = proposal.findAssetIndex(assetConfig.token);
+        strategyTypeId = proposal.getAssetKeys(assetIndex).strategyTypeId;
 
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
@@ -1422,11 +1426,11 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.prank(admin);
         uint256 _strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
-        // Register markets for the new strategyTypeId (skip if already registered from proposal)
-        if (marketRegistry.getMarketCount(_strategyTypeId) == 0) {
+        // Register markets for the new type (skip if already registered from proposal)
+        if (marketRegistry.getMarketCount(address(underlying)) == 0) {
             vm.startPrank(backend);
-            marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
-            marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
+            marketRegistry.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(address(underlying), address(metaMorphoVault), MarketType.ERC4626);
             vm.stopPrank();
         }
 
@@ -2093,11 +2097,11 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.prank(admin);
         uint256 _strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
 
-        // Register markets for the new strategyTypeId (skip if already registered from proposal)
-        if (marketRegistry.getMarketCount(_strategyTypeId) == 0) {
+        // Register markets for the new type (skip if already registered from proposal)
+        if (marketRegistry.getMarketCount(address(underlying)) == 0) {
             vm.startPrank(backend);
-            marketRegistry.addMarket(_strategyTypeId, address(mToken), MarketType.MTOKEN);
-            marketRegistry.addMarket(_strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
+            marketRegistry.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(address(underlying), address(metaMorphoVault), MarketType.ERC4626);
             vm.stopPrank();
         }
 

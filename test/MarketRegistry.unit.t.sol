@@ -18,10 +18,10 @@ contract MarketRegistryTest is Test {
 
     address public mToken = makeAddr("mToken");
     address public vault = makeAddr("vault");
-    uint256 public strategyTypeId = 1;
+    address public asset = makeAddr("asset");
 
-    event MarketAdded(uint256 indexed strategyTypeId, address indexed target, MarketType marketType);
-    event MarketDeactivated(uint256 indexed strategyTypeId, address indexed target);
+    event MarketAdded(address indexed asset, address indexed target, MarketType marketType);
+    event MarketDeactivated(address indexed asset, address indexed target);
 
     function setUp() public {
         admin = makeAddr("admin");
@@ -59,12 +59,12 @@ contract MarketRegistryTest is Test {
     function testAddMarket() public {
         vm.prank(backend);
         vm.expectEmit(true, true, false, true);
-        emit MarketAdded(strategyTypeId, mToken, MarketType.MTOKEN);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        emit MarketAdded(asset, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
 
-        assertEq(registry.getMarketCount(strategyTypeId), 1);
+        assertEq(registry.getMarketCount(asset), 1);
 
-        RegistryMarket memory market = registry.getMarket(strategyTypeId, mToken);
+        RegistryMarket memory market = registry.getMarket(asset, mToken);
         assertEq(market.target, mToken);
         assertEq(uint256(market.marketType), uint256(MarketType.MTOKEN));
         assertTrue(market.active);
@@ -72,13 +72,13 @@ contract MarketRegistryTest is Test {
 
     function testAddMultipleMarkets() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
-        registry.addMarket(strategyTypeId, vault, MarketType.ERC4626);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, vault, MarketType.ERC4626);
         vm.stopPrank();
 
-        assertEq(registry.getMarketCount(strategyTypeId), 2);
+        assertEq(registry.getMarketCount(asset), 2);
 
-        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory markets = registry.getMarkets(asset);
         assertEq(markets.length, 2);
         assertEq(markets[0].target, mToken);
         assertEq(markets[1].target, vault);
@@ -86,34 +86,34 @@ contract MarketRegistryTest is Test {
 
     function testRevertAddMarketDuplicate() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
 
         vm.expectRevert("Market already registered");
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
         vm.stopPrank();
     }
 
     function testRevertAddMarketTooMany() public {
         vm.startPrank(backend);
         for (uint256 i = 0; i < 10; i++) {
-            registry.addMarket(strategyTypeId, address(uint160(100 + i)), MarketType.MTOKEN);
+            registry.addMarket(asset, address(uint160(100 + i)), MarketType.MTOKEN);
         }
 
         vm.expectRevert("Too many markets");
-        registry.addMarket(strategyTypeId, makeAddr("extra"), MarketType.MTOKEN);
+        registry.addMarket(asset, makeAddr("extra"), MarketType.MTOKEN);
         vm.stopPrank();
     }
 
     function testRevertAddMarketZeroTarget() public {
         vm.prank(backend);
         vm.expectRevert("Invalid market target");
-        registry.addMarket(strategyTypeId, address(0), MarketType.MTOKEN);
+        registry.addMarket(asset, address(0), MarketType.MTOKEN);
     }
 
-    function testRevertAddMarketZeroStrategyTypeId() public {
+    function testRevertAddMarketZeroAsset() public {
         vm.prank(backend);
-        vm.expectRevert("Invalid strategy type id");
-        registry.addMarket(0, mToken, MarketType.MTOKEN);
+        vm.expectRevert("Invalid asset address");
+        registry.addMarket(address(0), mToken, MarketType.MTOKEN);
     }
 
     function testRevertAddMarketNotBackend() public {
@@ -122,52 +122,55 @@ contract MarketRegistryTest is Test {
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, backendRole)
         );
         vm.prank(admin);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
     }
 
-    function testAddMarketDifferentStrategyTypes() public {
+    function testAddMarketDifferentAssets() public {
+        address assetA = makeAddr("assetA");
+        address assetB = makeAddr("assetB");
+
         vm.startPrank(backend);
-        registry.addMarket(1, mToken, MarketType.MTOKEN);
-        registry.addMarket(2, mToken, MarketType.MTOKEN);
+        registry.addMarket(assetA, mToken, MarketType.MTOKEN);
+        registry.addMarket(assetB, mToken, MarketType.MTOKEN);
         vm.stopPrank();
 
-        assertEq(registry.getMarketCount(1), 1);
-        assertEq(registry.getMarketCount(2), 1);
+        assertEq(registry.getMarketCount(assetA), 1);
+        assertEq(registry.getMarketCount(assetB), 1);
     }
 
     // ==================== DEACTIVATE MARKET TESTS ====================
 
     function testDeactivateMarket() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
 
         vm.expectEmit(true, true, false, true);
-        emit MarketDeactivated(strategyTypeId, mToken);
-        registry.deactivateMarket(strategyTypeId, mToken);
+        emit MarketDeactivated(asset, mToken);
+        registry.deactivateMarket(asset, mToken);
         vm.stopPrank();
 
-        assertFalse(registry.isMarketActive(strategyTypeId, mToken));
+        assertFalse(registry.isMarketActive(asset, mToken));
     }
 
     function testRevertDeactivateMarketNotRegistered() public {
         vm.prank(backend);
         vm.expectRevert("Market not registered");
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.deactivateMarket(asset, mToken);
     }
 
     function testRevertDeactivateMarketAlreadyInactive() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.deactivateMarket(asset, mToken);
 
         vm.expectRevert("Market already inactive");
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.deactivateMarket(asset, mToken);
         vm.stopPrank();
     }
 
     function testRevertDeactivateMarketNotBackend() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
         vm.stopPrank();
 
         bytes32 backendRole = registry.BACKEND_ROLE();
@@ -175,39 +178,39 @@ contract MarketRegistryTest is Test {
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, backendRole)
         );
         vm.prank(admin);
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.deactivateMarket(asset, mToken);
     }
 
     function testDeactivateDoesNotAffectOtherMarkets() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
-        registry.addMarket(strategyTypeId, vault, MarketType.ERC4626);
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, vault, MarketType.ERC4626);
+        registry.deactivateMarket(asset, mToken);
         vm.stopPrank();
 
-        assertFalse(registry.isMarketActive(strategyTypeId, mToken));
-        assertTrue(registry.isMarketActive(strategyTypeId, vault));
+        assertFalse(registry.isMarketActive(asset, mToken));
+        assertTrue(registry.isMarketActive(asset, vault));
     }
 
     // ==================== VIEW FUNCTION TESTS ====================
 
     function testGetMarketsEmpty() public view {
-        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory markets = registry.getMarkets(asset);
         assertEq(markets.length, 0);
     }
 
     function testGetMarketCountEmpty() public view {
-        assertEq(registry.getMarketCount(strategyTypeId), 0);
+        assertEq(registry.getMarketCount(asset), 0);
     }
 
     function testRevertIsMarketActiveNotRegistered() public {
         vm.expectRevert("Market not registered");
-        registry.isMarketActive(strategyTypeId, mToken);
+        registry.isMarketActive(asset, mToken);
     }
 
     function testRevertGetMarketNotRegistered() public {
         vm.expectRevert("Market not registered");
-        registry.getMarket(strategyTypeId, mToken);
+        registry.getMarket(asset, mToken);
     }
 
     function testGetMarketsPreservesOrder() public {
@@ -216,12 +219,12 @@ contract MarketRegistryTest is Test {
         address market3 = makeAddr("market3");
 
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, market1, MarketType.MTOKEN);
-        registry.addMarket(strategyTypeId, market2, MarketType.ERC4626);
-        registry.addMarket(strategyTypeId, market3, MarketType.MTOKEN);
+        registry.addMarket(asset, market1, MarketType.MTOKEN);
+        registry.addMarket(asset, market2, MarketType.ERC4626);
+        registry.addMarket(asset, market3, MarketType.MTOKEN);
         vm.stopPrank();
 
-        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory markets = registry.getMarkets(asset);
         assertEq(markets[0].target, market1);
         assertEq(markets[1].target, market2);
         assertEq(markets[2].target, market3);
@@ -235,19 +238,19 @@ contract MarketRegistryTest is Test {
 
         vm.prank(backend);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
     }
 
     function testPauseBlocksDeactivateMarket() public {
         vm.prank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
 
         vm.prank(guardian);
         registry.pause();
 
         vm.prank(backend);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.deactivateMarket(asset, mToken);
     }
 
     function testUnpauseRestoresOperations() public {
@@ -258,8 +261,8 @@ contract MarketRegistryTest is Test {
         registry.unpause();
 
         vm.prank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
-        assertEq(registry.getMarketCount(strategyTypeId), 1);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        assertEq(registry.getMarketCount(asset), 1);
     }
 
     function testRevertPauseNotGuardian() public {
@@ -285,41 +288,41 @@ contract MarketRegistryTest is Test {
 
     function testViewFunctionsWorkWhilePaused() public {
         vm.prank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
 
         vm.prank(guardian);
         registry.pause();
 
         // View functions should still work
-        assertEq(registry.getMarketCount(strategyTypeId), 1);
-        assertTrue(registry.isMarketActive(strategyTypeId, mToken));
-        registry.getMarkets(strategyTypeId);
-        registry.getMarket(strategyTypeId, mToken);
+        assertEq(registry.getMarketCount(asset), 1);
+        assertTrue(registry.isMarketActive(asset, mToken));
+        registry.getMarkets(asset);
+        registry.getMarket(asset, mToken);
     }
 
     // ==================== EDGE CASE TESTS ====================
 
     function testZeroMarketsReturnsEmptyArray() public view {
-        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory markets = registry.getMarkets(asset);
         assertEq(markets.length, 0);
-        assertEq(registry.getMarketCount(strategyTypeId), 0);
+        assertEq(registry.getMarketCount(asset), 0);
     }
 
     function testAllMarketsDeactivated() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
-        registry.addMarket(strategyTypeId, vault, MarketType.ERC4626);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, vault, MarketType.ERC4626);
 
-        registry.deactivateMarket(strategyTypeId, mToken);
-        registry.deactivateMarket(strategyTypeId, vault);
+        registry.deactivateMarket(asset, mToken);
+        registry.deactivateMarket(asset, vault);
         vm.stopPrank();
 
         // Count stays the same (append-only), but both are inactive
-        assertEq(registry.getMarketCount(strategyTypeId), 2);
-        assertFalse(registry.isMarketActive(strategyTypeId, mToken));
-        assertFalse(registry.isMarketActive(strategyTypeId, vault));
+        assertEq(registry.getMarketCount(asset), 2);
+        assertFalse(registry.isMarketActive(asset, mToken));
+        assertFalse(registry.isMarketActive(asset, vault));
 
-        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory markets = registry.getMarkets(asset);
         assertFalse(markets[0].active);
         assertFalse(markets[1].active);
     }
@@ -327,57 +330,56 @@ contract MarketRegistryTest is Test {
     function testMaxMarketsGas() public {
         vm.startPrank(backend);
         for (uint256 i = 0; i < 10; i++) {
-            registry.addMarket(strategyTypeId, address(uint160(100 + i)), MarketType.MTOKEN);
+            registry.addMarket(asset, address(uint160(100 + i)), MarketType.MTOKEN);
         }
         vm.stopPrank();
 
         // Verify all 10 markets are accessible
-        RegistryMarket[] memory markets = registry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory markets = registry.getMarkets(asset);
         assertEq(markets.length, 10);
 
         // Verify getMarketCount
-        assertEq(registry.getMarketCount(strategyTypeId), 10);
+        assertEq(registry.getMarketCount(asset), 10);
     }
 
     function testInvalidEnumValueRevertsAtAbiLevel() public {
         // Solidity 0.8+ validates enum values at ABI decoding level
         // Passing an out-of-range uint (e.g. 2 for a 2-variant enum) reverts automatically
         vm.prank(backend);
-        (bool success,) = address(registry).call(
-            abi.encodeWithSelector(MarketRegistry.addMarket.selector, strategyTypeId, mToken, uint8(99))
-        );
+        (bool success,) =
+            address(registry).call(abi.encodeWithSelector(MarketRegistry.addMarket.selector, asset, mToken, uint8(99)));
         assertFalse(success, "Should revert for invalid enum value");
     }
 
     function testDeactivateAndQueryMarketState() public {
         vm.startPrank(backend);
-        registry.addMarket(strategyTypeId, mToken, MarketType.MTOKEN);
-        registry.deactivateMarket(strategyTypeId, mToken);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.deactivateMarket(asset, mToken);
         vm.stopPrank();
 
         // getMarket should still return the market (it exists, just inactive)
-        RegistryMarket memory market = registry.getMarket(strategyTypeId, mToken);
+        RegistryMarket memory market = registry.getMarket(asset, mToken);
         assertEq(market.target, mToken);
         assertFalse(market.active);
     }
 
-    function testMultipleStrategyTypesIndependent() public {
-        uint256 typeA = 1;
-        uint256 typeB = 2;
+    function testMultipleAssetsIndependent() public {
+        address assetA = makeAddr("assetA");
+        address assetB = makeAddr("assetB");
 
         vm.startPrank(backend);
-        registry.addMarket(typeA, mToken, MarketType.MTOKEN);
-        registry.addMarket(typeB, vault, MarketType.ERC4626);
+        registry.addMarket(assetA, mToken, MarketType.MTOKEN);
+        registry.addMarket(assetB, vault, MarketType.ERC4626);
 
-        // Deactivating in typeA doesn't affect typeB
-        registry.deactivateMarket(typeA, mToken);
+        // Deactivating in assetA doesn't affect assetB
+        registry.deactivateMarket(assetA, mToken);
         vm.stopPrank();
 
-        assertFalse(registry.isMarketActive(typeA, mToken));
-        assertTrue(registry.isMarketActive(typeB, vault));
+        assertFalse(registry.isMarketActive(assetA, mToken));
+        assertTrue(registry.isMarketActive(assetB, vault));
 
-        // typeB still has 1 market, typeA still has 1 (just inactive)
-        assertEq(registry.getMarketCount(typeA), 1);
-        assertEq(registry.getMarketCount(typeB), 1);
+        // assetB still has 1 market, assetA still has 1 (just inactive)
+        assertEq(registry.getMarketCount(assetA), 1);
+        assertEq(registry.getMarketCount(assetB), 1);
     }
 }

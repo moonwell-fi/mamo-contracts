@@ -14,31 +14,53 @@ import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 /**
  * @title DeployMultiMarketSystem
- * @notice Multisig proposal to deploy the multi-market strategy system:
- *         MarketRegistry, new strategy implementation, and MultiMarketStrategyFactory.
- * @dev Parameterized by ASSET_CONFIG_PATH env var. Run once per asset to upgrade
- *      an existing strategy type with multi-market support.
+ * @notice Multisig proposal to deploy the multi-market strategy system for all assets:
+ *         MarketRegistry, new strategy implementations, and MultiMarketStrategyFactories
+ *         for USDC, cbBTC, and WETH. Revokes BACKEND_ROLE from all old factories.
  */
 contract DeployMultiMarketSystem is MultisigProposal {
-    DeployAssetConfig public immutable deployAssetConfig;
+    string[] internal CONFIG_PATHS;
 
-    uint256 public strategyTypeId;
-    string public implKey;
-    string public factoryKey;
+    DeployAssetConfig[] public deployAssetConfigs;
+
+    struct AssetKeys {
+        string implKey;
+        string factoryKey;
+        string oldFactoryKey;
+        uint256 strategyTypeId;
+    }
+
+    AssetKeys[] public assetKeys;
 
     constructor() {
-        string memory configPath =
-            vm.envOr("ASSET_CONFIG_PATH", string("config/strategies/USDCStrategyConfig.json"));
-        deployAssetConfig = new DeployAssetConfig(configPath);
-        vm.makePersistent(address(deployAssetConfig));
+        CONFIG_PATHS.push("config/strategies/USDCStrategyConfig.json");
+        CONFIG_PATHS.push("config/strategies/cbBTCStrategyConfig.json");
+        CONFIG_PATHS.push("config/strategies/WETHStrategyConfig.json");
+
+        for (uint256 i = 0; i < CONFIG_PATHS.length; i++) {
+            DeployAssetConfig cfg = new DeployAssetConfig(CONFIG_PATHS[i]);
+            vm.makePersistent(address(cfg));
+            deployAssetConfigs.push(cfg);
+        }
     }
 
     function run() public override {
         _initializeAddresses();
 
-        DeployAssetConfig.Config memory cfg = deployAssetConfig.getConfig();
-        implKey = string(abi.encodePacked(cfg.token, "_MULTI_MARKET_IMPL"));
-        factoryKey = string(abi.encodePacked(cfg.token, "_MULTI_MARKET_STRATEGY_FACTORY"));
+        // Build asset keys for each config
+        for (uint256 i = 0; i < deployAssetConfigs.length; i++) {
+            DeployAssetConfig.Config memory cfg = deployAssetConfigs[i].getConfig();
+            assetKeys.push(
+                AssetKeys({
+                    implKey: string(
+                        abi.encodePacked("STRATEGY_TYPE_", vm.toString(cfg.strategyParams.strategyTypeId), "_IMPL")
+                    ),
+                    factoryKey: string(abi.encodePacked(cfg.token, "_MULTI_MARKET_STRATEGY_FACTORY")),
+                    oldFactoryKey: string(abi.encodePacked(cfg.token, "_STRATEGY_FACTORY")),
+                    strategyTypeId: cfg.strategyParams.strategyTypeId
+                })
+            );
+        }
 
         if (DO_DEPLOY) {
             deploy();
@@ -58,15 +80,36 @@ contract DeployMultiMarketSystem is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Deploy multi-market strategy system: MarketRegistry, implementation, and factory";
+        return "Deploy multi-market strategy system for USDC, cbBTC, and WETH";
+    }
+
+    /// @notice Returns the config and keys for a given asset index
+    function getAssetConfig(uint256 index) public view returns (DeployAssetConfig.Config memory) {
+        return deployAssetConfigs[index].getConfig();
+    }
+
+    /// @notice Returns the asset keys for a given index
+    function getAssetKeys(uint256 index) public view returns (AssetKeys memory) {
+        return assetKeys[index];
+    }
+
+    /// @notice Returns total number of assets
+    function assetCount() public view returns (uint256) {
+        return deployAssetConfigs.length;
+    }
+
+    /// @notice Find asset index by token key (e.g. "USDC", "cbBTC", "WETH")
+    function findAssetIndex(string memory tokenKey) public view returns (uint256) {
+        for (uint256 i = 0; i < deployAssetConfigs.length; i++) {
+            if (keccak256(bytes(deployAssetConfigs[i].getConfig().token)) == keccak256(bytes(tokenKey))) {
+                return i;
+            }
+        }
+        revert(string(abi.encodePacked("Asset not found: ", tokenKey)));
     }
 
     function deploy() public override {
-        DeployAssetConfig.Config memory cfg = deployAssetConfig.getConfig();
         address deployer = addresses.getAddress("DEPLOYER_EOA");
-
-        // Use the existing strategy type ID from config (upgrade, not new type)
-        strategyTypeId = cfg.strategyParams.strategyTypeId;
 
         vm.startBroadcast(deployer);
 
@@ -80,22 +123,31 @@ contract DeployMultiMarketSystem is MultisigProposal {
             addresses.addAddress("MARKET_REGISTRY", address(marketReg), true);
         }
 
-        // 2. Deploy new strategy implementation (one per asset/type)
-        if (!addresses.isAddressSet(implKey)) {
-            address newImpl = address(new MamoMultiMarketStrategy());
-            addresses.addAddress(implKey, newImpl, true);
+        // 2. Deploy implementation and factory for each asset
+        for (uint256 i = 0; i < deployAssetConfigs.length; i++) {
+            _deployAsset(deployAssetConfigs[i].getConfig(), assetKeys[i]);
         }
 
-        // 3. Deploy MultiMarketStrategyFactory
-        address impl = addresses.getAddress(implKey);
+        vm.stopBroadcast();
+    }
+
+    function _deployAsset(DeployAssetConfig.Config memory cfg, AssetKeys memory keys) internal {
+        // Deploy new strategy implementation (one per asset/type)
+        if (!addresses.isAddressSet(keys.implKey)) {
+            address newImpl = address(new MamoMultiMarketStrategy());
+            addresses.addAddress(keys.implKey, newImpl, true);
+        }
+
+        // Deploy MultiMarketStrategyFactory
+        address impl = addresses.getAddress(keys.implKey);
         address[] memory rewardTokens = new address[](cfg.rewardTokens.length);
-        for (uint256 i = 0; i < cfg.rewardTokens.length; i++) {
-            rewardTokens[i] = addresses.getAddress(cfg.rewardTokens[i].token);
+        for (uint256 j = 0; j < cfg.rewardTokens.length; j++) {
+            rewardTokens[j] = addresses.getAddress(cfg.rewardTokens[j].token);
         }
 
         uint256[] memory defaultSplitBps = new uint256[](cfg.markets.length);
-        for (uint256 i = 0; i < cfg.markets.length; i++) {
-            defaultSplitBps[i] = cfg.markets[i].splitBps;
+        for (uint256 j = 0; j < cfg.markets.length; j++) {
+            defaultSplitBps[j] = cfg.markets[j].splitBps;
         }
 
         MultiMarketStrategyFactory factory = new MultiMarketStrategyFactory(
@@ -106,7 +158,7 @@ contract DeployMultiMarketSystem is MultisigProposal {
             impl,
             addresses.getAddress("MAMO_MULTISIG"),
             addresses.getAddress("MARKET_REGISTRY"),
-            strategyTypeId,
+            keys.strategyTypeId,
             cfg.strategyParams.hookGasLimit,
             cfg.strategyParams.allowedSlippageInBps,
             cfg.strategyParams.compoundFee,
@@ -114,59 +166,75 @@ contract DeployMultiMarketSystem is MultisigProposal {
             defaultSplitBps
         );
 
-        if (addresses.isAddressSet(factoryKey)) {
-            addresses.changeAddress(factoryKey, address(factory), true);
+        if (addresses.isAddressSet(keys.factoryKey)) {
+            addresses.changeAddress(keys.factoryKey, address(factory), true);
         } else {
-            addresses.addAddress(factoryKey, address(factory), true);
+            addresses.addAddress(keys.factoryKey, address(factory), true);
         }
-
-        vm.stopBroadcast();
     }
 
     function preBuildMock() public view override {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        // Existing type should already have an implementation (we're upgrading it)
-        assertTrue(registry.latestImplementationById(strategyTypeId) != address(0), "Type should already exist");
+        for (uint256 i = 0; i < assetKeys.length; i++) {
+            assertTrue(
+                registry.latestImplementationById(assetKeys[i].strategyTypeId) != address(0),
+                "Type should already exist"
+            );
+        }
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         MarketRegistry marketReg = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
-        DeployAssetConfig.Config memory cfg = deployAssetConfig.getConfig();
 
-        address impl = addresses.getAddress(implKey);
-
-        // 1. Whitelist implementation on MamoStrategyRegistry
-        registry.whitelistImplementation(impl, strategyTypeId);
-
-        // 2. Register markets in MarketRegistry
-        //    Multisig is admin on MarketRegistry, grant itself BACKEND_ROLE temporarily
+        // Grant multisig BACKEND_ROLE on MarketRegistry temporarily for market registration
         marketReg.grantRole(marketReg.BACKEND_ROLE(), addresses.getAddress("MAMO_MULTISIG"));
 
-        for (uint256 i = 0; i < cfg.markets.length; i++) {
-            MarketType mType = _parseMarketType(cfg.markets[i].marketType);
-            marketReg.addMarket(strategyTypeId, addresses.getAddress(cfg.markets[i].target), mType);
+        for (uint256 i = 0; i < deployAssetConfigs.length; i++) {
+            DeployAssetConfig.Config memory cfg = deployAssetConfigs[i].getConfig();
+            AssetKeys memory keys = assetKeys[i];
+            address impl = addresses.getAddress(keys.implKey);
+
+            // 1. Whitelist implementation on MamoStrategyRegistry (skip if already whitelisted)
+            if (!registry.whitelistedImplementations(impl)) {
+                registry.whitelistImplementation(impl, keys.strategyTypeId);
+            }
+
+            // 2. Register markets in MarketRegistry (skip if already registered)
+            address tokenAddr = addresses.getAddress(cfg.token);
+            for (uint256 j = 0; j < cfg.markets.length; j++) {
+                address target = addresses.getAddress(cfg.markets[j].target);
+                bool alreadyRegistered = false;
+                try marketReg.isMarketActive(tokenAddr, target) {
+                    alreadyRegistered = true;
+                } catch {
+                    // Market not registered yet
+                }
+                if (!alreadyRegistered) {
+                    MarketType mType = _parseMarketType(cfg.markets[j].marketType);
+                    marketReg.addMarket(tokenAddr, target, mType);
+                }
+            }
+
+            // 3. Revoke BACKEND_ROLE from old factory
+            if (addresses.isAddressSet(keys.oldFactoryKey)) {
+                address oldFactory = addresses.getAddress(keys.oldFactoryKey);
+                if (registry.hasRole(registry.BACKEND_ROLE(), oldFactory)) {
+                    registry.revokeRole(registry.BACKEND_ROLE(), oldFactory);
+                }
+            }
+
+            // 4. Grant BACKEND_ROLE to new factory
+            registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress(keys.factoryKey));
         }
 
+        // Revoke temporary BACKEND_ROLE from multisig on MarketRegistry
         marketReg.revokeRole(marketReg.BACKEND_ROLE(), addresses.getAddress("MAMO_MULTISIG"));
 
-        // 3. Grant BACKEND_ROLE to STRATEGY_MULTICALL on MarketRegistry
-        //    (it serves as the backend in the deploy config)
+        // Grant BACKEND_ROLE to STRATEGY_MULTICALL on MarketRegistry
         if (addresses.isAddressSet("STRATEGY_MULTICALL")) {
             marketReg.grantRole(marketReg.BACKEND_ROLE(), addresses.getAddress("STRATEGY_MULTICALL"));
         }
-
-        // 4. Revoke BACKEND_ROLE from old factory on MamoStrategyRegistry
-        string memory oldFactoryKey = string(abi.encodePacked(cfg.token, "_STRATEGY_FACTORY"));
-        if (addresses.isAddressSet(oldFactoryKey)) {
-            address oldFactory = addresses.getAddress(oldFactoryKey);
-            if (registry.hasRole(registry.BACKEND_ROLE(), oldFactory)) {
-                registry.revokeRole(registry.BACKEND_ROLE(), oldFactory);
-            }
-        }
-
-        // 5. Grant BACKEND_ROLE to new factory on MamoStrategyRegistry
-        registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress(factoryKey));
     }
 
     function simulate() public override {
@@ -177,36 +245,51 @@ contract DeployMultiMarketSystem is MultisigProposal {
     function validate() public view override {
         MamoStrategyRegistry registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         MarketRegistry marketReg = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
-        DeployAssetConfig.Config memory cfg = deployAssetConfig.getConfig();
 
-        address impl = addresses.getAddress(implKey);
+        for (uint256 i = 0; i < deployAssetConfigs.length; i++) {
+            DeployAssetConfig.Config memory cfg = deployAssetConfigs[i].getConfig();
+            AssetKeys memory keys = assetKeys[i];
+            address impl = addresses.getAddress(keys.implKey);
 
-        // Verify implementation is whitelisted
-        assertTrue(registry.whitelistedImplementations(impl), "Implementation should be whitelisted");
-        assertEq(registry.implementationToId(impl), strategyTypeId, "Wrong strategy type ID");
-        assertEq(registry.latestImplementationById(strategyTypeId), impl, "Wrong latest implementation");
+            // Verify implementation is whitelisted
+            assertTrue(registry.whitelistedImplementations(impl), "Implementation should be whitelisted");
+            assertEq(registry.implementationToId(impl), keys.strategyTypeId, "Wrong strategy type ID");
+            assertEq(registry.latestImplementationById(keys.strategyTypeId), impl, "Wrong latest implementation");
 
-        // Verify new factory has BACKEND_ROLE
-        assertTrue(
-            registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress(factoryKey)),
-            "New factory should have BACKEND_ROLE"
-        );
-
-        // Verify old factory no longer has BACKEND_ROLE
-        string memory oldFactoryKey = string(abi.encodePacked(cfg.token, "_STRATEGY_FACTORY"));
-        if (addresses.isAddressSet(oldFactoryKey)) {
-            assertFalse(
-                registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress(oldFactoryKey)),
-                "Old factory should not have BACKEND_ROLE"
+            // Verify new factory has BACKEND_ROLE
+            assertTrue(
+                registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress(keys.factoryKey)),
+                "New factory should have BACKEND_ROLE"
             );
-        }
 
-        // Verify markets are registered
-        assertEq(marketReg.getMarketCount(strategyTypeId), cfg.markets.length, "Wrong market count");
+            // Verify old factory no longer has BACKEND_ROLE
+            if (addresses.isAddressSet(keys.oldFactoryKey)) {
+                assertFalse(
+                    registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress(keys.oldFactoryKey)),
+                    "Old factory should not have BACKEND_ROLE"
+                );
+            }
 
-        for (uint256 i = 0; i < cfg.markets.length; i++) {
-            address target = addresses.getAddress(cfg.markets[i].target);
-            assertTrue(marketReg.isMarketActive(strategyTypeId, target), "Market should be active");
+            // Verify markets are registered
+            for (uint256 j = 0; j < cfg.markets.length; j++) {
+                address target = addresses.getAddress(cfg.markets[j].target);
+                assertTrue(
+                    marketReg.isMarketActive(addresses.getAddress(cfg.token), target), "Market should be active"
+                );
+            }
+
+            // Verify factory configuration
+            MultiMarketStrategyFactory factory = MultiMarketStrategyFactory(addresses.getAddress(keys.factoryKey));
+            assertEq(factory.strategyTypeId(), keys.strategyTypeId, "Factory strategyTypeId mismatch");
+            assertEq(factory.token(), addresses.getAddress(cfg.token), "Factory token mismatch");
+            assertEq(
+                factory.mamoStrategyRegistry(),
+                addresses.getAddress("MAMO_STRATEGY_REGISTRY"),
+                "Factory registry mismatch"
+            );
+            assertEq(
+                factory.marketRegistry(), addresses.getAddress("MARKET_REGISTRY"), "Factory market registry mismatch"
+            );
         }
 
         // Verify multisig no longer has BACKEND_ROLE on MarketRegistry
@@ -214,17 +297,6 @@ contract DeployMultiMarketSystem is MultisigProposal {
             marketReg.hasRole(marketReg.BACKEND_ROLE(), addresses.getAddress("MAMO_MULTISIG")),
             "Multisig should not have BACKEND_ROLE on MarketRegistry"
         );
-
-        // Verify factory configuration
-        MultiMarketStrategyFactory factory = MultiMarketStrategyFactory(addresses.getAddress(factoryKey));
-        assertEq(factory.strategyTypeId(), strategyTypeId, "Factory strategyTypeId mismatch");
-        assertEq(factory.token(), addresses.getAddress(cfg.token), "Factory token mismatch");
-        assertEq(
-            factory.mamoStrategyRegistry(),
-            addresses.getAddress("MAMO_STRATEGY_REGISTRY"),
-            "Factory registry mismatch"
-        );
-        assertEq(factory.marketRegistry(), addresses.getAddress("MARKET_REGISTRY"), "Factory market registry mismatch");
     }
 
     function _parseMarketType(string memory typeStr) internal pure returns (MarketType) {

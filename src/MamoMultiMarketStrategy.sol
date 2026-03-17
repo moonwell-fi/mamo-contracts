@@ -184,7 +184,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         marketRegistry = IMarketRegistry(params.marketRegistry);
 
         // Read markets from registry and apply default splits
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(params.strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(params.token);
         require(regMarkets.length > 0, "No markets in registry");
         require(params.defaultSplitBps.length == regMarkets.length, "Split count must match market count");
 
@@ -215,12 +215,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         // Self-contained migration: read from own storage
         if (splitMToken > 0 && address(mToken) != address(0)) {
             marketSplitBps[address(mToken)] = splitMToken;
-            require(marketRegistry.isMarketActive(strategyTypeId, address(mToken)), "mToken not active in registry");
+            require(marketRegistry.isMarketActive(address(token), address(mToken)), "mToken not active in registry");
         }
         if (splitVault > 0 && address(metaMorphoVault) != address(0)) {
             marketSplitBps[address(metaMorphoVault)] = splitVault;
             require(
-                marketRegistry.isMarketActive(strategyTypeId, address(metaMorphoVault)),
+                marketRegistry.isMarketActive(address(token), address(metaMorphoVault)),
                 "metaMorphoVault not active in registry"
             );
         }
@@ -294,7 +294,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(totalTokenBalance > 0, "Nothing to rebalance");
 
         // Zero out all splits first
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         for (uint256 i = 0; i < regMarkets.length; i++) {
             marketSplitBps[regMarkets[i].target] = 0;
         }
@@ -302,7 +302,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         // Apply new splits from updates
         for (uint256 i = 0; i < updates.length; i++) {
             require(
-                marketRegistry.isMarketActive(strategyTypeId, updates[i].market), "Market not registered or not active"
+                marketRegistry.isMarketActive(address(token), updates[i].market), "Market not registered or not active"
             );
             marketSplitBps[updates[i].market] = updates[i].splitBps;
         }
@@ -369,7 +369,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @return Array of Market structs combining registry data + local splits
      */
     function getMarkets() external view returns (Market[] memory) {
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         Market[] memory result = new Market[](regMarkets.length);
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
@@ -388,7 +388,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @notice Returns the number of markets from the registry
      */
     function getMarketCount() external view returns (uint256) {
-        return marketRegistry.getMarketCount(strategyTypeId);
+        return marketRegistry.getMarketCount(address(token));
     }
 
     /// @param orderDigest The EIP-712 signing digest derived from the order
@@ -470,7 +470,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @param amount The amount of tokens to deposit
      */
     function depositInternal(uint256 amount) internal {
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         uint256 deposited = 0;
 
         // Find the last active market with nonzero split for remainder handling
@@ -521,7 +521,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @param amountNeeded The total amount of underlying tokens needed
      */
     function _withdrawProRata(uint256 amountNeeded) internal {
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (!regMarkets[i].active) continue;
@@ -544,7 +544,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @notice Withdraws all funds from all markets (including inactive, to recover stuck funds)
      */
     function _withdrawAllFromMarkets() internal {
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
             _withdrawFromMarket(regMarkets[i]);
@@ -574,7 +574,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      */
     function _getTotalBalance() internal returns (uint256) {
         uint256 total = token.balanceOf(address(this));
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (!regMarkets[i].active) continue;
@@ -596,7 +596,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @notice Validates that active market splits sum to SPLIT_TOTAL
      */
     function _validateTotalSplit() internal view {
-        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(strategyTypeId);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         uint256 total = 0;
 
         for (uint256 i = 0; i < regMarkets.length; i++) {

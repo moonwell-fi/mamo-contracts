@@ -100,7 +100,7 @@ contract MultiMarketStrategyFactory {
         require(user != address(0), "Invalid user address");
         require(msg.sender == mamoBackend || msg.sender == user, "Only backend or user can create strategy");
         require(
-            IMarketRegistry(marketRegistry).getMarketCount(strategyTypeId) == defaultSplitBps.length,
+            IMarketRegistry(marketRegistry).getMarketCount(token) == defaultSplitBps.length,
             "Split count must match market count"
         );
 

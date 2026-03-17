@@ -87,8 +87,8 @@ contract MultiMarketStrategyFactoryTest is Test {
         strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
         vm.startPrank(backend);
-        marketRegistry.addMarket(strategyTypeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(strategyTypeId, address(metaMorphoVault), MarketType.ERC4626);
+        marketRegistry.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+        marketRegistry.addMarket(address(underlying), address(metaMorphoVault), MarketType.ERC4626);
         vm.stopPrank();
     }
 

@@ -88,8 +88,12 @@ contract MultiMarketStrategyTest is Test {
 
         // Get addresses and config from proposal
         addresses = proposal.addresses();
-        assetConfig = proposal.deployAssetConfig().getConfig();
-        strategyTypeId = proposal.strategyTypeId();
+        string memory assetConfigPath =
+            vm.envOr("ASSET_CONFIG_PATH", string("config/strategies/USDCStrategyConfig.json"));
+        DeployAssetConfig assetCfg = new DeployAssetConfig(assetConfigPath);
+        assetConfig = assetCfg.getConfig();
+        uint256 assetIndex = proposal.findAssetIndex(assetConfig.token);
+        strategyTypeId = proposal.getAssetKeys(assetIndex).strategyTypeId;
 
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
@@ -275,7 +279,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Deactivate the last market in the array (metaMorphoVault) and rebalance to 100% Moonwell
         vm.prank(backend);
-        marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
+        marketRegistry.deactivateMarket(address(underlying), address(metaMorphoVault));
 
         MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
         updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 10000});
@@ -310,7 +314,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Deactivate metaMorphoVault
         vm.prank(backend);
-        marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
+        marketRegistry.deactivateMarket(address(underlying), address(metaMorphoVault));
 
         // Rebalance to 100% Moonwell — withdrawAll should still drain inactive vault
         MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
@@ -437,7 +441,7 @@ contract MultiMarketStrategyTest is Test {
 
         // Deactivate metaMorphoVault in the registry
         vm.prank(backend);
-        marketRegistry.deactivateMarket(strategyTypeId, address(metaMorphoVault));
+        marketRegistry.deactivateMarket(address(underlying), address(metaMorphoVault));
 
         // Try to allocate to the deactivated market
         MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
@@ -495,10 +499,13 @@ contract MultiMarketStrategyTest is Test {
         vm.prank(admin);
         typeId = registry.whitelistImplementation(address(v1Impl), 0);
 
-        vm.startPrank(backend);
-        marketRegistry.addMarket(typeId, address(mToken), MarketType.MTOKEN);
-        marketRegistry.addMarket(typeId, address(metaMorphoVault), MarketType.ERC4626);
-        vm.stopPrank();
+        // Markets may already be registered for this asset from the deployment proposal
+        if (marketRegistry.getMarketCount(address(underlying)) == 0) {
+            vm.startPrank(backend);
+            marketRegistry.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(address(underlying), address(metaMorphoVault), MarketType.ERC4626);
+            vm.stopPrank();
+        }
 
         vm.startPrank(backend);
         ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");

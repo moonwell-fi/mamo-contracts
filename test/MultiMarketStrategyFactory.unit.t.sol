@@ -24,10 +24,10 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
         registryAddr = makeAddr("registry");
         marketRegistry = new MarketRegistry(admin, backend, guardian);
 
-        // Register 2 markets for strategyTypeId
+        // Register 2 markets for token
         vm.startPrank(backend);
-        marketRegistry.addMarket(strategyTypeId, makeAddr("mToken"), MarketType.MTOKEN);
-        marketRegistry.addMarket(strategyTypeId, makeAddr("vault"), MarketType.ERC4626);
+        marketRegistry.addMarket(token, makeAddr("mToken"), MarketType.MTOKEN);
+        marketRegistry.addMarket(token, makeAddr("vault"), MarketType.ERC4626);
         vm.stopPrank();
     }
 
