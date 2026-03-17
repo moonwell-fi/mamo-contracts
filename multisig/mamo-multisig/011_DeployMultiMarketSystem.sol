@@ -156,7 +156,16 @@ contract DeployMultiMarketSystem is MultisigProposal {
             marketReg.grantRole(marketReg.BACKEND_ROLE(), addresses.getAddress("STRATEGY_MULTICALL"));
         }
 
-        // 4. Grant BACKEND_ROLE to new factory on MamoStrategyRegistry
+        // 4. Revoke BACKEND_ROLE from old factory on MamoStrategyRegistry
+        string memory oldFactoryKey = string(abi.encodePacked(cfg.token, "_STRATEGY_FACTORY"));
+        if (addresses.isAddressSet(oldFactoryKey)) {
+            address oldFactory = addresses.getAddress(oldFactoryKey);
+            if (registry.hasRole(registry.BACKEND_ROLE(), oldFactory)) {
+                registry.revokeRole(registry.BACKEND_ROLE(), oldFactory);
+            }
+        }
+
+        // 5. Grant BACKEND_ROLE to new factory on MamoStrategyRegistry
         registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress(factoryKey));
     }
 
@@ -177,11 +186,20 @@ contract DeployMultiMarketSystem is MultisigProposal {
         assertEq(registry.implementationToId(impl), strategyTypeId, "Wrong strategy type ID");
         assertEq(registry.latestImplementationById(strategyTypeId), impl, "Wrong latest implementation");
 
-        // Verify factory has BACKEND_ROLE
+        // Verify new factory has BACKEND_ROLE
         assertTrue(
             registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress(factoryKey)),
-            "Factory should have BACKEND_ROLE"
+            "New factory should have BACKEND_ROLE"
         );
+
+        // Verify old factory no longer has BACKEND_ROLE
+        string memory oldFactoryKey = string(abi.encodePacked(cfg.token, "_STRATEGY_FACTORY"));
+        if (addresses.isAddressSet(oldFactoryKey)) {
+            assertFalse(
+                registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress(oldFactoryKey)),
+                "Old factory should not have BACKEND_ROLE"
+            );
+        }
 
         // Verify markets are registered
         assertEq(marketReg.getMarketCount(strategyTypeId), cfg.markets.length, "Wrong market count");
