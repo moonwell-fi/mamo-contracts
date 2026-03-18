@@ -22,6 +22,7 @@ contract MarketRegistryTest is Test {
 
     event MarketAdded(address indexed asset, address indexed target, MarketType marketType);
     event MarketDeactivated(address indexed asset, address indexed target);
+    event MarketReactivated(address indexed asset, address indexed target);
 
     function setUp() public {
         admin = makeAddr("admin");
@@ -190,6 +191,100 @@ contract MarketRegistryTest is Test {
 
         assertFalse(registry.isMarketActive(asset, mToken));
         assertTrue(registry.isMarketActive(asset, vault));
+    }
+
+    // ==================== REACTIVATE MARKET TESTS ====================
+
+    function testReactivateMarket() public {
+        vm.startPrank(backend);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.deactivateMarket(asset, mToken);
+
+        assertFalse(registry.isMarketActive(asset, mToken));
+
+        vm.expectEmit(true, true, false, true);
+        emit MarketReactivated(asset, mToken);
+        registry.reactivateMarket(asset, mToken);
+        vm.stopPrank();
+
+        assertTrue(registry.isMarketActive(asset, mToken));
+    }
+
+    function testRevertReactivateMarketNotRegistered() public {
+        vm.prank(backend);
+        vm.expectRevert("Market not registered");
+        registry.reactivateMarket(asset, mToken);
+    }
+
+    function testRevertReactivateMarketAlreadyActive() public {
+        vm.startPrank(backend);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+
+        vm.expectRevert("Market already active");
+        registry.reactivateMarket(asset, mToken);
+        vm.stopPrank();
+    }
+
+    function testRevertReactivateMarketNotBackend() public {
+        vm.startPrank(backend);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.deactivateMarket(asset, mToken);
+        vm.stopPrank();
+
+        bytes32 backendRole = registry.BACKEND_ROLE();
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, backendRole)
+        );
+        vm.prank(admin);
+        registry.reactivateMarket(asset, mToken);
+    }
+
+    function testReactivateMarketBlockedWhenPaused() public {
+        vm.startPrank(backend);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.deactivateMarket(asset, mToken);
+        vm.stopPrank();
+
+        vm.prank(guardian);
+        registry.pause();
+
+        vm.prank(backend);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.reactivateMarket(asset, mToken);
+    }
+
+    function testDeactivateAndReactivateCycle() public {
+        vm.startPrank(backend);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+
+        registry.deactivateMarket(asset, mToken);
+        assertFalse(registry.isMarketActive(asset, mToken));
+
+        registry.reactivateMarket(asset, mToken);
+        assertTrue(registry.isMarketActive(asset, mToken));
+
+        registry.deactivateMarket(asset, mToken);
+        assertFalse(registry.isMarketActive(asset, mToken));
+        vm.stopPrank();
+
+        // Count should still be 1 (no new entries)
+        assertEq(registry.getMarketCount(asset), 1);
+    }
+
+    function testReactivateDoesNotAffectOtherMarkets() public {
+        vm.startPrank(backend);
+        registry.addMarket(asset, mToken, MarketType.MTOKEN);
+        registry.addMarket(asset, vault, MarketType.ERC4626);
+
+        registry.deactivateMarket(asset, mToken);
+        registry.deactivateMarket(asset, vault);
+
+        // Reactivate only mToken
+        registry.reactivateMarket(asset, mToken);
+        vm.stopPrank();
+
+        assertTrue(registry.isMarketActive(asset, mToken));
+        assertFalse(registry.isMarketActive(asset, vault));
     }
 
     // ==================== VIEW FUNCTION TESTS ====================

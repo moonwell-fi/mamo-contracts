@@ -32,6 +32,11 @@ interface IMarketRegistry {
     /// @param target The address of the market to deactivate
     function deactivateMarket(address asset, address target) external;
 
+    /// @notice Reactivates a previously deactivated market
+    /// @param asset The token address
+    /// @param target The address of the market to reactivate
+    function reactivateMarket(address asset, address target) external;
+
     /// @notice Returns all markets for an asset
     /// @param asset The token address
     /// @return Array of RegistryMarket structs

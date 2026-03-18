@@ -610,6 +610,79 @@ contract MultiMarketStrategyTest is Test {
         assertEq(address(s.marketRegistry()), address(marketRegistry), "MarketRegistry should be set by owner");
     }
 
+    // ==================== WITHDRAW WITH DEACTIVATED MARKET TESTS ====================
+
+    function testWithdrawAllAfterMarketDeactivation() public {
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Deactivate metaMorphoVault while strategy still has funds in it
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(address(underlying), address(metaMorphoVault));
+
+        // withdrawAll should still drain all markets including inactive ones
+        vm.prank(owner);
+        strategy.withdrawAll();
+
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, delta, "Owner should receive all funds");
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "Moonwell should be drained");
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "MetaMorpho should be drained");
+    }
+
+    // ==================== REACTIVATE MARKET TESTS ====================
+
+    function testReactivateMarketAndRebalance() public {
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Deactivate metaMorphoVault and rebalance to 100% Moonwell
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(address(underlying), address(metaMorphoVault));
+
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates100 =
+            new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
+        updates100[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 10000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates100);
+
+        assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "MetaMorpho should be drained after deactivation");
+
+        // Reactivate metaMorphoVault
+        vm.prank(backend);
+        marketRegistry.reactivateMarket(address(underlying), address(metaMorphoVault));
+
+        // Rebalance back to 60/40
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates6040 =
+            new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+        updates6040[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 6000});
+        updates6040[1] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 4000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates6040);
+
+        // Verify funds are distributed again
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        uint256 vaultShares = metaMorphoVault.balanceOf(address(strategy));
+        assertGt(vaultShares, 0, "MetaMorpho should have shares after reactivation");
+
+        MamoMultiMarketStrategy.Market[] memory markets = strategy.getMarkets();
+        assertEq(markets[0].splitBps, 6000, "mToken split should be 6000");
+        assertEq(markets[1].splitBps, 4000, "metaMorphoVault split should be 4000");
+        assertTrue(markets[1].active, "metaMorphoVault should be active again");
+    }
+
     // ==================== DEPOSIT IDLE TOKENS ====================
 
     function testDepositIdleTokensDistributesAcrossMarkets() public {

@@ -32,6 +32,7 @@ contract MarketRegistry is IMarketRegistry, AccessControlEnumerable, Pausable {
     // Events
     event MarketAdded(address indexed asset, address indexed target, MarketType marketType);
     event MarketDeactivated(address indexed asset, address indexed target);
+    event MarketReactivated(address indexed asset, address indexed target);
 
     constructor(address admin, address backend, address guardian) {
         require(admin != address(0), "Invalid admin address");
@@ -75,6 +76,19 @@ contract MarketRegistry is IMarketRegistry, AccessControlEnumerable, Pausable {
         _markets[asset][index].active = false;
 
         emit MarketDeactivated(asset, target);
+    }
+
+    /// @inheritdoc IMarketRegistry
+    function reactivateMarket(address asset, address target) external onlyRole(BACKEND_ROLE) whenNotPaused {
+        uint256 indexPlusOne = _marketIndex[asset][target];
+        require(indexPlusOne != 0, "Market not registered");
+
+        uint256 index = indexPlusOne - 1;
+        require(!_markets[asset][index].active, "Market already active");
+
+        _markets[asset][index].active = true;
+
+        emit MarketReactivated(asset, target);
     }
 
     // ==================== VIEW FUNCTIONS ====================
