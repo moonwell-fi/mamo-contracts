@@ -519,6 +519,8 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /**
      * @notice Withdraws pro-rata from active markets based on their split
      * @param amountNeeded The total amount of underlying tokens needed
+     * @dev Integer division may leave up to (N-1) wei undrawn where N = active markets.
+     *      Users can call withdrawAll() to fully drain all markets if withdraw() reverts on dust.
      */
     function _withdrawProRata(uint256 amountNeeded) internal {
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
@@ -570,6 +572,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
     /**
      * @notice Gets the total balance of tokens across all markets + idle
+     * @dev Includes inactive markets so withdraw() reflects actual holdings
      * @return The total balance in underlying tokens
      */
     function _getTotalBalance() internal returns (uint256) {
@@ -577,8 +580,6 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
-            if (!regMarkets[i].active) continue;
-
             if (regMarkets[i].marketType == MarketType.MTOKEN) {
                 total += IMToken(regMarkets[i].target).balanceOfUnderlying(address(this));
             } else {

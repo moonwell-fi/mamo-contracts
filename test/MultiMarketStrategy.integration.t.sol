@@ -270,7 +270,7 @@ contract MultiMarketStrategyTest is Test {
 
     function testDepositWithDeactivatedLastMarket() public {
         // First deposit so updatePosition has something to rebalance
-        uint256 seedAmount = 100 * 10 ** 6;
+        uint256 seedAmount = 100 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, seedAmount);
         vm.startPrank(owner);
         underlying.approve(address(strategy), seedAmount);
@@ -288,7 +288,7 @@ contract MultiMarketStrategyTest is Test {
         strategy.updatePosition(updates);
 
         // Now deposit — the last array entry is inactive, remainder should go to mToken
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -681,6 +681,30 @@ contract MultiMarketStrategyTest is Test {
         assertEq(markets[0].splitBps, 6000, "mToken split should be 6000");
         assertEq(markets[1].splitBps, 4000, "metaMorphoVault split should be 4000");
         assertTrue(markets[1].active, "metaMorphoVault should be active again");
+    }
+
+    // ==================== PARTIAL WITHDRAW AFTER DEACTIVATION ====================
+
+    function testPartialWithdrawAfterMarketDeactivation() public {
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // Deactivate metaMorphoVault while strategy still has funds in both markets
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(address(underlying), address(metaMorphoVault));
+
+        // Partial withdraw should still succeed — _getTotalBalance includes inactive markets
+        uint256 withdrawAmount = 400 * 10 ** assetConfig.decimals;
+        vm.prank(owner);
+        strategy.withdraw(withdrawAmount);
+
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        assertApproxEqAbs(underlying.balanceOf(owner), withdrawAmount, delta, "Owner should receive partial withdrawal");
     }
 
     // ==================== DEPOSIT IDLE TOKENS ====================
