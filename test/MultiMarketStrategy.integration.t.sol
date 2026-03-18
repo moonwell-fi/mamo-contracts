@@ -304,7 +304,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testUpdatePositionAfterMarketDeactivation() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -325,29 +325,31 @@ contract MultiMarketStrategyTest is Test {
 
         // All funds should be in Moonwell now
         uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
-        assertApproxEqAbs(mTokenBalance, depositAmount, 1e3, "Moonwell should have all funds after rebalance");
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        assertApproxEqAbs(mTokenBalance, depositAmount, delta, "Moonwell should have all funds after rebalance");
         assertEq(metaMorphoVault.balanceOf(address(strategy)), 0, "MetaMorpho should be drained");
     }
 
     // ==================== WITHDRAW TESTS ====================
 
     function testWithdrawFromMultipleMarkets() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
         underlying.approve(address(strategy), depositAmount);
         strategy.deposit(depositAmount);
 
-        uint256 withdrawAmount = 500 * 10 ** 6;
+        uint256 withdrawAmount = 500 * 10 ** assetConfig.decimals;
         strategy.withdraw(withdrawAmount);
         vm.stopPrank();
 
-        assertApproxEqAbs(underlying.balanceOf(owner), withdrawAmount, 1e3, "Owner should receive withdrawn amount");
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        assertApproxEqAbs(underlying.balanceOf(owner), withdrawAmount, delta, "Owner should receive withdrawn amount");
     }
 
     function testWithdrawAllFromMultipleMarkets() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -357,7 +359,8 @@ contract MultiMarketStrategyTest is Test {
         strategy.withdrawAll();
         vm.stopPrank();
 
-        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, 1e3, "Owner should receive all funds");
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        assertApproxEqAbs(underlying.balanceOf(owner), depositAmount, delta, "Owner should receive all funds");
 
         // Verify no funds remain in markets
         assertEq(mToken.balanceOfUnderlying(address(strategy)), 0, "Moonwell should be drained");
@@ -367,7 +370,7 @@ contract MultiMarketStrategyTest is Test {
     // ==================== UPDATE POSITION TESTS ====================
 
     function testUpdatePositionRebalancesMarkets() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -391,11 +394,12 @@ contract MultiMarketStrategyTest is Test {
         // Verify balances reflect new split (approximately)
         uint256 totalBalance = _getTotalBalance();
         uint256 mTokenBalance = mToken.balanceOfUnderlying(address(strategy));
-        assertApproxEqAbs(mTokenBalance, totalBalance / 2, 1e3, "Moonwell should have ~50%");
+        uint256 delta = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        assertApproxEqAbs(mTokenBalance, totalBalance / 2, delta, "Moonwell should have ~50%");
     }
 
     function testRevertUpdatePositionInvalidSplit() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -413,7 +417,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testRevertUpdatePositionInvalidMarket() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
@@ -431,7 +435,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testRevertUpdatePositionDeactivatedMarket() public {
-        uint256 depositAmount = 1000 * 10 ** 6;
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
         deal(address(underlying), owner, depositAmount);
 
         vm.startPrank(owner);
