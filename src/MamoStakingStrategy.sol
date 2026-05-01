@@ -10,7 +10,7 @@ import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IPool} from "@interfaces/IPool.sol";
-import {IQuoter} from "@interfaces/IQuoter.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -202,7 +202,9 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
 
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
         ISwapRouter dexRouter = stakingRegistry.dexRouter();
-        IQuoter quoter = stakingRegistry.quoter();
+        ISlippagePriceChecker priceChecker = stakingRegistry.slippagePriceChecker();
+        uint256 accountSlippage = getAccountSlippage();
+        address mamoTokenAddr = address(mamoToken);
 
         // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
@@ -216,20 +218,12 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             address poolAddress = rewardTokens[i].pool;
             int24 tickSpacing = IPool(poolAddress).tickSpacing();
 
-            // Get quote from quoter to calculate minimum amount out with slippage
-            (uint256 amountOut,,,) = quoter.quoteExactInputSingle(
-                IQuoter.QuoteExactInputSingleParams({
-                    tokenIn: address(rewardToken),
-                    tokenOut: address(mamoToken),
-                    amountIn: rewardBalance,
-                    tickSpacing: tickSpacing,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-
-            // Apply slippage tolerance to get minimum amount out
-            uint256 accountSlippage = getAccountSlippage();
-            uint256 amountOutMinimum = (amountOut * (10000 - accountSlippage)) / 10000;
+            // Compute reference output from Chainlink-based price checker.
+            // This anchors the slippage check to an off-pool oracle so that pool-price
+            // manipulation (sandwich attacks) cannot bypass the minimum-out guard the
+            // way an in-pool quoter call would.
+            uint256 expectedOut = priceChecker.getExpectedOut(rewardBalance, address(rewardToken), mamoTokenAddr);
+            uint256 amountOutMinimum = (expectedOut * (10000 - accountSlippage)) / 10000;
 
             // Approve DEX router to spend reward tokens
             rewardToken.forceApprove(address(dexRouter), rewardBalance);
