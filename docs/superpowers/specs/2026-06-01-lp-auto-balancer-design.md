@@ -23,7 +23,7 @@ This is delivered as two workstreams:
 | Trigger model | **Backend-decided params + on-chain guards** (mirrors `DropAutomation`) |
 | Fee handling on rebalance | **Skim accrued fees to fee collector** (`DropAutomation`); rebalance only re-ranges principal — preserves current drop economics |
 | Scope | **Generic multi-position registry**; start with the `TransferAndEarn` positions |
-| Safety model | **Approach A**: per-swap slippage cap + per-position cooldown + width/deviation bounds + decrease/mint min-amounts |
+| Safety model | **Approach A + reference guards**: per-swap slippage cap + per-position cooldown + width/center-deviation bounds + decrease/mint min-amounts, **plus** a TWAP-priced value floor (`maxRebalanceLossBps`) and a spot-vs-TWAP deviation gate (`maxTickDeviation`) adopted from `aerodrome-auto-balance` to bound the broad LLM discretion |
 | Operator | **No Gelato.** A dedicated `rebalancer` EOA (the backend hot wallet the LLM signs with); owner can rotate/revoke instantly |
 | LLM role | **LLM computes params directly** (raw target ticks + swap direction/size) → the on-chain contract is the *entire* trust boundary; value-bearing numbers (`minAmountOut`, min-amounts) are still computed deterministically off-chain, never by the LLM |
 | Authorization | **Fully autonomous** — service signs and sends with no human gate, bounded by contract guards + a service-side circuit-breaker |
@@ -34,7 +34,16 @@ This is delivered as two workstreams:
 
 ### 3.1 Trust boundary
 
-The LLM emits raw ticks + swap params. Therefore the contract treats `rebalance()` params as **arbitrary and potentially adversarial** (compromised key / hallucinating model). Every guard must hold against attacker-chosen inputs, not merely honest-but-imperfect ones. Worst-case value loss per call is bounded to ≈ `maxSlippageBps` on the swapped portion; the cooldown rate-limits cumulative damage; the owner kill-switch (`pause` / revoke `rebalancer`) stops it entirely.
+The LLM emits raw ticks + swap params. Therefore the contract treats `rebalance()` params as **arbitrary and potentially adversarial** (compromised key / hallucinating model). Every guard must hold against attacker-chosen inputs, not merely honest-but-imperfect ones.
+
+Because the LLM has full discretion over ticks and swap size (far more than the keeper in the `aerodrome-auto-balance` reference, which computes the range on-chain), the contract carries **two outcome-based guards adopted from that reference**, in addition to the per-step guards:
+
+- **TWAP-priced value floor (`maxRebalanceLossBps`)** — the position's value is snapshotted before and after the rebalance, priced at the pool's own TWAP (not spot, not Chainlink), and the call reverts unless `valueAfter >= valueBefore * (1 - maxRebalanceLossBps)`. This directly bounds per-call value loss regardless of what ticks/swap the LLM chose.
+- **Spot-vs-TWAP deviation gate (`maxTickDeviation`)** — the call reverts if the spot tick deviates from the TWAP tick by more than `maxTickDeviation`, refusing to act during a price spike or a manipulation attempt.
+
+Net: worst-case value loss per call is bounded to ≈ `maxRebalanceLossBps` (the tighter of it and `maxSlippageBps` on the swapped portion); the deviation gate blocks acting on a manipulated spot; the cooldown rate-limits cumulative damage; the owner kill-switch (`pause` / revoke `rebalancer`) stops it entirely.
+
+**Caveat — TWAP strength scales with pool depth.** The reference targets the deep WETH/cbBTC pool. Our target pools (MAMO/cbBTC, MAMO/USDC) are thinner, so a sufficiently capitalized attacker could move the TWAP over `twapWindow`. The value floor + deviation gate are still strictly stronger than slippage-cap + cooldown alone, and compose with them; `twapWindow` should be set conservatively (longer) per pool, and `maxRebalanceLossBps`/`maxTickDeviation` tightened for thinner pools.
 
 ### 3.2 Roles
 
@@ -55,6 +64,9 @@ struct ManagedPosition {
     uint24  maxWidth;           // max allowed (tickUpper - tickLower), tick units
     uint24  maxCenterDeviation; // new range center must be within N ticks of current tick
     uint16  maxSlippageBps;     // hard cap on swap slippage (<= MAX_SLIPPAGE_CAP_BPS)
+    uint32  twapWindow;         // seconds for the pool TWAP used by the spike gate + value floor
+    int24   maxTickDeviation;   // max allowed |spot tick - TWAP tick| before rebalance is refused
+    uint16  maxRebalanceLossBps; // value floor: post-value >= pre-value * (1 - this) (<= MAX_LOSS_CAP_BPS)
     uint256 minRebalanceInterval; // cooldown seconds
     uint256 lastRebalance;      // timestamp of last rebalance
     bool    active;
@@ -70,7 +82,7 @@ ISwapRouter public immutable AERODROME_ROUTER;
 IQuoter     public immutable AERODROME_QUOTER;
 ```
 
-Global constants: `MAX_SLIPPAGE_CAP_BPS` (e.g. 500 = 5%), `BPS_DENOMINATOR = 10_000`, `SWAP_DEADLINE_BUFFER`.
+Global constants: `MAX_SLIPPAGE_CAP_BPS` (e.g. 500 = 5%), `MAX_LOSS_CAP_BPS` (e.g. 500 = 5%), `BPS_DENOMINATOR = 10_000`, `SWAP_DEADLINE_BUFFER`.
 
 ### 3.4 `rebalance(uint256 slotId, RebalanceParams params)` — `onlyRebalancer`, `nonReentrant`, `whenNotPaused`
 
@@ -92,21 +104,24 @@ struct RebalanceParams {
 Execution order (fee-then-principal separation is the key trick):
 
 1. **Cooldown**: `require(block.timestamp >= pos.lastRebalance + pos.minRebalanceInterval)`.
-2. **Collect fees only**: `collect(tokenId, max, max)` *before* decreasing liquidity collects only accrued `tokensOwed` (fees). Forward both tokens to `pos.feeCollector` → keeps the drop fed. Emit `FeesSkimmed`.
-3. **Decrease all liquidity**: read position `liquidity`; `decreaseLiquidity(tokenId, liquidity, amount0MinDecrease, amount1MinDecrease, deadline)`; then `collect(tokenId, max, max)` to pull principal into the contract.
-4. **Validate new range** against live `pool.tickSpacing()` + `slot0().tick`:
+2. **TWAP deviation gate**: read spot tick (`slot0().tick`) and the TWAP tick over `pos.twapWindow` (e.g. via `OracleLibrary.consult`); `require(|spot - twap| <= pos.maxTickDeviation)` else revert `TwapDeviation`. Refuses to act during a spike/manipulation.
+3. **Snapshot pre-value**: value the *current* position's principal at the TWAP price in a single numeraire (token1), via `LiquidityAmounts.getAmountsForLiquidity` at the TWAP `sqrtPriceX96` over the current range → `valueBefore`.
+4. **Collect fees only**: `collect(tokenId, max, max)` *before* decreasing liquidity collects only accrued `tokensOwed` (fees). Forward both tokens to `pos.feeCollector` → keeps the drop fed. Emit `FeesSkimmed`. (Fees are excluded from the value-floor comparison — only principal is measured before/after, since fees deliberately leave the contract.)
+5. **Decrease all liquidity**: read position `liquidity`; `decreaseLiquidity(tokenId, liquidity, amount0MinDecrease, amount1MinDecrease, deadline)`; then `collect(tokenId, max, max)` to pull principal into the contract.
+6. **Validate new range** against live `pool.tickSpacing()` + `slot0().tick`:
    - ticks aligned to `tickSpacing` (`tickLower % spacing == 0`, same for upper);
    - `tickLower < tickUpper`;
    - `pos.minWidth <= (tickUpper - tickLower) <= pos.maxWidth`;
    - range straddles current tick: `tickLower < currentTick < tickUpper`;
    - `|((tickLower+tickUpper)/2) - currentTick| <= pos.maxCenterDeviation`.
-5. **Swap** to reach the target ratio via Aerodrome CL router, reusing `DropAutomation._executeSwap`'s dual-layer guard:
+7. **Swap** to reach the target ratio via Aerodrome CL router, reusing `DropAutomation._executeSwap`'s dual-layer guard:
    - quoter-based on-chain min = `quotedOut * (BPS - maxSlippageBps) / BPS`;
    - effective `minOut = max(quoterMin, swapMinAmountOut)`;
    - `require(swapTokenIn` is one of `token0/token1)`; tickSpacing from `pos`.
-6. **Mint** new position (recipient = `address(this)`) with `amount0MinMint`/`amount1MinMint`; **burn** the old now-empty NFT; set `pos.tokenId = newTokenId`; `pos.lastRebalance = block.timestamp`.
-7. **Forward dust**: any residual `token0`/`token1` after mint → `pos.feeCollector` (no value trapped in the contract).
-8. Emit `Rebalanced(slotId, oldTokenId, newTokenId, tickLower, tickUpper)`.
+8. **Mint** new position (recipient = `address(this)`) with `amount0MinMint`/`amount1MinMint`; **burn** the old now-empty NFT; set `pos.tokenId = newTokenId`; `pos.lastRebalance = block.timestamp`.
+9. **Value floor**: compute `valueAfter` = the minted position's principal (its `liquidity` over the new range, valued at the TWAP `sqrtPriceX96` in token1); `require(valueAfter >= valueBefore * (BPS - pos.maxRebalanceLossBps) / BPS)` else revert `ValueFloor`. This is the outcome guard that bounds total value loss across decrease+swap+mint, independent of the LLM-chosen ticks.
+10. **Forward dust**: any residual `token0`/`token1` after mint → `pos.feeCollector` (no value trapped in the contract).
+11. Emit `Rebalanced(slotId, oldTokenId, newTokenId, tickLower, tickUpper)`.
 
 ### 3.5 `collectFees(uint256 slotId)` — **permissionless**, `whenNotPaused`
 
@@ -114,7 +129,7 @@ Standalone fee skim **between** rebalances so the drop keeps its current cadence
 
 ### 3.6 Owner / emergency functions
 
-- `registerPosition(ManagedPosition config)` — requires the NFT already held by the contract; assigns a `slotId`; validates bounds (`maxSlippageBps <= MAX_SLIPPAGE_CAP_BPS`, `minWidth <= maxWidth`, non-zero pool/tokens). Returns `slotId`.
+- `registerPosition(ManagedPosition config)` — requires the NFT already held by the contract; assigns a `slotId`; validates bounds (`maxSlippageBps <= MAX_SLIPPAGE_CAP_BPS`, `maxRebalanceLossBps <= MAX_LOSS_CAP_BPS`, `minWidth <= maxWidth`, `twapWindow > 0`, `maxTickDeviation > 0`, non-zero pool/tokens). Returns `slotId`.
 - `deregisterPosition(slotId, address to)` — transfer the current NFT out to `to`, mark inactive.
 - `withdrawPosition(slotId, address to)` — emergency: transfer the current NFT to `to` (the Safe).
 - `setRebalancer(address)`, `setPositionConfig(slotId, ...)`, `setFeeCollector(slotId, address)`.
@@ -125,6 +140,8 @@ Standalone fee skim **between** rebalances so the drop keeps its current cadence
 ### 3.7 Events
 
 `PositionRegistered`, `PositionDeregistered`, `Rebalanced`, `FeesSkimmed`, `RebalancerUpdated`, `FeeCollectorUpdated`, `PositionConfigUpdated`, `PositionWithdrawn`, `TokensRecovered`.
+
+Custom errors: `Cooldown`, `TwapDeviation`, `ValueFloor`, `NotInRange`, `WidthOutOfBounds`, `CenterDeviation`, `TickNotAligned`, `SlippageTooHigh`, `NotRebalancer`, `OnlyPositionManager`.
 
 ## 4. Scope & a hard caveat
 
@@ -147,9 +164,9 @@ Wiring note: once a position lives in the balancer, fee-skimming for the drop ha
 
 ## 6. Testing (Base fork tests; `MoonwellMorphoStrategy`/`DropAutomation` style)
 
-- **Guard/unit**: tick alignment, width bounds, center-deviation, cooldown, slippage cap, access control (`onlyRebalancer` / `onlyOwner`), `pause`, emergency `withdrawPosition`, `onERC721Received` sender restriction.
+- **Guard/unit**: tick alignment, width bounds, center-deviation, cooldown, slippage cap, value-floor (`maxRebalanceLossBps`), TWAP deviation gate (`maxTickDeviation`), access control (`onlyRebalancer` / `onlyOwner`), `pause`, emergency `withdrawPosition`, `onERC721Received` sender restriction.
 - **Integration (fork)**: register a real MAMO/cbBTC position → swap in the pool to push the tick out of range → `rebalance()` → assert new range straddles tick, fees skimmed to `DropAutomation`, principal preserved within slippage, old NFT burned, `tokenId` updated, dust forwarded.
-- **Adversarial**: attacker `rebalance` params (off-spacing / excess-width / non-straddling ticks, slippage above cap, pre-cooldown) all revert; withdrawal & mint min-amounts bound a simulated sandwich.
+- **Adversarial**: attacker `rebalance` params (off-spacing / excess-width / non-straddling ticks, slippage above cap, pre-cooldown) all revert; a value-destroying range/swap reverts on the value floor; a manipulated spot (large in-pool swap pushing spot past `maxTickDeviation` from TWAP) reverts on the deviation gate; withdrawal & mint min-amounts bound a simulated sandwich.
 - **FPS proposal test** (like `ERC20StrategyV2Test`): run `006`'s deploy/build/simulate/validate end-to-end.
 
 ## 7. Off-chain Rebalancing Service (separate workstream)
@@ -168,7 +185,8 @@ Standalone TypeScript/Node service on a scheduler. The contract is the hard boun
    ```
    The LLM decides range + swap direction/size only.
 4. **Deterministic post-processing (no LLM):**
-   - Re-validate the LLM output against the policy envelope locally (alignment, width, straddle, deviation) → reject + alert before spending gas (mirror of on-chain guards; the revert is the backstop).
+   - Re-validate the LLM output against the policy envelope locally (alignment, width, straddle, center-deviation) → reject + alert before spending gas (mirror of on-chain guards; the revert is the backstop).
+   - Pre-check the two outcome guards off-chain too, to fail fast before gas: read the pool TWAP, confirm `|spot - twap| <= maxTickDeviation`, and simulate the rebalance to confirm the projected `valueAfter` clears the `maxRebalanceLossBps` floor. The on-chain checks remain the authoritative backstop.
    - Compute `swapMinAmountOut` from the **Aerodrome Quoter** at the service slippage; compute `decreaseLiquidity`/`mint` min-amounts from current reserves. Never from the LLM.
 5. **Sign & send:** build `rebalance(slotId, params)`, sign with the dedicated `rebalancer` hot wallet (KMS/secrets-managed, isolated from other Mamo keys), submit via a private/MEV-aware RPC where available, manage nonce, confirm, log.
 6. **Observe:** persist every decision (input snapshot, raw LLM output, validation result, tx hash, realized amounts). Metrics + alerts on validation rejections, reverts, slippage near cap, repeated rebalances (possible key compromise).
@@ -184,5 +202,5 @@ Standalone TypeScript/Node service on a scheduler. The contract is the hard boun
 - Rebalancing the MAMO/VIRTUALS LP (locked in `BurnAndEarn`, no transfer-out).
 - Changing the drop staging mechanism (`DropAutomation` / `RewardsDistributorSafeModule`) — fees continue to flow to it unchanged.
 - Compounding fees into positions (explicitly rejected; fees feed the drop).
-- Oracle-valued retention guards (no reliable MAMO Chainlink feed; the slippage-cap + cooldown model is the chosen protection).
+- **Chainlink-valued** retention guards — rejected because MAMO has no reliable Chainlink feed. (Note: this is *not* a reason to skip a value floor entirely. Section 3 adopts a **pool-TWAP-priced** value floor from the `aerodrome-auto-balance` reference, which needs no external oracle. Earlier drafts of this spec incorrectly dropped the value floor on the Chainlink grounds; that reasoning was corrected after reviewing the reference implementation.)
 - Human-approval gating (rejected in favor of fully autonomous operation bounded by guards).
