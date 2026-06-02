@@ -19,7 +19,9 @@ This is delivered as two workstreams:
 | Decision | Choice |
 | --- | --- |
 | Primary goal | General yield-max: concentration **and** ongoing re-centering, configurable per position |
-| Custody/logic location | **New standalone `LPAutoBalancer`** contract holding the NFTs; owner = F-MAMO Safe |
+| Custody/logic location | **New standalone `LPAutoBalancer`** contract holding the NFTs |
+| Access control | **`AccessControlEnumerable` role split** (not `Ownable`): admin = F-MAMO Safe (drain-capable powers + caps), `MANAGER_ROLE` = EOA (tune bounds within caps), `rebalancer` = EOA (re-range), guardian = EOA/Safe (pause) |
+| Pool selection / migration | LLM **never picks pairs autonomously**. Re-ranging stays within governance-registered pools. Changing pool/pair = `migrate()`, **Safe-admin-gated**, open destination, LLM advisory-only (Section 9) |
 | Trigger model | **Backend-decided params + on-chain guards** (mirrors `DropAutomation`) |
 | Fee handling on rebalance | **Skim accrued fees to fee collector** (`DropAutomation`); rebalance only re-ranges principal — preserves current drop economics |
 | Scope | **Generic multi-position registry**; start with the `TransferAndEarn` positions |
@@ -30,7 +32,7 @@ This is delivered as two workstreams:
 
 ## 3. On-chain Contract: `LPAutoBalancer`
 
-`Ownable`, `ReentrancyGuard`, `Pausable`, `IERC721Receiver`. Solidity 0.8.28, BUSL-1.1 (matches repo).
+`AccessControlEnumerable`, `ReentrancyGuard`, `Pausable`, `IERC721Receiver`. Solidity 0.8.28, BUSL-1.1 (matches repo). Uses the same role model as `MamoStrategyRegistry` / `MamoStakingRegistry` rather than `Ownable`, so day-to-day operation runs on an EOA while drain-capable powers stay on the Safe.
 
 ### 3.1 Trust boundary
 
@@ -47,8 +49,14 @@ Net: worst-case value loss per call is bounded to ≈ `maxRebalanceLossBps` (the
 
 ### 3.2 Roles
 
-- `owner` = **F-MAMO Safe**: register/deregister positions, set all policy bounds, emergency-withdraw NFTs, `recoverERC20`/`recoverETH`, `pause`/`unpause`, rotate `rebalancer`.
-- `rebalancer` = a single dedicated EOA (`MAMO_LP_REBALANCER`): may **only** call `rebalance()` and `collectFees()`. Holds no token custody and no config powers.
+Powers are split so an EOA can run operations without any single key being able to move or drain protocol liquidity. The drain-capable functions (`migrate`, `withdrawPosition`, `recoverERC20`/`recoverETH`) and all *cap*-setting stay on the Safe.
+
+- **`DEFAULT_ADMIN_ROLE` = F-MAMO Safe** — `registerPosition`/`deregisterPosition`, `migrate` (Section 9), `withdrawPosition`, `recoverERC20`/`recoverETH`, set the global caps (`MAX_SLIPPAGE_CAP_BPS`, `MAX_LOSS_CAP_BPS`), grant/revoke all roles (including `rebalancer`).
+- **`MANAGER_ROLE` = EOA** — fast operational tuning *within* admin-set caps: per-position `minWidth/maxWidth/maxCenterDeviation/maxSlippageBps/maxRebalanceLossBps/maxTickDeviation/twapWindow/minRebalanceInterval`, and `setFeeCollector`. **No** power to move, migrate, or withdraw funds.
+- **`rebalancer` = a dedicated EOA (`MAMO_LP_REBALANCER`)** — may **only** call `rebalance()` and `collectFees()`. No custody, no config. (The LLM hot wallet.)
+- **`GUARDIAN_ROLE` = EOA or Safe** — `pause()`/`unpause()`.
+
+Rationale: re-ranging is bounded by on-chain guards, so it can run on a hot key; migration has no enforceable on-chain value protection (Section 9), so it must stay behind the multisig — putting it on a single EOA would re-create a treasury-drain path. `MANAGER_ROLE` can only loosen/tighten bounds **between** the admin-set caps, so a compromised manager key cannot exceed limits the Safe set.
 
 ### 3.3 State
 
@@ -127,14 +135,18 @@ Execution order (fee-then-principal separation is the key trick):
 
 Standalone fee skim **between** rebalances so the drop keeps its current cadence without forcing a re-range. Permissionless because funds can only ever move to the owner-configured `pos.feeCollector` — there is no caller-chosen destination, so opening it up is safe and lets a keeper/cron poke it cheaply. `collect(tokenId, max, max)` → forward to `pos.feeCollector`. Emit `FeesSkimmed`.
 
-### 3.6 Owner / emergency functions
+### 3.6 Admin / manager / emergency functions
 
-- `registerPosition(ManagedPosition config)` — requires the NFT already held by the contract; assigns a `slotId`; validates bounds (`maxSlippageBps <= MAX_SLIPPAGE_CAP_BPS`, `maxRebalanceLossBps <= MAX_LOSS_CAP_BPS`, `minWidth <= maxWidth`, `twapWindow > 0`, `maxTickDeviation > 0`, non-zero pool/tokens). Returns `slotId`.
-- `deregisterPosition(slotId, address to)` — transfer the current NFT out to `to`, mark inactive.
-- `withdrawPosition(slotId, address to)` — emergency: transfer the current NFT to `to` (the Safe).
-- `setRebalancer(address)`, `setPositionConfig(slotId, ...)`, `setFeeCollector(slotId, address)`.
-- `recoverERC20(token, to, amount)`, `recoverETH(to)`.
-- `pause()` / `unpause()`.
+Admin = `DEFAULT_ADMIN_ROLE` (Safe), Manager = `MANAGER_ROLE` (EOA), Guardian = `GUARDIAN_ROLE`.
+
+- `registerPosition(ManagedPosition config)` — **admin**; requires the NFT already held by the contract; assigns a `slotId`; validates bounds (`maxSlippageBps <= MAX_SLIPPAGE_CAP_BPS`, `maxRebalanceLossBps <= MAX_LOSS_CAP_BPS`, `minWidth <= maxWidth`, `twapWindow > 0`, `maxTickDeviation > 0`, non-zero pool/tokens). Returns `slotId`.
+- `deregisterPosition(slotId, address to)` — **admin**; transfer the current NFT out to `to`, mark inactive.
+- `withdrawPosition(slotId, address to)` — **admin**; emergency: transfer the current NFT to `to` (the Safe).
+- `migrate(slotId, MigrateParams)` — **admin** (see Section 9).
+- `recoverERC20(token, to, amount)`, `recoverETH(to)` — **admin**.
+- `setRebalancer(address)`, `setCaps(...)` — **admin**.
+- `setPositionConfig(slotId, ...)` (bounds within caps), `setFeeCollector(slotId, address)` — **manager**.
+- `pause()` / `unpause()` — **guardian**.
 - `onERC721Received` — accept NFTs (restricted to the Aerodrome position manager as `msg.sender`, like `TransferAndEarn`).
 
 ### 3.7 Events
@@ -171,7 +183,7 @@ Wiring note: once a position lives in the balancer, fee-skimming for the drop ha
 
 ## 7. Off-chain Rebalancing Service (separate workstream)
 
-Standalone TypeScript/Node service on a scheduler. The contract is the hard boundary; the service fails fast and keeps a full audit trail. **Fully autonomous** — no human gate.
+Standalone TypeScript/Node service on a scheduler. The contract is the hard boundary; the service fails fast and keeps a full audit trail. This section covers the **re-range** loop, which is **fully autonomous** — no human gate. (Pool *migration* discovery is a separate, advisory, human-gated flow — see §8.3.)
 
 ### 7.1 Decision loop (per position, on a cron aligned so a rebalance can land before the weekly drop)
 
@@ -197,10 +209,51 @@ Standalone TypeScript/Node service on a scheduler. The contract is the hard boun
 - The LLM is **untrusted for value-bearing numbers** (`minAmountOut`, min-amounts) — those are deterministic.
 - **Kill switches:** owner rotates/revokes `rebalancer` and/or `pause()`s the contract; the service has a local circuit-breaker halting on N consecutive reverts or anomaly flags.
 
-## 8. Out of scope / non-goals
+## 8. Pool Migration (human-gated) + LLM pair discovery
+
+Re-ranging stays within governance-registered pools. **Migration** — moving a position into a *different* pool/pair (open destination) — is a separate, higher-trust action with a different power model.
+
+### 8.1 Why migration cannot be autonomous or EOA-gated
+
+Every on-chain guard (`maxSlippageBps`, the TWAP value floor) assumes a **known, liquid pool**. With an **open/LLM-discovered destination**, none of them hold: an attacker (or compromised key / hallucinating model) can migrate into a pool they created, seed its TWAP to report MAMO at an arbitrary price, and the value floor will read that fabricated number and approve its own draining; the quoter likewise quotes against the attacker's pool. The contract has nothing trustworthy to value against when the caller chooses the pool.
+
+You can have **open destinations** OR **on-chain-bounded autonomous execution** — not both. So migration's vetting moves to a human/governance step the contract does not pretend to replace. Concretely: `migrate()` is **`DEFAULT_ADMIN_ROLE` (F-MAMO Safe) only**; the `rebalancer`/LLM EOA cannot call it. The only actor that can route protocol liquidity into an arbitrary pool is the multisig — which can already do anything with protocol funds — so `migrate()` adds **no new trust**, it just makes the operation atomic and keeps the registry + fee-skim consistent. (This is exactly why the access-control split in §3.2 keeps `migrate`/`withdraw`/`recover` on the Safe and off any single EOA.)
+
+### 8.2 `migrate(uint256 slotId, MigrateParams params)` — `onlyRole(DEFAULT_ADMIN_ROLE)`, `nonReentrant`, `whenNotPaused`
+
+Params (multisig-reviewed): `destPool, destToken0, destToken1, destTickSpacing, tickLower, tickUpper, swapTokenIn, swapAmountIn, swapMinAmountOut, amount{0,1}MinDecrease, amount{0,1}MinMint, deadline`.
+
+Flow: collect fees → skim to `feeCollector`; `decreaseLiquidity(all)` + collect principal; swap per route with the passed `swapMinAmountOut` (defense-in-depth slippage); `mint` into `destPool` (recipient = contract) with mint mins; burn old NFT; **update the slot in place** (pool/tokens/tickSpacing/tokenId, plus the per-position bounds for the new pool); reset `lastRebalance`; emit `Migrated(slotId, oldPool, destPool, oldTokenId, newTokenId)`.
+
+**Cheap sanity guards** (catch fat-finger, NOT value protection — the human review is the value guard): `destPool.code.length > 0`, `destTickSpacing == IPool(destPool).tickSpacing()`, MAMO is one of `destToken0/1`, ticks aligned + `tickLower < tickUpper`. The TWAP value floor is **deliberately not applied** to migrations because an arbitrary pool's TWAP isn't trustworthy.
+
+### 8.3 LLM pair-discovery pipeline (advisory only)
+
+Because migration is Safe-gated, the LLM's role here is **decision support**: produce a ranked, justified shortlist of candidate MAMO pools for operators to vet. A bad pick is a recommendation a human rejects, not a loss. Pattern (deterministic funnel → LLM reasoning → human execution; mirrors QuickNode's "AI DeFi Yield Optimizer on Base"):
+
+1. **Deterministic data layer (no LLM):** pull the pool universe + metrics.
+   - **Aerodrome `LpSugar` (on-chain)** — `all()`/`byIndex()`/`count()` → per-pool reserves, fees, gauge, emissions, CL tick data. **Source of truth** (an attacker can spoof a 3rd-party API but not the on-chain Sugar read).
+   - **DefiLlama yields API** (`yields.llama.fi/pools`, free, no auth) — `apyBase` (fee yield = what feeds the drop), `apyReward` (AERO emissions), `tvlUsd`, APY history. Cross-check + trend.
+   - Optional analytics API (QuickNode Aerodrome / Bitquery) for 24h volume + fee-APR breakdowns.
+2. **Hard pre-filters (deterministic, non-negotiable):** pool must contain **MAMO**; verified canonical Aerodrome CL pool from the factory; **min TVL/depth** (this is the link that makes the destination safe for the re-range TWAP guards — directly addresses the thin-pool caveat in §3.1); min age / cumulative volume; verified counter-token.
+3. **Deterministic scoring → candidate set:** rank by fee APR (`apyBase`, the objective), volume/TVL (fees per dollar), TVL (safety weight), counter-token risk (stable vs volatile → IL), optionally `apyReward` if the destination would be gauge-staked.
+4. **LLM reasoning:** given the pre-filtered scored candidates + context (current position, realized fees, MAMO volatility regime), emit a **ranked shortlist with written rationale** weighing yield vs depth vs IL vs strategic fit. Outputs recommendations, **not** tx params.
+5. **Human/multisig execution:** operators review shortlist + rationale, pick a destination, the **Safe** signs `migrate()`.
+
+Caveats recorded: concentrating into volatile MAMO pairs raises impermanent-loss exposure (LLM weights it, humans own it); trust the on-chain Sugar read over any API; the min-TVL pre-filter is what connects "high-APR pool found" to "the re-range TWAP guards are actually safe there."
+
+### 8.4 Testing additions for migration
+
+- `migrate` access control: `rebalancer`/`manager`/random revert; only admin (Safe) succeeds.
+- Sanity guards: non-contract `destPool`, mismatched `destTickSpacing`, MAMO not a leg, misaligned/inverted ticks → revert.
+- Fork integration: admin migrates a real MAMO/USDC position into another MAMO pool → assert fees skimmed, principal moved within `swapMinAmountOut`, slot updated (new pool/tokens/tickSpacing/tokenId), old NFT burned, `Migrated` emitted, and the position is subsequently re-rangeable by the `rebalancer` in the new pool.
+
+## 9. Out of scope / non-goals
 
 - Rebalancing the MAMO/VIRTUALS LP (locked in `BurnAndEarn`, no transfer-out).
 - Changing the drop staging mechanism (`DropAutomation` / `RewardsDistributorSafeModule`) — fees continue to flow to it unchanged.
 - Compounding fees into positions (explicitly rejected; fees feed the drop).
 - **Chainlink-valued** retention guards — rejected because MAMO has no reliable Chainlink feed. (Note: this is *not* a reason to skip a value floor entirely. Section 3 adopts a **pool-TWAP-priced** value floor from the `aerodrome-auto-balance` reference, which needs no external oracle. Earlier drafts of this spec incorrectly dropped the value floor on the Chainlink grounds; that reasoning was corrected after reviewing the reference implementation.)
-- Human-approval gating (rejected in favor of fully autonomous operation bounded by guards).
+- Human-approval gating **for re-ranges** (rejected — re-ranges run fully autonomously, bounded by on-chain guards). Note: **pool migrations are the opposite** — they are Safe-admin-gated and never autonomous (§8), because open destinations have no enforceable on-chain value protection.
+- **Autonomous or single-EOA-gated migration** (rejected — would re-create a treasury-drain path; migration stays on the multisig).
+- LLM **autonomously selecting/entering pairs** (rejected — the LLM is advisory-only for pool selection; humans + the Safe execute migrations).
