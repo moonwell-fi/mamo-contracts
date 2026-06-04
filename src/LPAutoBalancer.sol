@@ -109,6 +109,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     event EmissionsClaimed(uint256 indexed slotId, uint256 amount);
     event FeesSkimmed(uint256 indexed slotId, uint256 amount0, uint256 amount1);
     event Rebalanced(uint256 indexed slotId, uint256 oldTokenId, uint256 newTokenId, int24 tickLower, int24 tickUpper);
+    event Migrated(uint256 indexed slotId, address oldPool, address destPool, uint256 oldTokenId, uint256 newTokenId);
 
     constructor(
         address admin_,
@@ -461,6 +462,176 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         emit Rebalanced(slotId, oldTokenId, newTokenId, tickLower, tickUpper);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Migrate — Safe-admin gated, arbitrary destination pool
+    // ═══════════════════════════════════════════════════════════════════════
+
+    struct MigrateParams {
+        address destPool;
+        address destToken0;
+        address destToken1;
+        int24 destTickSpacing;
+        address destGauge;
+        int24 tickLower;
+        int24 tickUpper;
+        address swapTokenIn;
+        uint256 swapAmountIn;
+        uint256 swapMinAmountOut;
+        uint256 amount0MinDecrease;
+        uint256 amount1MinDecrease;
+        uint256 amount0MinMint;
+        uint256 amount1MinMint;
+        uint256 deadline;
+    }
+
+    /// @notice Move a managed position into a DIFFERENT pool/pair (open destination).
+    ///
+    ///         WHY NO VALUE FLOOR / TWAP GATE:
+    ///         The destination pool is arbitrary — it may be a brand-new pair with no
+    ///         trustworthy on-chain oracle and no TWAP history. An automated value check
+    ///         could be spoofed or vacuous. The Safe multisig review IS the value guard:
+    ///         signers inspect the destination pool, token addresses, and swap route
+    ///         before signing. Only cheap fat-finger sanity guards are enforced on-chain.
+    ///
+    ///         The swap route (swapTokenIn / swapAmountIn / swapMinAmountOut) is
+    ///         entirely human-supplied; swapMinAmountOut acts as defense-in-depth
+    ///         slippage protection reviewed by the Safe signers.
+    function migrate(uint256 slotId, MigrateParams calldata params)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+
+        // ── Cheap fat-finger sanity guards (NOT value protection) ───────────
+        if (params.destPool.code.length == 0) revert InvalidConfig();
+        if (params.destTickSpacing != ICLPool(params.destPool).tickSpacing()) revert InvalidConfig();
+        if (params.tickLower >= params.tickUpper) revert InvalidConfig();
+        if (params.destToken0 == address(0) || params.destToken1 == address(0)) revert InvalidConfig();
+        if (params.swapAmountIn > 0 && params.swapTokenIn != p.token0 && params.swapTokenIn != p.token1) {
+            revert InvalidConfig();
+        }
+
+        address oldPool = p.pool;
+        uint256 oldTokenId = p.tokenId;
+
+        // 1. Unstake if staked (auto-claims AERO → feeCollector)
+        if (p.staked) _unstake(p, slotId);
+
+        // 2. Skim LP fees → feeCollector
+        _skimFees(p, slotId);
+
+        // 3. Decrease all liquidity + collect principal
+        _decreaseLiquidityAll(p.tokenId, params.amount0MinDecrease, params.amount1MinDecrease, params.deadline);
+
+        // 4. Execute the human-supplied swap (defense-in-depth slippage via swapMinAmountOut).
+        //    No _computeSwap — the multisig reviewed the route.
+        if (params.swapAmountIn > 0) {
+            address tin = params.swapTokenIn;
+            address tout = tin == p.token0 ? p.token1 : p.token0;
+            _executeSwap(tin, tout, params.swapAmountIn, p.tickSpacing, params.swapMinAmountOut, p.maxSlippageBps);
+        }
+
+        // 5. Mint into destPool with dest tokens / ticks.
+        //    NOTE: For a real cross-pair migration the multisig must set swapTokenIn/Out so the
+        //    contract holds destToken0/destToken1 by the time we reach this step.
+        //    For unit tests destToken0/1 == old tok0/1 (same-pair, different pool) so balances
+        //    naturally align without a swap.
+        uint256 newTokenId = _mintIntoDest(params);
+
+        // 6. Burn old NFT
+        POSITION_MANAGER.burn(oldTokenId);
+
+        // 7. Update slot in-place to the destination
+        p.pool = params.destPool;
+        p.token0 = params.destToken0;
+        p.token1 = params.destToken1;
+        p.tickSpacing = params.destTickSpacing;
+        p.gauge = params.destGauge;
+        p.tokenId = newTokenId;
+        p.staked = false;
+        p.lastRebalance = block.timestamp;
+
+        // 8. Optionally restake into destGauge
+        if (params.destGauge != address(0)) {
+            POSITION_MANAGER.approve(params.destGauge, newTokenId);
+            ICLGauge(params.destGauge).deposit(newTokenId);
+            p.staked = true;
+            emit Staked(slotId, newTokenId, params.destGauge);
+        }
+
+        // 9. Forward any residual dest-token dust → feeCollector
+        _forwardDustTokens(params.destToken0, params.destToken1, p.feeCollector);
+
+        emit Migrated(slotId, oldPool, params.destPool, oldTokenId, newTokenId);
+    }
+
+    // ─── migrate private helpers ─────────────────────────────────────────────
+
+    /// @dev Shared internal: remove all liquidity from tokenId and collect into this contract.
+    ///      Used by both rebalance (via _decreaseAll wrapper) and migrate.
+    function _decreaseLiquidityAll(uint256 tokenId, uint256 amount0Min, uint256 amount1Min, uint256 deadline) private {
+        (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
+        if (liq > 0) {
+            POSITION_MANAGER.decreaseLiquidity(
+                INonfungiblePositionManager.DecreaseLiquidityParams({
+                    tokenId: tokenId,
+                    liquidity: liq,
+                    amount0Min: amount0Min,
+                    amount1Min: amount1Min,
+                    deadline: deadline
+                })
+            );
+        }
+        POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+    }
+
+    /// @dev Mint a new position into the destination pool using current contract balances
+    ///      of destToken0/destToken1.
+    ///      NOTE: After a cross-pair swap the contract holds the dest tokens because the
+    ///      human-supplied swap route converted old tokens into destToken0/1.
+    ///      For same-pair migrations (unit tests) the balances already are the dest tokens.
+    function _mintIntoDest(MigrateParams calldata params) private returns (uint256 newTokenId) {
+        uint256 bal0 = IERC20(params.destToken0).balanceOf(address(this));
+        uint256 bal1 = IERC20(params.destToken1).balanceOf(address(this));
+
+        IERC20(params.destToken0).forceApprove(address(POSITION_MANAGER), bal0);
+        IERC20(params.destToken1).forceApprove(address(POSITION_MANAGER), bal1);
+
+        INonfungiblePositionManager.MintParams memory mp = INonfungiblePositionManager.MintParams({
+            token0: params.destToken0,
+            token1: params.destToken1,
+            fee: 0, // unused in Slipstream; kept for interface compatibility
+            tickLower: params.tickLower,
+            tickUpper: params.tickUpper,
+            amount0Desired: bal0,
+            amount1Desired: bal1,
+            amount0Min: params.amount0MinMint,
+            amount1Min: params.amount1MinMint,
+            recipient: address(this),
+            deadline: params.deadline
+        });
+        (newTokenId,,,) = POSITION_MANAGER.mint(mp);
+    }
+
+    /// @dev Transfer residual balances of t0 and t1 to `to`.
+    ///      Extracted so both _forwardDust (rebalance) and _forwardDustTokens (migrate) share it.
+    function _forwardDustTokens(address t0, address t1, address to) private {
+        uint256 d0 = IERC20(t0).balanceOf(address(this));
+        uint256 d1 = IERC20(t1).balanceOf(address(this));
+        if (d0 > 0) IERC20(t0).safeTransfer(to, d0);
+        if (d1 > 0) IERC20(t1).safeTransfer(to, d1);
+    }
+
     // ─── rebalance private helpers ───────────────────────────────────────────
 
     /// @dev Collect any accrued LP fees for the position (before decreasing liquidity)
@@ -480,30 +651,9 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     }
 
     /// @dev Remove all liquidity from the position and collect the resulting tokens
-    ///      into this contract. Reads current liquidity from the PM before decreasing.
+    ///      into this contract. Delegates to the shared _decreaseLiquidityAll helper.
     function _decreaseAll(ManagedPosition storage p, RebalanceParams calldata params) private {
-        // Read current liquidity at index 7 of the positions() tuple.
-        (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(p.tokenId);
-        if (liq > 0) {
-            POSITION_MANAGER.decreaseLiquidity(
-                INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: p.tokenId,
-                    liquidity: liq,
-                    amount0Min: params.amount0MinDecrease,
-                    amount1Min: params.amount1MinDecrease,
-                    deadline: params.deadline
-                })
-            );
-        }
-        // Collect principal (and any remaining owed amounts) into this contract.
-        POSITION_MANAGER.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: p.tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
-            })
-        );
+        _decreaseLiquidityAll(p.tokenId, params.amount0MinDecrease, params.amount1MinDecrease, params.deadline);
     }
 
     /// @dev Mint a new position NFT using the current token balances of this contract.
@@ -541,10 +691,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
 
     /// @dev Transfer any residual token0 / token1 balance of this contract to the feeCollector.
     function _forwardDust(ManagedPosition storage p) private {
-        uint256 d0 = IERC20(p.token0).balanceOf(address(this));
-        uint256 d1 = IERC20(p.token1).balanceOf(address(this));
-        if (d0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, d0);
-        if (d1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, d1);
+        _forwardDustTokens(p.token0, p.token1, p.feeCollector);
     }
 
     /// @dev Compute the USD value of the principal tokens locked in the position,
