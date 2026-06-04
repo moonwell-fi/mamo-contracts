@@ -307,6 +307,29 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     // Internal helpers
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @dev Round `tick` down to the nearest multiple of `spacing`, toward −∞.
+    ///      Solidity truncates division toward zero, so we adjust negative remainders.
+    function _floorAlign(int24 tick, int24 spacing) internal pure returns (int24) {
+        int24 q = tick / spacing;
+        if (tick < 0 && tick % spacing != 0) q -= 1; // floor toward -inf
+        return q * spacing;
+    }
+
+    /// @dev Compute a tick range of `width` ticks centered on `referenceTick`,
+    ///      with both bounds aligned to `spacing`. The range is shifted left until
+    ///      `tickLower` is the largest spacing-aligned tick that is ≤ (referenceTick − width/2).
+    ///      Reverts if `currentTick` does not strictly straddle the resulting range.
+    function _alignedRange(int24 referenceTick, uint24 width, int24 spacing, int24 currentTick)
+        internal
+        pure
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        int24 half = int24(width / 2);
+        tickLower = _floorAlign(referenceTick - half, spacing);
+        tickUpper = tickLower + int24(width);
+        require(tickLower < currentTick && currentTick < tickUpper, "no straddle");
+    }
+
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces
     ///      `active = true`, `staked = false`, and `lastRebalance = 0`.
     function _store(uint256 slotId, ManagedPosition calldata config) private {
