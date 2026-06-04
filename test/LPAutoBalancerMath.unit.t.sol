@@ -5,6 +5,7 @@ import {Test} from "@forge-std/Test.sol";
 
 import {FixedPoint96} from "@libraries/uniswap/FixedPoint96.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
+import {TickMath} from "@libraries/uniswap/TickMath.sol";
 
 contract LPAutoBalancerMathUnitTest is Test {
     function test_fullMath_mulDiv_basic() public pure {
@@ -27,5 +28,17 @@ contract LPAutoBalancerMathUnitTest is Test {
 
     function test_fixedPoint96_q96() public pure {
         assertEq(FixedPoint96.Q96, 0x1000000000000000000000000); // 2**96
+    }
+
+    function test_tickMath_knownAnswers() public pure {
+        assertEq(TickMath.getSqrtRatioAtTick(0), 79228162514264337593543950336); // 2**96, price 1.0
+        assertEq(TickMath.MIN_TICK, -887272);
+        assertEq(TickMath.MAX_TICK, 887272);
+        int24[3] memory ticks = [int24(200), int24(-200), int24(60000)];
+        for (uint256 i; i < ticks.length; i++) {
+            uint160 s = TickMath.getSqrtRatioAtTick(ticks[i]);
+            int24 back = TickMath.getTickAtSqrtRatio(s);
+            assertApproxEqAbs(int256(back), int256(ticks[i]), 1);
+        }
     }
 }
