@@ -374,6 +374,67 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             + FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
     }
 
+    /// @dev Compute how much of which token to swap so the held balances match the
+    ///      target ratio for a new range at the current sqrt price.
+    ///      This is an APPROXIMATE single-swap; any residual becomes dust.
+    ///      Per-position swapPolicy can forbid selling a protected token:
+    ///        0 = either token may be sold
+    ///        1 = never sell protectedToken (counter-asset only)
+    ///        2 = only sell protectedToken
+    /// @return zeroForOne true => sell token0 for token1
+    /// @return amountIn   amount of the surplus token to swap (0 => no swap needed)
+    function _computeSwap(
+        uint160 sqrtP,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 bal0,
+        uint256 bal1,
+        uint8 swapPolicy,
+        address token0,
+        address token1,
+        address protectedToken
+    ) internal pure returns (bool zeroForOne, uint256 amountIn) {
+        uint160 sqrtA = TickMath.getSqrtRatioAtTick(tickLower);
+        uint160 sqrtB = TickMath.getSqrtRatioAtTick(tickUpper);
+
+        // price of token0 in token1, Q96: P = sqrtP^2 / 2^96
+        uint256 priceX96 = FullMath.mulDiv(uint256(sqrtP), uint256(sqrtP), FixedPoint96.Q96);
+
+        uint256 total1 = bal1 + FullMath.mulDiv(bal0, priceX96, FixedPoint96.Q96);
+        if (total1 == 0) return (false, 0);
+
+        (uint256 req0, uint256 req1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtA, sqrtB, 1e18);
+        uint256 req0In1 = FullMath.mulDiv(req0, priceX96, FixedPoint96.Q96);
+        uint256 denom = req0In1 + req1;
+        if (denom == 0) {
+            // range entirely on one side at current price (extreme rounding with L=1e18)
+            if (req1 == 0) {
+                // range wants all token0 => sell any token1 we have
+                return bal1 > 0 ? (false, bal1) : (false, 0);
+            } else {
+                // range wants all token1 => sell any token0 we have
+                return bal0 > 0 ? (true, bal0) : (true, 0);
+            }
+        }
+
+        uint256 desired0In1 = FullMath.mulDiv(total1, req0In1, denom);
+        uint256 cur0In1 = FullMath.mulDiv(bal0, priceX96, FixedPoint96.Q96);
+
+        if (cur0In1 > desired0In1) {
+            uint256 surplus1 = cur0In1 - desired0In1;
+            amountIn = FullMath.mulDiv(surplus1, FixedPoint96.Q96, priceX96); // back to token0 units
+            zeroForOne = true;
+        } else {
+            amountIn = desired0In1 - cur0In1;
+            zeroForOne = false;
+        }
+
+        // swap-leg policy: 1 = never sell protectedToken; 2 = only sell protectedToken
+        address sellToken = zeroForOne ? token0 : token1;
+        if (swapPolicy == 1 && sellToken == protectedToken) return (zeroForOne, 0);
+        if (swapPolicy == 2 && sellToken != protectedToken) return (zeroForOne, 0);
+    }
+
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces
     ///      `active = true`, `staked = false`, and `lastRebalance = 0`.
     function _store(uint256 slotId, ManagedPosition calldata config) private {

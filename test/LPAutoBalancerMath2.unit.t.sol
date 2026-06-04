@@ -9,6 +9,9 @@ import {MockPositionManager} from "./mocks/MockPositionManager.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {LPAutoBalancer} from "@contracts/LPAutoBalancer.sol";
 
+import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
+import {TickMath} from "@libraries/uniswap/TickMath.sol";
+
 /// @notice Unit tests for _alignedRange / _floorAlign (Task 8) and
 ///         _consultTwapTick / _checkDeviation (Task 9).
 contract LPAutoBalancerMath2UnitTest is Test {
@@ -172,5 +175,95 @@ contract LPAutoBalancerMath2UnitTest is Test {
 
         // Expected: $2.00 in 1e8 scale = 200_000_000
         assertEq(usd, 200_000_000);
+    }
+
+    // ─── _computeSwap tests (Task 11) ────────────────────────────────────────
+
+    // Addresses used as token0 / token1 throughout these tests.
+    address constant A = address(0xA0);
+    address constant B = address(0xB0);
+
+    /// @dev sqrtP at tick 0, symmetric range [-1000,1000], surplus token0.
+    ///      With 2e18 token0 and 0 token1 the function should sell ~half token0.
+    function test_computeSwap_sellsSurplusToken0() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        (bool zeroForOne, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, 2e18, 0, 0, A, B, address(0));
+        assertTrue(zeroForOne, "should sell token0");
+        assertGt(amountIn, 0, "amountIn must be > 0");
+        assertLt(amountIn, 2e18, "amountIn must be < full balance");
+    }
+
+    /// @dev sqrtP at tick 0, symmetric range [-1000,1000], surplus token1.
+    function test_computeSwap_sellsSurplusToken1() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        (bool zeroForOne, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, 0, 2e18, 0, A, B, address(0));
+        assertFalse(zeroForOne, "should sell token1");
+        assertGt(amountIn, 0, "amountIn must be > 0");
+        assertLt(amountIn, 2e18, "amountIn must be < full balance");
+    }
+
+    /// @dev Balances already match the range ratio → amountIn is near zero.
+    ///      We derive the balanced amounts from getAmountsForLiquidity directly.
+    function test_computeSwap_balancedNoSwap() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        uint160 sqrtA = TickMath.getSqrtRatioAtTick(-1000);
+        uint160 sqrtB = TickMath.getSqrtRatioAtTick(1000);
+        // Use L=1e18 to get balanced amounts for the range at current price.
+        (uint256 req0, uint256 req1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtA, sqrtB, 1e18);
+        // Scale up to reasonable magnitudes (both req0, req1 > 0 for in-range symmetric).
+        uint256 bal0 = req0 * 1e6;
+        uint256 bal1 = req1 * 1e6;
+        (, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, bal0, bal1, 0, A, B, address(0));
+        // Residual should be tiny relative to the input (within 1e-6 of bal0).
+        assertLe(amountIn, bal0 / 1e6 + 1, "dust only - should be near zero");
+    }
+
+    /// @dev policy 1, protectedToken = A (token0), surplus token0 → sell side is A → blocked.
+    function test_computeSwap_policy1_blocksSellingProtected() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        (, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, 2e18, 0, 1, A, B, A);
+        assertEq(amountIn, 0, "policy 1 must block selling protectedToken");
+    }
+
+    /// @dev policy 1, protectedToken = A (token0), surplus token1 → sell side is B → allowed.
+    function test_computeSwap_policy1_allowsSellingCounter() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        (, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, 0, 2e18, 1, A, B, A);
+        assertGt(amountIn, 0, "policy 1 allows selling counter-asset");
+    }
+
+    /// @dev policy 2 (only sell protected), surplus token1 → sell side is B != A → blocked.
+    function test_computeSwap_policy2_onlySellsProtected() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        // surplus token1 → would sell B; protectedToken = A → B != A → amountIn=0
+        (, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, 0, 2e18, 2, A, B, A);
+        assertEq(amountIn, 0, "policy 2 blocks selling non-protected token");
+    }
+
+    /// @dev Zero balances → no swap.
+    function test_computeSwap_zeroBalances() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        (, uint256 amountIn) = harness.computeSwap(sqrtP, -1000, 1000, 0, 0, 0, A, B, address(0));
+        assertEq(amountIn, 0, "zero balances -> no swap");
+    }
+
+    /// @dev Range entirely BELOW spot ([-2000,-1000], spot tick 0).
+    ///      Price is ABOVE the range so getAmountsForLiquidity returns (req0=0, req1>0).
+    ///      denom = req0In1 + req1 = req1 > 0 (normal path, not denom==0 branch).
+    ///      desired0In1 = total1 * 0 / req1 = 0 so sell all token0: zeroForOne=true, amountIn==bal0.
+    function test_computeSwap_rangeAboveSpot() public view {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0); // spot at tick 0
+        // Range [-2000,-1000] is entirely below tick 0; price above range; wants all token1.
+        uint256 bal0 = 1e18;
+        (bool zeroForOne, uint256 amountIn) = harness.computeSwap(sqrtP, -2000, -1000, bal0, 0, 0, A, B, address(0));
+        // Verify using LiquidityAmounts directly what the library returns.
+        uint160 sqrtA = TickMath.getSqrtRatioAtTick(-2000);
+        uint160 sqrtB = TickMath.getSqrtRatioAtTick(-1000);
+        (uint256 req0, uint256 req1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtA, sqrtB, 1e18);
+        // price above range: req0==0, req1>0; range wants all token1; should sell token0.
+        assertEq(req0, 0, "sanity: price above range means req0==0");
+        assertGt(req1, 0, "sanity: price above range means req1>0");
+        assertTrue(zeroForOne, "should sell token0 (convert to token1 for range below spot)");
+        assertEq(amountIn, bal0, "should sell entire token0 balance");
     }
 }

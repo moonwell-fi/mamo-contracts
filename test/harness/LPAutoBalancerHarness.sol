@@ -32,4 +32,18 @@ contract LPAutoBalancerHarness is LPAutoBalancer {
     {
         return _valueInUsd(a0, a1, o0, o1, d0, d1);
     }
+
+    function computeSwap(
+        uint160 sqrtP,
+        int24 tl,
+        int24 tu,
+        uint256 b0,
+        uint256 b1,
+        uint8 policy,
+        address t0,
+        address t1,
+        address prot
+    ) external pure returns (bool, uint256) {
+        return _computeSwap(sqrtP, tl, tu, b0, b1, policy, t0, t1, prot);
+    }
 }
