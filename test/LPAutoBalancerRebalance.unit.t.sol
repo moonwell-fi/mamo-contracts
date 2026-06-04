@@ -690,4 +690,166 @@ contract LPAutoBalancerRebalanceTest is Test {
         assertGe(tok0.balanceOf(feeCollector), fee0, "feeCollector missing fee0");
         assertGe(tok1.balanceOf(feeCollector), fee1, "feeCollector missing fee1");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 9: TwapDeviation — spot tick deviates from TWAP by more than maxTickDeviation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_rebalance_revertTwapDeviation() public {
+        // Register with maxTickDeviation=200 (spotTick=100, twapTick must be >300 away to trigger)
+        // Strategy: set TWAP tick far from spotTick by configuring observe cumulatives.
+        //
+        // _consultTwapTick: delta = cum[1] - cum[0]; twapTick = delta / window (1800s)
+        // To get twapTick = 400 (spot=100, diff=300 > maxTickDeviation=200):
+        //   delta = 400 * 1800 = 720_000 → set cum[0]=0, cum[1]=720_000
+        //
+        // spotTick=100 remains; twapTick=400; |100-400|=300 > 200 → TwapDeviation
+        mockPool.setObserve(0, 720_000);
+
+        uint256 slotId = _registerSlot(false);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.TwapDeviation.selector);
+        lab.rebalance(slotId, _defaultParams());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 10: CenterDeviation — aligned center deviates from twapTick
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_rebalance_revertCenterDeviation() public {
+        // Geometry:
+        //   twapTick = 50 (set via observe: delta = 50 * 1800 = 90_000)
+        //   spotTick = 100 (already set in setUp via SPOT_TICK)
+        //   width = 400, spacing = 200
+        //   _alignedRange(50, 400, 200, 100):
+        //     half = 200; floorAlign(50-200, 200) = floorAlign(-150, 200)
+        //     -150 / 200 = 0 (truncated), but -150 < 0 and -150 % 200 != 0 → q = -1
+        //     tL = -200; tU = -200 + 400 = 200; center = 0
+        //     straddle: 100 ∈ (-200, 200) ✓
+        //   dev = |center - twapTick| = |0 - 50| = 50
+        //   Set maxCenterDeviation = 1 (minimum non-zero) → 50 > 1 → CenterDeviation
+        mockPool.setObserve(0, 90_000); // twapTick = 90_000 / 1800 = 50
+
+        // Register with maxCenterDeviation=1 (smallest non-zero value)
+        // maxTickDeviation must allow |spot-twap| = |100-50| = 50 → set maxTickDeviation >= 50
+        LPAutoBalancer.ManagedPosition memory cfg = LPAutoBalancer.ManagedPosition({
+            tokenId: OLD_TOKEN_ID,
+            pool: address(mockPool),
+            token0: address(tok0),
+            token1: address(tok1),
+            tickSpacing: 200,
+            gauge: address(0),
+            staked: false,
+            feeCollector: feeCollector,
+            oracle0: address(feed0),
+            oracle1: address(feed1),
+            swapPolicy: 0,
+            protectedToken: address(0),
+            minWidth: 200,
+            maxWidth: 2000,
+            maxCenterDeviation: 1, // tiny → any non-zero deviation fails
+            maxSlippageBps: 100,
+            twapWindow: 1800,
+            maxTickDeviation: 200, // allows |spot-twap|=50 through
+            maxRebalanceLossBps: 100,
+            minRebalanceInterval: 0,
+            lastRebalance: 0,
+            active: false
+        });
+        vm.prank(admin);
+        uint256 slotId = lab.registerPosition(cfg);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.CenterDeviation.selector);
+        lab.rebalance(slotId, _defaultParams());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 11: ValueFloor — new position value drops well below tolerance
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_rebalance_revertValueFloor() public {
+        uint256 slotId = _registerSlot(false);
+
+        // Principal for the old position: 1e18 tok0 + 1e18 tok1 → valueBefore > 0
+        _stagePrincipal(1e18, 1e18);
+
+        // New mint returns liquidity = 1 (effectively zero value).
+        // valueAfter will be ~0, which is << valueBefore * (10000-100)/10000
+        // → ValueFloor must trigger.
+        mockPM.setNextMintResult(NEW_TOKEN_ID, 1);
+        mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, 1, address(tok0), address(tok1));
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.ValueFloor.selector);
+        lab.rebalance(slotId, _defaultParams());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 12: StaleOracle — feed0 is older than maxOracleDelay
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_rebalance_revertStaleOracle() public {
+        // Warp forward so we can set updatedAt in the past
+        vm.warp(100_000);
+
+        uint256 slotId = _registerSlot(false);
+
+        // Make feed0 stale: updatedAt = now - maxOracleDelay - 1
+        uint256 delay = lab.maxOracleDelay();
+        feed0.setUpdatedAt(block.timestamp - delay - 1);
+        // feed1 stays fresh
+
+        _stagePrincipal(1e18, 1e18);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.StaleOracle.selector);
+        lab.rebalance(slotId, _defaultParams());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 13: executesSwap — imbalanced holdings trigger nonzero swap
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_rebalance_executesSwap() public {
+        // Setup: range [-200,200] at sqrtP for tick=0 (symmetric range).
+        // With bal0=2e18, bal1=0: cur0In1 > desired0In1 → must sell token0 (zeroForOne=true).
+        // We give ALL principal as token0 and none as token1.
+        //
+        // _computeSwap with sqrtP=Q96 (price=1), tL=-200, tU=200, L=1e18:
+        //   req0 ≈ req1 (symmetric) → ratio ≈ 50/50 in value
+        //   total1 = 0 + 2e18 * priceX96/Q96 ≈ 2e18
+        //   desired0In1 ≈ total1/2 = 1e18
+        //   cur0In1 = 2e18 * price = 2e18
+        //   surplus1 ≈ 1e18 → amountIn ≈ 1e18 (token0)
+        //   zeroForOne = true (sell token0)
+        //
+        // Router mock must return amountOut >= quoterMin.
+        // Quoter returns quotedOut=1e18; quoterMin = 1e18*(10000-100)/10000 = 9900...e14
+        // Router returns amountOutToReturn=1e18 ≥ quoterMin ✓
+        //
+        // After swap the lab may have residual tok0; mint is called with whatever balance remains.
+        // Value floor: new position has NEW_LIQ=1e18 same as old OLD_LIQ=1e18 → passes.
+
+        uint256 slotId = _registerSlot(false);
+
+        // Stage: 0 fees; principal = 2e18 tok0, 0 tok1
+        tok0.mint(address(mockPM), 2e18);
+        mockPM.setCollectSequence(0, 0, 2e18, 0);
+
+        // Configure quoter and router
+        mockQuoter.setQuotedOut(1e18);
+        mockRouter.setAmountOutToReturn(1e18);
+
+        // Mint tokens into router so it can "pay out" tok1 on swap
+        // (the mock router doesn't transfer but we need lab to have enough value after)
+        // Value floor uses stored liquidity from PM, not actual token balances — passes regardless.
+
+        vm.prank(rebalancer);
+        lab.rebalance(slotId, _defaultParams());
+
+        // Assert router was called (swap leg executed)
+        assertTrue(mockRouter.wasCalled(), "swap router was not called");
+    }
 }
