@@ -82,9 +82,17 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     error InvalidConfig();
     error NotActive();
     error NotHeld();
+    error InvalidSwapPolicy();
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
+    event PositionConfigUpdated(uint256 indexed slotId);
+    event FeeCollectorUpdated(uint256 indexed slotId, address feeCollector);
+    event OraclesUpdated(uint256 indexed slotId, address oracle0, address oracle1);
+    event SwapPolicyUpdated(uint256 indexed slotId, uint8 swapPolicy, address protectedToken);
+    event GaugeUpdated(uint256 indexed slotId, address gauge);
+    event MaxOracleDelayUpdated(uint256 oldDelay, uint256 newDelay);
+    event TokensRecovered(address indexed token, address indexed to, uint256 amount);
 
     constructor(
         address admin_,
@@ -161,6 +169,139 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         emit PositionDeregistered(slotId, to);
         POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Manager setters
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Update the core rebalance parameters for an active position.
+    function setPositionConfig(
+        uint256 slotId,
+        uint24 minWidth,
+        uint24 maxWidth,
+        uint24 maxCenterDeviation,
+        uint16 maxSlippageBps,
+        uint32 twapWindow,
+        int24 maxTickDeviation,
+        uint16 maxRebalanceLossBps,
+        uint256 minRebalanceInterval
+    ) external onlyRole(MANAGER_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        if (maxSlippageBps > MAX_SLIPPAGE_CAP_BPS) revert SlippageCapExceeded();
+        if (maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
+        if (twapWindow == 0 || maxTickDeviation <= 0) revert InvalidConfig();
+        int24 spacing = positions[slotId].tickSpacing;
+        if (minWidth == 0 || minWidth > maxWidth || minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0)
+        {
+            revert InvalidWidth();
+        }
+
+        ManagedPosition storage p = positions[slotId];
+        p.minWidth = minWidth;
+        p.maxWidth = maxWidth;
+        p.maxCenterDeviation = maxCenterDeviation;
+        p.maxSlippageBps = maxSlippageBps;
+        p.twapWindow = twapWindow;
+        p.maxTickDeviation = maxTickDeviation;
+        p.maxRebalanceLossBps = maxRebalanceLossBps;
+        p.minRebalanceInterval = minRebalanceInterval;
+
+        emit PositionConfigUpdated(slotId);
+    }
+
+    /// @notice Update the fee collector for an active position.
+    function setFeeCollector(uint256 slotId, address feeCollector) external onlyRole(MANAGER_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        if (feeCollector == address(0)) revert ZeroAddress();
+        positions[slotId].feeCollector = feeCollector;
+        emit FeeCollectorUpdated(slotId, feeCollector);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Admin setters
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Update the price-feed oracles for an active position.
+    function setOracles(uint256 slotId, address oracle0, address oracle1) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        if (oracle0 == address(0) || oracle1 == address(0)) revert OracleRequired();
+        positions[slotId].oracle0 = oracle0;
+        positions[slotId].oracle1 = oracle1;
+        emit OraclesUpdated(slotId, oracle0, oracle1);
+    }
+
+    /// @notice Update the swap policy for an active position.
+    ///         swapPolicy: 0 = either, 1 = counter-asset only, 2 = protected only.
+    function setSwapPolicy(uint256 slotId, uint8 swapPolicy, address protectedToken)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        if (!positions[slotId].active) revert NotActive();
+        if (swapPolicy > 2) revert InvalidSwapPolicy();
+        if (swapPolicy != 0) {
+            address t0 = positions[slotId].token0;
+            address t1 = positions[slotId].token1;
+            if (protectedToken != t0 && protectedToken != t1) revert InvalidConfig();
+        }
+        positions[slotId].swapPolicy = swapPolicy;
+        positions[slotId].protectedToken = protectedToken;
+        emit SwapPolicyUpdated(slotId, swapPolicy, protectedToken);
+    }
+
+    /// @notice Update the gauge for an active position. Pass address(0) to disable staking.
+    ///         Requires the position to not currently be staked.
+    function setGauge(uint256 slotId, address gauge) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        require(!positions[slotId].staked, "unstake first");
+        positions[slotId].gauge = gauge;
+        emit GaugeUpdated(slotId, gauge);
+    }
+
+    /// @notice Update the maximum acceptable oracle staleness.
+    function setMaxOracleDelay(uint256 newDelay) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newDelay == 0 || newDelay > 7 days) revert InvalidConfig();
+        uint256 old = maxOracleDelay;
+        maxOracleDelay = newDelay;
+        emit MaxOracleDelayUpdated(old, newDelay);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Pause
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Pause the contract (guardian only).
+    function pause() external onlyRole(GUARDIAN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Unpause the contract (guardian only).
+    function unpause() external onlyRole(GUARDIAN_ROLE) {
+        _unpause();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Token recovery
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Recover accidentally-sent ERC-20 tokens.
+    function recoverERC20(address token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        IERC20(token).safeTransfer(to, amount);
+        emit TokensRecovered(token, to, amount);
+    }
+
+    /// @notice Recover accidentally-sent ETH.
+    function recoverETH(address payable to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 bal = address(this).balance;
+        (bool ok,) = to.call{value: bal}("");
+        require(ok, "ETH transfer failed");
+        emit TokensRecovered(address(0), to, bal);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Internal helpers
+    // ═══════════════════════════════════════════════════════════════════════
 
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces
     ///      `active = true`, `staked = false`, and `lastRebalance = 0`.
