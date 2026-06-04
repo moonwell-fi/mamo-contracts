@@ -1221,4 +1221,103 @@ contract LPAutoBalancerUnitTest is Test {
         // feeCollector holds nothing
         assertEq(mockAero.balanceOf(feeCollector), 0);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 18 — withdrawPosition (emergency, DEFAULT_ADMIN_ROLE)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Register a slot, admin withdraws an unstaked position to `to`.
+    function test_withdrawPosition_happy() public {
+        uint256 slotId = _registerSlot(); // not staked
+        address to = makeAddr("withdrawRecipient");
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, false);
+        emit LPAutoBalancer.PositionWithdrawn(slotId, to);
+        lab.withdrawPosition(slotId, to);
+
+        // mockPM recorded safeTransferFrom(lab, to, tokenId)
+        assertEq(mockPM.lastFrom(), address(lab));
+        assertEq(mockPM.lastTo(), to);
+        assertEq(mockPM.lastTokenId(), TOKEN_ID);
+        assertEq(mockPM.transferCallCount(), 1);
+
+        // Position marked inactive
+        (,,,,,,,,,,,,,,,,,,,,, bool storedActive) = lab.positions(slotId);
+        assertFalse(storedActive);
+    }
+
+    /// @dev Register, stake the position (with AERO reward), then admin calls withdrawPosition.
+    ///      Should auto-unstake (AERO forwarded to feeCollector), mark inactive, transfer NFT.
+    function test_withdrawPosition_autoUnstakes() public {
+        uint256 slotId = _registerSlotWithGauge(); // gauge = mockGauge
+        uint256 aeroAmount = 3e18;
+
+        // Fund gauge so it pays AERO on withdraw
+        mockAero.mint(address(mockGauge), aeroAmount);
+        mockGauge.setAeroToPayOnWithdraw(aeroAmount);
+
+        // Stake the position
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Confirm it is staked
+        (,,,,,, bool stakedBefore,,,,,,,,,,,,,,,) = lab.positions(slotId);
+        assertTrue(stakedBefore);
+
+        address to = makeAddr("emergencyRecipient");
+
+        vm.prank(admin);
+        // Expect EmissionsClaimed (from _unstake) and PositionWithdrawn
+        vm.expectEmit(true, false, false, true);
+        emit LPAutoBalancer.EmissionsClaimed(slotId, aeroAmount);
+        vm.expectEmit(true, true, true, false);
+        emit LPAutoBalancer.Unstaked(slotId, TOKEN_ID, address(mockGauge));
+        vm.expectEmit(true, true, false, false);
+        emit LPAutoBalancer.PositionWithdrawn(slotId, to);
+        lab.withdrawPosition(slotId, to);
+
+        // staked flag cleared (by _unstake)
+        (,,,,,, bool stakedAfter,,,,,,,,,,,,,,,) = lab.positions(slotId);
+        assertFalse(stakedAfter);
+
+        // AERO forwarded to feeCollector
+        assertEq(mockAero.balanceOf(feeCollector), aeroAmount);
+        assertEq(mockAero.balanceOf(address(lab)), 0);
+
+        // NFT transferred to `to`
+        assertEq(mockPM.lastFrom(), address(lab));
+        assertEq(mockPM.lastTo(), to);
+        assertEq(mockPM.lastTokenId(), TOKEN_ID);
+
+        // Position inactive
+        (,,,,,,,,,,,,,,,,,,,,, bool storedActive) = lab.positions(slotId);
+        assertFalse(storedActive);
+    }
+
+    function test_withdrawPosition_revertNonAdmin() public {
+        uint256 slotId = _registerSlot();
+        address caller = makeAddr("nonAdmin");
+        address to = makeAddr("to");
+        vm.prank(caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, caller, bytes32(0))
+        );
+        lab.withdrawPosition(slotId, to);
+    }
+
+    function test_withdrawPosition_revertNotActive() public {
+        // slot 0 was never registered — active == false
+        address to = makeAddr("to");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.NotActive.selector);
+        lab.withdrawPosition(0, to);
+    }
+
+    function test_withdrawPosition_revertZeroTo() public {
+        uint256 slotId = _registerSlot();
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.ZeroAddress.selector);
+        lab.withdrawPosition(slotId, address(0));
+    }
 }

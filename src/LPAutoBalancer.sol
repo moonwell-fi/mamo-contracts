@@ -97,6 +97,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
+    event PositionWithdrawn(uint256 indexed slotId, address indexed to);
     event PositionConfigUpdated(uint256 indexed slotId);
     event FeeCollectorUpdated(uint256 indexed slotId, address feeCollector);
     event OraclesUpdated(uint256 indexed slotId, address oracle0, address oracle1);
@@ -185,6 +186,19 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         uint256 tokenId = p.tokenId;
         p.active = false; // effects before interaction (CEI)
         emit PositionDeregistered(slotId, to);
+        POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
+    }
+
+    /// @notice Emergency withdraw: auto-unstakes (if staked) then transfers the NFT to `to`.
+    ///         Allows an admin to rescue a position in one call regardless of staking state.
+    function withdrawPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (to == address(0)) revert ZeroAddress();
+        if (p.staked) _unstake(p, slotId); // auto-claims AERO -> feeCollector, returns NFT to this contract
+        uint256 tokenId = p.tokenId;
+        p.active = false; // effects before interaction (CEI)
+        emit PositionWithdrawn(slotId, to);
         POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
     }
 
