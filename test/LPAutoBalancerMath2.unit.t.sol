@@ -6,6 +6,7 @@ import {Test} from "@forge-std/Test.sol";
 import {LPAutoBalancerHarness} from "./harness/LPAutoBalancerHarness.sol";
 import {MockCLPool} from "./mocks/MockCLPool.sol";
 import {MockPositionManager} from "./mocks/MockPositionManager.sol";
+import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {LPAutoBalancer} from "@contracts/LPAutoBalancer.sol";
 
 /// @notice Unit tests for _alignedRange / _floorAlign (Task 8) and
@@ -89,5 +90,87 @@ contract LPAutoBalancerMath2UnitTest is Test {
     /// @dev Negative ticks: diff = |-1000 - (-1050)| = 50 <= 100: must not revert.
     function test_checkDeviation_negativeSpot() public view {
         harness.checkDeviation(-1000, -1050, 100); // no revert
+    }
+
+    // ─── _readFeed / _valueInUsd tests (Task 10) ─────────────────────────────
+
+    uint256 constant T = 1_780_000_000; // sane base timestamp
+
+    /// @dev MAMO/USD + cbBTC/USD valuation.
+    ///      MAMO: 1000e18 tokens, price = 885800 (8-dec), token dec = 18
+    ///        leg0 = mulDiv(1000e18, 885800, 1e18) * 1e8 / 1e8 = 885_800_000
+    ///      cbBTC: 1e8 tokens, price = 6_500_000_000_000 (8-dec), token dec = 8
+    ///        leg1 = mulDiv(1e8, 6_500_000_000_000, 1e8) * 1e8 / 1e8 = 6_500_000_000_000
+    ///      total = 885_800_000 + 6_500_000_000_000 = 6_500_885_800_000
+    function test_valueInUsd_mamoCbbtc() public {
+        vm.warp(T);
+
+        MockPriceFeed oracle0 = new MockPriceFeed(885_800, 8, T); // MAMO/USD
+        MockPriceFeed oracle1 = new MockPriceFeed(6_500_000_000_000, 8, T); // cbBTC/USD
+
+        uint256 amount0 = 1000e18; // 1000 MAMO (18-dec)
+        uint256 amount1 = 1e8; // 1 cbBTC (8-dec)
+
+        uint256 usd = harness.valueInUsd(amount0, amount1, address(oracle0), address(oracle1), 18, 8);
+
+        // Expected: 6_500_885_800_000 (1e8-scaled USD)
+        assertApproxEqAbs(usd, 6_500_885_800_000, 1e6);
+    }
+
+    /// @dev answer == 0 must revert StaleOracle.
+    function test_readFeed_revertStaleAnswer_zero() public {
+        vm.warp(T);
+        MockPriceFeed feed = new MockPriceFeed(0, 8, T);
+        vm.expectRevert(LPAutoBalancer.StaleOracle.selector);
+        harness.readFeed(address(feed));
+    }
+
+    /// @dev answer == -1 (negative) must revert StaleOracle.
+    function test_readFeed_revertStaleAnswer_negative() public {
+        vm.warp(T);
+        MockPriceFeed feed = new MockPriceFeed(-1, 8, T);
+        vm.expectRevert(LPAutoBalancer.StaleOracle.selector);
+        harness.readFeed(address(feed));
+    }
+
+    /// @dev updatedAt older than maxOracleDelay (26h) must revert StaleOracle.
+    function test_readFeed_revertStaleTime() public {
+        vm.warp(T);
+        // updatedAt = T - 27 hours (exceeds 26h default)
+        MockPriceFeed feed = new MockPriceFeed(1_000_000, 8, T - 27 hours);
+        vm.expectRevert(LPAutoBalancer.StaleOracle.selector);
+        harness.readFeed(address(feed));
+    }
+
+    /// @dev updatedAt = T - 1h (fresh within 26h window) must succeed.
+    function test_readFeed_freshOk() public {
+        vm.warp(T);
+        int256 answer = 1_234_567;
+        uint8 dec = 8;
+        MockPriceFeed feed = new MockPriceFeed(answer, dec, T - 1 hours);
+        (uint256 price, uint8 decimals) = harness.readFeed(address(feed));
+        assertEq(price, uint256(answer));
+        assertEq(decimals, dec);
+    }
+
+    /// @dev 18-decimal feed normalization: one token with 6 token decimals and
+    ///      18-decimal price feed (like many on-chain aggregators).
+    ///      amount = 1e6, price = 2e18 (i.e. $2 in 18-dec notation), token dec = 6.
+    ///      leg = mulDiv(1e6, 2e18, 1e6) * 1e8 / 1e18
+    ///          = 2e18 * 1e8 / 1e18 = 2e8 = 200_000_000 (= $2.00 in 1e8 USD)
+    ///      second leg: amount1=0 so contributes 0.
+    function test_valueInUsd_differentFeedDecimals() public {
+        vm.warp(T);
+
+        // 18-decimal oracle: price = 2e18 (represents $2.00)
+        MockPriceFeed oracle0 = new MockPriceFeed(int256(2e18), 18, T);
+        // second leg is zero (dummy oracle, not called via amount1=0 but must exist)
+        MockPriceFeed oracle1 = new MockPriceFeed(int256(1e8), 8, T);
+
+        // 1 USDC = 1e6 (6-dec token), price feed 18-dec
+        uint256 usd = harness.valueInUsd(1e6, 0, address(oracle0), address(oracle1), 6, 6);
+
+        // Expected: $2.00 in 1e8 scale = 200_000_000
+        assertEq(usd, 200_000_000);
     }
 }

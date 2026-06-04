@@ -76,6 +76,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
 
     error ZeroAddress();
     error TwapDeviation();
+    error StaleOracle();
     error SlippageCapExceeded();
     error LossCapExceeded();
     error InvalidWidth();
@@ -348,6 +349,29 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     function _checkDeviation(int24 spotTick, int24 twapTick, int24 maxDev) internal pure {
         int24 diff = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
         if (diff > maxDev) revert TwapDeviation();
+    }
+
+    /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
+    ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
+    function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
+        (, int256 answer,, uint256 updatedAt,) = IPriceFeed(feed).latestRoundData();
+        if (answer <= 0) revert StaleOracle();
+        if (block.timestamp - updatedAt > maxOracleDelay) revert StaleOracle();
+        price = uint256(answer);
+        decimals = IPriceFeed(feed).decimals();
+    }
+
+    /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
+    /// @param dec0 token0 ERC20 decimals; dec1 token1 ERC20 decimals.
+    function _valueInUsd(uint256 amount0, uint256 amount1, address oracle0, address oracle1, uint8 dec0, uint8 dec1)
+        internal
+        view
+        returns (uint256 usd)
+    {
+        (uint256 p0, uint8 fd0) = _readFeed(oracle0);
+        (uint256 p1, uint8 fd1) = _readFeed(oracle1);
+        usd = FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0)
+            + FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
     }
 
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces

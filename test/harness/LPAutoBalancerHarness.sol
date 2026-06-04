@@ -20,4 +20,16 @@ contract LPAutoBalancerHarness is LPAutoBalancer {
     function checkDeviation(int24 spot, int24 twap, int24 maxDev) external pure {
         _checkDeviation(spot, twap, maxDev);
     }
+
+    function readFeed(address feed) external view returns (uint256, uint8) {
+        return _readFeed(feed);
+    }
+
+    function valueInUsd(uint256 a0, uint256 a1, address o0, address o1, uint8 d0, uint8 d1)
+        external
+        view
+        returns (uint256)
+    {
+        return _valueInUsd(a0, a1, o0, o1, d0, d1);
+    }
 }
