@@ -1,7 +1,7 @@
 # LP Auto-Balancer — Design
 
 **Date:** 2026-06-01
-**Status:** Revised after review (design) — incorporates F-MAMO review feedback (PR #54)
+**Status:** Implemented — see docs/superpowers/plans/2026-06-04-lp-auto-balancer-implementation.md (contract + tests on branch feat/lp-auto-balancer). Previously: Revised after review (design) — incorporates F-MAMO review feedback (PR #54)
 **Author:** Ana Julia + Claude
 
 > **Revision note (post-review).** This draft was revised to address review comments from Luke:
@@ -298,3 +298,19 @@ Per review, migration destinations are decided by **periodic human analysis**, n
 - **Required LLM pool-discovery** (rejected — it is an optional nice-to-have; humans + the Safe decide and execute migrations, §8.3).
 
 > **Correction (was a non-goal in error).** A previous draft listed "Chainlink-valued retention guards — rejected because MAMO has no reliable Chainlink feed." **MAMO does have a live Chainlink feed** — `MAMO / USD` at `0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94` on Base (8 decimals, ~$0.0089 at writing). The value floor now prices against it when configured (Section 3.1), which is stronger than a thin-pool TWAP and resolves the earlier thin-pool caveat.
+
+## Implementation notes
+
+Key deltas discovered during implementation, important for reviewers:
+
+1. **Day-one managed position is MAMO/USDC (tokenId 21585074 from TransferAndEarn)**, not cbBTC/MAMO — the cbBTC/MAMO NFT is not held by TransferAndEarn. cbBTC/MAMO can be added later once its custody is confirmed.
+
+2. **The Position Manager is Aerodrome Slipstream**: `mint` uses `int24 tickSpacing` (not `uint24 fee`) plus a trailing `uint160 sqrtPriceX96` parameter — a dedicated `ICLPositionManager` interface was added. The repo's existing `INonfungiblePositionManager` was Uniswap-v3-shaped and was never exercised for `mint`.
+
+3. **The value floor refines the spec's single `valueOracle` into per-leg Chainlink feeds** (`oracle0`/`oracle1`), pricing realized token balances rather than in-range liquidity. This gives a more accurate and manipulation-resistant pre/post measurement.
+
+4. **Roles use OZ `AccessControlEnumerable` with a `REBALANCER_ROLE`** (not a standalone `rebalancer` address field). The spec's `address public rebalancer` state variable was replaced by the role — callers with `REBALANCER_ROLE` may call `rebalance()`, `collectFees()`, `stake()`/`unstake()`, and `claimEmissions()`.
+
+5. **Operational note — concentrating a full-range position into a tight range in a single swap can incur >1% value loss** from swap fees alone. `maxRebalanceLossBps` must be set with that headroom, or rebalances done incrementally. Observed on the fork test: 1% was marginally tight for a full-range → 4000-tick move; 3% was realistic.
+
+6. **Operational note — `maxOracleDelay` bounds Chainlink staleness**; keep it consistent with each feed's real heartbeat to avoid spurious stale-oracle reverts.
