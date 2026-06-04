@@ -12,4 +12,12 @@ contract LPAutoBalancerHarness is LPAutoBalancer {
     function alignedRange(int24 ref, uint24 width, int24 spacing, int24 cur) external pure returns (int24, int24) {
         return _alignedRange(ref, width, spacing, cur);
     }
+
+    function consultTwapTick(address pool, uint32 window) external view returns (int24) {
+        return _consultTwapTick(pool, window);
+    }
+
+    function checkDeviation(int24 spot, int24 twap, int24 maxDev) external pure {
+        _checkDeviation(spot, twap, maxDev);
+    }
 }

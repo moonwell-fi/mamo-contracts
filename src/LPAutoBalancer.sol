@@ -75,6 +75,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     uint256 public nextSlotId;
 
     error ZeroAddress();
+    error TwapDeviation();
     error SlippageCapExceeded();
     error LossCapExceeded();
     error InvalidWidth();
@@ -328,6 +329,25 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         tickLower = _floorAlign(referenceTick - half, spacing);
         tickUpper = tickLower + int24(width);
         require(tickLower < currentTick && currentTick < tickUpper, "no straddle");
+    }
+
+    /// @dev Consult the pool's TWAP oracle and return the time-weighted average tick
+    ///      over `window` seconds. Division is floored toward −∞ (matches OracleLibrary.consult).
+    function _consultTwapTick(address pool, uint32 window) internal view returns (int24) {
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = window;
+        secondsAgos[1] = 0;
+        (int56[] memory cum,) = ICLPool(pool).observe(secondsAgos);
+        int56 delta = cum[1] - cum[0];
+        int24 twapTick = int24(delta / int56(uint56(window)));
+        if (delta < 0 && (delta % int56(uint56(window)) != 0)) twapTick--; // round toward -inf
+        return twapTick;
+    }
+
+    /// @dev Revert if the absolute difference between `spotTick` and `twapTick` exceeds `maxDev`.
+    function _checkDeviation(int24 spotTick, int24 twapTick, int24 maxDev) internal pure {
+        int24 diff = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
+        if (diff > maxDev) revert TwapDeviation();
     }
 
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces
