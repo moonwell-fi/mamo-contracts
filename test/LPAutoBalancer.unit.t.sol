@@ -199,6 +199,64 @@ contract LPAutoBalancerUnitTest is Test {
         assertEq(storedLastRebalance, 0); // _store forces this to 0
     }
 
+    function test_registerPosition_revertPoolZero() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.pool = address(0);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertTwapZero() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.twapWindow = 0;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertMaxTickDevZero() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.maxTickDeviation = 0;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertTickSpacingZero() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.tickSpacing = 0;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertWidth_maxNotMultiple() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        // tickSpacing=200, minWidth=200, maxWidth=2100 — 2100 % 200 != 0
+        cfg.minWidth = 200;
+        cfg.maxWidth = 2100;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidWidth.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_slippageBoundaryValid() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.maxSlippageBps = 500; // exactly at cap — should succeed
+        vm.prank(admin);
+        uint256 slotId = lab.registerPosition(cfg);
+        assertEq(slotId, 0);
+    }
+
+    function test_registerPosition_emitsEvent() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        vm.prank(admin);
+        vm.expectEmit(true, true, true, false);
+        emit LPAutoBalancer.PositionRegistered(0, pool, TOKEN_ID);
+        lab.registerPosition(cfg);
+    }
+
     // ─── deregisterPosition tests ────────────────────────────────────────────
 
     function test_deregisterPosition_happy() public {
@@ -240,6 +298,28 @@ contract LPAutoBalancerUnitTest is Test {
         address recipient = makeAddr("recipient");
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.NotActive.selector);
+        lab.deregisterPosition(0, recipient);
+    }
+
+    function test_deregisterPosition_revertZeroTo() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        vm.prank(admin);
+        lab.registerPosition(cfg);
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.ZeroAddress.selector);
+        lab.deregisterPosition(0, address(0));
+    }
+
+    function test_deregisterPosition_emitsEvent() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        vm.prank(admin);
+        lab.registerPosition(cfg);
+
+        address recipient = makeAddr("recipient");
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, false);
+        emit LPAutoBalancer.PositionDeregistered(0, recipient);
         lab.deregisterPosition(0, recipient);
     }
 }

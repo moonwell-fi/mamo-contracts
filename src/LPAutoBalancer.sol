@@ -152,12 +152,14 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     function deregisterPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
         ManagedPosition storage p = positions[slotId];
         if (!p.active) revert NotActive();
+        if (to == address(0)) revert ZeroAddress();
         // NOTE: staked-unstake handling is added in Task 13 (_unstake does not exist yet).
         // For now, require not staked so we never silently strand a staked NFT.
         require(!p.staked, "unstake first");
-        POSITION_MANAGER.safeTransferFrom(address(this), to, p.tokenId);
-        p.active = false;
+        uint256 tokenId = p.tokenId;
+        p.active = false; // effects before interaction (CEI)
         emit PositionDeregistered(slotId, to);
+        POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
     }
 
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces
