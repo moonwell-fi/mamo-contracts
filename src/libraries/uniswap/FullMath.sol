@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Vendored from Uniswap/v3-core@fc2107bd5709cdee6742d5164c1eb998566bcb75, adapted to 0.8.28
+// Vendored from Uniswap/v3-core@fc2107bd5709cdee6742d5164c1eb998566bcb75 (upstream of velodrome-finance/slipstream; math identical), adapted to 0.8.28
 pragma solidity 0.8.28;
 
 /// @title Contains 512-bit math functions
