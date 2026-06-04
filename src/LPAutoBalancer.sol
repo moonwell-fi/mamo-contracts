@@ -75,6 +75,16 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     uint256 public nextSlotId;
 
     error ZeroAddress();
+    error SlippageCapExceeded();
+    error LossCapExceeded();
+    error InvalidWidth();
+    error OracleRequired();
+    error InvalidConfig();
+    error NotActive();
+    error NotHeld();
+
+    event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
+    event PositionDeregistered(uint256 indexed slotId, address indexed to);
 
     constructor(
         address admin_,
@@ -106,5 +116,75 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     function onERC721Received(address, address, uint256, bytes calldata) external view returns (bytes4) {
         require(msg.sender == address(POSITION_MANAGER), "Only position manager");
         return this.onERC721Received.selector;
+    }
+
+    /// @notice Register a position NFT already held by this contract.
+    /// @param config Full position configuration. `active`, `staked`, and `lastRebalance` are
+    ///               overridden by `_store` regardless of the values supplied here.
+    /// @return slotId The slot index assigned to this position.
+    function registerPosition(ManagedPosition calldata config)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (uint256 slotId)
+    {
+        if (config.maxSlippageBps > MAX_SLIPPAGE_CAP_BPS) revert SlippageCapExceeded();
+        if (config.maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
+        if (config.pool == address(0) || config.token0 == address(0) || config.token1 == address(0)) {
+            revert InvalidConfig();
+        }
+        if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
+        if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
+        int24 spacing = config.tickSpacing;
+        if (spacing <= 0) revert InvalidConfig();
+        if (
+            config.minWidth == 0 || config.minWidth > config.maxWidth || config.minWidth % uint24(spacing) != 0
+                || config.maxWidth % uint24(spacing) != 0
+        ) revert InvalidWidth();
+        if (POSITION_MANAGER.ownerOf(config.tokenId) != address(this)) revert NotHeld();
+
+        slotId = nextSlotId++;
+        _store(slotId, config);
+        emit PositionRegistered(slotId, config.pool, config.tokenId);
+    }
+
+    /// @notice Deregister a position and transfer its NFT to `to`.
+    ///         Requires the position to not be staked (unstake first via Task 13).
+    function deregisterPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        // NOTE: staked-unstake handling is added in Task 13 (_unstake does not exist yet).
+        // For now, require not staked so we never silently strand a staked NFT.
+        require(!p.staked, "unstake first");
+        POSITION_MANAGER.safeTransferFrom(address(this), to, p.tokenId);
+        p.active = false;
+        emit PositionDeregistered(slotId, to);
+    }
+
+    /// @dev Copies every field from `config` into `positions[slotId]`, but forces
+    ///      `active = true`, `staked = false`, and `lastRebalance = 0`.
+    function _store(uint256 slotId, ManagedPosition calldata config) private {
+        ManagedPosition storage p = positions[slotId];
+        p.tokenId = config.tokenId;
+        p.pool = config.pool;
+        p.token0 = config.token0;
+        p.token1 = config.token1;
+        p.tickSpacing = config.tickSpacing;
+        p.gauge = config.gauge;
+        p.staked = false; // forced
+        p.feeCollector = config.feeCollector;
+        p.oracle0 = config.oracle0;
+        p.oracle1 = config.oracle1;
+        p.swapPolicy = config.swapPolicy;
+        p.protectedToken = config.protectedToken;
+        p.minWidth = config.minWidth;
+        p.maxWidth = config.maxWidth;
+        p.maxCenterDeviation = config.maxCenterDeviation;
+        p.maxSlippageBps = config.maxSlippageBps;
+        p.twapWindow = config.twapWindow;
+        p.maxTickDeviation = config.maxTickDeviation;
+        p.maxRebalanceLossBps = config.maxRebalanceLossBps;
+        p.minRebalanceInterval = config.minRebalanceInterval;
+        p.lastRebalance = 0; // forced
+        p.active = true; // forced
     }
 }
