@@ -199,7 +199,6 @@ library TickMath {
                 r := shr(127, mul(r, r))
                 let f := shr(128, r)
                 log_2 := or(log_2, shl(50, f))
-                r := shr(f, r)
             }
 
             int256 log_sqrt10001 = log_2 * 255738958999603826347141; // 128.128 number

@@ -41,4 +41,15 @@ contract LPAutoBalancerMathUnitTest is Test {
             assertApproxEqAbs(int256(back), int256(ticks[i]), 1);
         }
     }
+
+    function test_tickMath_extremeRoundTrip() public pure {
+        int24[10] memory ticks = [int24(-887272), -700000, -500000, -100000, -1, 1, 100000, 500000, 700000, 887271];
+        for (uint256 i; i < ticks.length; i++) {
+            uint160 s = TickMath.getSqrtRatioAtTick(ticks[i]);
+            int24 back = TickMath.getTickAtSqrtRatio(s);
+            assertApproxEqAbs(int256(back), int256(ticks[i]), 1);
+        }
+        assertEq(TickMath.getSqrtRatioAtTick(TickMath.MIN_TICK), TickMath.MIN_SQRT_RATIO);
+        assertEq(TickMath.getSqrtRatioAtTick(TickMath.MAX_TICK), TickMath.MAX_SQRT_RATIO);
+    }
 }
