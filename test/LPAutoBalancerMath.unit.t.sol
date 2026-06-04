@@ -5,6 +5,7 @@ import {Test} from "@forge-std/Test.sol";
 
 import {FixedPoint96} from "@libraries/uniswap/FixedPoint96.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
+import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
 
 contract LPAutoBalancerMathUnitTest is Test {
@@ -51,5 +52,28 @@ contract LPAutoBalancerMathUnitTest is Test {
         }
         assertEq(TickMath.getSqrtRatioAtTick(TickMath.MIN_TICK), TickMath.MIN_SQRT_RATIO);
         assertEq(TickMath.getSqrtRatioAtTick(TickMath.MAX_TICK), TickMath.MAX_SQRT_RATIO);
+    }
+
+    function test_liquidityAmounts_boundaryProperties() public pure {
+        uint160 sqrtLower = TickMath.getSqrtRatioAtTick(-1000);
+        uint160 sqrtUpper = TickMath.getSqrtRatioAtTick(1000);
+        uint128 L = 1e18;
+
+        // price at/below lower => all token0, zero token1
+        (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(sqrtLower, sqrtLower, sqrtUpper, L);
+        assertGt(a0, 0);
+        assertEq(a1, 0);
+
+        // price at/above upper => all token1, zero token0
+        (a0, a1) = LiquidityAmounts.getAmountsForLiquidity(sqrtUpper, sqrtLower, sqrtUpper, L);
+        assertEq(a0, 0);
+        assertGt(a1, 0);
+
+        // round-trip: liquidity for amounts then amounts for that liquidity <= inputs
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        uint128 L2 = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, 1e18, 1e18);
+        (uint256 r0, uint256 r1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, L2);
+        assertLe(r0, 1e18);
+        assertLe(r1, 1e18);
     }
 }
