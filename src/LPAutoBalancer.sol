@@ -86,6 +86,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     error NotHeld();
     error InvalidSwapPolicy();
     error PositionStaked();
+    error SlippageTooHigh();
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
@@ -436,6 +437,46 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         address sellToken = zeroForOne ? token0 : token1;
         if (swapPolicy == 1 && sellToken == protectedToken) return (zeroForOne, 0);
         if (swapPolicy == 2 && sellToken != protectedToken) return (zeroForOne, 0);
+    }
+
+    /// @notice Swap exactly `amountIn` of tokenIn for tokenOut on the Aerodrome CL router,
+    ///         bounded by max(quoter-derived floor at maxSlippageBps, callerMinOut).
+    function _executeSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        int24 tickSpacing,
+        uint256 callerMinOut,
+        uint16 maxSlippageBps
+    ) internal returns (uint256 amountOut) {
+        IERC20(tokenIn).forceApprove(address(SWAP_ROUTER), amountIn);
+
+        IQuoter.QuoteExactInputSingleParams memory qp = IQuoter.QuoteExactInputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            amountIn: amountIn,
+            tickSpacing: tickSpacing,
+            sqrtPriceLimitX96: 0
+        });
+        (uint256 quotedOut,,,) = QUOTER.quoteExactInputSingle(qp);
+        require(quotedOut > 0, "Invalid quote");
+
+        uint256 quoterMin = (quotedOut * (BPS_DENOMINATOR - maxSlippageBps)) / BPS_DENOMINATOR;
+        if (quoterMin == 0) revert SlippageTooHigh();
+        uint256 minOut = callerMinOut > quoterMin ? callerMinOut : quoterMin;
+
+        ISwapRouter.ExactInputSingleParams memory sp = ISwapRouter.ExactInputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            tickSpacing: tickSpacing,
+            recipient: address(this),
+            deadline: block.timestamp + SWAP_DEADLINE_BUFFER,
+            amountIn: amountIn,
+            amountOutMinimum: minOut,
+            sqrtPriceLimitX96: 0
+        });
+        amountOut = SWAP_ROUTER.exactInputSingle(sp);
+        require(amountOut >= minOut, "Received less than min amount");
     }
 
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces

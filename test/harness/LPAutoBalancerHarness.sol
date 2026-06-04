@@ -46,4 +46,11 @@ contract LPAutoBalancerHarness is LPAutoBalancer {
     ) external pure returns (bool, uint256) {
         return _computeSwap(sqrtP, tl, tu, b0, b1, policy, t0, t1, prot);
     }
+
+    function executeSwap(address tin, address tout, uint256 amtIn, int24 spacing, uint256 callerMin, uint16 slippage)
+        external
+        returns (uint256)
+    {
+        return _executeSwap(tin, tout, amtIn, spacing, callerMin, slippage);
+    }
 }
