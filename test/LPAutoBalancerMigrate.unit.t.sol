@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {ICLPool} from "@interfaces/ICLPool.sol";
+import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
@@ -226,7 +227,7 @@ contract MockMigratePM {
         }
     }
 
-    function mint(INonfungiblePositionManager.MintParams calldata)
+    function mint(ICLPositionManager.MintParams calldata)
         external
         returns (uint256 tokenId, uint128 liquidity, uint256, uint256)
     {

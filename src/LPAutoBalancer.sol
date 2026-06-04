@@ -12,6 +12,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 import {ICLGauge} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
+import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
@@ -621,10 +622,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         IERC20(params.destToken0).forceApprove(address(POSITION_MANAGER), bal0);
         IERC20(params.destToken1).forceApprove(address(POSITION_MANAGER), bal1);
 
-        INonfungiblePositionManager.MintParams memory mp = INonfungiblePositionManager.MintParams({
+        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
             token0: params.destToken0,
             token1: params.destToken1,
-            fee: 0, // unused in Slipstream; kept for interface compatibility
+            tickSpacing: params.destTickSpacing,
             tickLower: params.tickLower,
             tickUpper: params.tickUpper,
             amount0Desired: bal0,
@@ -632,9 +633,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             amount0Min: params.amount0MinMint,
             amount1Min: params.amount1MinMint,
             recipient: address(this),
-            deadline: params.deadline
+            deadline: params.deadline,
+            sqrtPriceX96: 0 // pool already initialized
         });
-        (newTokenId,,,) = POSITION_MANAGER.mint(mp);
+        (newTokenId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
     }
 
     /// @dev Transfer residual balances of t0 and t1 to `to`.
@@ -685,12 +687,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
         IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
 
-        // NOTE: Aerodrome Slipstream mint uses tickSpacing; verify MintParams shape
-        // against live PM in the fork test (Task 26).
-        INonfungiblePositionManager.MintParams memory mp = INonfungiblePositionManager.MintParams({
+        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
             token0: p.token0,
             token1: p.token1,
-            fee: 0, // unused in Slipstream; kept for interface compatibility
+            tickSpacing: p.tickSpacing,
             tickLower: tickLower,
             tickUpper: tickUpper,
             amount0Desired: bal0,
@@ -698,9 +698,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             amount0Min: params.amount0MinMint,
             amount1Min: params.amount1MinMint,
             recipient: address(this),
-            deadline: params.deadline
+            deadline: params.deadline,
+            sqrtPriceX96: 0 // pool already initialized
         });
-        (newTokenId,,,) = POSITION_MANAGER.mint(mp);
+        (newTokenId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
     }
 
     /// @dev Transfer any residual token0 / token1 balance of this contract to the feeCollector.
