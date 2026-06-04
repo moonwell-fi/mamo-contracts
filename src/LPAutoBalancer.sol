@@ -83,6 +83,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     error NotActive();
     error NotHeld();
     error InvalidSwapPolicy();
+    error PositionStaked();
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
@@ -142,6 +143,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         }
         if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
         if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
+        if (config.maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = config.tickSpacing;
         if (spacing <= 0) revert InvalidConfig();
         if (
@@ -163,7 +165,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         if (to == address(0)) revert ZeroAddress();
         // NOTE: staked-unstake handling is added in Task 13 (_unstake does not exist yet).
         // For now, require not staked so we never silently strand a staked NFT.
-        require(!p.staked, "unstake first");
+        if (p.staked) revert PositionStaked();
         uint256 tokenId = p.tokenId;
         p.active = false; // effects before interaction (CEI)
         emit PositionDeregistered(slotId, to);
@@ -190,6 +192,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         if (maxSlippageBps > MAX_SLIPPAGE_CAP_BPS) revert SlippageCapExceeded();
         if (maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
         if (twapWindow == 0 || maxTickDeviation <= 0) revert InvalidConfig();
+        if (maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = positions[slotId].tickSpacing;
         if (minWidth == 0 || minWidth > maxWidth || minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0)
         {
@@ -238,13 +241,14 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     {
         if (!positions[slotId].active) revert NotActive();
         if (swapPolicy > 2) revert InvalidSwapPolicy();
-        if (swapPolicy != 0) {
-            address t0 = positions[slotId].token0;
-            address t1 = positions[slotId].token1;
-            if (protectedToken != t0 && protectedToken != t1) revert InvalidConfig();
+        ManagedPosition storage p = positions[slotId];
+        if (swapPolicy == 0) {
+            protectedToken = address(0);
+        } else if (protectedToken != p.token0 && protectedToken != p.token1) {
+            revert InvalidConfig();
         }
-        positions[slotId].swapPolicy = swapPolicy;
-        positions[slotId].protectedToken = protectedToken;
+        p.swapPolicy = swapPolicy;
+        p.protectedToken = protectedToken;
         emit SwapPolicyUpdated(slotId, swapPolicy, protectedToken);
     }
 
@@ -252,7 +256,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     ///         Requires the position to not currently be staked.
     function setGauge(uint256 slotId, address gauge) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!positions[slotId].active) revert NotActive();
-        require(!positions[slotId].staked, "unstake first");
+        if (positions[slotId].staked) revert PositionStaked();
         positions[slotId].gauge = gauge;
         emit GaugeUpdated(slotId, gauge);
     }

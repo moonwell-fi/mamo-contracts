@@ -630,6 +630,49 @@ contract LPAutoBalancerUnitTest is Test {
         lab.setGauge(0, makeAddr("newGauge"));
     }
 
+    // TODO(Task 13): test setGauge/deregister revert when staked once stake() exists
+
+    // ─── setSwapPolicy — policy-zero clears protectedToken ──────────────────
+
+    function test_setSwapPolicy_policyZeroClearsProtected() public {
+        uint256 slotId = _registerSlot();
+
+        // First set a non-zero policy so protectedToken is stored
+        vm.prank(admin);
+        lab.setSwapPolicy(slotId, 1, token0);
+
+        // Now reset to policy 0 with a non-zero address — it must be cleared
+        address someAddr = makeAddr("someNonZeroAddr");
+        vm.prank(admin);
+        vm.expectEmit(true, false, false, true);
+        emit LPAutoBalancer.SwapPolicyUpdated(slotId, 0, address(0));
+        lab.setSwapPolicy(slotId, 0, someAddr);
+
+        (,,,,,,,,,, uint8 storedPolicy, address storedProtected,,,,,,,,,,) = lab.positions(slotId);
+        assertEq(storedPolicy, 0);
+        assertEq(storedProtected, address(0));
+    }
+
+    // ─── setPositionConfig — zero maxCenterDeviation ─────────────────────────
+
+    function test_setPositionConfig_revertZeroCenterDev() public {
+        uint256 slotId = _registerSlot();
+        vm.prank(manager);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        // maxCenterDeviation = 0 (3rd param after minWidth, maxWidth)
+        lab.setPositionConfig(slotId, 200, 1800, 0, 200, 3600, 200, 200, 7200);
+    }
+
+    // ─── registerPosition — zero maxCenterDeviation ──────────────────────────
+
+    function test_registerPosition_revertZeroCenterDev() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.maxCenterDeviation = 0;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.registerPosition(cfg);
+    }
+
     // ─── setMaxOracleDelay ──────────────────────────────────────────────────
 
     function test_setMaxOracleDelay_happy() public {
