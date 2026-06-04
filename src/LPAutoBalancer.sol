@@ -410,26 +410,29 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             // range entirely on one side at current price (extreme rounding with L=1e18)
             if (req1 == 0) {
                 // range wants all token0 => sell any token1 we have
-                return bal1 > 0 ? (false, bal1) : (false, 0);
+                zeroForOne = false;
+                amountIn = bal1;
             } else {
                 // range wants all token1 => sell any token0 we have
-                return bal0 > 0 ? (true, bal0) : (true, 0);
+                zeroForOne = true;
+                amountIn = bal0;
+            }
+        } else {
+            uint256 desired0In1 = FullMath.mulDiv(total1, req0In1, denom);
+            uint256 cur0In1 = FullMath.mulDiv(bal0, priceX96, FixedPoint96.Q96);
+
+            if (cur0In1 > desired0In1) {
+                uint256 surplus1 = cur0In1 - desired0In1;
+                amountIn = FullMath.mulDiv(surplus1, FixedPoint96.Q96, priceX96); // back to token0 units
+                zeroForOne = true;
+            } else {
+                amountIn = desired0In1 - cur0In1;
+                zeroForOne = false;
             }
         }
 
-        uint256 desired0In1 = FullMath.mulDiv(total1, req0In1, denom);
-        uint256 cur0In1 = FullMath.mulDiv(bal0, priceX96, FixedPoint96.Q96);
-
-        if (cur0In1 > desired0In1) {
-            uint256 surplus1 = cur0In1 - desired0In1;
-            amountIn = FullMath.mulDiv(surplus1, FixedPoint96.Q96, priceX96); // back to token0 units
-            zeroForOne = true;
-        } else {
-            amountIn = desired0In1 - cur0In1;
-            zeroForOne = false;
-        }
-
-        // swap-leg policy: 1 = never sell protectedToken; 2 = only sell protectedToken
+        // swap-leg policy applied uniformly to ALL paths (including denom==0 one-sided ranges)
+        // 1 = never sell protectedToken; 2 = only sell protectedToken
         address sellToken = zeroForOne ? token0 : token1;
         if (swapPolicy == 1 && sellToken == protectedToken) return (zeroForOne, 0);
         if (swapPolicy == 2 && sellToken != protectedToken) return (zeroForOne, 0);
