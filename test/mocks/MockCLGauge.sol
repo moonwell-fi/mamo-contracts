@@ -49,8 +49,26 @@ contract MockCLGauge {
         }
     }
 
-    function getReward(uint256) external {
-        // No-op for now; extend if needed
+    // Amount of AERO to pay out when getReward() is called
+    uint256 public aeroToPayOnGetReward;
+
+    // Last recorded getReward call
+    uint256 public lastGetRewardTokenId;
+    uint256 public getRewardCallCount;
+
+    /// @notice Configure how much AERO to transfer to msg.sender on getReward.
+    function setAeroToPayOnGetReward(uint256 amount) external {
+        aeroToPayOnGetReward = amount;
+    }
+
+    function getReward(uint256 tokenId) external {
+        lastGetRewardTokenId = tokenId;
+        getRewardCallCount++;
+
+        // Simulate reward claim: transfer AERO to caller
+        if (aeroToPayOnGetReward > 0) {
+            IERC20(aeroToken).safeTransfer(msg.sender, aeroToPayOnGetReward);
+        }
     }
 
     function earned(address, uint256) external pure returns (uint256) {

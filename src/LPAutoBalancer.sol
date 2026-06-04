@@ -103,6 +103,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     event Staked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
     event Unstaked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
     event EmissionsClaimed(uint256 indexed slotId, uint256 amount);
+    event FeesSkimmed(uint256 indexed slotId, uint256 amount0, uint256 amount1);
 
     constructor(
         address admin_,
@@ -326,6 +327,38 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             emit EmissionsClaimed(slotId, aeroBal);
         }
         emit Unstaked(slotId, p.tokenId, p.gauge);
+    }
+
+    /// @notice Claim AERO emissions from the gauge for a staked position and forward to feeCollector.
+    ///         Permissionless — anyone may call to trigger the skim.
+    function claimEmissions(uint256 slotId) external whenNotPaused nonReentrant {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.staked) revert NotStaked();
+        ICLGauge(p.gauge).getReward(p.tokenId);
+        uint256 aeroBal = IERC20(AERO).balanceOf(address(this));
+        if (aeroBal > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroBal);
+            emit EmissionsClaimed(slotId, aeroBal);
+        }
+    }
+
+    /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.
+    ///         Permissionless — anyone may call. Reverts if the position is staked (use claimEmissions).
+    function collectFees(uint256 slotId) external whenNotPaused nonReentrant {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (p.staked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
+        (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: p.tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
+        if (a1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, a1);
+        emit FeesSkimmed(slotId, a0, a1);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

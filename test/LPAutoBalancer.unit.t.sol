@@ -1045,4 +1045,180 @@ contract LPAutoBalancerUnitTest is Test {
         vm.expectRevert(LPAutoBalancer.PositionStaked.selector);
         lab.deregisterPosition(slotId, recipient);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 14 — claimEmissions + collectFees (permissionless, whenNotPaused, nonReentrant)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    MockERC20 realToken0;
+    MockERC20 realToken1;
+
+    /// @dev Register a slot whose token0/token1 are real MockERC20s so safeTransfer works.
+    ///      The mockPM is pre-funded with those tokens so collect() can transfer them out.
+    function _registerSlotWithTokens() internal returns (uint256 slotId) {
+        realToken0 = new MockERC20("Token0", "TK0");
+        realToken1 = new MockERC20("Token1", "TK1");
+
+        LPAutoBalancer.ManagedPosition memory cfg = LPAutoBalancer.ManagedPosition({
+            tokenId: TOKEN_ID,
+            pool: pool,
+            token0: address(realToken0),
+            token1: address(realToken1),
+            tickSpacing: 200,
+            gauge: address(mockGauge),
+            staked: false,
+            feeCollector: feeCollector,
+            oracle0: oracle0,
+            oracle1: oracle1,
+            swapPolicy: 0,
+            protectedToken: address(0),
+            minWidth: 200,
+            maxWidth: 2000,
+            maxCenterDeviation: 400,
+            maxSlippageBps: 100,
+            twapWindow: 1800,
+            maxTickDeviation: 100,
+            maxRebalanceLossBps: 100,
+            minRebalanceInterval: 3600,
+            lastRebalance: 0,
+            active: false
+        });
+        vm.prank(admin);
+        slotId = lab.registerPosition(cfg);
+    }
+
+    // ─── collectFees ────────────────────────────────────────────────────────
+
+    function test_collectFees_happy() public {
+        uint256 slotId = _registerSlotWithTokens();
+
+        uint256 a0 = 3e18;
+        uint256 a1 = 4e6;
+
+        // Fund mockPM so it can transfer tokens to the contract on collect
+        realToken0.mint(address(mockPM), a0);
+        realToken1.mint(address(mockPM), a1);
+        mockPM.setCollectConfig(address(realToken0), address(realToken1), a0, a1);
+
+        // Call from a random address (permissionless)
+        address anyone = makeAddr("anyone");
+        vm.prank(anyone);
+        vm.expectEmit(true, false, false, true);
+        emit LPAutoBalancer.FeesSkimmed(slotId, a0, a1);
+        lab.collectFees(slotId);
+
+        // feeCollector received both tokens
+        assertEq(realToken0.balanceOf(feeCollector), a0);
+        assertEq(realToken1.balanceOf(feeCollector), a1);
+    }
+
+    function test_collectFees_permissionless() public {
+        uint256 slotId = _registerSlotWithTokens();
+        uint256 a0 = 1e18;
+        uint256 a1 = 2e6;
+        realToken0.mint(address(mockPM), a0);
+        realToken1.mint(address(mockPM), a1);
+        mockPM.setCollectConfig(address(realToken0), address(realToken1), a0, a1);
+
+        // Explicit non-role caller — must succeed
+        vm.prank(makeAddr("anyone"));
+        lab.collectFees(slotId); // no revert
+    }
+
+    function test_collectFees_revertWhenStaked() public {
+        uint256 slotId = _registerSlotWithTokens();
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        address anyone = makeAddr("anyone");
+        vm.prank(anyone);
+        vm.expectRevert(LPAutoBalancer.AlreadyStaked.selector);
+        lab.collectFees(slotId);
+    }
+
+    function test_collectFees_revertNotActive() public {
+        // slot 99 never registered → active == false
+        vm.expectRevert(LPAutoBalancer.NotActive.selector);
+        lab.collectFees(99);
+    }
+
+    function test_collectFees_revertWhenPaused() public {
+        uint256 slotId = _registerSlotWithTokens();
+
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.collectFees(slotId);
+    }
+
+    // ─── claimEmissions ─────────────────────────────────────────────────────
+
+    function test_claimEmissions_happy() public {
+        uint256 slotId = _registerSlotWithGauge();
+        uint256 aeroAmount = 5e18;
+
+        // Stake first
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Fund the gauge so getReward transfers AERO to the contract
+        mockAero.mint(address(mockGauge), aeroAmount);
+        mockGauge.setAeroToPayOnGetReward(aeroAmount);
+
+        // Call from a random address (permissionless)
+        address anyone = makeAddr("anyone");
+        vm.prank(anyone);
+        vm.expectEmit(true, false, false, true);
+        emit LPAutoBalancer.EmissionsClaimed(slotId, aeroAmount);
+        lab.claimEmissions(slotId);
+
+        // feeCollector received AERO
+        assertEq(mockAero.balanceOf(feeCollector), aeroAmount);
+        // lab holds no AERO
+        assertEq(mockAero.balanceOf(address(lab)), 0);
+    }
+
+    function test_claimEmissions_revertNotStaked() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.expectRevert(LPAutoBalancer.NotStaked.selector);
+        lab.claimEmissions(slotId);
+    }
+
+    function test_claimEmissions_revertWhenPaused() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.claimEmissions(slotId);
+    }
+
+    function test_claimEmissions_noAeroNoTransfer() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        // Stake but configure gauge to pay 0 AERO
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        mockGauge.setAeroToPayOnGetReward(0);
+
+        // Record logs to verify EmissionsClaimed is NOT emitted
+        vm.recordLogs();
+        lab.claimEmissions(slotId); // must not revert
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 emissionsClaimedSig = keccak256("EmissionsClaimed(uint256,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != emissionsClaimedSig, "EmissionsClaimed should not be emitted");
+        }
+
+        // feeCollector holds nothing
+        assertEq(mockAero.balanceOf(feeCollector), 0);
+    }
 }
