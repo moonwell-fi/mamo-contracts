@@ -12,6 +12,11 @@ contract MockPositionManager {
     uint256 public lastTokenId;
     uint256 public transferCallCount;
 
+    // Last recorded approve call
+    address public lastApprovedTo;
+    uint256 public lastApprovedTokenId;
+    uint256 public approveCallCount;
+
     constructor(address owner_) {
         mockOwner = owner_;
     }
@@ -29,5 +34,11 @@ contract MockPositionManager {
         lastTo = to;
         lastTokenId = tokenId;
         transferCallCount++;
+    }
+
+    function approve(address to, uint256 tokenId) external {
+        lastApprovedTo = to;
+        lastApprovedTokenId = tokenId;
+        approveCallCount++;
     }
 }

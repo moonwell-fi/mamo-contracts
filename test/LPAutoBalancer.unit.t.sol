@@ -2,14 +2,19 @@
 pragma solidity 0.8.28;
 
 import {MockERC20} from "./MockERC20.sol";
+import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPositionManager} from "./mocks/MockPositionManager.sol";
 import {LPAutoBalancer} from "@contracts/LPAutoBalancer.sol";
 import {Test} from "@forge-std/Test.sol";
+import {Vm} from "@forge-std/Vm.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract LPAutoBalancerUnitTest is Test {
     LPAutoBalancer lab;
     MockPositionManager mockPM;
+    MockERC20 mockAero;
+    MockCLGauge mockGauge;
 
     address admin = makeAddr("admin");
     address manager = makeAddr("manager");
@@ -17,13 +22,12 @@ contract LPAutoBalancerUnitTest is Test {
     address guardian = makeAddr("guardian");
     address router = makeAddr("router");
     address quoter = makeAddr("quoter");
-    address aero = makeAddr("aero");
 
     // Addresses for valid config
     address pool = makeAddr("pool");
     address token0 = makeAddr("token0");
     address token1 = makeAddr("token1");
-    address gauge = makeAddr("gauge");
+    address gauge; // set in setUp to address(mockGauge)
     address feeCollector = makeAddr("feeCollector");
     address oracle0 = makeAddr("oracle0");
     address oracle1 = makeAddr("oracle1");
@@ -32,10 +36,18 @@ contract LPAutoBalancerUnitTest is Test {
     uint256 constant TOKEN_ID = 42;
 
     function setUp() public {
+        // Deploy mock AERO token (real ERC20 so SafeERC20 transfers work)
+        mockAero = new MockERC20("Aerodrome", "AERO");
+
+        // Deploy mock gauge backed by mockAero
+        mockGauge = new MockCLGauge(address(mockAero));
+        gauge = address(mockGauge);
+
         // mockPM owner defaults to address(0); will be updated after lab deploy
         mockPM = new MockPositionManager(address(0));
 
-        lab = new LPAutoBalancer(admin, manager, rebalancer, guardian, address(mockPM), router, quoter, aero);
+        lab =
+            new LPAutoBalancer(admin, manager, rebalancer, guardian, address(mockPM), router, quoter, address(mockAero));
 
         // Now that lab is deployed, point mockPM owner to lab so ownerOf checks pass
         mockPM.setMockOwner(address(lab));
@@ -54,13 +66,15 @@ contract LPAutoBalancerUnitTest is Test {
         assertEq(address(lab.POSITION_MANAGER()), address(mockPM));
         assertEq(address(lab.SWAP_ROUTER()), router);
         assertEq(address(lab.QUOTER()), quoter);
-        assertEq(lab.AERO(), aero);
+        assertEq(lab.AERO(), address(mockAero));
         assertEq(lab.maxOracleDelay(), 26 hours);
     }
 
     function test_constructorRejectsZero() public {
         vm.expectRevert(LPAutoBalancer.ZeroAddress.selector);
-        new LPAutoBalancer(address(0), manager, rebalancer, guardian, address(mockPM), router, quoter, aero);
+        new LPAutoBalancer(
+            address(0), manager, rebalancer, guardian, address(mockPM), router, quoter, address(mockAero)
+        );
     }
 
     // ─── helpers ────────────────────────────────────────────────────────────
@@ -630,7 +644,21 @@ contract LPAutoBalancerUnitTest is Test {
         lab.setGauge(0, makeAddr("newGauge"));
     }
 
-    // TODO(Task 13): test setGauge/deregister revert when staked once stake() exists
+    // ─── Task 13: setGauge reverts when staked ──────────────────────────────
+
+    function test_setGauge_revertWhenStaked() public {
+        uint256 slotId = _registerSlot(); // registered with gauge = address(mockGauge)
+
+        // Stake the position
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Now admin tries to change the gauge — must revert
+        address otherGauge = makeAddr("otherGauge");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.PositionStaked.selector);
+        lab.setGauge(slotId, otherGauge);
+    }
 
     // ─── setSwapPolicy — policy-zero clears protectedToken ──────────────────
 
@@ -820,5 +848,201 @@ contract LPAutoBalancerUnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.ZeroAddress.selector);
         lab.recoverETH(payable(address(0)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 13 — stake / unstake / _unstake with AERO skim
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Register a slot whose gauge is already set to mockGauge.
+    ///      _validConfig() includes gauge = address(mockGauge) via setUp.
+    function _registerSlotWithGauge() internal returns (uint256 slotId) {
+        slotId = _registerSlot(); // gauge already = address(mockGauge) from _validConfig
+    }
+
+    // ─── stake ──────────────────────────────────────────────────────────────
+
+    function test_stake_happy() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(rebalancer);
+        vm.expectEmit(true, true, true, false);
+        emit LPAutoBalancer.Staked(slotId, TOKEN_ID, address(mockGauge));
+        lab.stake(slotId);
+
+        // staked flag set
+        (,,,,,, bool storedStaked,,,,,,,,,,,,,,,) = lab.positions(slotId);
+        assertTrue(storedStaked);
+
+        // mockPM recorded approve(gauge, tokenId)
+        assertEq(mockPM.lastApprovedTo(), address(mockGauge));
+        assertEq(mockPM.lastApprovedTokenId(), TOKEN_ID);
+        assertEq(mockPM.approveCallCount(), 1);
+
+        // mockGauge recorded deposit(tokenId)
+        assertEq(mockGauge.lastDepositedTokenId(), TOKEN_ID);
+        assertEq(mockGauge.lastDepositor(), address(lab));
+        assertEq(mockGauge.depositCallCount(), 1);
+    }
+
+    function test_stake_revertNoGauge() public {
+        uint256 slotId = _registerSlot();
+
+        // Clear the gauge
+        vm.prank(admin);
+        lab.setGauge(slotId, address(0));
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.NoGauge.selector);
+        lab.stake(slotId);
+    }
+
+    function test_stake_revertAlreadyStaked() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Stake again — should revert
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.AlreadyStaked.selector);
+        lab.stake(slotId);
+    }
+
+    function test_stake_revertNotActive() public {
+        // slotId 99 never registered
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.NotActive.selector);
+        lab.stake(99);
+    }
+
+    function test_stake_revertNonRebalancer() public {
+        uint256 slotId = _registerSlotWithGauge();
+        address caller = makeAddr("rando");
+        bytes32 rebalancerRole = lab.REBALANCER_ROLE();
+        vm.prank(caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, caller, rebalancerRole)
+        );
+        lab.stake(slotId);
+    }
+
+    function test_stake_revertWhenPaused() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.stake(slotId);
+    }
+
+    // ─── unstake ────────────────────────────────────────────────────────────
+
+    function test_unstake_happy() public {
+        uint256 slotId = _registerSlotWithGauge();
+        uint256 aeroAmount = 7e18;
+
+        // Fund the gauge so it can pay AERO on withdraw
+        mockAero.mint(address(mockGauge), aeroAmount);
+        mockGauge.setAeroToPayOnWithdraw(aeroAmount);
+
+        // Stake first
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Unstake — should claim AERO and forward to feeCollector
+        vm.prank(rebalancer);
+        vm.expectEmit(true, false, false, true);
+        emit LPAutoBalancer.EmissionsClaimed(slotId, aeroAmount);
+        vm.expectEmit(true, true, true, false);
+        emit LPAutoBalancer.Unstaked(slotId, TOKEN_ID, address(mockGauge));
+        lab.unstake(slotId);
+
+        // staked flag cleared
+        (,,,,,, bool storedStaked,,,,,,,,,,,,,,,) = lab.positions(slotId);
+        assertFalse(storedStaked);
+
+        // mockGauge recorded withdraw
+        assertEq(mockGauge.lastWithdrawnTokenId(), TOKEN_ID);
+        assertEq(mockGauge.withdrawCallCount(), 1);
+
+        // AERO forwarded to feeCollector
+        assertEq(mockAero.balanceOf(feeCollector), aeroAmount);
+        // lab holds no AERO
+        assertEq(mockAero.balanceOf(address(lab)), 0);
+    }
+
+    function test_unstake_noAero_noEmissionsClaimed() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        // Gauge pays nothing on withdraw
+        mockGauge.setAeroToPayOnWithdraw(0);
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Should emit Unstaked but NOT EmissionsClaimed
+        vm.recordLogs();
+        vm.prank(rebalancer);
+        lab.unstake(slotId);
+
+        // Check no EmissionsClaimed was emitted
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 emissionsClaimedSig = keccak256("EmissionsClaimed(uint256,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != emissionsClaimedSig, "EmissionsClaimed should not be emitted");
+        }
+    }
+
+    function test_unstake_revertNotStaked() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        // Never staked
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancer.NotStaked.selector);
+        lab.unstake(slotId);
+    }
+
+    function test_unstake_revertNonRebalancer() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        address caller = makeAddr("rando");
+        bytes32 rebalancerRole = lab.REBALANCER_ROLE();
+        vm.prank(caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, caller, rebalancerRole)
+        );
+        lab.unstake(slotId);
+    }
+
+    function test_unstake_revertWhenPaused() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.unstake(slotId);
+    }
+
+    function test_deregisterPosition_revertWhenStaked() public {
+        uint256 slotId = _registerSlotWithGauge();
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        address recipient = makeAddr("recipient");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.PositionStaked.selector);
+        lab.deregisterPosition(slotId, recipient);
     }
 }

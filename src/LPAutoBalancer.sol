@@ -87,6 +87,9 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     error InvalidSwapPolicy();
     error PositionStaked();
     error SlippageTooHigh();
+    error NoGauge();
+    error AlreadyStaked();
+    error NotStaked();
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
@@ -97,6 +100,9 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     event GaugeUpdated(uint256 indexed slotId, address gauge);
     event MaxOracleDelayUpdated(uint256 oldDelay, uint256 newDelay);
     event TokensRecovered(address indexed token, address indexed to, uint256 amount);
+    event Staked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
+    event Unstaked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
+    event EmissionsClaimed(uint256 indexed slotId, uint256 amount);
 
     constructor(
         address admin_,
@@ -284,6 +290,42 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     /// @notice Unpause the contract (guardian only).
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Gauge staking
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Approve the gauge and deposit the position NFT into it for AERO emissions.
+    function stake(uint256 slotId) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (p.gauge == address(0)) revert NoGauge();
+        if (p.staked) revert AlreadyStaked();
+        POSITION_MANAGER.approve(p.gauge, p.tokenId);
+        ICLGauge(p.gauge).deposit(p.tokenId);
+        p.staked = true;
+        emit Staked(slotId, p.tokenId, p.gauge);
+    }
+
+    /// @notice Withdraw the position NFT from the gauge and skim any AERO to the fee collector.
+    function unstake(uint256 slotId) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.staked) revert NotStaked();
+        _unstake(p, slotId);
+    }
+
+    /// @dev Internal unstake: withdraw from gauge (auto-claims AERO), set staked=false,
+    ///      then skim any AERO balance to the fee collector (CEI: state update before AERO transfer).
+    function _unstake(ManagedPosition storage p, uint256 slotId) internal {
+        ICLGauge(p.gauge).withdraw(p.tokenId); // returns NFT + auto-claims AERO
+        p.staked = false; // CEI: effect before interaction (AERO transfer below)
+        uint256 aeroBal = IERC20(AERO).balanceOf(address(this));
+        if (aeroBal > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroBal);
+            emit EmissionsClaimed(slotId, aeroBal);
+        }
+        emit Unstaked(slotId, p.tokenId, p.gauge);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
