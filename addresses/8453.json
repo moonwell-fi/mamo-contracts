@@ -398,5 +398,20 @@
     "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
     "name": "WETH_STRATEGY_FACTORY",
     "isContract": true
+  },
+  {
+    "addr": "0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94",
+    "name": "CHAINLINK_MAMO_USD",
+    "isContract": true
+  },
+  {
+    "addr": "0x11110000000000000000000000000000000A0001",
+    "name": "MAMO_LP_MANAGER",
+    "isContract": false
+  },
+  {
+    "addr": "0x11110000000000000000000000000000000A0002",
+    "name": "MAMO_LP_REBALANCER",
+    "isContract": false
   }
 ]
