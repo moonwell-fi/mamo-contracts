@@ -413,5 +413,15 @@
     "addr": "0x11110000000000000000000000000000000A0002",
     "name": "MAMO_LP_REBALANCER",
     "isContract": false
+  },
+  {
+    "addr": "0x678F431DA2aBb9B5726bbf5CCDbaEEBB60dA9813",
+    "name": "MAMO_USDC_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0xDFB9E9445aB1ABf6f083Fa2971cc335fDbE84Dd8",
+    "name": "AERODROME_MAMO_USDC_GAUGE",
+    "isContract": true
   }
 ]
