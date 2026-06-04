@@ -90,6 +90,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     error NoGauge();
     error AlreadyStaked();
     error NotStaked();
+    error Cooldown();
+    error WidthOutOfBounds();
+    error CenterDeviation();
+    error ValueFloor();
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
@@ -104,6 +108,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     event Unstaked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
     event EmissionsClaimed(uint256 indexed slotId, uint256 amount);
     event FeesSkimmed(uint256 indexed slotId, uint256 amount0, uint256 amount1);
+    event Rebalanced(uint256 indexed slotId, uint256 oldTokenId, uint256 newTokenId, int24 tickLower, int24 tickUpper);
 
     constructor(
         address admin_,
@@ -340,6 +345,222 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             IERC20(AERO).safeTransfer(p.feeCollector, aeroBal);
             emit EmissionsClaimed(slotId, aeroBal);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Rebalance
+    // ═══════════════════════════════════════════════════════════════════════
+
+    struct RebalanceParams {
+        uint24 width;
+        uint256 swapMinAmountOut;
+        uint256 amount0MinDecrease;
+        uint256 amount1MinDecrease;
+        uint256 amount0MinMint;
+        uint256 amount1MinMint;
+        uint256 deadline;
+    }
+
+    /// @notice Re-range an active position to a new tick range centered on the TWAP tick.
+    ///
+    ///         Orchestration (all on-chain):
+    ///         1.  Read spot + TWAP; deviation gate.
+    ///         2.  Snapshot value-before (principal only, at current sqrtP).
+    ///         3.  Unstake (if staked) — AERO auto-claimed → feeCollector.
+    ///         4.  Skim LP fees → feeCollector (does not perturb value measurement because
+    ///             _principalValue uses liquidity only, never tokensOwed).
+    ///         5.  DecreaseAll + collect principal into this contract.
+    ///         6.  Compute new aligned range; center-deviation gate.
+    ///         7.  Compute + execute swap to re-ratio balances for the new range.
+    ///         8.  Mint new NFT; burn old; update p.tokenId.
+    ///         9.  Restake (if it was staked).
+    ///         10. Snapshot value-after (same sqrtP); value-floor gate.
+    ///         11. Forward dust to feeCollector.
+    function rebalance(uint256 slotId, RebalanceParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (block.timestamp < p.lastRebalance + p.minRebalanceInterval) revert Cooldown();
+        if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
+
+        bool wasStaked = p.staked;
+
+        // 1. spot + TWAP ticks; deviation gate
+        (uint160 sqrtP, int24 spotTick,,,,) = ICLPool(p.pool).slot0();
+        int24 twapTick = _consultTwapTick(p.pool, p.twapWindow);
+        _checkDeviation(spotTick, twapTick, p.maxTickDeviation);
+
+        // 2. token decimals
+        uint8 dec0 = IERC20Metadata(p.token0).decimals();
+        uint8 dec1 = IERC20Metadata(p.token1).decimals();
+
+        // 3. value BEFORE: read old position's liquidity at current sqrtP.
+        //    _principalValue uses liquidity only — owed fees are excluded by construction,
+        //    so step 4 (skim fees) does NOT alter this measurement.
+        uint256 valueBefore = _principalValue(p, sqrtP, dec0, dec1);
+
+        // 4. unstake if needed (auto-claims AERO → feeCollector)
+        if (wasStaked) _unstake(p, slotId);
+
+        // 5. skim LP fees (pre-decrease) → feeCollector
+        _skimFees(p, slotId);
+
+        // 6. decrease all liquidity + collect principal into this contract
+        _decreaseAll(p, params);
+
+        // 7. compute new range centered on twapTick; center-deviation gate
+        (int24 tickLower, int24 tickUpper) = _alignedRange(twapTick, params.width, p.tickSpacing, spotTick);
+        {
+            int24 center = (tickLower + tickUpper) / 2;
+            int24 dev = center > twapTick ? center - twapTick : twapTick - center;
+            if (dev > int24(uint24(p.maxCenterDeviation))) revert CenterDeviation();
+        }
+
+        // 8. compute + execute swap to re-ratio balances for the new range
+        {
+            uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+            uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+            (bool zeroForOne, uint256 amountIn) = _computeSwap(
+                sqrtP, tickLower, tickUpper, bal0, bal1, p.swapPolicy, p.token0, p.token1, p.protectedToken
+            );
+            if (amountIn > 0) {
+                (address tin, address tout) = zeroForOne ? (p.token0, p.token1) : (p.token1, p.token0);
+                _executeSwap(tin, tout, amountIn, p.tickSpacing, params.swapMinAmountOut, p.maxSlippageBps);
+            }
+        }
+
+        // 9. mint new NFT; burn old; update tokenId + lastRebalance
+        uint256 oldTokenId = p.tokenId;
+        uint256 newTokenId = _mintNew(p, tickLower, tickUpper, params);
+        POSITION_MANAGER.burn(oldTokenId);
+        p.tokenId = newTokenId;
+        p.lastRebalance = block.timestamp;
+
+        // 10. restake if it was staked before
+        if (wasStaked && p.gauge != address(0)) {
+            POSITION_MANAGER.approve(p.gauge, newTokenId);
+            ICLGauge(p.gauge).deposit(newTokenId);
+            p.staked = true;
+            emit Staked(slotId, newTokenId, p.gauge);
+        }
+
+        // 11. value AFTER: p.tokenId now points to new position; same sqrtP snapshot from step 1.
+        //     Both measurements use principal-only liquidity → consistent comparison.
+        uint256 valueAfter = _principalValue(p, sqrtP, dec0, dec1);
+        if (valueAfter < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)) {
+            revert ValueFloor();
+        }
+
+        // 12. forward residual dust to feeCollector
+        _forwardDust(p);
+
+        emit Rebalanced(slotId, oldTokenId, newTokenId, tickLower, tickUpper);
+    }
+
+    // ─── rebalance private helpers ───────────────────────────────────────────
+
+    /// @dev Collect any accrued LP fees for the position (before decreasing liquidity)
+    ///      and forward both tokens to the feeCollector.
+    function _skimFees(ManagedPosition storage p, uint256 slotId) private {
+        (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: p.tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
+        if (a1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, a1);
+        emit FeesSkimmed(slotId, a0, a1);
+    }
+
+    /// @dev Remove all liquidity from the position and collect the resulting tokens
+    ///      into this contract. Reads current liquidity from the PM before decreasing.
+    function _decreaseAll(ManagedPosition storage p, RebalanceParams calldata params) private {
+        // Read current liquidity at index 7 of the positions() tuple.
+        (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(p.tokenId);
+        if (liq > 0) {
+            POSITION_MANAGER.decreaseLiquidity(
+                INonfungiblePositionManager.DecreaseLiquidityParams({
+                    tokenId: p.tokenId,
+                    liquidity: liq,
+                    amount0Min: params.amount0MinDecrease,
+                    amount1Min: params.amount1MinDecrease,
+                    deadline: params.deadline
+                })
+            );
+        }
+        // Collect principal (and any remaining owed amounts) into this contract.
+        POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: p.tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+    }
+
+    /// @dev Mint a new position NFT using the current token balances of this contract.
+    ///
+    ///      NOTE: Aerodrome Slipstream mint uses tickSpacing; verify MintParams shape
+    ///      against live PM in the fork test (Task 26). The interface here declares
+    ///      `fee` — pass 0 for unit tests with the mock PM.
+    function _mintNew(ManagedPosition storage p, int24 tickLower, int24 tickUpper, RebalanceParams calldata params)
+        private
+        returns (uint256 newTokenId)
+    {
+        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+
+        IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
+        IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
+
+        // NOTE: Aerodrome Slipstream mint uses tickSpacing; verify MintParams shape
+        // against live PM in the fork test (Task 26).
+        INonfungiblePositionManager.MintParams memory mp = INonfungiblePositionManager.MintParams({
+            token0: p.token0,
+            token1: p.token1,
+            fee: 0, // unused in Slipstream; kept for interface compatibility
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            amount0Desired: bal0,
+            amount1Desired: bal1,
+            amount0Min: params.amount0MinMint,
+            amount1Min: params.amount1MinMint,
+            recipient: address(this),
+            deadline: params.deadline
+        });
+        (newTokenId,,,) = POSITION_MANAGER.mint(mp);
+    }
+
+    /// @dev Transfer any residual token0 / token1 balance of this contract to the feeCollector.
+    function _forwardDust(ManagedPosition storage p) private {
+        uint256 d0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 d1 = IERC20(p.token1).balanceOf(address(this));
+        if (d0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, d0);
+        if (d1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, d1);
+    }
+
+    /// @dev Compute the USD value of the principal tokens locked in the position,
+    ///      valued at the given sqrtP (Q64.96 sqrt price). Uses LiquidityAmounts to
+    ///      derive token amounts from the NFT's stored liquidity — never counts tokensOwed
+    ///      (fees), so skimming fees does not perturb this measurement.
+    function _principalValue(ManagedPosition storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
+        private
+        view
+        returns (uint256)
+    {
+        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(p.tokenId);
+        (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtP, TickMath.getSqrtRatioAtTick(tl), TickMath.getSqrtRatioAtTick(tu), liq
+        );
+        return _valueInUsd(a0, a1, p.oracle0, p.oracle1, dec0, dec1);
     }
 
     /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.
