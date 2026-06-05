@@ -243,8 +243,9 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         emit PositionConfigUpdated(slotId);
     }
 
-    /// @notice Update the fee collector for an active position.
-    function setFeeCollector(uint256 slotId, address feeCollector) external onlyRole(MANAGER_ROLE) {
+    /// @notice Update the fee collector for an active position. Admin (Safe) only: feeCollector is the
+    ///         destination for all fee/AERO/dust flows, so it is a drain-direction power kept off the manager EOA.
+    function setFeeCollector(uint256 slotId, address feeCollector) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!positions[slotId].active) revert NotActive();
         if (feeCollector == address(0)) revert ZeroAddress();
         positions[slotId].feeCollector = feeCollector;

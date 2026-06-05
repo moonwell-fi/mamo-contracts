@@ -464,7 +464,7 @@ contract LPAutoBalancerUnitTest is Test {
         uint256 slotId = _registerSlot();
         address newCollector = makeAddr("newCollector");
 
-        vm.prank(manager);
+        vm.prank(admin);
         vm.expectEmit(true, true, false, false);
         emit LPAutoBalancer.FeeCollectorUpdated(slotId, newCollector);
         lab.setFeeCollector(slotId, newCollector);
@@ -473,26 +473,33 @@ contract LPAutoBalancerUnitTest is Test {
         assertEq(storedFeeCollector, newCollector);
     }
 
-    function test_setFeeCollector_revertNonManager() public {
+    function test_setFeeCollector_revertNonAdmin() public {
         uint256 slotId = _registerSlot();
-        address caller = makeAddr("rando");
-        bytes32 managerRole = lab.MANAGER_ROLE();
-        vm.prank(caller);
+        // setFeeCollector is now admin (Safe) only — the MANAGER EOA must NOT be able to redirect yield.
+        bytes32 adminRole = lab.DEFAULT_ADMIN_ROLE();
+        vm.prank(manager);
         vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, caller, managerRole)
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, manager, adminRole)
+        );
+        lab.setFeeCollector(slotId, makeAddr("newCollector"));
+
+        address rando = makeAddr("rando");
+        vm.prank(rando);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, rando, adminRole)
         );
         lab.setFeeCollector(slotId, makeAddr("newCollector"));
     }
 
     function test_setFeeCollector_revertNotActive() public {
-        vm.prank(manager);
+        vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.NotActive.selector);
         lab.setFeeCollector(0, makeAddr("newCollector"));
     }
 
     function test_setFeeCollector_revertZeroAddress() public {
         uint256 slotId = _registerSlot();
-        vm.prank(manager);
+        vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.ZeroAddress.selector);
         lab.setFeeCollector(slotId, address(0));
     }

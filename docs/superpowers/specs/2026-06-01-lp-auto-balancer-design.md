@@ -79,7 +79,7 @@ Net: worst-case value loss per call is bounded to ≈ `maxRebalanceLossBps` (the
 Powers are split so an EOA can run operations without any single key being able to move or drain protocol liquidity. The drain-capable functions (`migrate`, `withdrawPosition`, `recoverERC20`/`recoverETH`) and all *cap*-setting stay on the Safe.
 
 - **`DEFAULT_ADMIN_ROLE` = F-MAMO Safe** — `registerPosition`/`deregisterPosition`, `migrate` (Section 8), `withdrawPosition`, `recoverERC20`/`recoverETH`, set the global caps (`MAX_SLIPPAGE_CAP_BPS`, `MAX_LOSS_CAP_BPS`), set per-position `valueOracle` and `swapPolicy`, grant/revoke all roles (including `rebalancer`).
-- **`MANAGER_ROLE` = EOA** — fast operational tuning *within* admin-set caps: per-position `minWidth/maxWidth/maxCenterDeviation/maxSlippageBps/maxRebalanceLossBps/maxTickDeviation/twapWindow/minRebalanceInterval`, and `setFeeCollector`. **No** power to move, migrate, or withdraw funds.
+- **`MANAGER_ROLE` = EOA** — fast operational tuning *within* admin-set caps: per-position `minWidth/maxWidth/maxCenterDeviation/maxSlippageBps/maxRebalanceLossBps/maxTickDeviation/twapWindow/minRebalanceInterval`. **No** power to move, migrate, withdraw, or redirect funds. (`setFeeCollector` was moved to admin after the security review — it routes all fee/AERO/dust flows, so it is a drain-direction power kept off the hot EOA.)
 - **`rebalancer` = a dedicated EOA (`MAMO_LP_REBALANCER`)** — may **only** call `rebalance()`, `collectFees()`, `stake()`/`unstake()`, and `claimEmissions()`. No custody, no config.
 - **`GUARDIAN_ROLE` = EOA or Safe** — `pause()`/`unpause()`.
 
@@ -208,7 +208,8 @@ Admin = `DEFAULT_ADMIN_ROLE` (Safe), Manager = `MANAGER_ROLE` (EOA), Guardian = 
 - `migrate(slotId, MigrateParams)` — **admin** (Section 8).
 - `recoverERC20(token, to, amount)`, `recoverETH(to)` — **admin**.
 - `setRebalancer(address)`, `setCaps(...)`, `setValueOracle(slotId, feed)`, `setSwapPolicy(slotId, policy, protectedToken)`, `setGauge(slotId, gauge)` — **admin**.
-- `setPositionConfig(slotId, ...)` (bounds within caps), `setFeeCollector(slotId, address)` — **manager**.
+- `setPositionConfig(slotId, ...)` (bounds within caps) — **manager**.
+- `setFeeCollector(slotId, address)` — **admin** (drain-direction power; moved off the manager EOA after the security review).
 - `pause()` / `unpause()` — **guardian**.
 - `onERC721Received` — accept NFTs (restricted to the Aerodrome position manager as `msg.sender`, like `TransferAndEarn`).
 
