@@ -176,13 +176,13 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     }
 
     /// @notice Deregister a position and transfer its NFT to `to`.
-    ///         Requires the position to not be staked (unstake first via Task 13).
+    ///         Intentionally reverts if the position is staked: the admin must `unstake`
+    ///         (or use `withdrawPosition`, which auto-unstakes) first. This keeps deregister
+    ///         a pure book-keeping/transfer path and never silently strands a staked NFT.
     function deregisterPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
         ManagedPosition storage p = positions[slotId];
         if (!p.active) revert NotActive();
         if (to == address(0)) revert ZeroAddress();
-        // NOTE: staked-unstake handling is added in Task 13 (_unstake does not exist yet).
-        // For now, require not staked so we never silently strand a staked NFT.
         if (p.staked) revert PositionStaked();
         uint256 tokenId = p.tokenId;
         p.active = false; // effects before interaction (CEI)
@@ -340,12 +340,15 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     /// @dev Internal unstake: withdraw from gauge (auto-claims AERO), set staked=false,
     ///      then skim any AERO balance to the fee collector (CEI: state update before AERO transfer).
     function _unstake(ManagedPosition storage p, uint256 slotId) internal {
+        // Measure only the AERO GAINED by this withdraw so we never sweep another slot's
+        // pending AERO or a stray balance sitting on this contract.
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         ICLGauge(p.gauge).withdraw(p.tokenId); // returns NFT + auto-claims AERO
         p.staked = false; // CEI: effect before interaction (AERO transfer below)
-        uint256 aeroBal = IERC20(AERO).balanceOf(address(this));
-        if (aeroBal > 0) {
-            IERC20(AERO).safeTransfer(p.feeCollector, aeroBal);
-            emit EmissionsClaimed(slotId, aeroBal);
+        uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        if (aeroEarned > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
+            emit EmissionsClaimed(slotId, aeroEarned);
         }
         emit Unstaked(slotId, p.tokenId, p.gauge);
     }
@@ -354,12 +357,16 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     ///         Permissionless — anyone may call to trigger the skim.
     function claimEmissions(uint256 slotId) external whenNotPaused nonReentrant {
         ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
         if (!p.staked) revert NotStaked();
+        // Forward only the AERO gained by THIS claim, not the whole contract balance —
+        // avoids cross-slot sweeps and stray-balance theft.
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         ICLGauge(p.gauge).getReward(p.tokenId);
-        uint256 aeroBal = IERC20(AERO).balanceOf(address(this));
-        if (aeroBal > 0) {
-            IERC20(AERO).safeTransfer(p.feeCollector, aeroBal);
-            emit EmissionsClaimed(slotId, aeroBal);
+        uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        if (aeroEarned > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
+            emit EmissionsClaimed(slotId, aeroEarned);
         }
     }
 
@@ -428,8 +435,12 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         // 6. decrease all liquidity + collect principal into this contract
         _decreaseAll(p, params);
 
-        // 7. compute new range centered on twapTick; center-deviation gate
-        (int24 tickLower, int24 tickUpper) = _alignedRange(twapTick, params.width, p.tickSpacing, spotTick);
+        // 7. compute new range centered on SPOT, with center-deviation gate vs TWAP.
+        //    Center on spot (already gate-passed vs TWAP above); straddle is then guaranteed
+        //    for width >= 2*tickSpacing. The center-vs-TWAP deviation is still bounded by
+        //    maxCenterDeviation below, so a spot-centered range can't drift far from the
+        //    manipulation-resistant TWAP.
+        (int24 tickLower, int24 tickUpper) = _alignedRange(spotTick, params.width, p.tickSpacing, spotTick);
         {
             int24 center = (tickLower + tickUpper) / 2;
             int24 dev = center > twapTick ? center - twapTick : twapTick - center;
@@ -487,6 +498,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         address destToken1;
         int24 destTickSpacing;
         address destGauge;
+        address destOracle0;
+        address destOracle1;
+        uint8 destSwapPolicy;
+        address destProtectedToken;
         int24 tickLower;
         int24 tickUpper;
         address swapTokenIn;
@@ -528,6 +543,18 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         if (params.swapAmountIn > 0 && params.swapTokenIn != p.token0 && params.swapTokenIn != p.token1) {
             revert InvalidConfig();
         }
+        // Destination oracle/policy must be valid so the next rebalance values the new pair
+        // with the correct Chainlink feeds and a consistent swap policy (not stale source config).
+        if (params.destOracle0 == address(0) || params.destOracle1 == address(0)) revert OracleRequired();
+        if (params.destSwapPolicy > 2) revert InvalidSwapPolicy();
+        if (
+            params.destSwapPolicy != 0 && params.destProtectedToken != params.destToken0
+                && params.destProtectedToken != params.destToken1
+        ) revert InvalidConfig();
+        // Dest ticks must align to the destination pool's spacing so mint + future rebalances work.
+        if (params.tickLower % params.destTickSpacing != 0 || params.tickUpper % params.destTickSpacing != 0) {
+            revert InvalidConfig();
+        }
 
         address oldPool = p.pool;
         uint256 oldTokenId = p.tokenId;
@@ -543,6 +570,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
 
         // 4. Execute the human-supplied swap (defense-in-depth slippage via swapMinAmountOut).
         //    No _computeSwap — the multisig reviewed the route.
+        //    The swap converts the decreased OLD-pair principal between the OLD tokens and is
+        //    routed through the OLD pool (p.tickSpacing) — a single hop in the source pool —
+        //    BEFORE we mint into the destination pool. exactInputSingle cannot route cross-pair,
+        //    so this intentionally uses the old pool's tickSpacing, not the destination's.
         if (params.swapAmountIn > 0) {
             address tin = params.swapTokenIn;
             address tout = tin == p.token0 ? p.token1 : p.token0;
@@ -559,12 +590,17 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         // 6. Burn old NFT
         POSITION_MANAGER.burn(oldTokenId);
 
-        // 7. Update slot in-place to the destination
+        // 7. Update slot in-place to the destination, INCLUDING oracles + swap policy so the
+        //    next rebalance values the new pair with the correct feeds, not stale source config.
         p.pool = params.destPool;
         p.token0 = params.destToken0;
         p.token1 = params.destToken1;
         p.tickSpacing = params.destTickSpacing;
         p.gauge = params.destGauge;
+        p.oracle0 = params.destOracle0;
+        p.oracle1 = params.destOracle1;
+        p.swapPolicy = params.destSwapPolicy;
+        p.protectedToken = params.destSwapPolicy == 0 ? address(0) : params.destProtectedToken;
         p.tokenId = newTokenId;
         p.staked = false;
         p.lastRebalance = block.timestamp;
@@ -673,10 +709,8 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     }
 
     /// @dev Mint a new position NFT using the current token balances of this contract.
-    ///
-    ///      NOTE: Aerodrome Slipstream mint uses tickSpacing; verify MintParams shape
-    ///      against live PM in the fork test (Task 26). The interface here declares
-    ///      `fee` — pass 0 for unit tests with the mock PM.
+    ///      Builds Slipstream MintParams keyed by tickSpacing (not a fee tier) and passes
+    ///      sqrtPriceX96=0 because the destination pool is already initialized.
     function _mintNew(ManagedPosition storage p, int24 tickLower, int24 tickUpper, RebalanceParams calldata params)
         private
         returns (uint256 newTokenId)

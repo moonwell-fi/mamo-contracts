@@ -390,6 +390,10 @@ contract LPAutoBalancerMigrateTest is Test {
             destToken1: address(tok1),
             destTickSpacing: DEST_TICK_SPACING,
             destGauge: address(0),
+            destOracle0: address(feed0),
+            destOracle1: address(feed1),
+            destSwapPolicy: 0,
+            destProtectedToken: address(0),
             tickLower: -100,
             tickUpper: 100,
             swapTokenIn: address(tok0), // swapAmountIn=0 so token is unused but must be valid
@@ -673,6 +677,114 @@ contract LPAutoBalancerMigrateTest is Test {
         LPAutoBalancer.MigrateParams memory params = _defaultMigrateParams();
         params.swapAmountIn = 1e18;
         params.swapTokenIn = makeAddr("randomToken"); // neither tok0 nor tok1
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.migrate(slotId, params);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 11: cross-pair migrate updates oracle/policy/protectedToken/token1
+    // -------------------------------------------------------------------------
+
+    function test_migrate_updatesOracleAndPolicyForNewPair() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        // New counter-asset + its own oracle, distinct from the source pair.
+        MockERC20 newTok1 = new MockERC20("NewToken1", "NTK1");
+        MockPriceFeed newFeed1 = new MockPriceFeed(1e8, 8, block.timestamp);
+
+        LPAutoBalancer.MigrateParams memory params = _defaultMigrateParams();
+        params.destToken0 = address(tok0);
+        params.destToken1 = address(newTok1); // different pair
+        params.destOracle1 = address(newFeed1); // different feed
+        params.destSwapPolicy = 1; // counter-asset only
+        params.destProtectedToken = address(tok0); // protect destToken0
+
+        // Mint dest tokens into PM so the principal collect transfers succeed for the new pair.
+        mockPM.setCollectTokens(address(tok0), address(newTok1));
+        newTok1.mint(address(mockPM), 1e18);
+
+        vm.prank(admin);
+        lab.migrate(slotId, params);
+
+        (
+            ,
+            ,
+            ,
+            address storedToken1,
+            ,
+            ,
+            ,
+            ,
+            address storedOracle0,
+            address storedOracle1,
+            uint8 storedSwapPolicy,
+            address storedProtectedToken,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+        ) = lab.positions(slotId);
+
+        assertEq(storedToken1, address(newTok1), "token1 not updated to new counter-asset");
+        assertEq(storedOracle0, address(feed0), "oracle0 should be dest oracle0");
+        assertEq(storedOracle1, address(newFeed1), "oracle1 not updated to new feed");
+        assertEq(storedSwapPolicy, uint8(1), "swapPolicy not updated");
+        assertEq(storedProtectedToken, address(tok0), "protectedToken not updated");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 12: unaligned dest ticks -> InvalidConfig
+    // -------------------------------------------------------------------------
+
+    function test_migrate_revertUnalignedDestTicks() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        // DEST_TICK_SPACING = 100; 150 is not a multiple of 100.
+        LPAutoBalancer.MigrateParams memory params = _defaultMigrateParams();
+        params.tickLower = -150;
+        params.tickUpper = 100;
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);
+        lab.migrate(slotId, params);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 13: zero dest oracle -> OracleRequired
+    // -------------------------------------------------------------------------
+
+    function test_migrate_revertDestOracleZero() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        LPAutoBalancer.MigrateParams memory params = _defaultMigrateParams();
+        params.destOracle0 = address(0);
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.OracleRequired.selector);
+        lab.migrate(slotId, params);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 14: protected token not in dest pair (policy != 0) -> InvalidConfig
+    // -------------------------------------------------------------------------
+
+    function test_migrate_revertDestProtectedNotInPair() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        LPAutoBalancer.MigrateParams memory params = _defaultMigrateParams();
+        params.destSwapPolicy = 1;
+        params.destProtectedToken = makeAddr("notADestToken");
 
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.InvalidConfig.selector);

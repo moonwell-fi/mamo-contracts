@@ -853,4 +853,87 @@ contract LPAutoBalancerRebalanceTest is Test {
         // Assert router was called (swap leg executed)
         assertTrue(mockRouter.wasCalled(), "swap router was not called");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 14: spot-centered range succeeds where a TWAP-centered range would not
+    //          straddle spot (Fix 3 — eliminates the narrow-range straddle footgun).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_rebalance_spotCenteredRangeSucceeds() public {
+        // spotTick = 300, twapTick = 0, spacing = 200, width = 400 (half = 200).
+        //   TWAP-centered: floorAlign(0-200,200) = -200 → [-200, 200]; 300 NOT in range → old revert.
+        //   SPOT-centered: floorAlign(300-200,200) = 0 → [0, 400]; 0 < 300 < 400 → straddles ✓.
+        //   center = 200; dev vs twap = 200 → needs maxCenterDeviation >= 200.
+        //   |spot-twap| = 300 → needs maxTickDeviation >= 300 to pass the gate.
+        mockPool.setSlot0(SQRT_P, 300); // spotTick = 300
+        mockPool.setObserve(0, 0); // twapTick = 0
+
+        LPAutoBalancer.ManagedPosition memory cfg = LPAutoBalancer.ManagedPosition({
+            tokenId: OLD_TOKEN_ID,
+            pool: address(mockPool),
+            token0: address(tok0),
+            token1: address(tok1),
+            tickSpacing: 200,
+            gauge: address(0),
+            staked: false,
+            feeCollector: feeCollector,
+            oracle0: address(feed0),
+            oracle1: address(feed1),
+            swapPolicy: 0,
+            protectedToken: address(0),
+            minWidth: 200,
+            maxWidth: 2000,
+            maxCenterDeviation: 2000, // large enough for center(200)-vs-twap(0) dev=200
+            maxSlippageBps: 100,
+            twapWindow: 1800,
+            maxTickDeviation: 400, // allows |spot-twap| = 300
+            maxRebalanceLossBps: 100,
+            minRebalanceInterval: 0,
+            lastRebalance: 0,
+            active: false
+        });
+        vm.prank(admin);
+        uint256 slotId = lab.registerPosition(cfg);
+
+        _stagePrincipal(1e18, 1e18);
+
+        // The spot-centered range [0,400] is off-center vs sqrtP(tick 0), so a re-ratio
+        // swap fires; give the quoter/router positive outputs so the swap leg succeeds.
+        mockQuoter.setQuotedOut(1e18);
+        mockRouter.setAmountOutToReturn(1e18);
+
+        // New aligned spot-centered range is [0, 400].
+        vm.expectEmit(true, true, true, true);
+        emit LPAutoBalancer.Rebalanced(slotId, OLD_TOKEN_ID, NEW_TOKEN_ID, 0, 400);
+
+        vm.prank(rebalancer);
+        lab.rebalance(slotId, _defaultParams()); // width = 400; must NOT revert "no straddle"
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 15: claimEmissions forwards only the per-claim AERO delta, not a stray
+    //          balance already sitting on the contract (Fix 2).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_claimEmissions_perSlotDelta() public {
+        uint256 slotId = _registerSlot(true); // with gauge
+
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Pre-seed a stray AERO balance on the contract (e.g. from another slot or a transfer).
+        uint256 stray = 4e18;
+        mockAero.mint(address(lab), stray);
+
+        // Gauge pays this slot's reward on getReward.
+        uint256 reward = 3e18;
+        mockAero.mint(address(mockGauge), reward);
+        mockGauge.setAeroToPayOnGetReward(reward);
+
+        lab.claimEmissions(slotId);
+
+        // Only the getReward delta is forwarded; the stray stays on the contract.
+        assertEq(mockAero.balanceOf(feeCollector), reward, "feeCollector got more than the per-claim delta");
+        assertEq(mockAero.balanceOf(address(lab)), stray, "stray AERO should remain on the contract");
+    }
 }
