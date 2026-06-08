@@ -51,6 +51,6 @@ contract LPAutoBalancerHarness is LPAutoBalancer {
         external
         returns (uint256)
     {
-        return _executeSwap(tin, tout, amtIn, spacing, callerMin, slippage);
+        return _executeSwap(tin, tout, amtIn, spacing, callerMin, slippage, false);
     }
 }

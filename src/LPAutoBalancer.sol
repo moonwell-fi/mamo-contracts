@@ -457,7 +457,7 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             );
             if (amountIn > 0) {
                 (address tin, address tout) = zeroForOne ? (p.token0, p.token1) : (p.token1, p.token0);
-                _executeSwap(tin, tout, amountIn, p.tickSpacing, params.swapMinAmountOut, p.maxSlippageBps);
+                _executeSwap(tin, tout, amountIn, p.tickSpacing, params.swapMinAmountOut, p.maxSlippageBps, true);
             }
         }
 
@@ -578,7 +578,9 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         if (params.swapAmountIn > 0) {
             address tin = params.swapTokenIn;
             address tout = tin == p.token0 ? p.token1 : p.token0;
-            _executeSwap(tin, tout, params.swapAmountIn, p.tickSpacing, params.swapMinAmountOut, p.maxSlippageBps);
+            _executeSwap(
+                tin, tout, params.swapAmountIn, p.tickSpacing, params.swapMinAmountOut, p.maxSlippageBps, false
+            );
         }
 
         // 5. Mint into destPool with dest tokens / ticks.
@@ -940,10 +942,9 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         uint256 amountIn,
         int24 tickSpacing,
         uint256 callerMinOut,
-        uint16 maxSlippageBps
+        uint16 maxSlippageBps,
+        bool skipIfUnquotable
     ) internal returns (uint256 amountOut) {
-        IERC20(tokenIn).forceApprove(address(SWAP_ROUTER), amountIn);
-
         IQuoter.QuoteExactInputSingleParams memory qp = IQuoter.QuoteExactInputSingleParams({
             tokenIn: tokenIn,
             tokenOut: tokenOut,
@@ -952,12 +953,20 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             sqrtPriceLimitX96: 0
         });
         (uint256 quotedOut,,,) = QUOTER.quoteExactInputSingle(qp);
-        require(quotedOut > 0, "Invalid quote");
+        // The Aerodrome quoter rounds dust inputs down to zero output. The rebalance
+        // re-ratio leg can be dust (e.g. 1 wei) when balances already match the target
+        // range; skip that unprofitable leg instead of reverting the whole rebalance.
+        // Migrate's explicit, human-supplied swap stays strict and reverts on a zero quote.
+        if (quotedOut == 0) {
+            if (skipIfUnquotable) return 0;
+            revert("Invalid quote");
+        }
 
         uint256 quoterMin = (quotedOut * (BPS_DENOMINATOR - maxSlippageBps)) / BPS_DENOMINATOR;
         if (quoterMin == 0) revert SlippageTooHigh();
         uint256 minOut = callerMinOut > quoterMin ? callerMinOut : quoterMin;
 
+        IERC20(tokenIn).forceApprove(address(SWAP_ROUTER), amountIn);
         ISwapRouter.ExactInputSingleParams memory sp = ISwapRouter.ExactInputSingleParams({
             tokenIn: tokenIn,
             tokenOut: tokenOut,
