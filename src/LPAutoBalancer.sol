@@ -160,6 +160,10 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             revert InvalidConfig();
         }
         if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
+        // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
+        // not as a StaleOracle revert on the next rebalance.
+        _readFeed(config.oracle0);
+        _readFeed(config.oracle1);
         if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
         if (config.maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = config.tickSpacing;
@@ -260,6 +264,8 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     function setOracles(uint256 slotId, address oracle0, address oracle1) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!positions[slotId].active) revert NotActive();
         if (oracle0 == address(0) || oracle1 == address(0)) revert OracleRequired();
+        _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
+        _readFeed(oracle1);
         positions[slotId].oracle0 = oracle0;
         positions[slotId].oracle1 = oracle1;
         emit OraclesUpdated(slotId, oracle0, oracle1);
@@ -425,7 +431,11 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         // 3. value BEFORE: read old position's liquidity at current sqrtP.
         //    _principalValue uses liquidity only — owed fees are excluded by construction,
         //    so step 4 (skim fees) does NOT alter this measurement.
+        //    extBefore: pair-token balances already in this contract, netted out of the floor
+        //    check below so strays can't mask a genuine loss (they get minted into the new
+        //    position and would inflate valueAfter).
         uint256 valueBefore = _principalValue(p, sqrtP, dec0, dec1);
+        uint256 extBefore = _contractPairValue(p, dec0, dec1);
 
         // 4. unstake if needed (auto-claims AERO → feeCollector)
         if (wasStaked) _unstake(p, slotId);
@@ -476,10 +486,18 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             emit Staked(slotId, newTokenId, p.gauge);
         }
 
-        // 11. value AFTER: p.tokenId now points to new position; same sqrtP snapshot from step 1.
-        //     Both measurements use principal-only liquidity → consistent comparison.
-        uint256 valueAfter = _principalValue(p, sqrtP, dec0, dec1);
-        if (valueAfter < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)) {
+        // 11. value AFTER: new position principal (same sqrtP snapshot from step 1) PLUS the
+        //     post-mint leftover pair tokens. The leftover is forwarded to feeCollector in
+        //     step 12 — an internal transfer to the same trusted sink that receives fees, not
+        //     a market loss — and with a protective swapPolicy a one-sided drift makes such
+        //     leftover structural (the forbidden re-ratio swap can't trim the protected side).
+        //     Netting extBefore on the right keeps pre-existing strays from masking real loss,
+        //     so the floor bounds exactly market loss: swap fees, slippage, and rounding.
+        uint256 valueAfter = _principalValue(p, sqrtP, dec0, dec1) + _contractPairValue(p, dec0, dec1);
+        if (
+            valueAfter
+                < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + extBefore
+        ) {
             revert ValueFloor();
         }
 
@@ -547,6 +565,8 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         // Destination oracle/policy must be valid so the next rebalance values the new pair
         // with the correct Chainlink feeds and a consistent swap policy (not stale source config).
         if (params.destOracle0 == address(0) || params.destOracle1 == address(0)) revert OracleRequired();
+        _readFeed(params.destOracle0); // probe: fail in the admin tx, not on the next rebalance
+        _readFeed(params.destOracle1);
         if (params.destSwapPolicy > 2) revert InvalidSwapPolicy();
         if (
             params.destSwapPolicy != 0 && params.destProtectedToken != params.destToken0
@@ -744,6 +764,20 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     /// @dev Transfer any residual token0 / token1 balance of this contract to the feeCollector.
     function _forwardDust(ManagedPosition storage p) private {
         _forwardDustTokens(p.token0, p.token1, p.feeCollector);
+    }
+
+    /// @dev USD value of this contract's current (non-position) balances of the pair tokens.
+    ///      Used by the rebalance value floor to net contract-held balances out of the
+    ///      before/after comparison.
+    function _contractPairValue(ManagedPosition storage p, uint8 dec0, uint8 dec1) private view returns (uint256) {
+        return _valueInUsd(
+            IERC20(p.token0).balanceOf(address(this)),
+            IERC20(p.token1).balanceOf(address(this)),
+            p.oracle0,
+            p.oracle1,
+            dec0,
+            dec1
+        );
     }
 
     /// @dev Compute the USD value of the principal tokens locked in the position,

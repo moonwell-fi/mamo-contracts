@@ -58,6 +58,7 @@ contract MockPositionManagerV2 {
     // mint
     uint256 public lastMintedTokenId;
     uint256 public mintCallCount;
+    bool public pullOnMint;
 
     // Position storage
     struct PositionData {
@@ -113,6 +114,10 @@ contract MockPositionManagerV2 {
         collectAmounts1[0] = fee1;
         collectAmounts0[1] = princ0;
         collectAmounts1[1] = princ1;
+    }
+
+    function setPullOnMint(bool v) external {
+        pullOnMint = v;
     }
 
     function setNextMintResult(uint256 newTokenId, uint128 liq) external {
@@ -198,7 +203,7 @@ contract MockPositionManagerV2 {
         }
     }
 
-    function mint(ICLPositionManager.MintParams calldata)
+    function mint(ICLPositionManager.MintParams calldata params)
         external
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
     {
@@ -206,6 +211,11 @@ contract MockPositionManagerV2 {
         tokenId = nextMintTokenId;
         liquidity = nextMintLiquidity;
         lastMintedTokenId = tokenId;
+        if (pullOnMint) {
+            // Simulate the real PM consuming the supplied balances: value leaves the caller.
+            IERC20(params.token0).safeTransferFrom(msg.sender, address(this), params.amount0Desired);
+            IERC20(params.token1).safeTransferFrom(msg.sender, address(this), params.amount1Desired);
+        }
         return (tokenId, liquidity, 0, 0);
     }
 }
@@ -776,15 +786,36 @@ contract LPAutoBalancerRebalanceTest is Test {
         // Principal for the old position: 1e18 tok0 + 1e18 tok1 → valueBefore > 0
         _stagePrincipal(1e18, 1e18);
 
-        // New mint returns liquidity = 1 (effectively zero value).
-        // valueAfter will be ~0, which is << valueBefore * (10000-100)/10000
-        // → ValueFloor must trigger.
+        // New mint returns liquidity = 1 (effectively zero value) AND consumes the supplied
+        // balances (pullOnMint) — value genuinely leaves the contract, so neither the new
+        // position nor leftover dust retains it. ValueFloor must trigger.
         mockPM.setNextMintResult(NEW_TOKEN_ID, 1);
         mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, 1, address(tok0), address(tok1));
+        mockPM.setPullOnMint(true);
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancer.ValueFloor.selector);
         lab.rebalance(slotId, _defaultParams());
+    }
+
+    function test_rebalance_leftoverDustNotCountedAsLoss() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        // New mint returns liquidity = 1 but does NOT consume balances: the full principal
+        // remains in the contract as leftover and is forwarded to feeCollector in step 12.
+        // That is an internal transfer, not a market loss, so the floor must NOT trigger.
+        mockPM.setNextMintResult(NEW_TOKEN_ID, 1);
+        mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, 1, address(tok0), address(tok1));
+
+        vm.prank(rebalancer);
+        lab.rebalance(slotId, _defaultParams());
+
+        // Leftover swept to feeCollector, nothing stranded in the contract.
+        assertEq(tok0.balanceOf(feeCollector), 1e18, "leftover tok0 to feeCollector");
+        assertEq(tok1.balanceOf(feeCollector), 1e18, "leftover tok1 to feeCollector");
+        assertEq(tok0.balanceOf(address(lab)), 0, "no tok0 stranded");
+        assertEq(tok1.balanceOf(address(lab)), 0, "no tok1 stranded");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -794,6 +825,10 @@ contract LPAutoBalancerRebalanceTest is Test {
     function test_rebalance_revertStaleOracle() public {
         // Warp forward so we can set updatedAt in the past
         vm.warp(100_000);
+
+        // Refresh both feeds: registerPosition probes them, so they must be fresh at registration
+        feed0.setUpdatedAt(block.timestamp);
+        feed1.setUpdatedAt(block.timestamp);
 
         uint256 slotId = _registerSlot(false);
 

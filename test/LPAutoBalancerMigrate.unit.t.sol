@@ -774,6 +774,18 @@ contract LPAutoBalancerMigrateTest is Test {
         lab.migrate(slotId, params);
     }
 
+    function test_migrate_revertDestOracleNotAFeed() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        LPAutoBalancer.MigrateParams memory params = _defaultMigrateParams();
+        params.destOracle0 = makeAddr("notAFeed"); // codeless: latestRoundData() probe returns no data
+
+        vm.prank(admin);
+        vm.expectRevert();
+        lab.migrate(slotId, params);
+    }
+
     // -------------------------------------------------------------------------
     // Test 14: protected token not in dest pair (policy != 0) -> InvalidConfig
     // -------------------------------------------------------------------------

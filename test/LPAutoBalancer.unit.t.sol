@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {MockERC20} from "./MockERC20.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPositionManager} from "./mocks/MockPositionManager.sol";
+import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {LPAutoBalancer} from "@contracts/LPAutoBalancer.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Vm} from "@forge-std/Vm.sol";
@@ -29,8 +30,8 @@ contract LPAutoBalancerUnitTest is Test {
     address token1 = makeAddr("token1");
     address gauge; // set in setUp to address(mockGauge)
     address feeCollector = makeAddr("feeCollector");
-    address oracle0 = makeAddr("oracle0");
-    address oracle1 = makeAddr("oracle1");
+    address oracle0; // set in setUp to a MockPriceFeed (registerPosition probes feeds)
+    address oracle1;
     address protectedToken = makeAddr("protectedToken");
 
     uint256 constant TOKEN_ID = 42;
@@ -45,6 +46,10 @@ contract LPAutoBalancerUnitTest is Test {
 
         // mockPM owner defaults to address(0); will be updated after lab deploy
         mockPM = new MockPositionManager(address(0));
+
+        // Real mock feeds: registerPosition/setOracles probe latestRoundData at set-time
+        oracle0 = address(new MockPriceFeed(1e8, 8, block.timestamp));
+        oracle1 = address(new MockPriceFeed(1e8, 8, block.timestamp));
 
         lab =
             new LPAutoBalancer(admin, manager, rebalancer, guardian, address(mockPM), router, quoter, address(mockAero));
@@ -156,6 +161,22 @@ contract LPAutoBalancerUnitTest is Test {
         cfg.oracle0 = address(0);
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.OracleRequired.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertOracleNotAFeed() public {
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        cfg.oracle0 = makeAddr("notAFeed"); // codeless: latestRoundData() probe returns no data
+        vm.prank(admin);
+        vm.expectRevert();
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertOracleStale() public {
+        vm.warp(block.timestamp + 30 hours); // setUp feeds now older than maxOracleDelay (26h)
+        LPAutoBalancer.ManagedPosition memory cfg = _validConfig();
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.StaleOracle.selector);
         lab.registerPosition(cfg);
     }
 
@@ -508,8 +529,8 @@ contract LPAutoBalancerUnitTest is Test {
 
     function test_setOracles_happy() public {
         uint256 slotId = _registerSlot();
-        address newOracle0 = makeAddr("newOracle0");
-        address newOracle1 = makeAddr("newOracle1");
+        address newOracle0 = address(new MockPriceFeed(1e8, 8, block.timestamp));
+        address newOracle1 = address(new MockPriceFeed(1e8, 8, block.timestamp));
 
         vm.prank(admin);
         vm.expectEmit(true, true, true, false);
@@ -549,6 +570,22 @@ contract LPAutoBalancerUnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancer.OracleRequired.selector);
         lab.setOracles(slotId, makeAddr("o0"), address(0));
+    }
+
+    function test_setOracles_revertNonFeed() public {
+        uint256 slotId = _registerSlot();
+        vm.prank(admin);
+        vm.expectRevert(); // codeless address: latestRoundData() probe returns no data
+        lab.setOracles(slotId, makeAddr("notAFeed"), oracle1);
+    }
+
+    function test_setOracles_revertStaleFeed() public {
+        uint256 slotId = _registerSlot();
+        vm.warp(block.timestamp + 30 hours); // both feeds now older than maxOracleDelay (26h)
+        address freshOracle = address(new MockPriceFeed(1e8, 8, block.timestamp));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancer.StaleOracle.selector);
+        lab.setOracles(slotId, oracle0, freshOracle);
     }
 
     // ─── setSwapPolicy ──────────────────────────────────────────────────────
