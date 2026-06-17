@@ -15,6 +15,8 @@
 > (8) **LLM pool-discovery is demoted to a nice-to-have** — migration destinations are chosen by periodic human analysis; the discovery pipeline is future/optional (Section 8.3).
 > (9) **MAMO has a live Chainlink feed** — `MAMO / USD` at `0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94` on Base (8 decimals). The previous "no Chainlink feed" claim was an error. The value floor now prices against this feed when configured, which also resolves the thin-pool TWAP caveat (Sections 3.1, 9).
 
+> **Revision 2 (2026-06-17) — LLM decisioning is promoted from nice-to-have to the brain.** The off-chain role is no longer a dumb "trigger + bounded width" service. It is a **goal-gated LLM agent** that decides, per run: (a) whether/how to re-range (width), and (b) **whether to gauge-stake the position to farm AERO emissions or stay unstaked to earn trading fees** ("stack AERO vs earn LP rewards"). The agent reuses the goal-gated multi-turn loop pattern from `centaur-moonwell` PR #36 (`feat(agent-loops): goal-gated turns`): an explicit GOAL in the prompt + a workflow completion gate that re-reads chain state after every turn and feeds back `GOAL NOT MET: <reason>`. The decision architecture is **deterministic funnel + LLM judgment on the margin** (gather/compute/pre-filter in code → LLM picks a vetted candidate → code executes → gate re-checks). The agent is specified in §11 here and in full in `centaur-moonwell` at `docs/superpowers/specs/2026-06-17-lp-balancer-agent-design.md`. **Trust model is unchanged:** the agent is just another `REBALANCER_ROLE` caller, bounded by every on-chain guard; a hallucinating LLM gets a revert, not a loss. **Phase-1 scope is reduced to a single position — MAMO/USDC (tokenId 21585074)** — see §7. The AERO-stack half auto-gates on `pos.gauge != 0`: when no gauge is configured, the funnel never emits a stake candidate and the agent runs rebalance-only, with no separate code path.
+
 ## 1. Problem & Goal
 
 Protocol-owned Aerodrome concentrated-liquidity (CL) positions that fund the weekly MAMO drop currently sit **static and full-range** (`tickLower -887200` / `tickUpper 887200`, tickSpacing 200) inside the `TransferAndEarn` contract. The only operation performed on them today is fee collection (`earn()` → fee collector → `DropAutomation` → weekly drop). They are never re-ranged and never staked, so they are doubly capital-inefficient: a full-range position earns a small fraction of the fees a tight, centered range would earn for the same capital, **and** it forgoes the AERO emissions a staked position would earn.
@@ -219,6 +221,31 @@ Events: `PositionRegistered`, `PositionDeregistered`, `Rebalanced`, `FeesSkimmed
 
 Custom errors: `Cooldown`, `TwapDeviation`, `ValueFloor`, `StaleOracle`, `NotInRange`, `WidthOutOfBounds`, `CenterDeviation`, `TickNotAligned`, `SlippageTooHigh`, `SwapPolicyViolation`, `NotStaked`, `AlreadyStaked`, `NoGauge`, `NotRebalancer`, `OnlyPositionManager`.
 
+### 4.7 `getDecisionSnapshot(uint256 slotId)` — view (added for the agent, §11)
+
+A single read that batches everything the off-chain agent's *gather* step and its *completion gate* need, so both derive "is the goal met" from one consistent chain observation (replay-safety: no straddling a block boundary across several racy calls). No new powers, no state change.
+
+```solidity
+struct DecisionSnapshot {
+    int24   spotTick;            // pool slot0 tick
+    int24   twapTick;            // pool TWAP tick over pos.twapWindow
+    int24   tickLower;           // current position range
+    int24   tickUpper;
+    bool    inRange;             // tickLower <= spotTick < tickUpper
+    bool    staked;              // currently gauge-staked
+    bool    hasGauge;            // pos.gauge != address(0)  → AERO-stack decision is live iff true
+    uint128 liquidity;           // current position liquidity
+    uint256 earnedAero;          // gauge.earned(this, tokenId) if staked, else 0
+    uint256 gaugeRewardRate;     // AERO/sec for the gauge (emission-APR input)
+    uint256 cooldownRemaining;   // seconds until rebalance() is allowed again
+    bool    deviationGateOpen;   // |spotTick - twapTick| <= pos.maxTickDeviation  → rebalance won't revert on the gate now
+}
+
+function getDecisionSnapshot(uint256 slotId) external view returns (DecisionSnapshot memory);
+```
+
+`hasGauge == false` is exactly the signal that makes the agent run rebalance-only for a gaugeless pool (e.g. phase-1 MAMO/USDC if it has no CL gauge).
+
 ## 5. AERO emissions workstream (capability parity with `aerodrome-auto-balance`)
 
 The `aerodrome-auto-balance` module both re-ranges **and** stakes for emissions. This design matches that:
@@ -249,6 +276,8 @@ Initial managed set: the TransferAndEarn positions. New pools (including non-MAM
 
 **Phased rollout (review).** Do **not** move all liquidity at once. Begin with a **small amount of TVL** (one position, conservative bounds, `swapPolicy = counter-asset only`), prove fee + emission yield and guard behavior on mainnet, then **expand TVL and add pools** (including deep correlated non-MAMO pools) as the strategy demonstrates success.
 
+**Phase-1 (Revision 2) — single position, MAMO/USDC only.** The first deployment manages exactly **one** position: **MAMO/USDC (tokenId 21585074)**, the position already held by `TransferAndEarn` (custody confirmed). This deliberately sidesteps the MAMO/cbBTC custody question (implementation note #1: the cbBTC/MAMO NFT is *not* held by `TransferAndEarn`) — cbBTC/MAMO, deep correlated non-MAMO pools (cbBTC/WETH), and the multi-position **sweep** are all **phase-2+**. The off-chain agent (§11) therefore runs a **single-position loop**, not a sweep-over-set, in phase-1. If MAMO/USDC has no CL gauge, phase-1 is **rebalance-only** (`hasGauge == false` from §4.7); the AERO-stack decision activates automatically once a gauged pool is registered — no contract or agent code change.
+
 Wiring note: once a position lives in the balancer, fee/emission skimming for the drop happens via `rebalance()`, `collectFees(slotId)`, or `claimEmissions(slotId)`; `TransferAndEarn.earn()` no longer applies to the moved NFTs.
 
 ## 8. Pool Migration (human-gated)
@@ -268,6 +297,8 @@ Flow: unstake if staked (claim AERO → `feeCollector`); collect fees → skim; 
 **Cheap sanity guards** (catch fat-finger, NOT value protection — the human review is the value guard): `destPool.code.length > 0`, `destTickSpacing == IPool(destPool).tickSpacing()`, ticks aligned + `tickLower < tickUpper`. An **optional** MAMO-leg check is available per call but is **not** required, since non-MAMO correlated pools are in scope. The TWAP value floor is **deliberately not applied** to migrations because an arbitrary pool's TWAP isn't trustworthy.
 
 ### 8.3 LLM pair-discovery pipeline — **nice-to-have, not required** (future / optional)
+
+> **Scope note (Revision 2).** This section is *only* about **migration destination discovery** (which *new* pool to move into) — which remains human/Safe-gated and optional, for the trust reasons in §8.1. It is **distinct** from the §11 agent, which makes the **re-range and AERO-stake-vs-fees decisions** inside the *already-registered* pool. Those decisions are now the agent's live job (autonomous within on-chain guards); migration is not.
 
 Per review, migration destinations are decided by **periodic human analysis**, not an autonomous pipeline. Migration is rare and Safe-gated, so an operator can review pools by hand when considering a move. The discovery automation below is documented as an **optional future enhancement** — decision-support only, never execution — and is **not part of the initial deliverable**:
 
@@ -296,9 +327,55 @@ Per review, migration destinations are decided by **periodic human analysis**, n
 - **Untrusted off-chain minimums weakening protection** (rejected — min-amounts are recomputed on-chain from the Quoter; a caller floor can only tighten them).
 - Human-approval gating **for re-ranges** (rejected — re-ranges run autonomously within on-chain guards). **Migrations are the opposite** — Safe-admin-gated, never autonomous (§8).
 - **Autonomous or single-EOA-gated migration** (rejected — would re-create a treasury-drain path).
-- **Required LLM pool-discovery** (rejected — it is an optional nice-to-have; humans + the Safe decide and execute migrations, §8.3).
+- **Required LLM pool-discovery for *migration*** (rejected — it is an optional nice-to-have; humans + the Safe decide and execute migrations, §8.3). **Note (Revision 2):** LLM *decisioning* for the re-range/stake-vs-fees calls inside a registered pool is **now in scope** and is the primary off-chain deliverable (§11) — this non-goal is scoped to *migration destination* discovery only.
+- **veAERO locking / vote-bribe direction** (out of scope — the AERO decision is the binary gauge-stake-vs-unstaked yield-source switch only; claimed AERO continues to route to the drop, §5).
+- **LLM hallucinating value-relevant numbers** (mitigated, not trusted — the funnel feeds the LLM only *computed* facts and *pre-vetted* candidate actions; the LLM picks among them, and every executed action is still bounded by the on-chain guards, §11).
 
 > **Correction (was a non-goal in error).** A previous draft listed "Chainlink-valued retention guards — rejected because MAMO has no reliable Chainlink feed." **MAMO does have a live Chainlink feed** — `MAMO / USD` at `0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94` on Base (8 decimals, ~$0.0089 at writing). The value floor now prices against it when configured (Section 3.1), which is stronger than a thin-pool TWAP and resolves the earlier thin-pool caveat.
+
+## 11. Off-chain decisioning agent (goal-gated LLM)
+
+The off-chain side is a **goal-gated LLM agent**, reusing the multi-turn loop pattern shipped in `centaur-moonwell` PR #36 (`feat(agent-loops): goal-gated turns`). It lives in `centaur-moonwell` (full spec: `docs/superpowers/specs/2026-06-17-lp-balancer-agent-design.md`); summarized here because it is what drives this contract's `REBALANCER_ROLE` levers. **Phase-1 runs against the single MAMO/USDC position (§7).**
+
+### 11.1 What it decides
+
+Per run, two decisions:
+1. **Re-range?** — and at what `width`, or no-op.
+2. **Stack AERO vs earn LP rewards** — gauge-stake to farm AERO emissions, or stay unstaked to earn trading fees, choosing whichever yields more (only when `hasGauge` — §4.7).
+
+It drives the *existing* levers (`rebalance`, `stake`, `unstake`, `claimEmissions`, `collectFees`); it gains **no new on-chain power** and is bounded by every guard in §3.1. Migrations are *not* the agent's job (§8).
+
+### 11.2 Decision architecture — deterministic funnel + LLM judgment
+
+The LLM never sees raw RPC or invents numbers. Code does GATHER → COMPUTE → PRE-FILTER, then the LLM picks among **vetted** candidates:
+
+| Stage | Produces |
+| --- | --- |
+| Gather | `getDecisionSnapshot` (§4.7, authoritative chain reads) + Aerodrome LpSugar + DefiLlama `apyBase`/`apyReward` (cross-check) + Chainlink price (USD numeraire) + a tick-volatility window |
+| Compute | `feeAPR` vs `emissionAPR`, both USD-normalized; candidate widths `{tight, mid, wide}` with a projected in-range probability from volatility; projected value-floor headroom per candidate |
+| Pre-filter (hard) | drop candidates that *would revert* (`cooldownRemaining > 0`, `!deviationGateOpen`, width outside `[minWidth, maxWidth]`, below min-TVL); apply a **hysteresis band** around the APR crossover so noise can't cause stake/unstake flapping |
+| Brief | structured JSON to the LLM: current state + *only vetted* candidates + the APR comparison + a **do-nothing option that is always present** |
+
+The LLM exercises the judgment the funnel can't encode (is a flip worth the gas + IL when the APR gap is small and volatility is rising? is a tighter range worth it this week?), picks **one** vetted candidate, and writes a rationale. If DefiLlama and on-chain APR diverge beyond tolerance, the brief flags it and the LLM defaults to the conservative on-chain number or a no-op.
+
+### 11.3 Goal-gated loop (PR #36 shape)
+
+A cron-fired workflow (`workflows/lp_balancer_sweep.py`) runs a bounded turn loop with this GOAL injected per position:
+
+```
+GOAL: position {slotId} ({pair}) is optimally configured right now —
+  (1) in-range: spot tick within [tickLower, tickUpper] at a width justified by recent volatility
+  (2) higher-yield source selected: staked iff emissionAPR > feeAPR + HYSTERESIS_BPS  (only when hasGauge)
+  (3) no claimable AERO/fees left unswept past threshold
+```
+
+Each turn: build brief → LLM emits one structured action → workflow executes the lever (signs as the `REBALANCER_ROLE` EOA) → **completion gate re-reads `getDecisionSnapshot`** and evaluates the clauses. Met → end run. Unmet → next turn gets `GOAL NOT MET: <reason>` (e.g. `emission APR 18% > fee APR 6% but still unstaked`, `drifted out of range`, or a reverted-tx reason like `tx reverted: ValueFloor`). Budget spent unmet → escalate to a human, never loop forever.
+
+### 11.4 Safety (three layers, weakest→strongest)
+
+1. **On-chain (authoritative):** value floor, deviation gate, width bounds, cooldown, quoter slippage floor. A bad LLM action reverts and is fed back as the unmet reason — this is the real backstop.
+2. **Service-side circuit-breaker:** halt + alert on N consecutive reverts, a flap detector (stake-state flips > K in a window — belt-and-suspenders over hysteresis), DefiLlama-vs-on-chain APR divergence, or oracle staleness. Halting = stop signing; the Safe can also revoke the EOA instantly (existing kill-switch).
+3. **Replay-safety:** durable workflow state (PR #36 model); a sandbox dying mid-turn resumes, and the gate re-reads chain so a tx that landed pre-crash is seen as done, not double-sent. An idempotency key per `(slotId, cron-tick)` prevents a duplicate action in one tick (cooldown already guards `rebalance`, but `stake`/`claim` are not cooldown-gated).
 
 ## Implementation notes
 
