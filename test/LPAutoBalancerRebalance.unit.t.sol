@@ -880,6 +880,11 @@ contract LPAutoBalancerRebalanceTest is Test {
     }
 
     function test_getDecisionSnapshot_cooldownRemaining() public {
+        // Pin timestamp to 2 before registration so lastRebalance stays 0 and
+        // cooldownRemaining = minRebalanceInterval - elapsed is deterministic.
+        // Must be >= 2 because the mock oracle returns updatedAt=1; warping to 0
+        // would cause block.timestamp - updatedAt to underflow in the staleness check.
+        vm.warp(2);
         LPAutoBalancer.ManagedPosition memory cfg = LPAutoBalancer.ManagedPosition({
             tokenId: OLD_TOKEN_ID,
             pool: address(mockPool),
@@ -914,6 +919,22 @@ contract LPAutoBalancerRebalanceTest is Test {
     function test_getDecisionSnapshot_revertsOnInactiveSlot() public {
         vm.expectRevert(LPAutoBalancer.NotActive.selector);
         lab.getDecisionSnapshot(999);
+    }
+
+    function test_getDecisionSnapshot_earnedAero_whenStaked() public {
+        // Register a gauged slot and stake it via the rebalancer lever
+        uint256 slotId = _registerSlot(true);
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+
+        // Configure the mock gauge to report a non-zero earned amount
+        mockGauge.setEarnedAmount(42e18);
+
+        LPAutoBalancer.DecisionSnapshot memory s = lab.getDecisionSnapshot(slotId);
+        assertTrue(s.staked, "position should be staked");
+        assertTrue(s.hasGauge, "gauge should be set");
+        // earnedAero must reflect the value the gauge reports via earned(address(lab), tokenId)
+        assertEq(s.earnedAero, 42e18, "earnedAero should match gauge.earned()");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -834,7 +834,13 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
         s.staked = p.staked;
         s.hasGauge = p.gauge != address(0);
         s.liquidity = liq;
-        s.earnedAero = (p.staked && p.gauge != address(0)) ? ICLGauge(p.gauge).earned(address(this), p.tokenId) : 0;
+        if (p.staked) {
+            try ICLGauge(p.gauge).earned(address(this), p.tokenId) returns (uint256 e) {
+                s.earnedAero = e;
+            } catch {
+                s.earnedAero = 0;
+            }
+        }
         s.cooldownRemaining = block.timestamp >= ready ? 0 : ready - block.timestamp;
         s.deviationGateOpen = dev <= p.maxTickDeviation;
     }

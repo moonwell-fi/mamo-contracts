@@ -71,8 +71,16 @@ contract MockCLGauge {
         }
     }
 
-    function earned(address, uint256) external pure returns (uint256) {
-        return 0;
+    // Configurable earned value returned by earned()
+    uint256 public earnedAmount;
+
+    /// @notice Configure the value returned by earned().
+    function setEarnedAmount(uint256 amount) external {
+        earnedAmount = amount;
+    }
+
+    function earned(address, uint256) external view returns (uint256) {
+        return earnedAmount;
     }
 
     function rewardToken() external view returns (address) {
