@@ -236,7 +236,6 @@ struct DecisionSnapshot {
     bool    hasGauge;            // pos.gauge != address(0)  → AERO-stack decision is live iff true
     uint128 liquidity;           // current position liquidity
     uint256 earnedAero;          // gauge.earned(this, tokenId) if staked, else 0
-    uint256 gaugeRewardRate;     // AERO/sec for the gauge (emission-APR input)
     uint256 cooldownRemaining;   // seconds until rebalance() is allowed again
     bool    deviationGateOpen;   // |spotTick - twapTick| <= pos.maxTickDeviation  → rebalance won't revert on the gate now
 }
@@ -245,6 +244,8 @@ function getDecisionSnapshot(uint256 slotId) external view returns (DecisionSnap
 ```
 
 `hasGauge == false` is exactly the signal that makes the agent run rebalance-only for a gaugeless pool (e.g. phase-1 MAMO/USDC if it has no CL gauge).
+
+> **No on-chain emission rate.** `ICLGauge` exposes only `earned(account, tokenId)` — there is **no `rewardRate`/emission-rate getter**. The snapshot therefore does **not** carry an emission rate; the agent sources **emission APR off-chain** from Aerodrome LpSugar (which exposes gauge reward rate) and DefiLlama `apyReward` (§11.2). The snapshot's job is the **gate-relevant chain facts** (tick, range, in-range, staked, cooldown, deviation-gate-open) — the authoritative inputs the completion gate re-reads to verify the *mechanical* GOAL clauses.
 
 ## 5. AERO emissions workstream (capability parity with `aerodrome-auto-balance`)
 
@@ -369,7 +370,7 @@ GOAL: position {slotId} ({pair}) is optimally configured right now —
   (3) no claimable AERO/fees left unswept past threshold
 ```
 
-Each turn: build brief → LLM emits one structured action → workflow executes the lever (signs as the `REBALANCER_ROLE` EOA) → **completion gate re-reads `getDecisionSnapshot`** and evaluates the clauses. Met → end run. Unmet → next turn gets `GOAL NOT MET: <reason>` (e.g. `emission APR 18% > fee APR 6% but still unstaked`, `drifted out of range`, or a reverted-tx reason like `tx reverted: ValueFloor`). Budget spent unmet → escalate to a human, never loop forever.
+Each turn: workflow builds the brief → the **sandboxed agent decides and executes the lever itself via `cast`/foundry** (the centaur workflow layer has no web3/signer — on-platform, agents act through CLI in the sandbox, like the coding agent runs `git`/`gh`), holding the `REBALANCER_ROLE` key in the sandbox; the agent reports protocol lines (`LP_ACTION: rebalance tx=0x…`, `SNAPSHOT_AFTER: inRange=… staked=…`). The **completion gate runs in the workflow and independently re-reads `getDecisionSnapshot` via a single JSON-RPC `eth_call` over `httpx`** — it does *not* trust the agent's reported snapshot (same stance as PR #36 re-checking GitHub, not the agent's word). It verifies the **mechanical** clauses (in-range, no unswept fees/AERO, staked-state matches the agent's stated decision) and **trusts the agent's APR-based judgment** for stake *direction* (bounded, reversible, flap-detector-guarded). Met → end run. Unmet → next turn gets `GOAL NOT MET: <reason>` (e.g. `you decided to stake but position still unstaked`, `drifted out of range`, or a reverted-tx reason like `tx reverted: ValueFloor`). Budget spent unmet → escalate to a human, never loop forever.
 
 ### 11.4 Safety (three layers, weakest→strongest)
 
