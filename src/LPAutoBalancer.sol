@@ -381,6 +381,23 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
     // Rebalance
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @notice Read-only snapshot of the gate-relevant facts the off-chain agent needs.
+    ///         No emission rate — ICLGauge has no rewardRate getter; emission APR is
+    ///         sourced off-chain (LpSugar/DefiLlama). See spec §4.7.
+    struct DecisionSnapshot {
+        int24 spotTick;
+        int24 twapTick;
+        int24 tickLower;
+        int24 tickUpper;
+        bool inRange;
+        bool staked;
+        bool hasGauge;
+        uint128 liquidity;
+        uint256 earnedAero;
+        uint256 cooldownRemaining;
+        bool deviationGateOpen;
+    }
+
     struct RebalanceParams {
         uint24 width;
         uint256 swapMinAmountOut;
@@ -794,6 +811,32 @@ contract LPAutoBalancer is AccessControlEnumerable, ReentrancyGuard, Pausable, I
             sqrtP, TickMath.getSqrtRatioAtTick(tl), TickMath.getSqrtRatioAtTick(tu), liq
         );
         return _valueInUsd(a0, a1, p.oracle0, p.oracle1, dec0, dec1);
+    }
+
+    /// @notice Batched, gate-relevant read for the off-chain decisioning agent (spec §4.7).
+    ///         View-only; reverts if the slot is inactive.
+    function getDecisionSnapshot(uint256 slotId) external view returns (DecisionSnapshot memory s) {
+        ManagedPosition storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+
+        (, int24 spotTick,,,,) = ICLPool(p.pool).slot0();
+        int24 twapTick = _consultTwapTick(p.pool, p.twapWindow);
+        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(p.tokenId);
+
+        int24 dev = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
+        uint256 ready = p.lastRebalance + p.minRebalanceInterval;
+
+        s.spotTick = spotTick;
+        s.twapTick = twapTick;
+        s.tickLower = tl;
+        s.tickUpper = tu;
+        s.inRange = tl <= spotTick && spotTick < tu;
+        s.staked = p.staked;
+        s.hasGauge = p.gauge != address(0);
+        s.liquidity = liq;
+        s.earnedAero = (p.staked && p.gauge != address(0)) ? ICLGauge(p.gauge).earned(address(this), p.tokenId) : 0;
+        s.cooldownRemaining = block.timestamp >= ready ? 0 : ready - block.timestamp;
+        s.deviationGateOpen = dev <= p.maxTickDeviation;
     }
 
     /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.

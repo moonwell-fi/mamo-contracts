@@ -845,6 +845,78 @@ contract LPAutoBalancerRebalanceTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // getDecisionSnapshot tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_getDecisionSnapshot_inRange_noGauge() public {
+        uint256 slotId = _registerSlot(false);
+        LPAutoBalancer.DecisionSnapshot memory s = lab.getDecisionSnapshot(slotId);
+        assertEq(s.spotTick, SPOT_TICK, "spotTick");
+        assertEq(s.twapTick, TWAP_TICK, "twapTick");
+        assertEq(s.tickLower, OLD_TL, "tickLower");
+        assertEq(s.tickUpper, OLD_TU, "tickUpper");
+        assertTrue(s.inRange, "should be in range (-200<=100<200)");
+        assertFalse(s.staked, "not staked");
+        assertFalse(s.hasGauge, "no gauge");
+        assertEq(s.liquidity, OLD_LIQ, "liquidity");
+        assertEq(s.earnedAero, 0, "no aero when unstaked");
+        assertEq(s.cooldownRemaining, 0, "no cooldown (interval 0)");
+        assertTrue(s.deviationGateOpen, "|100-0|=100 <= 200");
+    }
+
+    function test_getDecisionSnapshot_hasGauge_flag() public {
+        uint256 slotId = _registerSlot(true);
+        LPAutoBalancer.DecisionSnapshot memory s = lab.getDecisionSnapshot(slotId);
+        assertTrue(s.hasGauge, "gauge configured => hasGauge true");
+        assertFalse(s.staked, "registered but not staked");
+    }
+
+    function test_getDecisionSnapshot_outOfRange_closesDeviationGate() public {
+        uint256 slotId = _registerSlot(false);
+        mockPool.setSlot0(SQRT_P, 500);
+        LPAutoBalancer.DecisionSnapshot memory s = lab.getDecisionSnapshot(slotId);
+        assertFalse(s.inRange, "500 not in [-200,200)");
+        assertFalse(s.deviationGateOpen, "|500-0| > 200");
+    }
+
+    function test_getDecisionSnapshot_cooldownRemaining() public {
+        LPAutoBalancer.ManagedPosition memory cfg = LPAutoBalancer.ManagedPosition({
+            tokenId: OLD_TOKEN_ID,
+            pool: address(mockPool),
+            token0: address(tok0),
+            token1: address(tok1),
+            tickSpacing: 200,
+            gauge: address(0),
+            staked: false,
+            feeCollector: feeCollector,
+            oracle0: address(feed0),
+            oracle1: address(feed1),
+            swapPolicy: 0,
+            protectedToken: address(0),
+            minWidth: 200,
+            maxWidth: 2000,
+            maxCenterDeviation: 400,
+            maxSlippageBps: 100,
+            twapWindow: 1800,
+            maxTickDeviation: 200,
+            maxRebalanceLossBps: 100,
+            minRebalanceInterval: 3600,
+            lastRebalance: 0,
+            active: false
+        });
+        vm.prank(admin);
+        uint256 slotId = lab.registerPosition(cfg);
+        vm.warp(1000);
+        LPAutoBalancer.DecisionSnapshot memory s = lab.getDecisionSnapshot(slotId);
+        assertEq(s.cooldownRemaining, 2600, "3600 - 1000");
+    }
+
+    function test_getDecisionSnapshot_revertsOnInactiveSlot() public {
+        vm.expectRevert(LPAutoBalancer.NotActive.selector);
+        lab.getDecisionSnapshot(999);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Test 13: executesSwap — imbalanced holdings trigger nonzero swap
     // ─────────────────────────────────────────────────────────────────────────
 
