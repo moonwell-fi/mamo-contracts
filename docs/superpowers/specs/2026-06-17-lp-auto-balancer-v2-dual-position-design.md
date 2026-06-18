@@ -8,7 +8,7 @@
 
 ## 1. Why V2 — the IL problem with V1
 
-V1 re-ranges by **swapping** to the new range's ratio (decrease → swap surplus leg → mint). Every swap **crystallizes** impermanent loss that was, until then, only on paper — plus swap fees. On a **volatile/stable** pair like MAMO/USDC (phase-1), divergence is large and frequent, so a swap-based auto-rebalancer can bleed more in realized IL + swap fees than it earns in trading fees + AERO. This is the failure mode Beefy's CLM docs call out for "rebalancing-heavy" ALMs (Gamma/vfat style), where "aggregate IL ... far exceeds earnings."
+V1 re-ranges by **swapping** to the new range's ratio (decrease → swap surplus leg → mint). Every swap **crystallizes** impermanent loss that was, until then, only on paper — plus swap fees. On a **volatile/stable** pair like MAMO/USDC, divergence is large and frequent, so a swap-based auto-rebalancer can bleed more in realized IL + swap fees than it earns in trading fees + AERO. (Phase-1 deliberately starts on a *correlated* pair — WETH/cbBTC, §7 — where IL is small, to prove the mechanism before touching high-IL pairs.) This is the failure mode Beefy's CLM docs call out for "rebalancing-heavy" ALMs (Gamma/vfat style), where "aggregate IL ... far exceeds earnings."
 
 **V2 adopts Beefy CLM's structural fix: never sell on reset.** Excess tokens are redeployed into a single-sided "alt" position instead of swapped. IL is realized only on a true range exit (same as holding), not on every reset.
 
@@ -132,11 +132,26 @@ Fees (unstaked) and AERO (staked) are skimmed to `feeCollector` (`DropAutomation
 
 V1's value floor was the primary bound on per-rebalance market loss (the swap). V2 removes the swap, so the dominant IL-crystallization source is gone. The floor is retained as a **sanity guard**: it catches mint-ratio rounding, a manipulated reference tick that would mint a lopsided main, or a buggy `LiquidityAmounts` computation. It should pass with wide headroom on a healthy reset; a failure means something is structurally wrong, and reverting is correct.
 
-## 7. Scope & phasing (unchanged from V1)
+## 7. Scope & phasing (revised 2026-06-18)
 
-- **Phase-1: single position, MAMO/USDC** (tokenId 21585074, custody confirmed). MAMO/USDC is volatile/stable — the highest-IL pair — which is *why* V2's no-swap model matters most here. Run a wide main (small alt), conservative cooldown.
-- Phase-2+: cbBTC/MAMO (once custody confirmed), deep correlated non-MAMO pools (cbBTC/WETH — low IL, strong emissions), multi-position sweep.
-- **Out of scope:** veAERO; compounding; the locked `BurnAndEarn` MAMO/VIRTUALS LP; autonomous migration.
+The roadmap is now two phases of improved yield generation:
+
+### Phase-1 (short term) — prove the rebalancer on WETH/cbBTC
+
+- **Single position: WETH/cbBTC** — a **correlated** pair (low IL), with a live Aerodrome CL **gauge** (farms AERO). Deliberately chosen as the first managed position because: (a) correlated ⇒ a tiny alt and minimal IL, so any bug in the no-swap `reset` surfaces as mechanics-wrong rather than being masked by large divergence; (b) it exercises the AERO-stake path; (c) we hold little WETH/cbBTC, so TVL-at-risk while proving the rebalancer is small.
+- **It replaces MAMO/USDC as the first position.** The existing MAMO pools (in `TransferAndEarn`) are **left untouched** in this phase.
+- **Funding is a Safe/FPS setup step, off the rebalancer (§ trust model, V1 §8):** governance sells a portion of the **underperforming** `TransferAndEarn` assets into **WETH + cbBTC**, mints a WETH/cbBTC CL position from those balances **externally** (the position doesn't pre-exist as a held NFT), transfers the NFT into `LPAutoBalancerV2`, and calls `registerPosition` (gauged, per-leg Chainlink oracles for WETH/USD + cbBTC/USD). The autonomous `REBALANCER_ROLE` only ever `reset`/`stake`/`unstake`/`claimEmissions` — **it never does the selling**, because selling is the value-moving action the trust model keeps on the Safe.
+- Goal: confirm the no-swap `reset` conserves principal on real liquidity and the AERO-stake decision works, at small TVL, before scaling.
+
+### Phase-2 (long term) — automated cross-pool migration into the best pair
+
+- Automate moving liquidity between pools: **sell the weaker pair's assets and rebalance into a higher-performing pair (e.g. MAMO/VVV) regularly.** This promotes V1's `migrate()` from human/Safe-gated to **agent-driven** — the same capability §8/§10 deliberately kept manual, because an open-destination swap can be defeated by a fabricated-TWAP pool.
+- **Automation prerequisites (the safety rails that make it possible):** an **allowlist of governance-registered destination pools**; a **Chainlink-priced value floor on both legs** of the destination (no thin-pool TWAP trusted as the price); a **min-TVL / min-depth** gate; and a per-migration **value floor + cooldown** like `reset`. Only with these does the open-destination risk become a bounded one the agent can drive. MAMO/VVV specifically needs a usable price feed (or to be allowlisted with a Chainlink-priced floor) before it is an automated destination.
+- The off-chain agent gains a **migration-decision capability** (LpSugar/DefiLlama pool scoring → ranked destinations → execute within the allowlist), building on the §8 discovery funnel.
+
+### Out of scope (both phases)
+
+veAERO; compounding (fees+AERO feed the drop); the locked `BurnAndEarn` MAMO/VIRTUALS LP; **autonomous migration without the phase-2 safety rails above**.
 
 ## 8. Off-chain agent changes (companion spec §3, §4)
 
@@ -159,3 +174,5 @@ The goal-gated agent and its funnel are mostly unchanged; the deltas:
 ## 10. Migration note
 
 `migrate` (Safe-gated) is retained from V1 and **may still swap** — it is a rare, human-reviewed action for moving into a different pool, where a one-time swap is acceptable and value protection is the human review. Only the autonomous `reset` path is swap-free.
+
+**Phase-2 automation (long term).** The roadmap (§7) automates this: agent-driven migration that sells a weaker pair's assets and rebalances into a higher-performing pair (e.g. MAMO/VVV). That requires hardening `migrate` for autonomous use — an **allowlist** of governance-registered destinations, a **Chainlink-priced value floor on both destination legs** (never a thin-pool TWAP), a **min-TVL/min-depth** gate, plus a per-call value floor + cooldown. With those rails the open-destination manipulation risk that forces `migrate` to be manual today becomes bounded, and the `REBALANCER_ROLE` agent can drive it within the allowlist. Until the rails exist, `migrate` stays Safe-gated. This is a **future contract change** (a new `migrateAllowlisted` path or a `migrate` overload), not part of the phase-1 `LPAutoBalancerV2` build.

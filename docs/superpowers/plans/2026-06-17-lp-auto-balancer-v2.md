@@ -578,7 +578,7 @@ Expected: PASS (full V2 unit suite).
 
 - [ ] **Step 3: Base-fork integration test**
 
-Create `test/LPAutoBalancerV2.integration.t.sol` (mirror V1's `LPAutoBalancerIntegration` style — `vm.createSelectFork("base")`, real `ICLPositionManager`/pool/gauge for MAMO/USDC, real `_alignedRange`). One end-to-end test: register the real MAMO/USDC position, push tick out of range, `reset(width)`, assert:
+Create `test/LPAutoBalancerV2.integration.t.sol` (mirror V1's `LPAutoBalancerIntegration` style — `vm.createSelectFork("base")`, real `ICLPositionManager`/pool/gauge for **WETH/cbBTC** — the correlated, gauged phase-1 pair (§7), real `_alignedRange`). Bootstrap the position the way the FPS setup will (mint a WETH/cbBTC CL position from test-held WETH+cbBTC, transfer the NFT into the contract, `registerPosition` gauged with WETH/USD + cbBTC/USD Chainlink oracles). One end-to-end test: register the WETH/cbBTC position, push tick out of range, `reset(width)`, assert:
 - main + alt rebuilt (both NFTs owned by the contract),
 - **no token sold** (compare token0/token1 contract balances before/after the deposit — principal conserved within mint rounding),
 - fees/AERO forwarded to `feeCollector`,
