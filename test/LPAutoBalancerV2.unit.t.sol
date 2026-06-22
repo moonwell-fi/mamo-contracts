@@ -917,6 +917,96 @@ contract LPAutoBalancerV2UnitTest is Test {
         dLab.reset(slotId, _defaultResetParams());
     }
 
+    /// @dev H-1 (accounting asymmetry). A loose token0/token1 balance ALREADY on the contract before
+    ///      reset (donated via a plain ERC20 transfer, or leftover from a prior reverted flow) must be
+    ///      counted in BOTH valueBefore and valueAfter, so it cancels and cannot create headroom that
+    ///      masks a real position loss.
+    ///
+    ///      Stage: new main + alt hold ~nothing, withdrawn principal = 1 dust unit. The position
+    ///      round-trip destroys essentially all value (same skeleton as the real-loss test above, which
+    ///      reverts with NO donation). Then DONATE a large token0 balance to the contract before reset.
+    ///
+    ///      OLD asymmetric code: valueBefore = positions only (large old main), valueAfter = positions
+    ///      (≈0) + loose (donation + 1 dust). With the donation sized >= valueBefore, valueAfter clears
+    ///      the floor → reset PASSES → the donation silently absorbed the entire position loss. That is
+    ///      the bug.
+    ///      NEW symmetric code: the donation is in valueBefore too, so it cancels; valueAfter_position
+    ///      (≈0) << valueBefore_position → reset REVERTS ValueFloor. This assertion proves H-1 is closed.
+    function test_reset_donatedBalanceCannotMaskLoss() public {
+        uint256 slotId = _setupMixedSlot(100); // 1% loss cap
+
+        // New main + alt both hold ~nothing; withdrawn principal is 1 dust unit (same skeleton as
+        // test_reset_valueFloorStillTripsOnRealLoss, which reverts with no donation).
+        dPM.setNextMintResult(D_NEW_ID, 0);
+        dPM.setPosition(D_NEW_ID, OLD_TL, OLD_TU, 0, address(dtok0), address(dtok1));
+        dPM.setPosition(D_ALT_ID, OLD_TU, OLD_TU + 200, 0, address(dtok0), address(dtok1));
+        _stageMixedPrincipal(1, 0);
+
+        // DONATE a large cbBTC balance directly to the contract BEFORE reset (1e10 raw = 100 cbBTC ≈
+        // $6.5M, vastly larger than the old main's principal value). Under OLD code this donation would
+        // sit only in valueAfter and clear the floor; under NEW code it is netted out of both sides.
+        dtok0.mint(address(dLab), 1e10);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
+        dLab.reset(slotId, _defaultResetParams());
+    }
+
+    /// @dev M-2. setGauge must reject when EITHER leg is staked. If a partial unstake ever leaves
+    ///      mainStaked=false but altStaked=true, the alt NFT is still custodied by the OLD gauge;
+    ///      changing the gauge would strand it. We reach mainStaked=false, altStaked=true (a state the
+    ///      public API never produces directly): stake() sets BOTH true, then we clear ONLY the
+    ///      mainStaked bit in the packed storage word with vm.store. The OLD guard (mainStaked only)
+    ///      would have let setGauge through here; the NEW guard (mainStaked || altStaked) reverts.
+    function test_setGauge_revertsWhenAltStaked() public {
+        uint256 slotId = _registerSlotWithAlt(true); // gauge set + altTokenId injected
+        vm.prank(rebalancer);
+        lab.stake(slotId); // sets mainStaked=true AND altStaked=true
+
+        // Locate the storage word packing (gauge | mainStaked | altStaked) and clear only mainStaked,
+        // leaving altStaked set. Scan the struct words of positions[slotId] for the one whose decoded
+        // (mainStaked, altStaked) round-trips through the getter, then flip the mainStaked bit.
+        bytes32 base = keccak256(abi.encode(slotId, uint256(_positionsBaseSlot())));
+        bool flipped = false;
+        for (uint256 w = 0; w < 24 && !flipped; w++) {
+            bytes32 slot = bytes32(uint256(base) + w);
+            bytes32 word = vm.load(address(lab), slot);
+            // Try clearing the mainStaked bit at each byte offset where gauge (20 bytes) ends.
+            // gauge occupies offset 0..19; mainStaked is the byte at offset 20, altStaked at 21.
+            uint256 mainBit = uint256(20) * 8;
+            uint256 altBit = uint256(21) * 8;
+            bool mainSet = (uint256(word) >> mainBit) & 0xff == 1;
+            bool altSet = (uint256(word) >> altBit) & 0xff == 1;
+            if (mainSet && altSet) {
+                // clear mainStaked byte, keep altStaked
+                uint256 cleared = uint256(word) & ~(uint256(0xff) << mainBit);
+                vm.store(address(lab), slot, bytes32(cleared));
+                flipped = true;
+            }
+        }
+        assertTrue(flipped, "located packed staked flags");
+
+        (bool mainStaked, bool altStaked) = _readStakeFlags(slotId);
+        assertFalse(mainStaked, "main cleared (precondition)");
+        assertTrue(altStaked, "alt still staked (precondition)");
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PositionStaked.selector);
+        lab.setGauge(slotId, makeAddr("newGauge"));
+    }
+
+    /// @dev Recover the declared base slot of the `positions` mapping (layout-robust). stdstore.find
+    ///      returns the absolute slot of positions[key].mainTokenId = keccak(key, base); we brute-force
+    ///      the small candidate base and return the one whose keccak matches.
+    function _positionsBaseSlot() internal returns (uint256) {
+        uint256 slotIdKey = 0;
+        uint256 found = stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotIdKey).depth(0).find();
+        for (uint256 b = 0; b < 64; b++) {
+            if (uint256(keccak256(abi.encode(slotIdKey, b))) == found) return b;
+        }
+        revert("positions base slot not found");
+    }
+
     // ─── Task 4: stake/unstake/claimEmissions (dual-NFT) + exit() ────────────────
 
     /// @dev Register a gauged (or gaugeless) slot and inject a non-zero altTokenId directly

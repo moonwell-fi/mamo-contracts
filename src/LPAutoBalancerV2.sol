@@ -269,7 +269,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function setGauge(uint256 slotId, address gauge) external onlyRole(DEFAULT_ADMIN_ROLE) {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
-        if (positions[slotId].mainStaked) revert PositionStaked();
+        // Both legs must be unstaked: a partial unstake can leave the alt NFT custodied by the OLD
+        // gauge; changing the gauge while altStaked would strand it (M-2).
+        if (positions[slotId].mainStaked || positions[slotId].altStaked) revert PositionStaked();
         positions[slotId].gauge = gauge;
         emit GaugeUpdated(slotId, gauge);
     }
@@ -466,8 +468,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint8 dec0 = IERC20Metadata(p.token0).decimals();
         uint8 dec1 = IERC20Metadata(p.token1).decimals();
 
-        // value BEFORE: both positions' principal at the current sqrtP snapshot.
-        uint256 valueBefore = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+        // value BEFORE: both positions' principal at the current sqrtP snapshot, PLUS any loose
+        // token0/token1 ALREADY held by this contract (donated, or leftover from a prior reverted
+        // flow). This MUST be read BEFORE _exitAll withdraws principal into the contract, so it
+        // captures only the genuinely pre-existing balance — not post-withdraw principal. valueAfter
+        // also counts loose balances (_contractPairValue), so a stray/donated balance cancels on both
+        // sides and cannot inflate the floor's headroom to mask a real rebalance loss (H-1).
+        uint256 looseBefore = _contractPairValue(p, dec0, dec1);
+        uint256 valueBefore =
+            _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1) + looseBefore;
 
         bool wasStaked = p.mainStaked;
 
