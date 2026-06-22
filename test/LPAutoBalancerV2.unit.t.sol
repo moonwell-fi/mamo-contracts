@@ -72,6 +72,12 @@ contract MockPositionManagerV2 {
     uint256 public nextMintTokenId;
     uint128 public nextMintLiquidity;
 
+    // Second staged mint result (alt). When set, the 2nd mint() call returns these
+    // and any further call falls back to the main result. Lets reset() mint main then alt.
+    uint256 public nextAltMintTokenId;
+    uint128 public nextAltMintLiquidity;
+    bool public hasAltMintResult;
+
     constructor(address owner_) {
         mockOwner = owner_;
     }
@@ -108,6 +114,14 @@ contract MockPositionManagerV2 {
     function setNextMintResult(uint256 newTokenId, uint128 liq) external {
         nextMintTokenId = newTokenId;
         nextMintLiquidity = liq;
+    }
+
+    /// @notice Stage the SECOND mint result (alt). With this set, the first mint() returns the
+    ///         main result and the second returns this alt result (subsequent calls reuse main).
+    function setNextAltMintResult(uint256 altTokenId, uint128 liq) external {
+        nextAltMintTokenId = altTokenId;
+        nextAltMintLiquidity = liq;
+        hasAltMintResult = true;
     }
 
     function ownerOf(uint256) external view returns (address) {
@@ -195,12 +209,26 @@ contract MockPositionManagerV2 {
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
     {
         mintCallCount++;
-        tokenId = nextMintTokenId;
-        liquidity = nextMintLiquidity;
+        // 1st mint => main result; 2nd mint => alt result (if staged); else fall back to main.
+        if (mintCallCount == 2 && hasAltMintResult) {
+            tokenId = nextAltMintTokenId;
+            liquidity = nextAltMintLiquidity;
+        } else {
+            tokenId = nextMintTokenId;
+            liquidity = nextMintLiquidity;
+        }
         lastMintedTokenId = tokenId;
         if (pullOnMint) {
-            IERC20(params.token0).safeTransferFrom(msg.sender, address(this), params.amount0Desired);
-            IERC20(params.token1).safeTransferFrom(msg.sender, address(this), params.amount1Desired);
+            // Model a price-1 in-ratio mint: consume min(desired0, desired1) of BOTH tokens.
+            // The balanced main mint then leaves only the genuine surplus leg behind, which the
+            // single-sided alt mint (called next) parks. Matches how the real PM consumes only the
+            // in-ratio portion and returns the remainder to the caller.
+            uint256 consume =
+                params.amount0Desired < params.amount1Desired ? params.amount0Desired : params.amount1Desired;
+            if (consume > 0) {
+                IERC20(params.token0).safeTransferFrom(msg.sender, address(this), consume);
+                IERC20(params.token1).safeTransferFrom(msg.sender, address(this), consume);
+            }
         }
         return (tokenId, liquidity, 0, 0);
     }
@@ -282,6 +310,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     uint256 constant TOKEN_ID = 42;
     uint256 constant NEW_TOKEN_ID = 43;
+    uint256 constant ALT_TOKEN_ID = 44;
 
     // Tick geometry (tickSpacing=200, width=400): twapTick=0, spotTick=100 →
     //   _alignedRange(0,400,200,100): tickLower=floorAlign(-200,200)=-200, tickUpper=200; 100∈(-200,200) ✓
@@ -332,7 +361,15 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(TOKEN_ID, OLD_TL, OLD_TU, OLD_LIQ, token0, token1);
         mockPM.setNextMintResult(NEW_TOKEN_ID, NEW_LIQ);
         mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, NEW_LIQ, token0, token1);
+        // Alt range sits one tickSpacing ABOVE main upper ([200,400]); at spot tick 0 it holds
+        // only token0, so _altValue counts the surplus token0 minted into it. Stored so the
+        // value-floor read after the alt mint sees a non-zero alt principal.
+        mockPM.setPosition(ALT_TOKEN_ID, OLD_TU, OLD_TU + 200, NEW_LIQ, token0, token1);
         mockPM.setCollectTokens(token0, token1);
+        // Model real PM behavior: mint consumes the in-ratio (price-1) portion of contract balances,
+        // leaving only a genuine surplus leg behind. Without this the mock would leave the full
+        // balanced principal on the contract and spuriously mint an alt from it.
+        mockPM.setPullOnMint(true);
     }
 
     // ─── helper ─────────────────────────────────────────────────────────────
@@ -621,5 +658,63 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.positions(slotId);
         assertEq(mainTokenId, NEW_TOKEN_ID, "reset completed with withdraw mins met");
+    }
+
+    // ─── reset() — Task 3: single-sided alt mint from leftover ───────────────────
+
+    /// @dev Read (mainTokenId, altTokenId, mainStaked) from the positions() getter.
+    function _readMainAlt(uint256 slotId) internal view returns (uint256 main, uint256 alt, bool mainStaked) {
+        (main, alt,,,,,, mainStaked,,,,,,,,,,,,,) = lab.positions(slotId);
+    }
+
+    /// @dev Read (mainStaked, altStaked) from the positions() getter.
+    function _readStakeFlags(uint256 slotId) internal view returns (bool mainStaked, bool altStaked) {
+        (,,,,,,, mainStaked, altStaked,,,,,,,,,,,,) = lab.positions(slotId);
+    }
+
+    function test_reset_mintsAltFromLeftover() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(3e18, 1e18); // imbalanced => surplus token0
+        mockPM.setNextMintResult(NEW_TOKEN_ID, 1e18); // main
+        mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17); // alt (single-sided from leftover)
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+        (, uint256 altId,) = _readMainAlt(slotId);
+        assertEq(altId, ALT_TOKEN_ID, "alt minted from leftover");
+    }
+
+    function test_reset_skipsAltWhenLeftoverDust() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18); // balanced => ~no leftover
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+        (, uint256 altId,) = _readMainAlt(slotId);
+        assertEq(altId, 0, "no alt when leftover is dust");
+    }
+
+    function test_reset_imbalanced_valueFloorCountsAlt() public {
+        // The surplus minted into the alt must be counted in valueAfter, so an
+        // imbalanced withdrawal does NOT spuriously trip ValueFloor.
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(3e18, 1e18);
+        mockPM.setNextMintResult(NEW_TOKEN_ID, 1e18);
+        mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17);
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams()); // must NOT revert ValueFloor
+        // both main and alt set; no large dust forwarded as "loss"
+        (uint256 mainId, uint256 altId,) = _readMainAlt(slotId);
+        assertEq(mainId, NEW_TOKEN_ID, "main set");
+        assertEq(altId, ALT_TOKEN_ID, "alt set");
+    }
+
+    function test_reset_restakesMain_whenStaked() public {
+        uint256 slotId = _registerSlot(true); // gauged
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+        (bool mainStaked,) = _readStakeFlags(slotId);
+        assertTrue(mainStaked, "main restaked after reset"); // covers the wasStaked branch
     }
 }

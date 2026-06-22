@@ -35,6 +35,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant MAX_LOSS_CAP_BPS = 500;
 
+    /// @notice Minimum surplus (in the surplus token's own base units, i.e. raw token amount,
+    ///         NOT USD) required to mint the single-sided alt. Below this the leftover is treated
+    ///         as dust and forwarded to the feeCollector instead — a sub-tick remainder too small
+    ///         to seed a position would revert the mint or round to zero liquidity. 1e6 base units.
+    uint256 public constant ALT_DUST = 1e6;
+
     INonfungiblePositionManager public immutable POSITION_MANAGER;
     address public immutable AERO;
 
@@ -421,19 +427,22 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         uint256 newMain = _mintBalanced(p, tl, tu, params);
         p.mainTokenId = newMain;
-        p.altTokenId = 0; // alt added in Task 3
-        p.altStaked = false; // no alt this cycle
+        p.altStaked = false; // freshly minted alt is never staked this cycle
         p.mainStaked = false; // freshly minted, not yet staked
         p.lastRebalance = block.timestamp;
 
-        // value AFTER: new main principal at the same sqrtP snapshot.
-        uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1);
+        // Mint the single-sided alt from the post-mint leftover (NO SWAP). _mintAlt forwards
+        // true sub-tick dust to the feeCollector and returns 0 when the leftover is below ALT_DUST.
+        // Set altTokenId BEFORE the value-floor read so _altValue sees the new alt.
+        p.altTokenId = _mintAlt(p, tl, tu, params);
+
+        // value AFTER: new main principal + alt principal at the same sqrtP snapshot. The alt
+        // captures the imbalanced surplus on-chain, so an imbalanced withdrawal is not counted
+        // as loss and does not spuriously trip the value floor.
+        uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
         if (valueAfter < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)) {
             revert ValueFloor();
         }
-
-        // forward the post-mint leftover to the feeCollector (Task 3 replaces this with the alt mint).
-        _forwardDust(p);
 
         if (wasStaked && p.gauge != address(0)) {
             POSITION_MANAGER.approve(p.gauge, newMain);
@@ -442,7 +451,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             emit Staked(slotId, newMain, p.gauge);
         }
 
-        emit Reset(slotId, newMain, 0, tl, tu);
+        emit Reset(slotId, newMain, p.altTokenId, tl, tu);
     }
 
     // ─── reset private helpers ────────────────────────────────────────────────
@@ -536,6 +545,64 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             sqrtPriceX96: 0 // pool already initialized
         });
         (newTokenId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
+    }
+
+    /// @dev Mint a single-sided `alt` position from the post-main-mint leftover (NO SWAP). The
+    ///      surplus leg is whichever token the balanced main mint did not fully consume; it is
+    ///      parked in a one-tickSpacing-wide range that holds ONLY that token, so no swap is
+    ///      needed. Returns 0 (and forwards the leftover to the feeCollector) when the surplus is
+    ///      below ALT_DUST — a sub-tick remainder too small to seed liquidity.
+    ///
+    ///      Orientation (Slipstream/Uniswap: price = token1/token0, ticks increase with price):
+    ///      a range strictly ABOVE spot holds only token0; strictly BELOW holds only token1
+    ///      (see LiquidityAmounts.getAmountsForLiquidity branches). Therefore:
+    ///        - token0 surplus => range ABOVE the main upper:  [mainTu, mainTu + tickSpacing]
+    ///        - token1 surplus => range BELOW the main lower:  [mainTl - tickSpacing, mainTl]
+    ///      After minting, any sub-tick remainder is swept to the feeCollector.
+    function _mintAlt(ManagedPositionV2 storage p, int24 mainTl, int24 mainTu, ResetParams calldata params)
+        private
+        returns (uint256 altId)
+    {
+        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+        bool surplus0 = bal0 >= bal1;
+        uint256 surplus = surplus0 ? bal0 : bal1;
+        if (surplus < ALT_DUST) {
+            _forwardDust(p);
+            return 0;
+        }
+
+        int24 altTl;
+        int24 altTu;
+        if (surplus0) {
+            altTl = mainTu;
+            altTu = mainTu + p.tickSpacing;
+        } else {
+            altTu = mainTl;
+            altTl = mainTl - p.tickSpacing;
+        }
+
+        IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
+        IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
+
+        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
+            token0: p.token0,
+            token1: p.token1,
+            tickSpacing: p.tickSpacing,
+            tickLower: altTl,
+            tickUpper: altTu,
+            amount0Desired: bal0,
+            amount1Desired: bal1,
+            amount0Min: params.amount0MinAlt,
+            amount1Min: params.amount1MinAlt,
+            recipient: address(this),
+            deadline: params.deadline,
+            sqrtPriceX96: 0 // pool already initialized
+        });
+        (altId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
+
+        // sweep any sub-tick remainder the alt mint did not consume.
+        _forwardDust(p);
     }
 
     // ─── shared private helpers ───────────────────────────────────────────────
