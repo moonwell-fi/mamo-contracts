@@ -768,6 +768,74 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // View — decision snapshot
+    // ═══════════════════════════════════════════════════════════════════════
+
+    struct DecisionSnapshotV2 {
+        int24 spotTick;
+        int24 twapTick;
+        int24 mainTickLower;
+        int24 mainTickUpper;
+        bool mainInRange;
+        int24 altTickLower;
+        int24 altTickUpper;
+        bool hasAlt;
+        uint128 mainLiquidity;
+        uint128 altLiquidity;
+        bool mainStaked;
+        bool hasGauge;
+        uint256 earnedAero;
+        uint256 cooldownRemaining;
+        bool deviationGateOpen;
+    }
+
+    /// @notice Return a snapshot of the fields the off-chain rebalancer reads to decide
+    ///         whether and how to reset a position. All values are read atomically in one
+    ///         call. The `earnedAero` field uses try/catch so a broken gauge never blocks the view.
+    function getDecisionSnapshot(uint256 slotId) external view returns (DecisionSnapshotV2 memory s) {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+
+        (, int24 spotTick,,,,) = ICLPool(p.pool).slot0();
+        int24 twapTick = _consultTwapTick(p.pool, p.twapWindow);
+        (,,,,, int24 mtl, int24 mtu, uint128 mliq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
+
+        s.spotTick = spotTick;
+        s.twapTick = twapTick;
+        s.mainTickLower = mtl;
+        s.mainTickUpper = mtu;
+        s.mainInRange = mtl <= spotTick && spotTick < mtu;
+        s.mainLiquidity = mliq;
+        s.hasAlt = p.altTokenId != 0;
+        if (s.hasAlt) {
+            (,,,,, int24 atl, int24 atu, uint128 aliq,,,,) = POSITION_MANAGER.positions(p.altTokenId);
+            s.altTickLower = atl;
+            s.altTickUpper = atu;
+            s.altLiquidity = aliq;
+        }
+        s.mainStaked = p.mainStaked;
+        s.hasGauge = p.gauge != address(0);
+
+        uint256 aero;
+        if (p.mainStaked) {
+            try ICLGauge(p.gauge).earned(address(this), p.mainTokenId) returns (uint256 e) {
+                aero += e;
+            } catch {}
+        }
+        if (p.altStaked && p.altTokenId != 0) {
+            try ICLGauge(p.gauge).earned(address(this), p.altTokenId) returns (uint256 e) {
+                aero += e;
+            } catch {}
+        }
+        s.earnedAero = aero;
+
+        uint256 ready = p.lastRebalance + p.minRebalanceInterval;
+        s.cooldownRemaining = block.timestamp >= ready ? 0 : ready - block.timestamp;
+        int24 dev = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
+        s.deviationGateOpen = dev <= p.maxTickDeviation;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Token recovery
     // ═══════════════════════════════════════════════════════════════════════
 

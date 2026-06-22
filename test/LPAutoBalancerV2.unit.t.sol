@@ -1015,4 +1015,91 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.exit(slotId, admin);
         assertGt(mockAero.balanceOf(feeCollector), before, "AERO skimmed on exit");
     }
+
+    // ─── Task 5: getDecisionSnapshot ─────────────────────────────────────────────
+
+    function test_getDecisionSnapshotV2_fields() public {
+        // _registerSlotWithAlt: main=TOKEN_ID (range [-200,200], liq=OLD_LIQ),
+        //                        alt=ALT_TOKEN_ID (range [200,400], liq=NEW_LIQ)
+        // Both are set in setUp() via mockPM.setPosition(). Not staked, no gauge (withGauge=false).
+        uint256 slotId = _registerSlotWithAlt(false);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+
+        // spot tick from MockCLPoolV2.slot0(): SPOT_TICK = 100
+        assertEq(s.spotTick, SPOT_TICK, "spot");
+
+        // main range [-200, 200]: spotTick=100 ∈ [-200, 200) → in range
+        assertTrue(s.mainInRange, "main in range");
+
+        // alt was injected
+        assertTrue(s.hasAlt, "alt present");
+
+        // main liquidity from positions(TOKEN_ID): OLD_LIQ
+        assertEq(s.mainLiquidity, OLD_LIQ, "main liq");
+
+        // alt liquidity from positions(ALT_TOKEN_ID): NEW_LIQ (set in setUp)
+        assertGt(s.altLiquidity, 0, "alt liq");
+
+        // not staked (registered with withGauge=false, stake() never called)
+        assertFalse(s.mainStaked, "not staked");
+
+        // deviation gate: spotTick=100, twapTick=0 (cumulatives 0,0), |diff|=100 ≤ maxTickDeviation=200
+        assertTrue(s.deviationGateOpen, "calm");
+    }
+
+    function test_getDecisionSnapshotV2_earnedAero_tryCatch() public {
+        uint256 slotId = _registerSlotWithAlt(true); // gauged
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        mockGauge.setEarnedAmount(3e18);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+        assertGt(s.earnedAero, 0, "earned summed over staked nfts");
+    }
+
+    function test_getDecisionSnapshotV2_revertsOnInactive() public {
+        vm.expectRevert(LPAutoBalancerV2.NotActive.selector);
+        lab.getDecisionSnapshot(999);
+    }
+
+    function test_getDecisionSnapshotV2_cooldownAndGate() public {
+        // Register with a non-zero cooldown interval, then warp partway through it.
+        // After warp, cooldownRemaining should be > 0.
+        // Also push spot far from twap to trip the deviation gate.
+        uint256 slotId = _registerSlot(false);
+
+        // Set a 1-hour cooldown via setPositionConfig (manager role)
+        vm.prank(manager);
+        lab.setPositionConfig(
+            slotId,
+            200, // minWidth
+            2000, // maxWidth
+            400, // maxCenterDeviation
+            1800, // twapWindow
+            200, // maxTickDeviation
+            100, // maxRebalanceLossBps
+            3600 // minRebalanceInterval = 1 hour
+        );
+
+        // Simulate a prior rebalance by warping forward 30 min, then trigger a reset to stamp lastRebalance.
+        // Easier: write lastRebalance directly via stdstore (field index 19 in the struct).
+        // ManagedPositionV2 field order: 0=mainTokenId, 1=altTokenId, 2=pool, 3=token0, 4=token1,
+        // 5=tickSpacing, 6=gauge, 7=mainStaked, 8=altStaked, 9=feeCollector, 10=oracle0, 11=oracle1,
+        // 12=minWidth, 13=maxWidth, 14=maxCenterDeviation, 15=twapWindow, 16=maxTickDeviation,
+        // 17=maxRebalanceLossBps, 18=minRebalanceInterval, 19=lastRebalance, 20=active
+        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(19)
+            .checked_write(block.timestamp);
+
+        // Warp 30 min: cooldownRemaining should be ~1800 s
+        vm.warp(block.timestamp + 1800);
+
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+        assertGt(s.cooldownRemaining, 0, "cooldown still running");
+
+        // Push spot far from twap: set spot to twap + maxTickDeviation + 1 = 201 ticks from 0.
+        // twapTick = 0 (cumulatives 0,0); set spotTick = 201 > maxTickDeviation=200 → gate closed.
+        mockPool.setSlot0(SQRT_P, 201);
+        s = lab.getDecisionSnapshot(slotId);
+        assertFalse(s.deviationGateOpen, "deviation gate closed when spot >> twap");
+        assertFalse(s.mainInRange, "spot=201 is outside main range [-200,200)");
+    }
 }
