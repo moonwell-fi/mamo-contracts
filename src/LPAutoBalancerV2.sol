@@ -17,7 +17,6 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
-import {FixedPoint96} from "@libraries/uniswap/FixedPoint96.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
@@ -130,8 +129,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     /// @notice Register a position NFT already held by this contract.
-    /// @param config Full position configuration. `active`, `mainStaked`, and `lastRebalance` are
-    ///               overridden by `_store` regardless of the values supplied here.
+    /// @param config Full position configuration. `active`, `mainStaked`, `altStaked`, `altTokenId`,
+    ///               and `lastRebalance` are overridden by `_store` (forced to true / false / false /
+    ///               0 / 0 respectively) regardless of the values supplied here.
     /// @return slotId The slot index assigned to this position.
     function registerPosition(ManagedPositionV2 calldata config)
         external
@@ -162,15 +162,16 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit PositionRegistered(slotId, config.pool, config.mainTokenId);
     }
 
-    /// @notice Deregister a position and transfer its NFT to `to`.
-    ///         Intentionally reverts if the position is staked: the admin must `unstake`
-    ///         (or use `withdrawPosition`, which auto-unstakes) first. This keeps deregister
-    ///         a pure book-keeping/transfer path and never silently strands a staked NFT.
+    /// @notice Deregister a position and transfer its NFT(s) to `to`.
+    ///         Intentionally reverts if EITHER the main or the alt is staked: the admin must
+    ///         `unstake` (or use `withdrawPosition`, which auto-unstakes) first. This keeps
+    ///         deregister a pure book-keeping/transfer path and never silently strands a staked
+    ///         NFT (an NFT held by the gauge can't be safeTransferFrom'd by this contract).
     function deregisterPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
         if (to == address(0)) revert ZeroAddress();
-        if (p.mainStaked) revert PositionStaked();
+        if (p.mainStaked || p.altStaked) revert PositionStaked();
         uint256 tokenId = p.mainTokenId;
         p.active = false; // effects before interaction (CEI)
         emit PositionDeregistered(slotId, to);
@@ -178,13 +179,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
     }
 
-    /// @notice Emergency withdraw: auto-unstakes (if staked) then transfers the NFT to `to`.
-    ///         Allows an admin to rescue a position in one call regardless of staking state.
+    /// @notice Emergency withdraw: auto-unstakes both legs (if staked) then transfers the NFT(s)
+    ///         to `to`. Allows an admin to rescue a position in one call regardless of staking state.
     function withdrawPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
         if (to == address(0)) revert ZeroAddress();
         if (p.mainStaked) _unstake(p, slotId); // auto-claims AERO -> feeCollector, returns NFT to this contract
+        if (p.altStaked) _unstakeAlt(p, slotId); // unstake the alt before transferring it
         uint256 tokenId = p.mainTokenId;
         p.active = false; // effects before interaction (CEI)
         emit PositionWithdrawn(slotId, to);
@@ -324,6 +326,21 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit Unstaked(slotId, p.mainTokenId, p.gauge);
     }
 
+    /// @dev Internal unstake for the ALT leg: withdraw the alt NFT from the gauge
+    ///      (auto-claims AERO), set altStaked=false, then skim only the AERO gained by
+    ///      this withdraw to the feeCollector (CEI: state update before AERO transfer).
+    function _unstakeAlt(ManagedPositionV2 storage p, uint256 slotId) internal {
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        ICLGauge(p.gauge).withdraw(p.altTokenId); // returns NFT + auto-claims AERO
+        p.altStaked = false; // CEI: effect before interaction (AERO transfer below)
+        uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        if (aeroEarned > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
+            emit EmissionsClaimed(slotId, aeroEarned);
+        }
+        emit Unstaked(slotId, p.altTokenId, p.gauge);
+    }
+
     /// @notice Claim AERO emissions from the gauge for a staked position and forward to feeCollector.
     ///         Permissionless — anyone may call to trigger the skim.
     function claimEmissions(uint256 slotId) external whenNotPaused nonReentrant {
@@ -342,22 +359,177 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Rebalance
+    // Reset
     // ═══════════════════════════════════════════════════════════════════════
 
-    // reset() added in Task 2
+    struct ResetParams {
+        uint24 width;
+        uint256 amount0MinMain;
+        uint256 amount1MinMain;
+        uint256 amount0MinAlt;
+        uint256 amount1MinAlt;
+        uint256 amount0MinWithdraw;
+        uint256 amount1MinWithdraw;
+        uint256 deadline;
+    }
 
-    // ─── rebalance private helpers ───────────────────────────────────────────
+    /// @notice Tear down both positions and rebuild ONLY the balanced `main` from the
+    ///         withdrawn principal — NO SWAP. V2 has no swap router/quoter, so the
+    ///         position is reconstituted purely from the tokens the position manager
+    ///         returns on withdraw; nothing is sold. The single-sided alt is added in Task 3.
+    ///
+    ///         Orchestration (all on-chain):
+    ///         1.  Read spot + TWAP; deviation gate.
+    ///         2.  Snapshot value-before (main + alt principal at current sqrtP).
+    ///         3.  _exitAll: unstake (AERO → feeCollector), skim fees, decreaseAll + collect
+    ///             principal into this contract, burn both NFTs.
+    ///         4.  Width bounds check; compute spot-centered aligned range.
+    ///         5.  _mintBalanced: mint new main from contract balances (PM consumes the
+    ///             in-ratio portion; leftover stays in the contract).
+    ///         6.  Value-floor gate on the new main principal.
+    ///         7.  Forward leftover dust → feeCollector (Task 3 replaces this with the alt mint).
+    ///         8.  Restake the new main if the old main was staked.
+    function reset(uint256 slotId, ResetParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (block.timestamp < p.lastRebalance + p.minRebalanceInterval) revert Cooldown();
 
-    /// @dev Collect any accrued LP fees for the position (before decreasing liquidity)
+        (uint160 sqrtP, int24 spotTick,,,,) = ICLPool(p.pool).slot0();
+        int24 twapTick = _consultTwapTick(p.pool, p.twapWindow);
+        _checkDeviation(spotTick, twapTick, p.maxTickDeviation);
+
+        uint8 dec0 = IERC20Metadata(p.token0).decimals();
+        uint8 dec1 = IERC20Metadata(p.token1).decimals();
+
+        // value BEFORE: both positions' principal at the current sqrtP snapshot.
+        uint256 valueBefore = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+
+        bool wasStaked = p.mainStaked;
+
+        // tear down: unstake + AERO skim, fee skim, decreaseAll + collect, burn both NFTs.
+        _exitAll(p, slotId);
+
+        if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
+        // Center on spot (already gate-passed vs TWAP). Straddle guaranteed for width ≥ 2*spacing.
+        (int24 tl, int24 tu) = _alignedRange(spotTick, params.width, p.tickSpacing, spotTick);
+
+        uint256 newMain = _mintBalanced(p, tl, tu, params);
+        p.mainTokenId = newMain;
+        p.altTokenId = 0; // alt added in Task 3
+        p.altStaked = false; // no alt this cycle
+        p.mainStaked = false; // freshly minted, not yet staked
+        p.lastRebalance = block.timestamp;
+
+        // value AFTER: new main principal at the same sqrtP snapshot.
+        uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1);
+        if (valueAfter < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)) {
+            revert ValueFloor();
+        }
+
+        // forward the post-mint leftover to the feeCollector (Task 3 replaces this with the alt mint).
+        _forwardDust(p);
+
+        if (wasStaked && p.gauge != address(0)) {
+            POSITION_MANAGER.approve(p.gauge, newMain);
+            ICLGauge(p.gauge).deposit(newMain);
+            p.mainStaked = true;
+            emit Staked(slotId, newMain, p.gauge);
+        }
+
+        emit Reset(slotId, newMain, 0, tl, tu);
+    }
+
+    // ─── reset private helpers ────────────────────────────────────────────────
+
+    /// @dev Tear down the managed position(s): unstake the main (auto-claims AERO →
+    ///      feeCollector), skim LP fees on every held NFT → feeCollector, then remove all
+    ///      liquidity, collect the principal into this contract, and burn the NFTs.
+    ///      Handles both main and alt; the alt is skipped when altTokenId == 0.
+    function _exitAll(ManagedPositionV2 storage p, uint256 slotId) private {
+        uint256 mainId = p.mainTokenId;
+        uint256 altId = p.altTokenId;
+
+        // 1. unstake both legs if staked (auto-claims AERO → feeCollector)
+        if (p.mainStaked) _unstake(p, slotId);
+        if (altId != 0 && p.altStaked) _unstakeAlt(p, slotId);
+
+        // 2. skim LP fees (pre-decrease) → feeCollector, for each held NFT
+        _skimFees(p, slotId, mainId);
+        if (altId != 0) _skimFees(p, slotId, altId);
+
+        // 3. decrease all liquidity + collect principal into this contract
+        _decreaseLiquidityAll(mainId);
+        if (altId != 0) _decreaseLiquidityAll(altId);
+
+        // 4. burn the old NFTs
+        POSITION_MANAGER.burn(mainId);
+        if (altId != 0) POSITION_MANAGER.burn(altId);
+    }
+
+    /// @dev Remove all liquidity from `tokenId` and collect the resulting tokens into
+    ///      this contract. Mirrors V1's _decreaseLiquidityAll (no caller mins on the
+    ///      collect; principal mins are not enforced here — reset uses params for the mint).
+    function _decreaseLiquidityAll(uint256 tokenId) private {
+        (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
+        if (liq > 0) {
+            POSITION_MANAGER.decreaseLiquidity(
+                INonfungiblePositionManager.DecreaseLiquidityParams({
+                    tokenId: tokenId, liquidity: liq, amount0Min: 0, amount1Min: 0, deadline: block.timestamp
+                })
+            );
+        }
+        POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
+            })
+        );
+    }
+
+    /// @dev Mint a new balanced `main` position from this contract's current token
+    ///      balances. NO SWAP: desired = full balances; the position manager consumes
+    ///      only the in-ratio portion and any leftover remains in the contract (forwarded
+    ///      to the feeCollector by the caller). Slipstream MintParams: int24 tickSpacing
+    ///      + trailing sqrtPriceX96 (0 because the pool is already initialized).
+    function _mintBalanced(ManagedPositionV2 storage p, int24 tickLower, int24 tickUpper, ResetParams calldata params)
+        private
+        returns (uint256 newTokenId)
+    {
+        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+
+        IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
+        IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
+
+        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
+            token0: p.token0,
+            token1: p.token1,
+            tickSpacing: p.tickSpacing,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            amount0Desired: bal0,
+            amount1Desired: bal1,
+            amount0Min: params.amount0MinMain,
+            amount1Min: params.amount1MinMain,
+            recipient: address(this),
+            deadline: params.deadline,
+            sqrtPriceX96: 0 // pool already initialized
+        });
+        (newTokenId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
+    }
+
+    // ─── shared private helpers ───────────────────────────────────────────────
+
+    /// @dev Collect any accrued LP fees for `tokenId` (before decreasing liquidity)
     ///      and forward both tokens to the feeCollector.
-    function _skimFees(ManagedPositionV2 storage p, uint256 slotId) private {
+    function _skimFees(ManagedPositionV2 storage p, uint256 slotId, uint256 tokenId) private {
         (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: p.mainTokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
         );
         if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
@@ -392,20 +564,31 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         );
     }
 
-    /// @dev Compute the USD value of the principal tokens locked in the position,
+    /// @dev Compute the USD value of the principal tokens locked in `tokenId`,
     ///      valued at the given sqrtP (Q64.96 sqrt price). Uses LiquidityAmounts to
     ///      derive token amounts from the NFT's stored liquidity — never counts tokensOwed
     ///      (fees), so skimming fees does not perturb this measurement.
-    function _principalValue(ManagedPositionV2 storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
+    ///      Returns 0 for tokenId == 0 (no position), used by _altValue when there is no alt.
+    function _principalValue(ManagedPositionV2 storage p, uint256 tokenId, uint160 sqrtP, uint8 dec0, uint8 dec1)
         private
         view
         returns (uint256)
     {
-        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
+        if (tokenId == 0) return 0;
+        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
         (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
             sqrtP, TickMath.getSqrtRatioAtTick(tl), TickMath.getSqrtRatioAtTick(tu), liq
         );
         return _valueInUsd(a0, a1, p.oracle0, p.oracle1, dec0, dec1);
+    }
+
+    /// @dev USD value of the alt position principal at `sqrtP`; 0 when there is no alt.
+    function _altValue(ManagedPositionV2 storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
+        private
+        view
+        returns (uint256)
+    {
+        return _principalValue(p, p.altTokenId, sqrtP, dec0, dec1);
     }
 
     /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.
