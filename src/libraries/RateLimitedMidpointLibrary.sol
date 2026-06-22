@@ -3,8 +3,7 @@ pragma solidity 0.8.28;
 
 import {Math} from "@contracts/libraries/Math.sol";
 import {
-    RateLimitMidPoint,
-    RateLimitMidpointCommonLibrary
+    RateLimitMidPoint, RateLimitMidpointCommonLibrary
 } from "@contracts/libraries/RateLimitMidpointCommonLibrary.sol";
 
 /// @title library for putting a rate limit on how fast a contract

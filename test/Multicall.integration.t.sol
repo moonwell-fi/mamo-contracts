@@ -421,7 +421,9 @@ contract MulticallIntegrationTest is BaseTest {
         // Prepare multicall that will trigger the malicious contract's reentrancy attempt
         Multicall.Call[] memory calls = new Multicall.Call[](1);
         calls[0] = Multicall.Call({
-            target: address(maliciousContract), data: abi.encodeWithSignature("triggerReentrancy()"), value: 0
+            target: address(maliciousContract),
+            data: abi.encodeWithSignature("triggerReentrancy()"),
+            value: 0
         });
 
         // The malicious contract will call this as the owner
@@ -451,7 +453,9 @@ contract MulticallIntegrationTest is BaseTest {
         // First, attempt reentrancy (should fail)
         Multicall.Call[] memory maliciousCalls = new Multicall.Call[](1);
         maliciousCalls[0] = Multicall.Call({
-            target: address(maliciousContract), data: abi.encodeWithSignature("triggerReentrancy()"), value: 0
+            target: address(maliciousContract),
+            data: abi.encodeWithSignature("triggerReentrancy()"),
+            value: 0
         });
 
         vm.startPrank(address(maliciousContract));
@@ -463,7 +467,9 @@ contract MulticallIntegrationTest is BaseTest {
         // Now verify that normal operations still work after the failed reentrancy
         Multicall.Call[] memory normalCalls = new Multicall.Call[](1);
         normalCalls[0] = Multicall.Call({
-            target: address(maliciousContract), data: abi.encodeWithSignature("harmlessFunction()"), value: 0
+            target: address(maliciousContract),
+            data: abi.encodeWithSignature("harmlessFunction()"),
+            value: 0
         });
 
         // This should succeed

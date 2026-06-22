@@ -428,7 +428,11 @@ contract DropAutomation is Ownable {
         IERC20(tokenIn).forceApprove(address(AERODROME_CL_ROUTER), amountIn);
 
         IQuoter.QuoteExactInputSingleParams memory params = IQuoter.QuoteExactInputSingleParams({
-            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn, tickSpacing: tickSpacing, sqrtPriceLimitX96: 0
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            amountIn: amountIn,
+            tickSpacing: tickSpacing,
+            sqrtPriceLimitX96: 0
         });
 
         (uint256 quotedAmountOut,,,) = AERODROME_QUOTER.quoteExactInputSingle(params);

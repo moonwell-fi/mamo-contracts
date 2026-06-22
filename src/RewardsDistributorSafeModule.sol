@@ -47,6 +47,7 @@ contract RewardsDistributorSafeModule is Pausable {
         NOT_READY, // Rewards are not ready to be notified
         PENDING_EXECUTION, // Rewards ready to be notified
         EXECUTED // Rewards have been notified and distributed
+
     }
 
     /////////////////////////// CONSTANTS ///////////////////////////

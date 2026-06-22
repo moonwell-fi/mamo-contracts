@@ -91,10 +91,8 @@ contract SlippagePriceCheckerTest is BaseTest {
                 "maxTimePriceValid should match"
             );
 
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory rewardTokenConfigs =
-                slippagePriceChecker.tokenPairOracleInformation(
-                    addresses.getAddress(rewardToken.token), address(underlying)
-                );
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory rewardTokenConfigs = slippagePriceChecker
+                .tokenPairOracleInformation(addresses.getAddress(rewardToken.token), address(underlying));
 
             assertEq(
                 rewardTokenConfigs.length,
@@ -247,7 +245,9 @@ contract SlippagePriceCheckerTest is BaseTest {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd, reverse: false, heartbeat: 1800
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
         });
 
         vm.prank(nonOwner);
@@ -267,7 +267,9 @@ contract SlippagePriceCheckerTest is BaseTest {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd, reverse: false, heartbeat: 1800
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
         });
 
         vm.prank(owner);
@@ -340,7 +342,9 @@ contract SlippagePriceCheckerTest is BaseTest {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd, reverse: false, heartbeat: 1800
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
         });
 
         vm.prank(owner);
@@ -362,7 +366,9 @@ contract SlippagePriceCheckerTest is BaseTest {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd, reverse: false, heartbeat: 1800
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1800
         });
 
         vm.prank(owner);
@@ -384,7 +390,9 @@ contract SlippagePriceCheckerTest is BaseTest {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd, reverse: false, heartbeat: 1 days
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1 days
         });
         configs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: chainlinkBtcUsd,
@@ -422,7 +430,9 @@ contract SlippagePriceCheckerTest is BaseTest {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd, reverse: true, heartbeat: 86400
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: true,
+            heartbeat: 86400
         });
 
         // First remove the existing configuration

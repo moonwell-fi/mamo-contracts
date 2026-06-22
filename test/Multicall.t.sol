@@ -196,12 +196,16 @@ contract MulticallTest is Test {
 
         // Second call: setValue1 on payableContract1 with ETH
         calls[1] = Multicall.Call({
-            target: address(payableContract1), data: abi.encodeWithSignature("setValue1(uint256)", 100), value: 1 ether
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
         });
 
         // Third call: setValue2 on payableContract2
         calls[2] = Multicall.Call({
-            target: address(payableContract2), data: abi.encodeWithSignature("setValue2(uint256)", 200), value: 0
+            target: address(payableContract2),
+            data: abi.encodeWithSignature("setValue2(uint256)", 200),
+            value: 0
         });
 
         vm.expectEmit(true, false, false, true);
@@ -250,7 +254,9 @@ contract MulticallTest is Test {
         });
 
         calls[1] = Multicall.Call({
-            target: address(payableContract1), data: abi.encodeWithSignature("failingFunction()"), value: 0
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("failingFunction()"),
+            value: 0
         });
 
         vm.expectRevert("MockPayableContract: Intentional failure");
@@ -309,7 +315,9 @@ contract MulticallTest is Test {
     function testGenericMulticall_ZeroSplits() public {
         Multicall.Call[] memory calls = new Multicall.Call[](1);
         calls[0] = Multicall.Call({
-            target: address(strategy1), data: abi.encodeWithSignature("updatePosition(uint256,uint256)", 0, 0), value: 0
+            target: address(strategy1),
+            data: abi.encodeWithSignature("updatePosition(uint256,uint256)", 0, 0),
+            value: 0
         });
 
         vm.prank(multicallOwner);
@@ -408,7 +416,9 @@ contract MulticallTest is Test {
         Multicall.Call[] memory calls = new Multicall.Call[](2);
 
         calls[0] = Multicall.Call({
-            target: address(payableContract1), data: abi.encodeWithSignature("setValue1(uint256)", 100), value: 1 ether
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
         });
 
         calls[1] = Multicall.Call({
@@ -434,7 +444,9 @@ contract MulticallTest is Test {
         Multicall.Call[] memory calls = new Multicall.Call[](2);
 
         calls[0] = Multicall.Call({
-            target: address(payableContract1), data: abi.encodeWithSignature("setValue1(uint256)", 100), value: 1 ether
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
         });
 
         calls[1] = Multicall.Call({
@@ -462,7 +474,9 @@ contract MulticallTest is Test {
         Multicall.Call[] memory calls = new Multicall.Call[](2);
 
         calls[0] = Multicall.Call({
-            target: address(payableContract1), data: abi.encodeWithSignature("setValue1(uint256)", 100), value: 1 ether
+            target: address(payableContract1),
+            data: abi.encodeWithSignature("setValue1(uint256)", 100),
+            value: 1 ether
         });
 
         calls[1] = Multicall.Call({

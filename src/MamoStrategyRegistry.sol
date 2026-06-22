@@ -248,7 +248,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         emit StrategyAdded(user, strategy, implementation);
     }
-
     // ==================== ADMIN FUNCTIONS ====================
 
     /**

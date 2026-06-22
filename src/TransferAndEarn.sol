@@ -49,7 +49,10 @@ contract TransferAndEarn is ITransferAndEarn, IERC721Receiver, Ownable {
 
         (amount0, amount1) = positionManager.collect(
             INonfungiblePositionManager.CollectParams({
-                recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max, tokenId: tokenId
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max,
+                tokenId: tokenId
             })
         );
 
