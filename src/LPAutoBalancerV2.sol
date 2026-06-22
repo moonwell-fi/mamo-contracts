@@ -44,6 +44,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         threshold means wildly different USD amounts per leg. 1e6 = $0.01.
     uint256 public constant MIN_ALT_VALUE_USD = 1e6;
 
+    /// @notice Minimum USD value (8-decimal scale) a minority leg must hold for the main to be built
+    ///         as a spot-centered straddle. Below this, the minority leg is treated as dust: the main
+    ///         is built SINGLE-SIDED on the majority leg instead of straddling. A near-zero minority
+    ///         leg (e.g. 1 wei) would otherwise force the straddle branch and compute near-zero (or
+    ///         zero, reverting) liquidity, dumping principal into the transient alt. Value-based, not
+    ///         exact-zero, for the same per-leg-decimals reason as MIN_ALT_VALUE_USD. 1e6 = $0.01.
+    uint256 public constant MIN_MAIN_LEG_USD = 1e6;
+
     INonfungiblePositionManager public immutable POSITION_MANAGER;
     address public immutable AERO;
 
@@ -81,6 +89,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error StaleOracle();
     error LossCapExceeded();
     error InvalidWidth();
+    error WidthTooNarrow();
+    error GaugeRewardMismatch();
+    error PoolMismatch();
     error OracleRequired();
     error InvalidConfig();
     error NotActive();
@@ -93,7 +104,6 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error WidthOutOfBounds();
     error CenterDeviation();
     error ValueFloor();
-    error AltMintFailed();
 
     event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
     event PositionDeregistered(uint256 indexed slotId, address indexed to);
@@ -160,10 +170,18 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (config.maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = config.tickSpacing;
         if (spacing <= 0) revert InvalidConfig();
+        // Cross-validate the supplied pool descriptor against the live pool: token0/token1 ordering
+        // and tickSpacing must match, or every on-chain geometry computation would be wrong.
         if (
-            config.minWidth == 0 || config.minWidth > config.maxWidth || config.minWidth % uint24(spacing) != 0
-                || config.maxWidth % uint24(spacing) != 0
-        ) revert InvalidWidth();
+            ICLPool(config.pool).token0() != config.token0 || ICLPool(config.pool).token1() != config.token1
+                || ICLPool(config.pool).tickSpacing() != spacing
+        ) revert PoolMismatch();
+        // A width narrower than 2*tickSpacing can never straddle an aligned spot, so a balanced
+        // reset would always revert in _alignedRange. Require at least two spacings of room.
+        if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
+        if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
+        // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded.
+        if (config.gauge != address(0) && ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
         if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
 
         slotId = nextSlotId++;
@@ -223,10 +241,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (twapWindow == 0 || maxTickDeviation <= 0) revert InvalidConfig();
         if (maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = positions[slotId].tickSpacing;
-        if (minWidth == 0 || minWidth > maxWidth || minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0)
-        {
-            revert InvalidWidth();
-        }
+        // minWidth must be at least 2*tickSpacing so a balanced reset can straddle an aligned spot.
+        if (minWidth < 2 * uint24(spacing) || maxWidth < minWidth) revert WidthTooNarrow();
+        if (minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0) revert InvalidWidth();
 
         ManagedPositionV2 storage p = positions[slotId];
         p.minWidth = minWidth;
@@ -272,6 +289,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Both legs must be unstaked: a partial unstake can leave the alt NFT custodied by the OLD
         // gauge; changing the gauge while altStaked would strand it (M-2).
         if (positions[slotId].mainStaked || positions[slotId].altStaked) revert PositionStaked();
+        // A non-zero gauge must reward in AERO or staked emissions would be stranded.
+        if (gauge != address(0) && ICLGauge(gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
         positions[slotId].gauge = gauge;
         emit GaugeUpdated(slotId, gauge);
     }
@@ -382,7 +401,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         p.active = false;
 
         // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
-        _exitAll(p, slotId, 0, 0);
+        // Emergency path: deadline = block.timestamp (execute immediately).
+        _exitAll(p, slotId, 0, 0, block.timestamp);
 
         // Transfer all principal recovered from the position to `to`.
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
@@ -475,14 +495,16 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // also counts loose balances (_contractPairValue), so a stray/donated balance cancels on both
         // sides and cannot inflate the floor's headroom to mask a real rebalance loss (H-1).
         uint256 looseBefore = _contractPairValue(p, dec0, dec1);
-        uint256 valueBefore =
-            _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1) + looseBefore;
+        // valueBeforePos is POSITION principal only (main + alt). The loss haircut below applies to
+        // this alone — never to looseBefore. A donated loose balance is added UNHAIRCUT to the floor's
+        // RHS instead (see the value-floor gate), so a donation cannot widen the loss tolerance.
+        uint256 valueBeforePos = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
 
         bool wasStaked = p.mainStaked;
 
         // tear down: unstake + AERO skim, fee skim, decreaseAll + collect, burn both NFTs.
         // Forward the caller-supplied withdraw mins as the sandwich floor on the MAIN decrease.
-        _exitAll(p, slotId, params.amount0MinWithdraw, params.amount1MinWithdraw);
+        _exitAll(p, slotId, params.amount0MinWithdraw, params.amount1MinWithdraw, params.deadline);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
 
@@ -493,7 +515,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // manufacture the missing leg, so in that degenerate case we place the main entirely on the
         // FUNDED side, adjacent to spot — a valid single-sided main that waits for price to oscillate
         // back into balance (Beefy "never sell"). Principal is fully redeployed; nothing is sold.
-        (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width);
+        (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
 
         uint256 newMain = _mintBalanced(p, tl, tu, params);
         p.mainTokenId = newMain;
@@ -515,7 +537,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // or loose (counted) at floor time. Only sub-threshold dust leaves, and only AFTER this check.
         uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1)
             + _contractPairValue(p, dec0, dec1);
-        if (valueAfter < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)) {
+        // Haircut applies to POSITION value only; the pre-existing loose balance is added back UNHAIRCUT.
+        // looseAfter (in valueAfter) ≈ looseBefore + withdrawn surplus, so the donated L cancels on both
+        // sides and cannot inflate headroom to mask a real principal loss (H-1).
+        if (
+            valueAfter
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
+                    + looseBefore
+        ) {
             revert ValueFloor();
         }
 
@@ -544,7 +573,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         ManagedPositionV2 storage p,
         uint256 slotId,
         uint256 amount0MinWithdraw,
-        uint256 amount1MinWithdraw
+        uint256 amount1MinWithdraw,
+        uint256 deadline
     ) private {
         uint256 mainId = p.mainTokenId;
         uint256 altId = p.altTokenId;
@@ -558,11 +588,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (altId != 0) _skimFees(p, slotId, altId);
 
         // 3. decrease all liquidity + collect principal into this contract.
-        //    MAIN gets the caller-supplied withdraw mins (sandwich floor).
-        _decreaseLiquidityAll(mainId, amount0MinWithdraw, amount1MinWithdraw);
+        //    MAIN gets the caller-supplied withdraw mins (sandwich floor) and the caller-supplied deadline.
+        _decreaseLiquidityAll(mainId, amount0MinWithdraw, amount1MinWithdraw, deadline);
         //    ALT is single-sided and transient (minted+burned within a cycle, not minted
         //    until Task 3), so 0 mins are acceptable here. This path is unreachable today.
-        if (altId != 0) _decreaseLiquidityAll(altId, 0, 0);
+        if (altId != 0) _decreaseLiquidityAll(altId, 0, 0, deadline);
 
         // 4. burn the old NFTs
         POSITION_MANAGER.burn(mainId);
@@ -572,17 +602,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Remove all liquidity from `tokenId` and collect the resulting tokens into
     ///      this contract. `amount0Min`/`amount1Min` are the caller-supplied sandwich floor
     ///      enforced by the position manager on the decrease (revert if the withdrawn amounts
-    ///      fall below them); pass 0 to skip the floor.
-    function _decreaseLiquidityAll(uint256 tokenId, uint256 amount0Min, uint256 amount1Min) private {
+    ///      fall below them); pass 0 to skip the floor. `deadline` is forwarded to the PM so the
+    ///      caller's deadline guard actually applies to the withdraw leg (not a hardcoded now).
+    function _decreaseLiquidityAll(uint256 tokenId, uint256 amount0Min, uint256 amount1Min, uint256 deadline) private {
         (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
         if (liq > 0) {
             POSITION_MANAGER.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId,
-                    liquidity: liq,
-                    amount0Min: amount0Min,
-                    amount1Min: amount1Min,
-                    deadline: block.timestamp
+                    tokenId: tokenId, liquidity: liq, amount0Min: amount0Min, amount1Min: amount1Min, deadline: deadline
                 })
             );
         }
@@ -770,17 +797,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
         if (p.mainStaked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
-        (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: p.mainTokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
-            })
-        );
-        if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
-        if (a1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, a1);
-        emit FeesSkimmed(slotId, a0, a1);
+        // Skim BOTH legs to the feeCollector via the shared helper. Ignoring the alt here would strand
+        // its accrued fees. Reuses _skimFees rather than duplicating the collect+forward logic.
+        _skimFees(p, slotId, p.mainTokenId);
+        if (p.altTokenId != 0) _skimFees(p, slotId, p.altTokenId);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -900,16 +920,22 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
     ///      - Both legs funded → spot-centered straddle (the normal balanced main).
-    ///      - Exactly ONE leg funded (fully out-of-range reset → 100% single-sided principal) →
-    ///        a single-sided `width`-wide range on the FUNDED side, adjacent to spot, so the mint
-    ///        has positive liquidity. NO SWAP is ever performed; this only changes WHERE the funded
-    ///        token is parked. Orientation (price = token1/token0, ticks rise with price): a range
-    ///        strictly ABOVE spot holds only token0; strictly BELOW holds only token1.
-    ///          token0-only (bal1 == 0): [up, up + width]      where up   = first aligned tick > spot
-    ///          token1-only (bal0 == 0): [down - width, down]  where down = first aligned tick < spot
+    ///      - The minority leg below MIN_MAIN_LEG_USD (including exactly one leg funded — a fully
+    ///        out-of-range reset returns 100% single-sided principal) → a single-sided `width`-wide
+    ///        range on the MAJORITY (funded) side, adjacent to spot, so the mint has positive
+    ///        liquidity. NO SWAP is ever performed; this only changes WHERE the funded token is parked.
+    ///        Orientation (price = token1/token0, ticks rise with price): a range strictly ABOVE spot
+    ///        holds only token0; strictly BELOW holds only token1.
+    ///          token0-majority: [up, up + width]      where up   = first aligned tick > spot
+    ///          token1-majority: [down - width, down]  where down = first aligned tick < spot
     ///      Both-empty is impossible here (reset withdrew real principal; an empty teardown would
     ///      already have reverted the value floor downstream).
-    function _mainRange(ManagedPositionV2 storage p, int24 spotTick, uint24 width)
+    ///
+    ///      Classifier is VALUE-based, not exact-zero: a tiny minority leg (e.g. 1 wei) would force the
+    ///      straddle branch and compute near-zero (or zero, reverting) liquidity. Only when BOTH legs
+    ///      carry >= MIN_MAIN_LEG_USD do we straddle; a genuinely dust minority is parked single-sided
+    ///      on the majority side and its remainder flows to the alt/dust path downstream.
+    function _mainRange(ManagedPositionV2 storage p, int24 spotTick, uint24 width, uint8 dec0, uint8 dec1)
         private
         view
         returns (int24 tickLower, int24 tickUpper)
@@ -919,24 +945,40 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 spacing = p.tickSpacing;
         int24 w = int24(width);
 
-        // INTENTIONAL exact-zero test: a dust-imbalanced straddle (both > 0 but skewed) is absorbed
-        // by _mintAlt, so do NOT convert this to a value threshold — that would misclassify imbalanced
-        // straddles as single-sided and place the main on the wrong side of spot.
-        if (bal0 > 0 && bal1 > 0) {
+        // Value each leg independently (pass the other amount as 0). The minority is the smaller-value
+        // leg; only straddle when BOTH legs are >= MIN_MAIN_LEG_USD. A sub-threshold minority is treated
+        // as dust → single-sided main on the majority side (placed on the correct side of spot below).
+        uint256 value0 = _valueInUsd(bal0, 0, p.oracle0, p.oracle1, dec0, dec1);
+        uint256 value1 = _valueInUsd(0, bal1, p.oracle0, p.oracle1, dec0, dec1);
+        uint256 minorityValue = value0 < value1 ? value0 : value1;
+
+        if (minorityValue >= MIN_MAIN_LEG_USD) {
             // Balanced straddle centered on spot (guaranteed straddle for width ≥ 2*spacing).
-            return _alignedRange(spotTick, width, spacing, spotTick);
+            (tickLower, tickUpper) = _alignedRange(spotTick, width, spacing, spotTick);
+            // Enforce maxCenterDeviation on the BALANCED path only. The range is centered on spotTick
+            // (the reference), so today the deviation is just the spacing-alignment remainder and is
+            // always within a non-trivial bound. This guard backstops any future change to the
+            // centering reference (e.g. centering on TWAP) so a skewed center can never slip through.
+            // The single-sided branch is intentionally off-center (it parks on the funded side), so it
+            // is NOT subject to this check.
+            int24 center = (tickLower + tickUpper) / 2;
+            int24 dev = center > spotTick ? center - spotTick : spotTick - center;
+            if (uint24(dev) > p.maxCenterDeviation) revert CenterDeviation();
+            return (tickLower, tickUpper);
         }
 
+        // Single-sided on the MAJORITY (higher-value) leg. token0-majority → range ABOVE spot;
+        // token1-majority → range BELOW spot.
         int24 floor = _floorAlign(spotTick, spacing);
-        if (bal1 == 0) {
-            // token0-only → range strictly ABOVE spot. `floor` is the largest aligned tick ≤ spot,
+        if (value0 >= value1) {
+            // token0-majority → range strictly ABOVE spot. `floor` is the largest aligned tick ≤ spot,
             // so floor+spacing is the first aligned tick strictly above spot (also holds when spot
             // is exactly aligned: floor == spot ⇒ floor+spacing > spot).
             int24 up = floor + spacing;
             tickLower = up;
             tickUpper = up + w;
         } else {
-            // token1-only (bal0 == 0) → range strictly BELOW spot.
+            // token1-majority → range strictly BELOW spot.
             // The first aligned tick strictly below spot is `floor` when spot is unaligned, else
             // floor - spacing when spot sits exactly on an aligned tick.
             int24 down = floor == spotTick ? floor - spacing : floor;
@@ -981,10 +1023,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         view
         returns (uint256 usd)
     {
-        (uint256 p0, uint8 fd0) = _readFeed(oracle0);
-        (uint256 p1, uint8 fd1) = _readFeed(oracle1);
-        usd = FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0)
-            + FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
+        // Only consult a leg's feed when that leg is funded. Valuing a single leg must not revert
+        // because the OTHER, unused feed happens to be stale — a zero amount contributes 0 regardless
+        // of price. The two-leg path (both amounts > 0) still reads both feeds, as required.
+        if (amount0 > 0) {
+            (uint256 p0, uint8 fd0) = _readFeed(oracle0);
+            usd += FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0);
+        }
+        if (amount1 > 0) {
+            (uint256 p1, uint8 fd1) = _readFeed(oracle1);
+            usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
+        }
     }
 
     /// @dev Copies every field from `config` into `positions[slotId]`, but forces

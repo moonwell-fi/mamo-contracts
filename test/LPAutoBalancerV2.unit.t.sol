@@ -180,6 +180,9 @@ contract MockPositionManagerV2 {
     {
         lastDecreaseTokenId = params.tokenId;
         decreaseCallCount++;
+        // Enforce the deadline exactly like the real position manager (so the threaded deadline,
+        // F8, is exercised): revert if the block time is past the supplied deadline.
+        require(block.timestamp <= params.deadline, "Transaction too old");
         // Model the principal returned by the decrease as the staged "principal" collect
         // amounts (slot 1). Enforce the caller-supplied sandwich floor exactly like the real
         // position manager: revert if the withdrawn amount is below the requested minimum.
@@ -272,6 +275,12 @@ contract MockCLPoolV2 is ICLPool {
     int56 public tickCumulative0;
     int56 public tickCumulative1;
 
+    // Configurable pool descriptor so registerPosition's pool cross-validation (token0/token1/
+    // tickSpacing must match the config) can pass — and be made to FAIL in a dedicated test.
+    address private _token0;
+    address private _token1;
+    int24 private _tickSpacing = 200;
+
     function setSlot0(uint160 sqrtP, int24 tick) external {
         sqrtPX96 = sqrtP;
         currentTick = tick;
@@ -280,6 +289,15 @@ contract MockCLPoolV2 is ICLPool {
     function setObserve(int56 cum0, int56 cum1) external {
         tickCumulative0 = cum0;
         tickCumulative1 = cum1;
+    }
+
+    function setTokens(address t0, address t1) external {
+        _token0 = t0;
+        _token1 = t1;
+    }
+
+    function setTickSpacing(int24 ts) external {
+        _tickSpacing = ts;
     }
 
     function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, bool unlocked) {
@@ -297,16 +315,16 @@ contract MockCLPoolV2 is ICLPool {
         secondsPerLiquidityCumulativeX128 = new uint160[](2);
     }
 
-    function token0() external pure returns (address) {
-        return address(0);
+    function token0() external view returns (address) {
+        return _token0;
     }
 
-    function token1() external pure returns (address) {
-        return address(0);
+    function token1() external view returns (address) {
+        return _token1;
     }
 
-    function tickSpacing() external pure returns (int24) {
-        return 200;
+    function tickSpacing() external view returns (int24) {
+        return _tickSpacing;
     }
 
     function liquidity() external pure returns (uint128) {
@@ -369,6 +387,9 @@ contract LPAutoBalancerV2UnitTest is Test {
         // Configurable pool mock (slot0 + observe) for reset() geometry.
         mockPool = new MockCLPoolV2();
         pool = address(mockPool);
+        // registerPosition cross-validates the pool descriptor: token0/token1/tickSpacing must match.
+        mockPool.setTokens(token0, token1);
+        mockPool.setTickSpacing(200);
 
         // Rich PM mock with full position lifecycle (positions/decrease/collect/mint/burn).
         mockPM = new MockPositionManagerV2(address(0));
@@ -420,7 +441,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             feeCollector: feeCollector,
             oracle0: oracle0,
             oracle1: oracle1,
-            minWidth: 200,
+            minWidth: 400,
             maxWidth: 2000,
             // center of [-200,200] = 0, twapTick=0 → dev=0 ≤ 400 ✓
             maxCenterDeviation: 400,
@@ -541,7 +562,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             feeCollector: feeCollector,
             oracle0: oracle0,
             oracle1: oracle1,
-            minWidth: 200,
+            minWidth: 400,
             maxWidth: 2000,
             maxCenterDeviation: 400,
             twapWindow: 1800,
@@ -572,7 +593,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             feeCollector: feeCollector,
             oracle0: oracle0,
             oracle1: oracle1,
-            minWidth: 200,
+            minWidth: 400,
             maxWidth: 2000,
             maxCenterDeviation: 400,
             twapWindow: 1800,
@@ -602,7 +623,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             feeCollector: feeCollector,
             oracle0: oracle0,
             oracle1: oracle1,
-            minWidth: 200,
+            minWidth: 400,
             maxWidth: 2000,
             maxCenterDeviation: 400,
             twapWindow: 1800,
@@ -784,6 +805,9 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         dPool.setSlot0(SQRT_P, SPOT_TICK); // spot tick 100, twap 0 (same geometry as shared fixture)
         dPool.setObserve(0, 0);
+        // Pool cross-validation: descriptor must match the live pool.
+        dPool.setTokens(address(dtok0), address(dtok1));
+        dPool.setTickSpacing(200);
 
         // OLD main: small liquidity so valueBefore is modest and the floor is easy to clear.
         dPM.setPosition(D_MAIN_ID, OLD_TL, OLD_TU, 1e12, address(dtok0), address(dtok1));
@@ -808,7 +832,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             feeCollector: feeCollector,
             oracle0: dOracle0,
             oracle1: dOracle1,
-            minWidth: 200,
+            minWidth: 400,
             maxWidth: 2000,
             maxCenterDeviation: 400,
             twapWindow: 1800,
@@ -1161,7 +1185,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(manager);
         lab.setPositionConfig(
             slotId,
-            200, // minWidth
+            400, // minWidth (>= 2*tickSpacing)
             2000, // maxWidth
             400, // maxCenterDeviation
             1800, // twapWindow
@@ -1212,7 +1236,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             feeCollector: feeCollector,
             oracle0: oracle0,
             oracle1: oracle1,
-            minWidth: 200,
+            minWidth: 400,
             maxWidth: 2000,
             maxCenterDeviation: 400,
             twapWindow: 1800,
@@ -1319,5 +1343,203 @@ contract LPAutoBalancerV2UnitTest is Test {
         // The new main must end at or below spot: range strictly below spot holds only token1.
         assertLe(s.mainTickUpper, SPOT_TICK, "token1-only: main range must end <= spotTick");
         assertGt(s.mainLiquidity, 0, "token1-only: main must have positive liquidity");
+    }
+
+    // ─── Review fixes F1/F5/F6: registerPosition validation ──────────────────────
+
+    /// @dev Build a valid base config on the shared fixtures. Tests mutate one field then register.
+    function _baseConfig() internal view returns (LPAutoBalancerV2.ManagedPositionV2 memory cfg) {
+        cfg = LPAutoBalancerV2.ManagedPositionV2({
+            mainTokenId: TOKEN_ID,
+            altTokenId: 0,
+            pool: pool,
+            token0: token0,
+            token1: token1,
+            tickSpacing: 200,
+            gauge: address(0),
+            mainStaked: false,
+            altStaked: false,
+            feeCollector: feeCollector,
+            oracle0: oracle0,
+            oracle1: oracle1,
+            minWidth: 400,
+            maxWidth: 2000,
+            maxCenterDeviation: 400,
+            twapWindow: 1800,
+            maxTickDeviation: 200,
+            maxRebalanceLossBps: 100,
+            minRebalanceInterval: 0,
+            lastRebalance: 0,
+            active: false
+        });
+    }
+
+    /// @dev F1: minWidth == tickSpacing (one spacing) can never straddle an aligned spot → reverts.
+    function test_registerPosition_revertWidthTooNarrow() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();
+        cfg.minWidth = 200; // == tickSpacing, below the 2*tickSpacing floor
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.WidthTooNarrow.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev F1: minWidth == 2*tickSpacing is the smallest accepted width and must succeed.
+    function test_registerPosition_acceptsMinWidthTwoSpacings() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();
+        cfg.minWidth = 400; // == 2*tickSpacing
+        vm.prank(admin);
+        uint256 slotId = lab.registerPosition(cfg);
+        (,,,,,,,,,,,, uint24 storedMinWidth,,,,,,,,) = lab.positions(slotId);
+        assertEq(storedMinWidth, 400, "minWidth == 2*tickSpacing accepted");
+    }
+
+    /// @dev F1: setPositionConfig must enforce the same 2*tickSpacing floor.
+    function test_setPositionConfig_revertWidthTooNarrow() public {
+        uint256 slotId = _registerSlot(false);
+        vm.prank(manager);
+        vm.expectRevert(LPAutoBalancerV2.WidthTooNarrow.selector);
+        lab.setPositionConfig(slotId, 200, 2000, 400, 1800, 200, 100, 0); // minWidth == tickSpacing
+    }
+
+    /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
+    function test_registerPosition_revertGaugeRewardMismatch() public {
+        MockCLGauge badGauge = new MockCLGauge(makeAddr("notAero")); // rewardToken != AERO
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();
+        cfg.gauge = address(badGauge);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.GaugeRewardMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev F5: setGauge must reject a gauge whose rewardToken != AERO.
+    function test_setGauge_revertGaugeRewardMismatch() public {
+        uint256 slotId = _registerSlot(false);
+        MockCLGauge badGauge = new MockCLGauge(makeAddr("notAero"));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.GaugeRewardMismatch.selector);
+        lab.setGauge(slotId, address(badGauge));
+    }
+
+    /// @dev F6: a config whose tickSpacing disagrees with the live pool must be rejected.
+    function test_registerPosition_revertPoolMismatch_tickSpacing() public {
+        mockPool.setTickSpacing(100); // live pool says 100, config says 200
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig(); // tickSpacing 200
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev F6: a config whose token0 disagrees with the live pool must be rejected.
+    function test_registerPosition_revertPoolMismatch_token() public {
+        mockPool.setTokens(makeAddr("wrongToken0"), token1); // live pool token0 != config token0
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    // ─── Review fix F2: single-leg valuation ignores the unused (stale) feed ─────
+
+    /// @dev F2: valuing a SINGLE leg must not read the other (unused) feed. Stage a balanced reset
+    ///      where only token0 is loose, then make oracle1 stale. Under the old code _valueInUsd read
+    ///      BOTH feeds unconditionally and would revert StaleOracle on the token1 leg even though
+    ///      amount1 == 0. With the fix, the zero leg's stale feed is skipped and reset succeeds.
+    function test_reset_singleLegValuation_ignoresStaleUnusedFeed() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 0); // token0-only principal → every _valueInUsd call passes amount1 == 0
+
+        // Make the (unused) token1 feed stale far in the past.
+        MockPriceFeed(oracle1).setUpdatedAt(1);
+
+        // Configure the single-sided main on the token0 side so the mint has liquidity.
+        mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
+
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams()); // must NOT revert StaleOracle
+
+        (uint256 mainId,,) = _readMainAlt(slotId);
+        assertEq(mainId, NEW_TOKEN_ID, "single-leg valuation skipped the stale unused feed");
+    }
+
+    // ─── Review fix F4: dust-minority leg classified single-sided (value threshold) ──
+
+    /// @dev F4: a tiny minority leg (sub-threshold USD value) must NOT force the straddle branch.
+    ///      Stage a majority token0 leg and a dust token1 leg worth far below MIN_MAIN_LEG_USD; the
+    ///      rebuilt main must be SINGLE-SIDED on the token0 (majority) side — range entirely ABOVE
+    ///      spot — not a degenerate straddle. Uses the mixed-decimal fixture so the dust leg's USD
+    ///      value is unambiguous. token0 = cbBTC ($65k), token1 = WETH ($2.5k).
+    function test_reset_dustMinorityLeg_classifiedSingleSided() public {
+        uint256 slotId = _setupMixedSlot(500);
+        // token0: 1e8 raw cbBTC = 1 cbBTC ≈ $65,000 (majority).
+        // token1: 1e6 raw WETH = 1e-12 WETH ≈ $0.0000000025 — far below MIN_MAIN_LEG_USD ($0.01).
+        _stageMixedPrincipal(1e8, 1e6);
+
+        // Main minted on the token0 side, strictly ABOVE spot ([200,400]); positive liquidity.
+        dPM.setPosition(D_NEW_ID, OLD_TU, OLD_TU + 200, 1e12, address(dtok0), address(dtok1));
+        dPM.setNextMintResult(D_NEW_ID, 1e12);
+
+        vm.prank(rebalancer);
+        dLab.reset(slotId, _defaultResetParams());
+
+        // The MAIN mint (1st mint) must be single-sided above spot — lower >= spotTick (100).
+        // _mainRange: spotTick=100, spacing=200 → floor=0, up=200 → [200, 600].
+        // Discriminator vs straddle: a straddle would center on spot ([-200,200]) with lower < spot.
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = dLab.getDecisionSnapshot(slotId);
+        assertGe(s.mainTickLower, SPOT_TICK, "dust minority: main is single-sided above spot (lower >= spot)");
+        assertGt(s.mainLiquidity, 0, "dust minority: main has positive liquidity (not a degenerate straddle)");
+    }
+
+    // ─── Review fix F7: maxCenterDeviation enforced on the balanced path ─────────
+
+    /// @dev F7: a balanced reset whose center is within maxCenterDeviation passes. The straddle is
+    ///      spot-centered, so |center - spot| is just the alignment remainder (here 100 ticks, well
+    ///      within 400). Asserts the happy path does not spuriously revert CenterDeviation; the guard
+    ///      is a backstop for any future change to the centering reference (single-sided path is
+    ///      intentionally off-center and exempt).
+    function test_reset_balancedCenterWithinDeviation_passes() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18); // balanced → straddle path
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams()); // must NOT revert CenterDeviation
+        (uint256 mainId,,) = _readMainAlt(slotId);
+        assertEq(mainId, NEW_TOKEN_ID, "balanced reset within center bound succeeded");
+    }
+
+    // ─── Review fix F8: deadline threaded into the withdraw leg ──────────────────
+
+    /// @dev F8: a reset with deadline < block.timestamp must revert at the MAIN decrease (the PM
+    ///      enforces the deadline). The old code hardcoded deadline = block.timestamp on the decrease,
+    ///      so an expired caller deadline had no effect on the withdraw leg.
+    function test_reset_revertsOnExpiredDeadline() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+        vm.warp(block.timestamp + 100);
+        LPAutoBalancerV2.ResetParams memory pr = _defaultResetParams();
+        pr.deadline = block.timestamp - 1; // expired
+        vm.prank(rebalancer);
+        vm.expectRevert("Transaction too old");
+        lab.reset(slotId, pr);
+    }
+
+    // ─── Review fix F9: collectFees skims BOTH main and alt ──────────────────────
+
+    /// @dev F9: collectFees on a slot with a live alt must skim BOTH NFTs' fees to the feeCollector.
+    ///      The mock collect auto-advances slots; we stage non-zero fees and assert both legs forward.
+    function test_collectFees_skimsBothMainAndAlt() public {
+        uint256 slotId = _registerSlotWithAlt(false); // not staked, alt injected
+        // collect call 0 → slot 0 (main fees), calls 1+ → slot 1 (alt fees). Stage both non-zero.
+        tok0.mint(address(mockPM), 5e18);
+        tok1.mint(address(mockPM), 5e18);
+        mockPM.setCollectSequence(2e18, 1e18, 1e18, 5e17); // main: 2e18/1e18 ; alt: 1e18/5e17
+
+        uint256 before0 = tok0.balanceOf(feeCollector);
+        uint256 before1 = tok1.balanceOf(feeCollector);
+
+        lab.collectFees(slotId);
+
+        // Two collects fired (main + alt); both legs' fees landed on the feeCollector.
+        assertEq(mockPM.collectCallCount(), 2, "collectFees skimmed both main and alt NFTs");
+        assertGt(tok0.balanceOf(feeCollector) - before0, 0, "token0 fees forwarded from both legs");
+        assertGt(tok1.balanceOf(feeCollector) - before1, 0, "token1 fees forwarded from both legs");
     }
 }
