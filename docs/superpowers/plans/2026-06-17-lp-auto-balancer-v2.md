@@ -4,7 +4,7 @@
 
 **Goal:** Build a new `LPAutoBalancerV2` contract that manages each slot as a Beefy-CLM-style **dual position** (balanced `main` + single-sided `alt`) and re-ranges via a **swap-free `reset()`**, eliminating the IL crystallization of V1's swap-based `rebalance()`.
 
-**Architecture:** Copy `src/LPAutoBalancer.sol` (V1) as the base — keep the role model, registry, immutables, TWAP/oracle/value-floor plumbing, `_alignedRange`/`_floorAlign`, `collectFees`, `claimEmissions`, `migrate`, recover/pause **verbatim**. Replace the `ManagedPosition` struct with `ManagedPositionV2` (add `altTokenId`/`mainStaked`/`altStaked`, drop `swapPolicy`/`protectedToken`) and replace swap-based `rebalance()` with `reset()` (withdraw both → skim fees/AERO → mint balanced main + single-sided alt, no swap). Spec: `docs/superpowers/specs/2026-06-17-lp-auto-balancer-v2-dual-position-design.md`.
+**Architecture:** Copy `src/LPAutoBalancer.sol` (V1) as the base — keep the role model, registry, TWAP/oracle/value-floor plumbing, `_alignedRange`/`_floorAlign`, `collectFees`, `claimEmissions`, recover/pause **verbatim**. **Drop the swap entirely:** remove the `SWAP_ROUTER` immutable, `migrate()` (V2 never swaps), `swapPolicy`/`protectedToken`/`maxSlippageBps`. Replace the `ManagedPosition` struct with `ManagedPositionV2` (add `altTokenId`/`mainStaked`/`altStaked`), replace swap-based `rebalance()` with `reset()` (withdraw both → skim fees/AERO → mint balanced main + single-sided alt, no swap), and add Safe-gated `exit()` (withdraw-all-to-Safe, no swap) in place of `migrate()`. Spec: `docs/superpowers/specs/2026-06-17-lp-auto-balancer-v2-dual-position-design.md`.
 
 **Tech Stack:** Solidity 0.8.28, Foundry, OZ AccessControlEnumerable, Aerodrome Slipstream (`ICLPositionManager`, `ICLPool`, `ICLGauge`), Uniswap math libs (`LiquidityAmounts`, `TickMath`). Unit tests run without a fork; integration on Base fork.
 
@@ -21,7 +21,7 @@
 ```bash
 cp src/LPAutoBalancer.sol src/LPAutoBalancerV2.sol
 ```
-In `src/LPAutoBalancerV2.sol`: rename `contract LPAutoBalancer` → `contract LPAutoBalancerV2`. Keep all imports, roles, immutables, constructor, `_consultTwapTick`, `_floorAlign`, `_alignedRange`, `collectFees`, `claimEmissions`, `migrate`, `recoverERC20`/`recoverETH`, pause, `onERC721Received`, the value-floor/oracle internals, and the registry functions.
+In `src/LPAutoBalancerV2.sol`: rename `contract LPAutoBalancer` → `contract LPAutoBalancerV2`. Keep the roles, constructor, `_consultTwapTick`, `_floorAlign`, `_alignedRange`, `collectFees`, `claimEmissions`, `recoverERC20`/`recoverETH`, pause, `onERC721Received`, the value-floor/oracle internals, and the registry functions. **Remove** the `SWAP_ROUTER` immutable + its constructor arg, `migrate()` + `MigrateParams`, and the `ISwapRouter`/`IQuoter`-for-swap imports (keep `QUOTER` only if used for valuation; V2 performs no swaps). `exit()` (Safe-gated withdraw-all) is added in Task 4 to replace `migrate()`.
 
 - [ ] **Step 2: Replace the struct**
 
@@ -44,7 +44,6 @@ struct ManagedPositionV2 {
     uint24  minWidth;
     uint24  maxWidth;
     uint24  maxCenterDeviation;
-    uint16  maxSlippageBps;     // migrate() only
     uint32  twapWindow;
     int24   maxTickDeviation;
     uint16  maxRebalanceLossBps;
@@ -55,11 +54,11 @@ struct ManagedPositionV2 {
 
 mapping(uint256 slotId => ManagedPositionV2) public positions;
 ```
-Update `registerPosition`, `migrate`, `stake`, `unstake`, `collectFees`, `claimEmissions`, the value-floor helper, and any code that read `p.tokenId`/`p.staked`/`p.swapPolicy` to use the new field names (`p.mainTokenId`/`p.mainStaked`) and to handle `altTokenId` where a position is moved/withdrawn (deregister/withdraw must transfer/burn both NFTs if `altTokenId != 0`). Delete the swap-policy branches that V1 used inside the old `rebalance()`.
+Update `registerPosition`, `stake`, `unstake`, `collectFees`, `claimEmissions`, the value-floor helper, and any code that read `p.tokenId`/`p.staked`/`p.swapPolicy`/`p.maxSlippageBps` to use the new field names (`p.mainTokenId`/`p.mainStaked`) and to handle `altTokenId` where a position is moved/withdrawn (deregister/withdraw must transfer/burn both NFTs if `altTokenId != 0`). Delete the swap-policy and slippage-cap branches (no swap in V2). `registerPosition` no longer validates `maxSlippageBps`.
 
-- [ ] **Step 3: Remove `rebalance()` and `RebalanceParams`**
+- [ ] **Step 3: Remove `rebalance()`, `RebalanceParams`, and `migrate()`**
 
-Delete the entire V1 `rebalance(uint256, RebalanceParams)` function and `struct RebalanceParams`, and V1's `getDecisionSnapshot`/`DecisionSnapshot` (re-added in Task 5). Add a comment placeholder so the file compiles in the interim:
+Delete the entire V1 `rebalance(uint256, RebalanceParams)` function and `struct RebalanceParams`, the `migrate()` function + `MigrateParams` struct + `Migrated` event, the `SWAP_ROUTER` immutable + constructor arg, and V1's `getDecisionSnapshot`/`DecisionSnapshot` (re-added in Task 5). Add a comment placeholder so the file compiles in the interim:
 
 ```solidity
 // reset() added in Task 2
@@ -329,7 +328,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 4: Stake/unstake per-pair (alt follows) + claimEmissions over both
+### Task 4: Stake/unstake per-pair (alt follows) + claimEmissions over both + `exit()`
 
 **Files:**
 - Modify: `src/LPAutoBalancerV2.sol`
@@ -403,12 +402,92 @@ Update `claimEmissions` to call `gauge.getReward` for `mainTokenId` and (if `alt
 Run: `forge test --ffi --match-path "test/LPAutoBalancerV2.unit.t.sol" --match-test "test_stake_main_altFollows|test_claimEmissions" -vvv`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Write the failing `exit()` tests**
+
+```solidity
+function test_exit_returnsBothTokensToSafe_andDeactivates() public {
+    uint256 slotId = _registerSlotWithAlt(false); // main + alt, unstaked
+    _stagePrincipal(2e18, 1e18); // PM holds principal to return on decrease/collect
+
+    vm.prank(admin);
+    lab.exit(slotId, admin);
+
+    // both NFTs burned
+    assertEq(mockPM.burnCallCount(), 2, "main + alt burned");
+    // all underlying returned to `to` (admin)
+    assertGt(tok0.balanceOf(admin), 0, "token0 to Safe");
+    assertGt(tok1.balanceOf(admin), 0, "token1 to Safe");
+    // contract holds no dust
+    assertEq(tok0.balanceOf(address(lab)), 0, "no token0 left");
+    assertEq(tok1.balanceOf(address(lab)), 0, "no token1 left");
+    // slot inactive
+    ( , , , , , , , , , , , , , , , , , , bool active) = lab.positions(slotId); // adjust arity
+    assertFalse(active, "slot deactivated");
+    // no swap
+    assertEq(mockRouter.callCount(), 0, "exit must not swap");
+}
+
+function test_exit_onlyAdmin() public {
+    uint256 slotId = _registerSlotWithAlt(false);
+    vm.prank(rebalancer);
+    vm.expectRevert(); // REBALANCER_ROLE is not DEFAULT_ADMIN_ROLE
+    lab.exit(slotId, rebalancer);
+}
+
+function test_exit_unstakesAndSkimsAero_whenStaked() public {
+    uint256 slotId = _registerSlotWithAlt(true);
+    vm.prank(rebalancer);
+    lab.stake(slotId);
+    mockGauge.setEarnedAmount(4e18);
+    uint256 before = mockAero.balanceOf(feeCollector);
+    vm.prank(admin);
+    lab.exit(slotId, admin);
+    assertGt(mockAero.balanceOf(feeCollector), before, "AERO skimmed on exit");
+}
+```
+
+- [ ] **Step 6: Run, expect FAIL**
+
+Run: `forge test --ffi --match-path "test/LPAutoBalancerV2.unit.t.sol" --match-test test_exit -vvv`
+Expected: FAIL — `exit` not defined.
+
+- [ ] **Step 7: Implement `exit()` (Safe-gated, no swap)**
+
+```solidity
+/// @notice Emergency / migration primitive (spec §3.6). Withdraws all liquidity from
+///         main + alt, burns both NFTs, returns ALL underlying token0/token1 to `to`
+///         (the Safe), marks the slot inactive. Skims any fees/AERO to feeCollector. No swap.
+function exit(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+    ManagedPositionV2 storage p = positions[slotId];
+    if (!p.active) revert NotActive();
+    if (to == address(0)) revert ZeroAddress();
+
+    _exitAll(p); // unstake (skim AERO) + collect fees (skim) + decreaseLiquidity(all) + collect principal + burn both
+
+    uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+    uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+    if (bal0 > 0) IERC20(p.token0).safeTransfer(to, bal0);
+    if (bal1 > 0) IERC20(p.token1).safeTransfer(to, bal1);
+
+    p.mainTokenId = 0;
+    p.altTokenId = 0;
+    p.active = false;
+    emit PositionWithdrawn(slotId, to); // reuse V1 event, or add Exited(slotId, to, bal0, bal1)
+}
+```
+Reuse the `_exitAll` helper from Task 2 (it already unstakes/skims/withdraws/burns both NFTs). `exit` differs from `reset` only in that it forwards the recovered principal to `to` instead of re-minting.
+
+- [ ] **Step 8: Run, expect PASS**
+
+Run: `forge test --ffi --match-path "test/LPAutoBalancerV2.unit.t.sol" --match-test test_exit -vvv`
+Expected: PASS (3 exit tests).
+
+- [ ] **Step 9: Commit**
 
 ```bash
 forge fmt
 git add src/LPAutoBalancerV2.sol test/LPAutoBalancerV2.unit.t.sol
-git commit -m "feat(lpv2): per-pair stake (alt follows main) + claim over both nfts
+git commit -m "feat(lpv2): per-pair stake (alt follows) + claim over both + exit() to Safe
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -609,7 +688,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Self-Review
 
-- **Spec coverage:** §3.1 struct → Task 1; §3.2 reset (no-swap, withdraw/skim/mint-main/value-floor) → Task 2; alt single-sided mint → Task 3; §3.3 per-pair stake → Task 4; §3.4 getDecisionSnapshot V2 → Task 5; §9 adversarial + no-swap assertion + fork integration → Task 6. §4 carryover (registry/migrate/oracle/pause) → reused verbatim in Task 1. §5 drop economics (skim, no compound) → preserved in `_exitAll` (Task 2). §10 migrate-may-swap → untouched from V1.
+- **Spec coverage:** §3.1 struct (no `maxSlippageBps`) → Task 1; §3.2/§3.3 reset (no-swap, withdraw/skim/mint-main/value-floor) → Task 2; alt single-sided mint → Task 3; §3.4 per-pair stake + §3.6 `exit()` → Task 4; §3.5 getDecisionSnapshot V2 → Task 5; §8 adversarial + no-swap assertion + WETH/cbBTC fork integration → Task 6. §4 carryover (registry/oracle/pause) → reused verbatim in Task 1; `SWAP_ROUTER`/`migrate()` **removed** there (no swap in V2). §4 drop economics (skim, no compound) → preserved in `_exitAll` (Task 2). Phase-2 automated migration (§6) builds on `exit()` + future safety rails — out of this plan's scope.
 - **Placeholder scan:** mint `MintParams` field layouts in `_mintBalanced`/`_mintAlt` are shown as commented field lists rather than literal struct constructors, because the exact `ICLPositionManager.MintParams` field order must be copied from V1's working mint call (Task 2 Step 5 / Task 3 Step 3 instruct this explicitly). This is a copy-from-V1 instruction, not an unresolved TODO. All test code is complete.
 - **Type consistency:** `ManagedPositionV2` field names (`mainTokenId`/`mainStaked`/`altTokenId`/`altStaked`) used consistently across reset, stake/unstake, getDecisionSnapshot. `DecisionSnapshotV2` field order matches the centaur decoder update (Plan B Task 2). `ResetParams` fields referenced consistently in `reset`/`_mintBalanced`/`_mintAlt`. Errors (`TwapDeviation`, `Cooldown`, `WidthOutOfBounds`, `ValueFloor`, `NotActive`, `NoGauge`, `AlreadyStaked`, `NotStaked`) reused from V1.
 - **Risk note:** the single-sided alt tick-direction (above vs below current tick for token0 vs token1 surplus) depends on pool token orientation — Task 3 Step 3 flags verifying/flipping against the mock. The Base-fork integration (Task 6) is the real proof the no-swap redeploy conserves principal.

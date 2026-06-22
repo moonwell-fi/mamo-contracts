@@ -3,29 +3,39 @@
 **Date:** 2026-06-17
 **Status:** Design
 **Author:** Ana Julia + Claude
-**Supersedes (for new deployments):** the swap-based `rebalance()` in `docs/superpowers/specs/2026-06-01-lp-auto-balancer-design.md` (V1, PR #54). V1 stays as-is; **V2 is a new contract** (`LPAutoBalancerV2`), not a modification.
-**Off-chain companion:** `centaur-moonwell` `docs/superpowers/specs/2026-06-17-lp-balancer-agent-design.md` (the goal-gated agent; its funnel is updated for V2 — see §8).
+**Off-chain companion:** `centaur-moonwell` `docs/superpowers/specs/2026-06-17-lp-balancer-agent-design.md`
 
-## 1. Why V2 — the IL problem with V1
+## 1. The IL problem
 
-V1 re-ranges by **swapping** to the new range's ratio (decrease → swap surplus leg → mint). Every swap **crystallizes** impermanent loss that was, until then, only on paper — plus swap fees. On a **volatile/stable** pair like MAMO/USDC, divergence is large and frequent, so a swap-based auto-rebalancer can bleed more in realized IL + swap fees than it earns in trading fees + AERO. (Phase-1 deliberately starts on a *correlated* pair — WETH/cbBTC, §7 — where IL is small, to prove the mechanism before touching high-IL pairs.) This is the failure mode Beefy's CLM docs call out for "rebalancing-heavy" ALMs (Gamma/vfat style), where "aggregate IL ... far exceeds earnings."
+V1 re-ranges by swapping to the new range's ratio (decrease → swap surplus leg → mint). Every swap **crystallizes** impermanent loss that was, until then, only on paper — plus swap fees. On a volatile/stable pair like MAMO/USDC, divergence is large and frequent, so a swap-based auto-rebalancer can bleed more in realized IL + swap fees than it earns in trading fees + AERO. (Phase-1 deliberately starts on a correlated pair — WETH/cbBTC, §6 — where IL is small, to prove the mechanism before touching high-IL pairs.) This is the failure mode Beefy's CLM docs call out for "rebalancing-heavy" ALMs (Gamma/vfat style), where "aggregate IL ... far exceeds earnings."
 
-**V2 adopts Beefy CLM's structural fix: never sell on reset.** Excess tokens are redeployed into a single-sided "alt" position instead of swapped. IL is realized only on a true range exit (same as holding), not on every reset.
+**V2 adopts Beefy CLM's structural fix: never sell.** Excess tokens are redeployed into a single-sided "alt" position instead of swapped. IL is realized only on a true range exit (same as holding), not on every reset.
 
 ## 2. The dual-position model (Beefy CLM, adapted)
 
 Each managed slot holds **two** Aerodrome CL position NFTs:
 
 - **`main`** — a balanced (~50/50) position centered on the reference tick at an agent-chosen `width`. Earns trading fees (unstaked) or AERO (staked). This is the workhorse.
-- **`alt`** — a **single-sided** position holding the **excess** token after the main is funded 50/50. Its range sits between the main's overweight boundary and the **nearest valid tick** on the excess side, so it holds only the surplus token and waits to be earned back into balance as price oscillates — **without any swap**.
+- **`alt`** — a single-sided position holding the **excess** token after the main is funded 50/50. Its range sits between the main's overweight boundary and the nearest valid tick on the excess side, so it holds only the surplus token and waits to be earned back into balance as price oscillates — **without any swap**.
 
 When price drifts, the main goes out of balance; on reset we rebuild a fresh 50/50 main and park the (now larger or smaller) excess in a fresh alt. No token is ever sold to do this.
 
-**Width tradeoff (Beefy's caveat):** a too-narrow main is "quickly imbalanced by Range IL, leading to a very large alt position." So `width` is a real decision — wider main ⇒ smaller alt ⇒ more capital earning balanced fees, fewer resets. The off-chain agent picks `width` (§8); the contract bounds it (`minWidth`/`maxWidth`).
+**Why only one alt side.** After a maxed 50/50 main mint, exactly **one** token is left over — never both: "balanced" means depositing the most that fits the range's ratio, which fully consumes one leg and leaves a remainder of the other. A single-sided CL range holds exactly one token (a range entirely above spot is 100% token0; entirely below is 100% token1), so one alt on the surplus side absorbs all of it. A second alt would have nothing to hold. The surplus *side* flips reset-to-reset with price; at any single reset there is only one.
+
+**Width tradeoff (Beefy's caveat):** a too-narrow main is "quickly imbalanced by Range IL, leading to a very large alt position." So `width` is a real decision — wider main ⇒ smaller alt ⇒ more capital earning balanced fees, fewer resets. The off-chain agent picks `width` (§7); the contract bounds it (`minWidth`/`maxWidth`).
 
 ## 3. Contract: `LPAutoBalancerV2`
 
-`AccessControlEnumerable`, `ReentrancyGuard`, `Pausable`, `IERC721Receiver`. Solidity 0.8.28, BUSL-1.1. **Reuses V1 verbatim** for everything that isn't the rebalance path: the role model (`DEFAULT_ADMIN_ROLE`=Safe, `MANAGER_ROLE`, `REBALANCER_ROLE`, `GUARDIAN_ROLE`), the `slotId` registry, immutables (`POSITION_MANAGER`, `SWAP_ROUTER` — retained only for `migrate`, `QUOTER`, `AERO`), the TWAP helper `_consultTwapTick`, the Chainlink value-floor oracle plumbing, `collectFees`, `claimEmissions`, `migrate` (still Safe-gated, still allowed to swap — it's a rare human-reviewed action), `recover*`, pause. **The swap-based `rebalance()` is removed** and replaced by `reset()`.
+The contract implements standard security protocols including `AccessControlEnumerable`, `ReentrancyGuard`, `Pausable`, and `IERC721Receiver` (Solidity 0.8.28, BUSL-1.1). It uses a role-based access model: `DEFAULT_ADMIN_ROLE` (assigned to the Safe), `MANAGER_ROLE`, `REBALANCER_ROLE`, and `GUARDIAN_ROLE`.
+
+The architecture is built on the following core components:
+
+- **Registry & position management:** tracks positions via a `slotId` registry, using the `POSITION_MANAGER`, `QUOTER`, and `AERO` interfaces. **No swap router** — V2 never swaps, on any path.
+- **Oracles & pricing:** the `_consultTwapTick` helper and Chainlink oracles enforce the value-floor checks.
+- **Core administrative functions:** `collectFees`, `claimEmissions`, `recover*` utilities, and pause.
+- **Operational mechanisms:**
+  - **`reset()`** — the primary operational function that rebuilds the dual position **without performing any token swap**, minimizing impermanent-loss impact.
+  - **`exit()`** — a protected, Safe-gated function that withdraws all liquidity from both the main and alt positions, burns the NFTs, and returns all underlying tokens to the Safe. This replaces V1's `migrate()`: V2 has no swap router, so cross-pool moves are done as exit-to-Safe + redeploy, never an in-contract swap.
 
 ### 3.1 State
 
@@ -41,12 +51,11 @@ struct ManagedPositionV2 {
     bool    mainStaked;         // main NFT staked in gauge
     bool    altStaked;          // alt NFT staked in gauge
     address feeCollector;       // skim destination (DropAutomation)
-    address oracle0;            // Chainlink feeds for the value floor (per-leg, from V1)
+    address oracle0;            // Chainlink feeds for the value floor (per-leg)
     address oracle1;
     uint24  minWidth;           // bounds on main width (tick units)
     uint24  maxWidth;
     uint24  maxCenterDeviation; // main center must be within N ticks of reference
-    uint16  maxSlippageBps;     // retained for migrate() only
     uint32  twapWindow;         // calm-gate + value-floor TWAP fallback
     int24   maxTickDeviation;   // calm gate: |spot - twap| <= this
     uint16  maxRebalanceLossBps;// value floor (sanity guard under no-swap)
@@ -58,43 +67,44 @@ struct ManagedPositionV2 {
 mapping(uint256 slotId => ManagedPositionV2) public positions;
 ```
 
-> **No `swapPolicy`/`protectedToken`.** V1 needed them to constrain which leg the swap could sell. V2 never swaps on reset, so they are gone. (`migrate` still swaps but is Safe-reviewed.)
+**No `swapPolicy`/`protectedToken`/`maxSlippageBps`.** Swap-related policy and the slippage cap are omitted because no swap ever occurs — not in `reset`, not in `exit`.
 
 ### 3.2 `reset(uint256 slotId, ResetParams params)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`
 
 ```solidity
 struct ResetParams {
-    uint24  width;              // desired main width; contract centers + aligns + bounds-checks
-    uint256 amount0MinMain;     // mint sandwich guards (main)
+    uint24  width;              // chosen main width; centers + aligns + bounds-checks
+    uint256 amount0MinMain;     // sandwich protection for balanced mint
     uint256 amount1MinMain;
-    uint256 amount0MinAlt;      // mint sandwich guard (alt, single-sided => one is 0)
+    uint256 amount0MinAlt;      // sandwich protection for single-sided alt
     uint256 amount1MinAlt;
-    uint256 amount0MinWithdraw; // decrease sandwich guards
+    uint256 amount0MinWithdraw; // sandwich protection for principal withdrawal
     uint256 amount1MinWithdraw;
     uint256 deadline;
 }
 ```
 
-Execution (no swap):
-1. **Cooldown**: `require(block.timestamp >= lastRebalance + minRebalanceInterval)`.
-2. **Calm gate**: read spot tick (`slot0`) + TWAP tick (`_consultTwapTick`); `require(|spot - twap| <= maxTickDeviation)` else revert `TwapDeviation`. TWAP tick is the **reference tick**.
-3. **Read pricing oracle** (Chainlink per-leg if set, else pool TWAP) — held once for both value snapshots.
-4. **Snapshot pre-value**: value `main`+`alt` principal at the oracle price → `valueBefore`.
-5. **Unstake** main (and alt) if staked; `gauge.withdraw` auto-claims AERO → skim to `feeCollector` (emit `EmissionsClaimed`).
-6. **Collect fees** from main+alt (`collect(max,max)` before decreasing) → skim to `feeCollector` (emit `FeesSkimmed`). Fees excluded from the value comparison.
-7. **Withdraw all**: `decreaseLiquidity(all)` + `collect` principal from both NFTs; **burn** both old NFTs. Contract now holds token0+token1.
-8. **Compute main range** from reference tick + `width` (reuse V1's `_alignedRange`): bounds-check `minWidth<=width<=maxWidth`, `|center-reference|<=maxCenterDeviation`.
-9. **Mint main 50/50**: compute the balanced amounts that fit `[tickLower,tickUpper]` at the oracle price (`LiquidityAmounts`), mint with `amount{0,1}MinMain`. Record `mainTokenId`.
-10. **Mint alt single-sided** with the **leftover** token (whichever leg has surplus after the main): range from the main's overweight boundary to the nearest aligned tick on that side; mint with `amount{0,1}MinAlt` (the zero-leg min is 0). If leftover is dust (below a threshold) skip the alt (`altTokenId = 0`) and forward dust to `feeCollector`. **No swap.**
-11. **Restake** per the agent's decision (carried in prior state / params): if main was staked, `gauge.deposit(mainTokenId)`; alt follows main's state (`altStaked = mainStaked` when alt exists and `gauge != 0`). Emit `Staked`.
-12. **Value floor (sanity)**: `valueAfter` = main+alt principal at the same oracle observation; `require(valueAfter >= valueBefore * (BPS - maxRebalanceLossBps)/BPS)`. Under no-swap this only catches mint rounding / a manipulated reference tick / a lopsided mint — defense-in-depth.
-13. `lastRebalance = block.timestamp`; emit `Reset(slotId, mainTokenId, altTokenId, tickLower, tickUpper)`.
+### 3.3 Core operational flow (the reset loop)
 
-### 3.3 Stake / unstake (per-pair)
+1. **Cooldown validation:** ensures `block.timestamp` has surpassed `lastRebalance + minRebalanceInterval`.
+2. **Calm gate:** compares the `slot0` spot tick against `_consultTwapTick`; if the delta exceeds `maxTickDeviation`, reverts with `TwapDeviation`. The TWAP serves as the **reference tick**.
+3. **Oracle pricing:** captures the market rate (preferring Chainlink per-leg feeds over pool TWAP) to be used consistently across both valuation checkpoints.
+4. **Pre-reset snapshot:** calculates `valueBefore` by pricing the principal in the main and alt positions at the captured oracle rate.
+5. **Unstake & harvest:** removes NFTs from the gauge; `gauge.withdraw` triggers an AERO claim which is skimmed to `feeCollector`, firing `EmissionsClaimed`.
+6. **Fee collection:** `collect(max,max)` on both positions, skimming trading fees to `feeCollector` and emitting `FeesSkimmed`. Fees are excluded from the value-floor check.
+7. **Liquidity withdrawal:** `decreaseLiquidity(all)` then burns both existing NFTs. Underlying `token0`/`token1` are now held by the contract.
+8. **Range calculation:** `_alignedRange` from the reference tick + provided `width`; strictly enforces `minWidth`/`maxWidth` and `maxCenterDeviation`.
+9. **Main mint:** `LiquidityAmounts` mints a balanced 50/50 position within `[tickLower, tickUpper]` at the oracle price with the slippage mins. A new `mainTokenId` is assigned.
+10. **Alt mint:** deploys the surplus leg into a single-sided range from the main's overweight boundary to the nearest aligned tick. If the remainder is dust, it is forwarded to `feeCollector` and `altTokenId` stays 0. **No swap occurs.**
+11. **Restaking:** the main is redeposited into the gauge if the agent's decision requires it; the alt inherits that state. Emits `Staked`.
+12. **Sanity value floor:** verifies `valueAfter` (total principal) ≥ `valueBefore * (BPS - maxRebalanceLossBps)/BPS`. Final defense against mint rounding or reference-tick manipulation.
+13. `lastRebalance = block.timestamp`; emits `Reset(slotId, mainTokenId, altTokenId, tickLower, tickUpper)`.
 
-`stake(slotId)` / `unstake(slotId)` operate on the **main**, and the **alt follows**: when `altTokenId != 0` and `gauge != 0`, the alt is staked/unstaked alongside. The agent decides the main's stake state (AERO-vs-fees, §8); the alt is a transient buffer that inherits it. (A single-sided alt may sit outside the gauge's active range and earn little AERO — acceptable; it is short-lived between resets and the bookkeeping stays simple.)
+### 3.4 Stake / unstake (per-pair)
 
-### 3.4 `getDecisionSnapshot(uint256 slotId)` — view (extended for V2)
+`stake(slotId)` / `unstake(slotId)` operate on the **main**, and the **alt follows**: when `altTokenId != 0` and `gauge != 0`, the alt is staked/unstaked alongside. The agent decides the main's stake state (AERO-vs-fees, §7); the alt is a transient buffer that inherits it. (A single-sided alt may sit outside the gauge's active range and earn little AERO — acceptable; it is short-lived between resets and the bookkeeping stays simple.)
+
+### 3.5 `getDecisionSnapshot(uint256 slotId)` — view (extended for V2)
 
 ```solidity
 struct DecisionSnapshotV2 {
@@ -118,61 +128,65 @@ struct DecisionSnapshotV2 {
 function getDecisionSnapshot(uint256 slotId) external view returns (DecisionSnapshotV2 memory);
 ```
 
-Built like V1's (a single consistent chain read for the agent's gather + the completion gate), extended with the alt fields. `mainInRange == false` is the primary reset signal; `altLiquidity` large relative to `mainLiquidity` is the divergence/"width too narrow" signal.
+A consolidated, atomic on-chain view for the agent's discovery and completion stages, augmented with alt-position data. `mainInRange == false` is the primary reset signal; a large `altLiquidity` relative to `mainLiquidity` is a diagnostic for persistent divergence or an overly restrictive width.
 
-## 4. What carries over from V1 unchanged
+### 3.6 `exit(uint256 slotId, address to)` — `onlyRole(DEFAULT_ADMIN_ROLE)`, `nonReentrant`
 
-Roles, registry (`registerPosition`/`deregisterPosition`/`withdrawPosition`), caps, `collectFees`, `claimEmissions`, the Chainlink value-floor plumbing + staleness, `_consultTwapTick`, `_alignedRange`/`_floorAlign`, `migrate` (Safe-gated, may still swap), `recoverERC20`/`recoverETH`, pause/guardian, `onERC721Received` (now accepts the two NFTs per slot). The trust model is identical: `REBALANCER_ROLE` is bounded by calm gate + cooldown + width bounds + value floor; migrations stay Safe-gated.
+Safe-gated emergency / migration primitive. Unstakes both NFTs if staked (skimming AERO to `feeCollector`), collects fees, `decreaseLiquidity(all)`, burns both NFTs, and transfers **all** underlying `token0`/`token1` to `to` (the Safe). Marks the slot inactive. No swap — the Safe decides what to do with the returned tokens (e.g. redeploy into a new pool). This is the seam that Phase-2 (§6) automates behind safety rails.
 
-## 5. Fees / AERO / drop economics — unchanged
+## 4. Fees / AERO / drop economics
 
-Fees (unstaked) and AERO (staked) are skimmed to `feeCollector` (`DropAutomation`) on every reset / `collectFees` / `claimEmissions`. **No compounding** — fees+AERO feed the weekly drop, exactly as V1. The no-swap change is about **principal** redeployment only; it does not touch the drop pipeline.
+Fees (unstaked) and AERO (staked) are skimmed to `feeCollector` (`DropAutomation`) on every `reset` / `collectFees` / `claimEmissions`. **No compounding** — fees + AERO feed the weekly drop.
 
-## 6. Value floor under no-swap
+## 5. Value floor under no-swap
 
-V1's value floor was the primary bound on per-rebalance market loss (the swap). V2 removes the swap, so the dominant IL-crystallization source is gone. The floor is retained as a **sanity guard**: it catches mint-ratio rounding, a manipulated reference tick that would mint a lopsided main, or a buggy `LiquidityAmounts` computation. It should pass with wide headroom on a healthy reset; a failure means something is structurally wrong, and reverting is correct.
+In V1, the value floor was the fundamental constraint on realized market loss during rebalancing (the swap). Since V2 eliminates the swap entirely, the primary cause of crystallized IL is removed. The floor is preserved as a **sanity guard**: it intercepts mint-ratio rounding, reference-tick manipulation that might skew the main, or structural flaws in `LiquidityAmounts`. During standard operation it resolves with significant margin; any failure indicates a structural anomaly where an immediate revert is the intended behavior.
 
-## 7. Scope & phasing (revised 2026-06-18)
+## 6. Scope & phasing
 
-The roadmap is now two phases of improved yield generation:
+Two phases of improved yield generation:
 
-### Phase-1 (short term) — prove the rebalancer on WETH/cbBTC
+### Phase-1 (immediate) — validate the no-swap model on WETH/cbBTC
 
-- **Single position: WETH/cbBTC** — a **correlated** pair (low IL), with a live Aerodrome CL **gauge** (farms AERO). Deliberately chosen as the first managed position because: (a) correlated ⇒ a tiny alt and minimal IL, so any bug in the no-swap `reset` surfaces as mechanics-wrong rather than being masked by large divergence; (b) it exercises the AERO-stake path; (c) we hold little WETH/cbBTC, so TVL-at-risk while proving the rebalancer is small.
-- **It replaces MAMO/USDC as the first position.** The existing MAMO pools (in `TransferAndEarn`) are **left untouched** in this phase.
-- **Funding is a Safe/FPS setup step, off the rebalancer (§ trust model, V1 §8):** governance sells a portion of the **underperforming** `TransferAndEarn` assets into **WETH + cbBTC**, mints a WETH/cbBTC CL position from those balances **externally** (the position doesn't pre-exist as a held NFT), transfers the NFT into `LPAutoBalancerV2`, and calls `registerPosition` (gauged, per-leg Chainlink oracles for WETH/USD + cbBTC/USD). The autonomous `REBALANCER_ROLE` only ever `reset`/`stake`/`unstake`/`claimEmissions` — **it never does the selling**, because selling is the value-moving action the trust model keeps on the Safe.
-- Goal: confirm the no-swap `reset` conserves principal on real liquidity and the AERO-stake decision works, at small TVL, before scaling.
+- **Initial pair: WETH/cbBTC** — a highly correlated pair (minimal IL) with a live Aerodrome CL **gauge** for AERO emissions. The strategic starting point because: (a) correlation ⇒ a compact alt and negligible IL, so mechanical failures in the reset logic surface without being masked by price divergence; (b) it validates the AERO-staking integration; (c) the small initial allocation limits TVL-at-risk during proof-of-concept.
+- **Displaces MAMO/USDC** as the primary testbed. MAMO-incentivized pools in `TransferAndEarn` remain unaltered this phase.
+- **Funding via Safe (external to the agent, § trust model):** governance liquidates lagging `TransferAndEarn` holdings into **WETH + cbBTC**, mints the initial WETH/cbBTC NFT manually (off-contract), transfers the NFT to `LPAutoBalancerV2`, and calls `registerPosition` with active gauging and Chainlink price feeds (WETH/USD + cbBTC/USD). `REBALANCER_ROLE` is restricted to `reset`/`stake`/`unstake`/`claimEmissions` — it has **no sell capability**; the trust model centralizes all value-shifting in the Safe.
+- **Goal:** verify the no-swap reset preserves principal through real market shifts and the automated stake/unstake logic is sound, before broader deployment.
 
 ### Phase-2 (long term) — automated cross-pool migration into the best pair
 
-- Automate moving liquidity between pools: **sell the weaker pair's assets and rebalance into a higher-performing pair (e.g. MAMO/VVV) regularly.** This promotes V1's `migrate()` from human/Safe-gated to **agent-driven** — the same capability §8/§10 deliberately kept manual, because an open-destination swap can be defeated by a fabricated-TWAP pool.
-- **Automation prerequisites (the safety rails that make it possible):** an **allowlist of governance-registered destination pools**; a **Chainlink-priced value floor on both legs** of the destination (no thin-pool TWAP trusted as the price); a **min-TVL / min-depth** gate; and a per-migration **value floor + cooldown** like `reset`. Only with these does the open-destination risk become a bounded one the agent can drive. MAMO/VVV specifically needs a usable price feed (or to be allowlisted with a Chainlink-priced floor) before it is an automated destination.
-- The off-chain agent gains a **migration-decision capability** (LpSugar/DefiLlama pool scoring → ranked destinations → execute within the allowlist), building on the §8 discovery funnel.
+- **Automated inter-pool migration:** systematically liquidate positions in underperforming pairs and redeploy into higher-yield opportunities (e.g. MAMO/VVV). This transitions **`exit()`** from a manual, Safe-gated operation to an agent-driven workflow. Previously restricted due to open-destination swap / TWAP-manipulation risk; V2 introduces the infrastructure to bridge the gap.
+- **Migration safety rails (deployment prerequisites):** a governance-sanctioned **allowlist** of destination pools, mandatory **Chainlink-based value floors for both assets** (never a potentially-compromised pool TWAP), and **min-TVL / liquidity-depth** gates. Each move inherits the cooldown + value-floor protections from `reset`. Automated migration stays blocked until a robust price feed or allowlist entry is secured (MAMO/VVV included).
+- The off-chain companion gains a **migration-decision capability** using LpSugar + DefiLlama for pool scoring, ranking destinations and executing within the approved allowlist — extending the core discovery funnel.
 
 ### Out of scope (both phases)
 
-veAERO; compounding (fees+AERO feed the drop); the locked `BurnAndEarn` MAMO/VIRTUALS LP; **autonomous migration without the phase-2 safety rails above**.
+veAERO; compounding (fees + AERO feed the drop); the locked `BurnAndEarn` MAMO/VIRTUALS LP; **autonomous migration without the Phase-2 safety rails above**.
 
-## 8. Off-chain agent changes (companion spec §3, §4)
+## 7. Off-chain agent
 
-The goal-gated agent and its funnel are mostly unchanged; the deltas:
-- The **`rebalance` candidate becomes `reset`**. The funnel's IL-crystallization-vs-fee-gain scoring is **dropped** — under no-swap a reset is cheap in IL terms, so the candidate is simply: offer `reset` when `mainInRange == false` AND `deviationGateOpen` AND `cooldownRemaining == 0`.
-- The agent's remaining real judgment narrows to **main `width`** (the alt-size tradeoff) and **stake-vs-fees** — the dangerous swap-timing call is gone from its hands.
-- The **completion gate** reads `DecisionSnapshotV2` and verifies the mechanical clauses: `mainInRange`, no unswept fees/AERO, `mainStaked` matches the agent's `DECISION:` line. A persistently bloated `altLiquidity` (divergence the resets can't tame) is surfaced as a `GOAL NOT MET: alt position oversized — widen main` hint and/or a circuit-breaker alert.
-- The eth_call decoder decodes `DecisionSnapshotV2` (more fields; same all-static-tuple layout).
+The off-chain companion is a goal-gated agent governing the liquidity lifecycle. It uses a continuous discovery funnel to keep positions aligned with market shifts **without ever triggering a swap**.
 
-## 9. Testing
+**Discovery funnel.** The agent runs a persistent loop, inspecting position health via the `DecisionSnapshotV2` view. Execution follows a strict heuristic:
 
-- **Reset (unit, mocks):** out-of-range → `reset(width)` rebuilds a 50/50 main + single-sided alt with **no swap call** (assert the router is never invoked on the reset path); fees/AERO skimmed; both old NFTs burned; new `mainTokenId`/`altTokenId` set; value floor passes; dust forwarded; alt skipped when leftover is dust.
+- **Reset candidacy:** a `reset()` is offered only when health criteria align — the main is out of range (`mainInRange == false`), the calm gate confirms price stability (`deviationGateOpen == true`), and `cooldownRemaining == 0`.
+- **Parameter choice:** the agent's primary mandate is picking `width` — balancing capital efficiency (narrower concentrates liquidity) against the resulting alt size. It also selects the staking strategy: unstaked (fees) vs staked (AERO emissions).
+
+**Completion gate & diagnostics.** After `reset()`, the agent enters a completion gate to verify mechanical success against an **independent** chain re-read:
+
+- **State alignment:** confirms the main is in range and the staking state matches the decision intent.
+- **Asset reconciliation:** verifies trading fees and AERO were skimmed to `feeCollector`.
+- **Diagnostic analysis:** monitors `altLiquidity`. Since V2 never sells on reset, a bloated alt is a diagnostic for persistent divergence — if alt liquidity grows too large relative to the main, the agent flags `GOAL NOT MET`, indicating the width is too restrictive.
+
+This feedback loop lets the agent autonomously adapt to volatility while safeguarding principal across the position lifecycle. (Full agent design — goal-gated turn loop, sandbox-`cast` execution, `eth_call` gate, circuit-breaker — in the companion spec.)
+
+## 8. Testing
+
+- **Reset (unit, mocks):** out-of-range → `reset(width)` rebuilds a 50/50 main + single-sided alt with **no swap call** (assert no router exists / is never invoked); fees/AERO skimmed; both old NFTs burned; new `mainTokenId`/`altTokenId` set; value floor passes; dust forwarded; alt skipped when leftover is dust.
 - **Calm gate / cooldown / width bounds / value-floor / stale-oracle** — ported from V1.
-- **Stake/unstake (per-pair):** main staked → alt follows; unstake roundtrip; `claimEmissions` sums both.
-- **getDecisionSnapshot V2:** main+alt ranges, `mainInRange`, `hasAlt`, `altLiquidity`, `cooldownRemaining`, `deviationGateOpen`, staked path `earnedAero` (try/catch).
-- **Adversarial:** manipulated spot (calm gate reverts), lopsided forced mint (value floor reverts), pre-cooldown, mint sandwich bounded by min-amounts. **Assert no swap path exists in `reset`** (the IL-defining property).
-- **Integration (Base fork):** register the real MAMO/USDC position, push tick out of range, `reset` → assert dual-position rebuilt without selling, principal preserved within rounding, fees/AERO to `DropAutomation`.
-- **FPS proposal test:** deploy `LPAutoBalancerV2`, move the MAMO/USDC NFT in, register, validate.
-
-## 10. Migration note
-
-`migrate` (Safe-gated) is retained from V1 and **may still swap** — it is a rare, human-reviewed action for moving into a different pool, where a one-time swap is acceptable and value protection is the human review. Only the autonomous `reset` path is swap-free.
-
-**Phase-2 automation (long term).** The roadmap (§7) automates this: agent-driven migration that sells a weaker pair's assets and rebalances into a higher-performing pair (e.g. MAMO/VVV). That requires hardening `migrate` for autonomous use — an **allowlist** of governance-registered destinations, a **Chainlink-priced value floor on both destination legs** (never a thin-pool TWAP), a **min-TVL/min-depth** gate, plus a per-call value floor + cooldown. With those rails the open-destination manipulation risk that forces `migrate` to be manual today becomes bounded, and the `REBALANCER_ROLE` agent can drive it within the allowlist. Until the rails exist, `migrate` stays Safe-gated. This is a **future contract change** (a new `migrateAllowlisted` path or a `migrate` overload), not part of the phase-1 `LPAutoBalancerV2` build.
+- **Stake/unstake (per-pair):** main staked → alt follows; unstake roundtrip; `claimEmissions` sums both NFTs.
+- **`exit` (Safe-gated):** non-admin reverts; admin withdraws both NFTs, burns them, returns all `token0`/`token1` to `to`, marks slot inactive, skims fees/AERO; no swap.
+- **getDecisionSnapshot V2:** main+alt ranges, `mainInRange`, `hasAlt`, `altLiquidity`, `cooldownRemaining`, `deviationGateOpen`, staked-path `earnedAero` (try/catch).
+- **Adversarial:** manipulated spot (calm gate reverts), lopsided forced mint (value floor reverts), pre-cooldown, mint sandwich bounded by min-amounts. **Assert no swap path exists** anywhere in the contract (the IL-defining property).
+- **Integration (Base fork):** bootstrap the real WETH/cbBTC position (mint from held WETH+cbBTC, transfer NFT in, register gauged with WETH/USD + cbBTC/USD oracles), push the tick out of range, `reset(width)` → assert dual-position rebuilt **without selling** (token0/token1 balances conserved within mint rounding, zero router calls), fees/AERO to `DropAutomation`, `mainInRange == true` after, old NFTs burned, `Reset` emitted.
+- **FPS proposal test:** deploy `LPAutoBalancerV2`, run the Safe setup (sell → mint → transfer → register), validate.
