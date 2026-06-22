@@ -35,11 +35,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant MAX_LOSS_CAP_BPS = 500;
 
-    /// @notice Minimum surplus (in the surplus token's own base units, i.e. raw token amount,
-    ///         NOT USD) required to mint the single-sided alt. Below this the leftover is treated
-    ///         as dust and forwarded to the feeCollector instead — a sub-tick remainder too small
-    ///         to seed a position would revert the mint or round to zero liquidity. 1e6 base units.
-    uint256 public constant ALT_DUST = 1e6;
+    /// @notice Minimum USD value of the surplus leg required to mint the single-sided alt.
+    ///         Scale is 8-decimal USD (Chainlink convention), the same scale `_valueInUsd`
+    ///         returns. Below this the leftover is treated as dust and forwarded to the
+    ///         feeCollector instead — a sub-tick remainder too small to seed a position would
+    ///         revert the mint or round to zero liquidity. MUST be a USD threshold, never raw
+    ///         base units: the phase-1 pair is WETH (18-dec) / cbBTC (8-dec), so a flat raw
+    ///         threshold means wildly different USD amounts per leg. 1e6 = $0.01.
+    uint256 public constant MIN_ALT_VALUE_USD = 1e6;
 
     INonfungiblePositionManager public immutable POSITION_MANAGER;
     address public immutable AERO;
@@ -392,9 +395,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         4.  Width bounds check; compute spot-centered aligned range.
     ///         5.  _mintBalanced: mint new main from contract balances (PM consumes the
     ///             in-ratio portion; leftover stays in the contract).
-    ///         6.  Value-floor gate on the new main principal.
-    ///         7.  Forward leftover dust → feeCollector (Task 3 replaces this with the alt mint).
-    ///         8.  Restake the new main if the old main was staked.
+    ///         6.  _mintAlt: mint the single-sided alt from the surplus leg (selected by USD
+    ///             VALUE), parking it one tickSpacing outside the main range. Forwards NO dust.
+    ///         7.  Value-floor gate: valueAfter = new main + alt + loose contract balances
+    ///             (_contractPairValue), so nothing escapes the floor as "dust".
+    ///         8.  Forward the genuine sub-threshold remainder → feeCollector (AFTER the floor).
+    ///         9.  Restake the new main if the old main was staked.
     function reset(uint256 slotId, ResetParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -431,18 +437,26 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         p.mainStaked = false; // freshly minted, not yet staked
         p.lastRebalance = block.timestamp;
 
-        // Mint the single-sided alt from the post-mint leftover (NO SWAP). _mintAlt forwards
-        // true sub-tick dust to the feeCollector and returns 0 when the leftover is below ALT_DUST.
+        // Mint the single-sided alt from the post-mint leftover (NO SWAP). _mintAlt selects the
+        // surplus leg by USD VALUE, returns 0 (minting nothing) when the surplus is below
+        // MIN_ALT_VALUE_USD, and — critically — does NOT forward dust. The value floor below must
+        // see all value the contract controls BEFORE anything is shipped out as "dust".
         // Set altTokenId BEFORE the value-floor read so _altValue sees the new alt.
-        p.altTokenId = _mintAlt(p, tl, tu, params);
+        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params);
 
-        // value AFTER: new main principal + alt principal at the same sqrtP snapshot. The alt
-        // captures the imbalanced surplus on-chain, so an imbalanced withdrawal is not counted
-        // as loss and does not spuriously trip the value floor.
-        uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+        // value AFTER: new main principal + alt principal at the same sqrtP snapshot, PLUS the
+        // USD value of any loose token0/token1 still held by this contract (_contractPairValue).
+        // Counting the loose balance is the key invariant: a non-trivial surplus cannot escape the
+        // floor by being forwarded as "dust" — if it's real value it is either in the alt (counted)
+        // or loose (counted) at floor time. Only sub-threshold dust leaves, and only AFTER this check.
+        uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1)
+            + _contractPairValue(p, dec0, dec1);
         if (valueAfter < FullMath.mulDiv(valueBefore, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)) {
             revert ValueFloor();
         }
+
+        // Floor passed: only NOW forward the genuine sub-threshold remainder to the feeCollector.
+        _forwardDust(p);
 
         if (wasStaked && p.gauge != address(0)) {
             POSITION_MANAGER.approve(p.gauge, newMain);
@@ -548,28 +562,43 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     /// @dev Mint a single-sided `alt` position from the post-main-mint leftover (NO SWAP). The
-    ///      surplus leg is whichever token the balanced main mint did not fully consume; it is
-    ///      parked in a one-tickSpacing-wide range that holds ONLY that token, so no swap is
-    ///      needed. Returns 0 (and forwards the leftover to the feeCollector) when the surplus is
-    ///      below ALT_DUST — a sub-tick remainder too small to seed liquidity.
+    ///      surplus leg is whichever token holds the most USD VALUE (NOT raw base units) — the
+    ///      legs may have different decimals (phase-1 pair: WETH 18-dec / cbBTC 8-dec), so comparing
+    ///      raw balances would almost always pick the higher-decimal leg regardless of real value.
+    ///      The surplus leg is parked in a one-tickSpacing-wide range that holds ONLY that token, so
+    ///      no swap is needed. Returns 0 (minting nothing) when the surplus leg's USD value is below
+    ///      MIN_ALT_VALUE_USD — a sub-tick remainder too small to seed liquidity.
+    ///
+    ///      NOTE: this function does NOT forward dust. The caller (`reset`) must run the value floor
+    ///      AFTER this returns — counting both the freshly minted alt and any loose contract balance
+    ///      via `_contractPairValue` — and only THEN forward the genuine sub-threshold remainder.
+    ///      Forwarding here would let a non-trivial surplus escape the floor as "dust".
     ///
     ///      Orientation (Slipstream/Uniswap: price = token1/token0, ticks increase with price):
     ///      a range strictly ABOVE spot holds only token0; strictly BELOW holds only token1
     ///      (see LiquidityAmounts.getAmountsForLiquidity branches). Therefore:
     ///        - token0 surplus => range ABOVE the main upper:  [mainTu, mainTu + tickSpacing]
     ///        - token1 surplus => range BELOW the main lower:  [mainTl - tickSpacing, mainTl]
-    ///      After minting, any sub-tick remainder is swept to the feeCollector.
-    function _mintAlt(ManagedPositionV2 storage p, int24 mainTl, int24 mainTu, ResetParams calldata params)
-        private
-        returns (uint256 altId)
-    {
+    function _mintAlt(
+        ManagedPositionV2 storage p,
+        int24 mainTl,
+        int24 mainTu,
+        uint8 dec0,
+        uint8 dec1,
+        ResetParams calldata params
+    ) private returns (uint256 altId) {
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
         uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
-        bool surplus0 = bal0 >= bal1;
-        uint256 surplus = surplus0 ? bal0 : bal1;
-        if (surplus < ALT_DUST) {
-            _forwardDust(p);
-            return 0;
+
+        // Value each leg in USD (8-decimal scale) from its own oracle. Pass the other amount as 0
+        // so each call values exactly one leg. Selection is by USD value, never raw base units.
+        uint256 value0 = _valueInUsd(bal0, 0, p.oracle0, p.oracle1, dec0, dec1);
+        uint256 value1 = _valueInUsd(0, bal1, p.oracle0, p.oracle1, dec0, dec1);
+
+        bool surplus0 = value0 >= value1;
+        uint256 surplusValue = surplus0 ? value0 : value1;
+        if (surplusValue < MIN_ALT_VALUE_USD) {
+            return 0; // genuine dust: caller forwards it after the value floor.
         }
 
         int24 altTl;
@@ -600,9 +629,6 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             sqrtPriceX96: 0 // pool already initialized
         });
         (altId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
-
-        // sweep any sub-tick remainder the alt mint did not consume.
-        _forwardDust(p);
     }
 
     // ─── shared private helpers ───────────────────────────────────────────────

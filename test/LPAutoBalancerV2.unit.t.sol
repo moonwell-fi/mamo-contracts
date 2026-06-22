@@ -10,6 +10,7 @@ import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -53,6 +54,9 @@ contract MockPositionManagerV2 {
     uint256 public lastMintedTokenId;
     uint256 public mintCallCount;
     bool public pullOnMint;
+    // tick range of the most recent mint (used to assert which side the alt was placed on).
+    int24 public lastMintTickLower;
+    int24 public lastMintTickUpper;
 
     struct PositionData {
         int24 tickLower;
@@ -218,6 +222,8 @@ contract MockPositionManagerV2 {
             liquidity = nextMintLiquidity;
         }
         lastMintedTokenId = tokenId;
+        lastMintTickLower = params.tickLower;
+        lastMintTickUpper = params.tickUpper;
         if (pullOnMint) {
             // Model a price-1 in-ratio mint: consume min(desired0, desired1) of BOTH tokens.
             // The balanced main mint then leaves only the genuine surplus leg behind, which the
@@ -237,6 +243,27 @@ contract MockPositionManagerV2 {
 // ─────────────────────────────────────────────────────────────────────────────
 // MockCLPoolV2 — configurable slot0 + observe
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// MockERC20Decimals — ERC20 with a configurable decimals() (default OZ MockERC20 is
+// fixed at 18). Used to model the real phase-1 pair: cbBTC (8-dec) / WETH (18-dec),
+// so the value-based leg selection and USD dust threshold can be exercised.
+// ─────────────────────────────────────────────────────────────────────────────
+contract MockERC20Decimals is ERC20 {
+    uint8 private immutable _decimals;
+
+    constructor(string memory name, string memory symbol, uint8 decimals_) ERC20(name, symbol) {
+        _decimals = decimals_;
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _decimals;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
 contract MockCLPoolV2 is ICLPool {
     uint160 public sqrtPX96;
     int24 public currentTick;
@@ -716,5 +743,174 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.reset(slotId, _defaultResetParams());
         (bool mainStaked,) = _readStakeFlags(slotId);
         assertTrue(mainStaked, "main restaked after reset"); // covers the wasStaked branch
+    }
+
+    // ─── reset() — Task 3 HIGH fix: value-based leg selection + USD dust + floor-counts-loose ──
+    //
+    // These tests model the REAL phase-1 pair: token0 = cbBTC-like (8-dec, high $/unit) and
+    // token1 = WETH-like (18-dec, lower $/unit). Dedicated tokens/pool/PM/oracles are spun up so
+    // the shared price-1 fixtures (and the tests above) are untouched.
+
+    MockERC20Decimals dtok0; // cbBTC-like, 8 decimals
+    MockERC20Decimals dtok1; // WETH-like, 18 decimals
+    MockPositionManagerV2 dPM;
+    MockCLPoolV2 dPool;
+    LPAutoBalancerV2 dLab;
+    address dOracle0; // cbBTC/USD: $65,000 (8-dec)
+    address dOracle1; // WETH/USD:  $2,500  (8-dec)
+
+    uint256 constant D_MAIN_ID = 100;
+    uint256 constant D_NEW_ID = 101;
+    uint256 constant D_ALT_ID = 102;
+
+    /// @dev Spin up an independent mixed-decimal fixture (cbBTC/WETH) and register a slot on a
+    ///      fresh balancer instance. pullOnMint=false: the main mint consumes nothing, so the
+    ///      loose contract balances at _mintAlt time equal exactly the staged principal — giving
+    ///      the test direct control over each leg's raw amount (and therefore its USD value).
+    function _setupMixedSlot(uint256 lossBps) internal returns (uint256 slotId) {
+        dtok0 = new MockERC20Decimals("cbBTC", "cbBTC", 8);
+        dtok1 = new MockERC20Decimals("WETH", "WETH", 18);
+        dPM = new MockPositionManagerV2(address(0));
+        dPool = new MockCLPoolV2();
+        // $65,000 cbBTC and $2,500 WETH, both 8-decimal feeds (Chainlink convention).
+        dOracle0 = address(new MockPriceFeed(65_000e8, 8, block.timestamp));
+        dOracle1 = address(new MockPriceFeed(2_500e8, 8, block.timestamp));
+
+        dLab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, address(dPM), address(mockAero));
+        dPM.setMockOwner(address(dLab));
+
+        dPool.setSlot0(SQRT_P, SPOT_TICK); // spot tick 100, twap 0 (same geometry as shared fixture)
+        dPool.setObserve(0, 0);
+
+        // OLD main: small liquidity so valueBefore is modest and the floor is easy to clear.
+        dPM.setPosition(D_MAIN_ID, OLD_TL, OLD_TU, 1e12, address(dtok0), address(dtok1));
+        dPM.setNextMintResult(D_NEW_ID, 1e12);
+        dPM.setPosition(D_NEW_ID, OLD_TL, OLD_TU, 1e12, address(dtok0), address(dtok1));
+        // alt parked one spacing ABOVE main upper: [200,400]; at spot it holds only token0 (cbBTC).
+        dPM.setPosition(D_ALT_ID, OLD_TU, OLD_TU + 200, 1e12, address(dtok0), address(dtok1));
+        dPM.setNextAltMintResult(D_ALT_ID, 1e12);
+        dPM.setCollectTokens(address(dtok0), address(dtok1));
+        dPM.setPullOnMint(false); // loose balances at alt time == staged principal exactly
+
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = LPAutoBalancerV2.ManagedPositionV2({
+            mainTokenId: D_MAIN_ID,
+            altTokenId: 0,
+            pool: address(dPool),
+            token0: address(dtok0),
+            token1: address(dtok1),
+            tickSpacing: 200,
+            gauge: address(0),
+            mainStaked: false,
+            altStaked: false,
+            feeCollector: feeCollector,
+            oracle0: dOracle0,
+            oracle1: dOracle1,
+            minWidth: 200,
+            maxWidth: 2000,
+            maxCenterDeviation: 400,
+            twapWindow: 1800,
+            maxTickDeviation: 200,
+            maxRebalanceLossBps: uint16(lossBps),
+            minRebalanceInterval: 0,
+            lastRebalance: 999,
+            active: false
+        });
+        vm.prank(admin);
+        slotId = dLab.registerPosition(cfg);
+    }
+
+    /// @dev Stage the mixed-fixture PM to pay out p0/p1 principal on decrease+collect (0 fees).
+    function _stageMixedPrincipal(uint256 p0, uint256 p1) internal {
+        dtok0.mint(address(dPM), p0);
+        dtok1.mint(address(dPM), p1);
+        dPM.setCollectSequence(0, 0, p0, p1);
+    }
+
+    /// @dev Read (mainTokenId, altTokenId, mainStaked) from the mixed-fixture balancer.
+    function _readMixedMainAlt(uint256 slotId) internal view returns (uint256 main, uint256 alt, bool mainStaked) {
+        (main, alt,,,,,, mainStaked,,,,,,,,,,,,,) = dLab.positions(slotId);
+    }
+
+    /// @dev DEFECT 1+2: the surplus leg must be chosen by USD VALUE, not raw base units, and the
+    ///      mint/skip decision must use a USD threshold. Stage raw bal0 < bal1 (1e5 cbBTC units vs
+    ///      1e16 WETH units) but value0 ($65) > value1 ($25). The alt must be minted on the token0
+    ///      (cbBTC) side — the range ABOVE the main upper [200,400] — proving value-based selection.
+    ///      The OLD raw-unit code (`surplus0 = bal0 >= bal1` → 1e5 >= 1e16 → false) would have placed
+    ///      the alt on the token1 side (range BELOW), so the tick assertions discriminate the fix.
+    function test_mintAlt_selectsSurplusByValue_notRawUnits() public {
+        uint256 slotId = _setupMixedSlot(500);
+        // token0 (cbBTC): 1e5 raw = 0.001 cbBTC ≈ $65 (65e8 USD)
+        // token1 (WETH):  1e16 raw = 0.01 WETH   ≈ $25 (25e8 USD)
+        // raw bal0 (1e5) < bal1 (1e16), but value0 ($65) > value1 ($25).
+        _stageMixedPrincipal(1e5, 1e16);
+
+        vm.prank(rebalancer);
+        dLab.reset(slotId, _defaultResetParams());
+
+        (uint256 mainId, uint256 altId,) = _readMixedMainAlt(slotId);
+        assertEq(mainId, D_NEW_ID, "main rebuilt");
+        assertEq(altId, D_ALT_ID, "alt minted (surplus value above USD threshold)");
+        // token0-surplus => range ABOVE main upper: [mainTu, mainTu + tickSpacing] = [200, 400].
+        // (OLD raw code would have chosen token1-surplus => range BELOW: [mainTl - spacing, mainTl].)
+        assertEq(dPM.lastMintTickLower(), OLD_TU, "alt on token0 side: lower == mainTu");
+        assertEq(dPM.lastMintTickUpper(), OLD_TU + 200, "alt on token0 side: upper == mainTu + spacing");
+    }
+
+    /// @dev DEFECT 3 (the floor bypass). The value floor must count LOOSE contract balances. We stage
+    ///      a position whose value is overwhelmingly the loose surplus leg (real principal the alt
+    ///      does NOT capture), and a fresh main that holds almost nothing.
+    ///
+    ///      OLD code: `_mintAlt` forwards the loose surplus to the feeCollector BEFORE the floor, and
+    ///      the floor reads only the position NFTs. valueAfter = new main (≈0) << floor → the OLD code
+    ///      would REVERT here EXCEPT it already shipped the principal out as "dust" — i.e. the only way
+    ///      a real surplus survives the floor under OLD code is by being dusted out first, which is the
+    ///      leak. (Verified empirically: an old-ordering build forwards the full surplus to feeCollector.)
+    ///
+    ///      NEW code: the loose surplus is counted by `_contractPairValue` at floor time, so the floor
+    ///      sees the FULL value (new main + loose surplus). The position did not actually lose value —
+    ///      it was merely rebuilt imbalanced — so the floor correctly PASSES, and only the genuine
+    ///      remainder is forwarded AFTER the check. This proves the floor can no longer be bypassed by
+    ///      routing principal out as dust: the value is on the books when the floor runs.
+    ///
+    ///      The discriminator vs OLD: if the floor did NOT count loose (OLD ordering), valueAfter would
+    ///      be ≈0 against a large valueBefore → ValueFloor revert. Counting loose is what lets the
+    ///      legitimate (no-loss) imbalanced rebuild pass — and simultaneously closes the leak.
+    function test_reset_forwardedDustCannotBypassValueFloor() public {
+        uint256 slotId = _setupMixedSlot(100); // tight 1% loss cap
+
+        // New main holds ~nothing; the alt captures nothing. The entire withdrawn principal comes
+        // back as a token0 surplus that stays LOOSE (pullOnMint=false → mint pulls no tokens).
+        dPM.setNextMintResult(D_NEW_ID, 0);
+        dPM.setPosition(D_NEW_ID, OLD_TL, OLD_TU, 0, address(dtok0), address(dtok1));
+        dPM.setPosition(D_ALT_ID, OLD_TU, OLD_TU + 200, 0, address(dtok0), address(dtok1)); // alt holds nothing
+
+        // Withdrawn principal = a big token0 surplus (1e10 raw cbBTC = 100 cbBTC ≈ $6.5M), all loose
+        // after the (empty) mints — comfortably above valueBefore so the no-loss rebuild clears the floor.
+        _stageMixedPrincipal(1e10, 0);
+
+        vm.prank(rebalancer);
+        dLab.reset(slotId, _defaultResetParams());
+
+        // NEW: floor counted the loose surplus → no spurious revert → reset succeeded.
+        // (OLD ordering would have to forward that surplus out before the floor — the leak — for the
+        // call to survive at all, since the NFTs alone are worth ≈0 here.)
+        (uint256 mainId,,) = _readMixedMainAlt(slotId);
+        assertEq(mainId, D_NEW_ID, "reset succeeded: loose surplus counted by the value floor");
+    }
+
+    /// @dev Counterpart proving the floor still trips on a GENUINE loss (value actually destroyed,
+    ///      not merely retained loose). New main and alt both hold ~nothing and only 1 dust unit of
+    ///      token0 is loose, so valueAfter collapses far below valueBefore minus the 1% cap.
+    function test_reset_valueFloorStillTripsOnRealLoss() public {
+        uint256 slotId = _setupMixedSlot(100); // 1% loss cap
+
+        dPM.setPosition(D_ALT_ID, OLD_TU, OLD_TU + 200, 0, address(dtok0), address(dtok1)); // alt holds nothing
+        dPM.setNextMintResult(D_NEW_ID, 0); // new main holds ~nothing
+        dPM.setPosition(D_NEW_ID, OLD_TL, OLD_TU, 0, address(dtok0), address(dtok1));
+        _stageMixedPrincipal(1, 0); // 1 raw cbBTC unit ≈ $0.00065 loose: far below the floor
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
+        dLab.reset(slotId, _defaultResetParams());
     }
 }
