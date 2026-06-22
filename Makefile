@@ -40,6 +40,13 @@ mamo-staking:
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
 
+# NOTE: no --fork-url here. The V2 integration test self-forks at a PINNED block via
+# vm.createSelectFork inside setUp. Passing --fork-url base in addition makes foundry 1.7.x
+# init the OP-stack L1Block handler against the CLI fork and panic ("Missing operator fee
+# scalar for isthmus L1 Block") before the in-test vm.fee(0) workaround runs.
+lp-auto-balancer-v2:
+	forge test --ffi --mc LPAutoBalancerV2Integration -vvv
+
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter
 

@@ -476,8 +476,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         _exitAll(p, slotId, params.amount0MinWithdraw, params.amount1MinWithdraw);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
-        // Center on spot (already gate-passed vs TWAP). Straddle guaranteed for width ≥ 2*spacing.
-        (int24 tl, int24 tu) = _alignedRange(spotTick, params.width, p.tickSpacing, spotTick);
+
+        // Choose the new main range. The common case is a spot-centered straddle. But a reset of a
+        // FULLY out-of-range position withdraws 100%-single-sided principal (a CL position outside
+        // its range holds exactly one token). A straddling balanced mint with one desired leg == 0
+        // computes ZERO liquidity and the position manager reverts. With NO SWAP we cannot
+        // manufacture the missing leg, so in that degenerate case we place the main entirely on the
+        // FUNDED side, adjacent to spot — a valid single-sided main that waits for price to oscillate
+        // back into balance (Beefy "never sell"). Principal is fully redeployed; nothing is sold.
+        (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width);
 
         uint256 newMain = _mintBalanced(p, tl, tu, params);
         p.mainTokenId = newMain;
@@ -880,6 +887,50 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         tickLower = _floorAlign(referenceTick - half, spacing);
         tickUpper = tickLower + int24(width);
         require(tickLower < currentTick && currentTick < tickUpper, "no straddle");
+    }
+
+    /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
+    ///      - Both legs funded → spot-centered straddle (the normal balanced main).
+    ///      - Exactly ONE leg funded (fully out-of-range reset → 100% single-sided principal) →
+    ///        a single-sided `width`-wide range on the FUNDED side, adjacent to spot, so the mint
+    ///        has positive liquidity. NO SWAP is ever performed; this only changes WHERE the funded
+    ///        token is parked. Orientation (price = token1/token0, ticks rise with price): a range
+    ///        strictly ABOVE spot holds only token0; strictly BELOW holds only token1.
+    ///          token0-only (bal1 == 0): [up, up + width]      where up   = first aligned tick > spot
+    ///          token1-only (bal0 == 0): [down - width, down]  where down = first aligned tick < spot
+    ///      Both-empty is impossible here (reset withdrew real principal; an empty teardown would
+    ///      already have reverted the value floor downstream).
+    function _mainRange(ManagedPositionV2 storage p, int24 spotTick, uint24 width)
+        private
+        view
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+        int24 spacing = p.tickSpacing;
+        int24 w = int24(width);
+
+        if (bal0 > 0 && bal1 > 0) {
+            // Balanced straddle centered on spot (guaranteed straddle for width ≥ 2*spacing).
+            return _alignedRange(spotTick, width, spacing, spotTick);
+        }
+
+        int24 floor = _floorAlign(spotTick, spacing);
+        if (bal1 == 0) {
+            // token0-only → range strictly ABOVE spot. `floor` is the largest aligned tick ≤ spot,
+            // so floor+spacing is the first aligned tick strictly above spot (also holds when spot
+            // is exactly aligned: floor == spot ⇒ floor+spacing > spot).
+            int24 up = floor + spacing;
+            tickLower = up;
+            tickUpper = up + w;
+        } else {
+            // token1-only (bal0 == 0) → range strictly BELOW spot.
+            // The first aligned tick strictly below spot is `floor` when spot is unaligned, else
+            // floor - spacing when spot sits exactly on an aligned tick.
+            int24 down = floor == spotTick ? floor - spacing : floor;
+            tickUpper = down;
+            tickLower = down - w;
+        }
     }
 
     /// @dev Consult the pool's TWAP oracle and return the time-weighted average tick

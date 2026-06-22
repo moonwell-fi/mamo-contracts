@@ -1102,4 +1102,79 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertFalse(s.deviationGateOpen, "deviation gate closed when spot >> twap");
         assertFalse(s.mainInRange, "spot=201 is outside main range [-200,200)");
     }
+
+    // ─── Task 6: adversarial reset() guards ──────────────────────────────────────
+
+    /// @dev Register a slot with a non-zero cooldown interval. `lastRebalance` is forced to 0
+    ///      by _store, so callers that need an ACTIVE cooldown must also stamp lastRebalance
+    ///      (see test_reset_revertsBeforeCooldown, which writes it via stdstore).
+    function _registerSlotWithInterval(uint256 interval) internal returns (uint256 slotId) {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = LPAutoBalancerV2.ManagedPositionV2({
+            mainTokenId: TOKEN_ID,
+            altTokenId: 0,
+            pool: pool,
+            token0: token0,
+            token1: token1,
+            tickSpacing: 200,
+            gauge: address(0),
+            mainStaked: false,
+            altStaked: false,
+            feeCollector: feeCollector,
+            oracle0: oracle0,
+            oracle1: oracle1,
+            minWidth: 200,
+            maxWidth: 2000,
+            maxCenterDeviation: 400,
+            twapWindow: 1800,
+            maxTickDeviation: 200,
+            maxRebalanceLossBps: 100,
+            minRebalanceInterval: interval,
+            lastRebalance: 0,
+            active: false
+        });
+        vm.prank(admin);
+        slotId = lab.registerPosition(cfg);
+    }
+
+    /// @dev A manipulated spot (far from the TWAP) must trip the deviation gate, blocking reset.
+    ///      spotTick=5000 vs twapTick=0 → |dev|=5000 > maxTickDeviation=200 → TwapDeviation.
+    function test_reset_revertsOnManipulatedSpot() public {
+        uint256 slotId = _registerSlot(false);
+        mockPool.setSlot0(SQRT_P, 5000); // far from twap 0 => |dev| > maxTickDeviation
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.TwapDeviation.selector);
+        lab.reset(slotId, _defaultResetParams());
+    }
+
+    /// @dev reset must revert while the cooldown is active. Register with a 1h interval and stamp
+    ///      lastRebalance = now via stdstore (field index 19), so block.timestamp < lastRebalance +
+    ///      interval and the Cooldown guard (checked before the deviation gate) fires.
+    function test_reset_revertsBeforeCooldown() public {
+        uint256 slotId = _registerSlotWithInterval(3600);
+        // _store forces lastRebalance to 0; stamp it to "now" so the cooldown is genuinely active.
+        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(19)
+            .checked_write(block.timestamp);
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.Cooldown.selector);
+        lab.reset(slotId, _defaultResetParams());
+    }
+
+    /// @dev A width below minWidth (or above maxWidth) must trip the width-bounds guard.
+    ///      The guard runs after _exitAll, so stage principal so the teardown collect succeeds.
+    function test_reset_revertsOnWidthOutOfBounds() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+        LPAutoBalancerV2.ResetParams memory pr = _defaultResetParams();
+        pr.width = 1; // below minWidth (200)
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.WidthOutOfBounds.selector);
+        lab.reset(slotId, pr);
+    }
+
+    /// @dev reset is REBALANCER_ROLE-gated: a caller without the role must revert (no prank).
+    function test_reset_onlyRebalancer() public {
+        uint256 slotId = _registerSlot(false);
+        vm.expectRevert(); // caller (this test contract) lacks REBALANCER_ROLE
+        lab.reset(slotId, _defaultResetParams());
+    }
 }
