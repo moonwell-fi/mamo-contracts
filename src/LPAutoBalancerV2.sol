@@ -362,12 +362,24 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         liquidity, burn both NFTs, and transfer the resulting token0/token1 balances to `to`.
     ///         Marks the slot inactive. Use when the Safe needs to fully tear down a position in one
     ///         call regardless of staking state. Uses 0 sandwich mins (emergency path).
+    ///
+    ///         CEI ordering:
+    ///           1. active = false  — flipped first; this is the re-entry sentinel checked by the
+    ///                                NotActive guard at the top of every external mutator.
+    ///           2. _exitAll + token transfers — the interactions (external calls).
+    ///           3. mainTokenId = altTokenId = 0 — final bookkeeping; these fields are consumed by
+    ///                                             _exitAll so they must remain valid through step 2.
     function exit(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
         if (to == address(0)) revert ZeroAddress();
 
-        // Tear down: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn both NFTs.
+        // Effect (re-entry sentinel): flip active before any external call.
+        // _exitAll reads mainTokenId/altTokenId from the struct, so those fields are kept
+        // intact until after _exitAll returns.
+        p.active = false;
+
+        // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
         _exitAll(p, slotId, 0, 0);
 
         // Transfer all principal recovered from the position to `to`.
@@ -376,10 +388,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (bal0 > 0) IERC20(p.token0).safeTransfer(to, bal0);
         if (bal1 > 0) IERC20(p.token1).safeTransfer(to, bal1);
 
-        // Clear NFT references and deactivate slot (CEI: state updated after interactions above).
+        // Bookkeeping: zero NFT references now that _exitAll has consumed and burned them.
         p.mainTokenId = 0;
         p.altTokenId = 0;
-        p.active = false;
 
         emit PositionWithdrawn(slotId, to);
     }

@@ -40,6 +40,7 @@ contract MockPositionManagerV2 {
     // burn
     uint256 public lastBurnedTokenId;
     uint256 public burnCallCount;
+    mapping(uint256 => bool) public wasBurned;
 
     // decreaseLiquidity
     uint256 public lastDecreaseTokenId;
@@ -148,6 +149,7 @@ contract MockPositionManagerV2 {
     function burn(uint256 tokenId) external {
         lastBurnedTokenId = tokenId;
         burnCallCount++;
+        wasBurned[tokenId] = true;
     }
 
     function positions(uint256 tokenId)
@@ -983,6 +985,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         lab.exit(slotId, admin);
         assertEq(mockPM.burnCallCount(), 2, "main + alt burned");
+        // Verify the two DISTINCT NFTs that were registered are the ones that got burned,
+        // not the same tokenId burned twice.
+        assertTrue(mockPM.wasBurned(TOKEN_ID), "main tokenId burned");
+        assertTrue(mockPM.wasBurned(ALT_TOKEN_ID), "alt tokenId burned");
         assertGt(tok0.balanceOf(admin), 0, "token0 to Safe");
         assertGt(tok1.balanceOf(admin), 0, "token1 to Safe");
         assertEq(tok0.balanceOf(address(lab)), 0, "no token0 dust");
