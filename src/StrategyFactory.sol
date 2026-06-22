@@ -132,8 +132,9 @@ contract StrategyFactory {
         strategy = address(proxy);
 
         // Initialize the strategy with the parameters
-        ERC20MoonwellMorphoStrategy(payable(strategy)).initialize(
-            ERC20MoonwellMorphoStrategy.InitParams({
+        ERC20MoonwellMorphoStrategy(payable(strategy))
+            .initialize(
+                ERC20MoonwellMorphoStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 mamoBackend: mamoBackend,
                 mToken: mToken,
@@ -150,7 +151,7 @@ contract StrategyFactory {
                 allowedSlippageInBps: allowedSlippageInBps,
                 compoundFee: compoundFee
             })
-        );
+            );
 
         // Register the strategy with the MamoStrategyRegistry
         mamoStrategyRegistryInterface.addStrategy(user, strategy);

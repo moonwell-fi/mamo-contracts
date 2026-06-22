@@ -1,0 +1,545 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+import {ICLGauge} from "@interfaces/ICLGauge.sol";
+import {ICLPool} from "@interfaces/ICLPool.sol";
+import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
+import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
+
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
+
+import {FixedPoint96} from "@libraries/uniswap/FixedPoint96.sol";
+import {FullMath} from "@libraries/uniswap/FullMath.sol";
+import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
+import {TickMath} from "@libraries/uniswap/TickMath.sol";
+
+/// @title LPAutoBalancerV2
+/// @notice Safe-governed, multi-position Aerodrome CL rebalancer. Holds position NFTs,
+///         re-ranges them with on-chain-computed ticks, stakes for AERO emissions, and
+///         skims fees/emissions to the weekly drop. See docs/superpowers/specs/2026-06-01-lp-auto-balancer-design.md
+contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable, IERC721Receiver {
+    using SafeERC20 for IERC20;
+
+    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
+    bytes32 public constant REBALANCER_ROLE = keccak256("REBALANCER_ROLE");
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+
+    uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint16 public constant MAX_LOSS_CAP_BPS = 500;
+
+    INonfungiblePositionManager public immutable POSITION_MANAGER;
+    address public immutable AERO;
+
+    uint256 public maxOracleDelay;
+
+    struct ManagedPositionV2 {
+        uint256 mainTokenId;
+        uint256 altTokenId; // 0 when no alt this cycle
+        address pool;
+        address token0;
+        address token1;
+        int24 tickSpacing;
+        address gauge;
+        bool mainStaked;
+        bool altStaked;
+        address feeCollector;
+        address oracle0;
+        address oracle1;
+        uint24 minWidth;
+        uint24 maxWidth;
+        uint24 maxCenterDeviation;
+        uint32 twapWindow;
+        int24 maxTickDeviation;
+        uint16 maxRebalanceLossBps;
+        uint256 minRebalanceInterval;
+        uint256 lastRebalance;
+        bool active;
+    }
+
+    mapping(uint256 slotId => ManagedPositionV2) public positions;
+    uint256 public nextSlotId;
+
+    error ZeroAddress();
+    error TwapDeviation();
+    error StaleOracle();
+    error LossCapExceeded();
+    error InvalidWidth();
+    error OracleRequired();
+    error InvalidConfig();
+    error NotActive();
+    error NotHeld();
+    error PositionStaked();
+    error NoGauge();
+    error AlreadyStaked();
+    error NotStaked();
+    error Cooldown();
+    error WidthOutOfBounds();
+    error CenterDeviation();
+    error ValueFloor();
+    error AltMintFailed();
+
+    event PositionRegistered(uint256 indexed slotId, address indexed pool, uint256 indexed tokenId);
+    event PositionDeregistered(uint256 indexed slotId, address indexed to);
+    event PositionWithdrawn(uint256 indexed slotId, address indexed to);
+    event PositionConfigUpdated(uint256 indexed slotId);
+    event FeeCollectorUpdated(uint256 indexed slotId, address feeCollector);
+    event OraclesUpdated(uint256 indexed slotId, address oracle0, address oracle1);
+    event GaugeUpdated(uint256 indexed slotId, address gauge);
+    event MaxOracleDelayUpdated(uint256 oldDelay, uint256 newDelay);
+    event TokensRecovered(address indexed token, address indexed to, uint256 amount);
+    event Staked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
+    event Unstaked(uint256 indexed slotId, uint256 indexed tokenId, address gauge);
+    event EmissionsClaimed(uint256 indexed slotId, uint256 amount);
+    event FeesSkimmed(uint256 indexed slotId, uint256 amount0, uint256 amount1);
+    event Reset(uint256 indexed slotId, uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper);
+
+    constructor(
+        address admin_,
+        address manager_,
+        address rebalancer_,
+        address guardian_,
+        address positionManager_,
+        address aero_
+    ) {
+        if (admin_ == address(0) || positionManager_ == address(0) || aero_ == address(0)) {
+            revert ZeroAddress();
+        }
+
+        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
+        if (manager_ != address(0)) _grantRole(MANAGER_ROLE, manager_);
+        if (rebalancer_ != address(0)) _grantRole(REBALANCER_ROLE, rebalancer_);
+        if (guardian_ != address(0)) _grantRole(GUARDIAN_ROLE, guardian_);
+
+        POSITION_MANAGER = INonfungiblePositionManager(positionManager_);
+        AERO = aero_;
+        maxOracleDelay = 26 hours;
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external view returns (bytes4) {
+        require(msg.sender == address(POSITION_MANAGER), "Only position manager");
+        return this.onERC721Received.selector;
+    }
+
+    /// @notice Register a position NFT already held by this contract.
+    /// @param config Full position configuration. `active`, `mainStaked`, and `lastRebalance` are
+    ///               overridden by `_store` regardless of the values supplied here.
+    /// @return slotId The slot index assigned to this position.
+    function registerPosition(ManagedPositionV2 calldata config)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (uint256 slotId)
+    {
+        if (config.maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
+        if (config.pool == address(0) || config.token0 == address(0) || config.token1 == address(0)) {
+            revert InvalidConfig();
+        }
+        if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
+        // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
+        // not as a StaleOracle revert on the next rebalance.
+        _readFeed(config.oracle0);
+        _readFeed(config.oracle1);
+        if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
+        if (config.maxCenterDeviation == 0) revert InvalidConfig();
+        int24 spacing = config.tickSpacing;
+        if (spacing <= 0) revert InvalidConfig();
+        if (
+            config.minWidth == 0 || config.minWidth > config.maxWidth || config.minWidth % uint24(spacing) != 0
+                || config.maxWidth % uint24(spacing) != 0
+        ) revert InvalidWidth();
+        if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
+
+        slotId = nextSlotId++;
+        _store(slotId, config);
+        emit PositionRegistered(slotId, config.pool, config.mainTokenId);
+    }
+
+    /// @notice Deregister a position and transfer its NFT to `to`.
+    ///         Intentionally reverts if the position is staked: the admin must `unstake`
+    ///         (or use `withdrawPosition`, which auto-unstakes) first. This keeps deregister
+    ///         a pure book-keeping/transfer path and never silently strands a staked NFT.
+    function deregisterPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (to == address(0)) revert ZeroAddress();
+        if (p.mainStaked) revert PositionStaked();
+        uint256 tokenId = p.mainTokenId;
+        p.active = false; // effects before interaction (CEI)
+        emit PositionDeregistered(slotId, to);
+        if (p.altTokenId != 0) POSITION_MANAGER.safeTransferFrom(address(this), to, p.altTokenId);
+        POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
+    }
+
+    /// @notice Emergency withdraw: auto-unstakes (if staked) then transfers the NFT to `to`.
+    ///         Allows an admin to rescue a position in one call regardless of staking state.
+    function withdrawPosition(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (to == address(0)) revert ZeroAddress();
+        if (p.mainStaked) _unstake(p, slotId); // auto-claims AERO -> feeCollector, returns NFT to this contract
+        uint256 tokenId = p.mainTokenId;
+        p.active = false; // effects before interaction (CEI)
+        emit PositionWithdrawn(slotId, to);
+        if (p.altTokenId != 0) POSITION_MANAGER.safeTransferFrom(address(this), to, p.altTokenId);
+        POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Manager setters
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Update the core rebalance parameters for an active position.
+    function setPositionConfig(
+        uint256 slotId,
+        uint24 minWidth,
+        uint24 maxWidth,
+        uint24 maxCenterDeviation,
+        uint32 twapWindow,
+        int24 maxTickDeviation,
+        uint16 maxRebalanceLossBps,
+        uint256 minRebalanceInterval
+    ) external onlyRole(MANAGER_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        if (maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
+        if (twapWindow == 0 || maxTickDeviation <= 0) revert InvalidConfig();
+        if (maxCenterDeviation == 0) revert InvalidConfig();
+        int24 spacing = positions[slotId].tickSpacing;
+        if (minWidth == 0 || minWidth > maxWidth || minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0)
+        {
+            revert InvalidWidth();
+        }
+
+        ManagedPositionV2 storage p = positions[slotId];
+        p.minWidth = minWidth;
+        p.maxWidth = maxWidth;
+        p.maxCenterDeviation = maxCenterDeviation;
+        p.twapWindow = twapWindow;
+        p.maxTickDeviation = maxTickDeviation;
+        p.maxRebalanceLossBps = maxRebalanceLossBps;
+        p.minRebalanceInterval = minRebalanceInterval;
+
+        emit PositionConfigUpdated(slotId);
+    }
+
+    /// @notice Update the fee collector for an active position. Admin (Safe) only: feeCollector is the
+    ///         destination for all fee/AERO/dust flows, so it is a drain-direction power kept off the manager EOA.
+    function setFeeCollector(uint256 slotId, address feeCollector) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        if (feeCollector == address(0)) revert ZeroAddress();
+        positions[slotId].feeCollector = feeCollector;
+        emit FeeCollectorUpdated(slotId, feeCollector);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Admin setters
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Update the price-feed oracles for an active position.
+    function setOracles(uint256 slotId, address oracle0, address oracle1) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!positions[slotId].active) revert NotActive();
+        if (oracle0 == address(0) || oracle1 == address(0)) revert OracleRequired();
+        _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
+        _readFeed(oracle1);
+        positions[slotId].oracle0 = oracle0;
+        positions[slotId].oracle1 = oracle1;
+        emit OraclesUpdated(slotId, oracle0, oracle1);
+    }
+
+    /// @notice Update the gauge for an active position. Pass address(0) to disable staking.
+    ///         Requires the position to not currently be staked.
+    function setGauge(uint256 slotId, address gauge) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (positions[slotId].mainStaked) revert PositionStaked();
+        positions[slotId].gauge = gauge;
+        emit GaugeUpdated(slotId, gauge);
+    }
+
+    /// @notice Update the maximum acceptable oracle staleness.
+    function setMaxOracleDelay(uint256 newDelay) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newDelay == 0 || newDelay > 7 days) revert InvalidConfig();
+        uint256 old = maxOracleDelay;
+        maxOracleDelay = newDelay;
+        emit MaxOracleDelayUpdated(old, newDelay);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Pause
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Pause the contract (guardian only).
+    function pause() external onlyRole(GUARDIAN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Unpause the contract (guardian only).
+    function unpause() external onlyRole(GUARDIAN_ROLE) {
+        _unpause();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Gauge staking
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Approve the gauge and deposit the position NFT into it for AERO emissions.
+    function stake(uint256 slotId) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (p.gauge == address(0)) revert NoGauge();
+        if (p.mainStaked) revert AlreadyStaked();
+        POSITION_MANAGER.approve(p.gauge, p.mainTokenId);
+        ICLGauge(p.gauge).deposit(p.mainTokenId);
+        p.mainStaked = true;
+        emit Staked(slotId, p.mainTokenId, p.gauge);
+    }
+
+    /// @notice Withdraw the position NFT from the gauge and skim any AERO to the fee collector.
+    function unstake(uint256 slotId) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.mainStaked) revert NotStaked();
+        _unstake(p, slotId);
+    }
+
+    /// @dev Internal unstake: withdraw from gauge (auto-claims AERO), set mainStaked=false,
+    ///      then skim any AERO balance to the fee collector (CEI: state update before AERO transfer).
+    function _unstake(ManagedPositionV2 storage p, uint256 slotId) internal {
+        // Measure only the AERO GAINED by this withdraw so we never sweep another slot's
+        // pending AERO or a stray balance sitting on this contract.
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        ICLGauge(p.gauge).withdraw(p.mainTokenId); // returns NFT + auto-claims AERO
+        p.mainStaked = false; // CEI: effect before interaction (AERO transfer below)
+        uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        if (aeroEarned > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
+            emit EmissionsClaimed(slotId, aeroEarned);
+        }
+        emit Unstaked(slotId, p.mainTokenId, p.gauge);
+    }
+
+    /// @notice Claim AERO emissions from the gauge for a staked position and forward to feeCollector.
+    ///         Permissionless — anyone may call to trigger the skim.
+    function claimEmissions(uint256 slotId) external whenNotPaused nonReentrant {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (!p.mainStaked) revert NotStaked();
+        // Forward only the AERO gained by THIS claim, not the whole contract balance —
+        // avoids cross-slot sweeps and stray-balance theft.
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        ICLGauge(p.gauge).getReward(p.mainTokenId);
+        uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        if (aeroEarned > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
+            emit EmissionsClaimed(slotId, aeroEarned);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Rebalance
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // reset() added in Task 2
+
+    // ─── rebalance private helpers ───────────────────────────────────────────
+
+    /// @dev Collect any accrued LP fees for the position (before decreasing liquidity)
+    ///      and forward both tokens to the feeCollector.
+    function _skimFees(ManagedPositionV2 storage p, uint256 slotId) private {
+        (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: p.mainTokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
+        if (a1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, a1);
+        emit FeesSkimmed(slotId, a0, a1);
+    }
+
+    /// @dev Transfer residual balances of t0 and t1 to `to`.
+    function _forwardDustTokens(address t0, address t1, address to) private {
+        uint256 d0 = IERC20(t0).balanceOf(address(this));
+        uint256 d1 = IERC20(t1).balanceOf(address(this));
+        if (d0 > 0) IERC20(t0).safeTransfer(to, d0);
+        if (d1 > 0) IERC20(t1).safeTransfer(to, d1);
+    }
+
+    /// @dev Transfer any residual token0 / token1 balance of this contract to the feeCollector.
+    function _forwardDust(ManagedPositionV2 storage p) private {
+        _forwardDustTokens(p.token0, p.token1, p.feeCollector);
+    }
+
+    /// @dev USD value of this contract's current (non-position) balances of the pair tokens.
+    ///      Used by the rebalance value floor to net contract-held balances out of the
+    ///      before/after comparison.
+    function _contractPairValue(ManagedPositionV2 storage p, uint8 dec0, uint8 dec1) private view returns (uint256) {
+        return _valueInUsd(
+            IERC20(p.token0).balanceOf(address(this)),
+            IERC20(p.token1).balanceOf(address(this)),
+            p.oracle0,
+            p.oracle1,
+            dec0,
+            dec1
+        );
+    }
+
+    /// @dev Compute the USD value of the principal tokens locked in the position,
+    ///      valued at the given sqrtP (Q64.96 sqrt price). Uses LiquidityAmounts to
+    ///      derive token amounts from the NFT's stored liquidity — never counts tokensOwed
+    ///      (fees), so skimming fees does not perturb this measurement.
+    function _principalValue(ManagedPositionV2 storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
+        private
+        view
+        returns (uint256)
+    {
+        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
+        (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtP, TickMath.getSqrtRatioAtTick(tl), TickMath.getSqrtRatioAtTick(tu), liq
+        );
+        return _valueInUsd(a0, a1, p.oracle0, p.oracle1, dec0, dec1);
+    }
+
+    /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.
+    ///         Permissionless — anyone may call. Reverts if the position is staked (use claimEmissions).
+    function collectFees(uint256 slotId) external whenNotPaused nonReentrant {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (p.mainStaked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
+        (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: p.mainTokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
+        if (a1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, a1);
+        emit FeesSkimmed(slotId, a0, a1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Token recovery
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Recover accidentally-sent ERC-20 tokens.
+    function recoverERC20(address token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        IERC20(token).safeTransfer(to, amount);
+        emit TokensRecovered(token, to, amount);
+    }
+
+    /// @notice Recover accidentally-sent ETH.
+    function recoverETH(address payable to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 bal = address(this).balance;
+        (bool ok,) = to.call{value: bal}("");
+        require(ok, "ETH transfer failed");
+        emit TokensRecovered(address(0), to, bal);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Internal helpers
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Round `tick` down to the nearest multiple of `spacing`, toward −∞.
+    ///      Solidity truncates division toward zero, so we adjust negative remainders.
+    function _floorAlign(int24 tick, int24 spacing) internal pure returns (int24) {
+        int24 q = tick / spacing;
+        if (tick < 0 && tick % spacing != 0) q -= 1; // floor toward -inf
+        return q * spacing;
+    }
+
+    /// @dev Compute a tick range of `width` ticks centered on `referenceTick`,
+    ///      with both bounds aligned to `spacing`. The range is shifted left until
+    ///      `tickLower` is the largest spacing-aligned tick that is ≤ (referenceTick − width/2).
+    ///      Reverts if `currentTick` does not strictly straddle the resulting range.
+    function _alignedRange(int24 referenceTick, uint24 width, int24 spacing, int24 currentTick)
+        internal
+        pure
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        int24 half = int24(width / 2);
+        tickLower = _floorAlign(referenceTick - half, spacing);
+        tickUpper = tickLower + int24(width);
+        require(tickLower < currentTick && currentTick < tickUpper, "no straddle");
+    }
+
+    /// @dev Consult the pool's TWAP oracle and return the time-weighted average tick
+    ///      over `window` seconds. Division is floored toward −∞ (matches OracleLibrary.consult).
+    function _consultTwapTick(address pool, uint32 window) internal view returns (int24) {
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = window;
+        secondsAgos[1] = 0;
+        (int56[] memory cum,) = ICLPool(pool).observe(secondsAgos);
+        int56 delta = cum[1] - cum[0];
+        int24 twapTick = int24(delta / int56(uint56(window)));
+        if (delta < 0 && (delta % int56(uint56(window)) != 0)) twapTick--; // round toward -inf
+        return twapTick;
+    }
+
+    /// @dev Revert if the absolute difference between `spotTick` and `twapTick` exceeds `maxDev`.
+    function _checkDeviation(int24 spotTick, int24 twapTick, int24 maxDev) internal pure {
+        int24 diff = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
+        if (diff > maxDev) revert TwapDeviation();
+    }
+
+    /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
+    ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
+    function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
+        (, int256 answer,, uint256 updatedAt,) = IPriceFeed(feed).latestRoundData();
+        if (answer <= 0) revert StaleOracle();
+        if (block.timestamp - updatedAt > maxOracleDelay) revert StaleOracle();
+        price = uint256(answer);
+        decimals = IPriceFeed(feed).decimals();
+    }
+
+    /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
+    /// @param dec0 token0 ERC20 decimals; dec1 token1 ERC20 decimals.
+    function _valueInUsd(uint256 amount0, uint256 amount1, address oracle0, address oracle1, uint8 dec0, uint8 dec1)
+        internal
+        view
+        returns (uint256 usd)
+    {
+        (uint256 p0, uint8 fd0) = _readFeed(oracle0);
+        (uint256 p1, uint8 fd1) = _readFeed(oracle1);
+        usd = FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0)
+            + FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
+    }
+
+    /// @dev Copies every field from `config` into `positions[slotId]`, but forces
+    ///      `active = true`, `mainStaked = false`, `altStaked = false`, `altTokenId = 0`, and `lastRebalance = 0`.
+    function _store(uint256 slotId, ManagedPositionV2 calldata config) private {
+        ManagedPositionV2 storage p = positions[slotId];
+        p.mainTokenId = config.mainTokenId;
+        p.altTokenId = 0; // forced
+        p.pool = config.pool;
+        p.token0 = config.token0;
+        p.token1 = config.token1;
+        p.tickSpacing = config.tickSpacing;
+        p.gauge = config.gauge;
+        p.mainStaked = false; // forced
+        p.altStaked = false; // forced
+        p.feeCollector = config.feeCollector;
+        p.oracle0 = config.oracle0;
+        p.oracle1 = config.oracle1;
+        p.minWidth = config.minWidth;
+        p.maxWidth = config.maxWidth;
+        p.maxCenterDeviation = config.maxCenterDeviation;
+        p.twapWindow = config.twapWindow;
+        p.maxTickDeviation = config.maxTickDeviation;
+        p.maxRebalanceLossBps = config.maxRebalanceLossBps;
+        p.minRebalanceInterval = config.minRebalanceInterval;
+        p.lastRebalance = 0; // forced
+        p.active = true; // forced
+    }
+}

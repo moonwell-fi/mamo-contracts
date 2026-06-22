@@ -120,19 +120,13 @@ interface IWormhole {
 
     function parseContractUpgrade(bytes memory encodedUpgrade) external pure returns (ContractUpgrade memory cu);
 
-    function parseGuardianSetUpgrade(bytes memory encodedUpgrade)
-        external
-        pure
-        returns (GuardianSetUpgrade memory gsu);
+    function parseGuardianSetUpgrade(bytes memory encodedUpgrade) external pure returns (GuardianSetUpgrade memory gsu);
 
     function parseSetMessageFee(bytes memory encodedSetMessageFee) external pure returns (SetMessageFee memory smf);
 
     function parseTransferFees(bytes memory encodedTransferFees) external pure returns (TransferFees memory tf);
 
-    function parseRecoverChainId(bytes memory encodedRecoverChainId)
-        external
-        pure
-        returns (RecoverChainId memory rci);
+    function parseRecoverChainId(bytes memory encodedRecoverChainId) external pure returns (RecoverChainId memory rci);
 
     function submitContractUpgrade(bytes memory _vm) external;
 
