@@ -743,6 +743,38 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(altId, 0, "no alt when leftover is dust");
     }
 
+    /// @dev FIX 8 dust-forward coverage. The mock uses pullOnMint=true (in-ratio consumption:
+    ///      mint consumes min(desired0, desired1) of both tokens, leaving only the genuine surplus
+    ///      leg). Stage a minimally-imbalanced principal so the surplus after the main mint is a
+    ///      single wei — far below MIN_ALT_VALUE_USD ($0.01) — and verify:
+    ///        1. No alt is minted (surplus sub-threshold).
+    ///        2. Contract holds ~0 loose after reset (surplus forwarded, not stranded).
+    ///        3. The 1-wei surplus landed on feeCollector (not destroyed, not on contract).
+    ///      This exercises the sub-threshold dust-forward path end-to-end with the in-ratio mock.
+    function test_reset_subThresholdSurplus_forwardedToFeeCollector() public {
+        uint256 slotId = _registerSlot(false);
+        // Stage p0 = 1e18 + 1, p1 = 1e18. pullOnMint=true: main mint consumes min(1e18+1, 1e18)
+        // = 1e18 of each token, leaving 1 wei of tok0 as a one-sided surplus.
+        // At oracle price $1/unit (18-dec), 1 wei = $1e-18 << MIN_ALT_VALUE_USD ($0.01) → no alt.
+        _stagePrincipal(1e18 + 1, 1e18);
+
+        uint256 feeCollBefore = tok0.balanceOf(feeCollector);
+
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+
+        // No alt minted: surplus is sub-threshold.
+        (, uint256 altId,) = _readMainAlt(slotId);
+        assertEq(altId, 0, "no alt: surplus below MIN_ALT_VALUE_USD");
+
+        // Contract holds no loose tokens after reset (dust was forwarded, not stranded).
+        assertEq(tok0.balanceOf(address(lab)), 0, "no tok0 dust stranded on contract");
+        assertEq(tok1.balanceOf(address(lab)), 0, "no tok1 dust stranded on contract");
+
+        // The 1-wei surplus reached feeCollector.
+        assertEq(tok0.balanceOf(feeCollector) - feeCollBefore, 1, "1-wei surplus forwarded to feeCollector");
+    }
+
     function test_reset_imbalanced_valueFloorCountsAlt() public {
         // The surplus minted into the alt must be counted in valueAfter, so an
         // imbalanced withdrawal does NOT spuriously trip ValueFloor.

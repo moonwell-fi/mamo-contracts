@@ -240,10 +240,16 @@ contract LPAutoBalancerV2Integration is Test {
         // principal can never be converted between tokens — the only outflows are to the feeCollector
         // (skimmed fees + AERO + sub-threshold dust). Those outflows must be a tiny fraction of the
         // deposited principal, never the bulk of a leg (which would mean principal escaped as "dust").
+        //
+        // Bounds are fee/dust-sized, calibrated against observed values at pinned block 47_600_000:
+        //   balanced rebuild:     WETH = 182 wei,     cbBTC = 0 sat
+        //   single-sided rebuild: WETH = 11_940 wei,  cbBTC = 0 sat
+        // 50_000 wei WETH (~4.2x headroom over 11_940) and 5_000 sat cbBTC absorb minor rounding
+        // shifts across forge versions without masking any principal-sized outflow.
         uint256 toFeeColl0 = IERC20(WETH).balanceOf(feeCollector) - feeColl0Before;
         uint256 toFeeColl1 = IERC20(CBBTC).balanceOf(feeCollector) - feeColl1Before;
-        assertLt(toFeeColl0, 0.2 ether, "WETH to feeCollector is fees/dust only, not principal");
-        assertLt(toFeeColl1, 0.005e8, "cbBTC to feeCollector is fees/dust only, not principal");
+        assertLt(toFeeColl0, 50_000, "WETH to feeCollector is fees/dust only, not principal");
+        assertLt(toFeeColl1, 5_000, "cbBTC to feeCollector is fees/dust only, not principal");
 
         // AERO emissions forwarded to feeCollector (position was staked ~2h).
         assertGt(IERC20(AERO).balanceOf(feeCollector), aeroBefore, "AERO emissions skimmed to feeCollector on reset");
