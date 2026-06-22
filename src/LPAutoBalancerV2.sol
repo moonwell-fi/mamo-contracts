@@ -412,7 +412,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         bool wasStaked = p.mainStaked;
 
         // tear down: unstake + AERO skim, fee skim, decreaseAll + collect, burn both NFTs.
-        _exitAll(p, slotId);
+        // Forward the caller-supplied withdraw mins as the sandwich floor on the MAIN decrease.
+        _exitAll(p, slotId, params.amount0MinWithdraw, params.amount1MinWithdraw);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
         // Center on spot (already gate-passed vs TWAP). Straddle guaranteed for width ≥ 2*spacing.
@@ -450,7 +451,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      feeCollector), skim LP fees on every held NFT → feeCollector, then remove all
     ///      liquidity, collect the principal into this contract, and burn the NFTs.
     ///      Handles both main and alt; the alt is skipped when altTokenId == 0.
-    function _exitAll(ManagedPositionV2 storage p, uint256 slotId) private {
+    /// @param amount0MinWithdraw Caller-supplied sandwich floor applied to the MAIN decrease (token0).
+    /// @param amount1MinWithdraw Caller-supplied sandwich floor applied to the MAIN decrease (token1).
+    function _exitAll(
+        ManagedPositionV2 storage p,
+        uint256 slotId,
+        uint256 amount0MinWithdraw,
+        uint256 amount1MinWithdraw
+    ) private {
         uint256 mainId = p.mainTokenId;
         uint256 altId = p.altTokenId;
 
@@ -462,9 +470,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         _skimFees(p, slotId, mainId);
         if (altId != 0) _skimFees(p, slotId, altId);
 
-        // 3. decrease all liquidity + collect principal into this contract
-        _decreaseLiquidityAll(mainId);
-        if (altId != 0) _decreaseLiquidityAll(altId);
+        // 3. decrease all liquidity + collect principal into this contract.
+        //    MAIN gets the caller-supplied withdraw mins (sandwich floor).
+        _decreaseLiquidityAll(mainId, amount0MinWithdraw, amount1MinWithdraw);
+        //    ALT is single-sided and transient (minted+burned within a cycle, not minted
+        //    until Task 3), so 0 mins are acceptable here. This path is unreachable today.
+        if (altId != 0) _decreaseLiquidityAll(altId, 0, 0);
 
         // 4. burn the old NFTs
         POSITION_MANAGER.burn(mainId);
@@ -472,14 +483,19 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     /// @dev Remove all liquidity from `tokenId` and collect the resulting tokens into
-    ///      this contract. Mirrors V1's _decreaseLiquidityAll (no caller mins on the
-    ///      collect; principal mins are not enforced here — reset uses params for the mint).
-    function _decreaseLiquidityAll(uint256 tokenId) private {
+    ///      this contract. `amount0Min`/`amount1Min` are the caller-supplied sandwich floor
+    ///      enforced by the position manager on the decrease (revert if the withdrawn amounts
+    ///      fall below them); pass 0 to skip the floor.
+    function _decreaseLiquidityAll(uint256 tokenId, uint256 amount0Min, uint256 amount1Min) private {
         (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
         if (liq > 0) {
             POSITION_MANAGER.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId, liquidity: liq, amount0Min: 0, amount1Min: 0, deadline: block.timestamp
+                    tokenId: tokenId,
+                    liquidity: liq,
+                    amount0Min: amount0Min,
+                    amount1Min: amount1Min,
+                    deadline: block.timestamp
                 })
             );
         }

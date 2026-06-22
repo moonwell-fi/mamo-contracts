@@ -160,7 +160,13 @@ contract MockPositionManagerV2 {
     {
         lastDecreaseTokenId = params.tokenId;
         decreaseCallCount++;
-        return (0, 0);
+        // Model the principal returned by the decrease as the staged "principal" collect
+        // amounts (slot 1). Enforce the caller-supplied sandwich floor exactly like the real
+        // position manager: revert if the withdrawn amount is below the requested minimum.
+        amount0 = collectAmounts0[1];
+        amount1 = collectAmounts1[1];
+        require(amount0 >= params.amount0Min, "Price slippage check");
+        require(amount1 >= params.amount1Min, "Price slippage check");
     }
 
     function collect(INonfungiblePositionManager.CollectParams calldata params)
@@ -581,5 +587,39 @@ contract LPAutoBalancerV2UnitTest is Test {
         // lastRebalance stamped to the current block.
         (,,,,,,,,,,,,,,,,,,, uint256 lastRebalance,) = lab.positions(slotId);
         assertEq(lastRebalance, block.timestamp, "lastRebalance stamped");
+    }
+
+    // ─── reset() — withdraw-min sandwich guard (HIGH defect fix) ─────────────────
+
+    /// @dev The caller's amount{0,1}MinWithdraw must be forwarded to the MAIN decrease so the
+    ///      position manager reverts when the withdrawn principal falls below the floor.
+    ///      Staged principal is 1e18/1e18; a withdraw-min ABOVE that must revert reset().
+    function test_reset_revertsWhenWithdrawMinUnmet() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        LPAutoBalancerV2.ResetParams memory params = _defaultResetParams();
+        params.amount0MinWithdraw = 1e18 + 1; // floor exceeds the staged decrease return
+
+        vm.prank(rebalancer);
+        vm.expectRevert("Price slippage check");
+        lab.reset(slotId, params);
+    }
+
+    /// @dev Mirror of the above: a withdraw-min AT or BELOW the staged return passes the floor
+    ///      and reset() succeeds, proving the wiring does not over-reject.
+    function test_reset_succeedsWhenWithdrawMinMet() public {
+        uint256 slotId = _registerSlot(false);
+        _stagePrincipal(1e18, 1e18);
+
+        LPAutoBalancerV2.ResetParams memory params = _defaultResetParams();
+        params.amount0MinWithdraw = 1e18; // exactly the staged return
+        params.amount1MinWithdraw = 1e18;
+
+        vm.prank(rebalancer);
+        lab.reset(slotId, params);
+
+        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.positions(slotId);
+        assertEq(mainTokenId, NEW_TOKEN_ID, "reset completed with withdraw mins met");
     }
 }
