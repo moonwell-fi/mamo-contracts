@@ -300,7 +300,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     // Gauge staking
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Approve the gauge and deposit the position NFT into it for AERO emissions.
+    /// @notice Approve the gauge and deposit the position NFT(s) into it for AERO emissions.
+    ///         Stakes the main NFT always; also stakes the alt NFT when altTokenId != 0.
     function stake(uint256 slotId) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
@@ -309,14 +310,21 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         POSITION_MANAGER.approve(p.gauge, p.mainTokenId);
         ICLGauge(p.gauge).deposit(p.mainTokenId);
         p.mainStaked = true;
+        if (p.altTokenId != 0) {
+            POSITION_MANAGER.approve(p.gauge, p.altTokenId);
+            ICLGauge(p.gauge).deposit(p.altTokenId);
+            p.altStaked = true;
+        }
         emit Staked(slotId, p.mainTokenId, p.gauge);
     }
 
-    /// @notice Withdraw the position NFT from the gauge and skim any AERO to the fee collector.
+    /// @notice Withdraw the position NFT(s) from the gauge and skim any AERO to the fee collector.
+    ///         Unstakes the main NFT always; also unstakes the alt NFT when altStaked && altTokenId != 0.
     function unstake(uint256 slotId) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.mainStaked) revert NotStaked();
         _unstake(p, slotId);
+        if (p.altStaked && p.altTokenId != 0) _unstakeAlt(p, slotId);
     }
 
     /// @dev Internal unstake: withdraw from gauge (auto-claims AERO), set mainStaked=false,
@@ -350,16 +358,45 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit Unstaked(slotId, p.altTokenId, p.gauge);
     }
 
+    /// @notice Emergency exit: unstake (skimming AERO to feeCollector), collect fees, remove all
+    ///         liquidity, burn both NFTs, and transfer the resulting token0/token1 balances to `to`.
+    ///         Marks the slot inactive. Use when the Safe needs to fully tear down a position in one
+    ///         call regardless of staking state. Uses 0 sandwich mins (emergency path).
+    function exit(uint256 slotId, address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        ManagedPositionV2 storage p = positions[slotId];
+        if (!p.active) revert NotActive();
+        if (to == address(0)) revert ZeroAddress();
+
+        // Tear down: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn both NFTs.
+        _exitAll(p, slotId, 0, 0);
+
+        // Transfer all principal recovered from the position to `to`.
+        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
+        if (bal0 > 0) IERC20(p.token0).safeTransfer(to, bal0);
+        if (bal1 > 0) IERC20(p.token1).safeTransfer(to, bal1);
+
+        // Clear NFT references and deactivate slot (CEI: state updated after interactions above).
+        p.mainTokenId = 0;
+        p.altTokenId = 0;
+        p.active = false;
+
+        emit PositionWithdrawn(slotId, to);
+    }
+
     /// @notice Claim AERO emissions from the gauge for a staked position and forward to feeCollector.
+    ///         Claims from both main and alt (if altStaked && altTokenId != 0).
     ///         Permissionless — anyone may call to trigger the skim.
     function claimEmissions(uint256 slotId) external whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = positions[slotId];
         if (!p.active) revert NotActive();
         if (!p.mainStaked) revert NotStaked();
-        // Forward only the AERO gained by THIS claim, not the whole contract balance —
-        // avoids cross-slot sweeps and stray-balance theft.
+        // Snapshot AERO balance before claiming from both legs, then forward the net gain.
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         ICLGauge(p.gauge).getReward(p.mainTokenId);
+        if (p.altStaked && p.altTokenId != 0) {
+            ICLGauge(p.gauge).getReward(p.altTokenId);
+        }
         uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         if (aeroEarned > 0) {
             IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);

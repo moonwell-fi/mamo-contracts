@@ -5,7 +5,7 @@ import {MockERC20} from "./MockERC20.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
-import {Test} from "@forge-std/Test.sol";
+import {StdStorage, Test, stdStorage} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -313,6 +313,7 @@ contract MockCLPoolV2 is ICLPool {
 }
 
 contract LPAutoBalancerV2UnitTest is Test {
+    using stdStorage for StdStorage;
     LPAutoBalancerV2 lab;
     MockPositionManagerV2 mockPM;
     MockCLPoolV2 mockPool;
@@ -912,5 +913,100 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
         dLab.reset(slotId, _defaultResetParams());
+    }
+
+    // ─── Task 4: stake/unstake/claimEmissions (dual-NFT) + exit() ────────────────
+
+    /// @dev Register a gauged (or gaugeless) slot and inject a non-zero altTokenId directly
+    ///      into contract storage using stdstore. This bypasses the _store() forced-zero for
+    ///      altTokenId so tests can exercise the alt staking paths without running reset().
+    function _registerSlotWithAlt(bool withGauge) internal returns (uint256 slotId) {
+        slotId = _registerSlot(withGauge);
+        // Also register ALT_TOKEN_ID with the mock PM so ownerOf returns this contract's address.
+        // (mockPM.ownerOf always returns mockOwner, so no extra setup needed.)
+        // Inject altTokenId = ALT_TOKEN_ID into positions[slotId].altTokenId via stdstore.
+        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(1) // altTokenId is field index 1
+            .checked_write(ALT_TOKEN_ID);
+    }
+
+    /// @dev Read active flag from positions() getter.
+    function _readActive(uint256 slotId) internal view returns (bool active) {
+        (,,,,,,,,,,,,,,,,,,,, active) = lab.positions(slotId);
+    }
+
+    function test_stake_main_altFollows() public {
+        uint256 slotId = _registerSlotWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        (bool mainStaked, bool altStaked) = _readStakeFlags(slotId);
+        assertTrue(mainStaked, "main staked");
+        assertTrue(altStaked, "alt follows main");
+    }
+
+    function test_unstake_main_altFollows() public {
+        uint256 slotId = _registerSlotWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        vm.prank(rebalancer);
+        lab.unstake(slotId);
+        (bool mainStaked, bool altStaked) = _readStakeFlags(slotId);
+        assertFalse(mainStaked, "main unstaked");
+        assertFalse(altStaked, "alt unstaked");
+    }
+
+    function test_claimEmissions_sumsBothNfts() public {
+        uint256 slotId = _registerSlotWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        // Mint AERO into gauge so getReward() can pay out; set payout per call.
+        mockAero.mint(address(mockGauge), 14e18);
+        mockGauge.setAeroToPayOnGetReward(7e18); // each getReward call pays 7e18
+        uint256 before = mockAero.balanceOf(feeCollector);
+        lab.claimEmissions(slotId);
+        // 2 calls: main (7e18) + alt (7e18) = 14e18 total
+        assertGt(mockAero.balanceOf(feeCollector), before, "AERO from both nfts to feeCollector");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 14e18, "correct total from both NFTs");
+    }
+
+    function test_exit_returnsBothTokensToSafe_andDeactivates() public {
+        uint256 slotId = _registerSlotWithAlt(false);
+        // MockPositionManagerV2.collect auto-advances: call 0 → slot 0 (fees=0), calls 1+ → slot 1.
+        // With a non-zero alt, _exitAll issues 4 collects total:
+        //   call 0: skim-main  (slot 0) → 0, 0
+        //   call 1: skim-alt   (slot 1) → 2e18/1e18 → feeCollector
+        //   call 2: collect-main after decrease (slot 1) → 2e18/1e18 → lab
+        //   call 3: collect-alt  after decrease (slot 1) → 2e18/1e18 → lab
+        // Slot 1 fires 3 times: mint 3×principal into PM so every collect succeeds.
+        tok0.mint(address(mockPM), 6e18);
+        tok1.mint(address(mockPM), 3e18);
+        mockPM.setCollectSequence(0, 0, 2e18, 1e18);
+        vm.prank(admin);
+        lab.exit(slotId, admin);
+        assertEq(mockPM.burnCallCount(), 2, "main + alt burned");
+        assertGt(tok0.balanceOf(admin), 0, "token0 to Safe");
+        assertGt(tok1.balanceOf(admin), 0, "token1 to Safe");
+        assertEq(tok0.balanceOf(address(lab)), 0, "no token0 dust");
+        assertEq(tok1.balanceOf(address(lab)), 0, "no token1 dust");
+        assertFalse(_readActive(slotId), "slot deactivated");
+    }
+
+    function test_exit_onlyAdmin() public {
+        uint256 slotId = _registerSlotWithAlt(false);
+        vm.prank(rebalancer);
+        vm.expectRevert();
+        lab.exit(slotId, rebalancer);
+    }
+
+    function test_exit_unstakesAndSkimsAero_whenStaked() public {
+        uint256 slotId = _registerSlotWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        // Mint AERO into gauge so withdraw() can auto-claim
+        mockAero.mint(address(mockGauge), 8e18);
+        mockGauge.setAeroToPayOnWithdraw(4e18); // each withdraw call pays 4e18
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(admin);
+        lab.exit(slotId, admin);
+        assertGt(mockAero.balanceOf(feeCollector), before, "AERO skimmed on exit");
     }
 }
