@@ -910,6 +910,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 spacing = p.tickSpacing;
         int24 w = int24(width);
 
+        // INTENTIONAL exact-zero test: a dust-imbalanced straddle (both > 0 but skewed) is absorbed
+        // by _mintAlt, so do NOT convert this to a value threshold — that would misclassify imbalanced
+        // straddles as single-sided and place the main on the wrong side of spot.
         if (bal0 > 0 && bal1 > 0) {
             // Balanced straddle centered on spot (guaranteed straddle for width ≥ 2*spacing).
             return _alignedRange(spotTick, width, spacing, spotTick);

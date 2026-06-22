@@ -1177,4 +1177,57 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.expectRevert(); // caller (this test contract) lacks REBALANCER_ROLE
         lab.reset(slotId, _defaultResetParams());
     }
+
+    // ─── _mainRange single-sided geometry (deterministic, no fork) ───────────────
+    //
+    // These tests verify the token0→above-spot / token1→below-spot decision in _mainRange
+    // without relying on a fork. They stage exactly one non-zero leg so the bal0>0&&bal1>0
+    // straddle branch is skipped and the single-sided branch runs. The new tokenId's tick
+    // range is read back via getDecisionSnapshot() so the assertion is end-to-end.
+
+    /// @dev token0-only principal (bal1 == 0 after decrease): _mainRange must place the main
+    ///      strictly ABOVE spot so the position holds only token0 (CL range orientation).
+    ///      With spotTick=100, spacing=200: floor=_floorAlign(100,200)=0, up=0+200=200.
+    ///      Expected new main: tickLower=200, tickUpper=200+400=600 (width=400).
+    ///      Assertion: mainTickLower >= spotTick (range starts at or above spot).
+    function test_reset_singleSided_token0_rangeAboveSpot() public {
+        uint256 slotId = _registerSlot(false);
+        // Stage token0-only: bal0=1e18, bal1=0.
+        _stagePrincipal(1e18, 0);
+
+        // Configure the minted main position at the expected above-spot range [200, 600].
+        // pullOnMint=true on the shared mockPM; with bal1=0, consume=min(1e18,0)=0 so no pull
+        // actually happens — both cases produce the same result with only token0 available.
+        mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
+
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+        // The new main must start at or above spot: range strictly above spot holds only token0.
+        assertGe(s.mainTickLower, SPOT_TICK, "token0-only: main range must start >= spotTick");
+        assertGt(s.mainLiquidity, 0, "token0-only: main must have positive liquidity");
+    }
+
+    /// @dev token1-only principal (bal0 == 0 after decrease): _mainRange must place the main
+    ///      strictly BELOW spot so the position holds only token1 (CL range orientation).
+    ///      With spotTick=100, spacing=200: floor=_floorAlign(100,200)=0 (unaligned → down=floor=0).
+    ///      Expected new main: tickUpper=0, tickLower=0-400=-400 (width=400).
+    ///      Assertion: mainTickUpper <= spotTick (range ends at or below spot).
+    function test_reset_singleSided_token1_rangeBelowSpot() public {
+        uint256 slotId = _registerSlot(false);
+        // Stage token1-only: bal0=0, bal1=1e18.
+        _stagePrincipal(0, 1e18);
+
+        // Configure the minted main position at the expected below-spot range [-400, 0].
+        mockPM.setPosition(NEW_TOKEN_ID, -400, 0, NEW_LIQ, token0, token1);
+
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+        // The new main must end at or below spot: range strictly below spot holds only token1.
+        assertLe(s.mainTickUpper, SPOT_TICK, "token1-only: main range must end <= spotTick");
+        assertGt(s.mainLiquidity, 0, "token1-only: main must have positive liquidity");
+    }
 }
