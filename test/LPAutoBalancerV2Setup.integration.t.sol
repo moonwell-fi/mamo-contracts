@@ -147,6 +147,8 @@ contract LPAutoBalancerV2SetupTest is Test {
             amount1MinAlt: 0,
             amount0MinWithdraw: 0,
             amount1MinWithdraw: 0,
+            amount0MinWithdrawAlt: 0,
+            amount1MinWithdrawAlt: 0,
             deadline: block.timestamp + 1
         });
     }

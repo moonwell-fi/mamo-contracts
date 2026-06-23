@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
+import {DeployLPAutoBalancerV2} from "@script/DeployLPAutoBalancerV2.s.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
@@ -103,27 +104,15 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     }
 
     function deploy() public override {
-        string memory labName = "MAMO_LP_AUTO_BALANCER_V2";
-        if (addresses.isAddressSet(labName)) {
+        if (addresses.isAddressSet("MAMO_LP_AUTO_BALANCER_V2")) {
             // Already deployed — nothing to do (idempotent).
             return;
         }
 
-        address admin = addresses.getAddress("F-MAMO");
-        address guardian = addresses.getAddress("F-MAMO");
-        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
-        address aero = addresses.getAddress("AERO");
-
-        // manager_ and rebalancer_ granted later (rebalancer in this proposal's build()).
-        address manager = address(0);
-        address rebalancer = address(0);
-
-        address deployer = addresses.getAddress("DEPLOYER_EOA");
-        vm.startBroadcast(deployer);
-        LPAutoBalancerV2 lab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, positionManager, aero);
-        vm.stopBroadcast();
-
-        addresses.addAddress(labName, address(lab), true);
+        // Delegate to the canonical deploy script helper instead of re-implementing the
+        // constructor-args assembly + address registration (single source of truth for the
+        // balancer's roles/wiring; the script handles the addAddress/changeAddress bookkeeping).
+        LPAutoBalancerV2 lab = new DeployLPAutoBalancerV2().deployLPAutoBalancerV2(addresses);
         console.log("LPAutoBalancerV2 deployed at:", address(lab));
     }
 

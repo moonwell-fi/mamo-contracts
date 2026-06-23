@@ -65,6 +65,7 @@ contract MockPositionManagerV2 {
         uint128 liquidity;
         address token0;
         address token1;
+        int24 tickSpacing;
     }
 
     mapping(uint256 => PositionData) internal _positions;
@@ -92,7 +93,17 @@ contract MockPositionManagerV2 {
     }
 
     function setPosition(uint256 tokenId, int24 tl, int24 tu, uint128 liq, address t0, address t1) external {
-        _positions[tokenId] = PositionData({tickLower: tl, tickUpper: tu, liquidity: liq, token0: t0, token1: t1});
+        // Default tickSpacing to 200 (the unit-test pool's spacing) so registerPosition's
+        // NFT-to-pool binding check passes for all existing 6-arg callers.
+        _positions[tokenId] =
+            PositionData({tickLower: tl, tickUpper: tu, liquidity: liq, token0: t0, token1: t1, tickSpacing: 200});
+    }
+
+    /// @notice Overload that sets an explicit tickSpacing (to drive registerPosition's
+    ///         NFT-to-pool binding check, including the mismatch case).
+    function setPosition(uint256 tokenId, int24 tl, int24 tu, uint128 liq, address t0, address t1, int24 ts) external {
+        _positions[tokenId] =
+            PositionData({tickLower: tl, tickUpper: tu, liquidity: liq, token0: t0, token1: t1, tickSpacing: ts});
     }
 
     function setCollectTokens(address t0, address t1) external {
@@ -171,7 +182,21 @@ contract MockPositionManagerV2 {
         )
     {
         PositionData storage pd = _positions[tokenId];
-        return (0, address(0), pd.token0, pd.token1, 0, pd.tickLower, pd.tickUpper, pd.liquidity, 0, 0, 0, 0);
+        // Index 4 carries tickSpacing on Aerodrome Slipstream (the interface labels it `fee`).
+        return (
+            0,
+            address(0),
+            pd.token0,
+            pd.token1,
+            uint24(pd.tickSpacing),
+            pd.tickLower,
+            pd.tickUpper,
+            pd.liquidity,
+            0,
+            0,
+            0,
+            0
+        );
     }
 
     function decreaseLiquidity(INonfungiblePositionManager.DecreaseLiquidityParams calldata params)
@@ -470,6 +495,8 @@ contract LPAutoBalancerV2UnitTest is Test {
             amount1MinAlt: 0,
             amount0MinWithdraw: 0,
             amount1MinWithdraw: 0,
+            amount0MinWithdrawAlt: 0,
+            amount1MinWithdrawAlt: 0,
             deadline: block.timestamp + 1
         });
     }
@@ -813,6 +840,51 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.reset(slotId, _defaultResetParams());
         (bool mainStaked,) = _readStakeFlags(slotId);
         assertTrue(mainStaked, "main restaked after reset"); // covers the wasStaked branch
+    }
+
+    /// @dev Review fix #3: when a staked position is reset and a NEW alt is minted, the alt must be
+    ///      staked alongside the restaked main. Otherwise it is stranded — stake() and collectFees()
+    ///      both revert AlreadyStaked once the main is staked, so the alt's emissions/fees could never
+    ///      be collected until the next reset.
+    function test_reset_restakesAlt_whenStakedAndAltMinted() public {
+        uint256 slotId = _registerSlot(true); // gauged
+        vm.prank(rebalancer);
+        lab.stake(slotId);
+        _stagePrincipal(3e18, 1e18); // imbalanced => surplus token0 => alt minted
+        mockPM.setNextMintResult(NEW_TOKEN_ID, 1e18); // main
+        mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17); // alt
+        vm.prank(rebalancer);
+        lab.reset(slotId, _defaultResetParams());
+
+        (uint256 mainId, uint256 altId,) = _readMainAlt(slotId);
+        assertEq(mainId, NEW_TOKEN_ID, "main rebuilt");
+        assertEq(altId, ALT_TOKEN_ID, "alt minted");
+        (bool mainStaked, bool altStaked) = _readStakeFlags(slotId);
+        assertTrue(mainStaked, "main restaked after reset");
+        assertTrue(altStaked, "alt also staked after reset (not stranded)");
+    }
+
+    /// @dev Review fix #2: registerPosition must reject an NFT whose own tickSpacing disagrees with
+    ///      the config, EVEN when the live pool descriptor matches. The descriptor check alone does
+    ///      not bind the NFT to the pool; the NFT's positions() tickSpacing must also match.
+    function test_registerPosition_revertNftPoolMismatch_tickSpacing() public {
+        // Descriptor matches (pool says 200, config says 200) but the NFT itself reports spacing 100.
+        mockPM.setPosition(TOKEN_ID, OLD_TL, OLD_TU, OLD_LIQ, token0, token1, int24(100));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig(); // tickSpacing 200
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev Review fix #2: registerPosition must reject an NFT whose own token0 disagrees with the
+    ///      config, even when the live pool descriptor matches.
+    function test_registerPosition_revertNftPoolMismatch_token() public {
+        // Descriptor matches, but the NFT was minted against a different token0.
+        mockPM.setPosition(TOKEN_ID, OLD_TL, OLD_TU, OLD_LIQ, makeAddr("wrongNftToken0"), token1, int24(200));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
     }
 
     // ─── reset() — Task 3 HIGH fix: value-based leg selection + USD dust + floor-counts-loose ──

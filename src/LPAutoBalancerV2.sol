@@ -84,6 +84,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     mapping(uint256 slotId => ManagedPositionV2) public positions;
     uint256 public nextSlotId;
 
+    /// @notice Cached ERC-decimals of each registered price feed. Chainlink feed `decimals()` is
+    ///         immutable, so it is read once when an oracle is registered (registerPosition/setOracles)
+    ///         and thereafter SLOAD-ed instead of re-fetched via an external staticcall on every
+    ///         valuation — `_valueInUsd` runs ~8x per reset(), so this removes a pile of redundant calls.
+    mapping(address feed => uint8 decimals) public feedDecimals;
+
     error ZeroAddress();
     error TwapDeviation();
     error StaleOracle();
@@ -163,9 +169,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         }
         if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
         // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
-        // not as a StaleOracle revert on the next rebalance.
-        _readFeed(config.oracle0);
-        _readFeed(config.oracle1);
+        // not as a StaleOracle revert on the next rebalance. Cache the feed decimals while here.
+        (, uint8 fd0) = _readFeed(config.oracle0);
+        (, uint8 fd1) = _readFeed(config.oracle1);
+        feedDecimals[config.oracle0] = fd0;
+        feedDecimals[config.oracle1] = fd1;
         if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
         if (config.maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = config.tickSpacing;
@@ -183,6 +191,19 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded.
         if (config.gauge != address(0) && ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
         if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
+        // Bind the NFT to the configured pool: PoolMismatch above only validates the supplied
+        // descriptor against config.pool, NOT that the NFT actually belongs to that pool. Read the
+        // NFT's own token0/token1/tickSpacing and require they match — otherwise a position minted
+        // against a DIFFERENT pool (wrong fee tier / token order) could be registered, and every
+        // on-chain geometry computation (TickMath/LiquidityAmounts on p.tickSpacing) would be wrong.
+        // NOTE: the INonfungiblePositionManager interface labels field 4 `fee` (Uniswap), but on
+        // Aerodrome Slipstream this slot carries tickSpacing — the same value MintParams.tickSpacing
+        // consumes. It is uint24 in the interface, so compare against uint24(spacing).
+        (,, address nftToken0, address nftToken1, uint24 nftSpacing,,,,,,,) =
+            POSITION_MANAGER.positions(config.mainTokenId);
+        if (nftToken0 != config.token0 || nftToken1 != config.token1 || nftSpacing != uint24(spacing)) {
+            revert PoolMismatch();
+        }
 
         slotId = nextSlotId++;
         _store(slotId, config);
@@ -274,8 +295,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function setOracles(uint256 slotId, address oracle0, address oracle1) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!positions[slotId].active) revert NotActive();
         if (oracle0 == address(0) || oracle1 == address(0)) revert OracleRequired();
-        _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
-        _readFeed(oracle1);
+        (, uint8 fd0) = _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
+        (, uint8 fd1) = _readFeed(oracle1);
+        feedDecimals[oracle0] = fd0; // cache immutable feed decimals for the valuation hot path
+        feedDecimals[oracle1] = fd1;
         positions[slotId].oracle0 = oracle0;
         positions[slotId].oracle1 = oracle1;
         emit OraclesUpdated(slotId, oracle0, oracle1);
@@ -401,8 +424,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         p.active = false;
 
         // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
-        // Emergency path: deadline = block.timestamp (execute immediately).
-        _exitAll(p, slotId, 0, 0, block.timestamp);
+        // Emergency path: 0 mins on both legs, deadline = block.timestamp (execute immediately).
+        _exitAll(p, slotId, 0, 0, 0, 0, block.timestamp);
 
         // Transfer all principal recovered from the position to `to`.
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
@@ -449,6 +472,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 amount1MinAlt;
         uint256 amount0MinWithdraw;
         uint256 amount1MinWithdraw;
+        uint256 amount0MinWithdrawAlt;
+        uint256 amount1MinWithdrawAlt;
         uint256 deadline;
     }
 
@@ -503,8 +528,18 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         bool wasStaked = p.mainStaked;
 
         // tear down: unstake + AERO skim, fee skim, decreaseAll + collect, burn both NFTs.
-        // Forward the caller-supplied withdraw mins as the sandwich floor on the MAIN decrease.
-        _exitAll(p, slotId, params.amount0MinWithdraw, params.amount1MinWithdraw, params.deadline);
+        // Forward the caller-supplied withdraw mins as the sandwich floor on BOTH decreases
+        // (main + alt). The alt mins are independent because the rebalancer cannot predict which
+        // single leg the alt holds until execution time.
+        _exitAll(
+            p,
+            slotId,
+            params.amount0MinWithdraw,
+            params.amount1MinWithdraw,
+            params.amount0MinWithdrawAlt,
+            params.amount1MinWithdrawAlt,
+            params.deadline
+        );
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
 
@@ -519,8 +554,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         uint256 newMain = _mintBalanced(p, tl, tu, params);
         p.mainTokenId = newMain;
-        p.altStaked = false; // freshly minted alt is never staked this cycle
-        p.mainStaked = false; // freshly minted, not yet staked
+        p.altStaked = false; // freshly minted, not yet staked (restaked below iff wasStaked)
+        p.mainStaked = false; // freshly minted, not yet staked (restaked below iff wasStaked)
         p.lastRebalance = block.timestamp;
 
         // Mint the single-sided alt from the post-mint leftover (NO SWAP). _mintAlt selects the
@@ -555,6 +590,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             ICLGauge(p.gauge).deposit(newMain);
             p.mainStaked = true;
             emit Staked(slotId, newMain, p.gauge);
+            // Stake the freshly minted alt too. Otherwise the alt is stranded unstaked: once the
+            // main is staked, stake() reverts AlreadyStaked and collectFees() reverts AlreadyStaked,
+            // so the alt's AERO emissions and LP fees could never be collected until the next reset.
+            if (p.altTokenId != 0) {
+                POSITION_MANAGER.approve(p.gauge, p.altTokenId);
+                ICLGauge(p.gauge).deposit(p.altTokenId);
+                p.altStaked = true;
+                emit Staked(slotId, p.altTokenId, p.gauge);
+            }
         }
 
         emit Reset(slotId, newMain, p.altTokenId, tl, tu);
@@ -568,11 +612,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      Handles both main and alt; the alt is skipped when altTokenId == 0.
     /// @param amount0MinWithdraw Caller-supplied sandwich floor applied to the MAIN decrease (token0).
     /// @param amount1MinWithdraw Caller-supplied sandwich floor applied to the MAIN decrease (token1).
+    /// @param amount0MinWithdrawAlt Caller-supplied sandwich floor applied to the ALT decrease (token0).
+    /// @param amount1MinWithdrawAlt Caller-supplied sandwich floor applied to the ALT decrease (token1).
     function _exitAll(
         ManagedPositionV2 storage p,
         uint256 slotId,
         uint256 amount0MinWithdraw,
         uint256 amount1MinWithdraw,
+        uint256 amount0MinWithdrawAlt,
+        uint256 amount1MinWithdrawAlt,
         uint256 deadline
     ) private {
         uint256 mainId = p.mainTokenId;
@@ -589,9 +637,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // 3. decrease all liquidity + collect principal into this contract.
         //    MAIN gets the caller-supplied withdraw mins (sandwich floor) and the caller-supplied deadline.
         _decreaseLiquidityAll(mainId, amount0MinWithdraw, amount1MinWithdraw, deadline);
-        //    ALT is single-sided and transient (minted+burned within a cycle, not minted
-        //    until Task 3), so 0 mins are acceptable here. This path is unreachable today.
-        if (altId != 0) _decreaseLiquidityAll(altId, 0, 0, deadline);
+        //    ALT is single-sided and transient (minted by _mintAlt in reset() whenever the
+        //    post-rebuild surplus leg clears MIN_ALT_VALUE_USD). When an alt persists into the
+        //    next cycle, this decrease removes its liquidity, so it gets its own caller-supplied
+        //    sandwich floor (the rebalancer cannot know in advance which single leg the alt holds).
+        if (altId != 0) _decreaseLiquidityAll(altId, amount0MinWithdrawAlt, amount1MinWithdrawAlt, deadline);
 
         // 4. burn the old NFTs
         POSITION_MANAGER.burn(mainId);
@@ -708,6 +758,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             altTl = mainTl - p.tickSpacing;
         }
 
+        // The alt is single-sided: a range strictly above spot consumes ONLY token0, strictly below
+        // ONLY token1. Force the unfunded leg's min to 0 — the caller cannot predict which leg the
+        // surplus lands on (selection is by USD value at execution time), so a nonzero min on the
+        // leg that ends up unfunded would revert an otherwise-valid mint. Only the funded leg keeps
+        // the caller-supplied floor.
+        uint256 altAmount0Min = surplus0 ? params.amount0MinAlt : 0;
+        uint256 altAmount1Min = surplus0 ? 0 : params.amount1MinAlt;
+
         IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
         IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
 
@@ -719,8 +777,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             tickUpper: altTu,
             amount0Desired: bal0,
             amount1Desired: bal1,
-            amount0Min: params.amount0MinAlt,
-            amount1Min: params.amount1MinAlt,
+            amount0Min: altAmount0Min,
+            amount1Min: altAmount1Min,
             recipient: address(this),
             deadline: params.deadline,
             sqrtPriceX96: 0 // pool already initialized
@@ -1015,14 +1073,22 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (diff > maxDev) revert TwapDeviation();
     }
 
-    /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
+    /// @dev Read a Chainlink-style price feed and validate freshness and positivity, returning the
+    ///      price AND the feed decimals. Used by the one-time registration/setOracles probes.
     ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
     function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
+        price = _readFeedPrice(feed);
+        decimals = IPriceFeed(feed).decimals();
+    }
+
+    /// @dev Price-only feed read for the valuation hot path: validates freshness and positivity but
+    ///      does NOT re-fetch decimals (those are cached in `feedDecimals` at registration time).
+    ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
+    function _readFeedPrice(address feed) internal view returns (uint256 price) {
         (, int256 answer,, uint256 updatedAt,) = IPriceFeed(feed).latestRoundData();
         if (answer <= 0) revert StaleOracle();
         if (block.timestamp - updatedAt > maxOracleDelay) revert StaleOracle();
         price = uint256(answer);
-        decimals = IPriceFeed(feed).decimals();
     }
 
     /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
@@ -1036,12 +1102,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // because the OTHER, unused feed happens to be stale — a zero amount contributes 0 regardless
         // of price. The two-leg path (both amounts > 0) still reads both feeds, as required.
         if (amount0 > 0) {
-            (uint256 p0, uint8 fd0) = _readFeed(oracle0);
-            usd += FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0);
+            uint256 p0 = _readFeedPrice(oracle0);
+            usd += FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** feedDecimals[oracle0]);
         }
         if (amount1 > 0) {
-            (uint256 p1, uint8 fd1) = _readFeed(oracle1);
-            usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
+            uint256 p1 = _readFeedPrice(oracle1);
+            usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** feedDecimals[oracle1]);
         }
     }
 
