@@ -398,5 +398,15 @@
     "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
     "name": "WETH_STRATEGY_FACTORY",
     "isContract": true
+  },
+  {
+    "addr": "0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1",
+    "name": "WETH_CBBTC_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x41b2126661C673C2beDd208cC72E85DC51a5320a",
+    "name": "WETH_CBBTC_CL_GAUGE",
+    "isContract": true
   }
 ]
