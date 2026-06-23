@@ -31,14 +31,14 @@ This is the step-by-step to stand up the **first** managed position: a **WETH/cb
 | feeCollector (drop sink) | `DROP_AUTOMATION` (from `addresses/8453.json`) |
 
 > **Two gotchas, both confirmed on-chain:**
-> 1. The position manager the **gauge accepts** is `0x827922…`, **not** the `AERODROME_POSITION_MANAGER` in `addresses/8453.json`. Deploy and mint against `0x827922…`.
+> 1. The position manager the **gauge accepts** is `0x827922…`, registered in `addresses/8453.json` as **`UNISWAP_V3_POSITION_MANAGER_AERODROME`** — **not** `AERODROME_POSITION_MANAGER` (`0xc741be…`, a different address). Deploy and mint against `0x827922…` / `UNISWAP_V3_POSITION_MANAGER_AERODROME`.
 > 2. Token order is by address: **WETH = token0, cbBTC = token1** (`0x42…` < `0xcb…`). Every `token0`/`token1`/`oracle0`/`oracle1`/`amount0`/`amount1` field follows this order.
 
 ---
 
 ## Phase 0 — Deploy `LPAutoBalancerV2`
 
-There is no deploy script yet — add `script/DeployLPAutoBalancerV2.s.sol` (mirror an existing deploy script) or deploy via the Safe. Constructor (6 args, **no swap router / no quoter**):
+Deploy via `script/DeployLPAutoBalancerV2.s.sol` (`deployLPAutoBalancerV2(Addresses)` / `run()`) — it reads `F-MAMO` (admin+guardian), `UNISWAP_V3_POSITION_MANAGER_AERODROME`, `AERO`, passes `manager_ = rebalancer_ = address(0)`, and records `MAMO_LP_AUTO_BALANCER_V2`. Or deploy via the FPS proposal's `deploy()` (Phase B). Constructor (6 args, **no swap router / no quoter**):
 
 ```solidity
 new LPAutoBalancerV2(
@@ -71,7 +71,7 @@ Output of Phase A: the Safe holds the LP positions to be liquidated into WETH + 
 
 ## Phase B — Safe: build and register the WETH/cbBTC position
 
-All steps are Safe transactions (batch them in one Safe tx / FPS proposal where possible). **Strongly recommended:** encode Phase B as an **FPS proposal script** (`multisig/f-mamo/00X_LPAutoBalancerV2Setup.sol`) with a `validate()` step, and add an FPS test (mirror `ERC20StrategyV2Test`) that runs build → simulate → validate on a fork before signing. Manual sequence below for reference.
+**Phase B is implemented as an FPS proposal: `multisig/mamo-multisig/011_LPAutoBalancerV2Setup.sol`** (`deploy` → `build` → `simulate` → `validate`), with a Base-fork test `test/LPAutoBalancerV2Setup.integration.t.sol` (`make lp-v2-setup`) that mints a real WETH/cbBTC position, runs the full lifecycle, and proves the granted rebalancer can `reset`. **Two values the production run MUST set on the proposal** (it reverts otherwise — fail-safe, no silent zero-address): `setTokenId(INIT_TOKEN_ID)` (the off-chain-minted NFT from B2) and `setRebalancerEOA(backendEOA)` (or add `MAMO_LP_REBALANCER` to `addresses/8453.json`). The proposal's `build()` encodes the on-chain Safe actions (B3 transfer-in + B4 register + C1 grant-rebalancer); the liquidate+mint (B1/B2) stay off-chain. Manual sequence below documents what the proposal does.
 
 ### B1. Liquidate the underperforming LP → WETH + cbBTC
 Withdraw liquidity from the Phase-A NFTs and swap the proceeds into **WETH + cbBTC** in the ratio you want for the initial position (≈50/50 by value for a centered main). Use the team's preferred venue (Aerodrome router / CoWSwap). This is a deliberate, Safe-reviewed sell — it is the one value-moving swap in the whole flow and is intentionally **off** the rebalancer.
