@@ -84,12 +84,6 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     mapping(uint256 slotId => ManagedPositionV2) public positions;
     uint256 public nextSlotId;
 
-    /// @notice Cached ERC-decimals of each registered price feed. Chainlink feed `decimals()` is
-    ///         immutable, so it is read once when an oracle is registered (registerPosition/setOracles)
-    ///         and thereafter SLOAD-ed instead of re-fetched via an external staticcall on every
-    ///         valuation — `_valueInUsd` runs ~8x per reset(), so this removes a pile of redundant calls.
-    mapping(address feed => uint8 decimals) public feedDecimals;
-
     error ZeroAddress();
     error TwapDeviation();
     error StaleOracle();
@@ -169,11 +163,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         }
         if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
         // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
-        // not as a StaleOracle revert on the next rebalance. Cache the feed decimals while here.
-        (, uint8 fd0) = _readFeed(config.oracle0);
-        (, uint8 fd1) = _readFeed(config.oracle1);
-        feedDecimals[config.oracle0] = fd0;
-        feedDecimals[config.oracle1] = fd1;
+        // not as a StaleOracle revert on the next rebalance.
+        _readFeed(config.oracle0);
+        _readFeed(config.oracle1);
         if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
         if (config.maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = config.tickSpacing;
@@ -295,10 +287,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function setOracles(uint256 slotId, address oracle0, address oracle1) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!positions[slotId].active) revert NotActive();
         if (oracle0 == address(0) || oracle1 == address(0)) revert OracleRequired();
-        (, uint8 fd0) = _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
-        (, uint8 fd1) = _readFeed(oracle1);
-        feedDecimals[oracle0] = fd0; // cache immutable feed decimals for the valuation hot path
-        feedDecimals[oracle1] = fd1;
+        _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
+        _readFeed(oracle1);
         positions[slotId].oracle0 = oracle0;
         positions[slotId].oracle1 = oracle1;
         emit OraclesUpdated(slotId, oracle0, oracle1);
@@ -1073,22 +1063,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (diff > maxDev) revert TwapDeviation();
     }
 
-    /// @dev Read a Chainlink-style price feed and validate freshness and positivity, returning the
-    ///      price AND the feed decimals. Used by the one-time registration/setOracles probes.
+    /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
     ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
     function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
-        price = _readFeedPrice(feed);
-        decimals = IPriceFeed(feed).decimals();
-    }
-
-    /// @dev Price-only feed read for the valuation hot path: validates freshness and positivity but
-    ///      does NOT re-fetch decimals (those are cached in `feedDecimals` at registration time).
-    ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
-    function _readFeedPrice(address feed) internal view returns (uint256 price) {
         (, int256 answer,, uint256 updatedAt,) = IPriceFeed(feed).latestRoundData();
         if (answer <= 0) revert StaleOracle();
         if (block.timestamp - updatedAt > maxOracleDelay) revert StaleOracle();
         price = uint256(answer);
+        decimals = IPriceFeed(feed).decimals();
     }
 
     /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
@@ -1102,12 +1084,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // because the OTHER, unused feed happens to be stale — a zero amount contributes 0 regardless
         // of price. The two-leg path (both amounts > 0) still reads both feeds, as required.
         if (amount0 > 0) {
-            uint256 p0 = _readFeedPrice(oracle0);
-            usd += FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** feedDecimals[oracle0]);
+            (uint256 p0, uint8 fd0) = _readFeed(oracle0);
+            usd += FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0);
         }
         if (amount1 > 0) {
-            uint256 p1 = _readFeedPrice(oracle1);
-            usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** feedDecimals[oracle1]);
+            (uint256 p1, uint8 fd1) = _readFeed(oracle1);
+            usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
         }
     }
 
