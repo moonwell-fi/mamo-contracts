@@ -47,7 +47,12 @@ fee-splitter:
 lp-auto-balancer-v2:
 	forge test --ffi --mc LPAutoBalancerV2Integration -vvv
 
-test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2
+# Same op-revm note as lp-auto-balancer-v2: the FPS setup test self-forks at a PINNED block via
+# vm.createSelectFork in setUp with the vm.fee(0) Isthmus workaround. NO --fork-url here.
+lp-v2-setup:
+	forge test --ffi --mc LPAutoBalancerV2SetupTest -vvv
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 test-all
+test-all:
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup test-all
