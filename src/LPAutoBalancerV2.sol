@@ -542,8 +542,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
         if (
             valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
-                    + looseBefore
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
         ) {
             revert ValueFloor();
         }
@@ -609,13 +608,20 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (liq > 0) {
             POSITION_MANAGER.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId, liquidity: liq, amount0Min: amount0Min, amount1Min: amount1Min, deadline: deadline
+                    tokenId: tokenId,
+                    liquidity: liq,
+                    amount0Min: amount0Min,
+                    amount1Min: amount1Min,
+                    deadline: deadline
                 })
             );
         }
         POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
             })
         );
     }
@@ -729,7 +735,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function _skimFees(ManagedPositionV2 storage p, uint256 slotId, uint256 tokenId) private {
         (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
             })
         );
         if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);

@@ -334,6 +334,7 @@ contract MockCLPoolV2 is ICLPool {
 
 contract LPAutoBalancerV2UnitTest is Test {
     using stdStorage for StdStorage;
+
     LPAutoBalancerV2 lab;
     MockPositionManagerV2 mockPM;
     MockCLPoolV2 mockPool;
@@ -525,10 +526,23 @@ contract LPAutoBalancerV2UnitTest is Test {
         (
             uint256 storedMainTokenId,
             uint256 storedAltTokenId,
-            address storedPool,,,
-            int24 storedTickSpacing,,
+            address storedPool,
+            ,
+            ,
+            int24 storedTickSpacing,
+            ,
             bool storedMainStaked,
-            bool storedAltStaked,,,,,,,,,,,
+            bool storedAltStaked,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
             uint256 storedLastRebalance,
             bool storedActive
         ) = lab.positions(slotId);
@@ -1232,8 +1246,9 @@ contract LPAutoBalancerV2UnitTest is Test {
         // 5=tickSpacing, 6=gauge, 7=mainStaked, 8=altStaked, 9=feeCollector, 10=oracle0, 11=oracle1,
         // 12=minWidth, 13=maxWidth, 14=maxCenterDeviation, 15=twapWindow, 16=maxTickDeviation,
         // 17=maxRebalanceLossBps, 18=minRebalanceInterval, 19=lastRebalance, 20=active
-        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(19)
-            .checked_write(block.timestamp);
+        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(19).checked_write(
+            block.timestamp
+        );
 
         // Warp 30 min: cooldownRemaining should be ~1800 s
         vm.warp(block.timestamp + 1800);
@@ -1298,8 +1313,9 @@ contract LPAutoBalancerV2UnitTest is Test {
     function test_reset_revertsBeforeCooldown() public {
         uint256 slotId = _registerSlotWithInterval(3600);
         // _store forces lastRebalance to 0; stamp it to "now" so the cooldown is genuinely active.
-        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(19)
-            .checked_write(block.timestamp);
+        stdstore.target(address(lab)).sig("positions(uint256)").with_key(slotId).depth(19).checked_write(
+            block.timestamp
+        );
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.Cooldown.selector);
         lab.reset(slotId, _defaultResetParams());
