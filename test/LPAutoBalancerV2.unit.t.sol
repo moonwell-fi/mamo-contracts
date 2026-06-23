@@ -1560,10 +1560,16 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     // ─── Review fix F2: single-leg valuation ignores the unused (stale) feed ─────
 
-    /// @dev F2: valuing a SINGLE leg must not read the other (unused) feed. Stage a balanced reset
-    ///      where only token0 is loose, then make oracle1 stale. Under the old code _valueInUsd read
-    ///      BOTH feeds unconditionally and would revert StaleOracle on the token1 leg even though
-    ///      amount1 == 0. With the fix, the zero leg's stale feed is skipped and reset succeeds.
+    /// @dev F2: valuing a SINGLE leg must not read the other (unused) feed. Stage a fully token0-sided
+    ///      reset, then make oracle1 stale. Under the old code _valueInUsd read BOTH feeds
+    ///      unconditionally and would revert StaleOracle on the token1 leg even though amount1 == 0.
+    ///      With the fix, the zero leg's stale feed is skipped and reset succeeds.
+    ///      NOTE: the staleness gate only bites once block.timestamp is realistic, so EVERY valuation
+    ///      that touches token1 must have amount1 == 0 — including the OLD main's valueBefore
+    ///      principal valuation. The OLD main is therefore placed single-sided ABOVE spot (token0 only)
+    ///      too; a straddling OLD main would legitimately hold token1 and reading its (stale) feed
+    ///      would NOT be a bug. (This previously passed only off-fork, where block.timestamp == 1
+    ///      masks the staleness check.)
     function test_reset_singleLegValuation_ignoresStaleUnusedFeed() public {
         uint256 slotId = _registerSlot(false);
         _stagePrincipal(1e18, 0); // token0-only principal → every _valueInUsd call passes amount1 == 0
@@ -1571,7 +1577,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         // Make the (unused) token1 feed stale far in the past.
         MockPriceFeed(oracle1).setUpdatedAt(1);
 
-        // Configure the single-sided main on the token0 side so the mint has liquidity.
+        // OLD main single-sided ABOVE spot (tick 0): valueBefore principal is token0-only, so the
+        // stale token1 feed is never read for it either.
+        mockPM.setPosition(TOKEN_ID, 200, 600, OLD_LIQ, token0, token1);
+        // NEW main also single-sided on the token0 side so the rebuilt mint has liquidity.
         mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
