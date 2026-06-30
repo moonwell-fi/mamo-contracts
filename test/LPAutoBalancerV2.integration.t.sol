@@ -131,7 +131,7 @@ contract LPAutoBalancerV2Integration is Test {
         (tokenId, liq,,) = ICLPositionManager(NFPM).mint(mp);
     }
 
-    function _register(uint256 tokenId) internal returns (uint256 slotId) {
+    function _register(uint256 tokenId) internal {
         // Transfer the freshly minted NFT to the balancer, then registerPosition (admin only).
         INonfungiblePositionManager(NFPM).safeTransferFrom(address(this), address(lab), tokenId);
 
@@ -161,7 +161,7 @@ contract LPAutoBalancerV2Integration is Test {
             active: false
         });
         vm.prank(admin);
-        slotId = lab.registerPosition(cfg);
+        lab.registerPosition(cfg);
     }
 
     /// @dev Push the pool tick DOWN (WETH in, cbBTC out): zeroForOne=true lowers price → tick falls.
@@ -176,8 +176,8 @@ contract LPAutoBalancerV2Integration is Test {
         ICLPoolSwap(POOL).swap(address(this), false, int256(cbBtcIn), MAX_SQRT_RATIO_MINUS_ONE, "");
     }
 
-    function _readSlot(uint256 slotId) internal view returns (uint256 mainId, uint256 altId, bool mainStaked) {
-        (mainId, altId,,,,,, mainStaked,,,,,,,,,,,,,) = lab.positions(slotId);
+    function _readSlot() internal view returns (uint256 mainId, uint256 altId, bool mainStaked) {
+        (mainId, altId,,,,,, mainStaked,,,,,,,,,,,,,) = lab.position();
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
@@ -200,15 +200,12 @@ contract LPAutoBalancerV2Integration is Test {
         });
     }
 
-    /// @dev Bootstrap a real, staked WETH/cbBTC main position straddling spot and return its slot.
-    function _bootstrap(int24 tl, int24 tu, uint256 amt0, uint256 amt1)
-        internal
-        returns (uint256 slotId, uint256 tokenId)
-    {
+    /// @dev Bootstrap a real, staked WETH/cbBTC main position straddling spot and return the tokenId.
+    function _bootstrap(int24 tl, int24 tu, uint256 amt0, uint256 amt1) internal returns (uint256 tokenId) {
         (tokenId,) = _mintMainPosition(tl, tu, amt0, amt1);
-        slotId = _register(tokenId);
+        _register(tokenId);
         vm.prank(rebalancer);
-        lab.stake(slotId);
+        lab.stake();
         // Accrue AERO so the unstake/skim/restake path runs on reset.
         skip(2 hours);
         vm.roll(block.number + 1);
@@ -218,14 +215,13 @@ contract LPAutoBalancerV2Integration is Test {
     ///      principal conserved (only fees/AERO/dust leave to feeCollector — V2 has no router), AERO
     ///      forwarded, old NFT burned, Reset emitted. Returns the new main id for caller assertions.
     function _assertNoSwapRebuild(
-        uint256 slotId,
         uint256 oldTokenId,
         uint256 feeColl0Before,
         uint256 feeColl1Before,
         uint256 aeroBefore
     ) internal returns (uint256 newMain, uint256 altId) {
         bool mainStaked;
-        (newMain, altId, mainStaked) = _readSlot(slotId);
+        (newMain, altId, mainStaked) = _readSlot();
         assertGt(newMain, 0, "new main tokenId set");
         assertTrue(newMain != oldTokenId, "main is a fresh NFT");
         assertEq(INonfungiblePositionManager(NFPM).ownerOf(newMain), GAUGE, "new main staked into gauge");
@@ -263,7 +259,7 @@ contract LPAutoBalancerV2Integration is Test {
         // Reset event emitted with the new main id.
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bool sawReset;
-        bytes32 resetSig = keccak256("Reset(uint256,uint256,uint256,int24,int24)");
+        bytes32 resetSig = keccak256("Reset(uint256,uint256,int24,int24)");
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter == address(lab) && logs[i].topics[0] == resetSig) {
                 sawReset = true;
@@ -289,7 +285,7 @@ contract LPAutoBalancerV2Integration is Test {
         int24 tu = center + 200;
         require(tl < spotTick && spotTick < tu, "setup: main must straddle spot");
 
-        (uint256 slotId, uint256 tokenId) = _bootstrap(tl, tu, 2 ether, 0.05e8);
+        uint256 tokenId = _bootstrap(tl, tu, 2 ether, 0.05e8);
 
         // Push spot OUT of the main range (reset would be offered)... 1500 WETH-in moves spot from
         // ~-266368 to ~-266663, below tl=-266600 (amounts tuned to the pinned-block pool state).
@@ -314,12 +310,12 @@ contract LPAutoBalancerV2Integration is Test {
 
         vm.prank(rebalancer);
         vm.recordLogs();
-        lab.reset(slotId, _defaultParams());
+        lab.reset(_defaultParams());
 
-        (uint256 newMain,) = _assertNoSwapRebuild(slotId, tokenId, feeColl0Before, feeColl1Before, aeroBefore);
+        (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
         // The defining assertion of the balanced path: the spot-centered rebuild is IN RANGE.
-        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertTrue(s.mainInRange, "balanced main is in range after spot-centered reset");
         assertGt(s.mainLiquidity, 0, "rebuilt main has liquidity");
         newMain; // used via the snapshot above
@@ -339,7 +335,7 @@ contract LPAutoBalancerV2Integration is Test {
         int24 tu = center + 200;
         require(tl < spotTick && spotTick < tu, "setup: main must straddle spot");
 
-        (uint256 slotId, uint256 tokenId) = _bootstrap(tl, tu, 2 ether, 0.05e8);
+        uint256 tokenId = _bootstrap(tl, tu, 2 ether, 0.05e8);
 
         // Push spot decisively BELOW the main and leave it there → the main holds 100% WETH (token0).
         _pushTickDown(2_000 ether);
@@ -356,14 +352,14 @@ contract LPAutoBalancerV2Integration is Test {
         vm.prank(rebalancer);
         vm.recordLogs();
         // Without the _mainRange fix this reverts inside the position manager (0-liquidity straddle).
-        lab.reset(slotId, _defaultParams());
+        lab.reset(_defaultParams());
 
-        (uint256 newMain,) = _assertNoSwapRebuild(slotId, tokenId, feeColl0Before, feeColl1Before, aeroBefore);
+        (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
         // The rebuilt single-sided main is a VALID position with real liquidity, parked on the funded
         // (token0/WETH) side strictly above spot — so it is intentionally NOT in range yet; it waits
         // for price to oscillate back. No swap occurred; the WETH principal was fully redeployed.
-        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(slotId);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "single-sided main has real liquidity (no revert, no swap)");
         assertTrue(s.mainTickLower > spotOut, "single-sided main parked strictly above spot (token0 side)");
         newMain; // consumed via the snapshot above

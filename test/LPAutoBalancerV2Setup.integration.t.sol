@@ -178,7 +178,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         // ── End-to-end: prove the registered position is OPERABLE by the granted rebalancer. ──
         // Stake the main into the gauge so reset() exercises the unstake/skim/restake path.
         vm.prank(rebalancerEOA);
-        lab.stake(0);
+        lab.stake();
 
         // Accrue AERO + advance the TWAP observation window.
         skip(2 hours);
@@ -199,15 +199,15 @@ contract LPAutoBalancerV2SetupTest is Test {
         skip(2 hours);
         vm.roll(block.number + 1);
 
-        LPAutoBalancerV2.DecisionSnapshotV2 memory snapBefore = lab.getDecisionSnapshot(0);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory snapBefore = lab.getDecisionSnapshot();
         assertFalse(snapBefore.mainInRange, "main driven out of range");
         assertTrue(snapBefore.deviationGateOpen, "TWAP converged: deviation gate open for reset");
 
         // As the granted rebalancer: reset must succeed (no revert) and rebuild a real position.
         vm.prank(rebalancerEOA);
-        lab.reset(0, _defaultResetParams());
+        lab.reset(_defaultResetParams());
 
-        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot(0);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
         assertTrue(s.mainStaked, "main restaked after reset (was staked before)");
     }

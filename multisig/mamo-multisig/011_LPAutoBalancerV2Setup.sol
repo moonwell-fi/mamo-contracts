@@ -175,7 +175,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertTrue(lab.hasRole(lab.GUARDIAN_ROLE(), safe), "guardian is F-MAMO");
         assertTrue(lab.hasRole(lab.REBALANCER_ROLE(), _resolveRebalancer()), "rebalancer granted");
 
-        // Slot 0 registered and active with the phase-1 config.
+        // Position registered and active with the phase-1 config.
         (
             uint256 mainTokenId,,
             address pool,
@@ -187,9 +187,9 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
             address oracle0,
             address oracle1,,,,,,,,,
             bool active
-        ) = lab.positions(0);
+        ) = lab.position();
 
-        assertTrue(active, "slot 0 active");
+        assertTrue(active, "position active");
         assertEq(mainTokenId, tokenId, "mainTokenId == tokenId");
         assertEq(pool, addresses.getAddress("WETH_CBBTC_CL_POOL"), "pool");
         assertEq(token0, addresses.getAddress("WETH"), "token0 == WETH");
