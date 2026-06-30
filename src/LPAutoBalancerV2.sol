@@ -159,9 +159,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit PositionRegistered(config.pool, config.mainTokenId);
     }
 
-    /// @notice Re-point this (emptied) contract at a new pool/pair. Requires a prior exit()/withdraw
-    ///         to have zeroed the position (active=false, mainTokenId=0, altTokenId=0).
-    ///         Same validation as registerPosition.
+    /// @notice Re-point this (emptied) contract at a new pool/pair. Requires `position` to be fully
+    ///         empty: only exit() zeroes the NFT ids (active=false, mainTokenId=0, altTokenId=0), so
+    ///         setPool is the re-point path after exit(). After withdrawPosition()/deregisterPosition()
+    ///         the token ids remain set, so re-point via registerPosition() in that case instead.
+    ///         Runs the same validation as registerPosition.
     function setPool(ManagedPositionV2 calldata config) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (position.active || position.mainTokenId != 0 || position.altTokenId != 0) revert NotEmpty();
         _validateAndStore(config);

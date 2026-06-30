@@ -1682,6 +1682,28 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(mainTokenId, NEW_TOKEN_ID, "mainTokenId updated after setPool");
     }
 
+    /// @dev Prove setPool reverts NotEmpty when active=false but mainTokenId is still set
+    ///      (the state left by withdrawPosition/deregisterPosition). This exercises the
+    ///      `|| position.mainTokenId != 0` branch of the empty-guard: a mutation that drops
+    ///      that clause would let this call through instead of reverting.
+    function test_setPool_revertsAfterWithdraw_tokenIdStillSet() public {
+        _register(false);
+        vm.prank(admin);
+        lab.withdrawPosition(admin); // sets active=false but leaves mainTokenId=TOKEN_ID (42)
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.NotEmpty.selector);
+        lab.setPool(cfg);
+    }
+
+    /// @dev setPool is DEFAULT_ADMIN_ROLE-gated: a caller with only REBALANCER_ROLE must revert.
+    function test_setPool_revertNonAdmin() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        vm.prank(rebalancer);
+        vm.expectRevert();
+        lab.setPool(cfg);
+    }
+
     // ─── Review fix F9: collectFees skims BOTH main and alt ──────────────────────
 
     /// @dev F9: collectFees on a position with a live alt must skim BOTH NFTs' fees to the feeCollector.
