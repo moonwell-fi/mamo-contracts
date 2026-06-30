@@ -22,7 +22,7 @@ import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
 
 /// @title LPAutoBalancerV2
-/// @notice Safe-governed, multi-position Aerodrome CL rebalancer. Holds position NFTs,
+/// @notice Safe-governed, single-position Aerodrome CL rebalancer. Holds position NFTs,
 ///         re-ranges them with on-chain-computed ticks, stakes for AERO emissions, and
 ///         skims fees/emissions to the weekly drop. See docs/superpowers/specs/2026-06-01-lp-auto-balancer-design.md
 contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable, IERC721Receiver {
@@ -358,8 +358,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Internal unstake: withdraw from gauge (auto-claims AERO), set mainStaked=false,
     ///      then skim any AERO balance to the fee collector (CEI: state update before AERO transfer).
     function _unstake(ManagedPositionV2 storage p) internal {
-        // Measure only the AERO GAINED by this withdraw so we never sweep another slot's
-        // pending AERO or a stray balance sitting on this contract.
+        // Measure only the AERO GAINED by this withdraw so we never sweep a stray AERO
+        // balance sitting on this contract.
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         ICLGauge(p.gauge).withdraw(p.mainTokenId); // returns NFT + auto-claims AERO
         p.mainStaked = false; // CEI: effect before interaction (AERO transfer below)
@@ -388,7 +388,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @notice Emergency exit: unstake (skimming AERO to feeCollector), collect fees, remove all
     ///         liquidity, burn both NFTs, and transfer the resulting token0/token1 balances to `to`.
-    ///         Marks the slot inactive. Use when the Safe needs to fully tear down a position in one
+    ///         Marks the position inactive. Use when the Safe needs to fully tear down a position in one
     ///         call regardless of staking state. Uses 0 sandwich mins (emergency path).
     ///
     ///         CEI ordering:

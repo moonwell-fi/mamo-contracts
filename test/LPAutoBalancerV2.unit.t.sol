@@ -917,7 +917,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     uint256 constant D_NEW_ID = 101;
     uint256 constant D_ALT_ID = 102;
 
-    /// @dev Spin up an independent mixed-decimal fixture (cbBTC/WETH) and register a slot on a
+    /// @dev Spin up an independent mixed-decimal fixture (cbBTC/WETH) and register a position on a
     ///      fresh balancer instance. pullOnMint=false: the main mint consumes nothing, so the
     ///      loose contract balances at _mintAlt time equal exactly the staged principal — giving
     ///      the test direct control over each leg's raw amount (and therefore its USD value).
@@ -1342,7 +1342,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     // ─── Task 6: adversarial reset() guards ──────────────────────────────────────
 
-    /// @dev Register a slot with a non-zero cooldown interval. `lastRebalance` is forced to 0
+    /// @dev Register a position with a non-zero cooldown interval. `lastRebalance` is forced to 0
     ///      by _store, so callers that need an ACTIVE cooldown must also stamp lastRebalance
     ///      (see test_reset_revertsBeforeCooldown, which writes it via stdstore).
     function _registerWithInterval(uint256 interval) internal {
@@ -1654,7 +1654,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     // ─── Review fix F9: collectFees skims BOTH main and alt ──────────────────────
 
-    /// @dev F9: collectFees on a slot with a live alt must skim BOTH NFTs' fees to the feeCollector.
+    /// @dev F9: collectFees on a position with a live alt must skim BOTH NFTs' fees to the feeCollector.
     ///      The mock collect auto-advances slots; we stage non-zero fees and assert both legs forward.
     function test_collectFees_skimsBothMainAndAlt() public {
         _registerWithAlt(false); // not staked, alt injected
