@@ -1652,6 +1652,36 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.reset(pr);
     }
 
+    // ─── setPool: re-point an emptied contract ───────────────────────────────────
+
+    function test_setPool_revertsWhenActive() public {
+        _register(false);
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.NotEmpty.selector);
+        lab.setPool(cfg);
+    }
+
+    function test_setPool_repointsAfterExit() public {
+        _register(false);
+        vm.prank(admin);
+        lab.exit(admin); // active=false, mainTokenId=0, altTokenId=0
+
+        // NEW_TOKEN_ID (43) is already wired in setUp:
+        //   mockPM.setPosition(43, ..., token0, token1) → tickSpacing defaults to 200
+        //   mockPM.ownerOf(43) returns address(lab) (mockOwner)
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        cfg.mainTokenId = NEW_TOKEN_ID;
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, false, address(lab));
+        emit LPAutoBalancerV2.PoolChanged(cfg.pool, NEW_TOKEN_ID);
+        lab.setPool(cfg);
+
+        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        assertEq(mainTokenId, NEW_TOKEN_ID, "mainTokenId updated after setPool");
+    }
+
     // ─── Review fix F9: collectFees skims BOTH main and alt ──────────────────────
 
     /// @dev F9: collectFees on a position with a live alt must skim BOTH NFTs' fees to the feeCollector.

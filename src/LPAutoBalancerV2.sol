@@ -104,8 +104,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error CenterDeviation();
     error ValueFloor();
     error AlreadyRegistered();
+    error NotEmpty();
 
     event PositionRegistered(address indexed pool, uint256 indexed tokenId);
+    event PoolChanged(address indexed pool, uint256 indexed mainTokenId);
     event PositionDeregistered(address indexed to);
     event PositionWithdrawn(address indexed to);
     event PositionConfigUpdated();
@@ -153,48 +155,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///               0 / 0 respectively) regardless of the values supplied here.
     function registerPosition(ManagedPositionV2 calldata config) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (position.active) revert AlreadyRegistered();
-        if (config.maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
-        if (config.pool == address(0) || config.token0 == address(0) || config.token1 == address(0)) {
-            revert InvalidConfig();
-        }
-        if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
-        // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
-        // not as a StaleOracle revert on the next rebalance.
-        _readFeed(config.oracle0);
-        _readFeed(config.oracle1);
-        if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
-        if (config.maxCenterDeviation == 0) revert InvalidConfig();
-        int24 spacing = config.tickSpacing;
-        if (spacing <= 0) revert InvalidConfig();
-        // Cross-validate the supplied pool descriptor against the live pool: token0/token1 ordering
-        // and tickSpacing must match, or every on-chain geometry computation would be wrong.
-        if (
-            ICLPool(config.pool).token0() != config.token0 || ICLPool(config.pool).token1() != config.token1
-                || ICLPool(config.pool).tickSpacing() != spacing
-        ) revert PoolMismatch();
-        // A width narrower than 2*tickSpacing can never straddle an aligned spot, so a balanced
-        // reset would always revert in _alignedRange. Require at least two spacings of room.
-        if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
-        if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
-        // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded.
-        if (config.gauge != address(0) && ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
-        if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
-        // Bind the NFT to the configured pool: PoolMismatch above only validates the supplied
-        // descriptor against config.pool, NOT that the NFT actually belongs to that pool. Read the
-        // NFT's own token0/token1/tickSpacing and require they match — otherwise a position minted
-        // against a DIFFERENT pool (wrong fee tier / token order) could be registered, and every
-        // on-chain geometry computation (TickMath/LiquidityAmounts on p.tickSpacing) would be wrong.
-        // NOTE: the INonfungiblePositionManager interface labels field 4 `fee` (Uniswap), but on
-        // Aerodrome Slipstream this slot carries tickSpacing — the same value MintParams.tickSpacing
-        // consumes. It is uint24 in the interface, so compare against uint24(spacing).
-        (,, address nftToken0, address nftToken1, uint24 nftSpacing,,,,,,,) =
-            POSITION_MANAGER.positions(config.mainTokenId);
-        if (nftToken0 != config.token0 || nftToken1 != config.token1 || nftSpacing != uint24(spacing)) {
-            revert PoolMismatch();
-        }
-
-        _store(config);
+        _validateAndStore(config);
         emit PositionRegistered(config.pool, config.mainTokenId);
+    }
+
+    /// @notice Re-point this (emptied) contract at a new pool/pair. Requires a prior exit()/withdraw
+    ///         to have zeroed the position (active=false, mainTokenId=0, altTokenId=0).
+    ///         Same validation as registerPosition.
+    function setPool(ManagedPositionV2 calldata config) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (position.active || position.mainTokenId != 0 || position.altTokenId != 0) revert NotEmpty();
+        _validateAndStore(config);
+        emit PoolChanged(config.pool, config.mainTokenId);
     }
 
     /// @notice Deregister a position and transfer its NFT(s) to `to`.
@@ -1078,6 +1049,53 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             (uint256 p1, uint8 fd1) = _readFeed(oracle1);
             usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
         }
+    }
+
+    /// @dev Validate all fields of `config` and store them via `_store`.
+    ///      Shared by registerPosition and setPool — the validation body is moved here verbatim so
+    ///      both entry points exercise identical checks.
+    function _validateAndStore(ManagedPositionV2 calldata config) private {
+        if (config.maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
+        if (config.pool == address(0) || config.token0 == address(0) || config.token1 == address(0)) {
+            revert InvalidConfig();
+        }
+        if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
+        // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
+        // not as a StaleOracle revert on the next rebalance.
+        _readFeed(config.oracle0);
+        _readFeed(config.oracle1);
+        if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
+        if (config.maxCenterDeviation == 0) revert InvalidConfig();
+        int24 spacing = config.tickSpacing;
+        if (spacing <= 0) revert InvalidConfig();
+        // Cross-validate the supplied pool descriptor against the live pool: token0/token1 ordering
+        // and tickSpacing must match, or every on-chain geometry computation would be wrong.
+        if (
+            ICLPool(config.pool).token0() != config.token0 || ICLPool(config.pool).token1() != config.token1
+                || ICLPool(config.pool).tickSpacing() != spacing
+        ) revert PoolMismatch();
+        // A width narrower than 2*tickSpacing can never straddle an aligned spot, so a balanced
+        // reset would always revert in _alignedRange. Require at least two spacings of room.
+        if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
+        if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
+        // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded.
+        if (config.gauge != address(0) && ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
+        if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
+        // Bind the NFT to the configured pool: PoolMismatch above only validates the supplied
+        // descriptor against config.pool, NOT that the NFT actually belongs to that pool. Read the
+        // NFT's own token0/token1/tickSpacing and require they match — otherwise a position minted
+        // against a DIFFERENT pool (wrong fee tier / token order) could be registered, and every
+        // on-chain geometry computation (TickMath/LiquidityAmounts on p.tickSpacing) would be wrong.
+        // NOTE: the INonfungiblePositionManager interface labels field 4 `fee` (Uniswap), but on
+        // Aerodrome Slipstream this slot carries tickSpacing — the same value MintParams.tickSpacing
+        // consumes. It is uint24 in the interface, so compare against uint24(spacing).
+        (,, address nftToken0, address nftToken1, uint24 nftSpacing,,,,,,,) =
+            POSITION_MANAGER.positions(config.mainTokenId);
+        if (nftToken0 != config.token0 || nftToken1 != config.token1 || nftSpacing != uint24(spacing)) {
+            revert PoolMismatch();
+        }
+
+        _store(config);
     }
 
     /// @dev Copies every field from `config` into `position`, but forces
