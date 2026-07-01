@@ -6,7 +6,9 @@ import {console} from "@forge-std/console.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {TenderlySwapHelper} from "./TenderlySwapHelper.sol";
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -59,15 +61,18 @@ ENV CONTRACT (set by run-harness.sh)
 //////////////////////////////////////////////////////////////////////////////*/
 
 contract LPV2TenderlyHarness is Script {
-    // ─── real Base mainnet addresses ────────────────────────────────────────────
-    address constant POOL = 0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1;
-    address constant GAUGE = 0x41b2126661C673C2beDd208cC72E85DC51a5320a;
-    address constant NFPM = 0x827922686190790b37229fd06084350E74485b72;
-    address constant WETH = 0x4200000000000000000000000000000000000006;
-    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    address constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
-    address constant ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
-    address constant BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
+    // ─── real Base mainnet addresses (resolved from addresses/8453.json via FPS) ──
+    // Populated once per entrypoint by _resolve(). Kept as storage (not hardcoded constants) so the
+    // harness reads the SAME address book the deploy scripts write, and ports to any fork/chain.
+    Addresses internal addresses;
+    address internal POOL;
+    address internal GAUGE;
+    address internal NFPM;
+    address internal WETH;
+    address internal CBBTC;
+    address internal AERO;
+    address internal ETH_USD;
+    address internal BTC_USD;
 
     // Skim sink. Not a precompile (0xFEE5 ≫ 0x0a); starts at zero balance so deltas
     // measured here are exactly what reset()/exit() forwarded.
@@ -87,6 +92,10 @@ contract LPV2TenderlyHarness is Script {
     bytes4 constant ACCESS_CONTROL_UNAUTHORIZED =
         bytes4(keccak256("AccessControlUnauthorizedAccount(address,bytes32)"));
 
+    // Uniswap-V3 sqrtPrice bounds (TickMath MIN/MAX +/- 1) for effectively-unbounded price-sim swaps.
+    uint160 constant MIN_SQRT_RATIO_PLUS_ONE = 4_295_128_740;
+    uint160 constant MAX_SQRT_RATIO_MINUS_ONE = 1_461_446_703_485_210_103_287_273_052_203_988_822_378_723_970_341;
+
     // ─── helpers ────────────────────────────────────────────────────────────────
 
     function _sender() internal view returns (address) {
@@ -95,6 +104,25 @@ contract LPV2TenderlyHarness is Script {
 
     function _lab() internal view returns (LPAutoBalancerV2) {
         return LPAutoBalancerV2(vm.envAddress("HARNESS_LAB"));
+    }
+
+    /// @dev Resolve the Base address book once per invocation (idempotent). Mirrors the deploy
+    ///      scripts (DeployLPAutoBalancerV2.s.sol) so the harness and deployments share
+    ///      addresses/<chainid>.json as the single source of truth instead of hardcoding hex.
+    function _resolve() internal {
+        if (address(addresses) != address(0)) return;
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+        addresses = new Addresses("./addresses", chainIds);
+        vm.makePersistent(address(addresses));
+        POOL = addresses.getAddress("WETH_CBBTC_CL_POOL");
+        GAUGE = addresses.getAddress("WETH_CBBTC_CL_GAUGE");
+        NFPM = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        WETH = addresses.getAddress("WETH");
+        CBBTC = addresses.getAddress("cbBTC");
+        AERO = addresses.getAddress("AERO");
+        ETH_USD = addresses.getAddress("CHAINLINK_ETH_USD");
+        BTC_USD = addresses.getAddress("CHAINLINK_BTC_USD");
     }
 
     function _isSingleSided() internal view returns (bool) {
@@ -166,6 +194,7 @@ contract LPV2TenderlyHarness is Script {
     // address(lab) as the mint recipient is safe.
     function deployAndMint() public {
         vm.fee(0); // neutralize op-revm operator-fee handling during local simulation
+        _resolve();
         address dep = _sender();
         bool single = _isSingleSided();
         int24 spot = _spotTick();
@@ -212,6 +241,7 @@ contract LPV2TenderlyHarness is Script {
     // ════════════════════════════════════════════════════════════════════════════
     function registerStake() public {
         vm.fee(0);
+        _resolve();
         LPAutoBalancerV2 lab = _lab();
         bool single = _isSingleSided();
         uint256 tokenId = vm.envUint("HARNESS_TOKEN_ID"); // real on-chain id, read by the orchestrator
@@ -316,6 +346,7 @@ contract LPV2TenderlyHarness is Script {
     // ════════════════════════════════════════════════════════════════════════════
     function doReset() public {
         vm.fee(0);
+        _resolve();
         LPAutoBalancerV2 lab = _lab();
         bool single = _isSingleSided();
 
@@ -389,6 +420,7 @@ contract LPV2TenderlyHarness is Script {
     // ════════════════════════════════════════════════════════════════════════════
     function doExit() public {
         vm.fee(0);
+        _resolve();
         LPAutoBalancerV2 lab = _lab();
         address to = _sender();
 
@@ -421,5 +453,107 @@ contract LPV2TenderlyHarness is Script {
         console.log("exit.cbBTC_returned_to_safe :", g1);
         console.log("exit.slot_inactive          :", inactive);
         console.log("doExit [OK]");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // PRICE-SIMULATION entrypoints (Phase 2)
+    // ════════════════════════════════════════════════════════════════════════════
+    // For this WETH/cbBTC pool the tick IS the price, so real broadcast swaps through the pool are the
+    // price simulation. The orchestrator deploys TenderlySwapHelper once (deploySwapper), funds it,
+    // and drives pushTick between phases; reset() is decoupled from its assertions (justReset +
+    // assertInRange/assertSingleSided) so ONE reset path serves both the re-center and the driven
+    // single-sided scenarios. Oracle staleness/coherent-oracle work lives in the sherwood port
+    // (Moonwell must see the same move); here the fresh Chainlink feed backs the value floor.
+
+    /// @notice Deploy the swap-callback helper. Orchestrator captures HARNESS_SWAPPER from the artifact.
+    function deploySwapper() public {
+        vm.fee(0);
+        vm.startBroadcast();
+        TenderlySwapHelper swapper = new TenderlySwapHelper();
+        vm.stopBroadcast();
+        console.log("HARNESS_SWAPPER=%s", address(swapper));
+        console.log("deploySwapper [OK]");
+    }
+
+    /// @notice Push the pool spot tick via a real swap through the pre-funded helper.
+    ///         zeroForOne=true sells WETH → tick falls (ETH cheaper); false sells cbBTC → tick rises.
+    function pushTick(bool zeroForOne, uint256 amountIn) public {
+        vm.fee(0);
+        _resolve();
+        address swapper = vm.envAddress("HARNESS_SWAPPER");
+        uint160 lim = zeroForOne ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE;
+        int24 spotBefore = _spotTick();
+        vm.startBroadcast();
+        TenderlySwapHelper(swapper).doSwap(POOL, zeroForOne, amountIn, lim);
+        vm.stopBroadcast();
+        console.log("pushTick.zeroForOne :", zeroForOne);
+        console.log("pushTick.spotBefore :", int256(spotBefore));
+        console.log("pushTick.spotAfter  :", int256(_spotTick()));
+        console.log("pushTick [OK]");
+    }
+
+    /// @notice Broadcast reset() with only the universal invariants (rebuilt liquidity + no-swap
+    ///         conservation). Scenario-specific geometry is asserted separately so the same reset
+    ///         serves both re-center (→ in range) and driven single-sided (→ parked above spot).
+    function justReset() public {
+        vm.fee(0);
+        _resolve();
+        LPAutoBalancerV2 lab = _lab();
+        uint256 fc0 = IERC20(WETH).balanceOf(FEE_COLLECTOR);
+        uint256 fc1 = IERC20(CBBTC).balanceOf(FEE_COLLECTOR);
+        vm.startBroadcast();
+        lab.reset(SLOT, _resetParams());
+        vm.stopBroadcast();
+        LPAutoBalancerV2.DecisionSnapshotV2 memory post = lab.getDecisionSnapshot(SLOT);
+        require(post.mainLiquidity > 0, "justReset: rebuilt main has liquidity");
+        require(IERC20(WETH).balanceOf(FEE_COLLECTOR) - fc0 < 0.02 ether, "justReset: WETH dust only");
+        require(IERC20(CBBTC).balanceOf(FEE_COLLECTOR) - fc1 < 10_000, "justReset: cbBTC dust only");
+        console.log("justReset.post.mainInRange   :", post.mainInRange);
+        console.log("justReset.post.spotTick      :", int256(post.spotTick));
+        console.log("justReset.post.mainTickLower :", int256(post.mainTickLower));
+        console.log("justReset.post.mainLiquidity :", uint256(post.mainLiquidity));
+        console.log("justReset [OK]");
+    }
+
+    /// @notice Post-reset assertion: main is a spot-straddling in-range position (re-center scenario).
+    function assertInRange() public view {
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = _lab().getDecisionSnapshot(SLOT);
+        require(s.mainLiquidity > 0, "assertInRange: no liquidity");
+        require(s.mainInRange, "assertInRange: main not in range after re-center");
+        console.log("assertInRange [OK]");
+    }
+
+    /// @notice Post-reset assertion: main is a valid single-sided position parked ABOVE spot with no
+    ///         swap (driven single-sided scenario — spot pushed decisively below the old range).
+    function assertSingleSided() public view {
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = _lab().getDecisionSnapshot(SLOT);
+        require(s.mainLiquidity > 0, "assertSingleSided: no liquidity");
+        require(s.mainTickLower > s.spotTick, "assertSingleSided: main not parked above spot");
+        require(!s.mainInRange, "assertSingleSided: main unexpectedly in range");
+        console.log("assertSingleSided [OK]");
+    }
+
+    /// @notice Tighten the deviation gate so a subsequent spot push (before TWAP catches up) trips it.
+    function tightenCalmGate() public {
+        vm.fee(0);
+        LPAutoBalancerV2 lab = _lab();
+        vm.startBroadcast();
+        // same bounds as registerStake but a TIGHT maxTickDeviation (5 ticks).
+        lab.setPositionConfig(SLOT, 200, 200_000, 800_000, 60, int24(5), 500, 3600);
+        vm.stopBroadcast();
+        console.log("tightenCalmGate.maxTickDeviation :", int256(5));
+        console.log("tightenCalmGate [OK]");
+    }
+
+    /// @notice Assert reset() reverts StaleOracle (orchestrator advanced the clock past maxOracleDelay).
+    function checkStaleOracle() public {
+        vm.fee(0);
+        LPAutoBalancerV2 lab = _lab();
+        vm.prank(_sender());
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.reset, (SLOT, _resetParams())));
+        require(!ok, "checkStaleOracle: reset must revert when feeds are stale");
+        require(bytes4(ret) == LPAutoBalancerV2.StaleOracle.selector, "checkStaleOracle: revert must be StaleOracle");
+        console.log("checkStaleOracle.reset_reverted_StaleOracle :", true);
+        console.log("checkStaleOracle [OK]");
     }
 }
