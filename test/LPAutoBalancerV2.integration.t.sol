@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
+import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
 import {Test, Vm} from "@forge-std/Test.sol";
 
 import {ICLGauge} from "@interfaces/ICLGauge.sol";
@@ -363,5 +364,59 @@ contract LPAutoBalancerV2Integration is Test {
         assertGt(s.mainLiquidity, 0, "single-sided main has real liquidity (no revert, no swap)");
         assertTrue(s.mainTickLower > spotOut, "single-sided main parked strictly above spot (token0 side)");
         newMain; // consumed via the snapshot above
+    }
+
+    // ─── compound() + module split (real gauge AERO harvest) ─────────────────────
+
+    /// @dev Real AERO accrues on the staked position; compound() harvests it, drops the
+    ///      (1 - compoundBps) share to feeCollector, and forwards the compoundBps share to the
+    ///      LPCompoundModule (which owns the CowSwap orders). Settling a real CowSwap order is not
+    ///      possible on a fork, so the swap leg is covered by the module unit tests.
+    function test_compound_forwardsAeroToModule() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        _bootstrap(center - 200, center + 200, 2 ether, 0.05e8); // stakes + skips 2h → AERO accrues
+
+        LPCompoundModule module = new LPCompoundModule(address(lab), AERO, admin);
+        vm.prank(admin);
+        lab.setCompoundModule(address(module));
+
+        uint256 fcAeroBefore = IERC20(AERO).balanceOf(feeCollector);
+
+        vm.prank(rebalancer);
+        lab.compound(7_000); // 70% compound / 30% drop
+
+        uint256 dropped = IERC20(AERO).balanceOf(feeCollector) - fcAeroBefore;
+        uint256 forwarded = IERC20(AERO).balanceOf(address(module));
+        uint256 total = dropped + forwarded;
+
+        assertGt(total, 0, "AERO harvested from gauge");
+        assertEq(dropped, total * 3_000 / 10_000, "30% dropped to feeCollector");
+        assertEq(forwarded, total - total * 3_000 / 10_000, "70% forwarded to module");
+        assertEq(IERC20(AERO).balanceOf(address(lab)), 0, "balancer retains no AERO");
+    }
+
+    /// @dev Settled compound proceeds arrive as loose WETH + cbBTC on the balancer (receiver ==
+    ///      balancer). reset() mints from balanceOf(this), folding them into the rebuilt position.
+    function test_looseProceeds_foldAtReset() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        _bootstrap(center - 200, center + 200, 2 ether, 0.05e8);
+
+        // Simulate solver-delivered compound proceeds sitting loose on the contract.
+        deal(WETH, address(lab), 0.1 ether);
+        deal(CBBTC, address(lab), 0.002e8);
+        uint256 looseBefore = IERC20(WETH).balanceOf(address(lab)) + IERC20(CBBTC).balanceOf(address(lab));
+        assertGt(looseBefore, 0, "loose proceeds staged");
+
+        skip(120);
+        vm.roll(block.number + 1);
+        vm.prank(rebalancer);
+        lab.reset(_defaultParams());
+
+        (uint256 newMain,,) = _readSlot();
+        assertGt(newMain, 0, "new main minted");
+        uint256 looseAfter = IERC20(WETH).balanceOf(address(lab)) + IERC20(CBBTC).balanceOf(address(lab));
+        assertLt(looseAfter, looseBefore, "loose compound proceeds folded into the rebuilt position");
     }
 }
