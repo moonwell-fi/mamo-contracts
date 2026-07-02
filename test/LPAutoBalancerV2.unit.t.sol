@@ -730,6 +730,34 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(lastRebalance, block.timestamp, "lastRebalance stamped");
     }
 
+    /// @dev Settled CowSwap compound proceeds arrive as loose token0+token1 on the contract.
+    ///      reset() mints from balanceOf(this), so the loose proceeds fold into the new main with
+    ///      no extra code. Prove the loose balance is consumed by the mint (not left idle).
+    function test_reset_foldsLooseCompoundProceeds_bothLegs() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18); // PM returns this principal on decrease+collect during reset
+
+        // The new main absorbs both the withdrawn principal AND the loose proceeds, so it holds
+        // MORE liquidity than the old position. Model that: stage the fresh NFT at 2x liquidity so
+        // the post-reset value floor (1% max loss) reflects the folded-in proceeds.
+        mockPM.setNextMintResult(NEW_TOKEN_ID, NEW_LIQ * 2);
+        mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, NEW_LIQ * 2, token0, token1);
+
+        // Simulate settled compound proceeds: drop loose token0 AND token1 onto the contract.
+        // Kept small vs the principal valuation so the 1% value floor has headroom.
+        tok0.mint(address(lab), 1e12);
+        tok1.mint(address(lab), 1e12);
+        uint256 looseBefore = tok0.balanceOf(address(lab)) + tok1.balanceOf(address(lab));
+        assertGt(looseBefore, 0, "loose proceeds staged");
+
+        vm.prank(rebalancer);
+        lab.reset(_defaultResetParams());
+
+        // The loose proceeds (plus withdrawn principal) were pulled into the fresh main mint.
+        uint256 looseAfter = tok0.balanceOf(address(lab)) + tok1.balanceOf(address(lab));
+        assertLt(looseAfter, looseBefore, "loose compound proceeds folded into main");
+    }
+
     // ─── reset() — withdraw-min sandwich guard (HIGH defect fix) ─────────────────
 
     /// @dev The caller's amount{0,1}MinWithdraw must be forwarded to the MAIN decrease so the
