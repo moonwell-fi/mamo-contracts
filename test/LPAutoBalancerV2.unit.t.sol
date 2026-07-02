@@ -1208,6 +1208,86 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(mockAero.balanceOf(feeCollector) - before, 14e18, "correct total from both NFTs");
     }
 
+    // ─── compound() — harvest, drop, forward to module ───────────────────────────
+
+    address moduleSink = makeAddr("moduleSink");
+
+    function _setModule() internal {
+        vm.prank(admin);
+        lab.setCompoundModule(moduleSink);
+    }
+
+    function test_token0_token1_getters() public {
+        _register(true);
+        assertEq(lab.token0(), token0);
+        assertEq(lab.token1(), token1);
+    }
+
+    function test_setCompoundModule_revertsZero() public {
+        _register(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.ZeroAddress.selector);
+        lab.setCompoundModule(address(0));
+    }
+
+    function test_setCompoundModule_onlyAdmin() public {
+        _register(true);
+        vm.prank(rebalancer);
+        vm.expectRevert();
+        lab.setCompoundModule(moduleSink);
+    }
+
+    function test_compound_revertsAboveMaxBps() public {
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.CompoundBpsTooHigh.selector);
+        lab.compound(10_001);
+    }
+
+    function test_compound_revertsNoModule() public {
+        _register(true); // module unset
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.ModuleNotSet.selector);
+        lab.compound(5_000);
+    }
+
+    function test_compound_onlyRebalancer() public {
+        _register(true);
+        _setModule();
+        vm.prank(admin);
+        vm.expectRevert();
+        lab.compound(5_000);
+    }
+
+    function test_compound_dropsAndForwardsToModule() public {
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(mockGauge), 1_000e18);
+        mockGauge.setAeroToPayOnGetReward(1_000e18); // 1000 AERO harvested
+        uint256 fcBefore = mockAero.balanceOf(feeCollector);
+
+        vm.prank(rebalancer);
+        lab.compound(7_000); // 70% compound / 30% drop
+
+        assertEq(mockAero.balanceOf(feeCollector) - fcBefore, 300e18, "30% dropped to feeCollector");
+        assertEq(mockAero.balanceOf(moduleSink), 700e18, "70% forwarded to module");
+        assertEq(mockAero.balanceOf(address(lab)), 0, "balancer keeps no AERO");
+    }
+
+    function test_compound_revertsWhenNothingHarvested() public {
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        lab.stake();
+        // aeroToPayOnGetReward defaults 0 => nothing harvested
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NothingToCompound.selector);
+        lab.compound(5_000);
+    }
+
     function test_exit_returnsBothTokensToSafe_andDeactivates() public {
         _registerWithAlt(false);
         // MockPositionManagerV2.collect auto-advances: call 0 → slot 0 (fees=0), calls 1+ → slot 1.

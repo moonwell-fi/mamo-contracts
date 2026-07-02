@@ -35,6 +35,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant MAX_LOSS_CAP_BPS = 500;
 
+    /// @notice Caps the per-call compound percentage; also guards `BPS_DENOMINATOR - compoundBps`
+    ///         from underflow. Equals BPS_DENOMINATOR (100%).
+    uint16 public constant MAX_COMPOUND_BPS = 10_000;
+
     /// @notice Minimum USD value of the surplus leg required to mint the single-sided alt.
     ///         Scale is 8-decimal USD (Chainlink convention), the same scale `_valueInUsd`
     ///         returns. Below this the leftover is treated as dust and forwarded to the
@@ -83,6 +87,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     ManagedPositionV2 public position;
 
+    /// @notice LPCompoundModule sink for the compound share of harvested AERO. The module owns the
+    ///         CowSwap orders + EIP-1271; set once by the Safe via `setCompoundModule`.
+    address public compoundModule;
+
     error ZeroAddress();
     error TwapDeviation();
     error StaleOracle();
@@ -105,6 +113,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error ValueFloor();
     error AlreadyRegistered();
     error NotEmpty();
+    error CompoundBpsTooHigh();
+    error NothingToCompound();
+    error ModuleNotSet();
 
     event PositionRegistered(address indexed pool, uint256 indexed tokenId);
     event PoolChanged(address indexed pool, uint256 indexed mainTokenId);
@@ -119,6 +130,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     event Staked(uint256 indexed tokenId, address gauge);
     event Unstaked(uint256 indexed tokenId, address gauge);
     event EmissionsClaimed(uint256 amount);
+    event CompoundModuleUpdated(address module);
+    event CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps);
     event FeesSkimmed(uint256 amount0, uint256 amount1);
     event Reset(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper);
 
@@ -415,6 +428,54 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
             emit EmissionsClaimed(aeroEarned);
         }
+    }
+
+    /// @notice Live underlying token0 — read by the compound module (survives setPool).
+    function token0() external view returns (address) {
+        return position.token0;
+    }
+
+    /// @notice Live underlying token1 — read by the compound module (survives setPool).
+    function token1() external view returns (address) {
+        return position.token1;
+    }
+
+    /// @notice Set the LPCompoundModule that receives the compound share of AERO.
+    function setCompoundModule(address module) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (module == address(0)) revert ZeroAddress();
+        compoundModule = module;
+        emit CompoundModuleUpdated(module);
+    }
+
+    /// @notice Harvest AERO, drop `(BPS - compoundBps)` to feeCollector, forward `compoundBps` to the
+    ///         compound module. The module owns the CowSwap orders (AERO -> token0|token1) and their
+    ///         EIP-1271 validation; the solver delivers underlying back to THIS contract, folded into
+    ///         the main+alt at the next reset(). Reward-only — never touches principal.
+    /// @param compoundBps share of harvested AERO to reinvest (<= MAX_COMPOUND_BPS).
+    function compound(uint16 compoundBps) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+        if (compoundBps > MAX_COMPOUND_BPS) revert CompoundBpsTooHigh();
+        if (compoundModule == address(0)) revert ModuleNotSet();
+        ManagedPositionV2 storage p = position;
+        if (!p.active) revert NotActive();
+
+        // Harvest pending AERO from staked legs into this contract (no unstake).
+        if (p.mainStaked) ICLGauge(p.gauge).getReward(p.mainTokenId);
+        if (p.altStaked && p.altTokenId != 0) ICLGauge(p.gauge).getReward(p.altTokenId);
+
+        uint256 aero = IERC20(AERO).balanceOf(address(this));
+        if (aero == 0) revert NothingToCompound();
+
+        uint256 dropAmount = FullMath.mulDiv(aero, BPS_DENOMINATOR - compoundBps, BPS_DENOMINATOR);
+        uint256 compoundAmount = aero - dropAmount;
+
+        if (dropAmount > 0) {
+            IERC20(AERO).safeTransfer(p.feeCollector, dropAmount);
+            emit EmissionsClaimed(dropAmount);
+        }
+        if (compoundAmount > 0) {
+            IERC20(AERO).safeTransfer(compoundModule, compoundAmount);
+        }
+        emit CompoundInitiated(compoundAmount, dropAmount, compoundBps);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
