@@ -31,7 +31,9 @@ When price drifts, the main goes out of balance; on reset we rebuild a fresh 50/
 
 ## 3. Contract: `LPAutoBalancerV2` (single-position)
 
-The contract implements standard security protocols including `AccessControlEnumerable`, `ReentrancyGuard`, `Pausable`, `IERC721Receiver`, and **EIP-1271 `isValidSignature`** (Solidity 0.8.28, BUSL-1.1). It uses a role-based access model: `DEFAULT_ADMIN_ROLE` (assigned to the Safe), `MANAGER_ROLE`, `REBALANCER_ROLE`, and `GUARDIAN_ROLE`.
+The contract implements standard security protocols including `AccessControlEnumerable`, `ReentrancyGuard`, `Pausable`, and `IERC721Receiver` (Solidity 0.8.28, BUSL-1.1). It uses a role-based access model: `DEFAULT_ADMIN_ROLE` (assigned to the Safe), `MANAGER_ROLE`, `REBALANCER_ROLE`, and `GUARDIAN_ROLE`.
+
+**CowSwap/EIP-1271 lives in a separate `LPCompoundModule`, not the balancer.** The balancer outgrew the 24 KB / `via_ir` budget once CowSwap `isValidSignature` + slippage config were added inline, and the order-hash path hit stack-too-deep. All CowSwap concerns — `isValidSignature`, `SlippagePriceChecker`, slippage config, `VAULT_RELAYER`/`DOMAIN_SEPARATOR`/`MAGIC_VALUE`, `GPv2Order` — move to a small `LPCompoundModule` (§4b) linked immutably to one balancer. `compound()` on the balancer stays tiny: harvest AERO, drop the non-compounded share, forward the compound share to the module. This keeps the balancer lean and removes the stack pressure.
 
 **One contract manages exactly one pool.** The previous multi-slot `positions[slotId]` registry is replaced by a single storage struct `position`. Every external function drops its `slotId` argument. This matches the deployment reality (each pool gets its own deployed contract) and removes the registry's slot-iteration surface.
 
@@ -75,14 +77,14 @@ struct ManagedPositionV2 {
 // Single managed position — NOT a mapping. One contract = one pool.
 ManagedPositionV2 public position;
 
-// Compound (reward-only swap) config — contract-level, since there is one position:
-ISlippagePriceChecker public slippagePriceChecker; // bounds AERO→underlying min-out
-uint256 public allowedSlippageInBps;               // <= MAX_SLIPPAGE_IN_BPS
+// Compound module — owns the AERO→underlying CowSwap orders + EIP-1271 (§4b).
+// Set once by the Safe; the balancer forwards the compound share of AERO here.
+address public compoundModule;
 ```
 
-**Constants.** `MAX_COMPOUND_BPS` caps the per-call compound percentage (e.g. `10_000` = up to 100%, or a tighter governance bound). `MAX_SLIPPAGE_IN_BPS` caps `allowedSlippageInBps`. `VAULT_RELAYER`, `DOMAIN_SEPARATOR`, and the EIP-1271 `MAGIC_VALUE` are added for CowSwap (mirroring `ERC20MoonwellMorphoStrategy`).
+**Constants.** `MAX_COMPOUND_BPS` caps the per-call compound percentage (e.g. `10_000` = up to 100%, or a tighter governance bound). **No CowSwap constants on the balancer** — `VAULT_RELAYER`, `DOMAIN_SEPARATOR`, `MAGIC_VALUE`, and `MAX_SLIPPAGE_IN_BPS` all live on `LPCompoundModule` (§4b).
 
-**No `swapPolicy`/`protectedToken`/principal `maxSlippageBps`.** Principal swap policy is omitted because no *principal* swap ever occurs — not in `reset`, not in `exit`. The only slippage cap (`allowedSlippageInBps`) governs the reward-only AERO→underlying compound swap.
+**No `swapPolicy`/`protectedToken`/principal `maxSlippageBps`.** Principal swap policy is omitted because no *principal* swap ever occurs — not in `reset`, not in `exit`. The only swap in the system is the reward-only AERO→underlying compound, and its slippage cap lives on the module.
 
 ### 3.2 `reset(ResetParams params)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`
 
@@ -168,27 +170,34 @@ LP trading fees (unstaked) and the **non-compounded** share of AERO (staked) are
 
 **Goal.** Reinvest a backend-chosen percentage of harvested AERO back into the underlying pair so the position grows over time and offsets divergence drag, while the remainder continues to feed the weekly drop.
 
-**Why a swap is needed (and why it is safe).** AERO is neither `token0` nor `token1` (for WETH/cbBTC it is a third token), so compounding it into the position requires converting AERO→underlying. The contract compounds into **both** legs — two CowSwap sells, AERO→token0 and AERO→token1, split ~50/50 by value so the proceeds fold into a balanced main (the reset rebuilds a 50/50 main centered on spot, so a 50/50-by-value buy maximizes how much lands in the main and minimizes alt spillover). These are the **only** swap paths in V2, and they are **reward-only**: they never touch principal `token0↔token1`, so they crystallize no impermanent loss. Each is bounded by a Chainlink-backed `SlippagePriceChecker` and gated by EIP-1271, exactly as `ERC20MoonwellMorphoStrategy` swaps its Merkl rewards.
+**Why a swap is needed (and why it is safe).** AERO is neither `token0` nor `token1` (for WETH/cbBTC it is a third token), so compounding it into the position requires converting AERO→underlying. The system compounds into **both** legs — two CowSwap sells, AERO→token0 and AERO→token1, split ~50/50 by value so the proceeds fold into a balanced main (the reset rebuilds a 50/50 main centered on spot, so a 50/50-by-value buy maximizes how much lands in the main and minimizes alt spillover). These are the **only** swap paths in V2, and they are **reward-only**: they never touch principal `token0↔token1`, so they crystallize no impermanent loss. Each is bounded by a Chainlink-backed `SlippagePriceChecker` and gated by EIP-1271 — **on the `LPCompoundModule` (§4b)**, not the balancer — exactly as `ERC20MoonwellMorphoStrategy` swaps its Merkl rewards.
 
-**`compound(uint16 compoundBps)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`:**
+**`compound(uint16 compoundBps)` on the balancer — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`:** stays tiny, does no CowSwap work.
 
-1. Require `compoundBps <= MAX_COMPOUND_BPS`.
-2. Harvest AERO from the gauge via `gauge.getReward(mainTokenId)` (and the alt if `altStaked`) — claims AERO to the contract **without unstaking**. Combined with any AERO already held.
+1. Require `compoundBps <= MAX_COMPOUND_BPS` and `compoundModule != address(0)`.
+2. Harvest AERO from the gauge via `gauge.getReward(mainTokenId)` (and the alt if `altStaked`) — claims AERO to the balancer **without unstaking**. Combined with any AERO already held.
 3. Compute `dropAmount = aero * (BPS − compoundBps) / BPS` and `safeTransfer` it to `feeCollector` **immediately** — the drop. Emit `EmissionsClaimed` for the dropped amount.
-4. The remaining `compoundBps` share stays on the contract; `forceApprove(VAULT_RELAYER, ...)` so the CowSwap solver can pull it. Emit `CompoundInitiated(compoundAmount)`.
-5. **Off-chain (bot):** posts **two** CowSwap **sell** orders — AERO→token0 and AERO→token1 — splitting `compoundAmount` ~50/50 by value. CowSwap validates each via this contract's `isValidSignature` (which permits `buyToken ∈ {token0, token1}`). Their combined sell is bounded by the contract's remaining AERO balance, so they cannot eat into the already-transferred drop.
-6. **Settlement (async):** the solver delivers **both** `token0` and `token1` to the contract. They sit as **loose balances** and are absorbed into a balanced main (with minimal alt spillover) at the **next `reset()`** (the existing mint reads `balanceOf(this)` and redeploys with no swap; the value floor counts them). The position grows step-wise per reset.
+4. `safeTransfer` the remaining `compoundBps` share of AERO to `compoundModule`. Emit `CompoundInitiated(compoundAmount)`. **The balancer holds no CowSwap logic** — no approval, no order, no signature.
+
+The module then owns the swap lifecycle (§4b): the bot posts the two sell orders, the module's `isValidSignature` gates them, and the solver delivers `token0`/`token1` **directly to the balancer** (`receiver == balancer`). They sit as **loose balances** and are absorbed into a balanced main (with minimal alt spillover) at the **next `reset()`** — the existing mint reads `balanceOf(this)` and redeploys with no swap; the value floor counts them. The position grows step-wise per reset. No sweep is needed because proceeds land on the balancer, not the module.
+
+### 4b. `LPCompoundModule` — the CowSwap surface
+
+A small standalone contract that isolates all CowSwap/EIP-1271 concerns so the balancer stays under the size/stack budget. **Immutably linked to one balancer** (`address public immutable balancer`, set in the constructor). It holds `ISlippagePriceChecker public slippagePriceChecker`, `uint256 public allowedSlippageInBps`, and the CowSwap constants `VAULT_RELAYER` / `DOMAIN_SEPARATOR` / `MAGIC_VALUE` / `MAX_SLIPPAGE_IN_BPS`, and imports the shared `GPv2Order` library (used untouched, exactly as `ERC20MoonwellMorphoStrategy`). It has its **own** `DEFAULT_ADMIN_ROLE` (the Safe) for the setters below.
 
 **`isValidSignature(orderDigest, encodedOrder)` — EIP-1271 view.** Mirrors `ERC20MoonwellMorphoStrategy.isValidSignature`, adapted:
 
 - `_order.hash(DOMAIN_SEPARATOR) == orderDigest`; `kind == SELL`; fill-or-kill (`!partiallyFillable`); ERC20 sell/buy balances; `validTo` within `[now + 5 min, now + maxTimePriceValid(sellToken)]`.
 - `sellToken == AERO`.
-- **`buyToken == token0 || buyToken == token1`** (the position's underlying — never an arbitrary token). The two compound orders are validated independently: one buys `token0`, the other `token1`.
-- `receiver == address(this)`; `feeAmount == 0`.
+- **`buyToken == balancer.token0() || buyToken == balancer.token1()`** — read **live** from the balancer's `position`, so the check survives a `setPool` re-point without touching the module. Never an arbitrary token. The two compound orders are validated independently: one buys `token0`, the other `token1`.
+- **`receiver == balancer`** — settled underlying lands directly on the balancer for fold-at-reset; the module never custodies the proceeds.
+- `feeAmount == 0`.
 - `slippagePriceChecker.checkPrice(sellAmount, sellToken, buyToken, buyAmount, allowedSlippageInBps)` must pass.
-- The drop is taken on-chain in step 3, so **no fee pre-hook / appData fee-transfer is required** — simpler than the strategy's order (the exact `appData` policy is pinned in the implementation plan). Settlement is bounded by the contract's AERO balance regardless of the order's stated `sellAmount`.
+- The drop is taken on-chain by the balancer's `compound()`, so **no fee pre-hook / appData fee-transfer is required** — simpler than the strategy's order (the exact `appData` policy is pinned in the implementation plan). Settlement is bounded by the module's AERO balance regardless of the order's stated `sellAmount`.
 
-**Setters.** `setSlippage(uint256)` (`onlyRole(DEFAULT_ADMIN_ROLE)`, `<= MAX_SLIPPAGE_IN_BPS`) and `setSlippagePriceChecker(address)` / `approveCowSwap(...)` mirror the strategy. AERO must be a configured reward token in the `SlippagePriceChecker` for the pair before compounding.
+**Approval.** The module pre-approves the CowSwap `VAULT_RELAYER` to pull its AERO once, via `approveCowSwap()` (`onlyRole(DEFAULT_ADMIN_ROLE)`). AERO the balancer forwards in `compound()` then sits on the module ready for the solver.
+
+**Setters (module admin = Safe).** `setSlippage(uint256)` (`<= MAX_SLIPPAGE_IN_BPS`), `setSlippagePriceChecker(address)`, `setCompoundAppData(bytes32)`, and `approveCowSwap()`. AERO must be a configured reward token in the `SlippagePriceChecker` for the pair before compounding.
 
 ## 5. Value floor under no principal swap
 

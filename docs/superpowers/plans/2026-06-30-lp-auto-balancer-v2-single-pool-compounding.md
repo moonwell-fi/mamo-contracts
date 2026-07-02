@@ -223,12 +223,15 @@ git commit -m "feat(lpv2): setPool re-point for emptied contract"
 
 ---
 
-## Task 3: CowSwap / EIP-1271 scaffolding (no compound yet)
+## Task 3: `LPCompoundModule` — CowSwap / EIP-1271 (standalone contract)
+
+**Architecture note (module split).** CowSwap/EIP-1271 does NOT live on the balancer — it outgrew the 24 KB / `via_ir` budget and hit stack-too-deep. All CowSwap concerns live in a new standalone `LPCompoundModule`, immutably linked to one balancer. The balancer only needs two tiny `token0()`/`token1()` view getters (added in Task 4) so the module can read the underlying live (surviving `setPool`). See spec §4b.
 
 **Files:**
-- Modify: `src/LPAutoBalancerV2.sol`
+- Create: `src/LPCompoundModule.sol`
+- Create: `src/interfaces/ILPAutoBalancerV2.sol` (minimal — `token0()`, `token1()`)
 - Create: `test/mocks/MockSlippagePriceChecker.sol`
-- Modify: `test/LPAutoBalancerV2.unit.t.sol`
+- Create: `test/LPCompoundModule.unit.t.sol`
 
 - [ ] **Step 1: Create the mock SlippagePriceChecker**
 
@@ -258,219 +261,200 @@ contract MockSlippagePriceChecker {
 }
 ```
 
-- [ ] **Step 2: Write the failing EIP-1271 tests**
+- [ ] **Step 2: Write the failing module tests** in a NEW file `test/LPCompoundModule.unit.t.sol`
 
-Add to `test/LPAutoBalancerV2.unit.t.sol` (import `GPv2Order` and the mock at top). Add a builder + the cases:
+The module is standalone. The test deploys a tiny stub balancer exposing `token0()`/`token1()` (or reuse `LPAutoBalancerV2` if cheap), constructs the module with `(balancer, aero, admin)`, wires the mock checker, and drives `isValidSignature`. `receiver` in every order is the **balancer** (not the module).
 
 ```solidity
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {MockSlippagePriceChecker} from "./mocks/MockSlippagePriceChecker.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
+
+// Minimal balancer stub for token0()/token1() the module reads live.
+contract StubBalancer {
+    address public token0;
+    address public token1;
+    constructor(address t0, address t1) { token0 = t0; token1 = t1; }
+    function setTokens(address t0, address t1) external { token0 = t0; token1 = t1; }
+}
 
 // in the test contract:
 MockSlippagePriceChecker spc;
+LPCompoundModule module;
+StubBalancer bal;
+bytes32 appData = keccak256("mamo-lpv2-compound");
 
 function _order(address sell, address buy, address receiver, uint32 validTo)
-    internal
-    view
-    returns (GPv2Order.Data memory o)
+    internal view returns (GPv2Order.Data memory o)
 {
     o = GPv2Order.Data({
-        sellToken: IERC20(sell),
-        buyToken: IERC20(buy),
-        receiver: receiver,
-        sellAmount: 1e18,
-        buyAmount: 1e18,
-        validTo: validTo,
-        appData: appData,           // stored compoundAppData (set below)
-        feeAmount: 0,
-        kind: GPv2Order.KIND_SELL,
-        partiallyFillable: false,
-        sellTokenBalance: GPv2Order.BALANCE_ERC20,
-        buyTokenBalance: GPv2Order.BALANCE_ERC20
+        sellToken: IERC20(sell), buyToken: IERC20(buy), receiver: receiver,
+        sellAmount: 1e18, buyAmount: 1e18, validTo: validTo, appData: appData,
+        feeAmount: 0, kind: GPv2Order.KIND_SELL, partiallyFillable: false,
+        sellTokenBalance: GPv2Order.BALANCE_ERC20, buyTokenBalance: GPv2Order.BALANCE_ERC20
     });
 }
 
 function _sig(GPv2Order.Data memory o) internal view returns (bytes32 digest, bytes memory enc) {
-    digest = o.hash(lab.DOMAIN_SEPARATOR());
+    digest = o.hash(module.DOMAIN_SEPARATOR());
     enc = abi.encode(o);
 }
 
-function _wireCompound() internal {
+function _wire() internal {
+    bal = new StubBalancer(token0, token1);
+    module = new LPCompoundModule(address(bal), aero, admin);
     spc = new MockSlippagePriceChecker();
     spc.setRewardToken(aero, true);
     vm.startPrank(admin);
-    lab.setSlippagePriceChecker(address(spc));
-    lab.setSlippage(100);
-    lab.setCompoundAppData(appData);
-    lab.approveCowSwap(aero, type(uint256).max);
+    module.setSlippagePriceChecker(address(spc));
+    module.setSlippage(100);
+    module.setCompoundAppData(appData);
+    module.approveCowSwap();
     vm.stopPrank();
 }
-
-function test_isValidSignature_validAeroToToken0() public {
-    _register(true);
-    _wireCompound();
-    GPv2Order.Data memory o = _order(aero, token0, address(lab), uint32(block.timestamp + 10 minutes));
-    (bytes32 d, bytes memory e) = _sig(o);
-    assertEq(lab.isValidSignature(d, e), bytes4(0x1626ba7e));
-}
-
-function test_isValidSignature_validAeroToToken1() public {
-    _register(true);
-    _wireCompound();
-    GPv2Order.Data memory o = _order(aero, token1, address(lab), uint32(block.timestamp + 10 minutes));
-    (bytes32 d, bytes memory e) = _sig(o);
-    assertEq(lab.isValidSignature(d, e), bytes4(0x1626ba7e));
-}
-
-function test_isValidSignature_revertsWrongSellToken() public {
-    _register(true); _wireCompound();
-    GPv2Order.Data memory o = _order(token0, token1, address(lab), uint32(block.timestamp + 10 minutes));
-    (bytes32 d, bytes memory e) = _sig(o);
-    vm.expectRevert(bytes("sellToken must be AERO"));
-    lab.isValidSignature(d, e);
-}
-
-function test_isValidSignature_revertsBuyTokenNotUnderlying() public {
-    _register(true); _wireCompound();
-    GPv2Order.Data memory o = _order(aero, address(0xBEEF), address(lab), uint32(block.timestamp + 10 minutes));
-    (bytes32 d, bytes memory e) = _sig(o);
-    vm.expectRevert(bytes("buyToken must be underlying"));
-    lab.isValidSignature(d, e);
-}
-
-function test_isValidSignature_revertsReceiverNotThis() public {
-    _register(true); _wireCompound();
-    GPv2Order.Data memory o = _order(aero, token0, address(0xCAFE), uint32(block.timestamp + 10 minutes));
-    (bytes32 d, bytes memory e) = _sig(o);
-    vm.expectRevert(bytes("receiver must be this"));
-    lab.isValidSignature(d, e);
-}
-
-function test_isValidSignature_revertsCheckPriceFails() public {
-    _register(true); _wireCompound();
-    spc.setPriceOk(false);
-    GPv2Order.Data memory o = _order(aero, token0, address(lab), uint32(block.timestamp + 10 minutes));
-    (bytes32 d, bytes memory e) = _sig(o);
-    vm.expectRevert(bytes("price check failed"));
-    lab.isValidSignature(d, e);
-}
-
-function test_setSlippage_bounds() public {
-    _register(true); _wireCompound();
-    vm.prank(admin);
-    vm.expectRevert(bytes("slippage too high"));
-    lab.setSlippage(2501); // MAX_SLIPPAGE_IN_BPS = 2500
-}
 ```
-Add a `bytes32 appData = keccak256("mamo-lpv2-compound");` constant to the test contract (the bot would match this).
+
+Cases (all assert against `module`, receiver == `address(bal)`):
+- `test_isValidSignature_validAeroToToken0` / `...Token1` → returns `0x1626ba7e`.
+- `test_isValidSignature_revertsWrongSellToken` (sell != AERO) → `"sellToken must be AERO"`.
+- `test_isValidSignature_revertsBuyTokenNotUnderlying` (buy == 0xBEEF) → `"buyToken must be underlying"`.
+- `test_isValidSignature_revertsReceiverNotBalancer` (receiver == 0xCAFE) → `"receiver must be balancer"`.
+- `test_isValidSignature_revertsCheckPriceFails` (`spc.setPriceOk(false)`) → `"price check failed"`.
+- `test_isValidSignature_survivesSetPool` — after `bal.setTokens(newT0, newT1)`, an order buying `newT0` validates (proves the module reads the balancer live).
+- `test_setSlippage_bounds` — `module.setSlippage(2501)` reverts `"slippage too high"` (MAX_SLIPPAGE_IN_BPS = 2500).
+- `test_setSlippage_onlyAdmin` / `test_approveCowSwap_onlyAdmin` — non-admin reverts (AccessControl).
 
 - [ ] **Step 3: Run to verify they fail**
 
-Run: `forge test --mc LPAutoBalancerV2UnitTest --mt isValidSignature -vvv`
-Expected: FAIL — `isValidSignature`/setters undefined.
+Run: `forge test --mc LPCompoundModuleUnitTest -vvv`
+Expected: FAIL — `LPCompoundModule` undefined.
 
-- [ ] **Step 4: Implement the scaffolding in `src/LPAutoBalancerV2.sol`**
+- [ ] **Step 4: Create `src/interfaces/ILPAutoBalancerV2.sol`**
 
-Add imports:
 ```solidity
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+/// @notice Minimal balancer surface the compound module reads live (survives setPool).
+interface ILPAutoBalancerV2 {
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+}
+```
+
+- [ ] **Step 5: Implement `src/LPCompoundModule.sol`** (standalone; owns ALL CowSwap concerns)
+
+```solidity
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
-```
-Add `using GPv2Order for GPv2Order.Data;` after the existing `using SafeERC20 for IERC20;`.
+import {ILPAutoBalancerV2} from "@interfaces/ILPAutoBalancerV2.sol";
 
-Add constants + state:
-```solidity
-bytes32 public constant DOMAIN_SEPARATOR = 0xd72ffa789b6fae41254d0b5a13e6e1e92ed947ec6a251edf1cf0b6c02c257b4b;
-bytes4  internal constant MAGIC_VALUE = 0x1626ba7e;
-address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
-uint256 public constant MAX_SLIPPAGE_IN_BPS = 2500;
-uint16  public constant MAX_COMPOUND_BPS = 10_000; // = BPS_DENOMINATOR; also guards BPS - compoundBps underflow
+/// @notice Isolates CowSwap/EIP-1271 for one LPAutoBalancerV2, keeping the balancer under the
+///         24 KB / via_ir budget. Validates reward-only AERO -> token0|token1 compound orders.
+///         Settled underlying is delivered to the balancer (receiver == balancer) for fold-at-reset.
+contract LPCompoundModule is AccessControlEnumerable {
+    using SafeERC20 for IERC20;
+    using GPv2Order for GPv2Order.Data;
 
-ISlippagePriceChecker public slippagePriceChecker;
-uint256 public allowedSlippageInBps;
-bytes32 public compoundAppData; // expected CowSwap appData hash for compound orders
-```
-Add errors + events:
-```solidity
-error SlippageTooHigh();
-error CheckerNotSet();
-event SlippageUpdated(uint256 oldBps, uint256 newBps);
-event SlippagePriceCheckerUpdated(address checker);
-event CompoundAppDataUpdated(bytes32 appData);
-```
-Add admin setters (DEFAULT_ADMIN_ROLE):
-```solidity
-function setSlippagePriceChecker(address checker) external onlyRole(DEFAULT_ADMIN_ROLE) {
-    if (checker == address(0)) revert ZeroAddress();
-    slippagePriceChecker = ISlippagePriceChecker(checker);
-    emit SlippagePriceCheckerUpdated(checker);
+    bytes32 public constant DOMAIN_SEPARATOR = 0xd72ffa789b6fae41254d0b5a13e6e1e92ed947ec6a251edf1cf0b6c02c257b4b;
+    bytes4  internal constant MAGIC_VALUE = 0x1626ba7e;
+    address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
+    uint256 public constant MAX_SLIPPAGE_IN_BPS = 2500;
+
+    address public immutable balancer; // the single LPAutoBalancerV2 this module serves
+    address public immutable AERO;
+
+    ISlippagePriceChecker public slippagePriceChecker;
+    uint256 public allowedSlippageInBps;
+    bytes32 public compoundAppData;
+
+    error ZeroAddress();
+    error CheckerNotSet();
+    event SlippageUpdated(uint256 oldBps, uint256 newBps);
+    event SlippagePriceCheckerUpdated(address checker);
+    event CompoundAppDataUpdated(bytes32 appData);
+
+    constructor(address balancer_, address aero_, address admin_) {
+        if (balancer_ == address(0) || aero_ == address(0) || admin_ == address(0)) revert ZeroAddress();
+        balancer = balancer_;
+        AERO = aero_;
+        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
+    }
+
+    function setSlippagePriceChecker(address checker) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (checker == address(0)) revert ZeroAddress();
+        slippagePriceChecker = ISlippagePriceChecker(checker);
+        emit SlippagePriceCheckerUpdated(checker);
+    }
+
+    function setSlippage(uint256 newBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newBps <= MAX_SLIPPAGE_IN_BPS, "slippage too high");
+        emit SlippageUpdated(allowedSlippageInBps, newBps);
+        allowedSlippageInBps = newBps;
+    }
+
+    function setCompoundAppData(bytes32 appData) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        compoundAppData = appData;
+        emit CompoundAppDataUpdated(appData);
+    }
+
+    /// @notice Pre-approve the CowSwap relayer to pull this module's AERO.
+    function approveCowSwap() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (address(slippagePriceChecker) == address(0)) revert CheckerNotSet();
+        require(slippagePriceChecker.isRewardToken(AERO), "Token not allowed");
+        IERC20(AERO).forceApprove(VAULT_RELAYER, type(uint256).max);
+    }
+
+    /// @notice EIP-1271 validation for CowSwap compound orders (AERO -> token0|token1, reward-only).
+    function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
+        GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
+        require(o.hash(DOMAIN_SEPARATOR) == orderDigest, "bad digest");
+        require(o.kind == GPv2Order.KIND_SELL, "must be sell");
+        require(!o.partiallyFillable, "must be fill-or-kill");
+        require(o.sellTokenBalance == GPv2Order.BALANCE_ERC20, "sell must be erc20");
+        require(o.buyTokenBalance == GPv2Order.BALANCE_ERC20, "buy must be erc20");
+        require(address(o.sellToken) == AERO, "sellToken must be AERO");
+        address t0 = ILPAutoBalancerV2(balancer).token0();
+        address t1 = ILPAutoBalancerV2(balancer).token1();
+        require(address(o.buyToken) == t0 || address(o.buyToken) == t1, "buyToken must be underlying");
+        require(o.receiver == balancer, "receiver must be balancer");
+        require(o.feeAmount == 0, "fee must be zero");
+        require(o.appData == compoundAppData, "bad appData");
+        require(o.validTo >= block.timestamp + 5 minutes, "expires too soon");
+        require(o.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(o.sellToken)), "expires too far");
+        require(
+            slippagePriceChecker.checkPrice(o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, allowedSlippageInBps),
+            "price check failed"
+        );
+        return MAGIC_VALUE;
+    }
 }
-
-function setSlippage(uint256 newBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-    require(newBps <= MAX_SLIPPAGE_IN_BPS, "slippage too high");
-    emit SlippageUpdated(allowedSlippageInBps, newBps);
-    allowedSlippageInBps = newBps;
-}
-
-function setCompoundAppData(bytes32 appData) external onlyRole(DEFAULT_ADMIN_ROLE) {
-    compoundAppData = appData;
-    emit CompoundAppDataUpdated(appData);
-}
-
-/// @notice Approve the CowSwap vault relayer to pull `amount` of `tokenAddress` (AERO).
-function approveCowSwap(address tokenAddress, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
-    if (address(slippagePriceChecker) == address(0)) revert CheckerNotSet();
-    require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
-    IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
-}
 ```
-Add `isValidSignature` (view):
-```solidity
-/// @notice EIP-1271 validation for CowSwap compound orders (AERO -> token0|token1, reward-only).
-function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
-    GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
-    require(o.hash(DOMAIN_SEPARATOR) == orderDigest, "bad digest");
-    require(o.kind == GPv2Order.KIND_SELL, "must be sell");
-    require(!o.partiallyFillable, "must be fill-or-kill");
-    require(o.sellTokenBalance == GPv2Order.BALANCE_ERC20, "sell must be erc20");
-    require(o.buyTokenBalance == GPv2Order.BALANCE_ERC20, "buy must be erc20");
-    require(address(o.sellToken) == AERO, "sellToken must be AERO");
-    require(address(o.buyToken) == position.token0 || address(o.buyToken) == position.token1, "buyToken must be underlying");
-    require(o.receiver == address(this), "receiver must be this");
-    require(o.feeAmount == 0, "fee must be zero");
-    require(o.appData == compoundAppData, "bad appData");
-    require(o.validTo >= block.timestamp + 5 minutes, "expires too soon");
-    require(o.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(o.sellToken)), "expires too far");
-    require(
-        slippagePriceChecker.checkPrice(o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, allowedSlippageInBps),
-        "price check failed"
-    );
-    return MAGIC_VALUE;
-}
-```
-The contract already imports `IERC20` and declares `address public immutable AERO;` — reuse them. (`SlippageTooHigh` is declared for parity but `setSlippage` uses a string revert to match the strategy and the test; keep one or the other consistently — the test expects the string `"slippage too high"`.)
 
-- [ ] **Step 5: Build + run the EIP-1271 tests**
+- [ ] **Step 6: Build + run the module tests**
 
-Run: `forge build && forge test --mc LPAutoBalancerV2UnitTest --mt "isValidSignature|setSlippage" -vvv`
-Expected: PASS.
-
-- [ ] **Step 6: Confirm contract still under 24 KB**
-
-Run: `forge build --sizes 2>/dev/null | grep LPAutoBalancerV2`
-Expected: runtime size < 24576 bytes. (Prior commit `29bce6f` trimmed for this limit — watch it.) If over, convert the `isValidSignature` string reverts to custom errors to save bytecode.
+Run: `forge build && forge test --mc LPCompoundModuleUnitTest -vvv`
+Expected: PASS. Module is small — no size concern; the point of the split is the balancer stays lean.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/LPAutoBalancerV2.sol test/mocks/MockSlippagePriceChecker.sol test/LPAutoBalancerV2.unit.t.sol
-git commit -m "feat(lpv2): CowSwap EIP-1271 isValidSignature + slippage config"
+git add src/LPCompoundModule.sol src/interfaces/ILPAutoBalancerV2.sol test/mocks/MockSlippagePriceChecker.sol test/LPCompoundModule.unit.t.sol
+git commit -m "feat(lpv2): LPCompoundModule — CowSwap EIP-1271 for AERO compound"
 ```
 
 ---
 
-## Task 4: `compound(compoundBps)` — harvest, split, approve
+## Task 4: balancer `compound(compoundBps)` — harvest, drop, forward to module
+
+**Balancer stays tiny.** No CowSwap code here: harvest AERO, drop `(BPS − compoundBps)` to `feeCollector`, forward the compound share to `compoundModule`. Also add the two `token0()`/`token1()` view getters the module reads live, and the `setCompoundModule` setter.
 
 **Files:**
 - Modify: `src/LPAutoBalancerV2.sol`
@@ -494,43 +478,59 @@ function getReward(uint256) external {
 
 - [ ] **Step 2: Write the failing compound tests**
 
-Add to `test/LPAutoBalancerV2.unit.t.sol`:
+Add to `test/LPAutoBalancerV2.unit.t.sol`. The balancer forwards the compound share to a set `compoundModule` (use any non-zero address as the sink — no real module needed for these unit tests):
 
 ```solidity
+address moduleSink = address(0xM0D); // stand-in compound module
+
+function _setModule() internal {
+    vm.prank(admin);
+    lab.setCompoundModule(moduleSink);
+}
+
+function test_token0_token1_getters() public {
+    _register(true);
+    assertEq(lab.token0(), token0);
+    assertEq(lab.token1(), token1);
+}
+
 function test_compound_revertsAboveMaxBps() public {
-    _register(true); _wireCompound();
+    _register(true); _setModule();
     vm.prank(rebalancer);
     vm.expectRevert(LPAutoBalancerV2.CompoundBpsTooHigh.selector);
     lab.compound(10_001);
 }
 
+function test_compound_revertsNoModule() public {
+    _register(true); // module unset
+    vm.prank(rebalancer);
+    vm.expectRevert(LPAutoBalancerV2.ModuleNotSet.selector);
+    lab.compound(5_000);
+}
+
 function test_compound_onlyRebalancer() public {
-    _register(true); _wireCompound();
+    _register(true); _setModule();
     vm.prank(admin);
     vm.expectRevert(); // AccessControl: missing REBALANCER_ROLE
     lab.compound(5_000);
 }
 
-function test_compound_splitsDropAndApproves() public {
-    _register(true);            // staked-capable position
-    _wireCompound();
-    vm.prank(rebalancer);
-    lab.stake();                // stake so getReward has an NFT context
+function test_compound_dropsAndForwardsToModule() public {
+    _register(true); _setModule();
+    vm.prank(rebalancer); lab.stake();
     gauge.setRewardOnGetReward(1_000e18); // 1000 AERO harvested
     uint256 fcBefore = MockERC20(aero).balanceOf(feeCollector);
 
     vm.prank(rebalancer);
     lab.compound(7_000);        // 70% compound / 30% drop
 
-    // 30% -> feeCollector
-    assertEq(MockERC20(aero).balanceOf(feeCollector) - fcBefore, 300e18);
-    // 70% stays on contract, approved to relayer
-    assertEq(MockERC20(aero).balanceOf(address(lab)), 700e18);
-    assertEq(MockERC20(aero).allowance(address(lab), lab.VAULT_RELAYER()), 700e18);
+    assertEq(MockERC20(aero).balanceOf(feeCollector) - fcBefore, 300e18); // drop
+    assertEq(MockERC20(aero).balanceOf(moduleSink), 700e18);              // compound share -> module
+    assertEq(MockERC20(aero).balanceOf(address(lab)), 0);                 // balancer keeps none
 }
 
 function test_compound_revertsWhenNothingHarvested() public {
-    _register(true); _wireCompound();
+    _register(true); _setModule();
     vm.prank(rebalancer); lab.stake();
     // rewardOnGetReward defaults 0
     vm.prank(rebalancer);
@@ -541,29 +541,46 @@ function test_compound_revertsWhenNothingHarvested() public {
 
 - [ ] **Step 3: Run to verify they fail**
 
-Run: `forge test --mc LPAutoBalancerV2UnitTest --mt compound -vvv`
-Expected: FAIL — `compound`/errors undefined.
+Run: `forge test --mc LPAutoBalancerV2UnitTest --mt "compound|token0" -vvv`
+Expected: FAIL — `compound`/`setCompoundModule`/getters undefined.
 
-- [ ] **Step 4: Implement `compound`**
+- [ ] **Step 4: Implement on `src/LPAutoBalancerV2.sol`**
 
-Add errors + event to `src/LPAutoBalancerV2.sol`:
+Add state + constant + errors + events (no CowSwap constants — those are on the module):
 ```solidity
+address public compoundModule; // LPCompoundModule sink for the compound AERO share
+uint16 public constant MAX_COMPOUND_BPS = 10_000; // = BPS_DENOMINATOR; guards BPS - compoundBps underflow
+
 error CompoundBpsTooHigh();
 error NothingToCompound();
+error ModuleNotSet();
+event CompoundModuleUpdated(address module);
 event CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps);
 ```
-Add the function (place near `claimEmissions`):
+Add the live-underlying getters (the module reads these):
 ```solidity
-/// @notice Harvest AERO and reinvest `compoundBps` of it into the underlying pair via CowSwap.
-///         Drops the remaining (BPS - compoundBps) share to feeCollector immediately. The compound
-///         share is left approved to VAULT_RELAYER; the off-chain bot posts two sell orders
-///         (AERO->token0 and AERO->token1) validated by isValidSignature. Settled underlying folds
-///         into the main+alt at the next reset(). Reward-only swap — never touches principal.
+function token0() external view returns (address) { return position.token0; }
+function token1() external view returns (address) { return position.token1; }
+```
+Add the module setter (DEFAULT_ADMIN_ROLE):
+```solidity
+function setCompoundModule(address module) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    if (module == address(0)) revert ZeroAddress();
+    compoundModule = module;
+    emit CompoundModuleUpdated(module);
+}
+```
+Add `compound` (place near `claimEmissions`):
+```solidity
+/// @notice Harvest AERO, drop (BPS - compoundBps) to feeCollector, forward compoundBps to the
+///         compound module. The module owns the CowSwap orders (AERO -> token0|token1) and their
+///         EIP-1271 validation; the solver delivers underlying back to THIS contract, folded into
+///         the main+alt at the next reset(). Reward-only — never touches principal.
 function compound(uint16 compoundBps) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
     if (compoundBps > MAX_COMPOUND_BPS) revert CompoundBpsTooHigh();
+    if (compoundModule == address(0)) revert ModuleNotSet();
     ManagedPositionV2 storage p = position;
     if (!p.active) revert NotActive();
-    if (address(slippagePriceChecker) == address(0)) revert CheckerNotSet();
 
     // Harvest pending AERO from staked legs into this contract (no unstake).
     if (p.mainStaked) ICLGauge(p.gauge).getReward(p.mainTokenId);
@@ -580,12 +597,12 @@ function compound(uint16 compoundBps) external onlyRole(REBALANCER_ROLE) nonReen
         emit EmissionsClaimed(dropAmount);
     }
     if (compoundAmount > 0) {
-        IERC20(AERO).forceApprove(VAULT_RELAYER, compoundAmount);
+        IERC20(AERO).safeTransfer(compoundModule, compoundAmount);
     }
     emit CompoundInitiated(compoundAmount, dropAmount, compoundBps);
 }
 ```
-Notes: `FullMath`, `IERC20`, `ICLGauge`, `BPS_DENOMINATOR`, `REBALANCER_ROLE` are already imported/declared. `EmissionsClaimed` is the existing event (now single-arg after Task 1).
+Notes: `FullMath`, `IERC20`, `ICLGauge`, `BPS_DENOMINATOR`, `REBALANCER_ROLE`, `SafeERC20`, `AERO` are already imported/declared; `compoundModule` is declared in this step. `EmissionsClaimed` is the existing single-arg event.
 
 - [ ] **Step 5: Run compound tests + full suite**
 
@@ -594,10 +611,10 @@ Expected: all PASS.
 
 - [ ] **Step 6: Size check + commit**
 
-Run: `forge build --sizes 2>/dev/null | grep LPAutoBalancerV2` (must stay < 24576).
+Run: `forge build --sizes 2>/dev/null | grep LPAutoBalancerV2` (must stay < 24576 — with CowSwap gone it has ample headroom).
 ```bash
 git add src/LPAutoBalancerV2.sol test/mocks/MockCLGauge.sol test/LPAutoBalancerV2.unit.t.sol
-git commit -m "feat(lpv2): compound() partial AERO reinvest via CowSwap"
+git commit -m "feat(lpv2): compound() forwards AERO share to compound module"
 ```
 
 ---
@@ -704,10 +721,10 @@ git commit -m "test(lpv2): integration single-position + compound fold"
 ## Task 7: FPS setup proposal + addresses + SlippagePriceChecker config
 
 **Files:**
-- Modify: `addresses/8453.json` (add `CHAINLINK_AERO_USD`)
-- Modify: `multisig/mamo-multisig/011_LPAutoBalancerV2Setup.sol`
+- Modify: `addresses/8453.json` (add `CHAINLINK_AERO_USD`; the proposal writes `LP_COMPOUND_MODULE` at deploy time)
+- Modify: `multisig/mamo-multisig/011_LPAutoBalancerV2Setup.sol` (deploy `LPCompoundModule`, wire it)
 - Modify: `test/LPAutoBalancerV2Setup.integration.t.sol`
-- Modify: `script/DeployLPAutoBalancerV2.s.sol` and `test/DeployLPAutoBalancerV2.t.sol` only if the constructor signature changed (it did not — leave unless build breaks)
+- Modify: `script/DeployLPAutoBalancerV2.s.sol` and `test/DeployLPAutoBalancerV2.t.sol` only if the constructor signature changed (balancer ctor unchanged — leave unless build breaks)
 
 - [ ] **Step 1: Obtain + add the Base AERO/USD Chainlink feed address**
 
@@ -721,15 +738,17 @@ Add to `addresses/8453.json` (follow the file's existing object shape — `{ "ad
 { "addr": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0", "name": "CHAINLINK_AERO_USD", "isContract": true }
 ```
 
-- [ ] **Step 2: Drop slotId in the proposal + add compound wiring**
+- [ ] **Step 2: Drop slotId in the proposal + deploy module + wire compounding**
 
 In `multisig/mamo-multisig/011_LPAutoBalancerV2Setup.sol`:
 - `registerPosition(config)` call is unchanged in shape (still takes the struct). No slotId there.
+- **Deploy `LPCompoundModule`** in the proposal's `deploy()` step: `new LPCompoundModule(address(lab), addresses.getAddress("AERO"), FMAMO_SAFE)` (module admin = the Safe). Record it as `LP_COMPOUND_MODULE` in the addresses file.
 - Add Safe build actions after `registerPosition`:
-  1. `lab.setSlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"))`
-  2. `lab.setSlippage(200)` (conservative 2% default)
-  3. `lab.setCompoundAppData(COMPOUND_APP_DATA)` — define `bytes32 constant COMPOUND_APP_DATA = keccak256("mamo-lpv2-compound");` (replace with the real appData hash agreed with the off-chain bot before mainnet execution).
-  4. `lab.approveCowSwap(addresses.getAddress("AERO"), type(uint256).max)`
+  1. `lab.setCompoundModule(address(module))` — wire the balancer to the module.
+  2. `module.setSlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"))`
+  3. `module.setSlippage(200)` (conservative 2% default)
+  4. `module.setCompoundAppData(COMPOUND_APP_DATA)` — define `bytes32 constant COMPOUND_APP_DATA = keccak256("mamo-lpv2-compound");` (replace with the real appData hash agreed with the off-chain bot before mainnet execution).
+  5. `module.approveCowSwap()` (no args — the module approves its own AERO to the relayer).
 - Configure the SlippagePriceChecker for AERO→WETH and AERO→cbBTC (mirror `010_WhitelistWETHStrategyImplementation.sol::_configureRewardTokens`). The owner of `CHAINLINK_SWAP_CHECKER_PROXY` must call these; if that owner is the F-MAMO Safe, add them as Safe actions, else note they are a separate owner tx:
   ```solidity
   ISlippagePriceChecker spc = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
@@ -749,7 +768,7 @@ In `multisig/mamo-multisig/011_LPAutoBalancerV2Setup.sol`:
   spc.setMaxTimePriceValid(addresses.getAddress("AERO"), 3600);
   ```
   Add `import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";` to the proposal.
-- Extend `validate()` to assert: `lab.allowedSlippageInBps() == 200`, `lab.compoundAppData() == COMPOUND_APP_DATA`, `address(lab.slippagePriceChecker()) == CHAINLINK_SWAP_CHECKER_PROXY`, `IERC20(AERO).allowance(address(lab), lab.VAULT_RELAYER()) == type(uint256).max`, and `spc.isTokenPairConfigured(AERO, WETH) && spc.isTokenPairConfigured(AERO, cbBTC)`.
+- Extend `validate()` to assert: `lab.compoundModule() == address(module)`, `module.balancer() == address(lab)`, `module.allowedSlippageInBps() == 200`, `module.compoundAppData() == COMPOUND_APP_DATA`, `address(module.slippagePriceChecker()) == CHAINLINK_SWAP_CHECKER_PROXY`, `IERC20(AERO).allowance(address(module), module.VAULT_RELAYER()) == type(uint256).max`, and `spc.isTokenPairConfigured(AERO, WETH) && spc.isTokenPairConfigured(AERO, cbBTC)`.
 
 - [ ] **Step 3: Drop slotId in the setup test + add compound assertions**
 
@@ -812,9 +831,10 @@ git commit -m "docs(lpv2): single-pool + compounding setup"
 
 ## Self-review checklist (run before handing off)
 
-- **Spec coverage:** §3 single-position → Task 1; §3.7 setPool → Task 2; §4a compound/isValidSignature/SlippagePriceChecker → Tasks 3–4; both-legs fold → Tasks 5–6; §6 setup/SlippagePriceChecker config → Task 7; §8 tests distributed across Tasks 1–7; docs → Task 8.
+- **Spec coverage:** §3 single-position → Task 1; §3.7 setPool → Task 2; §4b module (isValidSignature/SlippagePriceChecker) → Task 3; §4a balancer compound/forward → Task 4; both-legs fold → Tasks 5–6; §6 setup + module deploy/wire/SlippagePriceChecker config → Task 7; §8 tests distributed across Tasks 1–7; docs → Task 8.
 - **AERO/USD feed** is the one external unknown — Task 7 Step 1 verifies it on-chain before use (not a code placeholder).
-- **Size budget:** the 24 KB limit is real for this contract (commit `29bce6f`); Tasks 3 & 4 check `--sizes` and fall back to custom errors if needed.
-- **No principal swap invariant** preserved: `compound` only ever moves AERO; `isValidSignature` forces `sellToken == AERO`. The unit test `test_noSwapPolicyField` and the adversarial "no principal swap path" assertions remain valid.
+- **Size budget:** the 24 KB limit is real for the balancer (commit `29bce6f`); the module split moves ALL CowSwap bytecode off the balancer, so it now has ample headroom. Task 4 still checks `--sizes`.
+- **No principal swap invariant** preserved: `compound` only ever moves AERO; the module's `isValidSignature` forces `sellToken == AERO` and `receiver == balancer`. The unit test `test_noSwapPolicyField` and the adversarial "no principal swap path" assertions remain valid.
+- **setPool safety:** the module reads `balancer.token0()/token1()` live, so re-pointing the pool automatically re-scopes the compound buy-token check with no module change (test `test_isValidSignature_survivesSetPool`).
 - **Type consistency:** `compound(uint16)`, `MAX_COMPOUND_BPS` (uint16), `compoundAppData` (bytes32), `setCompoundAppData`/`setSlippage`/`setSlippagePriceChecker`/`approveCowSwap`, `position` getter, and `CompoundInitiated(uint256,uint256,uint16)` are referenced identically across contract, tests, and proposal.
 ```
