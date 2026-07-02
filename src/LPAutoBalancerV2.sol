@@ -18,8 +18,7 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
-import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
-import {TickMath} from "@libraries/uniswap/TickMath.sol";
+import {LPBalancerLib} from "@libraries/LPBalancerLib.sol";
 
 /// @title LPAutoBalancerV2
 /// @notice Safe-governed, single-position Aerodrome CL rebalancer. Holds position NFTs,
@@ -854,9 +853,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     {
         if (tokenId == 0) return 0;
         (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
-        (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
-            sqrtP, TickMath.getSqrtRatioAtTick(tl), TickMath.getSqrtRatioAtTick(tu), liq
-        );
+        (uint256 a0, uint256 a1) = LPBalancerLib.amountsForLiquidityAtTicks(sqrtP, tl, tu, liq);
         return _valueInUsd(a0, a1, p.oracle0, p.oracle1, dec0, dec1);
     }
 
@@ -976,9 +973,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Round `tick` down to the nearest multiple of `spacing`, toward −∞.
     ///      Solidity truncates division toward zero, so we adjust negative remainders.
     function _floorAlign(int24 tick, int24 spacing) internal pure returns (int24) {
-        int24 q = tick / spacing;
-        if (tick < 0 && tick % spacing != 0) q -= 1; // floor toward -inf
-        return q * spacing;
+        return LPBalancerLib.floorAlign(tick, spacing);
     }
 
     /// @dev Compute a tick range of `width` ticks centered on `referenceTick`,
@@ -990,10 +985,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         pure
         returns (int24 tickLower, int24 tickUpper)
     {
-        int24 half = int24(width / 2);
-        tickLower = _floorAlign(referenceTick - half, spacing);
-        tickUpper = tickLower + int24(width);
-        require(tickLower < currentTick && currentTick < tickUpper, "no straddle");
+        return LPBalancerLib.alignedRange(referenceTick, width, spacing, currentTick);
     }
 
     /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
@@ -1068,14 +1060,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Consult the pool's TWAP oracle and return the time-weighted average tick
     ///      over `window` seconds. Division is floored toward −∞ (matches OracleLibrary.consult).
     function _consultTwapTick(address pool, uint32 window) internal view returns (int24) {
-        uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = window;
-        secondsAgos[1] = 0;
-        (int56[] memory cum,) = ICLPool(pool).observe(secondsAgos);
-        int56 delta = cum[1] - cum[0];
-        int24 twapTick = int24(delta / int56(uint56(window)));
-        if (delta < 0 && (delta % int56(uint56(window)) != 0)) twapTick--; // round toward -inf
-        return twapTick;
+        return LPBalancerLib.consultTwapTick(pool, window);
     }
 
     /// @dev Revert if the absolute difference between `spotTick` and `twapTick` exceeds `maxDev`.
@@ -1087,11 +1072,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
     ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
     function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
-        (, int256 answer,, uint256 updatedAt,) = IPriceFeed(feed).latestRoundData();
-        if (answer <= 0) revert StaleOracle();
-        if (block.timestamp - updatedAt > maxOracleDelay) revert StaleOracle();
-        price = uint256(answer);
-        decimals = IPriceFeed(feed).decimals();
+        return LPBalancerLib.readFeed(feed, maxOracleDelay);
     }
 
     /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
@@ -1101,17 +1082,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         view
         returns (uint256 usd)
     {
-        // Only consult a leg's feed when that leg is funded. Valuing a single leg must not revert
-        // because the OTHER, unused feed happens to be stale — a zero amount contributes 0 regardless
-        // of price. The two-leg path (both amounts > 0) still reads both feeds, as required.
-        if (amount0 > 0) {
-            (uint256 p0, uint8 fd0) = _readFeed(oracle0);
-            usd += FullMath.mulDiv(amount0, p0, 10 ** dec0) * (10 ** 8) / (10 ** fd0);
-        }
-        if (amount1 > 0) {
-            (uint256 p1, uint8 fd1) = _readFeed(oracle1);
-            usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
-        }
+        return LPBalancerLib.valueInUsd(amount0, amount1, oracle0, oracle1, dec0, dec1, maxOracleDelay);
     }
 
     /// @dev Validate all fields of `config` and store them via `_store`.
