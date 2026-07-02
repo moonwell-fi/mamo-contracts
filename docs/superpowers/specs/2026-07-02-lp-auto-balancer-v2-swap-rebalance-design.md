@@ -10,9 +10,9 @@
 | Question | Decision |
 | --- | --- |
 | Swap venue | **Async CowSwap** (MEV-protected, best-price), NOT an atomic in-pool swap. Accepts a two-phase rebalance state machine and AERO downtime between phases. |
-| Mode selection | **Per-cycle by REBALANCER** — no Safe master switch. The backend runs the slippage-payback math (Luke: hours of extra AERO to earn back the swap cost) and picks `reset()` (no-swap) or `beginRebalance()`/`finishRebalance()` (swap) each cycle. |
+| Mode selection | **Per-cycle by REBALANCER** — no Safe master switch. The backend runs the slippage-payback math (Luke: hours of extra AERO to earn back the swap cost) and picks `rebalanceUsingAlt()` (the renamed `reset()`, no-swap) or `unwindForSwap()`/`rebuildAfterSwap()` (swap) each cycle. |
 | Swap ratio | **Continuous** — the backend chooses the sell amount off-chain; selling the full excess ≈ full 50/50 (no alt), selling nothing = today's no-swap path. No on-chain `swapBps`; the amount is embedded in the CowSwap order. |
-| Stuck orders | **`finishRebalance()` is never gated on order state** — it mints from whatever the contract holds. Filled → balanced main; expired unfilled → identical outcome to today's no-swap reset (single-sided main + alt). No cancel path, no on-chain order tracking. (It IS still gated on the calm gate and pause — minting at a deviated price is worse than waiting; `exit()` is the always-available escape.) |
+| Stuck orders | **`rebuildAfterSwap()` is never gated on order state** — it mints from whatever the contract holds. Filled → balanced main; expired unfilled → identical outcome to today's no-swap reset (single-sided main + alt). No cancel path, no on-chain order tracking. (It IS still gated on the calm gate and pause — minting at a deviated price is worse than waiting; `exit()` is the always-available escape.) |
 | EIP-1271 hosting | **Module validates, balancer delegates.** Order owner = balancer (tokens are pulled from and delivered to the balancer). The balancer's `isValidSignature` is a ~3-line passthrough to `LPCompoundModule.validateRebalanceOrder`. All validation logic lives on the module (balancer has ~590 B of EIP-170 headroom). |
 
 ## 2. Balancer changes (`LPAutoBalancerV2`)
@@ -27,10 +27,10 @@ uint16  public swapLossAllowanceBps;   // admin-set extra floor tolerance for th
 uint16  public constant MAX_SWAP_LOSS_ALLOWANCE_BPS = 500; // cap on the above
 ```
 
-### 2.2 `beginRebalance(BeginParams)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`
+### 2.2 `unwindForSwap(UnwindParams)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`
 
 ```solidity
-struct BeginParams {
+struct UnwindParams {
     address sellToken;          // token0 or token1 — the excess leg (backend-computed)
     uint256 sellAmount;         // approve exactly this to VAULT_RELAYER
     uint256 amount0MinWithdraw; // sandwich floors for the teardown (main)
@@ -41,21 +41,21 @@ struct BeginParams {
 }
 ```
 
-1. Guards: `active`, NOT already in flight, cooldown (`lastRebalance + minRebalanceInterval`), calm gate (TWAP deviation) — same as `reset()`.
+1. Guards: `active`, NOT already in flight, cooldown (`lastRebalance + minRebalanceInterval`), calm gate (TWAP deviation) — same as `rebalanceUsingAlt()`.
 2. Snapshot `rebalanceValueBefore` = main + alt principal at oracle prices **plus** loose balances (`_principalValue` + `_altValue` + `_contractPairValue`), and `rebalanceStartedAt = block.timestamp`.
 3. Teardown via the existing `_exitAll`: unstake (skims AERO → feeCollector), skim LP fees, `decreaseLiquidity(all)`, burn both NFTs. Principal now sits loose on the balancer.
 4. Validate `sellToken ∈ {token0, token1}` and `sellAmount > 0`; `forceApprove(VAULT_RELAYER, sellAmount)` on `sellToken`.
-5. Set `rebalanceInFlight = true`. **No mint.** Emit `RebalanceBegun(sellToken, sellAmount)`.
+5. Set `rebalanceInFlight = true`. **No mint.** Emit `RebalanceUnwound(sellToken, sellAmount)`.
 
 The contract does NOT compute the excess on-chain. The backend passes direction + amount; safety does not depend on it being "correct": every order is fair-price-bounded by the module's price check with `receiver == balancer`, so an oversized or wrong-direction sell only converts tokens at market — the finish floor catches any residual loss.
 
-### 2.3 `finishRebalance(ResetParams)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`
+### 2.3 `rebuildAfterSwap(RebalanceParams)` — `onlyRole(REBALANCER_ROLE)`, `nonReentrant`, `whenNotPaused`
 
 1. Requires `rebalanceInFlight` (reverts `NotInFlight` otherwise). **No cooldown check** — finish must always be callable; NOT gated on order settlement.
 2. Revoke the sell-token relayer approval (`forceApprove(VAULT_RELAYER, 0)`).
 3. Re-run the calm gate (fresh spot/TWAP), then mint from current balances via the **existing** reset mint path: `_mainRange` → `_mintBalanced` → `_mintAlt`. Post-swap ≈50/50 balances → balanced main with tiny/no alt; unfilled order → single-sided main + alt, exactly today's no-swap outcome.
-4. Value floor: `valueAfter ≥ rebalanceValueBefore × (BPS − maxRebalanceLossBps − swapLossAllowanceBps) / BPS`, where `valueAfter` = new main + alt + loose at current oracle prices. `swapLossAllowanceBps` covers the CowSwap slippage bound + fees; the per-order price check independently bounds the swap itself. No-swap `reset()` keeps its existing tighter floor (no allowance term).
-5. Clear `rebalanceInFlight` (closes the module's signing window — CowSwap re-checks EIP-1271 at settlement, so a stale signed order can no longer settle), zero `rebalanceValueBefore`, restake if the position was staked at begin, stamp `lastRebalance`, forward dust, emit `RebalanceFinished(mainTokenId, altTokenId)`.
+4. Value floor: `valueAfter ≥ rebalanceValueBefore × (BPS − maxRebalanceLossBps − swapLossAllowanceBps) / BPS`, where `valueAfter` = new main + alt + loose at current oracle prices. `swapLossAllowanceBps` covers the CowSwap slippage bound + fees; the per-order price check independently bounds the swap itself. No-swap `rebalanceUsingAlt()` keeps its existing tighter floor (no allowance term).
+5. Clear `rebalanceInFlight` (closes the module's signing window — CowSwap re-checks EIP-1271 at settlement, so a stale signed order can no longer settle), zero `rebalanceValueBefore`, restake if the position was staked at begin, stamp `lastRebalance`, forward dust, emit `RebalanceRebuilt(mainTokenId, altTokenId)`.
 
 ### 2.4 `isValidSignature` passthrough (balancer)
 
@@ -69,12 +69,12 @@ Order owner = balancer: GPv2 pulls the sell token from the balancer (approved in
 
 ### 2.5 Other
 
-- `reset()` unchanged — the atomic no-swap path stays as-is.
+- **Rename `reset()` → `rebalanceUsingAlt()`** — behavior unchanged (the atomic no-swap path); the new name states what it does (rebuilds by parking surplus as the alt, no swap). Mechanical rename across `src/`, the three test files, `011_LPAutoBalancerV2Setup.sol`, and the runbook. `ResetParams` → `RebalanceParams` and the `Reset` event → `RebalancedUsingAlt` to match; `rebuildAfterSwap` reuses `RebalanceParams`.
 - `exit(to)` additionally clears `rebalanceInFlight` and revokes any relayer approval — the Safe can always tear down mid-flight.
 - `setSwapLossAllowanceBps(uint16)` — `DEFAULT_ADMIN_ROLE`, `≤ MAX_SWAP_LOSS_ALLOWANCE_BPS`.
 - `getDecisionSnapshot()` gains `rebalanceInFlight` and `rebalanceStartedAt` so the agent's discovery stage sees pending state.
 - New errors: `NotInFlight`, `AlreadyInFlight`, `InvalidSellToken`, `SwapLossAllowanceTooHigh`.
-- Cooldown semantics: `beginRebalance` consumes the cooldown slot (it is the teardown); `finishRebalance` stamps `lastRebalance` so the next begin/reset honors the interval from finish time.
+- Cooldown semantics: `unwindForSwap` consumes the cooldown slot (it is the teardown); `rebuildAfterSwap` stamps `lastRebalance` so the next unwind/rebalance honors the interval from finish time.
 
 ## 3. Module changes (`LPCompoundModule`)
 
@@ -102,14 +102,14 @@ The `CHAINLINK_SWAP_CHECKER_PROXY` owner (`0x26c158A4…`, not F-MAMO) must add,
 - `cbBTC → WETH`: BTC/USD (forward), ETH/USD (reverse)
 - `setMaxTimePriceValid` for WETH and cbBTC.
 
-Until configured, `checkPrice` reverts → rebalance orders cannot settle → `finishRebalance` degenerates safely to the no-swap outcome.
+Until configured, `checkPrice` reverts → rebalance orders cannot settle → `rebuildAfterSwap` degenerates safely to the no-swap outcome.
 
 ## 4. Off-chain flow (backend, per cycle)
 
 1. Read `getDecisionSnapshot()`; compute imbalance, current AERO emission rate, and the slippage-payback time (hours of extra AERO from a balanced+concentrated position needed to repay the swap cost).
-2. **Swap wins** → `beginRebalance(sellToken, sellAmount, …)` → post CowSwap order (owner = balancer, receiver = balancer, appData = compound appData) → poll settlement → `finishRebalance(params)`. AERO downtime between begin and finish is a real cost the payback math must include.
+2. **Swap wins** → `unwindForSwap(sellToken, sellAmount, …)` → post CowSwap order (owner = balancer, receiver = balancer, appData = compound appData) → poll settlement → `rebuildAfterSwap(params)`. AERO downtime between begin and finish is a real cost the payback math must include.
 3. **Alt wins** (weak emissions / small imbalance) → plain `reset(params)`.
-4. Order expired unfilled → call `finishRebalance` anyway (no-swap outcome) or leave in-flight and re-post within `maxTimePriceValid` bounds; never leave the position unstaked longer than the payback math justifies.
+4. Order expired unfilled → call `rebuildAfterSwap` anyway (no-swap outcome) or leave in-flight and re-post within `maxTimePriceValid` bounds; never leave the position unstaked longer than the payback math justifies.
 
 ## 5. Security properties
 
