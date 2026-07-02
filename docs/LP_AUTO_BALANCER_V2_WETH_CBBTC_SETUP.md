@@ -10,7 +10,7 @@ This is the step-by-step to stand up the **first** managed position: a **WETH/cb
 | --- | --- |
 | **TransferAndEarn** | Releases underperforming protocol LP back to the Safe (source of capital) |
 | **F-MAMO Safe** (`DEFAULT_ADMIN_ROLE`) | Liquidates → WETH+cbBTC, mints the CL position, deposits it into the balancer, registers it, hands the rebalancer key to the backend |
-| **Backend / LLM** (`REBALANCER_ROLE`) | After handover: `reset` / `stake` / `unstake` / `claimEmissions` only — never sells, never withdraws to itself |
+| **Backend / LLM** (`REBALANCER_ROLE`) | After handover: `reset` / `stake` / `unstake` / `claimEmissions` / `compound` only — never sells principal, never withdraws to itself |
 
 > **Trust model:** every value-moving action (selling, minting, registering, emergency exit) is the **Safe's**. The backend key can only re-range and stake within on-chain guards and can only route fees/AERO to the configured `feeCollector`. Keep the two strictly separated.
 
@@ -28,6 +28,8 @@ This is the step-by-step to stand up the **first** managed position: a **WETH/cb
 | AERO | `0x940181a94A35A4569E4529A3CDfB74e38FD98631` |
 | Chainlink ETH/USD (8-dec) | `0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70` |
 | Chainlink BTC/USD (8-dec) | `0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F` |
+| Chainlink AERO/USD (8-dec, for compound) | `0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0` (`CHAINLINK_AERO_USD`) |
+| SlippagePriceChecker proxy (compound min-out) | `CHAINLINK_SWAP_CHECKER_PROXY` — owner `0x26c158A4…` (**not** F-MAMO) |
 | feeCollector (drop sink) | `DROP_AUTOMATION` (from `addresses/8453.json`) |
 
 > **Two gotchas, both confirmed on-chain:**
@@ -124,14 +126,28 @@ Suggested phase-1 config values (conservative; manager can tune within caps late
 | `mainTokenId` | `INIT_TOKEN_ID` | held NFT |
 | `altTokenId / mainStaked / altStaked / lastRebalance / active` | `0 / false / false / 0 / false` | **forced** by `_store` — values you pass are ignored |
 
-`registerPosition` returns `slotId` (the first one is `0`). Record it as `MAMO_LP_SLOT_ID`.
+> **Single position per contract (no `slotId`).** One `LPAutoBalancerV2` manages exactly **one** pool: state lives in a single `position` struct, and every external call (`reset`, `stake`, `exit`, `getDecisionSnapshot`, …) takes **no** `slotId`. To repoint the contract at a different pair, empty it first (`exit`) then `setPool(newConfig)` — see "Changing the pool" below. `registerPosition` reverts `AlreadyRegistered` if a position is already active.
 
 ### B5. AERO routing in DropAutomation
 Confirm **AERO is whitelisted in `DropAutomation`'s swap config** so claimed emissions get swapped into the drop. If not, add it (Safe). Without this, AERO reaches the feeCollector but isn't converted.
 
 > **Do not stake at setup.** Whether to gauge-stake (farm AERO) vs stay unstaked (fees) is the agent's per-pair decision (`stake` is `REBALANCER_ROLE`). Leave it unstaked; the backend stakes if/when its APR comparison says to.
 
-Output of Phase B: a registered, **unstaked** WETH/cbBTC position in the balancer at `slotId`, fees/AERO wired to the drop. No hot key exists yet.
+### B6. Compound module (partial AERO reinvest) — `LPCompoundModule`
+
+The `011` proposal also **deploys `LPCompoundModule`** (admin = F-MAMO, immutably linked to this balancer) and wires the F-MAMO-doable part:
+
+- `lab.setCompoundModule(module)` — the balancer forwards the compound share of harvested AERO here.
+- `module.setSlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY)`, `module.setSlippage(200)` (2%), `module.setCompoundAppData(keccak256("mamo-lpv2-compound"))`.
+
+**Two steps are DEFERRED to a separate owner tx** because the `CHAINLINK_SWAP_CHECKER_PROXY` owner is **not** F-MAMO:
+
+1. **Checker owner** (`0x26c158A4…`): `addTokenConfiguration(AERO → WETH)` and `(AERO → cbBTC)` using `CHAINLINK_AERO_USD` (`0x4EC5970f…`, 8-dec, forward) then ETH/USD resp. BTC/USD (reverse), plus `setMaxTimePriceValid(AERO, …)`. Only after this is AERO a reward token.
+2. **F-MAMO**: `module.approveCowSwap()` — reverts `"Token not allowed"` until step 1 lands.
+
+Until both run, `compound(compoundBps)` still harvests AERO, drops the `(1 − compoundBps)` share to `feeCollector`, and forwards the `compoundBps` share to the module; only the CowSwap **sell leg** is inert (no relayer allowance / orders fail slippage) — which is safe. The off-chain bot posts two CowSwap sell orders (AERO→WETH, AERO→cbBTC, ~50/50 by value) validated by the module's `isValidSignature`; the solver delivers the underlying **to the balancer**, where it folds into the next `reset()`. Reward-only — principal is never swapped.
+
+Output of Phase B: a registered, **unstaked** WETH/cbBTC position in the balancer, fees/AERO wired to the drop, and a linked compound module (CowSwap approval pending the checker-owner tx). No hot key exists yet.
 
 ---
 
@@ -152,16 +168,15 @@ Set the env the agent reads (see the agent spec / Plan B):
 | Env | Value |
 | --- | --- |
 | `MOONWELL_LP_AUTO_BALANCER` | deployed `LPAutoBalancerV2` address |
-| `MOONWELL_LP_SLOT_ID` | the `slotId` from B4 (e.g. `0`) |
 | `MOONWELL_LP_RPC_URL` | Base RPC (the gate's `eth_call` + the agent's `cast` use it) |
 | `MOONWELL_LP_HYSTERESIS_BPS` | e.g. `200` (stake/unstake anti-flap) |
 | `MOONWELL_LP_MAX_TURNS` | e.g. `3` |
 | `MOONWELL_LP_MAX_UNSWEPT_AERO` | dust threshold for the "no unswept AERO" goal clause |
 
-Provision the `BACKEND_REBALANCER_EOA` private key **inside the sandbox** (the workflow layer never holds it). The completion gate reads `getDecisionSnapshot(slotId)` over JSON-RPC; the agent acts via `cast send`.
+Provision the `BACKEND_REBALANCER_EOA` private key **inside the sandbox** (the workflow layer never holds it). The completion gate reads `getDecisionSnapshot()` over JSON-RPC; the agent acts via `cast send`.
 
 ### C3. Verify before go-live
-- **Read path:** call `getDecisionSnapshot(slotId)` — confirm `mainInRange`, `hasGauge == true`, `mainStaked == false`, `cooldownRemaining`, `deviationGateOpen` look right.
+- **Read path:** call `getDecisionSnapshot()` — confirm `mainInRange`, `hasGauge == true`, `mainStaked == false`, `cooldownRemaining`, `deviationGateOpen` look right.
 - **Dry run:** on a fork (or testnet), have the backend run one sweep turn end-to-end — confirm a `reset` lands, `Reset` event fires, fees/AERO route to `DropAutomation`, and the gate's independent re-read agrees with the agent's report.
 - **Guards live:** confirm cooldown blocks a too-soon second reset; confirm the calm gate (`maxTickDeviation`) and value floor are active.
 - **Market gather:** note that the stake/unstake decision stays dormant until the LpSugar/DefiLlama APR gather is wired in the workflow (logged follow-up). Until then phase-1 runs **reset-only** safely.
@@ -174,7 +189,7 @@ Enable the `lp_balancer_sweep` cron (default every 6h, matching `minRebalanceInt
 ## Verification checklist (post-setup)
 
 - [ ] `LPAutoBalancerV2` deployed; admin = Safe, guardian set, rebalancer = backend EOA, manager optional.
-- [ ] Position NFT held by the contract; `slotId` registered and `active`.
+- [ ] Position NFT held by the contract; the single `position` registered and `active`.
 - [ ] `registerPosition` passed all validations (pool/token/tickSpacing match, gauge reward = AERO, oracles fresh, `minWidth ≥ 200`).
 - [ ] `feeCollector == DROP_AUTOMATION`; AERO whitelisted in DropAutomation swaps.
 - [ ] `minRebalanceInterval > 0`.
@@ -185,7 +200,17 @@ Enable the `lp_balancer_sweep` cron (default every 6h, matching `minRebalanceInt
 
 - **Pause:** guardian calls `pause()` — blocks `reset`/`stake`/`unstake`/`claimEmissions` (not `exit`).
 - **Revoke the key:** Safe `revokeRole(REBALANCER_ROLE, BACKEND_REBALANCER_EOA)` — instantly stops the backend.
-- **Full teardown:** Safe `exit(slotId, SAFE)` — unstakes both legs (skims AERO), withdraws all liquidity, burns the NFTs, returns all WETH + cbBTC to the Safe, marks the slot inactive. No swap.
+- **Full teardown:** Safe `exit(SAFE)` — unstakes both legs (skims AERO), withdraws all liquidity, burns the NFTs, returns all WETH + cbBTC to the Safe, marks the position inactive and zeroes the token ids. No swap.
+
+## Changing the pool (`setPool`)
+
+One contract = one pool, so switching pairs is an explicit, Safe-gated re-registration on an **emptied** contract:
+
+1. Safe `exit(SAFE)` — liquidates and returns principal, and (critically) **zeroes the token ids** so the empty guard passes.
+2. Off-chain: acquire the new pair, mint its Slipstream NFT, `safeTransferFrom` it into the balancer.
+3. Safe `setPool(newConfig)` — same validation as `registerPosition` (pool/token/tickSpacing cross-checks, oracle probes, gauge reward-token check, NFT ownership). Reverts `NotEmpty` unless `!active && mainTokenId == 0 && altTokenId == 0`. Emits `PoolChanged`.
+
+The compound module reads `token0()/token1()` from the balancer **live**, so a `setPool` re-point automatically re-scopes the compound buy-token check — no module change needed. If the new pair no longer uses AERO/WETH/cbBTC feeds, the checker owner reconfigures the module's price checker accordingly.
 
 ## Scope notes
 
