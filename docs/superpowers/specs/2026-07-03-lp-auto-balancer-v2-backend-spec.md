@@ -255,7 +255,18 @@ Watchdogs (every poll): in-flight age (`now − rebalanceStartedAt`; WARN > `ORD
 
 ## 9. Compound and staking policy
 
-- `compound(COMPOUND_BPS)` on the sweep cadence when `earnedAero × aeroUsd > COMPOUND_MIN_USD` and idle. The module sells AERO → underlying via its own (always-open, `allowedSlippageInBps` = 200 bps) 1271 path with proceeds to the balancer; they fold into the next rebuild/rebalance mint. Don't call mid-flight (both legs unstaked ⇒ `NotStaked`); don't leave AERO pooling on the module (its relayer approval is standing `type(uint256).max` — forward-and-swap promptly).
+- `compound(COMPOUND_BPS)` on the sweep cadence when `earnedAero × aeroUsd > COMPOUND_MIN_USD` and idle. The module sells AERO → underlying via its own (always-open, `allowedSlippageInBps` = 200 bps) 1271 path with proceeds to the balancer; they fold into the next rebuild/rebalance mint. Don't call mid-flight (both legs unstaked ⇒ nothing harvests ⇒ `NothingToCompound` unless loose AERO happens to sit on the balancer); don't leave AERO pooling on the module (its relayer approval is standing `type(uint256).max` — forward-and-swap promptly).
+
+### 9.1 Weekly MAMO drop share
+
+`compound(uint16 compoundBps)` (LPAutoBalancerV2.sol:508) is the drop-share knob: each harvest sends `(10000 − compoundBps)/10000` of the claimed AERO to the `feeCollector` (DROP_AUTOMATION → the weekly MAMO drop) and forwards the rest to the compound module for reinvestment. Principal is never touched — rewards and LP liquidity are fully segregated, and no privileged withdrawal is involved.
+
+- **Default flow favors the drop.** Every AERO path that is NOT `compound()` already routes 100% to DROP_AUTOMATION: the permissionless `claimEmissions()`, and the auto-skims inside `unstake`, both rebalance flavors, and `unwindForSwap`'s teardown. `compound()` exists to carve out the *reinvest* share, not to enable the drop share.
+- **Policy knob.** `MOONWELL_LP_COMPOUND_BPS` (default `7000` → 30% of each harvest to the weekly drop). Per-call, full 0–10000 range; changing weekly policy is an env change, no transaction.
+- **Drop-day scheduling.** Guarantee at least one harvest inside the 24h before the weekly drop snapshot so the week's accrued AERO is included: call `compound(COMPOUND_BPS)` (or, if the reinvest leg is inert — checker/appData prerequisites pending — plain `claimEmissions()`). If a swap-rebalance is in flight at the cutoff, skip: the unwind's teardown already skimmed all pending AERO to the drop, and a mid-flight `compound()` reverts `NothingToCompound`.
+- **Measurement (policy is not protocol).** The split is chosen per call by the REBALANCER hot key — the contract does not store or enforce it (an on-chain `minDropShareBps` clamp was considered and declined for phase-1). Monitor realized share from events over each drop week:
+  `realizedDropShare = (Σ EmissionsClaimed.amount + Σ CompoundInitiated.droppedAmount) / (Σ EmissionsClaimed.amount + Σ CompoundInitiated.droppedAmount + Σ CompoundInitiated.compoundAmount)`
+  (`EmissionsClaimed(uint256)` covers claims and auto-skims; `CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps)` covers explicit splits — note `compound()` also emits `EmissionsClaimed` for its drop leg, so dedupe by tx hash: within a `CompoundInitiated` tx, count the drop leg once). Alert when it deviates from `1 − COMPOUND_BPS/10000` by more than `MOONWELL_LP_DROP_SHARE_TOL_BPS`. Both destinations are value-preserving, so a key compromise can skew the split but not extract — the monitor is the detection layer.
 - Compound proceeds or donations landing mid-flight inflate `valueAfter` and loosen the floor by that amount (documented contract limitation) — harmless, but the §8.2 realized-shortfall log keeps measurement honest.
 - `stake()` immediately after any rebuild/rebalance leaves `mainStaked == false` unexpectedly (restake is automatic iff staked at teardown; the phase-1 handover starts unstaked until the APR gather is wired). Hysteresis on stake/unstake flips: `MOONWELL_LP_HYSTERESIS_BPS`.
 
@@ -312,6 +323,8 @@ cast call $BALANCER "getDecisionSnapshot()" --rpc-url $RPC             # decodes
 | `MOONWELL_LP_WIDTH_TICKS` | `200` | Main range width |
 | `MOONWELL_LP_FEED_FRESHNESS_MAX_S` | 2× feed heartbeat | Unwind precondition |
 | `MOONWELL_LP_SEQUENCER_GRACE_S` | `3600` | No swaps after sequencer recovery |
+| `MOONWELL_LP_COMPOUND_BPS` | `7000` | Reinvest share per harvest; drop share = `10000 −` this (§9.1) |
+| `MOONWELL_LP_DROP_SHARE_TOL_BPS` | `500` | Alert threshold on realized vs policy drop share (§9.1) |
 | `MOONWELL_LP_HYSTERESIS_BPS` | `200` | Stake/unstake anti-flap (existing) |
 | `MOONWELL_LP_MAX_UNSWEPT_AERO` | — | Compound trigger (existing) |
 | `MOONWELL_LP_MAX_TURNS` | `3` | Agent turn budget (existing) |
