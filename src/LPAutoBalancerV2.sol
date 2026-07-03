@@ -559,7 +559,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Phase 1 of a swap rebalance: tears down both positions, snapshots value,
     ///         approves the CowSwap vault relayer for exactly `sellAmount`, and opens the
     ///         order-validation window. No mint happens here; `rebuildAfterSwap` completes the cycle.
-    function unwindForSwap(UnwindParams calldata params) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+    function unwindForSwap(UnwindParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
         ManagedPositionV2 storage p = position;
         // Guards + calm-gate delegated to LPBalancerLib (primitives in, primitives out) to keep this
         // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
@@ -657,10 +662,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (
             valueAfter
                 < FullMath.mulDiv(
-                        rebalanceValueBeforePos,
-                        BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps,
-                        BPS_DENOMINATOR
-                    ) + rebalanceLooseBefore
+                    rebalanceValueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps, BPS_DENOMINATOR
+                ) + rebalanceLooseBefore
         ) {
             revert ValueFloor();
         }
@@ -796,8 +799,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
         if (
             valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
-                    + looseBefore
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
         ) {
             revert ValueFloor();
         }
@@ -908,7 +910,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 deadline
     ) private returns (uint256 newTokenId) {
         return LPBalancerLib.mintPosition(
-            address(POSITION_MANAGER), p.token0, p.token1, p.tickSpacing, tickLower, tickUpper, amount0Min, amount1Min, deadline
+            address(POSITION_MANAGER),
+            p.token0,
+            p.token1,
+            p.tickSpacing,
+            tickLower,
+            tickUpper,
+            amount0Min,
+            amount1Min,
+            deadline
         );
     }
 
@@ -973,7 +983,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 altAmount1Min = surplus0 ? 0 : amount1MinAlt;
 
         altId = LPBalancerLib.mintPosition(
-            address(POSITION_MANAGER), p.token0, p.token1, p.tickSpacing, altTl, altTu, altAmount0Min, altAmount1Min, deadline
+            address(POSITION_MANAGER),
+            p.token0,
+            p.token1,
+            p.tickSpacing,
+            altTl,
+            altTu,
+            altAmount0Min,
+            altAmount1Min,
+            deadline
         );
     }
 
