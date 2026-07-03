@@ -138,7 +138,9 @@ Confirm **AERO is whitelisted in `DropAutomation`'s swap config** so claimed emi
 The `011` proposal also **deploys `LPCompoundModule`** (admin = F-MAMO, immutably linked to this balancer) and wires the F-MAMO-doable part:
 
 - `lab.setCompoundModule(module)` — the balancer forwards the compound share of harvested AERO here.
-- `module.setSlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY)`, `module.setSlippage(200)` (2%), `module.setCompoundAppData(keccak256("mamo-lpv2-compound"))`.
+- `module.setSlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY)`, `module.setSlippage(200)` (2%, compound/AERO orders), `module.setRebalanceSlippageBps(50)` (0.5%, principal WETH↔cbBTC orders — deliberately much tighter: EIP-1271 placement is permissionless while a swap-rebalance is in flight, so this knob is the binding price floor on the approved principal), `module.setCompoundAppData(keccak256("mamo-lpv2-compound"))`.
+
+> **appData is a placeholder.** `keccak256("mamo-lpv2-compound")` has no valid appData-JSON preimage, and the CoW orderbook wants the full document at order placement. Before the first order of either kind: generate a plain `{appCode:"Mamo"}` document (no pre-hook), `PUT` it to `/app_data/{hash}` on the orderbook, and F-MAMO `setCompoundAppData(realHash)`. See the backend spec §10 for the exact commands.
 
 **Two steps are DEFERRED to a separate owner tx** because the `CHAINLINK_SWAP_CHECKER_PROXY` owner is **not** F-MAMO:
 
@@ -173,8 +175,8 @@ CowSwap orders for the swap path are validated on-chain via `LPCompoundModule.va
 
 - Fill-or-kill sell order strictly between the pool's two underlying tokens (WETH/cbBTC), either direction.
 - `receiver == balancer` (the `LPAutoBalancerV2` contract itself, never the backend EOA).
-- Price bounded by the Chainlink-backed `SlippagePriceChecker` (the same checker used for compound orders).
-- Expiry window: minimum 5 minutes, maximum the checker's `maxTimePriceValid`.
+- Price bounded by the Chainlink-backed `SlippagePriceChecker` using the module's **dedicated `rebalanceSlippageBps`** (011: 50 bps) — NOT the looser compound slippage. This bound matters more than the backend's own limit price: order placement is permissionless while the window is open, so any third-party order is floored here too.
+- Expiry window: minimum 5 minutes (re-checked at settlement — an order cannot settle in its final 5 minutes), maximum the checker's `maxTimePriceValid`. The checker owner must keep `maxTimePriceValid(WETH/cbBTC) < minRebalanceInterval` (6h) so a stale order from one cycle can never settle inside the next cycle's window.
 - Validates **only** while the balancer reports `rebalanceInFlight() == true` — i.e. only between `unwindForSwap` and `rebuildAfterSwap`. Outside that window, no order can be signed off.
 
 ### `setSwapLossAllowanceBps`
@@ -194,10 +196,11 @@ Safe grants `REBALANCER_ROLE` to the backend's **signer EOA** (the key the sandb
 lpAutoBalancerV2.grantRole(REBALANCER_ROLE, BACKEND_REBALANCER_EOA)
 ```
 
-`REBALANCER_ROLE = keccak256("REBALANCER_ROLE")`. This EOA can call only `rebalanceUsingAlt` / `stake` / `unstake` / `claimEmissions` — no custody, no config, value only to `feeCollector`.
+`REBALANCER_ROLE = keccak256("REBALANCER_ROLE")`. This EOA can call only `rebalanceUsingAlt` / `unwindForSwap` / `rebuildAfterSwap` / `compound` / `stake` / `unstake` — no custody, no config; value can only ever move to the balancer itself, the `feeCollector`, or the compound module. (`claimEmissions` and `collectFees` are permissionless skims to the feeCollector, not role-gated.)
 
 ### C2. Configure the backend (`centaur-moonwell` `lp_balancer_sweep` workflow)
-Set the env the agent reads (see the agent spec / Plan B):
+
+The full backend behavior — cycle state machine, swap-vs-alt decision math, CowSwap order lifecycle, config invariants, and the failure playbook — is specified in `docs/superpowers/specs/2026-07-03-lp-auto-balancer-v2-backend-spec.md`. Set the env the agent reads (baseline below; swap-mode vars in the backend spec §11):
 
 | Env | Value |
 | --- | --- |
