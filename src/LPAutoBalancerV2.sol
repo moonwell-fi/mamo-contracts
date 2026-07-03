@@ -422,9 +422,25 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // intact until after _exitAll returns.
         p.active = false;
 
-        // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
-        // Emergency path: 0 mins on both legs, deadline = block.timestamp (execute immediately).
-        _exitAll(p, 0, 0, 0, 0, block.timestamp);
+        if (rebalanceInFlight) {
+            // Mid-flight: unwindForSwap already tore down and burned both NFTs before setting
+            // this flag. There is nothing left to decrease/skim/burn — calling _exitAll again
+            // would operate on already-burned tokenIds and revert against the real position
+            // manager. Just revoke the stale relayer approval and clear the in-flight state;
+            // the shared tail below sweeps whatever principal (± partial settlement proceeds)
+            // is currently sitting on the contract.
+            if (sellTokenInFlight != address(0)) {
+                IERC20(sellTokenInFlight).forceApprove(VAULT_RELAYER, 0);
+            }
+            rebalanceInFlight = false;
+            rebalanceValueBefore = 0;
+            sellTokenInFlight = address(0);
+            rebalanceWasStaked = false;
+        } else {
+            // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
+            // Emergency path: 0 mins on both legs, deadline = block.timestamp (execute immediately).
+            _exitAll(p, 0, 0, 0, 0, block.timestamp);
+        }
 
         // Transfer all principal recovered from the position to `to`.
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));

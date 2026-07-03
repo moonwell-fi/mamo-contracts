@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 import {MockERC20} from "./MockERC20.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
-import {LPAutoBalancerV2, ILPCompoundModuleRebalance} from "@contracts/LPAutoBalancerV2.sol";
+import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
 import {StdStorage, Test, stdStorage} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
@@ -2152,6 +2152,65 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertTrue(lab.rebalanceInFlight(), "still in flight; can retry or exit");
     }
 
+    // ---------- exit() mid-flight (Task 7) ----------
+
+    function test_exit_midFlight_sweepsAndClearsState_noDoubleTeardown() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        assertTrue(lab.rebalanceInFlight());
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 5e17);
+        uint256 burnCountBeforeExit = mockPM.burnCallCount();
+
+        address to = makeAddr("exitRecipient");
+        vm.prank(admin);
+        lab.exit(to); // must NOT revert — this is the whole point of this test
+
+        // no double-teardown: burn count unchanged (unwindForSwap already burned once; exit()
+        // must not attempt to burn the same (already-burned) tokenId again)
+        assertEq(mockPM.burnCallCount(), burnCountBeforeExit, "exit() did not re-run _exitAll mid-flight");
+
+        // in-flight state fully cleared + approval revoked
+        assertFalse(lab.rebalanceInFlight());
+        assertEq(lab.rebalanceValueBefore(), 0);
+        assertEq(lab.sellTokenInFlight(), address(0));
+        assertFalse(lab.rebalanceWasStaked());
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "relayer approval revoked");
+
+        // principal swept to recipient, position deactivated
+        assertEq(tok0.balanceOf(to), 1e18);
+        assertEq(tok1.balanceOf(to), 1e18);
+        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,,, bool active) = lab.position();
+        assertEq(mainTokenId, 0, "mainTokenId zeroed");
+        assertEq(altTokenId, 0, "altTokenId zeroed");
+        assertFalse(active);
+    }
+
+    function test_exit_midFlight_sweepsPartialSettlementProceeds() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        // simulate a partial/odd settlement state: some tok0 left the contract (pulled by the
+        // relayer), some tok1 arrived (delivered by a solver) — exit() must sweep whatever is
+        // actually there, not assume the pre-unwind amounts.
+        vm.prank(address(lab));
+        tok0.transfer(makeAddr("solver"), 2e17);
+        tok1.mint(address(lab), 3e17);
+
+        address to = makeAddr("exitRecipient2");
+        vm.prank(admin);
+        lab.exit(to);
+
+        assertEq(tok0.balanceOf(to), 1e18 - 2e17, "swept actual current tok0 balance");
+        assertEq(tok1.balanceOf(to), 1e18 + 3e17, "swept actual current tok1 balance");
+    }
+
     function test_rebuildAfterSwap_lossWithinAllowancePasses() public {
         vm.prank(admin);
         lab.setSwapLossAllowanceBps(500); // default maxRebalanceLossBps is 100 (1%); +500 = 6% tolerance
@@ -2234,8 +2293,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         // Guards against the local ILPCompoundModuleRebalance interface drifting out of sync with
         // LPCompoundModule's real signature (nothing else enforces this at compile time).
         assertEq(
-            ILPCompoundModuleRebalance.validateRebalanceOrder.selector,
-            LPCompoundModule.validateRebalanceOrder.selector
+            ILPCompoundModuleRebalance.validateRebalanceOrder.selector, LPCompoundModule.validateRebalanceOrder.selector
         );
     }
 }
