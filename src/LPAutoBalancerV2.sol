@@ -4,7 +4,6 @@ pragma solidity 0.8.28;
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -12,7 +11,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 import {ICLGauge} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
-import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
@@ -515,6 +513,67 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     // Rebalance
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @notice Parameters for phase 1 of a swap rebalance.
+    struct UnwindParams {
+        address sellToken; // token0 or token1 — the excess leg (backend-computed)
+        uint256 sellAmount; // approve exactly this to VAULT_RELAYER
+        uint256 amount0MinWithdraw; // sandwich floors for the teardown (main)
+        uint256 amount1MinWithdraw;
+        uint256 amount0MinWithdrawAlt; // (alt)
+        uint256 amount1MinWithdrawAlt;
+        uint256 deadline;
+    }
+
+    /// @notice Phase 1 of a swap rebalance: tears down both positions, snapshots value,
+    ///         approves the CowSwap vault relayer for exactly `sellAmount`, and opens the
+    ///         order-validation window. No mint happens here; `rebuildAfterSwap` completes the cycle.
+    function unwindForSwap(UnwindParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        ManagedPositionV2 storage p = position;
+        // Guards + calm-gate delegated to LPBalancerLib (primitives in, primitives out) to keep this
+        // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
+        // error selectors declared here (NotActive/AlreadyInFlight/Cooldown/ModuleNotSet/
+        // InvalidSellToken/TwapDeviation) and returns the current sqrt price + token decimals so the
+        // shared `_totalValue` below computes the USD value-before floor base.
+        (uint160 sqrtP, uint8 dec0, uint8 dec1) = LPBalancerLib.unwindPrecheck(
+            p.active,
+            rebalanceInFlight,
+            p.lastRebalance,
+            p.minRebalanceInterval,
+            compoundModule,
+            p.token0,
+            p.token1,
+            params.sellToken,
+            params.sellAmount,
+            p.pool,
+            p.twapWindow,
+            p.maxTickDeviation
+        );
+
+        rebalanceValueBefore = _totalValue(p, sqrtP, dec0, dec1);
+        rebalanceStartedAt = block.timestamp;
+        rebalanceWasStaked = p.mainStaked;
+        sellTokenInFlight = params.sellToken;
+
+        _exitAll(
+            p,
+            params.amount0MinWithdraw,
+            params.amount1MinWithdraw,
+            params.amount0MinWithdrawAlt,
+            params.amount1MinWithdrawAlt,
+            params.deadline
+        );
+
+        IERC20(params.sellToken).forceApprove(VAULT_RELAYER, params.sellAmount);
+        rebalanceInFlight = true;
+
+        emit RebalanceUnwound(params.sellToken, params.sellAmount);
+    }
+
     struct RebalanceParams {
         uint24 width;
         uint256 amount0MinMain;
@@ -557,12 +616,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (!p.active) revert NotActive();
         if (block.timestamp < p.lastRebalance + p.minRebalanceInterval) revert Cooldown();
 
-        (uint160 sqrtP, int24 spotTick,,,,) = ICLPool(p.pool).slot0();
-        int24 twapTick = _consultTwapTick(p.pool, p.twapWindow);
-        _checkDeviation(spotTick, twapTick, p.maxTickDeviation);
-
-        uint8 dec0 = IERC20Metadata(p.token0).decimals();
-        uint8 dec1 = IERC20Metadata(p.token1).decimals();
+        // Shared calm-gate preamble (spot + TWAP deviation gate + token decimals) in LPBalancerLib.
+        (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
+            LPBalancerLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
 
         // value BEFORE: both positions' principal at the current sqrtP snapshot, PLUS any loose
         // token0/token1 ALREADY held by this contract (donated, or leftover from a prior reverted
@@ -626,8 +682,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
         if (
             valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
-                    + looseBefore
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
         ) {
             revert ValueFloor();
         }
@@ -704,19 +759,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      fall below them); pass 0 to skip the floor. `deadline` is forwarded to the PM so the
     ///      caller's deadline guard actually applies to the withdraw leg (not a hardcoded now).
     function _decreaseLiquidityAll(uint256 tokenId, uint256 amount0Min, uint256 amount1Min, uint256 deadline) private {
-        (,,,,,,, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
-        if (liq > 0) {
-            POSITION_MANAGER.decreaseLiquidity(
-                INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId, liquidity: liq, amount0Min: amount0Min, amount1Min: amount1Min, deadline: deadline
-                })
-            );
-        }
-        POSITION_MANAGER.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
-            })
-        );
+        LPBalancerLib.decreaseLiquidityAll(address(POSITION_MANAGER), tokenId, amount0Min, amount1Min, deadline);
     }
 
     /// @dev Mint a new balanced `main` position from this contract's current token
@@ -730,27 +773,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 tickUpper,
         RebalanceParams calldata params
     ) private returns (uint256 newTokenId) {
-        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
-        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
-
-        IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
-        IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
-
-        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
-            token0: p.token0,
-            token1: p.token1,
-            tickSpacing: p.tickSpacing,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            amount0Desired: bal0,
-            amount1Desired: bal1,
-            amount0Min: params.amount0MinMain,
-            amount1Min: params.amount1MinMain,
-            recipient: address(this),
-            deadline: params.deadline,
-            sqrtPriceX96: 0 // pool already initialized
-        });
-        (newTokenId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
+        return LPBalancerLib.mintPosition(
+            address(POSITION_MANAGER),
+            p.token0,
+            p.token1,
+            p.tickSpacing,
+            tickLower,
+            tickUpper,
+            params.amount0MinMain,
+            params.amount1MinMain,
+            params.deadline
+        );
     }
 
     /// @dev Mint a single-sided `alt` position from the post-main-mint leftover (NO SWAP). The
@@ -811,24 +844,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 altAmount0Min = surplus0 ? params.amount0MinAlt : 0;
         uint256 altAmount1Min = surplus0 ? 0 : params.amount1MinAlt;
 
-        IERC20(p.token0).forceApprove(address(POSITION_MANAGER), bal0);
-        IERC20(p.token1).forceApprove(address(POSITION_MANAGER), bal1);
-
-        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
-            token0: p.token0,
-            token1: p.token1,
-            tickSpacing: p.tickSpacing,
-            tickLower: altTl,
-            tickUpper: altTu,
-            amount0Desired: bal0,
-            amount1Desired: bal1,
-            amount0Min: altAmount0Min,
-            amount1Min: altAmount1Min,
-            recipient: address(this),
-            deadline: params.deadline,
-            sqrtPriceX96: 0 // pool already initialized
-        });
-        (altId,,,) = ICLPositionManager(address(POSITION_MANAGER)).mint(mp);
+        altId = LPBalancerLib.mintPosition(
+            address(POSITION_MANAGER),
+            p.token0,
+            p.token1,
+            p.tickSpacing,
+            altTl,
+            altTu,
+            altAmount0Min,
+            altAmount1Min,
+            params.deadline
+        );
     }
 
     // ─── shared private helpers ───────────────────────────────────────────────
@@ -836,14 +862,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Collect any accrued LP fees for `tokenId` (before decreasing liquidity)
     ///      and forward both tokens to the feeCollector.
     function _skimFees(ManagedPositionV2 storage p, uint256 tokenId) private {
-        (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
-            })
-        );
-        if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
-        if (a1 > 0) IERC20(p.token1).safeTransfer(p.feeCollector, a1);
-        emit FeesSkimmed(a0, a1);
+        LPBalancerLib.skimFees(address(POSITION_MANAGER), p.token0, p.token1, p.feeCollector, tokenId);
     }
 
     /// @dev Transfer residual balances of t0 and t1 to `to`.
@@ -1103,12 +1122,6 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      over `window` seconds. Division is floored toward −∞ (matches OracleLibrary.consult).
     function _consultTwapTick(address pool, uint32 window) internal view returns (int24) {
         return LPBalancerLib.consultTwapTick(pool, window);
-    }
-
-    /// @dev Revert if the absolute difference between `spotTick` and `twapTick` exceeds `maxDev`.
-    function _checkDeviation(int24 spotTick, int24 twapTick, int24 maxDev) internal pure {
-        int24 diff = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
-        if (diff > maxDev) revert TwapDeviation();
     }
 
     /// @dev Read a Chainlink-style price feed and validate freshness and positivity.

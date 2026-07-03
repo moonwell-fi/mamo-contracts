@@ -2,12 +2,15 @@
 pragma solidity 0.8.28;
 
 import {ICLPool} from "@interfaces/ICLPool.sol";
+import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title LPBalancerLib
 /// @notice Pure/view geometry + valuation math for LPAutoBalancerV2, deployed as an EXTERNAL
@@ -18,7 +21,22 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 ///      signature, so `LPBalancerLib.StaleOracle.selector == LPAutoBalancerV2.StaleOracle.selector`
 ///      and existing `vm.expectRevert(...)` matchers keep working.
 library LPBalancerLib {
+    using SafeERC20 for IERC20;
+
     error StaleOracle();
+    // Redeclared to share 4-byte selectors with LPAutoBalancerV2 (see @dev note above) so that
+    // unwindPrecheck's reverts match the balancer's own `error` selectors and existing
+    // vm.expectRevert(LPAutoBalancerV2.XXX.selector) matchers keep passing unmodified.
+    error NotActive();
+    error AlreadyInFlight();
+    error Cooldown();
+    error ModuleNotSet();
+    error InvalidSellToken();
+    error TwapDeviation();
+
+    /// @dev Redeclared so `skimFees` logs the same topic as LPAutoBalancerV2.FeesSkimmed (event topic
+    ///      is keccak of the signature; emitted from the balancer's address under DELEGATECALL).
+    event FeesSkimmed(uint256 amount0, uint256 amount1);
 
     /// @dev Largest spacing-aligned tick <= `tick` (floors toward -inf).
     function floorAlign(int24 tick, int24 spacing) public pure returns (int24) {
@@ -131,5 +149,146 @@ library LPBalancerLib {
             dec1,
             maxOracleDelay
         );
+    }
+
+    /// @notice Collect accrued LP fees for `tokenId` (recipient = the balancer under DELEGATECALL) and
+    ///         forward both legs to `feeCollector`. Emits FeesSkimmed. Call BEFORE decreasing liquidity
+    ///         so only fees (not principal) are swept to the feeCollector.
+    function skimFees(address positionManager, address token0, address token1, address feeCollector, uint256 tokenId)
+        public
+    {
+        (uint256 a0, uint256 a1) = INonfungiblePositionManager(positionManager).collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        if (a0 > 0) IERC20(token0).safeTransfer(feeCollector, a0);
+        if (a1 > 0) IERC20(token1).safeTransfer(feeCollector, a1);
+        emit FeesSkimmed(a0, a1);
+    }
+
+    /// @notice Remove ALL liquidity from `tokenId` and collect the resulting tokens into the balancer
+    ///         (recipient = address(this), which is the balancer under DELEGATECALL). `amount0Min`/
+    ///         `amount1Min` are the caller-supplied sandwich floor enforced by the PM on the decrease
+    ///         (0 skips the floor); `deadline` is forwarded so the caller's deadline guard applies to
+    ///         the withdraw leg. A zero-liquidity position skips the decrease but still collects fees.
+    function decreaseLiquidityAll(
+        address positionManager,
+        uint256 tokenId,
+        uint256 amount0Min,
+        uint256 amount1Min,
+        uint256 deadline
+    ) public {
+        INonfungiblePositionManager pm = INonfungiblePositionManager(positionManager);
+        (,,,,,,, uint128 liq,,,,) = pm.positions(tokenId);
+        if (liq > 0) {
+            pm.decreaseLiquidity(
+                INonfungiblePositionManager.DecreaseLiquidityParams({
+                    tokenId: tokenId,
+                    liquidity: liq,
+                    amount0Min: amount0Min,
+                    amount1Min: amount1Min,
+                    deadline: deadline
+                })
+            );
+        }
+        pm.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+    }
+
+    /// @notice Mint a Slipstream CL position from the balancer's FULL current token balances (NO SWAP).
+    ///         Approves the position manager for both balances, builds MintParams (recipient = the
+    ///         balancer, since this runs via DELEGATECALL), mints, and returns the new tokenId. The
+    ///         position manager consumes only the in-ratio portion; any leftover stays on the balancer.
+    /// @dev Shared by `_mintBalanced` (spot-centered straddle) and `_mintAlt` (single-sided): the
+    ///      caller pre-computes the tick range and per-leg mins; this only does the approve+build+mint.
+    ///      `sqrtPriceX96` is 0 (pool already initialized).
+    function mintPosition(
+        address positionManager,
+        address token0,
+        address token1,
+        int24 tickSpacing,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount0Min,
+        uint256 amount1Min,
+        uint256 deadline
+    ) public returns (uint256 tokenId) {
+        uint256 bal0 = IERC20(token0).balanceOf(address(this));
+        uint256 bal1 = IERC20(token1).balanceOf(address(this));
+
+        IERC20(token0).forceApprove(positionManager, bal0);
+        IERC20(token1).forceApprove(positionManager, bal1);
+
+        ICLPositionManager.MintParams memory mp = ICLPositionManager.MintParams({
+            token0: token0,
+            token1: token1,
+            tickSpacing: tickSpacing,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            amount0Desired: bal0,
+            amount1Desired: bal1,
+            amount0Min: amount0Min,
+            amount1Min: amount1Min,
+            recipient: address(this),
+            deadline: deadline,
+            sqrtPriceX96: 0
+        });
+        (tokenId,,,) = ICLPositionManager(positionManager).mint(mp);
+    }
+
+    /// @notice Read spot (sqrtP + tick), enforce the TWAP deviation gate, and read both token
+    ///         decimals — the shared calm-gate preamble for every rebalance path. Reverts TwapDeviation
+    ///         when |spot − twap| exceeds `maxTickDeviation`.
+    /// @dev Runs via DELEGATECALL, so pool/token reads originate from the balancer's address.
+    function calmGate(address pool, uint32 twapWindow, int24 maxTickDeviation, address token0, address token1)
+        public
+        view
+        returns (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1)
+    {
+        (sqrtP, spotTick,,,,) = ICLPool(pool).slot0();
+        int24 twapTick = consultTwapTick(pool, twapWindow);
+        int24 dev = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
+        if (dev > maxTickDeviation) revert TwapDeviation();
+        dec0 = IERC20Metadata(token0).decimals();
+        dec1 = IERC20Metadata(token1).decimals();
+    }
+
+    /// @notice Guards + calm-gate for phase 1 of a swap rebalance (unwindForSwap).
+    /// @dev Takes primitives (never the `ManagedPositionV2` storage struct), so that struct stays
+    ///      defined on the balancer. Runs via DELEGATECALL, so every pool/oracle read originates from
+    ///      the balancer's address exactly as an inline check would. Returns the current sqrt price and
+    ///      both token decimals so the caller can reuse its shared `_totalValue` for the snapshot.
+    function unwindPrecheck(
+        bool active,
+        bool inFlight,
+        uint256 lastRebalance,
+        uint256 minRebalanceInterval,
+        address compoundModule,
+        address token0,
+        address token1,
+        address sellToken,
+        uint256 sellAmount,
+        address pool,
+        uint32 twapWindow,
+        int24 maxTickDeviation
+    ) public view returns (uint160 sqrtP, uint8 dec0, uint8 dec1) {
+        if (!active) revert NotActive();
+        if (inFlight) revert AlreadyInFlight();
+        if (block.timestamp < lastRebalance + minRebalanceInterval) revert Cooldown();
+        if (compoundModule == address(0)) revert ModuleNotSet();
+        if (sellToken != token0 && sellToken != token1) revert InvalidSellToken();
+        if (sellAmount == 0) revert InvalidSellToken();
+
+        (sqrtP,, dec0, dec1) = calmGate(pool, twapWindow, maxTickDeviation, token0, token1);
     }
 }

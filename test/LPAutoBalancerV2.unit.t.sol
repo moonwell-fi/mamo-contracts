@@ -5,6 +5,7 @@ import {MockERC20} from "./MockERC20.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
+import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
 import {StdStorage, Test, stdStorage} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
@@ -13,6 +14,7 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MockPositionManagerV2 — full position lifecycle for rebalanceUsingAlt() tests.
@@ -1866,5 +1868,170 @@ contract LPAutoBalancerV2UnitTest is Test {
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertFalse(s.rebalanceInFlight, "not in flight by default");
         assertEq(s.rebalanceStartedAt, 0, "no unwind yet");
+    }
+
+    // ---------- swap-rebalance fixtures ----------
+
+    LPCompoundModule realModule;
+
+    function _setRealModule() internal {
+        realModule = new LPCompoundModule(address(lab), address(mockAero), admin);
+        vm.prank(admin);
+        lab.setCompoundModule(address(realModule));
+    }
+
+    function _defaultUnwindParams() internal view returns (LPAutoBalancerV2.UnwindParams memory) {
+        return LPAutoBalancerV2.UnwindParams({
+            sellToken: token0,
+            sellAmount: 5e17,
+            amount0MinWithdraw: 0,
+            amount1MinWithdraw: 0,
+            amount0MinWithdrawAlt: 0,
+            amount1MinWithdrawAlt: 0,
+            deadline: block.timestamp + 1
+        });
+    }
+
+    // ---------- unwindForSwap ----------
+
+    function test_unwindForSwap_happyPath_teardownApprovalFlagSnapshot() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+
+        vm.expectEmit(true, true, true, true);
+        emit LPAutoBalancerV2.RebalanceUnwound(token0, 5e17);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        // teardown happened: old NFT burned, principal loose on the balancer
+        assertEq(mockPM.burnCallCount(), 1);
+        assertEq(mockPM.lastBurnedTokenId(), TOKEN_ID);
+        assertEq(tok0.balanceOf(address(lab)), 1e18);
+        assertEq(tok1.balanceOf(address(lab)), 1e18);
+
+        // no mint in phase 1
+        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        assertEq(mainTokenId, TOKEN_ID, "mainTokenId untouched until rebuild");
+
+        // approval + in-flight state
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 5e17);
+        assertTrue(lab.rebalanceInFlight());
+        assertEq(lab.sellTokenInFlight(), token0);
+        assertEq(lab.rebalanceStartedAt(), block.timestamp);
+        assertGt(lab.rebalanceValueBefore(), 0, "snapshot captured");
+        assertFalse(lab.rebalanceWasStaked());
+
+        // snapshot view reflects in-flight
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
+        assertTrue(s.rebalanceInFlight);
+        assertEq(s.rebalanceStartedAt, block.timestamp);
+    }
+
+    function test_unwindForSwap_recordsWasStaked() public {
+        _register(true); // gauge configured; _register does NOT stake, so stake explicitly:
+        vm.prank(rebalancer);
+        lab.stake();
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+        assertTrue(lab.rebalanceWasStaked());
+    }
+
+    function test_unwindForSwap_revertsNotActive() public {
+        _setRealModule();
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NotActive.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_unwindForSwap_revertsAlreadyInFlight() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.AlreadyInFlight.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_unwindForSwap_revertsOnCooldown() public {
+        _registerWithInterval(3600); // default config's minRebalanceInterval is 0 (no gate); use a real interval
+        _setRealModule();
+        // _store forces lastRebalance to 0; stamp it to "now" so the cooldown is genuinely active
+        // (field index 19 in the struct, same pattern as test_rebalanceUsingAlt_revertsBeforeCooldown).
+        stdstore.target(address(lab)).sig("position()").depth(19).checked_write(block.timestamp);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.Cooldown.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_unwindForSwap_revertsOnTwapDeviation() public {
+        _register(false);
+        _setRealModule();
+        // push spot far from twap=0 using the pool mock's real setter (setSlot0), matching the
+        // existing TWAP-deviation test convention in this file.
+        mockPool.setSlot0(SQRT_P, 5000);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.TwapDeviation.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_unwindForSwap_revertsBadSellToken() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        LPAutoBalancerV2.UnwindParams memory u = _defaultUnwindParams();
+        u.sellToken = address(mockAero);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.InvalidSellToken.selector);
+        lab.unwindForSwap(u);
+    }
+
+    function test_unwindForSwap_revertsZeroSellAmount() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        LPAutoBalancerV2.UnwindParams memory u = _defaultUnwindParams();
+        u.sellAmount = 0;
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.InvalidSellToken.selector);
+        lab.unwindForSwap(u);
+    }
+
+    function test_unwindForSwap_revertsModuleNotSet() public {
+        _register(false); // no module set
+        _stagePrincipal(1e18, 1e18);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.ModuleNotSet.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_unwindForSwap_revertsWhenPaused() public {
+        _register(false);
+        _setRealModule();
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_unwindForSwap_revertsNonRebalancer() public {
+        _register(false);
+        _setRealModule();
+        vm.prank(manager);
+        vm.expectRevert();
+        lab.unwindForSwap(_defaultUnwindParams());
     }
 }
