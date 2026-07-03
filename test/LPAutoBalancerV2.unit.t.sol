@@ -2277,6 +2277,10 @@ contract LPAutoBalancerV2UnitTest is Test {
             lab.rebalanceValueBefore(),
             "split fields sum to the diagnostic total"
         );
+        // Exact value, not just ordering: 5e17 tok0 (18-dec) at the mock oracle's $1.00 (1e8, 8-dec)
+        // price is worth exactly 5e7 in the contract's 1e8-scale USD accounting. Pins the loose term
+        // to a known number rather than only its relative position in the split.
+        assertEq(lab.rebalanceLooseBefore(), 5e7, "loose value == 0.5 tokens * $1.00 at 1e8 USD scale");
     }
 
     function test_rebuildAfterSwap_revertsOnTwapDeviation() public {

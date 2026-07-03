@@ -615,16 +615,18 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         or never-placed orders all rebuild from current balances. IS gated on pause and
     ///         the calm gate; exit() remains the escape hatch if either blocks.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
-    ///         out of the floor per H-1), the POSITION component of this floor (rebalanceValueBeforePos)
-    ///         is snapshotted back in unwindForSwap — a prior transaction. A token donated to the
-    ///         contract between unwindForSwap and rebuildAfterSwap inflates valueAfter's position term
-    ///         without inflating that snapshot, widening the floor's apparent headroom by the donated
-    ///         amount. Not a fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away
-    ///         value to loosen a check on their own gift), but it is a strictly weaker safety guarantee
-    ///         than rebalanceUsingAlt's — a structural consequence of the floor spanning two
-    ///         transactions. The LOOSE component (rebalanceLooseBefore) is now added back un-haircut,
-    ///         matching rebalanceUsingAlt's H-1 treatment — a pre-existing loose balance (e.g. un-folded
-    ///         AERO-compound proceeds) at unwind time no longer widens the tolerated absolute loss.
+    ///         out of the floor per H-1), BOTH floor snapshots here (rebalanceValueBeforePos and
+    ///         rebalanceLooseBefore) are taken back in unwindForSwap — a prior transaction. A token
+    ///         donated to the contract between unwindForSwap and rebuildAfterSwap inflates valueAfter
+    ///         (whichever term — position or loose — the donation lands in) without inflating either
+    ///         snapshot, widening the floor's apparent headroom by the donated amount. Not a
+    ///         fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away value to
+    ///         loosen a check on their own gift), but it is a strictly weaker safety guarantee than
+    ///         rebalanceUsingAlt's — a structural consequence of the floor spanning two transactions.
+    ///         Separately (not a cross-tx concern): the LOOSE component is added back un-haircut here,
+    ///         matching rebalanceUsingAlt's H-1 treatment — a pre-existing loose balance already on the
+    ///         contract when unwindForSwap runs (e.g. un-folded AERO-compound proceeds) no longer widens
+    ///         the tolerated absolute loss the way it did before this split.
     function rebuildAfterSwap(RebalanceParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
