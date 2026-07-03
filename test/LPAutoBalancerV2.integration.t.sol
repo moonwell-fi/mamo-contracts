@@ -423,4 +423,121 @@ contract LPAutoBalancerV2Integration is Test {
         uint256 looseAfter = IERC20(WETH).balanceOf(address(lab)) + IERC20(CBBTC).balanceOf(address(lab));
         assertLt(looseAfter, looseBefore, "loose compound proceeds folded into the rebuilt position");
     }
+
+    // ─── two-phase swap rebalance (unwindForSwap / rebuildAfterSwap) ─────────────
+
+    function _defaultUnwindParams(address sellToken, uint256 sellAmount)
+        internal
+        view
+        returns (LPAutoBalancerV2.UnwindParams memory)
+    {
+        return LPAutoBalancerV2.UnwindParams({
+            sellToken: sellToken,
+            sellAmount: sellAmount,
+            amount0MinWithdraw: 0,
+            amount1MinWithdraw: 0,
+            amount0MinWithdrawAlt: 0,
+            amount1MinWithdrawAlt: 0,
+            deadline: block.timestamp + 300
+        });
+    }
+
+    function _ensureModule() internal returns (LPCompoundModule m) {
+        if (lab.compoundModule() != address(0)) {
+            return LPCompoundModule(lab.compoundModule());
+        }
+        m = new LPCompoundModule(address(lab), AERO, admin);
+        vm.prank(admin);
+        lab.setCompoundModule(address(m));
+    }
+
+    /// @notice Full two-phase cycle on a REAL Base-fork pool: unwindForSwap tears down both
+    ///         positions and approves the CowSwap vault relayer for the sell leg; the test then
+    ///         simulates a CowSwap settlement (relayer pulls the sell token, solver delivers the
+    ///         buy token); rebuildAfterSwap mints + restakes a fresh main from the resulting
+    ///         balances and closes the in-flight window.
+    function test_fork_swapRebalance_fullTwoPhaseCycle() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        uint256 tokenId = _bootstrap(center - 200, center + 200, 1 ether, 0.03e8);
+        _ensureModule();
+        vm.prank(admin);
+        lab.setSwapLossAllowanceBps(300); // headroom for the simulated fill's real-world slippage
+
+        // ---- phase 1: unwind, selling 0.2 WETH ----
+        uint256 sellAmount = 0.2 ether;
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams(WETH, sellAmount));
+
+        assertTrue(lab.rebalanceInFlight());
+        assertEq(lab.sellTokenInFlight(), WETH);
+        assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), sellAmount);
+        assertGt(lab.rebalanceValueBefore(), 0);
+        assertGt(IERC20(WETH).balanceOf(address(lab)), 0, "principal loose on balancer");
+
+        // ---- simulate CowSwap settlement: relayer pulls WETH, solver delivers cbBTC ----
+        vm.prank(address(lab));
+        IERC20(WETH).transfer(makeAddr("cowSolver"), sellAmount);
+        deal(CBBTC, address(lab), IERC20(CBBTC).balanceOf(address(lab)) + 0.006e8);
+
+        // ---- phase 2: rebuild ----
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultParams());
+
+        (uint256 mainTokenId,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
+        assertTrue(mainTokenId != 0 && mainTokenId != tokenId, "new main minted");
+        assertFalse(lab.rebalanceInFlight(), "window closed");
+        assertEq(lab.sellTokenInFlight(), address(0));
+        assertEq(lab.rebalanceValueBefore(), 0);
+        assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), 0, "approval revoked");
+        assertTrue(mainStaked, "restaked (bootstrap stakes)");
+    }
+
+    /// @notice Order expires unfilled on CowSwap: no balance changes occur between the two phases.
+    ///         rebuildAfterSwap must still succeed, rebuilding from the untouched original balances.
+    function test_fork_swapRebalance_unfilledOrder_rebuildStillWorks() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        _bootstrap(center - 200, center + 200, 1 ether, 0.03e8);
+        _ensureModule();
+
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams(WETH, 0.2 ether));
+
+        // order expires unfilled: NO balance changes at all. Rebuild immediately.
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultParams());
+
+        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        assertTrue(mainTokenId != 0, "rebuilt from original balances, identical outcome to rebalanceUsingAlt");
+        assertFalse(lab.rebalanceInFlight());
+        assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), 0, "stale approval revoked");
+    }
+
+    /// @notice Regression for the exit() mid-flight fix: calling exit() while a swap rebalance is
+    ///         in flight (both NFTs torn down, sell-token approval outstanding) must not revert and
+    ///         must recover all principal to the given recipient, closing the in-flight window and
+    ///         revoking the stale CowSwap approval.
+    function test_fork_swapRebalance_exitMidFlight_recoversAllFunds() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        _bootstrap(center - 200, center + 200, 1 ether, 0.03e8);
+        _ensureModule();
+
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams(WETH, 0.2 ether));
+        assertTrue(lab.rebalanceInFlight());
+
+        uint256 wethOnContract = IERC20(WETH).balanceOf(address(lab));
+        uint256 cbbtcOnContract = IERC20(CBBTC).balanceOf(address(lab));
+        address safe = makeAddr("safeRecipient");
+
+        vm.prank(admin);
+        lab.exit(safe); // must NOT revert — this proves the exit() mid-flight fix from Task 7
+
+        assertEq(IERC20(WETH).balanceOf(safe), wethOnContract, "principal recovered mid-flight");
+        assertEq(IERC20(CBBTC).balanceOf(safe), cbbtcOnContract, "principal recovered mid-flight");
+        assertFalse(lab.rebalanceInFlight());
+        assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), 0, "approval revoked on exit");
+    }
 }
