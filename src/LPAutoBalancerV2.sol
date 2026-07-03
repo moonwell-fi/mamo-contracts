@@ -527,12 +527,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Phase 1 of a swap rebalance: tears down both positions, snapshots value,
     ///         approves the CowSwap vault relayer for exactly `sellAmount`, and opens the
     ///         order-validation window. No mint happens here; `rebuildAfterSwap` completes the cycle.
-    function unwindForSwap(UnwindParams calldata params)
-        external
-        onlyRole(REBALANCER_ROLE)
-        nonReentrant
-        whenNotPaused
-    {
+    function unwindForSwap(UnwindParams calldata params) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         ManagedPositionV2 storage p = position;
         // Guards + calm-gate delegated to LPBalancerLib (primitives in, primitives out) to keep this
         // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
@@ -572,6 +567,75 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         rebalanceInFlight = true;
 
         emit RebalanceUnwound(params.sellToken, params.sellAmount);
+    }
+
+    /// @notice Phase 2 of a swap rebalance: revokes the relayer approval, re-mints main (+alt)
+    ///         from whatever the contract currently holds, enforces the value floor against the
+    ///         unwind snapshot (with swapLossAllowanceBps extra tolerance), restakes if the
+    ///         position was staked before, and closes the in-flight window.
+    /// @dev    Deliberately NOT gated on cooldown or on CowSwap order state: filled, expired,
+    ///         or never-placed orders all rebuild from current balances. IS gated on pause and
+    ///         the calm gate; exit() remains the escape hatch if either blocks.
+    function rebuildAfterSwap(RebalanceParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        if (!rebalanceInFlight) revert NotInFlight();
+        ManagedPositionV2 storage p = position;
+
+        IERC20(sellTokenInFlight).forceApprove(VAULT_RELAYER, 0);
+
+        (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
+            LPBalancerLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
+
+        if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
+
+        (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
+
+        uint256 newMain = _mintBalanced(p, tl, tu, params);
+        p.mainTokenId = newMain;
+        p.altStaked = false;
+        p.mainStaked = false;
+        p.lastRebalance = block.timestamp;
+
+        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params);
+
+        uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
+        if (
+            valueAfter
+                < FullMath.mulDiv(
+                    rebalanceValueBefore,
+                    BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps,
+                    BPS_DENOMINATOR
+                )
+        ) {
+            revert ValueFloor();
+        }
+
+        bool wasStaked = rebalanceWasStaked;
+        rebalanceInFlight = false;
+        rebalanceValueBefore = 0;
+        sellTokenInFlight = address(0);
+        rebalanceWasStaked = false;
+
+        _forwardDust(p);
+
+        if (wasStaked && p.gauge != address(0)) {
+            POSITION_MANAGER.approve(p.gauge, newMain);
+            ICLGauge(p.gauge).deposit(newMain);
+            p.mainStaked = true;
+            emit Staked(newMain, p.gauge);
+            if (p.altTokenId != 0) {
+                POSITION_MANAGER.approve(p.gauge, p.altTokenId);
+                ICLGauge(p.gauge).deposit(p.altTokenId);
+                p.altStaked = true;
+                emit Staked(p.altTokenId, p.gauge);
+            }
+        }
+
+        emit RebalanceRebuilt(newMain, p.altTokenId);
     }
 
     struct RebalanceParams {
@@ -682,7 +746,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
         if (
             valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
+                    + looseBefore
         ) {
             revert ValueFloor();
         }

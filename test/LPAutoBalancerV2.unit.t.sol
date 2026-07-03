@@ -2034,4 +2034,163 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.expectRevert();
         lab.unwindForSwap(_defaultUnwindParams());
     }
+
+    // ---------- rebuildAfterSwap ----------
+
+    function _unwind() internal {
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+    }
+
+    function test_rebuildAfterSwap_happyPath_afterSimulatedSettlement() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+
+        // simulate CowSwap settlement: relayer pulls 5e17 tok0, delivers tok1 — this leaves the
+        // contract imbalanced (5e17 tok0 / 1.5e18 tok1), so a real (non-dust) alt gets minted from
+        // the leftover, same as rebalanceUsingAlt's imbalanced-input case.
+        vm.prank(address(lab));
+        tok0.transfer(makeAddr("solver"), 5e17);
+        tok1.mint(address(lab), 5e17);
+        mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17);
+
+        vm.expectEmit(true, true, true, true);
+        emit LPAutoBalancerV2.RebalanceRebuilt(NEW_TOKEN_ID, ALT_TOKEN_ID);
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+
+        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,, uint256 lastRebalance, bool active) = lab.position();
+        assertEq(mainTokenId, NEW_TOKEN_ID, "new main minted");
+        assertEq(altTokenId, ALT_TOKEN_ID, "surplus leg minted as alt");
+        assertTrue(active);
+        assertEq(lastRebalance, block.timestamp, "cooldown stamped at rebuild");
+
+        // in-flight state fully cleared + approval revoked
+        assertFalse(lab.rebalanceInFlight());
+        assertEq(lab.rebalanceValueBefore(), 0);
+        assertEq(lab.sellTokenInFlight(), address(0));
+        assertFalse(lab.rebalanceWasStaked());
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "relayer approval revoked");
+    }
+
+    function test_rebuildAfterSwap_unfilledOrder_matchesNoSwapOutcome() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        // order expired unfilled: balances unchanged (1e18 / 1e18 loose)
+
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+
+        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        assertEq(mainTokenId, NEW_TOKEN_ID, "rebuilt from original balances, identical to rebalanceUsingAlt outcome");
+        assertFalse(lab.rebalanceInFlight());
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "stale approval revoked");
+    }
+
+    function test_rebuildAfterSwap_restakesWhenWasStaked() public {
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake(); // _register does NOT stake — stake explicitly
+        _setRealModule();
+        _unwind();
+        assertTrue(lab.rebalanceWasStaked());
+
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+
+        (,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
+        assertTrue(mainStaked, "restaked after rebuild");
+        assertFalse(lab.rebalanceWasStaked(), "flag cleared");
+    }
+
+    function test_rebuildAfterSwap_revertsNotInFlight() public {
+        _register(false);
+        _setRealModule();
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NotInFlight.selector);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+    }
+
+    function test_rebuildAfterSwap_revertsOnValueFloorBreach() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+
+        // Force the rebuilt main's mocked liquidity/value to zero (same technique the dedicated
+        // rebalanceUsingAlt ValueFloor tests use), then drain nearly all loose principal, to
+        // simulate a genuine catastrophic loss rather than relying on the mock's fixed principal
+        // value (which ignores actual mint amounts).
+        mockPM.setNextMintResult(NEW_TOKEN_ID, 0);
+        mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, 0, token0, token1);
+        vm.startPrank(address(lab));
+        tok0.transfer(makeAddr("solver"), 1e18 - 1);
+        tok1.transfer(makeAddr("solver"), 1e18 - 1);
+        vm.stopPrank();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        assertTrue(lab.rebalanceInFlight(), "still in flight; can retry or exit");
+    }
+
+    function test_rebuildAfterSwap_lossWithinAllowancePasses() public {
+        vm.prank(admin);
+        lab.setSwapLossAllowanceBps(500); // default maxRebalanceLossBps is 100 (1%); +500 = 6% tolerance
+        _register(false);
+        _setRealModule();
+        _unwind();
+
+        // small loss: 2% of tok0 gone — within maxRebalanceLossBps(1%) + allowance(5%) = 6%
+        vm.prank(address(lab));
+        tok0.transfer(makeAddr("solver"), 2e16);
+
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        assertFalse(lab.rebalanceInFlight());
+    }
+
+    function test_rebuildAfterSwap_revertsOnTwapDeviation() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        mockPool.setSlot0(SQRT_P, 5000); // same setter/convention as the unwindForSwap TWAP test
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.TwapDeviation.selector);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+    }
+
+    function test_rebuildAfterSwap_noCooldownGate() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        // do NOT warp past minRebalanceInterval — rebuild must still work
+        vm.prank(rebalancer);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        assertFalse(lab.rebalanceInFlight());
+    }
+
+    function test_rebuildAfterSwap_revertsWhenPaused() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+    }
+
+    function test_rebuildAfterSwap_revertsNonRebalancer() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        vm.prank(manager);
+        vm.expectRevert();
+        lab.rebuildAfterSwap(_defaultRebalanceParams());
+    }
 }
