@@ -863,13 +863,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      Used by the rebalance value floor to net contract-held balances out of the
     ///      before/after comparison.
     function _contractPairValue(ManagedPositionV2 storage p, uint8 dec0, uint8 dec1) private view returns (uint256) {
-        return _valueInUsd(
-            IERC20(p.token0).balanceOf(address(this)),
-            IERC20(p.token1).balanceOf(address(this)),
-            p.oracle0,
-            p.oracle1,
-            dec0,
-            dec1
+        return LPBalancerLib.contractPairValue(
+            p.token0, p.token1, address(this), p.oracle0, p.oracle1, dec0, dec1, maxOracleDelay
         );
     }
 
@@ -883,10 +878,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         view
         returns (uint256)
     {
-        if (tokenId == 0) return 0;
-        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = POSITION_MANAGER.positions(tokenId);
-        (uint256 a0, uint256 a1) = LPBalancerLib.amountsForLiquidityAtTicks(sqrtP, tl, tu, liq);
-        return _valueInUsd(a0, a1, p.oracle0, p.oracle1, dec0, dec1);
+        return LPBalancerLib.principalValue(
+            address(POSITION_MANAGER), tokenId, sqrtP, p.oracle0, p.oracle1, dec0, dec1, maxOracleDelay
+        );
     }
 
     /// @dev USD value of the alt position principal at `sqrtP`; 0 when there is no alt.

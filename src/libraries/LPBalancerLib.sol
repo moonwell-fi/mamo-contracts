@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
+import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 import {LiquidityAmounts} from "@libraries/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title LPBalancerLib
 /// @notice Pure/view geometry + valuation math for LPAutoBalancerV2, deployed as an EXTERNAL
@@ -90,5 +91,45 @@ library LPBalancerLib {
             (uint256 p1, uint8 fd1) = readFeed(oracle1, maxOracleDelay);
             usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
         }
+    }
+
+    /// @notice USD value of the principal tokens locked in `tokenId` at sqrt price `sqrtP`. Returns
+    ///         0 for tokenId == 0 (no position). Never counts tokensOwed (fees) — only liquidity.
+    function principalValue(
+        address positionManager,
+        uint256 tokenId,
+        uint160 sqrtP,
+        address oracle0,
+        address oracle1,
+        uint8 dec0,
+        uint8 dec1,
+        uint256 maxOracleDelay
+    ) public view returns (uint256) {
+        if (tokenId == 0) return 0;
+        (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = INonfungiblePositionManager(positionManager).positions(tokenId);
+        (uint256 a0, uint256 a1) = amountsForLiquidityAtTicks(sqrtP, tl, tu, liq);
+        return valueInUsd(a0, a1, oracle0, oracle1, dec0, dec1, maxOracleDelay);
+    }
+
+    /// @notice USD value of `holder`'s current (non-position) balances of `token0`/`token1`.
+    function contractPairValue(
+        address token0,
+        address token1,
+        address holder,
+        address oracle0,
+        address oracle1,
+        uint8 dec0,
+        uint8 dec1,
+        uint256 maxOracleDelay
+    ) public view returns (uint256) {
+        return valueInUsd(
+            IERC20(token0).balanceOf(holder),
+            IERC20(token1).balanceOf(holder),
+            oracle0,
+            oracle1,
+            dec0,
+            dec1,
+            maxOracleDelay
+        );
     }
 }
