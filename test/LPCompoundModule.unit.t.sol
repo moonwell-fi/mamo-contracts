@@ -335,4 +335,83 @@ contract LPCompoundModuleUnitTest is Test {
         vm.expectRevert("bad digest");
         module.validateRebalanceOrder(bytes32(uint256(1)), e);
     }
+
+    // ---------- rebalanceSlippageBps (dedicated principal-order knob) ----------
+
+    function test_setRebalanceSlippageBps_adminSetsAndEmits() public {
+        vm.prank(admin);
+        vm.expectEmit(address(module));
+        emit LPCompoundModule.RebalanceSlippageUpdated(0, 50);
+        module.setRebalanceSlippageBps(50);
+        assertEq(module.rebalanceSlippageBps(), 50);
+    }
+
+    function test_setRebalanceSlippageBps_revertsAboveMax() public {
+        vm.prank(admin);
+        vm.expectRevert(bytes("slippage too high"));
+        module.setRebalanceSlippageBps(2501);
+    }
+
+    function test_setRebalanceSlippageBps_onlyAdmin() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, address(this), bytes32(0))
+        );
+        module.setRebalanceSlippageBps(50);
+    }
+
+    /// @notice The discriminating test: an order priced 150 bps below oracle. The compound knob
+    ///         is 100 (setUp), so if validateRebalanceOrder used allowedSlippageInBps it would
+    ///         fail regardless — it passes with rebalanceSlippageBps = 200 and fails at 50,
+    ///         proving the principal path reads the dedicated knob.
+    function test_validateRebalanceOrder_usesRebalanceKnob_notCompoundKnob() public {
+        bal.setInFlight(true);
+        spc.setMaxTimePriceValid(token0, 1 hours);
+        spc.setMinSlippageToPass(150);
+
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        (bytes32 d, bytes memory e) = _sig(o);
+
+        vm.prank(admin);
+        module.setRebalanceSlippageBps(200);
+        assertEq(module.validateRebalanceOrder(d, e), MAGIC);
+
+        vm.prank(admin);
+        module.setRebalanceSlippageBps(50);
+        vm.expectRevert(bytes("price check failed"));
+        module.validateRebalanceOrder(d, e);
+    }
+
+    /// @notice Default (never set) is 0: any below-oracle pricing fails the check, so rebalance
+    ///         orders cannot settle until the admin explicitly sets the knob — safe-strict.
+    ///         An at-or-above-oracle order still validates (the window is not bricked).
+    function test_validateRebalanceOrder_defaultZeroRejectsBelowOracle() public {
+        bal.setInFlight(true);
+        spc.setMaxTimePriceValid(token0, 1 hours);
+
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        (bytes32 d, bytes memory e) = _sig(o);
+
+        spc.setMinSlippageToPass(1); // priced even 1 bp below oracle
+        vm.expectRevert(bytes("price check failed"));
+        module.validateRebalanceOrder(d, e);
+
+        spc.setMinSlippageToPass(0); // priced at/above oracle
+        assertEq(module.validateRebalanceOrder(d, e), MAGIC);
+    }
+
+    /// @notice Regression: the compound path stays governed by allowedSlippageInBps (100 in
+    ///         setUp) and is indifferent to the rebalance knob.
+    function test_isValidSignature_compoundUnaffectedByRebalanceKnob() public {
+        vm.prank(admin);
+        module.setRebalanceSlippageBps(50);
+
+        spc.setMinSlippageToPass(100); // needs the full compound allowance, more than the rebalance knob
+        GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        (bytes32 d, bytes memory e) = _sig(o);
+        assertEq(module.isValidSignature(d, e), MAGIC);
+
+        spc.setMinSlippageToPass(101); // just past the compound allowance
+        vm.expectRevert(bytes("price check failed"));
+        module.isValidSignature(d, e);
+    }
 }
