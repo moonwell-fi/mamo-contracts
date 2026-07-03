@@ -559,7 +559,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
 
-        // Choose the new main range. The common case is a spot-centered straddle. But a rebalanceUsingAlt of a
+        // Choose the new main range. The common case is a spot-centered straddle. But rebalancing a
         // FULLY out-of-range position withdraws 100%-single-sided principal (a CL position outside
         // its range holds exactly one token). A straddling balanced mint with one desired leg == 0
         // computes ZERO liquidity and the position manager reverts. With NO SWAP we cannot
@@ -990,7 +990,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
     ///      - Both legs funded → spot-centered straddle (the normal balanced main).
     ///      - The minority leg below MIN_MAIN_LEG_USD (including exactly one leg funded — a fully
-    ///        out-of-range rebalanceUsingAlt returns 100% single-sided principal) → a single-sided `width`-wide
+    ///        out-of-range rebalance returns 100% single-sided principal) → a single-sided `width`-wide
     ///        range on the MAJORITY (funded) side, adjacent to spot, so the mint has positive
     ///        liquidity. NO SWAP is ever performed; this only changes WHERE the funded token is parked.
     ///        Orientation (price = token1/token0, ticks rise with price): a range strictly ABOVE spot

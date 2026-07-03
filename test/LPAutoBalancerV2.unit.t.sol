@@ -869,7 +869,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertTrue(mainStaked, "main restaked after rebalanceUsingAlt"); // covers the wasStaked branch
     }
 
-    /// @dev Review fix #3: when a staked position is rebalanceUsingAlt and a NEW alt is minted, the alt must be
+    /// @dev Review fix #3: when a staked position is rebalanced and a NEW alt is minted, the alt must be
     ///      staked alongside the restaked main. Otherwise it is stranded — stake() and collectFees()
     ///      both revert AlreadyStaked once the main is staked, so the alt's emissions/fees could never
     ///      be collected until the next rebalanceUsingAlt.
