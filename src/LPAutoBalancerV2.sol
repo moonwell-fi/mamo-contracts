@@ -936,6 +936,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 earnedAero;
         uint256 cooldownRemaining;
         bool deviationGateOpen;
+        bool rebalanceInFlight;
+        uint256 rebalanceStartedAt;
     }
 
     /// @notice Return a snapshot of the fields the off-chain rebalancer reads to decide
@@ -982,6 +984,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         s.cooldownRemaining = block.timestamp >= ready ? 0 : ready - block.timestamp;
         int24 dev = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
         s.deviationGateOpen = dev <= p.maxTickDeviation;
+        s.rebalanceInFlight = rebalanceInFlight;
+        s.rebalanceStartedAt = rebalanceStartedAt;
     }
 
     // ═══════════════════════════════════════════════════════════════════════

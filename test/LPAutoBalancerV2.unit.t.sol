@@ -1859,4 +1859,12 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(lab.MAX_SWAP_LOSS_ALLOWANCE_BPS(), 500);
         assertEq(lab.VAULT_RELAYER(), 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110);
     }
+
+    function test_getDecisionSnapshot_includesInFlightFields() public {
+        _register(false);
+
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
+        assertFalse(s.rebalanceInFlight, "not in flight by default");
+        assertEq(s.rebalanceStartedAt, 0, "no unwind yet");
+    }
 }
