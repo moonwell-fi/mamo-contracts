@@ -12,7 +12,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @notice Isolates all CowSwap / EIP-1271 concerns for a single LPAutoBalancerV2, keeping the
 ///         balancer under the 24 KB / via_ir budget. Validates reward-only AERO -> token0|token1
 ///         compound orders. Settled underlying is delivered to the balancer (receiver == balancer)
-///         so it folds into the main+alt at the next reset(); this module never custodies the
+///         so it folds into the main+alt at the next rebalanceUsingAlt(); this module never custodies the
 ///         swap proceeds. The balancer's compound() forwards the compound share of AERO here.
 contract LPCompoundModule is AccessControlEnumerable {
     using SafeERC20 for IERC20;

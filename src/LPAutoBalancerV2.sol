@@ -1058,48 +1058,60 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Return a snapshot of the fields the off-chain rebalancer reads to decide
     ///         whether and how to rebalanceUsingAlt a position. All values are read atomically in one
     ///         call. The `earnedAero` field uses try/catch so a broken gauge never blocks the view.
+    /// @dev    Mid-swap-rebalance (rebalanceInFlight), unwindForSwap has already burned both NFTs —
+    ///         p.mainTokenId/p.altTokenId point at burned tokenIds until rebuildAfterSwap re-mints.
+    ///         POSITION_MANAGER.positions() on a burned tokenId reverts on the real position manager,
+    ///         so the main/alt geometry + gauge-earned reads are SKIPPED while in flight (both legs
+    ///         are already unstaked by unwindForSwap's teardown, so mainStaked/altStaked read false
+    ///         here regardless). This keeps the view itself always callable — the off-chain agent
+    ///         must be able to observe rebalanceInFlight/rebalanceStartedAt precisely when a rebalance
+    ///         is in flight, not have its primary read-path revert for the whole window.
     function getDecisionSnapshot() external view returns (DecisionSnapshotV2 memory s) {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
 
         (, int24 spotTick,,,,) = ICLPool(p.pool).slot0();
         int24 twapTick = _consultTwapTick(p.pool, p.twapWindow);
-        (,,,,, int24 mtl, int24 mtu, uint128 mliq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
 
         s.spotTick = spotTick;
         s.twapTick = twapTick;
-        s.mainTickLower = mtl;
-        s.mainTickUpper = mtu;
-        s.mainInRange = mtl <= spotTick && spotTick < mtu;
-        s.mainLiquidity = mliq;
-        s.hasAlt = p.altTokenId != 0;
-        if (s.hasAlt) {
-            (,,,,, int24 atl, int24 atu, uint128 aliq,,,,) = POSITION_MANAGER.positions(p.altTokenId);
-            s.altTickLower = atl;
-            s.altTickUpper = atu;
-            s.altLiquidity = aliq;
-        }
-        s.mainStaked = p.mainStaked;
-        s.hasGauge = p.gauge != address(0);
 
-        uint256 aero;
-        if (p.mainStaked) {
-            try ICLGauge(p.gauge).earned(address(this), p.mainTokenId) returns (uint256 e) {
-                aero += e;
-            } catch {}
+        bool inFlight = rebalanceInFlight;
+        if (!inFlight) {
+            (,,,,, int24 mtl, int24 mtu, uint128 mliq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
+            s.mainTickLower = mtl;
+            s.mainTickUpper = mtu;
+            s.mainInRange = mtl <= spotTick && spotTick < mtu;
+            s.mainLiquidity = mliq;
+            s.hasAlt = p.altTokenId != 0;
+            if (s.hasAlt) {
+                (,,,,, int24 atl, int24 atu, uint128 aliq,,,,) = POSITION_MANAGER.positions(p.altTokenId);
+                s.altTickLower = atl;
+                s.altTickUpper = atu;
+                s.altLiquidity = aliq;
+            }
+            s.mainStaked = p.mainStaked;
+            s.hasGauge = p.gauge != address(0);
+
+            uint256 aero;
+            if (p.mainStaked) {
+                try ICLGauge(p.gauge).earned(address(this), p.mainTokenId) returns (uint256 e) {
+                    aero += e;
+                } catch {}
+            }
+            if (p.altStaked && p.altTokenId != 0) {
+                try ICLGauge(p.gauge).earned(address(this), p.altTokenId) returns (uint256 e) {
+                    aero += e;
+                } catch {}
+            }
+            s.earnedAero = aero;
         }
-        if (p.altStaked && p.altTokenId != 0) {
-            try ICLGauge(p.gauge).earned(address(this), p.altTokenId) returns (uint256 e) {
-                aero += e;
-            } catch {}
-        }
-        s.earnedAero = aero;
 
         uint256 ready = p.lastRebalance + p.minRebalanceInterval;
         s.cooldownRemaining = block.timestamp >= ready ? 0 : ready - block.timestamp;
         int24 dev = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
         s.deviationGateOpen = dev <= p.maxTickDeviation;
-        s.rebalanceInFlight = rebalanceInFlight;
+        s.rebalanceInFlight = inFlight;
         s.rebalanceStartedAt = rebalanceStartedAt;
     }
 

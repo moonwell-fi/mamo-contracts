@@ -1886,6 +1886,32 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(s.rebalanceStartedAt, 0, "no unwind yet");
     }
 
+    /// @dev Regression for a whole-feature-review finding: mid-flight, position.mainTokenId/altTokenId
+    ///      point at NFTs unwindForSwap already burned. getDecisionSnapshot() must skip the
+    ///      POSITION_MANAGER.positions() reads entirely while in flight (they'd revert against the
+    ///      real position manager on a burned tokenId) rather than reverting the whole view — the
+    ///      off-chain agent needs this exact view to observe rebalanceInFlight and know to wait/rebuild.
+    ///      The mock PM doesn't delete burned positions, so it can't reproduce the real revert; this
+    ///      test only proves the geometry fields are left at their zero default (i.e. the read was
+    ///      skipped, not that stale mock data happened to still resolve) — the fork suite proves the
+    ///      call is genuinely revert-free against the real position manager.
+    function test_getDecisionSnapshot_callableMidFlight_skipsPositionReads() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
+        assertTrue(s.rebalanceInFlight);
+        assertGt(s.rebalanceStartedAt, 0);
+        assertEq(s.mainTickLower, 0, "position geometry skipped while in flight");
+        assertEq(s.mainTickUpper, 0, "position geometry skipped while in flight");
+        assertEq(s.mainLiquidity, 0, "position geometry skipped while in flight");
+        assertFalse(s.hasAlt);
+        assertEq(s.earnedAero, 0, "gauge reads skipped while in flight");
+    }
+
     // ---------- swap-rebalance fixtures ----------
 
     LPCompoundModule realModule;

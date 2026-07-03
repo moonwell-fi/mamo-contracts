@@ -545,4 +545,27 @@ contract LPAutoBalancerV2Integration is Test {
         assertFalse(lab.rebalanceInFlight());
         assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), 0, "approval revoked on exit");
     }
+
+    /// @dev Regression for a whole-feature-review finding: unwindForSwap burns both real NFTs and
+    ///      leaves position.mainTokenId/altTokenId pointing at them until rebuildAfterSwap re-mints.
+    ///      getDecisionSnapshot() calling POSITION_MANAGER.positions() on a burned tokenId reverts
+    ///      against the REAL Aerodrome position manager — the mock PM can't reproduce this since it
+    ///      never deletes burned positions. This fork test is the only thing that actually proves the
+    ///      off-chain agent's primary read interface stays callable for the whole in-flight window.
+    function test_fork_getDecisionSnapshot_callableMidFlight() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        _bootstrap(center - 200, center + 200, 1 ether, 0.03e8);
+        _ensureModule();
+
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams(WETH, 0.2 ether));
+
+        // must NOT revert against the real position manager, even though the burned mainTokenId is
+        // still what `position.mainTokenId` points at.
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
+        assertTrue(s.rebalanceInFlight);
+        assertGt(s.rebalanceStartedAt, 0);
+        assertEq(s.mainLiquidity, 0, "position geometry skipped while in flight");
+    }
 }
