@@ -405,6 +405,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         liquidity, burn both NFTs, and transfer the resulting token0/token1 balances to `to`.
     ///         Marks the position inactive. Use when the Safe needs to fully tear down a position in one
     ///         call regardless of staking state. Uses 0 sandwich mins (emergency path).
+    ///         Always available mid-swap-rebalance: if unwindForSwap already tore down and burned
+    ///         both NFTs (rebalanceInFlight == true), this skips the teardown (nothing left to do),
+    ///         revokes the stale CowSwap relayer approval, and clears the in-flight state instead —
+    ///         then falls into the same sweep/deactivate tail as the normal path.
     ///
     ///         CEI ordering:
     ///           1. active = false  — flipped first; this is the re-entry sentinel checked by the
@@ -432,10 +436,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             if (sellTokenInFlight != address(0)) {
                 IERC20(sellTokenInFlight).forceApprove(VAULT_RELAYER, 0);
             }
-            rebalanceInFlight = false;
-            rebalanceValueBefore = 0;
-            sellTokenInFlight = address(0);
-            rebalanceWasStaked = false;
+            _clearInFlight();
         } else {
             // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
             // Emergency path: 0 mins on both legs, deadline = block.timestamp (execute immediately).
@@ -644,10 +645,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         }
 
         bool wasStaked = rebalanceWasStaked;
-        rebalanceInFlight = false;
-        rebalanceValueBefore = 0;
-        sellTokenInFlight = address(0);
-        rebalanceWasStaked = false;
+        _clearInFlight();
 
         _forwardDust(p);
 
@@ -779,6 +777,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     // ─── rebalanceUsingAlt private helpers ────────────────────────────────────────────────
+
+    /// @dev Zero every swap-rebalance in-flight field. Called by both closers of the window —
+    ///      rebuildAfterSwap (success path) and exit() (mid-flight escape hatch) — so a future
+    ///      field added to the in-flight set only needs updating here, not at both call sites.
+    function _clearInFlight() private {
+        rebalanceInFlight = false;
+        rebalanceValueBefore = 0;
+        rebalanceStartedAt = 0;
+        sellTokenInFlight = address(0);
+        rebalanceWasStaked = false;
+    }
 
     /// @dev Restake the freshly minted main (+ alt, if any) into the gauge, iff `wasStaked` (the
     ///      position was staked before teardown). Shared by rebalanceUsingAlt and rebuildAfterSwap.
