@@ -73,6 +73,9 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     /// @notice Expected CowSwap appData hash for compound orders. Replace with the real hash agreed
     ///         with the off-chain bot before mainnet execution.
     bytes32 public constant COMPOUND_APP_DATA = keccak256("mamo-lpv2-compound");
+    /// @notice Extra value-floor tolerance for the CowSwap swap-rebalance round-trip's real-world
+    ///         slippage, on top of maxRebalanceLossBps.
+    uint16 public constant SWAP_LOSS_ALLOWANCE_BPS = 300;
 
     /// @notice The pre-minted WETH/cbBTC Slipstream NFT tokenId held by the F-MAMO Safe (Phase B2).
     ///         MUST be set (setTokenId) before build() — there is no sensible default.
@@ -120,7 +123,8 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position, and grant REBALANCER_ROLE to the backend signer.";
+        return
+        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position, and grant REBALANCER_ROLE to the backend signer.";
     }
 
     function deploy() public override {
@@ -206,6 +210,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         module.setSlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         module.setSlippage(COMPOUND_SLIPPAGE_BPS);
         module.setCompoundAppData(COMPOUND_APP_DATA);
+        lab.setSwapLossAllowanceBps(SWAP_LOSS_ALLOWANCE_BPS);
     }
 
     function simulate() public override {
@@ -234,15 +239,26 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     /// @dev Assert the registered position matches the phase-1 config and the balancer holds the NFT.
     function validatePosition(LPAutoBalancerV2 lab) public view {
         (
-            uint256 mainTokenId,,
+            uint256 mainTokenId,
+            ,
             address pool,
             address token0,
             address token1,
             int24 tickSpacing,
-            address gauge,,,
+            address gauge,
+            ,
+            ,
             address feeCollector,
             address oracle0,
-            address oracle1,,,,,,,,,
+            address oracle1,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
             bool active
         ) = lab.position();
 
@@ -258,7 +274,9 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(oracle1, addresses.getAddress("CHAINLINK_BTC_USD"), "oracle1 == BTC/USD");
 
         assertEq(
-            INonfungiblePositionManager(addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME")).ownerOf(mainTokenId),
+            INonfungiblePositionManager(addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME")).ownerOf(
+                mainTokenId
+            ),
             address(lab),
             "balancer owns the WETH/cbBTC NFT"
         );
@@ -277,10 +295,9 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(module.allowedSlippageInBps(), COMPOUND_SLIPPAGE_BPS, "slippage set");
         assertEq(module.compoundAppData(), COMPOUND_APP_DATA, "appData set");
         assertEq(
-            address(module.slippagePriceChecker()),
-            addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
-            "checker set"
+            address(module.slippagePriceChecker()), addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"), "checker set"
         );
+        assertEq(LPAutoBalancerV2(labAddr).swapLossAllowanceBps(), SWAP_LOSS_ALLOWANCE_BPS, "swap loss allowance set");
     }
 
     /// @dev Resolve the rebalancer EOA: explicit setter wins; else fall back to the

@@ -151,6 +151,40 @@ Output of Phase B: a registered, **unstaked** WETH/cbBTC position in the balance
 
 ---
 
+## Rebalance mode selection (swap vs. no-swap)
+
+Every rebalance cycle, the backend (`REBALANCER_ROLE`) picks **one** of two paths. There is **no Safe-level master switch** — the choice is made per cycle by the backend, based on whether re-ranging the position without a swap keeps it reasonably centered or whether a partial swap is needed to rebalance the underlying ratio:
+
+- **No-swap path — `rebalanceUsingAlt(RebalanceParams)`.** The original single-transaction flow: re-range using only what the position already holds. Use this whenever it's sufficient; it's simpler and has no off-chain dependency.
+- **Swap path — `unwindForSwap(UnwindParams)` + off-chain CowSwap order + `rebuildAfterSwap(RebalanceParams)`.** An async, two-phase flow for when the backend needs to actually change the WETH/cbBTC ratio:
+  1. `unwindForSwap` tears down the position and pins the CowSwap relayer's allowance to an **exact** sell amount.
+  2. The backend places a CowSwap order off-chain. **The sell amount is chosen off-chain by the backend and baked directly into the order** — the contract's only job is pinning the relayer approval to that exact amount in step 1; it does not compute or re-derive a sell size on-chain.
+  3. Once the order settles (or is abandoned), the backend calls `rebuildAfterSwap` to redeploy into a fresh position.
+
+### Stuck-order handling
+
+`rebuildAfterSwap` is **never gated on CowSwap order state**. If the order expires unfilled, calling `rebuildAfterSwap` anyway simply redeploys the principal as-is — the outcome is identical to what the no-swap path would have produced. What `rebuildAfterSwap` **is** gated on is `pause()` and the TWAP calm gate, same as the no-swap path.
+
+For a true escape hatch mid-flight — for example if the backend key goes dark after `unwindForSwap` but before `rebuildAfterSwap` — `exit()` (`DEFAULT_ADMIN_ROLE`, Safe-only) is **always available**, swap or no swap. It correctly detects an in-flight swap-rebalance and skips the redundant teardown step (the position was already torn down by `unwindForSwap`), going straight to returning principal to the Safe.
+
+### On-chain order validation
+
+CowSwap orders for the swap path are validated on-chain via `LPCompoundModule.validateRebalanceOrder` (EIP-1271, `isValidSignature`). An order only validates if **all** of the following hold:
+
+- Fill-or-kill sell order strictly between the pool's two underlying tokens (WETH/cbBTC), either direction.
+- `receiver == balancer` (the `LPAutoBalancerV2` contract itself, never the backend EOA).
+- Price bounded by the Chainlink-backed `SlippagePriceChecker` (the same checker used for compound orders).
+- Expiry window: minimum 5 minutes, maximum the checker's `maxTimePriceValid`.
+- Validates **only** while the balancer reports `rebalanceInFlight() == true` — i.e. only between `unwindForSwap` and `rebuildAfterSwap`. Outside that window, no order can be signed off.
+
+### `setSwapLossAllowanceBps`
+
+`setSwapLossAllowanceBps` (admin-only, capped at `MAX_SWAP_LOSS_ALLOWANCE_BPS = 500` bps) sets the **extra** value-floor tolerance `rebuildAfterSwap` allows for the CowSwap round-trip's real-world slippage, on top of the position's existing `maxRebalanceLossBps`. The `011` proposal sets this to `SWAP_LOSS_ALLOWANCE_BPS = 300` (3%) by default — a conservative allowance on top of the 1% `maxRebalanceLossBps` already configured for phase-1 (see B4).
+
+> **Manual prerequisite, unchanged from B6:** as with AERO compounding, the `CHAINLINK_SWAP_CHECKER_PROXY` owner (**not** F-MAMO) must have the relevant WETH/cbBTC feed configuration in place — here it's the existing `oracle0`/`oracle1` config already required by `registerPosition` (B4), plus `WETH→cbBTC` and `cbBTC→WETH` token-pair configs on the checker itself, before swap-rebalance orders can settle in production. Without this, `validateRebalanceOrder` will reject any order priced against those pairs.
+
+---
+
 ## Phase C — Handover to the LLM backend
 
 ### C1. Grant the rebalancer key
