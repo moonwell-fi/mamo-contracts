@@ -508,6 +508,19 @@ contract LPAutoBalancerV2UnitTest is Test {
         });
     }
 
+    /// @dev Default rebuildAfterSwap params: width 400, all mint mins 0, deadline now+1.
+    function _defaultRebuildParams() internal view returns (LPAutoBalancerV2.RebuildParams memory) {
+        LPAutoBalancerV2.RebalanceParams memory p = _defaultRebalanceParams();
+        return LPAutoBalancerV2.RebuildParams({
+            width: p.width,
+            amount0MinMain: p.amount0MinMain,
+            amount1MinMain: p.amount1MinMain,
+            amount0MinAlt: p.amount0MinAlt,
+            amount1MinAlt: p.amount1MinAlt,
+            deadline: p.deadline
+        });
+    }
+
     /// @dev Stage the PM so decreaseLiquidity+collect returns p0/p1 as withdrawn principal
     ///      (0 fees on the first collect). Mints tokens into the PM so collect transfers succeed.
     function _stagePrincipal(uint256 p0, uint256 p1) internal {
@@ -2101,7 +2114,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.expectEmit(true, true, true, true);
         emit LPAutoBalancerV2.RebalanceRebuilt(NEW_TOKEN_ID, ALT_TOKEN_ID);
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
 
         (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,, uint256 lastRebalance, bool active) = lab.position();
         assertEq(mainTokenId, NEW_TOKEN_ID, "new main minted");
@@ -2124,7 +2137,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         // order expired unfilled: balances unchanged (1e18 / 1e18 loose)
 
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
 
         (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
         assertEq(mainTokenId, NEW_TOKEN_ID, "rebuilt from original balances, identical to rebalanceUsingAlt outcome");
@@ -2141,7 +2154,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertTrue(lab.rebalanceWasStaked());
 
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
 
         (,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
         assertTrue(mainStaked, "restaked after rebuild");
@@ -2153,7 +2166,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _setRealModule();
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.NotInFlight.selector);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
     }
 
     function test_rebuildAfterSwap_revertsOnValueFloorBreach() public {
@@ -2174,7 +2187,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
         assertTrue(lab.rebalanceInFlight(), "still in flight; can retry or exit");
     }
 
@@ -2249,7 +2262,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         tok0.transfer(makeAddr("solver"), 2e16);
 
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
         assertFalse(lab.rebalanceInFlight());
     }
 
@@ -2291,7 +2304,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.TwapDeviation.selector);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
     }
 
     function test_rebuildAfterSwap_noCooldownGate() public {
@@ -2300,7 +2313,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _unwind();
         // do NOT warp past minRebalanceInterval — rebuild must still work
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
         assertFalse(lab.rebalanceInFlight());
     }
 
@@ -2313,7 +2326,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(rebalancer);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
     }
 
     function test_rebuildAfterSwap_revertsNonRebalancer() public {
@@ -2322,7 +2335,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _unwind();
         vm.prank(manager);
         vm.expectRevert();
-        lab.rebuildAfterSwap(_defaultRebalanceParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
     }
 
     function test_isValidSignature_delegatesToModule() public {
