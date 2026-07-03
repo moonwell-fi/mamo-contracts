@@ -5,4 +5,5 @@ pragma solidity 0.8.28;
 interface ILPAutoBalancerV2 {
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function rebalanceInFlight() external view returns (bool);
 }

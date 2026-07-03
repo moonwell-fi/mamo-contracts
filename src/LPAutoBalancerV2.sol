@@ -18,6 +18,11 @@ import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {LPBalancerLib} from "@libraries/LPBalancerLib.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 
+/// @dev Minimal view surface of LPCompoundModule needed for the EIP-1271 passthrough.
+interface ILPCompoundModuleRebalance {
+    function validateRebalanceOrder(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4);
+}
+
 /// @title LPAutoBalancerV2
 /// @notice Safe-governed, single-position Aerodrome CL rebalancer. Holds position NFTs,
 ///         re-ranges them with on-chain-computed ticks, stakes for AERO emissions, and
@@ -1071,6 +1076,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         s.deviationGateOpen = dev <= p.maxTickDeviation;
         s.rebalanceInFlight = rebalanceInFlight;
         s.rebalanceStartedAt = rebalanceStartedAt;
+    }
+
+    /// @notice EIP-1271 passthrough. The balancer is the CowSwap order owner (tokens pulled
+    ///         from / delivered to it); all validation logic lives on the compound module.
+    function isValidSignature(bytes32 digest, bytes calldata order) external view returns (bytes4) {
+        return ILPCompoundModuleRebalance(compoundModule).validateRebalanceOrder(digest, order);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

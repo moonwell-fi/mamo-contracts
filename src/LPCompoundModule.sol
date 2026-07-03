@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {ILPAutoBalancerV2} from "@interfaces/ILPAutoBalancerV2.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {GPv2Order} from "@libraries/GPv2Order.sol";
-import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
-import {ILPAutoBalancerV2} from "@interfaces/ILPAutoBalancerV2.sol";
 
 /// @title LPCompoundModule
 /// @notice Isolates all CowSwap / EIP-1271 concerns for a single LPAutoBalancerV2, keeping the
@@ -96,6 +96,43 @@ contract LPCompoundModule is AccessControlEnumerable {
         address t0 = ILPAutoBalancerV2(balancer).token0();
         address t1 = ILPAutoBalancerV2(balancer).token1();
         require(address(o.buyToken) == t0 || address(o.buyToken) == t1, "buyToken must be underlying");
+        require(o.receiver == balancer, "receiver must be balancer");
+        require(o.feeAmount == 0, "fee must be zero");
+        require(o.appData == compoundAppData, "bad appData");
+        require(o.validTo >= block.timestamp + 5 minutes, "expires too soon");
+        require(
+            o.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(o.sellToken)),
+            "expires too far"
+        );
+        require(
+            slippagePriceChecker.checkPrice(
+                o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, allowedSlippageInBps
+            ),
+            "price check failed"
+        );
+        return MAGIC_VALUE;
+    }
+
+    /// @notice EIP-1271 validation for principal-rebalance orders. The balancer's
+    ///         isValidSignature delegates here. Orders validate ONLY while the balancer
+    ///         reports rebalanceInFlight, must swap between the two pool underlyings
+    ///         (either direction), deliver to the balancer, and pass the price checker.
+    function validateRebalanceOrder(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
+        require(ILPAutoBalancerV2(balancer).rebalanceInFlight(), "no rebalance in flight");
+        GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
+        require(o.hash(DOMAIN_SEPARATOR) == orderDigest, "bad digest");
+        require(o.kind == GPv2Order.KIND_SELL, "must be sell");
+        require(!o.partiallyFillable, "must be fill-or-kill");
+        require(o.sellTokenBalance == GPv2Order.BALANCE_ERC20, "sell must be erc20");
+        require(o.buyTokenBalance == GPv2Order.BALANCE_ERC20, "buy must be erc20");
+        address t0 = ILPAutoBalancerV2(balancer).token0();
+        address t1 = ILPAutoBalancerV2(balancer).token1();
+        require(
+            (address(o.sellToken) == t0 || address(o.sellToken) == t1)
+                && (address(o.buyToken) == t0 || address(o.buyToken) == t1)
+                && address(o.sellToken) != address(o.buyToken),
+            "tokens must be distinct underlying"
+        );
         require(o.receiver == balancer, "receiver must be balancer");
         require(o.feeAmount == 0, "fee must be zero");
         require(o.appData == compoundAppData, "bad appData");

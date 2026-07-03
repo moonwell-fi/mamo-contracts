@@ -2193,4 +2193,17 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.expectRevert();
         lab.rebuildAfterSwap(_defaultRebalanceParams());
     }
+
+    function test_isValidSignature_delegatesToModule() public {
+        _register(false);
+        address mockModule = makeAddr("mockModule");
+        vm.prank(admin);
+        lab.setCompoundModule(mockModule);
+        vm.mockCall(
+            mockModule, abi.encodeWithSignature("validateRebalanceOrder(bytes32,bytes)"), abi.encode(bytes4(0x1626ba7e))
+        );
+
+        bytes4 v = lab.isValidSignature(bytes32(uint256(123)), hex"deadbeef");
+        assertEq(v, bytes4(0x1626ba7e));
+    }
 }
