@@ -576,6 +576,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev    Deliberately NOT gated on cooldown or on CowSwap order state: filled, expired,
     ///         or never-placed orders all rebuild from current balances. IS gated on pause and
     ///         the calm gate; exit() remains the escape hatch if either blocks.
+    /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
+    ///         out of the floor per H-1), this floor compares against a SINGLE `rebalanceValueBefore`
+    ///         snapshot taken back in unwindForSwap — a prior transaction. A token donated to the
+    ///         contract between unwindForSwap and rebuildAfterSwap inflates valueAfter without
+    ///         inflating that snapshot, widening the floor's apparent headroom by the donated amount.
+    ///         Not a fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away value
+    ///         to loosen a check on their own gift), but it is a strictly weaker safety guarantee than
+    ///         rebalanceUsingAlt's — a structural consequence of the floor spanning two transactions.
     function rebuildAfterSwap(RebalanceParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -622,18 +630,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         _forwardDust(p);
 
-        if (wasStaked && p.gauge != address(0)) {
-            POSITION_MANAGER.approve(p.gauge, newMain);
-            ICLGauge(p.gauge).deposit(newMain);
-            p.mainStaked = true;
-            emit Staked(newMain, p.gauge);
-            if (p.altTokenId != 0) {
-                POSITION_MANAGER.approve(p.gauge, p.altTokenId);
-                ICLGauge(p.gauge).deposit(p.altTokenId);
-                p.altStaked = true;
-                emit Staked(p.altTokenId, p.gauge);
-            }
-        }
+        _restakeBoth(p, newMain, wasStaked);
 
         emit RebalanceRebuilt(newMain, p.altTokenId);
     }
@@ -755,27 +752,31 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Floor passed: only NOW forward the genuine sub-threshold remainder to the feeCollector.
         _forwardDust(p);
 
-        if (wasStaked && p.gauge != address(0)) {
-            POSITION_MANAGER.approve(p.gauge, newMain);
-            ICLGauge(p.gauge).deposit(newMain);
-            p.mainStaked = true;
-            emit Staked(newMain, p.gauge);
-            // Stake the freshly minted alt too. Otherwise the alt is stranded unstaked: once the
-            // main is staked, stake() reverts AlreadyStaked and collectFees() reverts AlreadyStaked,
-            // so the alt's AERO emissions and LP fees could never be collected until the next rebalanceUsingAlt.
-
-            if (p.altTokenId != 0) {
-                POSITION_MANAGER.approve(p.gauge, p.altTokenId);
-                ICLGauge(p.gauge).deposit(p.altTokenId);
-                p.altStaked = true;
-                emit Staked(p.altTokenId, p.gauge);
-            }
-        }
+        _restakeBoth(p, newMain, wasStaked);
 
         emit RebalancedUsingAlt(newMain, p.altTokenId, tl, tu);
     }
 
     // ─── rebalanceUsingAlt private helpers ────────────────────────────────────────────────
+
+    /// @dev Restake the freshly minted main (+ alt, if any) into the gauge, iff `wasStaked` (the
+    ///      position was staked before teardown). Shared by rebalanceUsingAlt and rebuildAfterSwap.
+    ///      Staking the alt too matters: once the main is staked, stake() and collectFees() both
+    ///      revert AlreadyStaked, so a stranded unstaked alt could never collect AERO/fees until
+    ///      the next rebalance.
+    function _restakeBoth(ManagedPositionV2 storage p, uint256 newMain, bool wasStaked) private {
+        if (!wasStaked || p.gauge == address(0)) return;
+        POSITION_MANAGER.approve(p.gauge, newMain);
+        ICLGauge(p.gauge).deposit(newMain);
+        p.mainStaked = true;
+        emit Staked(newMain, p.gauge);
+        if (p.altTokenId != 0) {
+            POSITION_MANAGER.approve(p.gauge, p.altTokenId);
+            ICLGauge(p.gauge).deposit(p.altTokenId);
+            p.altStaked = true;
+            emit Staked(p.altTokenId, p.gauge);
+        }
+    }
 
     /// @dev Tear down the managed position(s): unstake the main (auto-claims AERO →
     ///      feeCollector), skim LP fees on every held NFT → feeCollector, then remove all
