@@ -620,8 +620,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Counting the loose balance is the key invariant: a non-trivial surplus cannot escape the
         // floor by being forwarded as "dust" — if it's real value it is either in the alt (counted)
         // or loose (counted) at floor time. Only sub-threshold dust leaves, and only AFTER this check.
-        uint256 valueAfter = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1)
-            + _contractPairValue(p, dec0, dec1);
+        uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
         // Haircut applies to POSITION value only; the pre-existing loose balance is added back UNHAIRCUT.
         // looseAfter (in valueAfter) ≈ looseBefore + withdrawn surplus, so the donated L cancels on both
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
@@ -897,6 +896,18 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         returns (uint256)
     {
         return _principalValue(p, p.altTokenId, sqrtP, dec0, dec1);
+    }
+
+    /// @dev Total USD value the rebalance value-floor cares about: main + alt principal, plus any
+    ///      loose token0/token1 already held by the contract. Shared by rebalanceUsingAlt's
+    ///      "after" snapshot and (in a later task) the swap-rebalance rebuild floor.
+    function _totalValue(ManagedPositionV2 storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
+        private
+        view
+        returns (uint256)
+    {
+        return _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1)
+            + _contractPairValue(p, dec0, dec1);
     }
 
     /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.
