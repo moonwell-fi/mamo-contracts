@@ -475,7 +475,12 @@ contract LPAutoBalancerV2Integration is Test {
         assertGt(lab.rebalanceValueBefore(), 0);
         assertGt(IERC20(WETH).balanceOf(address(lab)), 0, "principal loose on balancer");
 
-        // ---- simulate CowSwap settlement: relayer pulls WETH, solver delivers cbBTC ----
+        // ---- simulate the NET EFFECT of CowSwap settlement (not the transferFrom mechanics: this
+        // pushes WETH out and deals cbBTC in directly, rather than pranking VAULT_RELAYER to pull via
+        // the allowance unwindForSwap set). rebuildAfterSwap force-zeroes that allowance unconditionally
+        // regardless of whether a real pull happened, so "approval revoked" below asserts rebuildAfterSwap's
+        // cleanup, not that a transferFrom actually consumed it. 0.006e8 cbBTC approximates the pool's
+        // fair rate for 0.2 WETH at the pinned block, comfortably inside the 300bps swapLossAllowanceBps set above ----
         vm.prank(address(lab));
         IERC20(WETH).transfer(makeAddr("cowSolver"), sellAmount);
         deal(CBBTC, address(lab), IERC20(CBBTC).balanceOf(address(lab)) + 0.006e8);
