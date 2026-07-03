@@ -1820,4 +1820,43 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertGt(tok0.balanceOf(feeCollector) - before0, 0, "token0 fees forwarded from both legs");
         assertGt(tok1.balanceOf(feeCollector) - before1, 0, "token1 fees forwarded from both legs");
     }
+
+    // ---------- swap-loss allowance setter ----------
+
+    function test_setSwapLossAllowanceBps_adminSets_andEmits() public {
+        vm.expectEmit(true, true, true, true);
+        emit LPAutoBalancerV2.SwapLossAllowanceUpdated(0, 300);
+        vm.prank(admin);
+        lab.setSwapLossAllowanceBps(300);
+        assertEq(lab.swapLossAllowanceBps(), 300);
+    }
+
+    function test_setSwapLossAllowanceBps_revertsAboveCap() public {
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.SwapLossAllowanceTooHigh.selector);
+        lab.setSwapLossAllowanceBps(501);
+    }
+
+    function test_setSwapLossAllowanceBps_capValueAllowed() public {
+        vm.prank(admin);
+        lab.setSwapLossAllowanceBps(500);
+        assertEq(lab.swapLossAllowanceBps(), 500);
+    }
+
+    function test_setSwapLossAllowanceBps_revertsNonAdmin() public {
+        vm.prank(rebalancer);
+        vm.expectRevert();
+        lab.setSwapLossAllowanceBps(100);
+    }
+
+    function test_swapRebalance_stateDefaults() public view {
+        assertFalse(lab.rebalanceInFlight());
+        assertEq(lab.rebalanceValueBefore(), 0);
+        assertEq(lab.rebalanceStartedAt(), 0);
+        assertEq(lab.sellTokenInFlight(), address(0));
+        assertFalse(lab.rebalanceWasStaked());
+        assertEq(lab.swapLossAllowanceBps(), 0);
+        assertEq(lab.MAX_SWAP_LOSS_ALLOWANCE_BPS(), 500);
+        assertEq(lab.VAULT_RELAYER(), 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110);
+    }
 }

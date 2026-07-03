@@ -90,6 +90,26 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         CowSwap orders + EIP-1271; set once by the Safe via `setCompoundModule`.
     address public compoundModule;
 
+    /// @notice CowSwap settlement vault relayer (same constant as LPCompoundModule; duplicated to
+    ///         avoid an external call from the balancer's hot paths).
+    address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
+
+    /// @notice Cap on the extra rebalance-loss tolerance granted for the CowSwap round trip.
+    uint16 public constant MAX_SWAP_LOSS_ALLOWANCE_BPS = 500;
+
+    /// @notice True between unwindForSwap() and rebuildAfterSwap()/exit(); gates rebalance-order validation.
+    bool public rebalanceInFlight;
+    /// @notice USD (1e8) value snapshot taken at unwind, used as the rebuild value-floor base.
+    uint256 public rebalanceValueBefore;
+    /// @notice Timestamp of the last unwindForSwap() (diagnostics + snapshot field).
+    uint256 public rebalanceStartedAt;
+    /// @notice Token approved to VAULT_RELAYER during the in-flight window (revoked at rebuild/exit).
+    address public sellTokenInFlight;
+    /// @notice Whether the main position was staked at unwind time (restake at rebuild).
+    bool public rebalanceWasStaked;
+    /// @notice Extra floor tolerance (bps) added to maxRebalanceLossBps for the swap round trip.
+    uint16 public swapLossAllowanceBps;
+
     error ZeroAddress();
     error TwapDeviation();
     error StaleOracle();
@@ -115,6 +135,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error CompoundBpsTooHigh();
     error NothingToCompound();
     error ModuleNotSet();
+    error NotInFlight();
+    error AlreadyInFlight();
+    error InvalidSellToken();
+    error SwapLossAllowanceTooHigh();
 
     event PositionRegistered(address indexed pool, uint256 indexed tokenId);
     event PoolChanged(address indexed pool, uint256 indexed mainTokenId);
@@ -133,6 +157,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     event CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps);
     event FeesSkimmed(uint256 amount0, uint256 amount1);
     event RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper);
+    event RebalanceUnwound(address sellToken, uint256 sellAmount);
+    event RebalanceRebuilt(uint256 mainTokenId, uint256 altTokenId);
+    event SwapLossAllowanceUpdated(uint256 oldBps, uint256 newBps);
 
     constructor(
         address admin_,
@@ -444,6 +471,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (module == address(0)) revert ZeroAddress();
         compoundModule = module;
         emit CompoundModuleUpdated(module);
+    }
+
+    /// @notice Sets the extra value-floor tolerance for swap rebalances. Admin only, capped.
+    function setSwapLossAllowanceBps(uint16 newBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newBps > MAX_SWAP_LOSS_ALLOWANCE_BPS) revert SwapLossAllowanceTooHigh();
+        emit SwapLossAllowanceUpdated(swapLossAllowanceBps, newBps);
+        swapLossAllowanceBps = newBps;
     }
 
     /// @notice Harvest AERO, drop `(BPS - compoundBps)` to feeCollector, forward `compoundBps` to the
