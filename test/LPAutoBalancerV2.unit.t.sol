@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 import {MockERC20} from "./MockERC20.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
-import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
+import {LPAutoBalancerV2, ILPCompoundModuleRebalance} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
 import {StdStorage, Test, stdStorage} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
@@ -646,6 +646,22 @@ contract LPAutoBalancerV2UnitTest is Test {
         });
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.LossCapExceeded.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertsAeroAsToken0() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        cfg.token0 = address(mockAero);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_registerPosition_revertsAeroAsToken1() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        cfg.token1 = address(mockAero);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
         lab.registerPosition(cfg);
     }
 
@@ -2199,11 +2215,27 @@ contract LPAutoBalancerV2UnitTest is Test {
         address mockModule = makeAddr("mockModule");
         vm.prank(admin);
         lab.setCompoundModule(mockModule);
+        bytes32 digest = bytes32(uint256(123));
+        bytes memory order = hex"deadbeef";
         vm.mockCall(
-            mockModule, abi.encodeWithSignature("validateRebalanceOrder(bytes32,bytes)"), abi.encode(bytes4(0x1626ba7e))
+            mockModule,
+            abi.encodeWithSignature("validateRebalanceOrder(bytes32,bytes)", digest, order),
+            abi.encode(bytes4(0x1626ba7e))
         );
 
-        bytes4 v = lab.isValidSignature(bytes32(uint256(123)), hex"deadbeef");
+        // vm.expectCall pins the EXACT calldata the passthrough forwards — proves digest/order are
+        // relayed unmodified, not just that SOME call to compoundModule returns SOMETHING.
+        vm.expectCall(mockModule, abi.encodeWithSignature("validateRebalanceOrder(bytes32,bytes)", digest, order));
+        bytes4 v = lab.isValidSignature(digest, order);
         assertEq(v, bytes4(0x1626ba7e));
+    }
+
+    function test_isValidSignature_interfaceSelectorMatchesModule() public pure {
+        // Guards against the local ILPCompoundModuleRebalance interface drifting out of sync with
+        // LPCompoundModule's real signature (nothing else enforces this at compile time).
+        assertEq(
+            ILPCompoundModuleRebalance.validateRebalanceOrder.selector,
+            LPCompoundModule.validateRebalanceOrder.selector
+        );
     }
 }

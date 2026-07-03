@@ -1226,6 +1226,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             revert InvalidConfig();
         }
         if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
+        // AERO must never be an underlying: the compound module's isValidSignature relies on AERO
+        // being excluded from {token0, token1} to keep AERO-compound orders and principal-rebalance
+        // orders (validateRebalanceOrder) structurally disjoint. Enforced here rather than left as an
+        // unstated assumption, since a future AERO-paired pool would otherwise silently break that
+        // separation.
+        if (config.token0 == AERO || config.token1 == AERO) revert InvalidConfig();
         // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
         // not as a StaleOracle revert on the next rebalance.
         _readFeed(config.oracle0);
