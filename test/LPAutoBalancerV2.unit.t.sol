@@ -2253,6 +2253,32 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertFalse(lab.rebalanceInFlight());
     }
 
+    function test_rebuildAfterSwap_looseBalance_notHaircut_matchesRebalanceUsingAltPattern() public {
+        _register(false);
+        _setRealModule();
+        // Donate a loose balance BEFORE unwinding — simulates un-folded AERO-compound proceeds
+        // already sitting on the contract when unwindForSwap runs.
+        tok0.mint(address(lab), 5e17);
+
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        // rebalanceValueBeforePos must be POSITION-ONLY (the staged 1e18/1e18 principal), NOT
+        // including the 5e17 loose donation — the loose component must be tracked separately.
+        assertLt(
+            lab.rebalanceValueBeforePos(),
+            lab.rebalanceValueBefore(),
+            "position-only snapshot must be strictly less than the combined total when loose > 0"
+        );
+        assertGt(lab.rebalanceLooseBefore(), 0, "loose balance snapshotted separately");
+        assertEq(
+            lab.rebalanceValueBeforePos() + lab.rebalanceLooseBefore(),
+            lab.rebalanceValueBefore(),
+            "split fields sum to the diagnostic total"
+        );
+    }
+
     function test_rebuildAfterSwap_revertsOnTwapDeviation() public {
         _register(false);
         _setRealModule();

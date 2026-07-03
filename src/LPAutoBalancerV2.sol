@@ -103,7 +103,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice True between unwindForSwap() and rebuildAfterSwap()/exit(); gates rebalance-order validation.
     bool public rebalanceInFlight;
     /// @notice USD (1e8) value snapshot taken at unwind, used as the rebuild value-floor base.
+    ///         Diagnostic total kept for API/test compatibility: positions + loose, COMBINED.
+    ///         The floor math itself uses the split fields below, not this sum.
     uint256 public rebalanceValueBefore;
+    /// @notice USD (1e8) value of main+alt PRINCIPAL ONLY (no loose), snapshotted at unwind.
+    ///         The value floor's loss haircut applies to this term alone.
+    uint256 public rebalanceValueBeforePos;
+    /// @notice USD (1e8) value of loose token0/token1 already on the contract at unwind (e.g.
+    ///         un-folded AERO-compound proceeds). Added back UN-HAIRCUT to the rebuild floor's
+    ///         RHS, matching rebalanceUsingAlt's H-1 fix — a pre-existing loose balance must not
+    ///         widen the tolerated absolute loss on the swap round trip.
+    uint256 public rebalanceLooseBefore;
     /// @notice Timestamp of the last unwindForSwap() (diagnostics + snapshot field).
     uint256 public rebalanceStartedAt;
     /// @notice Token approved to VAULT_RELAYER during the in-flight window (revoked at rebuild/exit).
@@ -571,7 +581,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             p.maxTickDeviation
         );
 
-        rebalanceValueBefore = _totalValue(p, sqrtP, dec0, dec1);
+        // Split the snapshot the same way rebalanceUsingAlt does: position principal (haircut by
+        // the floor below) vs. pre-existing loose token0/token1 (added back un-haircut). See H-1.
+        uint256 looseBefore = _contractPairValue(p, dec0, dec1);
+        uint256 valueBeforePos = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+        rebalanceValueBefore = valueBeforePos + looseBefore; // diagnostic total (kept for API/test compat)
+        rebalanceValueBeforePos = valueBeforePos;
+        rebalanceLooseBefore = looseBefore;
         rebalanceStartedAt = block.timestamp;
         rebalanceWasStaked = p.mainStaked;
         sellTokenInFlight = params.sellToken;
@@ -599,13 +615,16 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         or never-placed orders all rebuild from current balances. IS gated on pause and
     ///         the calm gate; exit() remains the escape hatch if either blocks.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
-    ///         out of the floor per H-1), this floor compares against a SINGLE `rebalanceValueBefore`
-    ///         snapshot taken back in unwindForSwap — a prior transaction. A token donated to the
-    ///         contract between unwindForSwap and rebuildAfterSwap inflates valueAfter without
-    ///         inflating that snapshot, widening the floor's apparent headroom by the donated amount.
-    ///         Not a fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away value
-    ///         to loosen a check on their own gift), but it is a strictly weaker safety guarantee than
-    ///         rebalanceUsingAlt's — a structural consequence of the floor spanning two transactions.
+    ///         out of the floor per H-1), the POSITION component of this floor (rebalanceValueBeforePos)
+    ///         is snapshotted back in unwindForSwap — a prior transaction. A token donated to the
+    ///         contract between unwindForSwap and rebuildAfterSwap inflates valueAfter's position term
+    ///         without inflating that snapshot, widening the floor's apparent headroom by the donated
+    ///         amount. Not a fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away
+    ///         value to loosen a check on their own gift), but it is a strictly weaker safety guarantee
+    ///         than rebalanceUsingAlt's — a structural consequence of the floor spanning two
+    ///         transactions. The LOOSE component (rebalanceLooseBefore) is now added back un-haircut,
+    ///         matching rebalanceUsingAlt's H-1 treatment — a pre-existing loose balance (e.g. un-folded
+    ///         AERO-compound proceeds) at unwind time no longer widens the tolerated absolute loss.
     function rebuildAfterSwap(RebalanceParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -636,10 +655,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (
             valueAfter
                 < FullMath.mulDiv(
-                    rebalanceValueBefore,
-                    BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps,
-                    BPS_DENOMINATOR
-                )
+                        rebalanceValueBeforePos,
+                        BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps,
+                        BPS_DENOMINATOR
+                    ) + rebalanceLooseBefore
         ) {
             revert ValueFloor();
         }
@@ -784,6 +803,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function _clearInFlight() private {
         rebalanceInFlight = false;
         rebalanceValueBefore = 0;
+        rebalanceValueBeforePos = 0;
+        rebalanceLooseBefore = 0;
         rebalanceStartedAt = 0;
         sellTokenInFlight = address(0);
         rebalanceWasStaked = false;
