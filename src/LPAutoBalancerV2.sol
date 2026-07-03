@@ -17,8 +17,8 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
-import {FullMath} from "@libraries/uniswap/FullMath.sol";
 import {LPBalancerLib} from "@libraries/LPBalancerLib.sol";
+import {FullMath} from "@libraries/uniswap/FullMath.sol";
 
 /// @title LPAutoBalancerV2
 /// @notice Safe-governed, single-position Aerodrome CL rebalancer. Holds position NFTs,
@@ -132,7 +132,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     event CompoundModuleUpdated(address module);
     event CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps);
     event FeesSkimmed(uint256 amount0, uint256 amount1);
-    event Reset(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper);
+    event RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper);
 
     constructor(
         address admin_,
@@ -233,7 +233,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (twapWindow == 0 || maxTickDeviation <= 0) revert InvalidConfig();
         if (maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = position.tickSpacing;
-        // minWidth must be at least 2*tickSpacing so a balanced reset can straddle an aligned spot.
+        // minWidth must be at least 2*tickSpacing so a balanced rebalanceUsingAlt can straddle an aligned spot.
         if (minWidth < 2 * uint24(spacing) || maxWidth < minWidth) revert WidthTooNarrow();
         if (minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0) revert InvalidWidth();
 
@@ -449,7 +449,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Harvest AERO, drop `(BPS - compoundBps)` to feeCollector, forward `compoundBps` to the
     ///         compound module. The module owns the CowSwap orders (AERO -> token0|token1) and their
     ///         EIP-1271 validation; the solver delivers underlying back to THIS contract, folded into
-    ///         the main+alt at the next reset(). Reward-only — never touches principal.
+    ///         the main+alt at the next rebalanceUsingAlt(). Reward-only — never touches principal.
     /// @param compoundBps share of harvested AERO to reinvest (<= MAX_COMPOUND_BPS).
     function compound(uint16 compoundBps) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         if (compoundBps > MAX_COMPOUND_BPS) revert CompoundBpsTooHigh();
@@ -478,10 +478,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Reset
+    // Rebalance
     // ═══════════════════════════════════════════════════════════════════════
 
-    struct ResetParams {
+    struct RebalanceParams {
         uint24 width;
         uint256 amount0MinMain;
         uint256 amount1MinMain;
@@ -513,7 +513,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///             (_contractPairValue), so nothing escapes the floor as "dust".
     ///         8.  Forward the genuine sub-threshold remainder → feeCollector (AFTER the floor).
     ///         9.  Restake the new main if the old main was staked.
-    function reset(ResetParams calldata params) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+    function rebalanceUsingAlt(RebalanceParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
         if (block.timestamp < p.lastRebalance + p.minRebalanceInterval) revert Cooldown();
@@ -554,7 +559,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
 
-        // Choose the new main range. The common case is a spot-centered straddle. But a reset of a
+        // Choose the new main range. The common case is a spot-centered straddle. But a rebalanceUsingAlt of a
         // FULLY out-of-range position withdraws 100%-single-sided principal (a CL position outside
         // its range holds exactly one token). A straddling balanced mint with one desired leg == 0
         // computes ZERO liquidity and the position manager reverts. With NO SWAP we cannot
@@ -588,7 +593,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
         if (
             valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
+                    + looseBefore
         ) {
             revert ValueFloor();
         }
@@ -603,7 +609,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             emit Staked(newMain, p.gauge);
             // Stake the freshly minted alt too. Otherwise the alt is stranded unstaked: once the
             // main is staked, stake() reverts AlreadyStaked and collectFees() reverts AlreadyStaked,
-            // so the alt's AERO emissions and LP fees could never be collected until the next reset.
+            // so the alt's AERO emissions and LP fees could never be collected until the next rebalanceUsingAlt.
+
             if (p.altTokenId != 0) {
                 POSITION_MANAGER.approve(p.gauge, p.altTokenId);
                 ICLGauge(p.gauge).deposit(p.altTokenId);
@@ -612,10 +619,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             }
         }
 
-        emit Reset(newMain, p.altTokenId, tl, tu);
+        emit RebalancedUsingAlt(newMain, p.altTokenId, tl, tu);
     }
 
-    // ─── reset private helpers ────────────────────────────────────────────────
+    // ─── rebalanceUsingAlt private helpers ────────────────────────────────────────────────
 
     /// @dev Tear down the managed position(s): unstake the main (auto-claims AERO →
     ///      feeCollector), skim LP fees on every held NFT → feeCollector, then remove all
@@ -647,7 +654,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // 3. decrease all liquidity + collect principal into this contract.
         //    MAIN gets the caller-supplied withdraw mins (sandwich floor) and the caller-supplied deadline.
         _decreaseLiquidityAll(mainId, amount0MinWithdraw, amount1MinWithdraw, deadline);
-        //    ALT is single-sided and transient (minted by _mintAlt in reset() whenever the
+        //    ALT is single-sided and transient (minted by _mintAlt in rebalanceUsingAlt() whenever the
         //    post-rebuild surplus leg clears MIN_ALT_VALUE_USD). When an alt persists into the
         //    next cycle, this decrease removes its liquidity, so it gets its own caller-supplied
         //    sandwich floor (the rebalancer cannot know in advance which single leg the alt holds).
@@ -668,20 +675,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (liq > 0) {
             POSITION_MANAGER.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId,
-                    liquidity: liq,
-                    amount0Min: amount0Min,
-                    amount1Min: amount1Min,
-                    deadline: deadline
+                    tokenId: tokenId, liquidity: liq, amount0Min: amount0Min, amount1Min: amount1Min, deadline: deadline
                 })
             );
         }
         POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
         );
     }
@@ -691,10 +691,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      only the in-ratio portion and any leftover remains in the contract (forwarded
     ///      to the feeCollector by the caller). Slipstream MintParams: int24 tickSpacing
     ///      + trailing sqrtPriceX96 (0 because the pool is already initialized).
-    function _mintBalanced(ManagedPositionV2 storage p, int24 tickLower, int24 tickUpper, ResetParams calldata params)
-        private
-        returns (uint256 newTokenId)
-    {
+    function _mintBalanced(
+        ManagedPositionV2 storage p,
+        int24 tickLower,
+        int24 tickUpper,
+        RebalanceParams calldata params
+    ) private returns (uint256 newTokenId) {
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
         uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
 
@@ -726,7 +728,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      no swap is needed. Returns 0 (minting nothing) when the surplus leg's USD value is below
     ///      MIN_ALT_VALUE_USD — a sub-tick remainder too small to seed liquidity.
     ///
-    ///      NOTE: this function does NOT forward dust. The caller (`reset`) must run the value floor
+    ///      NOTE: this function does NOT forward dust. The caller (`rebalanceUsingAlt`) must run the value floor
     ///      AFTER this returns — counting both the freshly minted alt and any loose contract balance
     ///      via `_contractPairValue` — and only THEN forward the genuine sub-threshold remainder.
     ///      Forwarding here would let a non-trivial surplus escape the floor as "dust".
@@ -742,7 +744,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 mainTu,
         uint8 dec0,
         uint8 dec1,
-        ResetParams calldata params
+        RebalanceParams calldata params
     ) private returns (uint256 altId) {
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
         uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
@@ -803,10 +805,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function _skimFees(ManagedPositionV2 storage p, uint256 tokenId) private {
         (uint256 a0, uint256 a1) = POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
         );
         if (a0 > 0) IERC20(p.token0).safeTransfer(p.feeCollector, a0);
@@ -901,7 +900,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     /// @notice Return a snapshot of the fields the off-chain rebalancer reads to decide
-    ///         whether and how to reset a position. All values are read atomically in one
+    ///         whether and how to rebalanceUsingAlt a position. All values are read atomically in one
     ///         call. The `earnedAero` field uses try/catch so a broken gauge never blocks the view.
     function getDecisionSnapshot() external view returns (DecisionSnapshotV2 memory s) {
         ManagedPositionV2 storage p = position;
@@ -991,14 +990,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
     ///      - Both legs funded → spot-centered straddle (the normal balanced main).
     ///      - The minority leg below MIN_MAIN_LEG_USD (including exactly one leg funded — a fully
-    ///        out-of-range reset returns 100% single-sided principal) → a single-sided `width`-wide
+    ///        out-of-range rebalanceUsingAlt returns 100% single-sided principal) → a single-sided `width`-wide
     ///        range on the MAJORITY (funded) side, adjacent to spot, so the mint has positive
     ///        liquidity. NO SWAP is ever performed; this only changes WHERE the funded token is parked.
     ///        Orientation (price = token1/token0, ticks rise with price): a range strictly ABOVE spot
     ///        holds only token0; strictly BELOW holds only token1.
     ///          token0-majority: [up, up + width]      where up   = first aligned tick > spot
     ///          token1-majority: [down - width, down]  where down = first aligned tick < spot
-    ///      Both-empty is impossible here (reset withdrew real principal; an empty teardown would
+    ///      Both-empty is impossible here (rebalanceUsingAlt withdrew real principal; an empty teardown would
     ///      already have reverted the value floor downstream).
     ///
     ///      Classifier is VALUE-based, not exact-zero: a tiny minority leg (e.g. 1 wei) would force the
@@ -1109,7 +1108,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
                 || ICLPool(config.pool).tickSpacing() != spacing
         ) revert PoolMismatch();
         // A width narrower than 2*tickSpacing can never straddle an aligned spot, so a balanced
-        // reset would always revert in _alignedRange. Require at least two spacings of room.
+        // rebalanceUsingAlt would always revert in _alignedRange. Require at least two spacings of room.
         if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
         if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
         // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded.

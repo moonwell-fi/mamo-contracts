@@ -22,7 +22,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 // (the off-chain Phase-B precondition), then wires the proposal and injects tokenId + a test
 // rebalancer EOA. test_proposal_lifecycle runs deploy/build/simulate/validate and then proves
 // the registered position is operable: as the granted rebalancer, push the tick out of range and
-// reset(), expecting a successful single-sided rebuild with real liquidity.
+// rebalanceUsingAlt(), expecting a successful single-sided rebuild with real liquidity.
 //
 // NO --fork-url on the make target: foundry 1.7.x would init the OP-stack L1Block handler against
 // the CLI fork and panic before the in-test vm.fee(0) workaround runs. The fork is created here.
@@ -138,8 +138,8 @@ contract LPAutoBalancerV2SetupTest is Test {
         return this.onERC721Received.selector;
     }
 
-    function _defaultResetParams() internal view returns (LPAutoBalancerV2.ResetParams memory) {
-        return LPAutoBalancerV2.ResetParams({
+    function _defaultRebalanceParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        return LPAutoBalancerV2.RebalanceParams({
             width: 400,
             amount0MinMain: 0,
             amount1MinMain: 0,
@@ -176,7 +176,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         assertTrue(lab.hasRole(lab.REBALANCER_ROLE(), rebalancerEOA), "rebalancer granted");
 
         // ── End-to-end: prove the registered position is OPERABLE by the granted rebalancer. ──
-        // Stake the main into the gauge so reset() exercises the unstake/skim/restake path.
+        // Stake the main into the gauge so rebalanceUsingAlt() exercises the unstake/skim/restake path.
         vm.prank(rebalancerEOA);
         lab.stake();
 
@@ -184,11 +184,11 @@ contract LPAutoBalancerV2SetupTest is Test {
         skip(2 hours);
         vm.roll(block.number + 1);
 
-        // Drive spot BELOW the main range → single-sided WETH withdrawal on reset. The production
-        // config gates reset on |spot - TWAP| <= maxTickDeviation (100), so we cannot do a single
+        // Drive spot BELOW the main range → single-sided WETH withdrawal on rebalanceUsingAlt. The production
+        // config gates rebalanceUsingAlt on |spot - TWAP| <= maxTickDeviation (100), so we cannot do a single
         // huge swap (its instantaneous spot vs the lagging 1800s TWAP would trip TwapDeviation).
         // Instead: do the swap, then skip well past twapWindow (1800s) so the TWAP converges onto
-        // the post-swap tick and the deviation gate is back within tolerance at reset time.
+        // the post-swap tick and the deviation gate is back within tolerance at rebalanceUsingAlt time.
         (, int24 spotBefore,,,,) = ICLPool(POOL).slot0();
         _pushTickDown(2_000 ether);
         (, int24 spotOut,,,,) = ICLPool(POOL).slot0();
@@ -201,14 +201,14 @@ contract LPAutoBalancerV2SetupTest is Test {
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory snapBefore = lab.getDecisionSnapshot();
         assertFalse(snapBefore.mainInRange, "main driven out of range");
-        assertTrue(snapBefore.deviationGateOpen, "TWAP converged: deviation gate open for reset");
+        assertTrue(snapBefore.deviationGateOpen, "TWAP converged: deviation gate open for rebalanceUsingAlt");
 
-        // As the granted rebalancer: reset must succeed (no revert) and rebuild a real position.
+        // As the granted rebalancer: rebalanceUsingAlt must succeed (no revert) and rebuild a real position.
         vm.prank(rebalancerEOA);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
-        assertTrue(s.mainStaked, "main restaked after reset (was staked before)");
+        assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
     }
 }

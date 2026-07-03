@@ -15,10 +15,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MockPositionManagerV2 — full position lifecycle for reset() tests.
+// MockPositionManagerV2 — full position lifecycle for rebalanceUsingAlt() tests.
 // Ported from V1 (LPAutoBalancerRebalanceTest). Models a two-phase collect:
 //   slot 0 (skimFees) → fees; slot 1 (decreaseAll) → principal. Auto-advances.
-// NOTE: V2 has NO swap router, so the "no swap" property is structural — reset()
+// NOTE: V2 has NO swap router, so the "no swap" property is structural — rebalanceUsingAlt()
 // rebuilds the position purely from the principal this mock pays out on collect.
 // ─────────────────────────────────────────────────────────────────────────────
 contract MockPositionManagerV2 {
@@ -79,7 +79,7 @@ contract MockPositionManagerV2 {
     uint128 public nextMintLiquidity;
 
     // Second staged mint result (alt). When set, the 2nd mint() call returns these
-    // and any further call falls back to the main result. Lets reset() mint main then alt.
+    // and any further call falls back to the main result. Lets rebalanceUsingAlt() mint main then alt.
     uint256 public nextAltMintTokenId;
     uint128 public nextAltMintLiquidity;
     bool public hasAltMintResult;
@@ -373,7 +373,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     address rebalancer = makeAddr("rebalancer");
     address guardian = makeAddr("guardian");
 
-    // Live mock contracts backing the config (real pool/tokens so reset() can run).
+    // Live mock contracts backing the config (real pool/tokens so rebalanceUsingAlt() can run).
     address pool; // address(mockPool)
     address token0; // address(tok0)
     address token1; // address(tok1)
@@ -410,7 +410,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockGauge = new MockCLGauge(address(mockAero));
         gauge = address(mockGauge);
 
-        // Configurable pool mock (slot0 + observe) for reset() geometry.
+        // Configurable pool mock (slot0 + observe) for rebalanceUsingAlt() geometry.
         mockPool = new MockCLPoolV2();
         pool = address(mockPool);
         // registerPosition cross-validates the pool descriptor: token0/token1/tickSpacing must match.
@@ -475,7 +475,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             // spotTick=100, twapTick=0 → |diff|=100 ≤ 200 ✓
             maxTickDeviation: 200,
             maxRebalanceLossBps: 100,
-            minRebalanceInterval: 0, // no cooldown so reset() can run immediately
+            minRebalanceInterval: 0, // no cooldown so rebalanceUsingAlt() can run immediately
             lastRebalance: 999, // should be forced to 0 by _store
             active: false // should be forced to true by _store
         });
@@ -488,11 +488,11 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.registerPosition(cfg);
     }
 
-    // ─── reset() helpers ───────────────────────────────────────────────────────
+    // ─── rebalanceUsingAlt() helpers ───────────────────────────────────────────────────────
 
-    /// @dev Default reset params: width 400, all mins 0, deadline now+1.
-    function _defaultResetParams() internal view returns (LPAutoBalancerV2.ResetParams memory) {
-        return LPAutoBalancerV2.ResetParams({
+    /// @dev Default rebalanceUsingAlt params: width 400, all mins 0, deadline now+1.
+    function _defaultRebalanceParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        return LPAutoBalancerV2.RebalanceParams({
             width: 400,
             amount0MinMain: 0,
             amount1MinMain: 0,
@@ -558,23 +558,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         (
             uint256 storedMainTokenId,
             uint256 storedAltTokenId,
-            address storedPool,
-            ,
-            ,
-            int24 storedTickSpacing,
-            ,
+            address storedPool,,,
+            int24 storedTickSpacing,,
             bool storedMainStaked,
-            bool storedAltStaked,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
+            bool storedAltStaked,,,,,,,,,,,
             uint256 storedLastRebalance,
             bool storedActive
         ) = lab.position();
@@ -700,14 +687,14 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertTrue(active); // just confirm it registered
     }
 
-    // ─── reset() — Task 2: rebuild balanced main, no swap ────────────────────────
+    // ─── rebalanceUsingAlt() — Task 2: rebuild balanced main, no swap ────────────────────────
 
-    function test_reset_rebuildsMain_fromWithdrawnBalances() public {
+    function test_rebalanceUsingAlt_rebuildsMain_fromWithdrawnBalances() public {
         _register(false);
         _stagePrincipal(1e18, 1e18); // PM returns this principal on decrease+collect
 
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         // position active, main tokenId updated to the freshly minted NFT, alt cleared
         (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,,, bool active) = lab.position();
@@ -731,15 +718,15 @@ contract LPAutoBalancerV2UnitTest is Test {
     }
 
     /// @dev Settled CowSwap compound proceeds arrive as loose token0+token1 on the contract.
-    ///      reset() mints from balanceOf(this), so the loose proceeds fold into the new main with
+    ///      rebalanceUsingAlt() mints from balanceOf(this), so the loose proceeds fold into the new main with
     ///      no extra code. Prove the loose balance is consumed by the mint (not left idle).
-    function test_reset_foldsLooseCompoundProceeds_bothLegs() public {
+    function test_rebalanceUsingAlt_foldsLooseCompoundProceeds_bothLegs() public {
         _register(false);
-        _stagePrincipal(1e18, 1e18); // PM returns this principal on decrease+collect during reset
+        _stagePrincipal(1e18, 1e18); // PM returns this principal on decrease+collect during rebalanceUsingAlt
 
         // The new main absorbs both the withdrawn principal AND the loose proceeds, so it holds
         // MORE liquidity than the old position. Model that: stage the fresh NFT at 2x liquidity so
-        // the post-reset value floor (1% max loss) reflects the folded-in proceeds.
+        // the post-rebalanceUsingAlt value floor (1% max loss) reflects the folded-in proceeds.
         mockPM.setNextMintResult(NEW_TOKEN_ID, NEW_LIQ * 2);
         mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, NEW_LIQ * 2, token0, token1);
 
@@ -751,48 +738,48 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertGt(looseBefore, 0, "loose proceeds staged");
 
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         // The loose proceeds (plus withdrawn principal) were pulled into the fresh main mint.
         uint256 looseAfter = tok0.balanceOf(address(lab)) + tok1.balanceOf(address(lab));
         assertLt(looseAfter, looseBefore, "loose compound proceeds folded into main");
     }
 
-    // ─── reset() — withdraw-min sandwich guard (HIGH defect fix) ─────────────────
+    // ─── rebalanceUsingAlt() — withdraw-min sandwich guard (HIGH defect fix) ─────────────────
 
     /// @dev The caller's amount{0,1}MinWithdraw must be forwarded to the MAIN decrease so the
     ///      position manager reverts when the withdrawn principal falls below the floor.
-    ///      Staged principal is 1e18/1e18; a withdraw-min ABOVE that must revert reset().
-    function test_reset_revertsWhenWithdrawMinUnmet() public {
+    ///      Staged principal is 1e18/1e18; a withdraw-min ABOVE that must revert rebalanceUsingAlt().
+    function test_rebalanceUsingAlt_revertsWhenWithdrawMinUnmet() public {
         _register(false);
         _stagePrincipal(1e18, 1e18);
 
-        LPAutoBalancerV2.ResetParams memory params = _defaultResetParams();
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
         params.amount0MinWithdraw = 1e18 + 1; // floor exceeds the staged decrease return
 
         vm.prank(rebalancer);
         vm.expectRevert("Price slippage check");
-        lab.reset(params);
+        lab.rebalanceUsingAlt(params);
     }
 
     /// @dev Mirror of the above: a withdraw-min AT or BELOW the staged return passes the floor
-    ///      and reset() succeeds, proving the wiring does not over-reject.
-    function test_reset_succeedsWhenWithdrawMinMet() public {
+    ///      and rebalanceUsingAlt() succeeds, proving the wiring does not over-reject.
+    function test_rebalanceUsingAlt_succeedsWhenWithdrawMinMet() public {
         _register(false);
         _stagePrincipal(1e18, 1e18);
 
-        LPAutoBalancerV2.ResetParams memory params = _defaultResetParams();
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
         params.amount0MinWithdraw = 1e18; // exactly the staged return
         params.amount1MinWithdraw = 1e18;
 
         vm.prank(rebalancer);
-        lab.reset(params);
+        lab.rebalanceUsingAlt(params);
 
         (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "reset completed with withdraw mins met");
+        assertEq(mainTokenId, NEW_TOKEN_ID, "rebalanceUsingAlt completed with withdraw mins met");
     }
 
-    // ─── reset() — Task 3: single-sided alt mint from leftover ───────────────────
+    // ─── rebalanceUsingAlt() — Task 3: single-sided alt mint from leftover ───────────────────
 
     /// @dev Read (mainTokenId, altTokenId, mainStaked) from the position() getter.
     function _readMainAlt() internal view returns (uint256 main, uint256 alt, bool mainStaked) {
@@ -804,22 +791,22 @@ contract LPAutoBalancerV2UnitTest is Test {
         (,,,,,,, mainStaked, altStaked,,,,,,,,,,,,) = lab.position();
     }
 
-    function test_reset_mintsAltFromLeftover() public {
+    function test_rebalanceUsingAlt_mintsAltFromLeftover() public {
         _register(false);
         _stagePrincipal(3e18, 1e18); // imbalanced => surplus token0
         mockPM.setNextMintResult(NEW_TOKEN_ID, 1e18); // main
         mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17); // alt (single-sided from leftover)
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
         (, uint256 altId,) = _readMainAlt();
         assertEq(altId, ALT_TOKEN_ID, "alt minted from leftover");
     }
 
-    function test_reset_skipsAltWhenLeftoverDust() public {
+    function test_rebalanceUsingAlt_skipsAltWhenLeftoverDust() public {
         _register(false);
         _stagePrincipal(1e18, 1e18); // balanced => ~no leftover
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
         (, uint256 altId,) = _readMainAlt();
         assertEq(altId, 0, "no alt when leftover is dust");
     }
@@ -829,10 +816,10 @@ contract LPAutoBalancerV2UnitTest is Test {
     ///      leg). Stage a minimally-imbalanced principal so the surplus after the main mint is a
     ///      single wei — far below MIN_ALT_VALUE_USD ($0.01) — and verify:
     ///        1. No alt is minted (surplus sub-threshold).
-    ///        2. Contract holds ~0 loose after reset (surplus forwarded, not stranded).
+    ///        2. Contract holds ~0 loose after rebalanceUsingAlt (surplus forwarded, not stranded).
     ///        3. The 1-wei surplus landed on feeCollector (not destroyed, not on contract).
     ///      This exercises the sub-threshold dust-forward path end-to-end with the in-ratio mock.
-    function test_reset_subThresholdSurplus_forwardedToFeeCollector() public {
+    function test_rebalanceUsingAlt_subThresholdSurplus_forwardedToFeeCollector() public {
         _register(false);
         // Stage p0 = 1e18 + 1, p1 = 1e18. pullOnMint=true: main mint consumes min(1e18+1, 1e18)
         // = 1e18 of each token, leaving 1 wei of tok0 as a one-sided surplus.
@@ -842,13 +829,13 @@ contract LPAutoBalancerV2UnitTest is Test {
         uint256 feeCollBefore = tok0.balanceOf(feeCollector);
 
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         // No alt minted: surplus is sub-threshold.
         (, uint256 altId,) = _readMainAlt();
         assertEq(altId, 0, "no alt: surplus below MIN_ALT_VALUE_USD");
 
-        // Contract holds no loose tokens after reset (dust was forwarded, not stranded).
+        // Contract holds no loose tokens after rebalanceUsingAlt (dust was forwarded, not stranded).
         assertEq(tok0.balanceOf(address(lab)), 0, "no tok0 dust stranded on contract");
         assertEq(tok1.balanceOf(address(lab)), 0, "no tok1 dust stranded on contract");
 
@@ -856,7 +843,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(tok0.balanceOf(feeCollector) - feeCollBefore, 1, "1-wei surplus forwarded to feeCollector");
     }
 
-    function test_reset_imbalanced_valueFloorCountsAlt() public {
+    function test_rebalanceUsingAlt_imbalanced_valueFloorCountsAlt() public {
         // The surplus minted into the alt must be counted in valueAfter, so an
         // imbalanced withdrawal does NOT spuriously trip ValueFloor.
         _register(false);
@@ -864,29 +851,29 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setNextMintResult(NEW_TOKEN_ID, 1e18);
         mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17);
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams()); // must NOT revert ValueFloor
+        lab.rebalanceUsingAlt(_defaultRebalanceParams()); // must NOT revert ValueFloor
         // both main and alt set; no large dust forwarded as "loss"
         (uint256 mainId, uint256 altId,) = _readMainAlt();
         assertEq(mainId, NEW_TOKEN_ID, "main set");
         assertEq(altId, ALT_TOKEN_ID, "alt set");
     }
 
-    function test_reset_restakesMain_whenStaked() public {
+    function test_rebalanceUsingAlt_restakesMain_whenStaked() public {
         _register(true); // gauged
         vm.prank(rebalancer);
         lab.stake();
         _stagePrincipal(1e18, 1e18);
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
         (bool mainStaked,) = _readStakeFlags();
-        assertTrue(mainStaked, "main restaked after reset"); // covers the wasStaked branch
+        assertTrue(mainStaked, "main restaked after rebalanceUsingAlt"); // covers the wasStaked branch
     }
 
-    /// @dev Review fix #3: when a staked position is reset and a NEW alt is minted, the alt must be
+    /// @dev Review fix #3: when a staked position is rebalanceUsingAlt and a NEW alt is minted, the alt must be
     ///      staked alongside the restaked main. Otherwise it is stranded — stake() and collectFees()
     ///      both revert AlreadyStaked once the main is staked, so the alt's emissions/fees could never
-    ///      be collected until the next reset.
-    function test_reset_restakesAlt_whenStakedAndAltMinted() public {
+    ///      be collected until the next rebalanceUsingAlt.
+    function test_rebalanceUsingAlt_restakesAlt_whenStakedAndAltMinted() public {
         _register(true); // gauged
         vm.prank(rebalancer);
         lab.stake();
@@ -894,14 +881,14 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setNextMintResult(NEW_TOKEN_ID, 1e18); // main
         mockPM.setNextAltMintResult(ALT_TOKEN_ID, 5e17); // alt
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         (uint256 mainId, uint256 altId,) = _readMainAlt();
         assertEq(mainId, NEW_TOKEN_ID, "main rebuilt");
         assertEq(altId, ALT_TOKEN_ID, "alt minted");
         (bool mainStaked, bool altStaked) = _readStakeFlags();
-        assertTrue(mainStaked, "main restaked after reset");
-        assertTrue(altStaked, "alt also staked after reset (not stranded)");
+        assertTrue(mainStaked, "main restaked after rebalanceUsingAlt");
+        assertTrue(altStaked, "alt also staked after rebalanceUsingAlt (not stranded)");
     }
 
     /// @dev Review fix #2: registerPosition must reject an NFT whose own tickSpacing disagrees with
@@ -927,7 +914,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.registerPosition(cfg);
     }
 
-    // ─── reset() — Task 3 HIGH fix: value-based leg selection + USD dust + floor-counts-loose ──
+    // ─── rebalanceUsingAlt() — Task 3 HIGH fix: value-based leg selection + USD dust + floor-counts-loose ──
     //
     // These tests model the REAL phase-1 pair: token0 = cbBTC-like (8-dec, high $/unit) and
     // token1 = WETH-like (18-dec, lower $/unit). Dedicated tokens/pool/PM/oracles are spun up so
@@ -1030,7 +1017,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _stageMixedPrincipal(1e5, 1e16);
 
         vm.prank(rebalancer);
-        dLab.reset(_defaultResetParams());
+        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         (uint256 mainId, uint256 altId,) = _readMixedMainAlt();
         assertEq(mainId, D_NEW_ID, "main rebuilt");
@@ -1060,7 +1047,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     ///      The discriminator vs OLD: if the floor did NOT count loose (OLD ordering), valueAfter would
     ///      be ≈0 against a large valueBefore → ValueFloor revert. Counting loose is what lets the
     ///      legitimate (no-loss) imbalanced rebuild pass — and simultaneously closes the leak.
-    function test_reset_forwardedDustCannotBypassValueFloor() public {
+    function test_rebalanceUsingAlt_forwardedDustCannotBypassValueFloor() public {
         _setupMixed(100); // tight 1% loss cap
 
         // New main holds ~nothing; the alt captures nothing. The entire withdrawn principal comes
@@ -1074,19 +1061,19 @@ contract LPAutoBalancerV2UnitTest is Test {
         _stageMixedPrincipal(1e10, 0);
 
         vm.prank(rebalancer);
-        dLab.reset(_defaultResetParams());
+        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
 
-        // NEW: floor counted the loose surplus → no spurious revert → reset succeeded.
+        // NEW: floor counted the loose surplus → no spurious revert → rebalanceUsingAlt succeeded.
         // (OLD ordering would have to forward that surplus out before the floor — the leak — for the
         // call to survive at all, since the NFTs alone are worth ≈0 here.)
         (uint256 mainId,,) = _readMixedMainAlt();
-        assertEq(mainId, D_NEW_ID, "reset succeeded: loose surplus counted by the value floor");
+        assertEq(mainId, D_NEW_ID, "rebalanceUsingAlt succeeded: loose surplus counted by the value floor");
     }
 
     /// @dev Counterpart proving the floor still trips on a GENUINE loss (value actually destroyed,
     ///      not merely retained loose). New main and alt both hold ~nothing and only 1 dust unit of
     ///      token0 is loose, so valueAfter collapses far below valueBefore minus the 1% cap.
-    function test_reset_valueFloorStillTripsOnRealLoss() public {
+    function test_rebalanceUsingAlt_valueFloorStillTripsOnRealLoss() public {
         _setupMixed(100); // 1% loss cap
 
         dPM.setPosition(D_ALT_ID, OLD_TU, OLD_TU + 200, 0, address(dtok0), address(dtok1)); // alt holds nothing
@@ -1096,42 +1083,42 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
-        dLab.reset(_defaultResetParams());
+        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
     }
 
     /// @dev H-1 (accounting asymmetry). A loose token0/token1 balance ALREADY on the contract before
-    ///      reset (donated via a plain ERC20 transfer, or leftover from a prior reverted flow) must be
+    ///      rebalanceUsingAlt (donated via a plain ERC20 transfer, or leftover from a prior reverted flow) must be
     ///      counted in BOTH valueBefore and valueAfter, so it cancels and cannot create headroom that
     ///      masks a real position loss.
     ///
     ///      Stage: new main + alt hold ~nothing, withdrawn principal = 1 dust unit. The position
     ///      round-trip destroys essentially all value (same skeleton as the real-loss test above, which
-    ///      reverts with NO donation). Then DONATE a large token0 balance to the contract before reset.
+    ///      reverts with NO donation). Then DONATE a large token0 balance to the contract before rebalanceUsingAlt.
     ///
     ///      OLD asymmetric code: valueBefore = positions only (large old main), valueAfter = positions
     ///      (≈0) + loose (donation + 1 dust). With the donation sized >= valueBefore, valueAfter clears
-    ///      the floor → reset PASSES → the donation silently absorbed the entire position loss. That is
+    ///      the floor → rebalanceUsingAlt PASSES → the donation silently absorbed the entire position loss. That is
     ///      the bug.
     ///      NEW symmetric code: the donation is in valueBefore too, so it cancels; valueAfter_position
-    ///      (≈0) << valueBefore_position → reset REVERTS ValueFloor. This assertion proves H-1 is closed.
-    function test_reset_donatedBalanceCannotMaskLoss() public {
+    ///      (≈0) << valueBefore_position → rebalanceUsingAlt REVERTS ValueFloor. This assertion proves H-1 is closed.
+    function test_rebalanceUsingAlt_donatedBalanceCannotMaskLoss() public {
         _setupMixed(100); // 1% loss cap
 
         // New main + alt both hold ~nothing; withdrawn principal is 1 dust unit (same skeleton as
-        // test_reset_valueFloorStillTripsOnRealLoss, which reverts with no donation).
+        // test_rebalanceUsingAlt_valueFloorStillTripsOnRealLoss, which reverts with no donation).
         dPM.setNextMintResult(D_NEW_ID, 0);
         dPM.setPosition(D_NEW_ID, OLD_TL, OLD_TU, 0, address(dtok0), address(dtok1));
         dPM.setPosition(D_ALT_ID, OLD_TU, OLD_TU + 200, 0, address(dtok0), address(dtok1));
         _stageMixedPrincipal(1, 0);
 
-        // DONATE a large cbBTC balance directly to the contract BEFORE reset (1e10 raw = 100 cbBTC ≈
+        // DONATE a large cbBTC balance directly to the contract BEFORE rebalanceUsingAlt (1e10 raw = 100 cbBTC ≈
         // $6.5M, vastly larger than the old main's principal value). Under OLD code this donation would
         // sit only in valueAfter and clear the floor; under NEW code it is netted out of both sides.
         dtok0.mint(address(dLab), 1e10);
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
-        dLab.reset(_defaultResetParams());
+        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
     }
 
     /// @dev M-2. setGauge must reject when EITHER leg is staked. If a partial unstake ever leaves
@@ -1187,7 +1174,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     /// @dev Register a gauged (or gaugeless) position and inject a non-zero altTokenId directly
     ///      into contract storage using stdstore. This bypasses the _store() forced-zero for
-    ///      altTokenId so tests can exercise the alt staking paths without running reset().
+    ///      altTokenId so tests can exercise the alt staking paths without running rebalanceUsingAlt().
     function _registerWithAlt(bool withGauge) internal {
         _register(withGauge);
         // Also register ALT_TOKEN_ID with the mock PM so ownerOf returns this contract's address.
@@ -1426,7 +1413,7 @@ contract LPAutoBalancerV2UnitTest is Test {
             3600 // minRebalanceInterval = 1 hour
         );
 
-        // Simulate a prior rebalance by warping forward 30 min, then trigger a reset to stamp lastRebalance.
+        // Simulate a prior rebalance by warping forward 30 min, then trigger a rebalanceUsingAlt to stamp lastRebalance.
         // Easier: write lastRebalance directly via stdstore (field index 19 in the struct).
         // ManagedPositionV2 field order: 0=mainTokenId, 1=altTokenId, 2=pool, 3=token0, 4=token1,
         // 5=tickSpacing, 6=gauge, 7=mainStaked, 8=altStaked, 9=feeCollector, 10=oracle0, 11=oracle1,
@@ -1448,11 +1435,11 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertFalse(s.mainInRange, "spot=201 is outside main range [-200,200)");
     }
 
-    // ─── Task 6: adversarial reset() guards ──────────────────────────────────────
+    // ─── Task 6: adversarial rebalanceUsingAlt() guards ──────────────────────────────────────
 
     /// @dev Register a position with a non-zero cooldown interval. `lastRebalance` is forced to 0
     ///      by _store, so callers that need an ACTIVE cooldown must also stamp lastRebalance
-    ///      (see test_reset_revertsBeforeCooldown, which writes it via stdstore).
+    ///      (see test_rebalanceUsingAlt_revertsBeforeCooldown, which writes it via stdstore).
     function _registerWithInterval(uint256 interval) internal {
         LPAutoBalancerV2.ManagedPositionV2 memory cfg = LPAutoBalancerV2.ManagedPositionV2({
             mainTokenId: TOKEN_ID,
@@ -1481,45 +1468,45 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.registerPosition(cfg);
     }
 
-    /// @dev A manipulated spot (far from the TWAP) must trip the deviation gate, blocking reset.
+    /// @dev A manipulated spot (far from the TWAP) must trip the deviation gate, blocking rebalanceUsingAlt.
     ///      spotTick=5000 vs twapTick=0 → |dev|=5000 > maxTickDeviation=200 → TwapDeviation.
-    function test_reset_revertsOnManipulatedSpot() public {
+    function test_rebalanceUsingAlt_revertsOnManipulatedSpot() public {
         _register(false);
         mockPool.setSlot0(SQRT_P, 5000); // far from twap 0 => |dev| > maxTickDeviation
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.TwapDeviation.selector);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
     }
 
-    /// @dev reset must revert while the cooldown is active. Register with a 1h interval and stamp
+    /// @dev rebalanceUsingAlt must revert while the cooldown is active. Register with a 1h interval and stamp
     ///      lastRebalance = now via stdstore (field index 19), so block.timestamp < lastRebalance +
     ///      interval and the Cooldown guard (checked before the deviation gate) fires.
-    function test_reset_revertsBeforeCooldown() public {
+    function test_rebalanceUsingAlt_revertsBeforeCooldown() public {
         _registerWithInterval(3600);
         // _store forces lastRebalance to 0; stamp it to "now" so the cooldown is genuinely active.
         stdstore.target(address(lab)).sig("position()").depth(19).checked_write(block.timestamp);
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.Cooldown.selector);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
     }
 
     /// @dev A width below minWidth (or above maxWidth) must trip the width-bounds guard.
     ///      The guard runs after _exitAll, so stage principal so the teardown collect succeeds.
-    function test_reset_revertsOnWidthOutOfBounds() public {
+    function test_rebalanceUsingAlt_revertsOnWidthOutOfBounds() public {
         _register(false);
         _stagePrincipal(1e18, 1e18);
-        LPAutoBalancerV2.ResetParams memory pr = _defaultResetParams();
+        LPAutoBalancerV2.RebalanceParams memory pr = _defaultRebalanceParams();
         pr.width = 1; // below minWidth (200)
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.WidthOutOfBounds.selector);
-        lab.reset(pr);
+        lab.rebalanceUsingAlt(pr);
     }
 
-    /// @dev reset is REBALANCER_ROLE-gated: a caller without the role must revert (no prank).
-    function test_reset_onlyRebalancer() public {
+    /// @dev rebalanceUsingAlt is REBALANCER_ROLE-gated: a caller without the role must revert (no prank).
+    function test_rebalanceUsingAlt_onlyRebalancer() public {
         _register(false);
         vm.expectRevert(); // caller (this test contract) lacks REBALANCER_ROLE
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
     }
 
     // ─── _mainRange single-sided geometry (deterministic, no fork) ───────────────
@@ -1534,7 +1521,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     ///      With spotTick=100, spacing=200: floor=_floorAlign(100,200)=0, up=0+200=200.
     ///      Expected new main: tickLower=200, tickUpper=200+400=600 (width=400).
     ///      Assertion: mainTickLower >= spotTick (range starts at or above spot).
-    function test_reset_singleSided_token0_rangeAboveSpot() public {
+    function test_rebalanceUsingAlt_singleSided_token0_rangeAboveSpot() public {
         _register(false);
         // Stage token0-only: bal0=1e18, bal1=0.
         _stagePrincipal(1e18, 0);
@@ -1545,7 +1532,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         // The new main must start at or above spot: range strictly above spot holds only token0.
@@ -1558,7 +1545,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     ///      With spotTick=100, spacing=200: floor=_floorAlign(100,200)=0 (unaligned → down=floor=0).
     ///      Expected new main: tickUpper=0, tickLower=0-400=-400 (width=400).
     ///      Assertion: mainTickUpper <= spotTick (range ends at or below spot).
-    function test_reset_singleSided_token1_rangeBelowSpot() public {
+    function test_rebalanceUsingAlt_singleSided_token1_rangeBelowSpot() public {
         _register(false);
         // Stage token1-only: bal0=0, bal1=1e18.
         _stagePrincipal(0, 1e18);
@@ -1567,7 +1554,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(NEW_TOKEN_ID, -400, 0, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams());
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         // The new main must end at or below spot: range strictly below spot holds only token1.
@@ -1671,16 +1658,16 @@ contract LPAutoBalancerV2UnitTest is Test {
     // ─── Review fix F2: single-leg valuation ignores the unused (stale) feed ─────
 
     /// @dev F2: valuing a SINGLE leg must not read the other (unused) feed. Stage a fully token0-sided
-    ///      reset, then make oracle1 stale. Under the old code _valueInUsd read BOTH feeds
+    ///      rebalanceUsingAlt, then make oracle1 stale. Under the old code _valueInUsd read BOTH feeds
     ///      unconditionally and would revert StaleOracle on the token1 leg even though amount1 == 0.
-    ///      With the fix, the zero leg's stale feed is skipped and reset succeeds.
+    ///      With the fix, the zero leg's stale feed is skipped and rebalanceUsingAlt succeeds.
     ///      NOTE: the staleness gate only bites once block.timestamp is realistic, so EVERY valuation
     ///      that touches token1 must have amount1 == 0 — including the OLD main's valueBefore
     ///      principal valuation. The OLD main is therefore placed single-sided ABOVE spot (token0 only)
     ///      too; a straddling OLD main would legitimately hold token1 and reading its (stale) feed
     ///      would NOT be a bug. (This previously passed only off-fork, where block.timestamp == 1
     ///      masks the staleness check.)
-    function test_reset_singleLegValuation_ignoresStaleUnusedFeed() public {
+    function test_rebalanceUsingAlt_singleLegValuation_ignoresStaleUnusedFeed() public {
         _register(false);
         _stagePrincipal(1e18, 0); // token0-only principal → every _valueInUsd call passes amount1 == 0
 
@@ -1694,7 +1681,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams()); // must NOT revert StaleOracle
+        lab.rebalanceUsingAlt(_defaultRebalanceParams()); // must NOT revert StaleOracle
 
         (uint256 mainId,,) = _readMainAlt();
         assertEq(mainId, NEW_TOKEN_ID, "single-leg valuation skipped the stale unused feed");
@@ -1707,7 +1694,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     ///      rebuilt main must be SINGLE-SIDED on the token0 (majority) side — range entirely ABOVE
     ///      spot — not a degenerate straddle. Uses the mixed-decimal fixture so the dust leg's USD
     ///      value is unambiguous. token0 = cbBTC ($65k), token1 = WETH ($2.5k).
-    function test_reset_dustMinorityLeg_classifiedSingleSided() public {
+    function test_rebalanceUsingAlt_dustMinorityLeg_classifiedSingleSided() public {
         _setupMixed(500);
         // token0: 1e8 raw cbBTC = 1 cbBTC ≈ $65,000 (majority).
         // token1: 1e6 raw WETH = 1e-12 WETH ≈ $0.0000000025 — far below MIN_MAIN_LEG_USD ($0.01).
@@ -1718,7 +1705,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         dPM.setNextMintResult(D_NEW_ID, 1e12);
 
         vm.prank(rebalancer);
-        dLab.reset(_defaultResetParams());
+        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         // The MAIN mint (1st mint) must be single-sided above spot — lower >= spotTick (100).
         // _mainRange: spotTick=100, spacing=200 → floor=0, up=200 → [200, 600].
@@ -1730,34 +1717,34 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     // ─── Review fix F7: maxCenterDeviation enforced on the balanced path ─────────
 
-    /// @dev F7: a balanced reset whose center is within maxCenterDeviation passes. The straddle is
+    /// @dev F7: a balanced rebalanceUsingAlt whose center is within maxCenterDeviation passes. The straddle is
     ///      spot-centered, so |center - spot| is just the alignment remainder (here 100 ticks, well
     ///      within 400). Asserts the happy path does not spuriously revert CenterDeviation; the guard
     ///      is a backstop for any future change to the centering reference (single-sided path is
     ///      intentionally off-center and exempt).
-    function test_reset_balancedCenterWithinDeviation_passes() public {
+    function test_rebalanceUsingAlt_balancedCenterWithinDeviation_passes() public {
         _register(false);
         _stagePrincipal(1e18, 1e18); // balanced → straddle path
         vm.prank(rebalancer);
-        lab.reset(_defaultResetParams()); // must NOT revert CenterDeviation
+        lab.rebalanceUsingAlt(_defaultRebalanceParams()); // must NOT revert CenterDeviation
         (uint256 mainId,,) = _readMainAlt();
-        assertEq(mainId, NEW_TOKEN_ID, "balanced reset within center bound succeeded");
+        assertEq(mainId, NEW_TOKEN_ID, "balanced rebalanceUsingAlt within center bound succeeded");
     }
 
     // ─── Review fix F8: deadline threaded into the withdraw leg ──────────────────
 
-    /// @dev F8: a reset with deadline < block.timestamp must revert at the MAIN decrease (the PM
+    /// @dev F8: a rebalanceUsingAlt with deadline < block.timestamp must revert at the MAIN decrease (the PM
     ///      enforces the deadline). The old code hardcoded deadline = block.timestamp on the decrease,
     ///      so an expired caller deadline had no effect on the withdraw leg.
-    function test_reset_revertsOnExpiredDeadline() public {
+    function test_rebalanceUsingAlt_revertsOnExpiredDeadline() public {
         _register(false);
         _stagePrincipal(1e18, 1e18);
         vm.warp(block.timestamp + 100);
-        LPAutoBalancerV2.ResetParams memory pr = _defaultResetParams();
+        LPAutoBalancerV2.RebalanceParams memory pr = _defaultRebalanceParams();
         pr.deadline = block.timestamp - 1; // expired
         vm.prank(rebalancer);
         vm.expectRevert("Transaction too old");
-        lab.reset(pr);
+        lab.rebalanceUsingAlt(pr);
     }
 
     // ─── setPool: re-point an emptied contract ───────────────────────────────────

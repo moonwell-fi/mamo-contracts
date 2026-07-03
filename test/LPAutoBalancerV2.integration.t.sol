@@ -13,9 +13,9 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LPAutoBalancerV2Integration — REAL Base-fork WETH/cbBTC no-swap reset test.
+// LPAutoBalancerV2Integration — REAL Base-fork WETH/cbBTC no-swap rebalanceUsingAlt test.
 //
-// Proves the V2 reset() rebuilds a dual position from REAL Aerodrome Slipstream
+// Proves the V2 rebalanceUsingAlt() rebuilds a dual position from REAL Aerodrome Slipstream
 // liquidity, conserving principal WITHOUT any swap (V2 has no router/quoter — the
 // only way principal moves is in/out of the position manager, never sold).
 //
@@ -154,7 +154,7 @@ contract LPAutoBalancerV2Integration is Test {
             maxCenterDeviation: 800_000,
             twapWindow: 60,
             // Deviation gate is exercised in the unit suite; here we keep it wide so a
-            // deliberate large swap (to push the main out of range) doesn't block reset.
+            // deliberate large swap (to push the main out of range) doesn't block rebalanceUsingAlt.
             maxTickDeviation: 800_000,
             maxRebalanceLossBps: 500, // 5% — covers concentrated→tight rebuild rounding headroom
             minRebalanceInterval: 0,
@@ -185,9 +185,9 @@ contract LPAutoBalancerV2Integration is Test {
         return this.onERC721Received.selector;
     }
 
-    function _defaultParams() internal view returns (LPAutoBalancerV2.ResetParams memory) {
+    function _defaultParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
         // Width 400 (= 4 * spacing); mins 0 (fork is deterministic, pinned).
-        return LPAutoBalancerV2.ResetParams({
+        return LPAutoBalancerV2.RebalanceParams({
             width: 400,
             amount0MinMain: 0,
             amount1MinMain: 0,
@@ -207,14 +207,14 @@ contract LPAutoBalancerV2Integration is Test {
         _register(tokenId);
         vm.prank(rebalancer);
         lab.stake();
-        // Accrue AERO so the unstake/skim/restake path runs on reset.
+        // Accrue AERO so the unstake/skim/restake path runs on rebalanceUsingAlt.
         skip(2 hours);
         vm.roll(block.number + 1);
     }
 
-    /// @dev Common post-reset invariants shared by both scenarios: dual position rebuilt, NO SWAP /
+    /// @dev Common post-rebalanceUsingAlt invariants shared by both scenarios: dual position rebuilt, NO SWAP /
     ///      principal conserved (only fees/AERO/dust leave to feeCollector — V2 has no router), AERO
-    ///      forwarded, old NFT burned, Reset emitted. Returns the new main id for caller assertions.
+    ///      forwarded, old NFT burned, RebalancedUsingAlt emitted. Returns the new main id for caller assertions.
     function _assertNoSwapRebuild(
         uint256 oldTokenId,
         uint256 feeColl0Before,
@@ -234,7 +234,7 @@ contract LPAutoBalancerV2Integration is Test {
             assertTrue(altOwner == address(lab) || altOwner == GAUGE, "alt held by contract or gauge");
         }
 
-        // NO SWAP / principal conserved. The value floor inside reset() already enforced
+        // NO SWAP / principal conserved. The value floor inside rebalanceUsingAlt() already enforced
         // valueAfter >= valueBefore*(1 - 5%) on the SAME oracles. Beyond that: V2 has NO router, so
         // principal can never be converted between tokens — the only outflows are to the feeCollector
         // (skimmed fees + AERO + sub-threshold dust). Those outflows must be a tiny fraction of the
@@ -251,33 +251,37 @@ contract LPAutoBalancerV2Integration is Test {
         assertLt(toFeeColl1, 5_000, "cbBTC to feeCollector is fees/dust only, not principal");
 
         // AERO emissions forwarded to feeCollector (position was staked ~2h).
-        assertGt(IERC20(AERO).balanceOf(feeCollector), aeroBefore, "AERO emissions skimmed to feeCollector on reset");
+        assertGt(
+            IERC20(AERO).balanceOf(feeCollector),
+            aeroBefore,
+            "AERO emissions skimmed to feeCollector on rebalanceUsingAlt"
+        );
 
         // Old NFT burned (ownerOf reverts on a burned token).
         vm.expectRevert();
         INonfungiblePositionManager(NFPM).ownerOf(oldTokenId);
 
-        // Reset event emitted with the new main id.
+        // RebalancedUsingAlt event emitted with the new main id.
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bool sawReset;
-        bytes32 resetSig = keccak256("Reset(uint256,uint256,int24,int24)");
+        bool sawRebalance;
+        bytes32 rebalanceSig = keccak256("RebalancedUsingAlt(uint256,uint256,int24,int24)");
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].emitter == address(lab) && logs[i].topics[0] == resetSig) {
-                sawReset = true;
+            if (logs[i].emitter == address(lab) && logs[i].topics[0] == rebalanceSig) {
+                sawRebalance = true;
                 (uint256 emittedMain,,,) = abi.decode(logs[i].data, (uint256, uint256, int24, int24));
-                assertEq(emittedMain, newMain, "Reset event main id matches");
+                assertEq(emittedMain, newMain, "RebalancedUsingAlt event main id matches");
             }
         }
-        assertTrue(sawReset, "Reset event emitted");
+        assertTrue(sawRebalance, "RebalancedUsingAlt event emitted");
     }
 
     // ─── tests ─────────────────────────────────────────────────────────────────
 
-    /// @notice BALANCED rebuild. The main is driven out of range (reset candidacy), then price
-    ///         oscillates back so the withdrawn principal is TWO-sided. The no-swap reset rebuilds a
+    /// @notice BALANCED rebuild. The main is driven out of range (rebalanceUsingAlt candidacy), then price
+    ///         oscillates back so the withdrawn principal is TWO-sided. The no-swap rebalanceUsingAlt rebuilds a
     ///         spot-straddling balanced main → getDecisionSnapshot.mainInRange == true. Proves the
     ///         core conservation path on REAL WETH/cbBTC liquidity with no swap.
-    function test_reset_conservesPrincipal_balancedRebuild() public {
+    function test_rebalanceUsingAlt_conservesPrincipal_balancedRebuild() public {
         (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
         assertEq(ICLPool(POOL).tickSpacing(), TICK_SPACING, "pool tickSpacing");
 
@@ -288,7 +292,7 @@ contract LPAutoBalancerV2Integration is Test {
 
         uint256 tokenId = _bootstrap(tl, tu, 2 ether, 0.05e8);
 
-        // Push spot OUT of the main range (reset would be offered)... 1500 WETH-in moves spot from
+        // Push spot OUT of the main range (rebalanceUsingAlt would be offered)... 1500 WETH-in moves spot from
         // ~-266368 to ~-266663, below tl=-266600 (amounts tuned to the pinned-block pool state).
         _pushTickDown(1_500 ether);
         (, int24 spotOut,,,,) = ICLPool(POOL).slot0();
@@ -311,13 +315,13 @@ contract LPAutoBalancerV2Integration is Test {
 
         vm.prank(rebalancer);
         vm.recordLogs();
-        lab.reset(_defaultParams());
+        lab.rebalanceUsingAlt(_defaultParams());
 
         (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
         // The defining assertion of the balanced path: the spot-centered rebuild is IN RANGE.
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
-        assertTrue(s.mainInRange, "balanced main is in range after spot-centered reset");
+        assertTrue(s.mainInRange, "balanced main is in range after spot-centered rebalanceUsingAlt");
         assertGt(s.mainLiquidity, 0, "rebuilt main has liquidity");
         newMain; // used via the snapshot above
     }
@@ -328,7 +332,7 @@ contract LPAutoBalancerV2Integration is Test {
     ///         liquidity and the position manager reverts; with NO SWAP the missing leg cannot be
     ///         manufactured. The contract's `_mainRange` fix parks the funded token in a single-sided
     ///         range adjacent to spot — valid liquidity, nothing sold, principal fully redeployed.
-    function test_reset_singleSidedWithdrawal_noSwap() public {
+    function test_rebalanceUsingAlt_singleSidedWithdrawal_noSwap() public {
         (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
 
         int24 center = _align(spotTick);
@@ -353,7 +357,7 @@ contract LPAutoBalancerV2Integration is Test {
         vm.prank(rebalancer);
         vm.recordLogs();
         // Without the _mainRange fix this reverts inside the position manager (0-liquidity straddle).
-        lab.reset(_defaultParams());
+        lab.rebalanceUsingAlt(_defaultParams());
 
         (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
@@ -397,8 +401,8 @@ contract LPAutoBalancerV2Integration is Test {
     }
 
     /// @dev Settled compound proceeds arrive as loose WETH + cbBTC on the balancer (receiver ==
-    ///      balancer). reset() mints from balanceOf(this), folding them into the rebuilt position.
-    function test_looseProceeds_foldAtReset() public {
+    ///      balancer). rebalanceUsingAlt() mints from balanceOf(this), folding them into the rebuilt position.
+    function test_looseProceeds_foldAtRebalanceUsingAlt() public {
         (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
         int24 center = _align(spotTick);
         _bootstrap(center - 200, center + 200, 2 ether, 0.05e8);
@@ -412,7 +416,7 @@ contract LPAutoBalancerV2Integration is Test {
         skip(120);
         vm.roll(block.number + 1);
         vm.prank(rebalancer);
-        lab.reset(_defaultParams());
+        lab.rebalanceUsingAlt(_defaultParams());
 
         (uint256 newMain,,) = _readSlot();
         assertGt(newMain, 0, "new main minted");
