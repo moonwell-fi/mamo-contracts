@@ -42,9 +42,12 @@ contract LPCompoundModule is AccessControlEnumerable {
     ///         notional between two deep, tight-deviation feeds — sharing one knob would hand
     ///         any order placer the loose AERO tolerance on the whole approved principal
     ///         (EIP-1271 placement is permissionless while rebalanceInFlight). Default 0 is
-    ///         maximally strict — checkPrice then rejects any below-oracle pricing, so rebalance
-    ///         orders cannot settle until the admin explicitly sets this (same safe-degradation
-    ///         posture as the deferred checker config: unwound principal rebuilds unswapped).
+    ///         maximally strict — checkPrice's condition is `buyAmount > expectedOut·(BPS−bps)/BPS`,
+    ///         so at 0 bps only an order priced strictly ABOVE the Chainlink rate clears (any
+    ///         below-oracle pricing is rejected). This is NOT an absolute "cannot settle" gate — a
+    ///         favorably-priced order can still fill before the knob is set; the hard pre-config
+    ///         block is the deferred checker token-pair config (unconfigured pair reverts checkPrice).
+    ///         Set this before enabling the swap path (unwound principal rebuilds unswapped otherwise).
     uint256 public rebalanceSlippageBps;
     /// @notice Expected CowSwap appData hash for compound orders.
     bytes32 public compoundAppData;
@@ -147,8 +150,7 @@ contract LPCompoundModule is AccessControlEnumerable {
         address t1 = ILPAutoBalancerV2(balancer).token1();
         require(
             (address(o.sellToken) == t0 || address(o.sellToken) == t1)
-                && (address(o.buyToken) == t0 || address(o.buyToken) == t1)
-                && address(o.sellToken) != address(o.buyToken),
+                && (address(o.buyToken) == t0 || address(o.buyToken) == t1) && address(o.sellToken) != address(o.buyToken),
             "tokens must be distinct underlying"
         );
         require(

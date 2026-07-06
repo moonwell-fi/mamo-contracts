@@ -173,7 +173,8 @@ For a true escape hatch mid-flight — for example if the backend key goes dark 
 
 CowSwap orders for the swap path are validated on-chain via `LPCompoundModule.validateRebalanceOrder` (EIP-1271, `isValidSignature`). An order only validates if **all** of the following hold:
 
-- Fill-or-kill sell order strictly between the pool's two underlying tokens (WETH/cbBTC), either direction.
+- Fill-or-kill sell order strictly between the pool's two underlying tokens (WETH/cbBTC).
+- `sellToken == sellTokenInFlight()` — the sell leg must be exactly the one `unwindForSwap` approved this cycle. A reverse-direction order is rejected even though the other token is a valid underlying (defense-in-depth beyond the exact-amount relayer allowance).
 - `receiver == balancer` (the `LPAutoBalancerV2` contract itself, never the backend EOA).
 - Price bounded by the Chainlink-backed `SlippagePriceChecker` using the module's **dedicated `rebalanceSlippageBps`** (011: 50 bps) — NOT the looser compound slippage. This bound matters more than the backend's own limit price: order placement is permissionless while the window is open, so any third-party order is floored here too.
 - Expiry window: minimum 5 minutes (re-checked at settlement — an order cannot settle in its final 5 minutes), maximum the checker's `maxTimePriceValid`. The checker owner must keep `maxTimePriceValid(WETH/cbBTC) < minRebalanceInterval` (6h) so a stale order from one cycle can never settle inside the next cycle's window.

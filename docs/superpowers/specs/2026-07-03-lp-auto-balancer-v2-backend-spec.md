@@ -51,7 +51,7 @@ struct DecisionSnapshotV2 {
 
 Supplementary reads the decision engine needs beyond the snapshot:
 - `position()` — 21-field tuple; notably `token0`, `token1`, `gauge`, `lastRebalance`, `minRebalanceInterval`, `minWidth`, `maxWidth`, `maxRebalanceLossBps`.
-- `rebalanceValueBefore()`, `sellTokenInFlight()`, `swapLossAllowanceBps()`, `maxOracleDelay()` on the balancer.
+- `rebalanceValueBeforePos()`, `rebalanceLooseBefore()` (the two floor terms; `rebalanceValueBefore()` is their diagnostic sum), `sellTokenInFlight()`, `swapLossAllowanceBps()`, `maxOracleDelay()` on the balancer.
 - `POSITION_MANAGER.positions(tokenId)` for exact liquidity/ticks (idle only).
 - `IERC20(token0|token1).balanceOf(balancer)` — loose balances (the principal itself, mid-flight).
 - `IERC20(sellTokenInFlight).allowance(balancer, VAULT_RELAYER)` — remaining approval mid-flight.
@@ -72,22 +72,31 @@ struct UnwindParams {            // unwindForSwap — phase 1
     uint256 deadline;
 }
 
-struct RebalanceParams {         // rebuildAfterSwap AND rebalanceUsingAlt
+struct RebalanceParams {         // rebalanceUsingAlt ONLY (has withdraw-min fields; it tears down)
     uint24  width;               // ∈ [minWidth, maxWidth], multiple of tickSpacing
     uint256 amount0MinMain;      // mint floors, main
     uint256 amount1MinMain;
     uint256 amount0MinAlt;       // mint floors, alt (contract zeroes the unfunded leg)
     uint256 amount1MinAlt;
-    uint256 amount0MinWithdraw;  // teardown floors — USED by rebalanceUsingAlt,
-    uint256 amount1MinWithdraw;  // IGNORED by rebuildAfterSwap (no teardown): pass 0
+    uint256 amount0MinWithdraw;  // teardown sandwich floors, main
+    uint256 amount1MinWithdraw;
     uint256 amount0MinWithdrawAlt;
     uint256 amount1MinWithdrawAlt;
     uint256 deadline;
 }
+
+struct RebuildParams {           // rebuildAfterSwap ONLY — NO withdraw-min fields (teardown
+    uint24  width;               // already happened in unwindForSwap; this call only mints)
+    uint256 amount0MinMain;      // mint floors, main
+    uint256 amount1MinMain;
+    uint256 amount0MinAlt;       // mint floors, alt (contract zeroes the unfunded leg)
+    uint256 amount1MinAlt;
+    uint256 deadline;
+}
 ```
 
-- `unwindForSwap(UnwindParams)` — guards in order: active → not-in-flight → cooldown → module set → sellToken/amount valid → calm gate. Snapshots `rebalanceValueBefore` (USD 1e8, position + loose at current prices), tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
-- `rebuildAfterSwap(RebalanceParams)` — requires in-flight; **no cooldown**; revokes approval; re-runs calm gate; mints main (+alt from surplus); enforces `valueAfter ≥ rebalanceValueBefore × (10000 − maxRebalanceLossBps − swapLossAllowanceBps)/10000`; clears in-flight state; forwards dust; restakes iff staked at unwind; **stamps `lastRebalance`**. Emits `RebalanceRebuilt(uint256 mainTokenId, uint256 altTokenId)`.
+- `unwindForSwap(UnwindParams)` — guards in order: active → not-in-flight → cooldown → module set → sellToken/amount valid → calm gate. Snapshots the value floor as TWO fields — `rebalanceValueBeforePos` (main + alt PRINCIPAL, USD 1e8) and `rebalanceLooseBefore` (loose token0/token1 already on the contract, USD 1e8); the public `rebalanceValueBefore()` is their sum, diagnostic only. Tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight` and `sellTokenInFlight = sellToken`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
+- `rebuildAfterSwap(RebuildParams)` — **takes `RebuildParams`, NOT `RebalanceParams`** (6 fields, no withdraw-mins — a `RebalanceParams`-encoded call hits a different selector and reverts). Requires in-flight; **no cooldown**; revokes approval; re-runs calm gate; mints main (+alt from surplus); enforces `valueAfter ≥ rebalanceValueBeforePos × (10000 − maxRebalanceLossBps − swapLossAllowanceBps)/10000 + rebalanceLooseBefore` (position term haircut, loose term added back UN-haircut — same H-1 treatment as `rebalanceUsingAlt`); clears in-flight state; forwards dust; restakes iff staked at unwind; **stamps `lastRebalance`**. Emits `RebalanceRebuilt(uint256 mainTokenId, uint256 altTokenId)`.
 - `rebalanceUsingAlt(RebalanceParams)` — the atomic no-swap path (same-transaction floor: `valueAfter ≥ valueBeforePos × (10000 − maxRebalanceLossBps)/10000 + looseBefore`). Emits `RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper)`.
 - `compound(uint16 compoundBps)` — harvests AERO from staked legs; `compoundBps`/10000 → module, remainder → feeCollector. Emits `CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps)`.
 - `stake()` / `unstake()` — gauge deposit/withdraw for both legs.
@@ -213,13 +222,13 @@ The `signature` bytes are the ABI encoding of the full `GPv2Order.Data` struct (
 Poll `GET /orders/{uid}` (and watch GPv2 `Trade` logs) every `POLL_SECONDS` (default 30).
 - **Fulfilled** → REBUILD immediately (every in-flight minute is unstaked downtime).
 - **Policy-expired**: treat the order as dead at `validTo − 5 min` — the module's settlement-time lower bound (`validTo ≥ now + 5 min`) makes later settlement impossible. Then either re-post (§6.5) or REBUILD unswapped.
-- **API rejection at placement**: re-check `rebalanceInFlight == true`, appData preimage/hash match, `balanceOf(sellToken) ≥ sellAmount`, allowance ≥ sellAmount, and that the checker path is configured (a `checkPrice` revert inside simulation reads as signature-verification failure).
+- **API rejection at placement**: re-check `rebalanceInFlight == true`, `order.sellToken == sellTokenInFlight()` (the module hard-requires the order's sell leg to match the leg `unwindForSwap` approved — "sellToken must match in-flight approval"; a reverse-direction order is rejected even though the other token is a valid underlying), appData preimage/hash match, `balanceOf(sellToken) ≥ sellAmount`, allowance ≥ sellAmount, and that the checker path is configured (a `checkPrice` revert inside simulation reads as signature-verification failure).
 
 ### 6.5 Re-posting
 EIP-1271 orders have no off-chain hard-cancel: orderbook cancellation only delists; a solver holding the order can still settle it until `validTo` while the window is open and allowance remains. Therefore: **at most one live order at a time**, and when re-posting after a policy-expiry, size so that `Σ sellAmounts of all orders whose validTo has not passed ≤ approval` — the allowance is the real serialization primitive. Total in-flight time across re-posts is bounded by the payback budget: stop re-posting once `elapsed × R_now_usd` approaches `swapCostUsd` headroom and rebuild unswapped.
 
 ### 6.6 Third-party orders (accepted residual risk)
-While in flight, anyone can post a validating order against the approved principal; economics are floored at `rebalanceSlippageBps` (50 bps) below Chainlink, direction/size pinned by the exact-amount allowance. This is why the knob is tight and windows are short. Detection: a `Trade` with owner == balancer and uid ≠ ours. Response: none needed on-chain (the trade IS a fair-priced version of the intended swap) — recompute the remaining excess from balances and proceed to REBUILD.
+While in flight, anyone can post a validating order against the approved principal; economics are floored at `rebalanceSlippageBps` (50 bps) below Chainlink. Direction is pinned by the module's explicit `sellToken == sellTokenInFlight()` require (defense-in-depth beyond allowance scoping); size is pinned by the exact-amount allowance. This is why the knob is tight and windows are short. Detection: a `Trade` with owner == balancer and uid ≠ ours. Response: none needed on-chain (the trade IS a fair-priced version of the intended swap) — recompute the remaining excess from balances and proceed to REBUILD.
 
 ## 7. Config invariants (assert at startup and before each SWAP cycle)
 
@@ -243,7 +252,7 @@ Watchdogs (every poll): in-flight age (`now − rebalanceStartedAt`; WARN > `ORD
 | --- | --- | --- |
 | `TwapDeviation` on unwind (idle) | Skip cycle; retry next sweep. | — |
 | `TwapDeviation` on rebuild (in flight) | Backoff retry 5→15→30 min. Volatility gates the mint on purpose. | WARN at 1h in flight; PAGE at 2h. |
-| **`ValueFloor` on rebuild (§8.2)** | Compute `ratio = valueNowUsd / rebalanceValueBefore` from reads. Retry every 15 min while `ratio` trends up. | If `ratio < (10000−400)/10000` from market drop: alert with the three Safe options — wait it out (funds are loose tokens, no IL, only AERO downtime), raise `swapLossAllowanceBps` (≤500) / `maxRebalanceLossBps` (≤500, MANAGER), or `exit(SAFE)`. Never spam retries during a crash — each costs gas and mints/burns nothing. |
+| **`ValueFloor` on rebuild (§8.2)** | The on-chain floor is `valueAfter ≥ rebalanceValueBeforePos·(10000−maxRebalanceLossBps−swapLossAllowanceBps)/10000 + rebalanceLooseBefore` (loose term is NOT haircut). Predict it from reads with the SAME split — do NOT use `valueNowUsd / rebalanceValueBefore()` (the combined sum), which over-predicts a revert whenever loose value was present at unwind. Retry every 15 min while the margin trends up. | If it trips from a market drop: alert with the three Safe options — wait it out (funds are loose tokens, no IL, only AERO downtime), raise `swapLossAllowanceBps` (≤500) / `maxRebalanceLossBps` (≤500, MANAGER), or `exit(SAFE)`. Never spam retries during a crash — each costs gas and mints/burns nothing. |
 | Mint slippage revert (NFPM `Price slippage check`) | Distinct from ValueFloor — recompute mint mins at fresh spot and retry once. | Recurring ⇒ tolerance too tight; bump `MINT_TOLERANCE_BPS`. |
 | `StaleOracle` anywhere | Do nothing on-chain. | PAGE — feed outage. `exit` reads no oracles (0-min emergency path) so it still works if teardown becomes urgent, but a feed outage alone rarely warrants it. |
 | `EnforcedPause` | Freeze all writes, keep read-only monitoring. | Notify; guardian decides. If paused mid-flight: funds sit loose on the balancer; `exit` (Safe) is the only mover. |
@@ -259,7 +268,7 @@ Watchdogs (every poll): in-flight age (`now − rebalanceStartedAt`; WARN > `ORD
 
 ### 9.1 Weekly MAMO drop share
 
-`compound(uint16 compoundBps)` (LPAutoBalancerV2.sol:508) is the drop-share knob: each harvest sends `(10000 − compoundBps)/10000` of the claimed AERO to the `feeCollector` (DROP_AUTOMATION → the weekly MAMO drop) and forwards the rest to the compound module for reinvestment. Principal is never touched — rewards and LP liquidity are fully segregated, and no privileged withdrawal is involved.
+`compound(uint16 compoundBps)` (in `LPAutoBalancerV2.sol`) is the drop-share knob: each harvest sends `(10000 − compoundBps)/10000` of the claimed AERO to the `feeCollector` (DROP_AUTOMATION → the weekly MAMO drop) and forwards the rest to the compound module for reinvestment. Principal is never touched — rewards and LP liquidity are fully segregated, and no privileged withdrawal is involved.
 
 - **Default flow favors the drop.** Every AERO path that is NOT `compound()` already routes 100% to DROP_AUTOMATION: the permissionless `claimEmissions()`, and the auto-skims inside `unstake`, both rebalance flavors, and `unwindForSwap`'s teardown. `compound()` exists to carve out the *reinvest* share, not to enable the drop share.
 - **Policy knob.** `MOONWELL_LP_COMPOUND_BPS` (default `7000` → 30% of each harvest to the weekly drop). Per-call, full 0–10000 range; changing weekly policy is an env change, no transaction.
