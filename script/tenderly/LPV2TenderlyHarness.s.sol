@@ -33,6 +33,10 @@ PR review.
 It is NOT a replacement for the unit/integration suites — it complements them by
 proving the *deployed artifact* behaves as specified on a live fork.
 
+NOTE ON NAMING: the contract entrypoint was renamed reset() → rebalanceUsingAlt()
+upstream. The harness keeps "reset" as its phase vocabulary (doReset/justReset and
+the reset.* log labels the orchestrator greps) — they drive rebalanceUsingAlt().
+
 WHY MULTIPLE ENTRYPOINTS
 ------------------------
 A single `--broadcast` run simulates the whole script once and then replays the
@@ -86,8 +90,6 @@ contract LPV2TenderlyHarness is Script {
     uint256 constant AMT_WETH = 2 ether;
     uint256 constant AMT_CBBTC = 0.05e8;
 
-    uint256 constant SLOT = 0; // first registerPosition on a fresh lab always returns 0
-
     // OZ AccessControl: error AccessControlUnauthorizedAccount(address,bytes32)
     bytes4 constant ACCESS_CONTROL_UNAUTHORIZED =
         bytes4(keccak256("AccessControlUnauthorizedAccount(address,bytes32)"));
@@ -140,10 +142,10 @@ contract LPV2TenderlyHarness is Script {
         (, t,,,,) = ICLPool(POOL).slot0();
     }
 
-    function _resetParams() internal view returns (LPAutoBalancerV2.ResetParams memory) {
+    function _resetParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
         // mins = 0: the vnet is calm (no in-harness price manipulation), so the rebuild is
         // deterministic. Sandwich-min wiring is asserted in the unit suite.
-        return LPAutoBalancerV2.ResetParams({
+        return LPAutoBalancerV2.RebalanceParams({
             width: WIDTH,
             amount0MinMain: 0,
             amount1MinMain: 0,
@@ -248,7 +250,7 @@ contract LPV2TenderlyHarness is Script {
         require(INonfungiblePositionManager(NFPM).ownerOf(tokenId) == address(lab), "registerStake: lab must hold NFT");
 
         vm.startBroadcast();
-        uint256 slotId = lab.registerPosition(
+        lab.registerPosition(
             LPAutoBalancerV2.ManagedPositionV2({
                 mainTokenId: tokenId,
                 altTokenId: 0,
@@ -277,15 +279,13 @@ contract LPV2TenderlyHarness is Script {
                 active: false
             })
         );
-        require(slotId == SLOT, "registerStake: expected slot 0");
 
         // Stake only the balanced scenario: it then accrues AERO while the orchestrator advances
-        // the vnet clock, so reset()'s unstake/AERO-skim path runs against real emissions.
-        if (!single) lab.stake(slotId);
+        // the vnet clock, so rebalanceUsingAlt()'s unstake/AERO-skim path runs against real emissions.
+        if (!single) lab.stake();
         vm.stopBroadcast();
 
         console.log("registerStake.tokenId :", tokenId);
-        console.log("registerStake.slot    :", slotId);
         console.log("registerStake.staked  :", !single);
         console.log("registerStake [OK]");
     }
@@ -302,18 +302,18 @@ contract LPV2TenderlyHarness is Script {
         address rando = address(0xBAD);
 
         vm.prank(rando);
-        (bool ok0, bytes memory r0) = address(lab).call(abi.encodeCall(lab.reset, (SLOT, _resetParams())));
+        (bool ok0, bytes memory r0) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
         require(!ok0, "reset must revert for non-REBALANCER");
         require(bytes4(r0) == ACCESS_CONTROL_UNAUTHORIZED, "reset revert must be AccessControl");
 
         vm.prank(rando);
-        (bool ok1, bytes memory r1) = address(lab).call(abi.encodeCall(lab.exit, (SLOT, rando)));
+        (bool ok1, bytes memory r1) = address(lab).call(abi.encodeCall(lab.exit, (rando)));
         require(!ok1, "exit must revert for non-ADMIN");
         require(bytes4(r1) == ACCESS_CONTROL_UNAUTHORIZED, "exit revert must be AccessControl");
 
         // a privileged-but-wrong-role surface: stake is REBALANCER-only too
         vm.prank(rando);
-        (bool ok2, bytes memory r2) = address(lab).call(abi.encodeCall(lab.stake, (SLOT)));
+        (bool ok2, bytes memory r2) = address(lab).call(abi.encodeCall(lab.stake, ()));
         require(!ok2, "stake must revert for non-REBALANCER");
         require(bytes4(r2) == ACCESS_CONTROL_UNAUTHORIZED, "stake revert must be AccessControl");
 
@@ -334,7 +334,7 @@ contract LPV2TenderlyHarness is Script {
         vm.fee(0);
         LPAutoBalancerV2 lab = _lab();
         vm.prank(_sender()); // REBALANCER
-        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.reset, (SLOT, _resetParams())));
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
         require(!ok, "reset must revert when spot deviates from TWAP");
         require(bytes4(ret) == LPAutoBalancerV2.TwapDeviation.selector, "revert must be TwapDeviation");
         console.log("calmGate.reset_reverted_TwapDeviation:", true);
@@ -350,17 +350,17 @@ contract LPV2TenderlyHarness is Script {
         LPAutoBalancerV2 lab = _lab();
         bool single = _isSingleSided();
 
-        LPAutoBalancerV2.DecisionSnapshotV2 memory pre = lab.getDecisionSnapshot(SLOT);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory pre = lab.getDecisionSnapshot();
         uint256 fc0 = IERC20(WETH).balanceOf(FEE_COLLECTOR);
         uint256 fc1 = IERC20(CBBTC).balanceOf(FEE_COLLECTOR);
         uint256 fca = IERC20(AERO).balanceOf(FEE_COLLECTOR);
         int24 spotBefore = _spotTick();
 
         vm.startBroadcast();
-        lab.reset(SLOT, _resetParams());
+        lab.rebalanceUsingAlt(_resetParams());
         vm.stopBroadcast();
 
-        LPAutoBalancerV2.DecisionSnapshotV2 memory post = lab.getDecisionSnapshot(SLOT);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory post = lab.getDecisionSnapshot();
         uint256 d0 = IERC20(WETH).balanceOf(FEE_COLLECTOR) - fc0;
         uint256 d1 = IERC20(CBBTC).balanceOf(FEE_COLLECTOR) - fc1;
         uint256 da = IERC20(AERO).balanceOf(FEE_COLLECTOR) - fca;
@@ -396,7 +396,7 @@ contract LPV2TenderlyHarness is Script {
         // reset() just set lastRebalance = now; minRebalanceInterval = 3600 > elapsed, so a second
         // reset by the same REBALANCER must revert Cooldown.
         vm.prank(_sender());
-        (bool okCd, bytes memory rCd) = address(lab).call(abi.encodeCall(lab.reset, (SLOT, _resetParams())));
+        (bool okCd, bytes memory rCd) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
         require(!okCd, "reset: immediate 2nd reset must hit cooldown");
         require(bytes4(rCd) == LPAutoBalancerV2.Cooldown.selector, "reset: 2nd-reset revert must be Cooldown");
 
@@ -428,7 +428,7 @@ contract LPV2TenderlyHarness is Script {
         uint256 b1 = IERC20(CBBTC).balanceOf(to);
 
         vm.startBroadcast();
-        lab.exit(SLOT, to);
+        lab.exit(to);
         vm.stopBroadcast();
 
         uint256 g0 = IERC20(WETH).balanceOf(to) - b0;
@@ -441,7 +441,7 @@ contract LPV2TenderlyHarness is Script {
 
         // ── INVARIANT: slot marked inactive (getDecisionSnapshot reverts NotActive) ──
         bool inactive;
-        try lab.getDecisionSnapshot(SLOT) {
+        try lab.getDecisionSnapshot() {
             inactive = false;
         } catch {
             inactive = true;
@@ -502,9 +502,9 @@ contract LPV2TenderlyHarness is Script {
         uint256 fc0 = IERC20(WETH).balanceOf(FEE_COLLECTOR);
         uint256 fc1 = IERC20(CBBTC).balanceOf(FEE_COLLECTOR);
         vm.startBroadcast();
-        lab.reset(SLOT, _resetParams());
+        lab.rebalanceUsingAlt(_resetParams());
         vm.stopBroadcast();
-        LPAutoBalancerV2.DecisionSnapshotV2 memory post = lab.getDecisionSnapshot(SLOT);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory post = lab.getDecisionSnapshot();
         require(post.mainLiquidity > 0, "justReset: rebuilt main has liquidity");
         require(IERC20(WETH).balanceOf(FEE_COLLECTOR) - fc0 < 0.02 ether, "justReset: WETH dust only");
         require(IERC20(CBBTC).balanceOf(FEE_COLLECTOR) - fc1 < 10_000, "justReset: cbBTC dust only");
@@ -517,7 +517,7 @@ contract LPV2TenderlyHarness is Script {
 
     /// @notice Post-reset assertion: main is a spot-straddling in-range position (re-center scenario).
     function assertInRange() public view {
-        LPAutoBalancerV2.DecisionSnapshotV2 memory s = _lab().getDecisionSnapshot(SLOT);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = _lab().getDecisionSnapshot();
         require(s.mainLiquidity > 0, "assertInRange: no liquidity");
         require(s.mainInRange, "assertInRange: main not in range after re-center");
         console.log("assertInRange [OK]");
@@ -526,7 +526,7 @@ contract LPV2TenderlyHarness is Script {
     /// @notice Post-reset assertion: main is a valid single-sided position parked ABOVE spot with no
     ///         swap (driven single-sided scenario — spot pushed decisively below the old range).
     function assertSingleSided() public view {
-        LPAutoBalancerV2.DecisionSnapshotV2 memory s = _lab().getDecisionSnapshot(SLOT);
+        LPAutoBalancerV2.DecisionSnapshotV2 memory s = _lab().getDecisionSnapshot();
         require(s.mainLiquidity > 0, "assertSingleSided: no liquidity");
         require(s.mainTickLower > s.spotTick, "assertSingleSided: main not parked above spot");
         require(!s.mainInRange, "assertSingleSided: main unexpectedly in range");
@@ -539,7 +539,7 @@ contract LPV2TenderlyHarness is Script {
         LPAutoBalancerV2 lab = _lab();
         vm.startBroadcast();
         // same bounds as registerStake but a TIGHT maxTickDeviation (5 ticks).
-        lab.setPositionConfig(SLOT, 200, 200_000, 800_000, 60, int24(5), 500, 3600);
+        lab.setPositionConfig(200, 200_000, 800_000, 60, int24(5), 500, 3600);
         vm.stopBroadcast();
         console.log("tightenCalmGate.maxTickDeviation :", int256(5));
         console.log("tightenCalmGate [OK]");
@@ -550,7 +550,7 @@ contract LPV2TenderlyHarness is Script {
         vm.fee(0);
         LPAutoBalancerV2 lab = _lab();
         vm.prank(_sender());
-        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.reset, (SLOT, _resetParams())));
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
         require(!ok, "checkStaleOracle: reset must revert when feeds are stale");
         require(bytes4(ret) == LPAutoBalancerV2.StaleOracle.selector, "checkStaleOracle: revert must be StaleOracle");
         console.log("checkStaleOracle.reset_reverted_StaleOracle :", true);
