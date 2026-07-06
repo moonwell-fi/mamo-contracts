@@ -453,4 +453,102 @@ contract LPCompoundModuleUnitTest is Test {
         (bytes32 d, bytes memory e) = _sig(o);
         assertEq(module.validateRebalanceOrder(d, e), bytes4(0x1626ba7e));
     }
+
+    // ---------- structural order-shape rejections (both validation paths) ----------
+    // The classic CowSwap surface checks: a BUY-kind, partially-fillable, or Balancer-vault
+    // internal/external-balance order changes settlement semantics on the whole approved
+    // amount, so each shape must be rejected in BOTH validation paths.
+
+    /// @dev Arm the in-flight window so validateRebalanceOrder reaches the structural checks.
+    function _armRebalanceWindow() internal {
+        bal.setInFlight(true);
+        bal.setSellTokenInFlight(token0);
+        spc.setMaxTimePriceValid(token0, 1 hours);
+    }
+
+    function test_isValidSignature_revertsBuyKind() public {
+        GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        o.kind = GPv2Order.KIND_BUY;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("must be sell"));
+        module.isValidSignature(d, e);
+    }
+
+    function test_isValidSignature_revertsPartiallyFillable() public {
+        GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        o.partiallyFillable = true;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("must be fill-or-kill"));
+        module.isValidSignature(d, e);
+    }
+
+    function test_isValidSignature_revertsSellBalanceNotErc20() public {
+        GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        o.sellTokenBalance = GPv2Order.BALANCE_EXTERNAL;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("sell must be erc20"));
+        module.isValidSignature(d, e);
+    }
+
+    function test_isValidSignature_revertsBuyBalanceNotErc20() public {
+        GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        o.buyTokenBalance = GPv2Order.BALANCE_INTERNAL;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("buy must be erc20"));
+        module.isValidSignature(d, e);
+    }
+
+    function test_validateRebalanceOrder_revertsBuyKind() public {
+        _armRebalanceWindow();
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        o.kind = GPv2Order.KIND_BUY;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("must be sell"));
+        module.validateRebalanceOrder(d, e);
+    }
+
+    function test_validateRebalanceOrder_revertsPartiallyFillable() public {
+        _armRebalanceWindow();
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        o.partiallyFillable = true;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("must be fill-or-kill"));
+        module.validateRebalanceOrder(d, e);
+    }
+
+    function test_validateRebalanceOrder_revertsSellBalanceNotErc20() public {
+        _armRebalanceWindow();
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        o.sellTokenBalance = GPv2Order.BALANCE_EXTERNAL;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("sell must be erc20"));
+        module.validateRebalanceOrder(d, e);
+    }
+
+    function test_validateRebalanceOrder_revertsBuyBalanceNotErc20() public {
+        _armRebalanceWindow();
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        o.buyTokenBalance = GPv2Order.BALANCE_INTERNAL;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("buy must be erc20"));
+        module.validateRebalanceOrder(d, e);
+    }
+
+    function test_validateRebalanceOrder_revertsFeeNonZero() public {
+        _armRebalanceWindow();
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        o.feeAmount = 1;
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("fee must be zero"));
+        module.validateRebalanceOrder(d, e);
+    }
+
+    function test_validateRebalanceOrder_revertsBadAppData() public {
+        _armRebalanceWindow();
+        GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
+        o.appData = keccak256("wrong");
+        (bytes32 d, bytes memory e) = _sig(o);
+        vm.expectRevert(bytes("bad appData"));
+        module.validateRebalanceOrder(d, e);
+    }
 }

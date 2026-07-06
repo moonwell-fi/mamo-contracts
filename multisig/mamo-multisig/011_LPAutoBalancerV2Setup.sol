@@ -145,11 +145,18 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
 
         // 2. Compound module (idempotent). Admin == F-MAMO so the Safe can run the setters in build().
         if (!addresses.isAddressSet("MAMO_LP_COMPOUND_MODULE")) {
+            // The overridden run() calls deploy() with no broadcast wrapper (unlike the FPS base
+            // run(), which wraps deploy() in vm.startBroadcast). The balancer leg above broadcasts
+            // inside deployLPAutoBalancerV2; this CREATE must broadcast too, or a production
+            // `forge script --broadcast` records the module only in simulation and the address
+            // book ends up pointing at codeless bytes.
+            vm.startBroadcast();
             LPCompoundModule module = new LPCompoundModule(
                 addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2"),
                 addresses.getAddress("AERO"),
                 addresses.getAddress("F-MAMO")
             );
+            vm.stopBroadcast();
             addresses.addAddress("MAMO_LP_COMPOUND_MODULE", address(module), true);
             console.log("LPCompoundModule deployed at:", address(module));
         }

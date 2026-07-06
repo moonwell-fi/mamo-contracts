@@ -647,6 +647,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             LPBalancerLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
+        // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
+        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
+        if (params.width % uint24(p.tickSpacing) != 0) revert InvalidWidth();
 
         (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
 
@@ -765,6 +768,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         );
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
+        // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
+        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
+        if (params.width % uint24(p.tickSpacing) != 0) revert InvalidWidth();
 
         // Choose the new main range. The common case is a spot-centered straddle. But rebalancing a
         // FULLY out-of-range position withdraws 100%-single-sided principal (a CL position outside

@@ -2378,4 +2378,317 @@ contract LPAutoBalancerV2UnitTest is Test {
             ILPCompoundModuleRebalance.validateRebalanceOrder.selector, LPCompoundModule.validateRebalanceOrder.selector
         );
     }
+
+    // ---------- per-call width alignment ----------
+    // Config minWidth/maxWidth are enforced to be spacing multiples, but the per-call width is
+    // caller-supplied: 500 is inside [400, 2000] yet 500 % 200 != 0, so without the alignment
+    // check the mint would only revert deep inside the pool (tick-not-spaced) after teardown.
+
+    function test_rebalanceUsingAlt_revertsUnalignedWidth() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18);
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.width = 500;
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.InvalidWidth.selector);
+        lab.rebalanceUsingAlt(params);
+    }
+
+    function test_rebuildAfterSwap_revertsUnalignedWidth() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        LPAutoBalancerV2.RebuildParams memory params = _defaultRebuildParams();
+        params.width = 500;
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.InvalidWidth.selector);
+        lab.rebuildAfterSwap(params);
+    }
+
+    // ---------- unwindForSwap with a live alt leg ----------
+    // Realistic cycle-N+1 state: a prior rebalanceUsingAlt left an alt NFT and the backend now
+    // chooses the swap path. Phase 1 must tear down BOTH legs and count the alt in the snapshot.
+
+    /// @dev Register with a live alt whose range [200,400] sits above spot, holding only token0.
+    function _registerWithLiveAlt() internal {
+        _register(false);
+        stdstore.target(address(lab)).sig("position()").depth(1).checked_write(ALT_TOKEN_ID);
+        mockPM.setPosition(ALT_TOKEN_ID, OLD_TU, OLD_TU + 200, NEW_LIQ, token0, token1);
+    }
+
+    function test_unwindForSwap_withLiveAlt_tearsDownBothAndSnapshotsAltValue() public {
+        _registerWithLiveAlt();
+        _setRealModule();
+        // Zero the MAIN's liquidity so rebalanceValueBeforePos can only come from the alt —
+        // proving the snapshot's _altValue term without reproducing the USD math in the test.
+        mockPM.setPosition(TOKEN_ID, OLD_TL, OLD_TU, 0, token0, token1);
+        _stagePrincipal(1e18, 1e18);
+        // Three slot-1 collects transfer tokens out of the PM here (alt fee skim, main principal
+        // collect — the mock pays slot-1 amounts even for the liq-0 main — and alt principal
+        // collect); _stagePrincipal funded one, so top the PM up for the other two.
+        tok0.mint(address(mockPM), 2e18);
+        tok1.mint(address(mockPM), 2e18);
+
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        assertTrue(mockPM.wasBurned(TOKEN_ID), "main burned");
+        assertTrue(mockPM.wasBurned(ALT_TOKEN_ID), "alt burned");
+        assertEq(mockPM.burnCallCount(), 2);
+        assertGt(lab.rebalanceValueBeforePos(), 0, "alt principal counted in the unwind snapshot");
+        assertTrue(lab.rebalanceInFlight());
+    }
+
+    function test_unwindForSwap_altWithdrawMinEnforced() public {
+        _registerWithLiveAlt();
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        tok0.mint(address(mockPM), 1e18);
+        tok1.mint(address(mockPM), 1e18);
+
+        // Main mins 0 (its decrease passes); alt min above the staged withdraw. The main decrease
+        // runs FIRST, so the revert proves the alt mins are threaded to the ALT decrease.
+        LPAutoBalancerV2.UnwindParams memory params = _defaultUnwindParams();
+        params.amount0MinWithdrawAlt = 2e18;
+
+        vm.prank(rebalancer);
+        vm.expectRevert(bytes("Price slippage check"));
+        lab.unwindForSwap(params);
+    }
+
+    // ---------- pause interactions ----------
+
+    function test_exit_succeedsWhilePaused_midFlight() public {
+        // The runbook's documented escape hatch: guardian pauses mid-flight, and the admin's
+        // exit() — deliberately NOT whenNotPaused — is the only way to recover unwound principal.
+        _register(false);
+        _setRealModule();
+        _unwind();
+        vm.prank(guardian);
+        lab.pause();
+
+        address safe = makeAddr("safeExit");
+        vm.prank(admin);
+        lab.exit(safe);
+
+        assertFalse(lab.rebalanceInFlight(), "in-flight window closed");
+        assertEq(lab.sellTokenInFlight(), address(0), "sell token cleared");
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "relayer approval revoked");
+        assertEq(tok0.balanceOf(safe), 1e18, "principal token0 recovered while paused");
+        assertEq(tok1.balanceOf(safe), 1e18, "principal token1 recovered while paused");
+        assertFalse(_readActive(), "position deactivated");
+    }
+
+    function test_unpause_restoresRebalance() public {
+        _register(false);
+        vm.prank(guardian);
+        lab.pause();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+
+        vm.prank(guardian);
+        lab.unpause();
+
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        assertEq(mainTokenId, NEW_TOKEN_ID, "rebalance ran after unpause");
+    }
+
+    // ---------- admin / lifecycle surface ----------
+
+    function test_deregisterPosition_transfersBothNftsAndDeactivates() public {
+        _registerWithAlt(false);
+        address to = makeAddr("deregisterTo");
+
+        vm.prank(admin);
+        lab.deregisterPosition(to);
+
+        assertFalse(_readActive(), "deactivated");
+        assertEq(mockPM.transferCallCount(), 2, "both NFTs transferred");
+        assertEq(mockPM.lastTo(), to);
+        // NFT ids are NOT zeroed by deregister (only exit() zeroes them), so setPool stays
+        // blocked and re-pointing goes through registerPosition — asserted here so the
+        // documented asymmetry (spec 3.7) does not silently change.
+        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,,,) = lab.position();
+        assertEq(mainTokenId, TOKEN_ID, "main id kept");
+        assertEq(altTokenId, ALT_TOKEN_ID, "alt id kept");
+    }
+
+    function test_deregisterPosition_revertsNotActive() public {
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.NotActive.selector);
+        lab.deregisterPosition(makeAddr("to"));
+    }
+
+    function test_deregisterPosition_revertsZeroAddress() public {
+        _register(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.ZeroAddress.selector);
+        lab.deregisterPosition(address(0));
+    }
+
+    function test_deregisterPosition_revertsWhenStaked() public {
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PositionStaked.selector);
+        lab.deregisterPosition(makeAddr("to"));
+    }
+
+    function test_withdrawPosition_autoUnstakesAndTransfersBoth() public {
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        address to = makeAddr("withdrawTo");
+
+        vm.prank(admin);
+        lab.withdrawPosition(to);
+
+        assertFalse(_readActive(), "deactivated");
+        (bool mainStaked, bool altStaked) = _readStakeFlags();
+        assertFalse(mainStaked, "main auto-unstaked");
+        assertFalse(altStaked, "alt auto-unstaked");
+        assertEq(mockPM.lastTo(), to, "NFTs sent to recipient");
+    }
+
+    function test_setFeeCollector_updates() public {
+        _register(false);
+        address newCollector = makeAddr("newCollector");
+        vm.prank(admin);
+        lab.setFeeCollector(newCollector);
+        (,,,,,,,,, address fc,,,,,,,,,,,) = lab.position();
+        assertEq(fc, newCollector);
+    }
+
+    function test_setFeeCollector_revertsZeroAddress() public {
+        _register(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.ZeroAddress.selector);
+        lab.setFeeCollector(address(0));
+    }
+
+    function test_setOracles_updatesAndProbes() public {
+        _register(false);
+        address newOracle0 = address(new MockPriceFeed(2e8, 8, block.timestamp));
+        address newOracle1 = address(new MockPriceFeed(3e8, 8, block.timestamp));
+
+        vm.prank(admin);
+        lab.setOracles(newOracle0, newOracle1);
+        (,,,,,,,,,, address o0, address o1,,,,,,,,,) = lab.position();
+        assertEq(o0, newOracle0);
+        assertEq(o1, newOracle1);
+    }
+
+    function test_setOracles_revertsZeroOracle() public {
+        _register(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.OracleRequired.selector);
+        lab.setOracles(address(0), oracle1);
+    }
+
+    function test_setOracles_revertsOnStaleFeedProbe() public {
+        _register(false);
+        // Probe must fail in the admin tx, not on the next rebalance: a feed older than
+        // maxOracleDelay (26h default) reverts StaleOracle at set time.
+        address staleFeed = address(new MockPriceFeed(1e8, 8, block.timestamp));
+        vm.warp(block.timestamp + 27 hours);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        lab.setOracles(staleFeed, oracle1);
+    }
+
+    function test_setMaxOracleDelay_updates() public {
+        vm.prank(admin);
+        lab.setMaxOracleDelay(1 days);
+        assertEq(lab.maxOracleDelay(), 1 days);
+    }
+
+    function test_setMaxOracleDelay_revertsOutOfBounds() public {
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
+        lab.setMaxOracleDelay(0);
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
+        lab.setMaxOracleDelay(7 days + 1);
+    }
+
+    function test_recoverERC20_sweepsToRecipient() public {
+        address to = makeAddr("recoverTo");
+        tok0.mint(address(lab), 5e17);
+
+        vm.prank(admin);
+        lab.recoverERC20(token0, to, 5e17);
+        assertEq(tok0.balanceOf(to), 5e17);
+    }
+
+    function test_recoverERC20_revertsZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.ZeroAddress.selector);
+        lab.recoverERC20(token0, address(0), 1);
+    }
+
+    function test_recoverETH_sweepsFullBalance() public {
+        address payable to = payable(makeAddr("ethTo"));
+        vm.deal(address(lab), 1 ether);
+
+        vm.prank(admin);
+        lab.recoverETH(to);
+        assertEq(to.balance, 1 ether);
+        assertEq(address(lab).balance, 0);
+    }
+
+    function test_onERC721Received_rejectsNonPositionManager() public {
+        vm.expectRevert(bytes("Only position manager"));
+        lab.onERC721Received(address(this), address(this), 1, "");
+    }
+
+    function test_stake_revertsNoGauge() public {
+        _register(false); // no gauge configured
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NoGauge.selector);
+        lab.stake();
+    }
+
+    function test_stake_revertsAlreadyStaked() public {
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.AlreadyStaked.selector);
+        lab.stake();
+    }
+
+    function test_stake_revertsNotActive() public {
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NotActive.selector);
+        lab.stake();
+    }
+
+    function test_unstake_revertsNotStaked() public {
+        _register(true);
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NotStaked.selector);
+        lab.unstake();
+    }
+
+    function test_claimEmissions_revertsNotActive() public {
+        vm.expectRevert(LPAutoBalancerV2.NotActive.selector);
+        lab.claimEmissions();
+    }
+
+    function test_claimEmissions_revertsNotStaked() public {
+        _register(true); // registered but never staked
+        vm.expectRevert(LPAutoBalancerV2.NotStaked.selector);
+        lab.claimEmissions();
+    }
 }

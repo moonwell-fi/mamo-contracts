@@ -124,7 +124,7 @@ Suggested phase-1 config values (conservative; manager can tune within caps late
 | `maxRebalanceLossBps` | e.g. `100` (1%) | no-swap → sanity guard; small headroom is enough |
 | `minRebalanceInterval` | e.g. `21600` (6h) | matches the agent's sweep cadence; **set > 0** so a buggy agent can't loop rebalances |
 | `mainTokenId` | `INIT_TOKEN_ID` | held NFT |
-| `altTokenId / mainStaked / altStaked / lastRebalance / active` | `0 / false / false / 0 / false` | **forced** by `_store` — values you pass are ignored |
+| `altTokenId / mainStaked / altStaked / lastRebalance / active` | `0 / false / false / 0 / true` | **forced** by `_store` — values you pass are ignored (`active` is forced **true**: registration activates the position) |
 
 > **Single position per contract (no `slotId`).** One `LPAutoBalancerV2` manages exactly **one** pool: state lives in a single `position` struct, and every external call (`rebalanceUsingAlt`, `stake`, `exit`, `getDecisionSnapshot`, …) takes **no** `slotId`. To repoint the contract at a different pair, empty it first (`exit`) then `setPool(newConfig)` — see "Changing the pool" below. `registerPosition` reverts `AlreadyRegistered` if a position is already active.
 
@@ -158,7 +158,7 @@ Output of Phase B: a registered, **unstaked** WETH/cbBTC position in the balance
 Every rebalance cycle, the backend (`REBALANCER_ROLE`) picks **one** of two paths. There is **no Safe-level master switch** — the choice is made per cycle by the backend, based on whether re-ranging the position without a swap keeps it reasonably centered or whether a partial swap is needed to rebalance the underlying ratio:
 
 - **No-swap path — `rebalanceUsingAlt(RebalanceParams)`.** The original single-transaction flow: re-range using only what the position already holds. Use this whenever it's sufficient; it's simpler and has no off-chain dependency.
-- **Swap path — `unwindForSwap(UnwindParams)` + off-chain CowSwap order + `rebuildAfterSwap(RebalanceParams)`.** An async, two-phase flow for when the backend needs to actually change the WETH/cbBTC ratio:
+- **Swap path — `unwindForSwap(UnwindParams)` + off-chain CowSwap order + `rebuildAfterSwap(RebuildParams)`.** (`RebuildParams` is the slimmer 6-field struct — `width`, the four mint mins, `deadline`; it has **no** withdraw-min fields, those belong to `UnwindParams`.) An async, two-phase flow for when the backend needs to actually change the WETH/cbBTC ratio:
   1. `unwindForSwap` tears down the position and pins the CowSwap relayer's allowance to an **exact** sell amount.
   2. The backend places a CowSwap order off-chain. **The sell amount is chosen off-chain by the backend and baked directly into the order** — the contract's only job is pinning the relayer approval to that exact amount in step 1; it does not compute or re-derive a sell size on-chain.
   3. Once the order settles (or is abandoned), the backend calls `rebuildAfterSwap` to redeploy into a fresh position.

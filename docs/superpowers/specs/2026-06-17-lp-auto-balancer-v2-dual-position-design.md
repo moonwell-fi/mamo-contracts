@@ -1,10 +1,12 @@
 # LPAutoBalancerV2 — Dual-Position (No-Swap Principal) Design
 
-**Date:** 2026-06-17 (revised 2026-06-30)
+**Date:** 2026-06-17 (revised 2026-06-30; extended 2026-07-02)
 **Status:** Design
 **Author:** Ana Julia + Claude
 **Off-chain companion:** `centaur-moonwell` `docs/superpowers/specs/2026-06-17-lp-balancer-agent-design.md`
 
+> **2026-07-02 extension — swap-rebalance supersedes the "no principal swap, on any path" invariant.** The two-phase swap-rebalance mode (`unwindForSwap` → off-chain CowSwap order → `rebuildAfterSwap`), specified in `2026-07-02-lp-auto-balancer-v2-swap-rebalance-design.md`, adds an oracle-bounded, floor-guarded **principal** `token0↔token1` swap path reachable by `REBALANCER_ROLE`. Statements below that the contract "never sells `token0↔token1`, on any path", that `REBALANCER_ROLE` "has no principal-sell capability" (§6 trust model), and the §8 test assertion "no PRINCIPAL swap path exists" now hold **only for the `rebalanceUsingAlt` (née `reset`) path**. See the extension spec for the revised trust model (per-swap loss bounded by the module's `rebalanceSlippageBps` price check plus the rebuild floor's `swapLossAllowanceBps`) and its review notes R1–R6 for the accepted residuals.
+>
 > **2026-06-30 revision.** Three changes, driven by production needs:
 > 1. **One contract per pool.** The multi-slot `positions[slotId]` registry collapses to a **single managed position** per deployment, with a `setPool` setter to re-point an emptied contract at a new pair.
 > 2. **Partial AERO compounding.** A new `compound()` reinvests a backend-chosen percentage of harvested AERO back into the underlying pair — **both `token0` and `token1`** — while the rest still feeds the weekly drop, so the position grows over time and offsets divergence drag. The conversion is two **async CowSwap** sells (AERO→token0 and AERO→token1) gated by `SlippagePriceChecker` + EIP-1271 — mirroring `ERC20MoonwellMorphoStrategy`.
@@ -158,7 +160,7 @@ Safe-gated emergency / migration primitive. Unstakes both NFTs if staked (skimmi
 Because one contract manages one pool, changing the pool is an explicit, Safe-gated re-registration:
 
 - `registerPosition(config)` is the **first** registration. It reverts (`AlreadyRegistered`) if a position is already `active`.
-- **`setPool(config)`** re-points the contract at a new pair. It requires the contract to be **empty** — `!active`, `mainTokenId == 0`, `altTokenId == 0` — i.e. a prior `exit()` (or `deregisterPosition`) has run. It performs the same validation as `registerPosition` (pool/token/tickSpacing cross-checks, oracle probes, gauge reward-token check, NFT ownership + pool binding) on the new pool, then stores the fresh config and emits `PoolChanged`. `registerPosition` and `setPool` share one internal validate-and-store path; `setPool` is the named entry for the "change the pool" operation.
+- **`setPool(config)`** re-points the contract at a new pair. It requires the contract to be **empty** — `!active`, `mainTokenId == 0`, `altTokenId == 0` — i.e. a prior `exit()` has run. (`deregisterPosition` does **not** satisfy this: it clears `active` but leaves the NFT ids set, so `setPool` reverts `NotEmpty` after it — re-point via `registerPosition` instead, which only requires `!active`.) It performs the same validation as `registerPosition` (pool/token/tickSpacing cross-checks, oracle probes, gauge reward-token check, NFT ownership + pool binding) on the new pool, then stores the fresh config and emits `PoolChanged`. `registerPosition` and `setPool` share one internal validate-and-store path; `setPool` is the named entry for the "change the pool" operation.
 
 **Flow to change pool:** Safe calls `exit(safe)` → liquidates/acquires the new pair off-contract → mints the new pool's NFT off-contract → `safeTransferFrom`s it in → `setPool(newConfig)`. Identical to the phase-1 funding path (§6), just reusing an already-deployed contract. The contract never holds two pools' positions at once.
 
