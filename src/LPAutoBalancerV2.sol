@@ -48,6 +48,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         revert the mint or round to zero liquidity. MUST be a USD threshold, never raw
     ///         base units: the phase-1 pair is WETH (18-dec) / cbBTC (8-dec), so a flat raw
     ///         threshold means wildly different USD amounts per leg. 1e6 = $0.01.
+    ///
+    ///         INVARIANT: MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD (asserted in the unit suite). A
+    ///         single-sided main sits one spacing off spot, so the OPPOSITE-side alt range would
+    ///         straddle spot — an in-range two-sided "single-sided" mint whose in-range leg's min is
+    ///         forced to 0 (sandwichable). That is only reachable if a minority leg can clear the alt
+    ///         threshold while still being sub-MIN_MAIN_LEG_USD (i.e. this constant drops below it).
+    ///         Keeping MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD guarantees any sub-main-threshold minority
+    ///         is also sub-alt-threshold and returns 0 in _mintAlt before such a range can mint. If you
+    ///         bump MIN_ALT_VALUE_USD, keep it >= MIN_MAIN_LEG_USD or add a spot-containment guard.
     uint256 public constant MIN_ALT_VALUE_USD = 1e6;
 
     /// @notice Minimum USD value (8-decimal scale) a minority leg must hold for the main to be built
@@ -662,14 +671,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
 
         uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
-        if (
-            valueAfter
-                < FullMath.mulDiv(
-                    rebalanceValueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps, BPS_DENOMINATOR
-                ) + rebalanceLooseBefore
-        ) {
-            revert ValueFloor();
-        }
+        // Swap round trip gets the extra swapLossAllowanceBps tolerance on top of maxRebalanceLossBps.
+        _enforceValueFloor(rebalanceValueBeforePos, rebalanceLooseBefore, valueAfter, swapLossAllowanceBps);
 
         bool wasStaked = rebalanceWasStaked;
         _clearInFlight();
@@ -707,10 +710,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 deadline;
     }
 
-    /// @notice Tear down both positions and rebuild ONLY the balanced `main` from the
-    ///         withdrawn principal — NO SWAP. V2 has no swap router/quoter, so the
-    ///         position is reconstituted purely from the tokens the position manager
-    ///         returns on withdraw; nothing is sold. The single-sided alt is added in Task 3.
+    /// @notice Tear down both positions and rebuild a fresh balanced `main` plus a single-sided
+    ///         `alt` from the withdrawn principal — NO SWAP. V2 has no swap router/quoter, so the
+    ///         positions are reconstituted purely from the tokens the position manager returns on
+    ///         withdraw; nothing is sold. The alt parks the post-main surplus leg (see step 6).
     ///
     ///         Orchestration (all on-chain):
     ///         1.  Read spot + TWAP; deviation gate.
@@ -802,13 +805,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
         // Haircut applies to POSITION value only; the pre-existing loose balance is added back UNHAIRCUT.
         // looseAfter (in valueAfter) ≈ looseBefore + withdrawn surplus, so the donated L cancels on both
-        // sides and cannot inflate headroom to mask a real principal loss (H-1).
-        if (
-            valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
-        ) {
-            revert ValueFloor();
-        }
+        // sides and cannot inflate headroom to mask a real principal loss (H-1). No-swap path: extraBps = 0.
+        _enforceValueFloor(valueBeforePos, looseBefore, valueAfter, 0);
 
         // Floor passed: only NOW forward the genuine sub-threshold remainder to the feeCollector.
         _forwardDust(p);
@@ -1302,6 +1300,22 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         return LPBalancerLib.valueInUsd(amount0, amount1, oracle0, oracle1, dec0, dec1, maxOracleDelay);
     }
 
+    /// @dev Shared value-floor gate for both rebalance paths (H-1). Reverts `ValueFloor` when
+    ///      `valueAfter` drops below the haircut position floor plus the un-haircut loose balance.
+    ///      The haircut is (maxRebalanceLossBps + extraBps) of the position principal ONLY; the
+    ///      pre-existing loose balance (`looseBefore`) is added back un-haircut so a donated loose
+    ///      balance cannot inflate headroom to mask a real principal loss. `extraBps` carries
+    ///      swapLossAllowanceBps on the swap-rebuild path and 0 on rebalanceUsingAlt.
+    function _enforceValueFloor(uint256 valueBeforePos, uint256 looseBefore, uint256 valueAfter, uint16 extraBps)
+        private
+        view
+    {
+        uint256 floor = FullMath.mulDiv(
+            valueBeforePos, BPS_DENOMINATOR - position.maxRebalanceLossBps - extraBps, BPS_DENOMINATOR
+        ) + looseBefore;
+        if (valueAfter < floor) revert ValueFloor();
+    }
+
     /// @dev Validate all fields of `config` and store them via `_store`.
     ///      Shared by registerPosition and setPool — the validation body is moved here verbatim so
     ///      both entry points exercise identical checks.
@@ -1311,6 +1325,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             revert InvalidConfig();
         }
         if (config.oracle0 == address(0) || config.oracle1 == address(0)) revert OracleRequired();
+        // feeCollector must be non-zero: every AERO/fee/dust transfer (incl. the emergency exit()
+        // when staked with pending AERO) safeTransfers to it and would revert on address(0).
+        // setFeeCollector already guards this — mirror it here so a bad config can't be stored.
+        if (config.feeCollector == address(0)) revert ZeroAddress();
         // AERO must never be an underlying: the compound module's isValidSignature relies on AERO
         // being excluded from {token0, token1} to keep AERO-compound orders and principal-rebalance
         // orders (validateRebalanceOrder) structurally disjoint. Enforced here rather than left as an
@@ -1335,8 +1353,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // rebalanceUsingAlt would always revert in _alignedRange. Require at least two spacings of room.
         if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
         if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
-        // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded.
-        if (config.gauge != address(0) && ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
+        // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded,
+        // and it MUST be the gauge for THIS pool — a valid AERO-rewarding gauge for a different pool
+        // otherwise passes registration and only fails later at stake()/_restakeBoth (confusing late
+        // revert on the rebalance path). Bind gauge -> pool here, same family as the NFT/pool binding.
+        if (config.gauge != address(0)) {
+            if (ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
+            if (ICLGauge(config.gauge).pool() != config.pool) revert PoolMismatch();
+        }
         if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
         // Bind the NFT to the configured pool: PoolMismatch above only validates the supplied
         // descriptor against config.pool, NOT that the NFT actually belongs to that pool. Read the

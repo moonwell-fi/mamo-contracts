@@ -418,6 +418,8 @@ contract LPAutoBalancerV2UnitTest is Test {
         // registerPosition cross-validates the pool descriptor: token0/token1/tickSpacing must match.
         mockPool.setTokens(token0, token1);
         mockPool.setTickSpacing(200);
+        // Bind the gauge to this pool so _validateAndStore's gauge->pool check passes.
+        mockGauge.setPool(pool);
 
         // Rich PM mock with full position lifecycle (positions/decrease/collect/mint/burn).
         mockPM = new MockPositionManagerV2(address(0));
@@ -1292,7 +1294,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     function test_setCompoundModule_onlyAdmin() public {
         _register(true);
         vm.prank(rebalancer);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.setCompoundModule(moduleSink);
     }
 
@@ -1315,7 +1317,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _register(true);
         _setModule();
         vm.prank(admin);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.compound(5_000);
     }
 
@@ -1376,7 +1378,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     function test_exit_onlyAdmin() public {
         _registerWithAlt(false);
         vm.prank(rebalancer);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.exit(rebalancer);
     }
 
@@ -1549,7 +1551,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     /// @dev rebalanceUsingAlt is REBALANCER_ROLE-gated: a caller without the role must revert (no prank).
     function test_rebalanceUsingAlt_onlyRebalancer() public {
         _register(false);
-        vm.expectRevert(); // caller (this test contract) lacks REBALANCER_ROLE
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector); // caller (this test contract) lacks REBALANCER_ROLE
         lab.rebalanceUsingAlt(_defaultRebalanceParams());
     }
 
@@ -1839,7 +1841,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     function test_setPool_revertNonAdmin() public {
         LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
         vm.prank(rebalancer);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.setPool(cfg);
     }
 
@@ -1889,7 +1891,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     function test_setSwapLossAllowanceBps_revertsNonAdmin() public {
         vm.prank(rebalancer);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.setSwapLossAllowanceBps(100);
     }
 
@@ -2099,7 +2101,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _register(false);
         _setRealModule();
         vm.prank(manager);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.unwindForSwap(_defaultUnwindParams());
     }
 
@@ -2347,7 +2349,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _setRealModule();
         _unwind();
         vm.prank(manager);
-        vm.expectRevert();
+        vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.rebuildAfterSwap(_defaultRebuildParams());
     }
 
@@ -2690,5 +2692,16 @@ contract LPAutoBalancerV2UnitTest is Test {
         _register(true); // registered but never staked
         vm.expectRevert(LPAutoBalancerV2.NotStaked.selector);
         lab.claimEmissions();
+    }
+
+    // ---------- constant invariant ----------
+
+    /// @dev MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD keeps a sub-main-threshold minority also
+    ///      sub-alt-threshold, so _mintAlt returns 0 before an alt range could straddle spot on a
+    ///      single-sided main (see the MIN_ALT_VALUE_USD NatSpec). The two constants live 15 lines
+    ///      apart and are edited independently; this asserts the coupling so a future bump can't
+    ///      silently open the sandwichable in-range-alt path.
+    function test_invariant_minAltValueGeMinMainLeg() public view {
+        assertGe(lab.MIN_ALT_VALUE_USD(), lab.MIN_MAIN_LEG_USD());
     }
 }

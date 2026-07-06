@@ -10,6 +10,9 @@ contract MockCLGauge {
 
     address public aeroToken;
 
+    // Pool this gauge is bound to (read by _validateAndStore's gauge->pool binding check).
+    address public pool;
+
     // Amount of AERO to pay out when withdraw() is called
     uint256 public aeroToPayOnWithdraw;
 
@@ -25,6 +28,11 @@ contract MockCLGauge {
 
     constructor(address aeroToken_) {
         aeroToken = aeroToken_;
+    }
+
+    /// @notice Set the pool this gauge reports as its own (for the gauge->pool binding check).
+    function setPool(address pool_) external {
+        pool = pool_;
     }
 
     /// @notice Configure how much AERO to transfer to msg.sender on withdraw.

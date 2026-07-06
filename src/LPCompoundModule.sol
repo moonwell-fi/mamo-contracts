@@ -104,19 +104,19 @@ contract LPCompoundModule is AccessControlEnumerable {
         IERC20(AERO).forceApprove(VAULT_RELAYER, type(uint256).max);
     }
 
-    /// @notice EIP-1271 validation for CowSwap compound orders (AERO -> token0|token1, reward-only).
-    /// @dev Reads token0/token1 live from the balancer so the check survives a setPool re-point.
-    function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
-        GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
+    /// @dev Order-class-agnostic GPv2 checks shared by both validation paths: digest binding, SELL
+    ///      kind, fill-or-kill, ERC20 balance flags, receiver == balancer, zero fee, pinned appData,
+    ///      and the [now+5min, now+maxTimePriceValid(sellToken)] expiry window. The per-path token
+    ///      constraints (compound: AERO->underlying; rebalance: distinct underlyings + in-flight
+    ///      direction pin), the in-flight gate, and the slippage knob stay in the callers — extracting
+    ///      the common block keeps a future hardening from landing in only one of the two stacks (the
+    ///      rebalance class is the permissionlessly-placeable, higher-notional one).
+    function _commonOrderChecks(GPv2Order.Data memory o, bytes32 orderDigest) internal view {
         require(o.hash(DOMAIN_SEPARATOR) == orderDigest, "bad digest");
         require(o.kind == GPv2Order.KIND_SELL, "must be sell");
         require(!o.partiallyFillable, "must be fill-or-kill");
         require(o.sellTokenBalance == GPv2Order.BALANCE_ERC20, "sell must be erc20");
         require(o.buyTokenBalance == GPv2Order.BALANCE_ERC20, "buy must be erc20");
-        require(address(o.sellToken) == AERO, "sellToken must be AERO");
-        address t0 = ILPAutoBalancerV2(balancer).token0();
-        address t1 = ILPAutoBalancerV2(balancer).token1();
-        require(address(o.buyToken) == t0 || address(o.buyToken) == t1, "buyToken must be underlying");
         require(o.receiver == balancer, "receiver must be balancer");
         require(o.feeAmount == 0, "fee must be zero");
         require(o.appData == compoundAppData, "bad appData");
@@ -125,6 +125,17 @@ contract LPCompoundModule is AccessControlEnumerable {
             o.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(o.sellToken)),
             "expires too far"
         );
+    }
+
+    /// @notice EIP-1271 validation for CowSwap compound orders (AERO -> token0|token1, reward-only).
+    /// @dev Reads token0/token1 live from the balancer so the check survives a setPool re-point.
+    function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
+        GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
+        _commonOrderChecks(o, orderDigest);
+        require(address(o.sellToken) == AERO, "sellToken must be AERO");
+        address t0 = ILPAutoBalancerV2(balancer).token0();
+        address t1 = ILPAutoBalancerV2(balancer).token1();
+        require(address(o.buyToken) == t0 || address(o.buyToken) == t1, "buyToken must be underlying");
         require(
             slippagePriceChecker.checkPrice(
                 o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, allowedSlippageInBps
@@ -141,11 +152,7 @@ contract LPCompoundModule is AccessControlEnumerable {
     function validateRebalanceOrder(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         require(ILPAutoBalancerV2(balancer).rebalanceInFlight(), "no rebalance in flight");
         GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
-        require(o.hash(DOMAIN_SEPARATOR) == orderDigest, "bad digest");
-        require(o.kind == GPv2Order.KIND_SELL, "must be sell");
-        require(!o.partiallyFillable, "must be fill-or-kill");
-        require(o.sellTokenBalance == GPv2Order.BALANCE_ERC20, "sell must be erc20");
-        require(o.buyTokenBalance == GPv2Order.BALANCE_ERC20, "buy must be erc20");
+        _commonOrderChecks(o, orderDigest);
         address t0 = ILPAutoBalancerV2(balancer).token0();
         address t1 = ILPAutoBalancerV2(balancer).token1();
         require(
@@ -156,14 +163,6 @@ contract LPCompoundModule is AccessControlEnumerable {
         require(
             address(o.sellToken) == ILPAutoBalancerV2(balancer).sellTokenInFlight(),
             "sellToken must match in-flight approval"
-        );
-        require(o.receiver == balancer, "receiver must be balancer");
-        require(o.feeAmount == 0, "fee must be zero");
-        require(o.appData == compoundAppData, "bad appData");
-        require(o.validTo >= block.timestamp + 5 minutes, "expires too soon");
-        require(
-            o.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(o.sellToken)),
-            "expires too far"
         );
         require(
             slippagePriceChecker.checkPrice(

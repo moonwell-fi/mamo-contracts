@@ -270,7 +270,7 @@ contract LPAutoBalancerV2Integration is Test {
         );
 
         // Old NFT burned (ownerOf reverts on a burned token).
-        vm.expectRevert();
+        vm.expectRevert("ERC721: owner query for nonexistent token");
         INonfungiblePositionManager(NFPM).ownerOf(oldTokenId);
 
         // RebalancedUsingAlt event emitted with the new main id.
