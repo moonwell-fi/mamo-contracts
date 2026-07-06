@@ -151,6 +151,10 @@ contract LPCompoundModule is AccessControlEnumerable {
                 && address(o.sellToken) != address(o.buyToken),
             "tokens must be distinct underlying"
         );
+        require(
+            address(o.sellToken) == ILPAutoBalancerV2(balancer).sellTokenInFlight(),
+            "sellToken must match in-flight approval"
+        );
         require(o.receiver == balancer, "receiver must be balancer");
         require(o.feeAmount == 0, "fee must be zero");
         require(o.appData == compoundAppData, "bad appData");

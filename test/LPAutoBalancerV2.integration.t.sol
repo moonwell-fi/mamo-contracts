@@ -201,6 +201,18 @@ contract LPAutoBalancerV2Integration is Test {
         });
     }
 
+    function _defaultRebuildParams() internal view returns (LPAutoBalancerV2.RebuildParams memory) {
+        LPAutoBalancerV2.RebalanceParams memory p = _defaultParams();
+        return LPAutoBalancerV2.RebuildParams({
+            width: p.width,
+            amount0MinMain: p.amount0MinMain,
+            amount1MinMain: p.amount1MinMain,
+            amount0MinAlt: p.amount0MinAlt,
+            amount1MinAlt: p.amount1MinAlt,
+            deadline: p.deadline
+        });
+    }
+
     /// @dev Bootstrap a real, staked WETH/cbBTC main position straddling spot and return the tokenId.
     function _bootstrap(int24 tl, int24 tu, uint256 amt0, uint256 amt1) internal returns (uint256 tokenId) {
         (tokenId,) = _mintMainPosition(tl, tu, amt0, amt1);
@@ -487,7 +499,7 @@ contract LPAutoBalancerV2Integration is Test {
 
         // ---- phase 2: rebuild ----
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
 
         (uint256 mainTokenId,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
         assertTrue(mainTokenId != 0 && mainTokenId != tokenId, "new main minted");
@@ -511,7 +523,7 @@ contract LPAutoBalancerV2Integration is Test {
 
         // order expires unfilled: NO balance changes at all. Rebuild immediately.
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultParams());
+        lab.rebuildAfterSwap(_defaultRebuildParams());
 
         (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
         assertTrue(mainTokenId != 0, "rebuilt from original balances, identical outcome to rebalanceUsingAlt");

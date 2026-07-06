@@ -6,4 +6,5 @@ interface ILPAutoBalancerV2 {
     function token0() external view returns (address);
     function token1() external view returns (address);
     function rebalanceInFlight() external view returns (bool);
+    function sellTokenInFlight() external view returns (address);
 }

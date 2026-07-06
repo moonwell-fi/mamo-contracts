@@ -103,7 +103,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice True between unwindForSwap() and rebuildAfterSwap()/exit(); gates rebalance-order validation.
     bool public rebalanceInFlight;
     /// @notice USD (1e8) value snapshot taken at unwind, used as the rebuild value-floor base.
+    ///         Diagnostic total kept for API/test compatibility: positions + loose, COMBINED.
+    ///         The floor math itself uses the split fields below, not this sum.
     uint256 public rebalanceValueBefore;
+    /// @notice USD (1e8) value of main+alt PRINCIPAL ONLY (no loose), snapshotted at unwind.
+    ///         The value floor's loss haircut applies to this term alone.
+    uint256 public rebalanceValueBeforePos;
+    /// @notice USD (1e8) value of loose token0/token1 already on the contract at unwind (e.g.
+    ///         un-folded AERO-compound proceeds). Added back UN-HAIRCUT to the rebuild floor's
+    ///         RHS, matching rebalanceUsingAlt's H-1 fix — a pre-existing loose balance must not
+    ///         widen the tolerated absolute loss on the swap round trip.
+    uint256 public rebalanceLooseBefore;
     /// @notice Timestamp of the last unwindForSwap() (diagnostics + snapshot field).
     uint256 public rebalanceStartedAt;
     /// @notice Token approved to VAULT_RELAYER during the in-flight window (revoked at rebuild/exit).
@@ -549,7 +559,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Phase 1 of a swap rebalance: tears down both positions, snapshots value,
     ///         approves the CowSwap vault relayer for exactly `sellAmount`, and opens the
     ///         order-validation window. No mint happens here; `rebuildAfterSwap` completes the cycle.
-    function unwindForSwap(UnwindParams calldata params) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
+    function unwindForSwap(UnwindParams calldata params)
+        external
+        onlyRole(REBALANCER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
         ManagedPositionV2 storage p = position;
         // Guards + calm-gate delegated to LPBalancerLib (primitives in, primitives out) to keep this
         // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
@@ -571,7 +586,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             p.maxTickDeviation
         );
 
-        rebalanceValueBefore = _totalValue(p, sqrtP, dec0, dec1);
+        // Split the snapshot the same way rebalanceUsingAlt does: position principal (haircut by
+        // the floor below) vs. pre-existing loose token0/token1 (added back un-haircut). See H-1.
+        uint256 looseBefore = _contractPairValue(p, dec0, dec1);
+        uint256 valueBeforePos = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+        rebalanceValueBefore = valueBeforePos + looseBefore; // diagnostic total (kept for API/test compat)
+        rebalanceValueBeforePos = valueBeforePos;
+        rebalanceLooseBefore = looseBefore;
         rebalanceStartedAt = block.timestamp;
         rebalanceWasStaked = p.mainStaked;
         sellTokenInFlight = params.sellToken;
@@ -599,14 +620,19 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         or never-placed orders all rebuild from current balances. IS gated on pause and
     ///         the calm gate; exit() remains the escape hatch if either blocks.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
-    ///         out of the floor per H-1), this floor compares against a SINGLE `rebalanceValueBefore`
-    ///         snapshot taken back in unwindForSwap — a prior transaction. A token donated to the
-    ///         contract between unwindForSwap and rebuildAfterSwap inflates valueAfter without
-    ///         inflating that snapshot, widening the floor's apparent headroom by the donated amount.
-    ///         Not a fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away value
-    ///         to loosen a check on their own gift), but it is a strictly weaker safety guarantee than
+    ///         out of the floor per H-1), BOTH floor snapshots here (rebalanceValueBeforePos and
+    ///         rebalanceLooseBefore) are taken back in unwindForSwap — a prior transaction. A token
+    ///         donated to the contract between unwindForSwap and rebuildAfterSwap inflates valueAfter
+    ///         (whichever term — position or loose — the donation lands in) without inflating either
+    ///         snapshot, widening the floor's apparent headroom by the donated amount. Not a
+    ///         fund-extraction vector (REBALANCER_ROLE-gated, and a donor only gives away value to
+    ///         loosen a check on their own gift), but it is a strictly weaker safety guarantee than
     ///         rebalanceUsingAlt's — a structural consequence of the floor spanning two transactions.
-    function rebuildAfterSwap(RebalanceParams calldata params)
+    ///         Separately (not a cross-tx concern): the LOOSE component is added back un-haircut here,
+    ///         matching rebalanceUsingAlt's H-1 treatment — a pre-existing loose balance already on the
+    ///         contract when unwindForSwap runs (e.g. un-folded AERO-compound proceeds) no longer widens
+    ///         the tolerated absolute loss the way it did before this split.
+    function rebuildAfterSwap(RebuildParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
         nonReentrant
@@ -624,22 +650,20 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
 
-        uint256 newMain = _mintBalanced(p, tl, tu, params);
+        uint256 newMain = _mintBalanced(p, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
         p.mainTokenId = newMain;
         p.altStaked = false;
         p.mainStaked = false;
         p.lastRebalance = block.timestamp;
 
-        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params);
+        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
 
         uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
         if (
             valueAfter
                 < FullMath.mulDiv(
-                    rebalanceValueBefore,
-                    BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps,
-                    BPS_DENOMINATOR
-                )
+                    rebalanceValueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps - swapLossAllowanceBps, BPS_DENOMINATOR
+                ) + rebalanceLooseBefore
         ) {
             revert ValueFloor();
         }
@@ -664,6 +688,19 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 amount1MinWithdraw;
         uint256 amount0MinWithdrawAlt;
         uint256 amount1MinWithdrawAlt;
+        uint256 deadline;
+    }
+
+    /// @notice Parameters for phase 2 of a swap rebalance (rebuildAfterSwap). Unlike
+    ///         RebalanceParams, this has NO withdraw-min fields — unwindForSwap already tore
+    ///         down the position in a prior transaction, so there is no _exitAll here to sandwich-
+    ///         floor. Only the mint side needs protection.
+    struct RebuildParams {
+        uint24 width;
+        uint256 amount0MinMain;
+        uint256 amount1MinMain;
+        uint256 amount0MinAlt;
+        uint256 amount1MinAlt;
         uint256 deadline;
     }
 
@@ -738,7 +775,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // back into balance (Beefy "never sell"). Principal is fully redeployed; nothing is sold.
         (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
 
-        uint256 newMain = _mintBalanced(p, tl, tu, params);
+        uint256 newMain = _mintBalanced(p, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
         p.mainTokenId = newMain;
         p.altStaked = false; // freshly minted, not yet staked (restaked below iff wasStaked)
         p.mainStaked = false; // freshly minted, not yet staked (restaked below iff wasStaked)
@@ -749,7 +786,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // MIN_ALT_VALUE_USD, and — critically — does NOT forward dust. The value floor below must
         // see all value the contract controls BEFORE anything is shipped out as "dust".
         // Set altTokenId BEFORE the value-floor read so _altValue sees the new alt.
-        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params);
+        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
 
         // value AFTER: new main principal + alt principal at the same sqrtP snapshot, PLUS the
         // USD value of any loose token0/token1 still held by this contract (_contractPairValue).
@@ -762,8 +799,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // sides and cannot inflate headroom to mask a real principal loss (H-1).
         if (
             valueAfter
-                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR)
-                    + looseBefore
+                < FullMath.mulDiv(valueBeforePos, BPS_DENOMINATOR - p.maxRebalanceLossBps, BPS_DENOMINATOR) + looseBefore
         ) {
             revert ValueFloor();
         }
@@ -784,6 +820,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function _clearInFlight() private {
         rebalanceInFlight = false;
         rebalanceValueBefore = 0;
+        rebalanceValueBeforePos = 0;
+        rebalanceLooseBefore = 0;
         rebalanceStartedAt = 0;
         sellTokenInFlight = address(0);
         rebalanceWasStaked = false;
@@ -867,7 +905,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         ManagedPositionV2 storage p,
         int24 tickLower,
         int24 tickUpper,
-        RebalanceParams calldata params
+        uint256 amount0Min,
+        uint256 amount1Min,
+        uint256 deadline
     ) private returns (uint256 newTokenId) {
         return LPBalancerLib.mintPosition(
             address(POSITION_MANAGER),
@@ -876,9 +916,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             p.tickSpacing,
             tickLower,
             tickUpper,
-            params.amount0MinMain,
-            params.amount1MinMain,
-            params.deadline
+            amount0Min,
+            amount1Min,
+            deadline
         );
     }
 
@@ -906,7 +946,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 mainTu,
         uint8 dec0,
         uint8 dec1,
-        RebalanceParams calldata params
+        uint256 amount0MinAlt,
+        uint256 amount1MinAlt,
+        uint256 deadline
     ) private returns (uint256 altId) {
         uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
         uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
@@ -937,8 +979,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // surplus lands on (selection is by USD value at execution time), so a nonzero min on the
         // leg that ends up unfunded would revert an otherwise-valid mint. Only the funded leg keeps
         // the caller-supplied floor.
-        uint256 altAmount0Min = surplus0 ? params.amount0MinAlt : 0;
-        uint256 altAmount1Min = surplus0 ? 0 : params.amount1MinAlt;
+        uint256 altAmount0Min = surplus0 ? amount0MinAlt : 0;
+        uint256 altAmount1Min = surplus0 ? 0 : amount1MinAlt;
 
         altId = LPBalancerLib.mintPosition(
             address(POSITION_MANAGER),
@@ -949,7 +991,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             altTu,
             altAmount0Min,
             altAmount1Min,
-            params.deadline
+            deadline
         );
     }
 
