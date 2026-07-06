@@ -70,6 +70,12 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     // ─── compound module config ─────────────────────────────────────────────────
     /// @notice Conservative 2% default slippage for the AERO->underlying compound swap.
     uint256 public constant COMPOUND_SLIPPAGE_BPS = 200;
+    /// @notice Tight 0.5% slippage for principal rebalance orders (WETH<->cbBTC). Deliberately much
+    ///         tighter than COMPOUND_SLIPPAGE_BPS: EIP-1271 order placement is permissionless while
+    ///         rebalanceInFlight, so this knob is the binding price floor on the whole approved
+    ///         principal — ETH/USD + BTC/USD are deep, tight-deviation feeds, and an unfillably
+    ///         tight bound only degrades to the no-swap outcome (order expires, rebuild proceeds).
+    uint256 public constant REBALANCE_SLIPPAGE_BPS = 50;
     /// @notice Expected CowSwap appData hash for compound orders. Replace with the real hash agreed
     ///         with the off-chain bot before mainnet execution.
     bytes32 public constant COMPOUND_APP_DATA = keccak256("mamo-lpv2-compound");
@@ -209,6 +215,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         lab.setCompoundModule(address(module));
         module.setSlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         module.setSlippage(COMPOUND_SLIPPAGE_BPS);
+        module.setRebalanceSlippageBps(REBALANCE_SLIPPAGE_BPS);
         module.setCompoundAppData(COMPOUND_APP_DATA);
         lab.setSwapLossAllowanceBps(SWAP_LOSS_ALLOWANCE_BPS);
     }
@@ -293,6 +300,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(module.AERO(), addresses.getAddress("AERO"), "module AERO");
         assertTrue(module.hasRole(module.DEFAULT_ADMIN_ROLE(), safe), "module admin is F-MAMO");
         assertEq(module.allowedSlippageInBps(), COMPOUND_SLIPPAGE_BPS, "slippage set");
+        assertEq(module.rebalanceSlippageBps(), REBALANCE_SLIPPAGE_BPS, "rebalance slippage set");
         assertEq(module.compoundAppData(), COMPOUND_APP_DATA, "appData set");
         assertEq(
             address(module.slippagePriceChecker()), addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"), "checker set"

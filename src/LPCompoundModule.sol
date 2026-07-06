@@ -36,6 +36,19 @@ contract LPCompoundModule is AccessControlEnumerable {
     ISlippagePriceChecker public slippagePriceChecker;
     /// @notice Allowed slippage for the compound swap, in bps (<= MAX_SLIPPAGE_IN_BPS).
     uint256 public allowedSlippageInBps;
+    /// @notice Allowed slippage for principal rebalance orders (token0 <-> token1), in bps
+    ///         (<= MAX_SLIPPAGE_IN_BPS). Deliberately separate from allowedSlippageInBps: the
+    ///         compound knob is sized for thin AERO feeds, while principal orders move large
+    ///         notional between two deep, tight-deviation feeds — sharing one knob would hand
+    ///         any order placer the loose AERO tolerance on the whole approved principal
+    ///         (EIP-1271 placement is permissionless while rebalanceInFlight). Default 0 is
+    ///         maximally strict — checkPrice's condition is `buyAmount > expectedOut·(BPS−bps)/BPS`,
+    ///         so at 0 bps only an order priced strictly ABOVE the Chainlink rate clears (any
+    ///         below-oracle pricing is rejected). This is NOT an absolute "cannot settle" gate — a
+    ///         favorably-priced order can still fill before the knob is set; the hard pre-config
+    ///         block is the deferred checker token-pair config (unconfigured pair reverts checkPrice).
+    ///         Set this before enabling the swap path (unwound principal rebuilds unswapped otherwise).
+    uint256 public rebalanceSlippageBps;
     /// @notice Expected CowSwap appData hash for compound orders.
     bytes32 public compoundAppData;
 
@@ -43,6 +56,7 @@ contract LPCompoundModule is AccessControlEnumerable {
     error CheckerNotSet();
 
     event SlippageUpdated(uint256 oldBps, uint256 newBps);
+    event RebalanceSlippageUpdated(uint256 oldBps, uint256 newBps);
     event SlippagePriceCheckerUpdated(address checker);
     event CompoundAppDataUpdated(bytes32 appData);
 
@@ -68,6 +82,13 @@ contract LPCompoundModule is AccessControlEnumerable {
         require(newBps <= MAX_SLIPPAGE_IN_BPS, "slippage too high");
         emit SlippageUpdated(allowedSlippageInBps, newBps);
         allowedSlippageInBps = newBps;
+    }
+
+    /// @notice Set the allowed principal-rebalance-order slippage (bps).
+    function setRebalanceSlippageBps(uint256 newBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newBps <= MAX_SLIPPAGE_IN_BPS, "slippage too high");
+        emit RebalanceSlippageUpdated(rebalanceSlippageBps, newBps);
+        rebalanceSlippageBps = newBps;
     }
 
     /// @notice Set the expected CowSwap appData hash for compound orders.
@@ -129,8 +150,7 @@ contract LPCompoundModule is AccessControlEnumerable {
         address t1 = ILPAutoBalancerV2(balancer).token1();
         require(
             (address(o.sellToken) == t0 || address(o.sellToken) == t1)
-                && (address(o.buyToken) == t0 || address(o.buyToken) == t1)
-                && address(o.sellToken) != address(o.buyToken),
+                && (address(o.buyToken) == t0 || address(o.buyToken) == t1) && address(o.sellToken) != address(o.buyToken),
             "tokens must be distinct underlying"
         );
         require(
@@ -147,7 +167,7 @@ contract LPCompoundModule is AccessControlEnumerable {
         );
         require(
             slippagePriceChecker.checkPrice(
-                o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, allowedSlippageInBps
+                o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, rebalanceSlippageBps
             ),
             "price check failed"
         );
