@@ -91,8 +91,7 @@ contract LPV2TenderlyHarness is Script {
     uint256 constant AMT_CBBTC = 0.05e8;
 
     // OZ AccessControl: error AccessControlUnauthorizedAccount(address,bytes32)
-    bytes4 constant ACCESS_CONTROL_UNAUTHORIZED =
-        bytes4(keccak256("AccessControlUnauthorizedAccount(address,bytes32)"));
+    bytes4 constant ACCESS_CONTROL_UNAUTHORIZED = bytes4(keccak256("AccessControlUnauthorizedAccount(address,bytes32)"));
 
     // Uniswap-V3 sqrtPrice bounds (TickMath MIN/MAX +/- 1) for effectively-unbounded price-sim swaps.
     uint160 constant MIN_SQRT_RATIO_PLUS_ONE = 4_295_128_740;
@@ -211,9 +210,8 @@ contract LPV2TenderlyHarness is Script {
         IERC20(WETH).approve(NFPM, a0);
         if (a1 > 0) IERC20(CBBTC).approve(NFPM, a1);
 
-        ICLPositionManager(NFPM)
-            .mint(
-                ICLPositionManager.MintParams({
+        ICLPositionManager(NFPM).mint(
+            ICLPositionManager.MintParams({
                 token0: WETH,
                 token1: CBBTC,
                 tickSpacing: TICK_SPACING,
@@ -227,7 +225,7 @@ contract LPV2TenderlyHarness is Script {
                 deadline: block.timestamp + 1 days, // see _resetParams: broadcast lands in a later block
                 sqrtPriceX96: 0
             })
-            );
+        );
         vm.stopBroadcast();
 
         console.log("HARNESS_LAB=%s", address(lab));
