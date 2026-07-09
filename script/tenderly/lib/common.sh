@@ -54,8 +54,25 @@ addr() {
 # ── env ─────────────────────────────────────────────────────────────────────
 load_env() {
   [ -f "$ROOT/.env" ] || die ".env not found in $ROOT"
+  # `set -a` exports everything sourced from .env, so MAMO_DEPLOYER_PRIVATE_KEY reaches forge/the .s.sol
+  # via the ENVIRONMENT (vm.envUint) rather than forge's argv (--private-key), keeping the key out of
+  # `ps aux` on a shared host. MUST be a throwaway, fork-only key — never a mainnet deployer.
   set -a; . "$ROOT/.env"; set +a
   [ -n "${MAMO_DEPLOYER_PRIVATE_KEY:-}" ] || die "MAMO_DEPLOYER_PRIVATE_KEY not set in .env"
+}
+
+# Derive the broadcaster address from MAMO_DEPLOYER_PRIVATE_KEY WITHOUT putting the raw key on argv.
+# `cast wallet address --private-key <key>` (and any argv form) is visible in `ps aux`; foundry offers
+# no argv-free raw-key→address path (ETH_PRIVATE_KEY is not honored; --interactive needs a TTY). So we
+# read it back through the harness's sender() entrypoint, which logs vm.addr(vm.envUint(...)). No
+# --rpc-url / --broadcast → no fork spin-up, just local key derivation. Sets + exports $SENDER.
+# usage: derive_sender <forge-script-fq>
+derive_sender() {
+  local fq="$1" out
+  out="$(forge script "$fq" --sig 'sender()' 2>&1)" || true
+  SENDER="$(printf '%s\n' "$out" | grep -oE 'HARNESS_SENDER_DERIVED=0x[0-9a-fA-F]{40}' | head -1 | cut -d= -f2)"
+  [ -n "$SENDER" ] || die "could not derive sender from MAMO_DEPLOYER_PRIVATE_KEY via ${fq} sender()"
+  export SENDER
 }
 
 # ── vnet lifecycle ──────────────────────────────────────────────────────────
@@ -63,6 +80,10 @@ CREATED_VNET=0
 VNET_ID=""
 
 teardown() {
+  # One-shot guard: die() calls teardown explicitly then exit 1, which re-fires the
+  # `trap teardown EXIT` in each runner → a second teardown. Run at most once.
+  [ "${_TENDERLY_TEARDOWN_DONE:-0}" = "1" ] && return 0
+  _TENDERLY_TEARDOWN_DONE=1
   if [ "${CREATED_VNET:-0}" = "1" ] && [ "${KEEP_VNET:-0}" = "0" ] && [ -n "${VNET_ID:-}" ]; then
     section "Teardown: deleting created vnet $VNET_ID"
     curl -s -X DELETE "$TENDERLY_API/account/$TENDERLY_ACCOUNT_SLUG/project/$TENDERLY_PROJECT_SLUG/vnets/$VNET_ID" \
@@ -195,7 +216,11 @@ run_forge_phase() {
   # --no-storage-caching is REQUIRED: this vnet reports chain id 8453 (same as real Base), so
   # forge's fork cache (keyed by chain id) would otherwise mix stale real-Base slots with live
   # vnet slots. (moonwell-tenderly avoids this by giving vnets a unique chain id, 73570+networkId.)
-  local flags=(--rpc-url "$RPC" --private-key "$MAMO_DEPLOYER_PRIVATE_KEY" --sig "$sig" --no-storage-caching -vvv)
+  # NOTE: the broadcaster key is deliberately NOT passed here as --private-key. forge's argv is
+  # world-readable (`ps aux`) on a shared host; instead load_env exports MAMO_DEPLOYER_PRIVATE_KEY
+  # into the environment and the .s.sol reads it via vm.envUint + vm.startBroadcast(pk). Non-broadcast
+  # (simulate-only) phases need no key at all. See the finding in script/tenderly/README.md.
+  local flags=(--rpc-url "$RPC" --sig "$sig" --no-storage-caching -vvv)
   [ "$broadcast" = "1" ] && flags+=(--broadcast --slow --gas-estimate-multiplier "$mult")
   # $sigargs (unquoted) are the --sig function arguments, e.g. "true 2000000000000000000000".
   forge script "$fq" "${flags[@]}" $sigargs > "$full" 2>&1

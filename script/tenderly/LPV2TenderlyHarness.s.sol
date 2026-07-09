@@ -107,6 +107,23 @@ contract LPV2TenderlyHarness is Script {
         return LPAutoBalancerV2(vm.envAddress("HARNESS_LAB"));
     }
 
+    /// @dev Broadcaster private key, read from the ENVIRONMENT (vm.envUint) rather than passed to
+    ///      forge on argv as `--private-key`. forge's argv is world-readable via `ps aux` on a shared
+    ///      host; a process env var is not (only same-uid via /proc/<pid>/environ). The orchestrator
+    ///      exports it from .env (see script/tenderly/lib/common.sh load_env). This MUST be a
+    ///      throwaway, fork-only key — never a mainnet deployer. vm.addr() of this key equals
+    ///      HARNESS_SENDER (the orchestrator derives the sender from the SAME key via sender()).
+    function _broadcastKey() internal view returns (uint256) {
+        return vm.envUint("MAMO_DEPLOYER_PRIVATE_KEY");
+    }
+
+    /// @notice argv-free sender derivation for the orchestrator. Logs vm.addr(MAMO_DEPLOYER_PRIVATE_KEY)
+    ///         so bash can capture the broadcaster address WITHOUT ever putting the raw key on a
+    ///         `cast wallet address --private-key` command line (ps-visibility). Needs no fork/RPC.
+    function sender() public view {
+        console.log("HARNESS_SENDER_DERIVED=%s", vm.addr(_broadcastKey()));
+    }
+
     /// @dev Resolve the Base address book once per invocation (idempotent). Mirrors the deploy
     ///      scripts (DeployLPAutoBalancerV2.s.sol) so the harness and deployments share
     ///      addresses/<chainid>.json as the single source of truth instead of hardcoding hex.
@@ -202,7 +219,7 @@ contract LPV2TenderlyHarness is Script {
         int24 center = _align(spot);
         (int24 tl, int24 tu, uint256 a0, uint256 a1) = _mintGeometry(single, spot, center);
 
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         // deployer holds ALL roles so one signer drives the whole lifecycle. Role SEPARATION
         // (rebalancer vs admin) is verified independently by checkRoleGating() and the unit suite.
         LPAutoBalancerV2 lab = new LPAutoBalancerV2(dep, dep, dep, dep, NFPM, AERO);
@@ -247,7 +264,7 @@ contract LPV2TenderlyHarness is Script {
         uint256 tokenId = vm.envUint("HARNESS_TOKEN_ID"); // real on-chain id, read by the orchestrator
         require(INonfungiblePositionManager(NFPM).ownerOf(tokenId) == address(lab), "registerStake: lab must hold NFT");
 
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         lab.registerPosition(
             LPAutoBalancerV2.ManagedPositionV2({
                 mainTokenId: tokenId,
@@ -354,7 +371,7 @@ contract LPV2TenderlyHarness is Script {
         uint256 fca = IERC20(AERO).balanceOf(FEE_COLLECTOR);
         int24 spotBefore = _spotTick();
 
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         lab.rebalanceUsingAlt(_resetParams());
         vm.stopBroadcast();
 
@@ -425,7 +442,7 @@ contract LPV2TenderlyHarness is Script {
         uint256 b0 = IERC20(WETH).balanceOf(to);
         uint256 b1 = IERC20(CBBTC).balanceOf(to);
 
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         lab.exit(to);
         vm.stopBroadcast();
 
@@ -466,7 +483,7 @@ contract LPV2TenderlyHarness is Script {
     /// @notice Deploy the swap-callback helper. Orchestrator captures HARNESS_SWAPPER from the artifact.
     function deploySwapper() public {
         vm.fee(0);
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         TenderlySwapHelper swapper = new TenderlySwapHelper();
         vm.stopBroadcast();
         console.log("HARNESS_SWAPPER=%s", address(swapper));
@@ -481,7 +498,7 @@ contract LPV2TenderlyHarness is Script {
         address swapper = vm.envAddress("HARNESS_SWAPPER");
         uint160 lim = zeroForOne ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE;
         int24 spotBefore = _spotTick();
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         TenderlySwapHelper(swapper).doSwap(POOL, zeroForOne, amountIn, lim);
         vm.stopBroadcast();
         console.log("pushTick.zeroForOne :", zeroForOne);
@@ -499,7 +516,7 @@ contract LPV2TenderlyHarness is Script {
         LPAutoBalancerV2 lab = _lab();
         uint256 fc0 = IERC20(WETH).balanceOf(FEE_COLLECTOR);
         uint256 fc1 = IERC20(CBBTC).balanceOf(FEE_COLLECTOR);
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         lab.rebalanceUsingAlt(_resetParams());
         vm.stopBroadcast();
         LPAutoBalancerV2.DecisionSnapshotV2 memory post = lab.getDecisionSnapshot();
@@ -535,7 +552,7 @@ contract LPV2TenderlyHarness is Script {
     function tightenCalmGate() public {
         vm.fee(0);
         LPAutoBalancerV2 lab = _lab();
-        vm.startBroadcast();
+        vm.startBroadcast(_broadcastKey()); // key from env, not forge argv (see _broadcastKey)
         // same bounds as registerStake but a TIGHT maxTickDeviation (5 ticks).
         lab.setPositionConfig(200, 200_000, 800_000, 60, int24(5), 500, 3600);
         vm.stopBroadcast();

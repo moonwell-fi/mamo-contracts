@@ -68,7 +68,8 @@ chain_sanity
 [ "$(ccall "$GAUGE" 'nft()(address)')" = "$NFPM" ] || die "gauge.nft() != expected NFPM"
 ok "gauge.nft()==NFPM"
 
-SENDER="$(cast wallet address --private-key "$MAMO_DEPLOYER_PRIVATE_KEY" 2>/dev/null)"
+# derive_sender reads the key from the env (not argv) via the harness sender() entrypoint — see common.sh
+derive_sender "$FQ"
 export HARNESS_SENDER="$SENDER"
 export HARNESS_SCENARIO="balanced"   # baseline mints a spot-straddling main
 info "sender: $SENDER"

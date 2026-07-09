@@ -81,7 +81,8 @@ chain_sanity
 ok "gauge.nft()==NFPM and gauge.rewardToken()==AERO"
 
 # ── 3. sender ─────────────────────────────────────────────────────────────────
-SENDER="$(cast wallet address --private-key "$MAMO_DEPLOYER_PRIVATE_KEY" 2>/dev/null)"
+# derive_sender reads the key from the env (not argv) via the harness sender() entrypoint — see common.sh
+derive_sender "$FQ"
 export HARNESS_SENDER="$SENDER"
 info "sender (all-roles deployer): $SENDER"
 

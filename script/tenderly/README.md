@@ -44,6 +44,20 @@ make tenderly-harness
 
 Requires `forge`, `cast`, `jq`, `python3`, `curl`. Reads `.env`.
 
+### Broadcaster key (`MAMO_DEPLOYER_PRIVATE_KEY`)
+
+`MAMO_DEPLOYER_PRIVATE_KEY` in `.env` signs the broadcast txs. **It must be a throwaway, fork-only key
+— never a mainnet deployer.** The harness only ever touches an ephemeral Tenderly Base-fork vnet, so
+any funded key works; treat it as disposable.
+
+The key is deliberately kept **off the command line**: forge/cast argv is world-readable via `ps aux`
+on a shared host. Instead `load_env` exports it into the environment (`set -a`), the `.s.sol` reads it
+with `vm.envUint` + `vm.startBroadcast(pk)`, and the orchestrator derives the sender address by reading
+it back through the harness `sender()` entrypoint (`vm.addr`) — so the raw key never appears in an argv.
+(This differs from `make deploy-broadcast`, which uses a `--account` keystore; an interactive keystore
+prompt is a poor fit for this non-interactive automation loop, and foundry does not honor an
+`ETH_PRIVATE_KEY` env fallback on the pinned nightly.)
+
 ## vnet resolution
 
 Mirrors the goal's "(a) spin up a vnet **or** (b) use the url in `.env`":
@@ -56,10 +70,34 @@ Mirrors the goal's "(a) spin up a vnet **or** (b) use the url in `.env`":
 
 ## Files
 
-- `LPV2TenderlyHarness.s.sol` — the Foundry script. Multiple `--sig` entrypoints
-  (`deployAndMint`, `registerStake`, `checkRoleGating`, `doReset`, `doExit`, `checkCalmGate`) so
-  the orchestrator can interleave Tenderly cheat-RPCs (funding, time advance) between phases.
-- `run-harness.sh` — the orchestrator (vnet lifecycle, funding, clock/oracle handling, reporting).
+**Foundry harnesses** — each exposes multiple `--sig` entrypoints so the orchestrator can
+interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases:
+
+- `LPV2TenderlyHarness.s.sol` — the LPAutoBalancerV2 script.
+  - lifecycle (`run-lpv2.sh`): `deployAndMint`, `registerStake`, `checkRoleGating`, `doReset`, `doExit`
+  - price-sim matrix (`run-lpv2-matrix.sh`): `deploySwapper`, `pushTick(bool,uint256)`, `justReset`,
+    `assertInRange`, `assertSingleSided`, `tightenCalmGate`, `checkCalmGate`, `checkStaleOracle`
+  - `sender()` — plumbing: prints `vm.addr(pk)` so the orchestrator derives the broadcaster
+    address without putting the raw key on an argv (see "Broadcaster key" above).
+- `SlippagePriceCheckerTenderlyHarness.s.sol` — the SlippagePriceChecker script
+  (`run-price-checker.sh`): `checkPriceGating`, `checkStalePrice`.
+- `TenderlySwapHelper.sol` — a tiny deployed swap-callback holder for the price-sim matrix; a
+  forge Script can't be its own `uniswapV3SwapCallback`, so `pushTick` routes swaps through this.
+
+**Orchestrators / shell:**
+
+- `run-harness.sh` — dispatcher: routes to `run-lpv2.sh` (default), `run-lpv2-matrix.sh`, or
+  `run-price-checker.sh` (see Usage).
+- `run-lpv2.sh` — LPAutoBalancerV2 lifecycle orchestrator (balanced + single-sided scenarios).
+- `run-lpv2-matrix.sh` — LPAutoBalancerV2 price-simulation scenario matrix (calm reset → in range,
+  large move → single-sided, calm-gate → `TwapDeviation`, stale-oracle → `StaleOracle`), each off a
+  fresh `evm_snapshot`.
+- `run-price-checker.sh` — SlippagePriceChecker gate against the live checker + real Chainlink config.
+- `setup-staging.sh` — stands up a **persistent** frontend staging vnet (not torn down after the run).
+- `lib/common.sh` — shared plumbing (vnet resolution/teardown, cheat-RPC fund/time helpers, the
+  forge-phase runner, address-book lookup, vnet gotcha fixes). Sourced, never executed.
+- `lib/market.sh` — reusable price/market simulation cheat primitives (`snapshot`/`revert_to`,
+  time advance). Sourced after `common.sh`.
 - `harness-results.log` — written each run (gitignored).
 
 ## Notes / gotchas baked into the harness

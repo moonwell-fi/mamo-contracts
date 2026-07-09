@@ -29,6 +29,10 @@ contract SlippagePriceCheckerTenderlyHarness is Script {
     uint256 constant SLIPPAGE_BPS = 100; // 1%
     uint256 constant AMOUNT_IN = 100e18; // reward tokens (WELL/MORPHO/AERO) are 18-dec
 
+    // Exact require-string emitted by SlippagePriceChecker.getExpectedOutFromChainlink when a feed is
+    // stale (block.timestamp > updatedAt + heartbeat). Pinned so checkStalePrice() asserts the REASON.
+    string constant STALE_REVERT_REASON = "Price feed update time exceeds heartbeat";
+
     Addresses internal addresses;
     ISlippagePriceChecker internal checker;
 
@@ -92,18 +96,30 @@ contract SlippagePriceCheckerTenderlyHarness is Script {
         console.log("checkPriceGating [OK]");
     }
 
-    /// @notice Assert checkPrice() reverts once the feed is stale (orchestrator advanced the clock
-    ///         past the configured heartbeat). getExpectedOutFromChainlink requires
-    ///         block.timestamp <= updatedAt + heartbeat.
+    /// @notice Assert getExpectedOut() reverts for the RIGHT reason once the feed is stale (orchestrator
+    ///         advanced the clock past the configured heartbeat). The staleness guard lives in
+    ///         SlippagePriceChecker.getExpectedOutFromChainlink as a require-string:
+    ///           require(block.timestamp <= updatedAt + heartbeat, "Price feed update time exceeds heartbeat")
+    ///         which bubbles up as Error(string). We assert the EXACT message (not merely "it reverted"),
+    ///         so an unrelated revert cause fails this phase — mirroring checkStaleOracle/checkCalmGate
+    ///         in LPV2TenderlyHarness, which pin the revert selector.
     function checkStalePrice() public {
         _resolve();
         (address from, address to) = _findConfiguredPair();
-        (bool ok, bytes memory ret) =
-            address(checker).staticcall(abi.encodeCall(checker.getExpectedOut, (AMOUNT_IN, from, to)));
-        require(!ok, "getExpectedOut must revert when the feed is stale");
-        // best-effort: surface the revert string
-        console.log("stalePrice.reverted     :", !ok);
-        console.log("stalePrice.retLen       :", ret.length);
-        console.log("checkStalePrice [OK]");
+        try checker.getExpectedOut(AMOUNT_IN, from, to) returns (uint256) {
+            revert("getExpectedOut must revert when the feed is stale");
+        } catch Error(string memory reason) {
+            require(
+                keccak256(bytes(reason)) == keccak256(bytes(STALE_REVERT_REASON)),
+                "stale revert reason must be 'Price feed update time exceeds heartbeat'"
+            );
+            console.log("stalePrice.reverted     :", true);
+            console.log("stalePrice.reason       :", reason);
+            console.log("checkStalePrice [OK]");
+        } catch (bytes memory ret) {
+            // A custom error / Panic — NOT the require-string staleness guard. Fail loudly.
+            console.log("stalePrice.unexpectedSelector_len :", ret.length);
+            revert("stale revert was not Error(string) 'exceeds heartbeat' - unexpected cause");
+        }
     }
 }
