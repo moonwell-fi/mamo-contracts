@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {ICLGauge} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -33,10 +34,58 @@ library LPBalancerLib {
     error ModuleNotSet();
     error InvalidSellToken();
     error TwapDeviation();
+    error GaugeRewardMismatch();
+    error PoolMismatch();
+    error NotHeld();
 
     /// @dev Redeclared so `skimFees` logs the same topic as LPAutoBalancerV2.FeesSkimmed (event topic
     ///      is keccak of the signature; emitted from the balancer's address under DELEGATECALL).
     event FeesSkimmed(uint256 amount0, uint256 amount1);
+
+    /// @dev Cross-validate a position config's pool descriptor and NFT binding (extracted from the
+    ///      balancer's _validateAndStore for EIP-170 headroom; runs under DELEGATECALL so
+    ///      address(this) is the balancer):
+    ///      1. pool token0/token1/tickSpacing must match the supplied descriptor, or every on-chain
+    ///         geometry computation would be wrong;
+    ///      2. the balancer must hold the NFT;
+    ///      3. the NFT's own token0/token1/tickSpacing must match — PoolMismatch in (1) only
+    ///         validates the descriptor against `pool`, NOT that the NFT belongs to that pool. A
+    ///         position minted against a DIFFERENT pool (wrong fee tier / token order) would
+    ///         otherwise register and corrupt every TickMath/LiquidityAmounts computation.
+    ///      NOTE: the INonfungiblePositionManager interface labels field 4 `fee` (Uniswap), but on
+    ///      Aerodrome Slipstream this slot carries tickSpacing — the same value MintParams.tickSpacing
+    ///      consumes. It is uint24 in the interface, so compare against uint24(spacing).
+    function validatePoolAndNft(
+        address pool,
+        address positionManager,
+        uint256 mainTokenId,
+        address token0,
+        address token1,
+        int24 spacing
+    ) public view {
+        if (
+            ICLPool(pool).token0() != token0 || ICLPool(pool).token1() != token1
+                || ICLPool(pool).tickSpacing() != spacing
+        ) revert PoolMismatch();
+        if (INonfungiblePositionManager(positionManager).ownerOf(mainTokenId) != address(this)) revert NotHeld();
+        (,, address nftToken0, address nftToken1, uint24 nftSpacing,,,,,,,) =
+            INonfungiblePositionManager(positionManager).positions(mainTokenId);
+        if (nftToken0 != token0 || nftToken1 != token1 || nftSpacing != uint24(spacing)) {
+            revert PoolMismatch();
+        }
+    }
+
+    /// @dev Validate a gauge binding (shared by registerPosition/setPool via _validateAndStore AND
+    ///      setGauge, so the two admin paths cannot drift): a non-zero gauge must reward in `aero`
+    ///      (or staked emissions would be stranded) and must be the gauge for THIS `pool` — a valid
+    ///      AERO-rewarding gauge for a different pool would otherwise be accepted and only fail
+    ///      later, deep inside stake()/_restakeBoth on the rebalance path.
+    function validateGauge(address gauge, address pool, address aero) public view {
+        if (gauge != address(0)) {
+            if (ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
+            if (ICLGauge(gauge).pool() != pool) revert PoolMismatch();
+        }
+    }
 
     /// @dev Largest spacing-aligned tick <= `tick` (floors toward -inf).
     function floorAlign(int24 tick, int24 spacing) public pure returns (int24) {

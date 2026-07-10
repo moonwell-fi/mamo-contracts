@@ -142,12 +142,13 @@ The `011` proposal also **deploys `LPCompoundModule`** (admin = F-MAMO, immutabl
 
 > **appData is a placeholder.** `keccak256("mamo-lpv2-compound")` has no valid appData-JSON preimage, and the CoW orderbook wants the full document at order placement. Before the first order of either kind: generate a plain `{appCode:"Mamo"}` document (no pre-hook), `PUT` it to `/app_data/{hash}` on the orderbook, and F-MAMO `setCompoundAppData(realHash)`. See the backend spec §10 for the exact commands.
 
-**Two steps are DEFERRED to a separate owner tx** because the `CHAINLINK_SWAP_CHECKER_PROXY` owner is **not** F-MAMO:
+**Three steps are DEFERRED to a separate owner tx** because the `CHAINLINK_SWAP_CHECKER_PROXY` owner is **not** F-MAMO:
 
 1. **Checker owner** (`0x26c158A4…`): `addTokenConfiguration(AERO → WETH)` and `(AERO → cbBTC)` using `CHAINLINK_AERO_USD` (`0x4EC5970f…`, 8-dec, forward) then ETH/USD resp. BTC/USD (reverse), plus `setMaxTimePriceValid(AERO, …)`. Only after this is AERO a reward token.
-2. **F-MAMO**: `module.approveCowSwap()` — reverts `"Token not allowed"` until step 1 lands.
+2. **Checker owner — SWAP-REBALANCE pair (do not skip)**: `addTokenConfiguration(WETH → cbBTC)` and `(cbBTC → WETH)` (ETH/USD forward + BTC/USD reverse and vice-versa), plus `setMaxTimePriceValid(WETH, …)` **and** `setMaxTimePriceValid(cbBTC, …)`. `validateRebalanceOrder` calls `checkPrice` on the WETH↔cbBTC pair and an **unconfigured pair reverts** — without this step no rebalance order ever validates and every `unwindForSwap`/`rebuildAfterSwap` cycle silently degrades to a no-swap rebuild. See "Rebalance mode selection" below for the `maxTimePriceValid == 0` failure mode this also prevents.
+3. **F-MAMO**: `module.approveCowSwap()` — reverts `"Token not allowed"` until step 1 lands.
 
-Until both run, `compound(compoundBps)` still harvests AERO, drops the `(1 − compoundBps)` share to `feeCollector`, and forwards the `compoundBps` share to the module; only the CowSwap **sell leg** is inert (no relayer allowance / orders fail slippage) — which is safe. The off-chain bot posts two CowSwap sell orders (AERO→WETH, AERO→cbBTC, ~50/50 by value) validated by the module's `isValidSignature`; the solver delivers the underlying **to the balancer**, where it folds into the next `rebalanceUsingAlt()`. Reward-only — principal is never swapped.
+Until steps 1 and 3 run, `compound(compoundBps)` still harvests AERO, drops the `(1 − compoundBps)` share to `feeCollector`, and forwards the `compoundBps` share to the module; only the CowSwap **sell leg** is inert (no relayer allowance / orders fail slippage) — which is safe. The off-chain bot posts two CowSwap sell orders (AERO→WETH, AERO→cbBTC, ~50/50 by value) validated by the module's `isValidSignature`; the solver delivers the underlying **to the balancer**, where it folds into the next `rebalanceUsingAlt()`. Reward-only — principal is never swapped.
 
 Output of Phase B: a registered, **unstaked** WETH/cbBTC position in the balancer, fees/AERO wired to the drop, and a linked compound module (CowSwap approval pending the checker-owner tx). No hot key exists yet.
 

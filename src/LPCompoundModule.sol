@@ -97,6 +97,17 @@ contract LPCompoundModule is AccessControlEnumerable {
         emit CompoundAppDataUpdated(appData);
     }
 
+    /// @notice Rescue tokens stranded on this module. AERO forwarded here by the balancer's
+    ///         compound() can normally only leave via a settled CowSwap order; if the checker or
+    ///         appData config goes bad in a way the setters cannot fix, that AERO would otherwise be
+    ///         trapped until a redeploy. The module never custodies swap proceeds (orders pin
+    ///         receiver == balancer), so this sweep mirrors the balancer's own recoverERC20 escape
+    ///         hatch without touching principal.
+    function recoverERC20(address token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        IERC20(token).safeTransfer(to, amount);
+    }
+
     /// @notice Pre-approve the CowSwap relayer to pull this module's AERO.
     function approveCowSwap() external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (address(slippagePriceChecker) == address(0)) revert CheckerNotSet();

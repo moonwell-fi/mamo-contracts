@@ -251,6 +251,32 @@ contract LPCompoundModuleUnitTest is Test {
         module.approveCowSwap();
     }
 
+    // ---------- recoverERC20 ----------
+
+    /// @notice AERO forwarded by compound() can only leave via a settled order; if the checker or
+    ///         appData config goes bad, recoverERC20 is the admin escape hatch (mirrors the
+    ///         balancer's own recoverERC20 — the module never custodies swap proceeds).
+    function test_recoverERC20_sweepsStrandedToken() public {
+        MockERC20(aero).mint(address(module), 5e18);
+        vm.prank(admin);
+        module.recoverERC20(aero, admin, 5e18);
+        assertEq(IERC20(aero).balanceOf(admin), 5e18);
+        assertEq(IERC20(aero).balanceOf(address(module)), 0);
+    }
+
+    function test_recoverERC20_revertsZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(LPCompoundModule.ZeroAddress.selector);
+        module.recoverERC20(aero, address(0), 1);
+    }
+
+    function test_recoverERC20_onlyAdmin() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, address(this), bytes32(0))
+        );
+        module.recoverERC20(aero, admin, 1);
+    }
+
     // ---------- validateRebalanceOrder ----------
 
     function _rebalanceOrder(address sell, address buy) internal view returns (GPv2Order.Data memory) {
@@ -261,6 +287,9 @@ contract LPCompoundModuleUnitTest is Test {
         bal.setInFlight(true);
         spc.setMaxTimePriceValid(token0, 1 hours);
         spc.setMaxTimePriceValid(token1, 1 hours);
+        // Direction test, not a pricing test: price the order strictly above oracle so it clears
+        // the default 0-bps knob (checkPrice is strict — an at-oracle order fails at 0 bps).
+        spc.setOracleDiscountBps(-1);
 
         bal.setSellTokenInFlight(token0);
         GPv2Order.Data memory o01 = _rebalanceOrder(token0, token1);
@@ -383,7 +412,7 @@ contract LPCompoundModuleUnitTest is Test {
         bal.setInFlight(true);
         bal.setSellTokenInFlight(token0); // base 8fbfaea: order sellToken must match in-flight approval
         spc.setMaxTimePriceValid(token0, 1 hours);
-        spc.setMinSlippageToPass(150);
+        spc.setOracleDiscountBps(150);
 
         GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
         (bytes32 d, bytes memory e) = _sig(o);
@@ -398,9 +427,11 @@ contract LPCompoundModuleUnitTest is Test {
         module.validateRebalanceOrder(d, e);
     }
 
-    /// @notice Default (never set) is 0: any below-oracle pricing fails the check, so rebalance
-    ///         orders cannot settle until the admin explicitly sets the knob — safe-strict.
-    ///         An at-or-above-oracle order still validates (the window is not bricked).
+    /// @notice Default (never set) is 0: any at-or-below-oracle pricing fails the check, so
+    ///         rebalance orders cannot settle until the admin explicitly sets the knob —
+    ///         safe-strict. Only an order priced strictly ABOVE oracle validates at 0 bps (the
+    ///         window is not bricked); an exactly-at-oracle order is rejected, mirroring the real
+    ///         checker's strict `>` boundary.
     function test_validateRebalanceOrder_defaultZeroRejectsBelowOracle() public {
         bal.setInFlight(true);
         bal.setSellTokenInFlight(token0); // base 8fbfaea: order sellToken must match in-flight approval
@@ -409,11 +440,15 @@ contract LPCompoundModuleUnitTest is Test {
         GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
         (bytes32 d, bytes memory e) = _sig(o);
 
-        spc.setMinSlippageToPass(1); // priced even 1 bp below oracle
+        spc.setOracleDiscountBps(1); // priced even 1 bp below oracle
         vm.expectRevert(bytes("price check failed"));
         module.validateRebalanceOrder(d, e);
 
-        spc.setMinSlippageToPass(0); // priced at/above oracle
+        spc.setOracleDiscountBps(0); // priced exactly AT oracle — strict boundary still rejects
+        vm.expectRevert(bytes("price check failed"));
+        module.validateRebalanceOrder(d, e);
+
+        spc.setOracleDiscountBps(-1); // priced strictly above oracle
         assertEq(module.validateRebalanceOrder(d, e), MAGIC);
     }
 
@@ -423,12 +458,12 @@ contract LPCompoundModuleUnitTest is Test {
         vm.prank(admin);
         module.setRebalanceSlippageBps(50);
 
-        spc.setMinSlippageToPass(100); // needs the full compound allowance, more than the rebalance knob
+        spc.setOracleDiscountBps(99); // just under the compound allowance (strict >), above the rebalance knob
         GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
         (bytes32 d, bytes memory e) = _sig(o);
         assertEq(module.isValidSignature(d, e), MAGIC);
 
-        spc.setMinSlippageToPass(101); // just past the compound allowance
+        spc.setOracleDiscountBps(100); // exactly AT the compound allowance — strict > rejects
         vm.expectRevert(bytes("price check failed"));
         module.isValidSignature(d, e);
     }
@@ -449,6 +484,9 @@ contract LPCompoundModuleUnitTest is Test {
         bal.setInFlight(true);
         bal.setSellTokenInFlight(token0);
         spc.setMaxTimePriceValid(token0, 1 hours);
+        // sellToken-binding test, not a pricing test: price strictly above oracle to clear the
+        // default 0-bps knob (strict checkPrice rejects at-oracle at 0 bps).
+        spc.setOracleDiscountBps(-1);
         GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
         (bytes32 d, bytes memory e) = _sig(o);
         assertEq(module.validateRebalanceOrder(d, e), bytes4(0x1626ba7e));

@@ -55,6 +55,10 @@ contract MockPositionManagerV2 {
 
     // mint
     uint256 public lastMintedTokenId;
+    // amountMin forwarding recorded per mint call (1-indexed by mintCallCount): call 1 = main,
+    // call 2 = alt. Lets tests assert _mintBalanced/_mintAlt zeroed the unfunded leg's min.
+    mapping(uint256 => uint256) public mintAmount0MinByCall;
+    mapping(uint256 => uint256) public mintAmount1MinByCall;
     uint256 public mintCallCount;
     bool public pullOnMint;
     // tick range of the most recent mint (used to assert which side the alt was placed on).
@@ -256,6 +260,8 @@ contract MockPositionManagerV2 {
         lastMintedTokenId = tokenId;
         lastMintTickLower = params.tickLower;
         lastMintTickUpper = params.tickUpper;
+        mintAmount0MinByCall[mintCallCount] = params.amount0Min;
+        mintAmount1MinByCall[mintCallCount] = params.amount1Min;
         if (pullOnMint) {
             // Model a price-1 in-ratio mint: consume min(desired0, desired1) of BOTH tokens.
             // The balanced main mint then leaves only the genuine surplus leg behind, which the
@@ -1608,6 +1614,28 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertGt(s.mainLiquidity, 0, "token1-only: main must have positive liquidity");
     }
 
+    /// @dev When _mainRange returns a single-sided range, _mintBalanced must zero the UNFUNDED
+    ///      leg's min before forwarding to the PM — mirroring _mintAlt. token0-only staging puts
+    ///      the main strictly ABOVE spot (token0-funded), so a caller-supplied amount1MinMain
+    ///      would spuriously revert the mint on the real position manager; the funded leg's
+    ///      amount0MinMain must pass through untouched.
+    function test_rebalanceUsingAlt_singleSidedMain_zeroesUnfundedLegMin() public {
+        _register(false);
+        _stagePrincipal(1e18, 0); // token0-only: single-sided branch, range above spot
+        mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
+
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.amount0MinMain = 123; // funded leg: forwarded as-is
+        params.amount1MinMain = 456; // unfunded leg: must be zeroed, not forwarded
+
+        vm.prank(rebalancer);
+        lab.rebalanceUsingAlt(params);
+
+        // Mint call 1 is the main. The unfunded (token1) min must arrive at the PM as 0.
+        assertEq(mockPM.mintAmount0MinByCall(1), 123, "funded leg min must pass through");
+        assertEq(mockPM.mintAmount1MinByCall(1), 0, "unfunded leg min must be zeroed");
+    }
+
     // ─── Review fixes F1/F5/F6: registerPosition validation ──────────────────────
 
     /// @dev Build a valid base config on the shared fixtures. Tests mutate one field then register.
@@ -1681,6 +1709,38 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.GaugeRewardMismatch.selector);
         lab.setGauge(address(badGauge));
+    }
+
+    /// @dev setGauge must enforce the same gauge->pool binding as _validateAndStore: an
+    ///      AERO-rewarding gauge bound to a DIFFERENT pool would otherwise be stored and only
+    ///      fail later, deep inside stake()/_restakeBoth.
+    function test_setGauge_revertPoolMismatch() public {
+        _register(false);
+        MockCLGauge wrongPoolGauge = new MockCLGauge(address(mockAero)); // rewards AERO...
+        wrongPoolGauge.setPool(makeAddr("otherPool")); // ...but is the gauge for another pool
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(wrongPoolGauge));
+    }
+
+    /// @dev Widths are uint24 but downstream tick math casts them to int24, which bit-reinterprets
+    ///      (not reverts) above int24.max. 8_388_800 > int24.max (8_388_607), yet is % 200 == 0 and
+    ///      >= minWidth — it passes every pre-existing width check, so registration must bound it.
+    function test_registerPosition_revertWidthOutOfBounds_maxWidthAboveInt24Max() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();
+        cfg.maxWidth = 8_388_800;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.WidthOutOfBounds.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev Same int24 bound on the post-registration config path — setPositionConfig and
+    ///      _validateAndStore must enforce identical width invariants.
+    function test_setPositionConfig_revertWidthOutOfBounds_maxWidthAboveInt24Max() public {
+        _register(false);
+        vm.prank(manager);
+        vm.expectRevert(LPAutoBalancerV2.WidthOutOfBounds.selector);
+        lab.setPositionConfig(400, 8_388_800, 400, 1800, 200, 100, 0);
     }
 
     /// @dev F6: a config whose tickSpacing disagrees with the live pool must be rejected.
@@ -1938,6 +1998,21 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(s.mainLiquidity, 0, "position geometry skipped while in flight");
         assertFalse(s.hasAlt);
         assertEq(s.earnedAero, 0, "gauge reads skipped while in flight");
+    }
+
+    /// @dev Same in-flight window as above, sibling entry point: collectFees is PERMISSIONLESS and
+    ///      p.mainStaked is already false mid-flight, so without a guard it would call
+    ///      POSITION_MANAGER.collect() on a burned tokenId — a deep revert on the real PM (the mock
+    ///      PM doesn't delete burned positions, so this asserts the fail-fast guard instead).
+    function test_collectFees_revertsMidFlight() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        vm.expectRevert(LPAutoBalancerV2.AlreadyInFlight.selector);
+        lab.collectFees();
     }
 
     // ---------- swap-rebalance fixtures ----------

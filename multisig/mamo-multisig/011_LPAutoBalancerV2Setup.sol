@@ -39,14 +39,20 @@ import {console} from "forge-std/console.sol";
 ///         NOTE — AERO COMPOUND (SlippagePriceChecker + approveCowSwap): PARTIALLY DEFERRED.
 ///         deploy() deploys LPCompoundModule (admin = F-MAMO) and build() wires the F-MAMO-doable
 ///         setters (setCompoundModule, setSlippagePriceChecker, setSlippage, setCompoundAppData).
-///         The remaining two steps are a SEPARATE owner tx because the CHAINLINK_SWAP_CHECKER_PROXY
+///         The remaining three steps are a SEPARATE owner tx because the CHAINLINK_SWAP_CHECKER_PROXY
 ///         owner is NOT F-MAMO:
 ///           1. checker owner: addTokenConfiguration(AERO->WETH) + addTokenConfiguration(AERO->cbBTC)
 ///              + setMaxTimePriceValid(AERO, ...) — feeds: CHAINLINK_AERO_USD (fwd) then ETH/USD resp.
 ///              BTC/USD (reverse). Only after this is AERO a reward token.
-///           2. F-MAMO: module.approveCowSwap() — reverts "Token not allowed" until step 1 lands.
-///         Until both run, compound() still harvests + drops + forwards AERO to the module; only the
-///         CowSwap sell leg is inert (no relayer allowance, orders fail slippage), which is safe.
+///           2. checker owner (SWAP-REBALANCE pair, do not skip): addTokenConfiguration(WETH->cbBTC)
+///              + addTokenConfiguration(cbBTC->WETH) + setMaxTimePriceValid(WETH, ...) +
+///              setMaxTimePriceValid(cbBTC, ...). validateRebalanceOrder calls checkPrice on the
+///              WETH<->cbBTC pair and an unconfigured pair REVERTS — without this step no rebalance
+///              order ever validates and every unwindForSwap/rebuildAfterSwap cycle silently
+///              degrades to a no-swap rebuild.
+///           3. F-MAMO: module.approveCowSwap() — reverts "Token not allowed" until step 1 lands.
+///         Until steps 1 and 3 run, compound() still harvests + drops + forwards AERO to the module;
+///         only the CowSwap sell leg is inert (no relayer allowance, orders fail slippage), which is safe.
 ///
 ///         NOTE — AERO / DropAutomation: DEFERRED (no on-chain action). DropAutomation has no
 ///         per-token "swappable reward" whitelist setter. The tokens it swaps are passed per-call as

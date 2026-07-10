@@ -24,9 +24,11 @@ interface ILPCompoundModuleRebalance {
 }
 
 /// @title LPAutoBalancerV2
-/// @notice Safe-governed, single-position Aerodrome CL rebalancer. Holds position NFTs,
-///         re-ranges them with on-chain-computed ticks, stakes for AERO emissions, and
-///         skims fees/emissions to the weekly drop. See docs/superpowers/specs/2026-06-01-lp-auto-balancer-design.md
+/// @notice Safe-governed, dual-position (balanced `main` + single-sided `alt`) Aerodrome CL
+///         rebalancer. Holds position NFTs, re-ranges them with on-chain-computed ticks without
+///         swapping principal, stakes for AERO emissions, and skims fees/emissions to the weekly
+///         drop. See docs/superpowers/specs/2026-06-17-lp-auto-balancer-v2-dual-position-design.md
+///         and docs/superpowers/specs/2026-07-02-lp-auto-balancer-v2-swap-rebalance-design.md
 contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable, IERC721Receiver {
     using SafeERC20 for IERC20;
 
@@ -236,7 +238,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         `unstake` (or use `withdrawPosition`, which auto-unstakes) first. This keeps
     ///         deregister a pure book-keeping/transfer path and never silently strands a staked
     ///         NFT (an NFT held by the gauge can't be safeTransferFrom'd by this contract).
-    function deregisterPosition(address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function deregisterPosition(address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
         if (to == address(0)) revert ZeroAddress();
@@ -285,6 +287,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // minWidth must be at least 2*tickSpacing so a balanced rebalanceUsingAlt can straddle an aligned spot.
         if (minWidth < 2 * uint24(spacing) || maxWidth < minWidth) revert WidthTooNarrow();
         if (minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0) revert InvalidWidth();
+        // Same int24-reinterpretation guard as _validateAndStore: keep the two width-config paths
+        // enforcing identical bounds.
+        if (maxWidth > uint24(type(int24).max)) revert WidthOutOfBounds();
 
         ManagedPositionV2 storage p = position;
         p.minWidth = minWidth;
@@ -330,8 +335,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Both legs must be unstaked: a partial unstake can leave the alt NFT custodied by the OLD
         // gauge; changing the gauge while altStaked would strand it (M-2).
         if (position.mainStaked || position.altStaked) revert PositionStaked();
-        // A non-zero gauge must reward in AERO or staked emissions would be stranded.
-        if (gauge != address(0) && ICLGauge(gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
+        // Same gauge->pool + reward-token binding _validateAndStore enforces at registration —
+        // shared via LPBalancerLib.validateGauge so the two admin paths cannot drift.
+        LPBalancerLib.validateGauge(gauge, p.pool, AERO);
         position.gauge = gauge;
         emit GaugeUpdated(gauge);
     }
@@ -641,6 +647,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         matching rebalanceUsingAlt's H-1 treatment — a pre-existing loose balance already on the
     ///         contract when unwindForSwap runs (e.g. un-folded AERO-compound proceeds) no longer widens
     ///         the tolerated absolute loss the way it did before this split.
+    /// @dev    Second residual (availability only, same two-transaction structure): _exitAll
+    ///         commingles any pre-existing loose balance with the withdrawn principal BEFORE the
+    ///         off-chain sellAmount is chosen, so the CowSwap sell may dip into that loose balance.
+    ///         Slippage then accrues on a notional larger than rebalanceValueBeforePos while the
+    ///         floor's tolerance scales only with rebalanceValueBeforePos, which can false-revert an
+    ///         honest rebuild. Not a fund-loss vector; recoverable via exit() (or by retrying with a
+    ///         smaller sell). Backends should size sellAmount from the position snapshot, not from
+    ///         the contract's whole balance.
     function rebuildAfterSwap(RebuildParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -662,7 +676,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
 
-        uint256 newMain = _mintBalanced(p, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
+        uint256 newMain =
+            _mintBalanced(p, spotTick, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
         p.mainTokenId = newMain;
         p.altStaked = false;
         p.mainStaked = false;
@@ -784,7 +799,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // back into balance (Beefy "never sell"). Principal is fully redeployed; nothing is sold.
         (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
 
-        uint256 newMain = _mintBalanced(p, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
+        uint256 newMain =
+            _mintBalanced(p, spotTick, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
         p.mainTokenId = newMain;
         p.altStaked = false; // freshly minted, not yet staked (restaked below iff wasStaked)
         p.mainStaked = false; // freshly minted, not yet staked (restaked below iff wasStaked)
@@ -907,12 +923,20 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      + trailing sqrtPriceX96 (0 because the pool is already initialized).
     function _mintBalanced(
         ManagedPositionV2 storage p,
+        int24 spotTick,
         int24 tickLower,
         int24 tickUpper,
         uint256 amount0Min,
         uint256 amount1Min,
         uint256 deadline
     ) private returns (uint256 newTokenId) {
+        // _mainRange may return a SINGLE-SIDED range (dust-minority branch): entirely above spot
+        // consumes only token0, entirely below only token1 (pool mint semantics on slot0.tick).
+        // Zero the unfunded leg's min — mirroring _mintAlt: the caller cannot predict which branch
+        // executes, so a nonzero min on the leg that ends up unfunded would revert an otherwise-valid
+        // single-sided rebuild. The funded leg keeps the caller-supplied floor.
+        if (spotTick < tickLower) amount1Min = 0;
+        else if (spotTick >= tickUpper) amount0Min = 0;
         return LPBalancerLib.mintPosition(
             address(POSITION_MANAGER),
             p.token0,
@@ -1070,6 +1094,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function collectFees() external whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
+        // Mid-swap-rebalance both NFTs are burned but p.mainTokenId/altTokenId still hold the burned
+        // ids until rebuildAfterSwap re-mints (same window getDecisionSnapshot guards); collect() on
+        // a burned id reverts deep inside the position manager, and mainStaked is already false here,
+        // so fail fast with a clear error instead.
+        if (rebalanceInFlight) revert AlreadyInFlight();
         if (p.mainStaked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
         // Skim BOTH legs to the feeCollector via the shared helper. Ignoring the alt here would strand
         // its accrued fees. Reuses _skimFees rather than duplicating the collect+forward logic.
@@ -1343,38 +1372,22 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (config.maxCenterDeviation == 0) revert InvalidConfig();
         int24 spacing = config.tickSpacing;
         if (spacing <= 0) revert InvalidConfig();
-        // Cross-validate the supplied pool descriptor against the live pool: token0/token1 ordering
-        // and tickSpacing must match, or every on-chain geometry computation would be wrong.
-        if (
-            ICLPool(config.pool).token0() != config.token0 || ICLPool(config.pool).token1() != config.token1
-                || ICLPool(config.pool).tickSpacing() != spacing
-        ) revert PoolMismatch();
         // A width narrower than 2*tickSpacing can never straddle an aligned spot, so a balanced
         // rebalanceUsingAlt would always revert in _alignedRange. Require at least two spacings of room.
         if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
         if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
-        // If a gauge is set, its reward token MUST be AERO or staked emissions would be stranded,
-        // and it MUST be the gauge for THIS pool — a valid AERO-rewarding gauge for a different pool
-        // otherwise passes registration and only fails later at stake()/_restakeBoth (confusing late
-        // revert on the rebalance path). Bind gauge -> pool here, same family as the NFT/pool binding.
-        if (config.gauge != address(0)) {
-            if (ICLGauge(config.gauge).rewardToken() != AERO) revert GaugeRewardMismatch();
-            if (ICLGauge(config.gauge).pool() != config.pool) revert PoolMismatch();
-        }
-        if (POSITION_MANAGER.ownerOf(config.mainTokenId) != address(this)) revert NotHeld();
-        // Bind the NFT to the configured pool: PoolMismatch above only validates the supplied
-        // descriptor against config.pool, NOT that the NFT actually belongs to that pool. Read the
-        // NFT's own token0/token1/tickSpacing and require they match — otherwise a position minted
-        // against a DIFFERENT pool (wrong fee tier / token order) could be registered, and every
-        // on-chain geometry computation (TickMath/LiquidityAmounts on p.tickSpacing) would be wrong.
-        // NOTE: the INonfungiblePositionManager interface labels field 4 `fee` (Uniswap), but on
-        // Aerodrome Slipstream this slot carries tickSpacing — the same value MintParams.tickSpacing
-        // consumes. It is uint24 in the interface, so compare against uint24(spacing).
-        (,, address nftToken0, address nftToken1, uint24 nftSpacing,,,,,,,) =
-            POSITION_MANAGER.positions(config.mainTokenId);
-        if (nftToken0 != config.token0 || nftToken1 != config.token1 || nftSpacing != uint24(spacing)) {
-            revert PoolMismatch();
-        }
+        // Widths are uint24 but _mainRange/alignedRange cast them to int24, which bit-reinterprets
+        // (not reverts) above int24.max — a huge maxWidth would pass every check here and corrupt
+        // tick math downstream. Fail closed at config time; per-call widths are bounded by maxWidth.
+        if (config.maxWidth > uint24(type(int24).max)) revert WidthOutOfBounds();
+        // Gauge reward-token + gauge->pool binding, shared with setGauge (LPBalancerLib.validateGauge)
+        // so the registration and post-registration admin paths enforce the same invariant.
+        LPBalancerLib.validateGauge(config.gauge, config.pool, AERO);
+        // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPBalancerLib for
+        // EIP-170 headroom (see validatePoolAndNft's NatSpec for the full invariants).
+        LPBalancerLib.validatePoolAndNft(
+            config.pool, address(POSITION_MANAGER), config.mainTokenId, config.token0, config.token1, spacing
+        );
 
         _store(config);
     }

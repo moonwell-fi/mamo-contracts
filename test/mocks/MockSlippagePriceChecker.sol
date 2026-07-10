@@ -6,17 +6,19 @@ contract MockSlippagePriceChecker {
     bool public priceOk = true;
     uint256 public maxValid = 30 minutes;
     mapping(address => bool) public reward;
-    /// @notice Minimum slippage bps the caller must allow for checkPrice to pass — models an
-    ///         order priced exactly this far below oracle (the real check is monotonic in
-    ///         slippage: a fixed order passes iff allowed slippage >= its oracle discount).
-    uint256 public minSlippageToPass;
+    /// @notice How far below oracle the modeled order is priced, in bps (negative = priced ABOVE
+    ///         oracle). Mirrors the real checker's STRICT inequality — SlippagePriceChecker uses
+    ///         `_minOut > expectedOut·(BPS−bps)/BPS`, so a fixed order at discount d passes iff the
+    ///         allowed slippage is strictly greater than d: an exactly-at-oracle order (d = 0) FAILS
+    ///         at 0 bps, and only an above-oracle order (d < 0) clears a 0-bps knob.
+    int256 public oracleDiscountBps;
 
     function setPriceOk(bool ok) external {
         priceOk = ok;
     }
 
-    function setMinSlippageToPass(uint256 v) external {
-        minSlippageToPass = v;
+    function setOracleDiscountBps(int256 v) external {
+        oracleDiscountBps = v;
     }
 
     function setMaxTimePriceValid(address, uint256 v) external {
@@ -28,7 +30,7 @@ contract MockSlippagePriceChecker {
     }
 
     function checkPrice(uint256, address, address, uint256, uint256 slippageBps) external view returns (bool) {
-        return priceOk && slippageBps >= minSlippageToPass;
+        return priceOk && int256(slippageBps) > oracleDiscountBps;
     }
 
     function isRewardToken(address t) external view returns (bool) {
