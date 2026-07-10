@@ -55,4 +55,22 @@ lp-v2-setup:
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup test-all
+# Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
+# lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
+# gating, cooldown, exit). Uses TENDERLY_VNET_RPC_URL from .env (or creates a vnet if TENDERLY_*
+# creds are set). See script/tenderly/README.md.
+tenderly-harness:
+	./script/tenderly/run-harness.sh
+
+# LPAutoBalancerV2 price-simulation scenario matrix on a fresh vnet: calm reset→in-range,
+# large-move-down→single-sided (the _mainRange fix under a real price move), calm-gate→TwapDeviation,
+# stale-oracle→StaleOracle. Fresh vnet by default (--reuse to reuse TENDERLY_VNET_RPC_URL).
+tenderly-matrix:
+	./script/tenderly/run-harness.sh lpv2-matrix
+
+# SlippagePriceChecker gate against the live checker + real Chainlink config on a fresh vnet:
+# fair minOut passes, under-priced fails, stale feed reverts.
+tenderly-price-checker:
+	./script/tenderly/run-harness.sh price-checker
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker
