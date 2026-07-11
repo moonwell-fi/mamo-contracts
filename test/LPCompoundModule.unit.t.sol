@@ -258,6 +258,8 @@ contract LPCompoundModuleUnitTest is Test {
     ///         balancer's own recoverERC20 — the module never custodies swap proceeds).
     function test_recoverERC20_sweepsStrandedToken() public {
         MockERC20(aero).mint(address(module), 5e18);
+        vm.expectEmit(true, true, true, true);
+        emit LPCompoundModule.TokensRecovered(aero, admin, 5e18);
         vm.prank(admin);
         module.recoverERC20(aero, admin, 5e18);
         assertEq(IERC20(aero).balanceOf(admin), 5e18);

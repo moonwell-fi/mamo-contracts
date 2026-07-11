@@ -56,6 +56,8 @@ contract LPCompoundModule is AccessControlEnumerable {
     error CheckerNotSet();
 
     event SlippageUpdated(uint256 oldBps, uint256 newBps);
+    /// @dev Mirrors LPAutoBalancerV2.TokensRecovered (same signature) so monitoring can watch one topic.
+    event TokensRecovered(address indexed token, address indexed to, uint256 amount);
     event RebalanceSlippageUpdated(uint256 oldBps, uint256 newBps);
     event SlippagePriceCheckerUpdated(address checker);
     event CompoundAppDataUpdated(bytes32 appData);
@@ -106,6 +108,7 @@ contract LPCompoundModule is AccessControlEnumerable {
     function recoverERC20(address token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (to == address(0)) revert ZeroAddress();
         IERC20(token).safeTransfer(to, amount);
+        emit TokensRecovered(token, to, amount);
     }
 
     /// @notice Pre-approve the CowSwap relayer to pull this module's AERO.
