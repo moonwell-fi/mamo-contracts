@@ -1,5 +1,7 @@
 # LPAutoBalancerV2 — WETH/cbBTC Phase-1 Setup Runbook
 
+> 📖 New here? Start with the [system overview](LP_AUTO_BALANCER_V2.md) — architecture, state machines, and how this runbook fits in.
+
 **Status:** Operational runbook (phase-1)
 **Audience:** Mamo ops + F-MAMO Safe signers + the backend team running the LLM rebalancer
 **Design refs:** `docs/superpowers/specs/2026-06-17-lp-auto-balancer-v2-dual-position-design.md` (contract), `centaur-moonwell` `docs/superpowers/specs/2026-06-17-lp-balancer-agent-design.md` (agent)

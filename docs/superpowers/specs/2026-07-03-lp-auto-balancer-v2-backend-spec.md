@@ -1,5 +1,7 @@
 # LPAutoBalancerV2 — Offchain Backend Specification (`lp_balancer_sweep`)
 
+> 📖 New here? Start with the [system overview](../../LP_AUTO_BALANCER_V2.md) — architecture, state machines, and how this spec fits in.
+
 **Status:** Spec, pre-implementation (contracts implemented and tested on `feat/lp-auto-balancer-v2`)
 **Date:** 2026-07-03
 **Extends:** `2026-06-17-lp-auto-balancer-v2-dual-position-design.md` (base), `2026-07-02-lp-auto-balancer-v2-swap-rebalance-design.md` (two-phase swap mode), `docs/LP_AUTO_BALANCER_V2_WETH_CBBTC_SETUP.md` Phase C (handover)
