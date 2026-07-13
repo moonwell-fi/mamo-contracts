@@ -16,6 +16,7 @@ interface ISyndicateGovernor {
         Executed, // strategy is live
         Settled, // P&L calculated, fee distributed
         Cancelled // proposer or owner cancelled
+
     }
 
     enum VoteType {

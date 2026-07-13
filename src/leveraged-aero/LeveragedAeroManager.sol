@@ -375,8 +375,9 @@ library LeveragedAeroManager {
         IERC20(aero).forceApprove(AERO_V2_ROUTER, aeroBal);
         IAeroRouter.Route[] memory routes = new IAeroRouter.Route[](1);
         routes[0] = IAeroRouter.Route({from: aero, to: $.usdc, stable: false, factory: AERO_V2_FACTORY});
-        IAeroRouter(AERO_V2_ROUTER)
-            .swapExactTokensForTokens(aeroBal, minUsdcOut, routes, address(this), block.timestamp + 600);
+        IAeroRouter(AERO_V2_ROUTER).swapExactTokensForTokens(
+            aeroBal, minUsdcOut, routes, address(this), block.timestamp + 600
+        );
         uint256 usdcOut = IERC20($.usdc).balanceOf(address(this)) - usdcBefore;
         if (usdcOut < floor) revert BelowOracleFloor(); // post-check on the measured fill (L9)
         if (usdcOut == 0) return 0; // unreachable when floor > 0 (aeroBal > 0), kept as defence
@@ -753,25 +754,23 @@ library LeveragedAeroManager {
             (uint256 exp0, uint256 exp1) =
                 LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liqToRemove);
             uint256 slip = uint256($.maxSlippageBps);
-            INonfungiblePositionManager(npm_)
-                .decreaseLiquidity(
-                    INonfungiblePositionManager.DecreaseLiquidityParams({
+            INonfungiblePositionManager(npm_).decreaseLiquidity(
+                INonfungiblePositionManager.DecreaseLiquidityParams({
                     tokenId: tokenId_,
                     liquidity: liqToRemove,
                     amount0Min: exp0 * (10000 - slip) / 10000,
                     amount1Min: exp1 * (10000 - slip) / 10000,
                     deadline: block.timestamp + 600
                 })
-                );
-            INonfungiblePositionManager(npm_)
-                .collect(
-                    INonfungiblePositionManager.CollectParams({
+            );
+            INonfungiblePositionManager(npm_).collect(
+                INonfungiblePositionManager.CollectParams({
                     tokenId: tokenId_,
                     recipient: address(this),
                     amount0Max: type(uint128).max,
                     amount1Max: type(uint128).max
                 })
-                );
+            );
         }
 
         // Re-stake only when remaining liquidity is non-zero.
@@ -854,9 +853,8 @@ library LeveragedAeroManager {
         uint256 actualIn = usdcBal < amountIn ? usdcBal : amountIn;
         if (actualIn == 0) return;
         IERC20($.usdc).forceApprove($.swapRouter, actualIn);
-        ICLSwapRouter($.swapRouter)
-            .exactInputSingle(
-                ICLSwapRouter.ExactInputSingleParams({
+        ICLSwapRouter($.swapRouter).exactInputSingle(
+            ICLSwapRouter.ExactInputSingleParams({
                 tokenIn: $.usdc,
                 tokenOut: tokenOut,
                 tickSpacing: int24(100),
@@ -866,7 +864,7 @@ library LeveragedAeroManager {
                 amountOutMinimum: minAmtOut,
                 sqrtPriceLimitX96: 0
             })
-            );
+        );
     }
 
     /// @dev Sweep the full balance of `tokenIn` to USDC via exactInputSingle (minOut may be 0).
@@ -882,9 +880,8 @@ library LeveragedAeroManager {
         if (bal <= keep) return;
         uint256 amt = bal - keep;
         IERC20(tokenIn).forceApprove($.swapRouter, amt);
-        ICLSwapRouter($.swapRouter)
-            .exactInputSingle(
-                ICLSwapRouter.ExactInputSingleParams({
+        ICLSwapRouter($.swapRouter).exactInputSingle(
+            ICLSwapRouter.ExactInputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: $.usdc,
                 tickSpacing: int24(100),
@@ -894,7 +891,7 @@ library LeveragedAeroManager {
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
-            );
+        );
     }
 
     /// @dev (1-f) of the strategy's current `token` balance, f = shares/supply. Used by redeem to
@@ -958,9 +955,8 @@ library LeveragedAeroManager {
         uint256 slip = uint256($.maxSlippageBps);
         IERC20($.weth).forceApprove(npm_, wethAmt);
         IERC20($.cbBTC).forceApprove(npm_, cbBTCAmt);
-        (uint128 liq,,) = INonfungiblePositionManager(npm_)
-            .increaseLiquidity(
-                INonfungiblePositionManager.IncreaseLiquidityParams({
+        (uint128 liq,,) = INonfungiblePositionManager(npm_).increaseLiquidity(
+            INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId_,
                 amount0Desired: wethAmt,
                 amount1Desired: cbBTCAmt,
@@ -968,7 +964,7 @@ library LeveragedAeroManager {
                 amount1Min: exp1 * (10000 - slip) / 10000,
                 deadline: block.timestamp + 600
             })
-            );
+        );
         if (uint256(liq) < minLiquidity) revert InsufficientLiquidity();
     }
 
@@ -1047,9 +1043,8 @@ library LeveragedAeroManager {
         if (usdcBal == 0 || amountOut == 0) return;
         uint256 maxIn = usdcBal < amountInMax ? usdcBal : amountInMax;
         IERC20($.usdc).forceApprove($.swapRouter, maxIn);
-        ICLSwapRouter($.swapRouter)
-            .exactOutputSingle(
-                ICLSwapRouter.ExactOutputSingleParams({
+        ICLSwapRouter($.swapRouter).exactOutputSingle(
+            ICLSwapRouter.ExactOutputSingleParams({
                 tokenIn: $.usdc,
                 tokenOut: tokenOut,
                 tickSpacing: int24(100),
@@ -1059,7 +1054,7 @@ library LeveragedAeroManager {
                 amountInMaximum: maxIn,
                 sqrtPriceLimitX96: 0
             })
-            );
+        );
         IERC20($.usdc).forceApprove($.swapRouter, 0);
         uint256 tokenBal = IERC20(tokenOut).balanceOf(address(this));
         if (tokenBal > 0) {
