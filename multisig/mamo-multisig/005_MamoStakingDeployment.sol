@@ -65,13 +65,23 @@ contract MamoStakingDeployment is MultisigProposal {
         address mamoToken = addresses.getAddress("MAMO");
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
         address quoter = addresses.getAddress("AERODROME_QUOTER");
+        address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
         vm.startBroadcast(deployer);
 
         address mamoStakingRegistry = address(
-            new MamoStakingRegistry(deployer, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
+            new MamoStakingRegistry(
+                deployer,
+                deployer,
+                guardian,
+                mamoToken,
+                dexRouter,
+                quoter,
+                slippagePriceChecker,
+                DEFAULT_SLIPPAGE_IN_BPS
+            )
         );
 
         address mamoStakingStrategy = address(new MamoStakingStrategy());

@@ -7,6 +7,7 @@ import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 
 import {RewardsDistributorSafeModule} from "@contracts/RewardsDistributorSafeModule.sol";
+import {ISlippagePriceChecker} from "@contracts/interfaces/ISlippagePriceChecker.sol";
 import {IMultiRewards} from "@contracts/interfaces/IMultiRewards.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -66,6 +67,7 @@ contract MamoStakingV2Deployment is MultisigProposal {
         address mamoToken = addresses.getAddress("MAMO");
         address dexRouter = addresses.getAddress("AERODROME_ROUTER");
         address quoter = addresses.getAddress("AERODROME_QUOTER");
+        address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address multiRewards = addresses.getAddress("MAMO_MULTI_REWARDS");
 
@@ -78,7 +80,16 @@ contract MamoStakingV2Deployment is MultisigProposal {
         vm.startBroadcast(deployer);
 
         address mamoStakingRegistry = address(
-            new MamoStakingRegistry(deployer, deployer, guardian, mamoToken, dexRouter, quoter, DEFAULT_SLIPPAGE_IN_BPS)
+            new MamoStakingRegistry(
+                deployer,
+                deployer,
+                guardian,
+                mamoToken,
+                dexRouter,
+                quoter,
+                slippagePriceChecker,
+                DEFAULT_SLIPPAGE_IN_BPS
+            )
         );
 
         address mamoStakingStrategy = address(new MamoStakingStrategy());
@@ -146,6 +157,37 @@ contract MamoStakingV2Deployment is MultisigProposal {
 
         // Remove backend role from deprecated staking factory
         registry.revokeRole(registry.BACKEND_ROLE(), deprecatedStakingStrategyFactory);
+
+        _configureCbBtcToMamoOracle();
+    }
+
+    /**
+     * @notice Configures the SlippagePriceChecker for the cbBTC -> MAMO swap path used by compound()
+     * @dev Chain: cbBTC * (BTC/USD) / (MAMO/USD) = MAMO equivalent.
+     *      The first feed is forward (multiply); the second is reverse (divide), since we want
+     *      to convert "USD value" back into "MAMO units."
+     */
+    function _configureCbBtcToMamoOracle() private {
+        ISlippagePriceChecker priceChecker =
+            ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        address cbBTC = addresses.getAddress("cbBTC");
+        address mamo = addresses.getAddress("MAMO");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+        feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_BTC_USD"),
+            reverse: false,
+            heartbeat: 3600
+        });
+        feeds[1] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"),
+            reverse: true,
+            heartbeat: 86400
+        });
+
+        priceChecker.addTokenConfiguration(cbBTC, mamo, feeds);
+        priceChecker.setMaxTimePriceValid(cbBTC, 3600);
     }
 
     function simulate() public override {
