@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {StrategyFactory} from "@contracts/StrategyFactory.sol";
@@ -16,7 +16,7 @@ import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
  * @title WhitelistWETHStrategyImplementation
  * @notice Multisig proposal to whitelist a new strategy implementation for WETH accounts.
  *         The new implementation includes receive() function that wraps any received ETH to WETH
- * @dev This script will deploy a new ERC20MoonwellMorphoStrategy implementation and whitelist it
+ * @dev This script will deploy a new MamoMultiMarketStrategy implementation and whitelist it
  *      for strategy type ID 4, which is used for WETH strategy.
  */
 contract WhitelistWETHStrategyImplementation is MultisigProposal {
@@ -61,7 +61,7 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy and whitelist new ERC20MoonwellMorphoStrategy implementation for token type 4, with support for WETH";
+        "Deploy and whitelist new MamoMultiMarketStrategy implementation for token type 4, with support for WETH";
     }
 
     function deploy() public override {
@@ -73,7 +73,7 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         vm.startBroadcast(deployer);
 
-        address newImplementation = address(new ERC20MoonwellMorphoStrategy());
+        address newImplementation = address(new MamoMultiMarketStrategy());
         vm.stopBroadcast();
 
         addresses.addAddress(strategyImplementation, newImplementation, true);

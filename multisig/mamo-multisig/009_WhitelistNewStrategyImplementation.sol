@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
@@ -12,7 +12,7 @@ import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
  * @title WhitelistNewStrategyImplementation
  * @notice Multisig proposal to whitelist a new strategy implementation for USDC and cbBTC accounts.
  *         The new implementation includes a claimRewards function compatible with the Merkle protocol.
- * @dev This script will deploy a new ERC20MoonwellMorphoStrategy implementation and whitelist it
+ * @dev This script will deploy a new MamoMultiMarketStrategy implementation and whitelist it
  *      for strategy type ID 1, which is used for both USDC and cbBTC strategies.
  */
 contract WhitelistNewStrategyImplementation is MultisigProposal {
@@ -56,7 +56,7 @@ contract WhitelistNewStrategyImplementation is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Deploy and whitelist new ERC20MoonwellMorphoStrategy implementation for token type 1";
+        return "Deploy and whitelist new MamoMultiMarketStrategy implementation for token type 1";
     }
 
     function deploy() public override {
@@ -64,7 +64,7 @@ contract WhitelistNewStrategyImplementation is MultisigProposal {
         vm.startBroadcast(deployer);
 
         // Deploy new strategy implementation
-        address newImplementation = address(new ERC20MoonwellMorphoStrategy());
+        address newImplementation = address(new MamoMultiMarketStrategy());
         vm.stopBroadcast();
 
         if (addresses.isAddressSet("MOONWELL_MORPHO_STRATEGY_IMPL")) {
