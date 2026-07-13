@@ -7,12 +7,17 @@ Canonical entry point for the LP auto-balancer. Explains what the system is, its
 
 ## 1. What it is
 
-A Safe-governed, **dual-position** Aerodrome concentrated-liquidity rebalancer in the Beefy-CLM style. Principal is held as two NFTs:
+A Safe-governed, **dual-position** Aerodrome concentrated-liquidity rebalancer with **two rebalance modes, chosen per-cycle by the backend**:
+
+- **Rebalance (no-swap)** — the Beefy-CLM-style default: withdraw both positions and re-mint from the balances as they are, principal never sold, impermanent loss realized only on a true range exit;
+- **Swap-rebalance** — an explicitly-armed two-phase path (CowSwap, oracle-bounded, floor-guarded end to end) for when the position is too lopsided for a no-swap rebuild to fix.
+
+Principal is held as two NFTs:
 
 - **main** — a balanced range straddling spot (the bulk of principal);
 - **alt** — a transient single-sided range parking whatever surplus leg the main mint could not consume.
 
-The core thesis: **the default rebalance never sells principal.** When price drifts, a rebalance (no-swap) withdraws both positions and re-mints main + alt from the balances as they are — impermanent loss is realized only on a true range exit, not on every re-range. A separate, explicitly-armed **swap-rebalance** path exists for when the position is so lopsided that a principal swap is worth its cost; it is oracle-bounded and floor-guarded end to end.
+"Explicitly-armed" is operational reality, not just intent: until the checker owner configures the WETH↔cbBTC token pairs and the admin sets the slippage knobs, no rebalance order validates and every swap cycle degrades to a no-swap rebuild. The mode decision table lives in [§5](#5-backend-integration-summary--the-spec-is-the-contract).
 
 Reward AERO (from gauge staking) is a third, non-principal asset: it is either dropped to the weekly distribution or partially sold back into the pair (the compound share) via CowSwap — reward-only orders validated by the `LPCompoundModule`.
 
