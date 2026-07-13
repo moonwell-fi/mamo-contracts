@@ -1,13 +1,11 @@
-    // SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
 
-import {WhitelistNewStrategyImplementation} from "../multisig/mamo-multisig/009_WhitelistNewStrategyImplementation.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
-
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -20,10 +18,12 @@ contract ERC20StrategyV2Test is BaseTest {
     address public backend;
     ERC1967Proxy public usdcStrategyProxy;
     ERC1967Proxy public cbbtcStrategyProxy;
-    ERC20MoonwellMorphoStrategy public usdcStrategy;
-    ERC20MoonwellMorphoStrategy public cbbtcStrategy;
-    ERC20MoonwellMorphoStrategy public newImplementation;
+    MamoMultiMarketStrategy public usdcStrategy;
+    MamoMultiMarketStrategy public cbbtcStrategy;
+    MamoMultiMarketStrategy public newImplementation;
     MamoStrategyRegistry public registry;
+
+    uint256 public constant STRATEGY_TYPE_ID = 1;
 
     function setUp() public override {
         super.setUp();
@@ -32,8 +32,11 @@ contract ERC20StrategyV2Test is BaseTest {
         // create account with old implementation
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY_DEPRECATED";
         string memory cbbtcFactoryName = "cbBTC_STRATEGY_FACTORY_DEPRECATED";
-        StrategyFactory usdcFactory = StrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
-        StrategyFactory cbbtcFactory = StrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
+        // The on-chain deprecated factories have createStrategyForUser(address) with the same selector
+        MultiMarketStrategyFactory usdcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
+        MultiMarketStrategyFactory cbbtcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
 
         owner = makeAddr("owner");
         backend = addresses.getAddress("STRATEGY_MULTICALL");
@@ -41,8 +44,8 @@ contract ERC20StrategyV2Test is BaseTest {
         vm.startPrank(owner);
         usdcStrategyProxy = ERC1967Proxy(payable(usdcFactory.createStrategyForUser(owner)));
         cbbtcStrategyProxy = ERC1967Proxy(payable(cbbtcFactory.createStrategyForUser(owner)));
-        usdcStrategy = ERC20MoonwellMorphoStrategy(payable(address(usdcStrategyProxy)));
-        cbbtcStrategy = ERC20MoonwellMorphoStrategy(payable(address(cbbtcStrategyProxy)));
+        usdcStrategy = MamoMultiMarketStrategy(payable(address(usdcStrategyProxy)));
+        cbbtcStrategy = MamoMultiMarketStrategy(payable(address(cbbtcStrategyProxy)));
         vm.stopPrank();
 
         vm.warp(block.timestamp + 1 minutes);
@@ -54,16 +57,18 @@ contract ERC20StrategyV2Test is BaseTest {
             cbbtcStrategyProxy.getImplementation(), addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL_DEPRECATED")
         );
 
-        WhitelistNewStrategyImplementation whitelistNewStrategyImplementation = new WhitelistNewStrategyImplementation();
-        whitelistNewStrategyImplementation.setAddresses(addresses);
-        whitelistNewStrategyImplementation.deploy();
-        whitelistNewStrategyImplementation.build();
-        whitelistNewStrategyImplementation.simulate();
-        whitelistNewStrategyImplementation.validate();
-
-        newImplementation = ERC20MoonwellMorphoStrategy(payable(addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
-
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+
+        // Deploy new implementation and whitelist it (inlined from old 009 multisig script)
+        address deployer = addresses.getAddress("DEPLOYER_EOA");
+        vm.startPrank(deployer);
+        newImplementation = new MamoMultiMarketStrategy();
+        vm.stopPrank();
+
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        vm.startPrank(multisig);
+        registry.whitelistImplementation(address(newImplementation), STRATEGY_TYPE_ID);
+        vm.stopPrank();
     }
 
     function testUpgrade() public {
@@ -99,7 +104,7 @@ contract ERC20StrategyV2Test is BaseTest {
 
         vm.expectCall(merkleDistributor, abi.encodeWithSignature("claim(address[],address[],uint256[],bytes32[][])"));
         vm.expectEmit(true, true, true, true);
-        emit ERC20MoonwellMorphoStrategy.RewardsClaimed(rewardTokens, rewardAmounts);
+        emit MamoMultiMarketStrategy.RewardsClaimed(rewardTokens, rewardAmounts);
 
         vm.startPrank(backend);
         usdcStrategy.claimRewards(rewardTokens, rewardAmounts, proofs);
@@ -176,10 +181,15 @@ contract ERC20StrategyV2Test is BaseTest {
     }
 
     function test_FactoryCanCreateStrategy() public {
+        // Re-fork at latest to ensure factories have BACKEND_ROLE
+        vm.createSelectFork({urlOrAlias: "base"});
+
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY";
         string memory cbbtcFactoryName = "cbBTC_STRATEGY_FACTORY";
-        StrategyFactory usdcFactory = StrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
-        StrategyFactory cbbtcFactory = StrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
+        MultiMarketStrategyFactory usdcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(usdcFactoryName)));
+        MultiMarketStrategyFactory cbbtcFactory =
+            MultiMarketStrategyFactory(payable(addresses.getAddress(cbbtcFactoryName)));
 
         vm.startPrank(owner);
         usdcFactory.createStrategyForUser(owner);

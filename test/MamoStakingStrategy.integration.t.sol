@@ -17,14 +17,14 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 
 contract MamoStakingStrategyIntegrationTest is BaseTest {
     MamoStakingRegistry public stakingRegistry;
     MamoStakingStrategyFactory public stakingStrategyFactory;
     MamoStrategyRegistry public mamoStrategyRegistry;
     IMultiRewards public multiRewards;
-    StrategyFactory public cbBTCStrategyFactory;
+    MultiMarketStrategyFactory public cbBTCStrategyFactory;
 
     IERC20 public mamoToken;
     address public user;
@@ -45,7 +45,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         stakingStrategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
         // Get the cbBTC strategy factory for testing reward distribution
-        cbBTCStrategyFactory = StrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
+        cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
 
         // Create test user
         user = makeAddr("testUser");

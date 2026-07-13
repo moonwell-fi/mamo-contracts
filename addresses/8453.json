@@ -145,6 +145,11 @@
     "isContract": true
   },
   {
+    "addr": "0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94",
+    "name": "CHAINLINK_MAMO_USD",
+    "isContract": true
+  },
+  {
     "addr": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0",
     "name": "CHAINLINK_AERO_USD",
     "isContract": true
