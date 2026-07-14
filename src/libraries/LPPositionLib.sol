@@ -179,11 +179,11 @@ library LPPositionLib {
 
     /// @notice Guards + calm-gate for phase 1 of a swap rebalance (unwindForSwap).
     /// @dev Takes primitives (never the `ManagedPositionV2` storage struct), so that struct stays
-    ///      defined on the balancer. Runs via DELEGATECALL, so every pool/oracle read originates from
-    ///      the balancer's address exactly as an inline check would. Returns the current sqrt price and
-    ///      both token decimals so the caller can reuse its shared `_totalValue` for the snapshot.
-    ///      The calm gate itself lives in LPGeometryLib; the library-to-library call is a DELEGATECALL
-    ///      in the same (balancer) context.
+    ///      defined on the balancer. All reads go to the passed-in pool/token addresses — the guards
+    ///      and the calm gate never consult msg.sender/address(this), so behavior is identical to an
+    ///      inline check regardless of call context. Returns the current sqrt price and both token
+    ///      decimals so the caller can reuse its shared `_totalValue` for the snapshot. The calm gate
+    ///      itself lives in LPGeometryLib.
     function unwindPrecheck(
         bool active,
         bool inFlight,

@@ -1,5 +1,9 @@
 # LP Auto Balancer V2 Swap-Rebalance (CowSwap Two-Phase) Implementation Plan
 
+> **2026-07-14 editorial note:** references to `LPBalancerLib` below are historical — that spillover
+> library was later split by domain into `LPGeometryLib` / `LPValuationLib` / `LPPositionLib`
+> (bytecode-neutral refactor). The plan text is preserved as written.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an async, MEV-protected principal-rebalance mode to `LPAutoBalancerV2`: unwind both LP positions, sell the excess leg via CowSwap (EIP-1271 validated by `LPCompoundModule`), then rebuild a balanced position — alongside the existing no-swap path, which is renamed `rebalanceUsingAlt()`.

@@ -67,7 +67,8 @@ library LPGeometryLib {
     /// @notice Read spot (sqrtP + tick), enforce the TWAP deviation gate, and read both token
     ///         decimals — the shared calm-gate preamble for every rebalance path. Reverts TwapDeviation
     ///         when |spot − twap| exceeds `maxTickDeviation`.
-    /// @dev Runs via DELEGATECALL, so pool/token reads originate from the balancer's address.
+    /// @dev All reads go to the passed-in `pool`/`token` addresses — nothing here depends on the
+    ///      delegatecall context (msg.sender/address(this) are never consulted).
     function calmGate(address pool, uint32 twapWindow, int24 maxTickDeviation, address token0, address token1)
         public
         view

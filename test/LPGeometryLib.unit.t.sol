@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, stdError} from "@forge-std/Test.sol";
 
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
@@ -158,6 +158,27 @@ contract LPGeometryLibUnitTest is Test {
         pool.set(0, 300, 0, 0);
         (, int24 spotTick,,) = LPGeometryLib.calmGate(address(pool), 1800, 300, token0, token1);
         assertEq(spotTick, 300);
+    }
+
+    /// @dev Edge documented for independent linkers: window == 0 hits a raw division-by-zero panic
+    ///      (0x12). The balancer guards this upstream (`twapWindow == 0 → InvalidConfig` in both
+    ///      config paths); any new caller must do the same.
+    function test_consultTwapTick_zeroWindow_panicsDivByZero() public {
+        pool.set(0, 0, 0, 3600);
+        vm.expectRevert(stdError.divisionError);
+        LPGeometryLib.consultTwapTick(address(pool), 0);
+    }
+
+    /// @dev Edge documented for independent linkers: a width that is NOT a spacing multiple yields
+    ///      a misaligned tickUpper (tl is floor-aligned, tu = tl + width). The balancer guards this
+    ///      upstream (`width % spacing != 0 → InvalidWidth` on every rebalance path); any new
+    ///      caller must align the width itself.
+    function test_alignedRange_misalignedWidth_producesMisalignedUpper() public pure {
+        // spacing 200, width 300 (not a multiple), spot 150: tl = floorAlign(0) = 0, tu = 300.
+        (int24 tl, int24 tu) = LPGeometryLib.alignedRange(150, 300, 200, 150);
+        assertEq(tl, 0);
+        assertEq(tu, 300);
+        assertTrue(tu % 200 != 0, "upper bound is NOT spacing-aligned for misaligned widths");
     }
 
     // ─── amountsForLiquidityAtTicks ──────────────────────────────────────────

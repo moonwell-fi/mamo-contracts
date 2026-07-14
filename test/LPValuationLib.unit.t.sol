@@ -78,6 +78,14 @@ contract LPValuationLibUnitTest is Test {
         LPValuationLib.readFeed(address(feed0), MAX_DELAY);
     }
 
+    /// @dev A FUTURE-dated feed (misbehaving oracle) must revert StaleOracle explicitly, not trip
+    ///      the 0x11 underflow panic in the staleness subtraction.
+    function test_readFeed_futureDatedFeed_revertsStaleOracle() public {
+        feed0.setUpdatedAt(block.timestamp + 1);
+        vm.expectRevert(LPValuationLib.StaleOracle.selector);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+    }
+
     // ─── valueInUsd ──────────────────────────────────────────────────────────
 
     /// @dev 1 token (18-dec) at $1.00 (8-dec feed) = 1e8 USD units (1e8 scale).
@@ -104,13 +112,41 @@ contract LPValuationLibUnitTest is Test {
         assertEq(usd, 1e8);
     }
 
-    /// @dev USD value is additive across legs and linear in amount (no rounding surprises at
-    ///      realistic magnitudes).
-    function testFuzz_valueInUsd_linearInAmount(uint96 amount) public view {
-        uint256 a = uint256(bound(amount, 1, type(uint96).max)); // up to ~7.9e28 wei
-        uint256 one = LPValuationLib.valueInUsd(a, 0, address(feed0), address(feed1), 18, 18, MAX_DELAY);
-        uint256 twoLegs = LPValuationLib.valueInUsd(a, a, address(feed0), address(feed1), 18, 18, MAX_DELAY);
-        assertEq(twoLegs, 2 * one, "legs must sum");
+    /// @dev DISTINCT per-leg prices ($1 vs $3) so wiring a leg to the wrong feed changes the
+    ///      result, plus real amount-scaling (f(2a) == 2·f(a)) and additivity assertions. Amounts
+    ///      are whole tokens so every expectation is exact (no floor-loss tautology).
+    function testFuzz_valueInUsd_scalingAndDistinctFeeds(uint64 tokens) public {
+        feed1.setAnswer(3e8); // $3.00 — distinct from feed0's $1.00
+        uint256 n = bound(tokens, 1, 1e10);
+        uint256 a = n * 1e18;
+
+        uint256 leg0 = LPValuationLib.valueInUsd(a, 0, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        assertEq(leg0, n * 1e8, "leg0 priced by feed0 at $1");
+
+        uint256 leg1 = LPValuationLib.valueInUsd(0, a, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        assertEq(leg1, 3 * n * 1e8, "leg1 must consult ITS OWN feed ($3), not feed0");
+
+        assertEq(
+            LPValuationLib.valueInUsd(2 * a, 0, address(feed0), address(feed1), 18, 18, MAX_DELAY),
+            2 * leg0,
+            "linear in amount"
+        );
+        assertEq(
+            LPValuationLib.valueInUsd(a, a, address(feed0), address(feed1), 18, 18, MAX_DELAY),
+            leg0 + leg1,
+            "legs additive under distinct prices"
+        );
+    }
+
+    /// @dev Edge (upstream-guarded caller contract documented here): a nonzero tokenId with ZERO
+    ///      liquidity values to 0 — and consults no feed (proven with address(0) oracles).
+    function test_principalValue_zeroLiquidity_isZeroWithoutFeedConsult() public {
+        MiniPositionManager pm = new MiniPositionManager();
+        pm.set(-400, 400, 0);
+        uint256 v = LPValuationLib.principalValue(
+            address(pm), 77, TickMath.getSqrtRatioAtTick(0), address(0), address(0), 18, 18, MAX_DELAY
+        );
+        assertEq(v, 0);
     }
 
     // ─── principalValue ──────────────────────────────────────────────────────

@@ -22,9 +22,13 @@ library LPValuationLib {
     error StaleOracle();
 
     /// @dev Read a Chainlink-style feed, validating positivity + freshness against `maxOracleDelay`.
+    ///      A future-dated `updatedAt` (misbehaving feed) reverts StaleOracle explicitly rather than
+    ///      tripping the 0x11 underflow panic in the staleness subtraction — same fail-closed
+    ///      outcome, honest error.
     function readFeed(address feed, uint256 maxOracleDelay) public view returns (uint256 price, uint8 decimals) {
         (, int256 answer,, uint256 updatedAt,) = IPriceFeed(feed).latestRoundData();
         if (answer <= 0) revert StaleOracle();
+        if (updatedAt > block.timestamp) revert StaleOracle();
         if (block.timestamp - updatedAt > maxOracleDelay) revert StaleOracle();
         price = uint256(answer);
         decimals = IPriceFeed(feed).decimals();
