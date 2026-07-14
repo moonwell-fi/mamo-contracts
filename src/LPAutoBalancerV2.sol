@@ -15,7 +15,9 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
-import {LPBalancerLib} from "@libraries/LPBalancerLib.sol";
+import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
+import {LPPositionLib} from "@libraries/LPPositionLib.sol";
+import {LPValuationLib} from "@libraries/LPValuationLib.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 
 /// @dev Minimal view surface of LPCompoundModule needed for the EIP-1271 passthrough.
@@ -336,8 +338,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // gauge; changing the gauge while altStaked would strand it (M-2).
         if (position.mainStaked || position.altStaked) revert PositionStaked();
         // Same gauge->pool + reward-token binding _validateAndStore enforces at registration —
-        // shared via LPBalancerLib.validateGauge so the two admin paths cannot drift.
-        LPBalancerLib.validateGauge(gauge, p.pool, AERO);
+        // shared via LPPositionLib.validateGauge so the two admin paths cannot drift.
+        LPPositionLib.validateGauge(gauge, p.pool, AERO);
         position.gauge = gauge;
         emit GaugeUpdated(gauge);
     }
@@ -581,12 +583,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         whenNotPaused
     {
         ManagedPositionV2 storage p = position;
-        // Guards + calm-gate delegated to LPBalancerLib (primitives in, primitives out) to keep this
+        // Guards + calm-gate delegated to LPPositionLib (primitives in, primitives out) to keep this
         // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
         // error selectors declared here (NotActive/AlreadyInFlight/Cooldown/ModuleNotSet/
         // InvalidSellToken/TwapDeviation) and returns the current sqrt price + token decimals so the
         // shared `_totalValue` below computes the USD value-before floor base.
-        (uint160 sqrtP, uint8 dec0, uint8 dec1) = LPBalancerLib.unwindPrecheck(
+        (uint160 sqrtP, uint8 dec0, uint8 dec1) = LPPositionLib.unwindPrecheck(
             p.active,
             rebalanceInFlight,
             p.lastRebalance,
@@ -667,7 +669,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         IERC20(sellTokenInFlight).forceApprove(VAULT_RELAYER, 0);
 
         (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
-            LPBalancerLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
+            LPGeometryLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
         // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
@@ -754,9 +756,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (!p.active) revert NotActive();
         if (block.timestamp < p.lastRebalance + p.minRebalanceInterval) revert Cooldown();
 
-        // Shared calm-gate preamble (spot + TWAP deviation gate + token decimals) in LPBalancerLib.
+        // Shared calm-gate preamble (spot + TWAP deviation gate + token decimals) in LPGeometryLib.
         (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
-            LPBalancerLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
+            LPGeometryLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
 
         // value BEFORE: both positions' principal at the current sqrtP snapshot, PLUS any loose
         // token0/token1 ALREADY held by this contract (donated, or leftover from a prior reverted
@@ -913,7 +915,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      fall below them); pass 0 to skip the floor. `deadline` is forwarded to the PM so the
     ///      caller's deadline guard actually applies to the withdraw leg (not a hardcoded now).
     function _decreaseLiquidityAll(uint256 tokenId, uint256 amount0Min, uint256 amount1Min, uint256 deadline) private {
-        LPBalancerLib.decreaseLiquidityAll(address(POSITION_MANAGER), tokenId, amount0Min, amount1Min, deadline);
+        LPPositionLib.decreaseLiquidityAll(address(POSITION_MANAGER), tokenId, amount0Min, amount1Min, deadline);
     }
 
     /// @dev Mint a new balanced `main` position from this contract's current token
@@ -937,7 +939,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // single-sided rebuild. The funded leg keeps the caller-supplied floor.
         if (spotTick < tickLower) amount1Min = 0;
         else if (spotTick >= tickUpper) amount0Min = 0;
-        return LPBalancerLib.mintPosition(
+        return LPPositionLib.mintPosition(
             address(POSITION_MANAGER),
             p.token0,
             p.token1,
@@ -1010,7 +1012,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 altAmount0Min = surplus0 ? amount0MinAlt : 0;
         uint256 altAmount1Min = surplus0 ? 0 : amount1MinAlt;
 
-        altId = LPBalancerLib.mintPosition(
+        altId = LPPositionLib.mintPosition(
             address(POSITION_MANAGER),
             p.token0,
             p.token1,
@@ -1028,7 +1030,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Collect any accrued LP fees for `tokenId` (before decreasing liquidity)
     ///      and forward both tokens to the feeCollector.
     function _skimFees(ManagedPositionV2 storage p, uint256 tokenId) private {
-        LPBalancerLib.skimFees(address(POSITION_MANAGER), p.token0, p.token1, p.feeCollector, tokenId);
+        LPPositionLib.skimFees(address(POSITION_MANAGER), p.token0, p.token1, p.feeCollector, tokenId);
     }
 
     /// @dev Transfer residual balances of t0 and t1 to `to`.
@@ -1048,7 +1050,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      Used by the rebalance value floor to net contract-held balances out of the
     ///      before/after comparison.
     function _contractPairValue(ManagedPositionV2 storage p, uint8 dec0, uint8 dec1) private view returns (uint256) {
-        return LPBalancerLib.contractPairValue(
+        return LPValuationLib.contractPairValue(
             p.token0, p.token1, address(this), p.oracle0, p.oracle1, dec0, dec1, maxOracleDelay
         );
     }
@@ -1063,7 +1065,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         view
         returns (uint256)
     {
-        return LPBalancerLib.principalValue(
+        return LPValuationLib.principalValue(
             address(POSITION_MANAGER), tokenId, sqrtP, p.oracle0, p.oracle1, dec0, dec1, maxOracleDelay
         );
     }
@@ -1223,7 +1225,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Round `tick` down to the nearest multiple of `spacing`, toward −∞.
     ///      Solidity truncates division toward zero, so we adjust negative remainders.
     function _floorAlign(int24 tick, int24 spacing) internal pure returns (int24) {
-        return LPBalancerLib.floorAlign(tick, spacing);
+        return LPGeometryLib.floorAlign(tick, spacing);
     }
 
     /// @dev Compute a tick range of `width` ticks centered on `referenceTick`,
@@ -1235,7 +1237,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         pure
         returns (int24 tickLower, int24 tickUpper)
     {
-        return LPBalancerLib.alignedRange(referenceTick, width, spacing, currentTick);
+        return LPGeometryLib.alignedRange(referenceTick, width, spacing, currentTick);
     }
 
     /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
@@ -1310,13 +1312,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev Consult the pool's TWAP oracle and return the time-weighted average tick
     ///      over `window` seconds. Division is floored toward −∞ (matches OracleLibrary.consult).
     function _consultTwapTick(address pool, uint32 window) internal view returns (int24) {
-        return LPBalancerLib.consultTwapTick(pool, window);
+        return LPGeometryLib.consultTwapTick(pool, window);
     }
 
     /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
     ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
     function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
-        return LPBalancerLib.readFeed(feed, maxOracleDelay);
+        return LPValuationLib.readFeed(feed, maxOracleDelay);
     }
 
     /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
@@ -1326,7 +1328,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         view
         returns (uint256 usd)
     {
-        return LPBalancerLib.valueInUsd(amount0, amount1, oracle0, oracle1, dec0, dec1, maxOracleDelay);
+        return LPValuationLib.valueInUsd(amount0, amount1, oracle0, oracle1, dec0, dec1, maxOracleDelay);
     }
 
     /// @dev Shared value-floor gate for both rebalance paths (H-1). Reverts `ValueFloor` when
@@ -1380,12 +1382,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // (not reverts) above int24.max — a huge maxWidth would pass every check here and corrupt
         // tick math downstream. Fail closed at config time; per-call widths are bounded by maxWidth.
         if (config.maxWidth > uint24(type(int24).max)) revert WidthOutOfBounds();
-        // Gauge reward-token + gauge->pool binding, shared with setGauge (LPBalancerLib.validateGauge)
+        // Gauge reward-token + gauge->pool binding, shared with setGauge (LPPositionLib.validateGauge)
         // so the registration and post-registration admin paths enforce the same invariant.
-        LPBalancerLib.validateGauge(config.gauge, config.pool, AERO);
-        // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPBalancerLib for
+        LPPositionLib.validateGauge(config.gauge, config.pool, AERO);
+        // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPPositionLib for
         // EIP-170 headroom (see validatePoolAndNft's NatSpec for the full invariants).
-        LPBalancerLib.validatePoolAndNft(
+        LPPositionLib.validatePoolAndNft(
             config.pool, address(POSITION_MANAGER), config.mainTokenId, config.token0, config.token1, spacing
         );
 

@@ -2,7 +2,7 @@
 
 Canonical entry point for the LP auto-balancer. Explains what the system is, its state machines, and how the offchain backend drives it. Deep detail lives in the linked documents (see [Document map](#document-map)); vocabulary is fixed in the repo-root [`CONTEXT.md`](../CONTEXT.md).
 
-- Contract: `src/LPAutoBalancerV2.sol` (+ `src/LPCompoundModule.sol`, `src/libraries/LPBalancerLib.sol`)
+- Contract: `src/LPAutoBalancerV2.sol` (+ `src/LPCompoundModule.sol`, `src/libraries/LPGeometryLib.sol` / `LPValuationLib.sol` / `LPPositionLib.sol`)
 - Phase-1 deployment: WETH/cbBTC on Aerodrome Slipstream (Base), gauged
 
 ## 1. What it is
@@ -56,7 +56,7 @@ stateDiagram-v2
 ```
 
 Notes:
-- `registerPosition`/`setPool` share one validation path (`_validateAndStore` → `LPBalancerLib.validateGauge` + `validatePoolAndNft`): pool descriptor ↔ live pool, NFT ownership + NFT ↔ pool binding, gauge rewards AERO + gauge ↔ pool binding, width bounds (incl. the `int24.max` cap).
+- `registerPosition`/`setPool` share one validation path (`_validateAndStore` → `LPPositionLib.validateGauge` + `validatePoolAndNft`): pool descriptor ↔ live pool, NFT ownership + NFT ↔ pool binding, gauge rewards AERO + gauge ↔ pool binding, width bounds (incl. the `int24.max` cap).
 - `deregisterPosition` is pure bookkeeping transfer (reverts if staked); `withdrawPosition` rescues in one call (auto-unstakes); `exit` additionally liquidates to tokens and sweeps — see 3.2 for its mid-flight role.
 
 ### 3.2 Machine B — rebalance window (operational plane)
