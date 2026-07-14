@@ -41,9 +41,12 @@ library GPv2OrderChecks {
         require(o.buyTokenBalance == GPv2Order.BALANCE_ERC20, "buy must be erc20");
         require(o.receiver == receiver, "bad receiver");
         require(o.feeAmount == 0, "fee must be zero");
-        require(o.appData == expectedAppData, "bad appData");
+        // Expiry window BEFORE the appData pin: appData can be expensive for callers to compute
+        // (the strategy builds a hook JSON), and pre-existing suites construct expiry-violation
+        // orders with placeholder appData — window first keeps each check independently testable.
         require(o.validTo >= block.timestamp + 5 minutes, "expires too soon");
         require(o.validTo <= block.timestamp + checker.maxTimePriceValid(address(o.sellToken)), "expires too far");
+        require(o.appData == expectedAppData, "bad appData");
         require(
             checker.checkPrice(o.sellAmount, address(o.sellToken), address(o.buyToken), o.buyAmount, slippageBps),
             "price check failed"
