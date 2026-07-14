@@ -7,14 +7,15 @@ run by the Mamo backend as operator, on Sherwood's pooled-vault rails.
 
 ## Provenance
 
-The code in `src/leveraged-aero/` is **vendored byte-identical** (import-path rewrites only) from the
-public Sherwood protocol repo:
+The code in `src/leveraged-aero/` is **vendored identical modulo import-path rewrites and `forge fmt`**
+from the public Sherwood protocol repo — i.e. it compares equal to upstream after the import-path
+rewrites and this repo's `forge fmt` whitespace normalization:
 
 | | |
 |---|---|
 | Repo | https://github.com/sherwoodagent/sherwood-protocol |
 | Pinned commit | [`bb10bebff3cbf554e7538e42f1e876a47b09a6ac`](https://github.com/sherwoodagent/sherwood-protocol/tree/bb10bebff3cbf554e7538e42f1e876a47b09a6ac) (2026-07-10) |
-| Verified | 2026-07-13 — every vendored strategy file blob-compared equal to the mirror at the pinned commit |
+| Verified | 2026-07-13 — every vendored strategy file compared equal to the mirror at the pinned commit after import-path rewrites and `forge fmt` normalization |
 
 Where this package and the upstream repo disagree, upstream at the pinned commit is authoritative.
 
@@ -65,8 +66,10 @@ byte-identical in the manager" vs "…in the strategy" — while every storage-r
 
 **Bytecode margin note:** under this repo's optimizer profile (via_ir, runs=200), `LeveragedAeroManager`
 compiles to 23,996 runtime bytes — only **580 bytes under** the EIP-170 cap (`LeveragedAerodromeCLStrategy`
-is 19,514). Sherwood's CI gates this; this repo does not, so optimizer-setting changes can silently push
-it over. Re-check `forge build --sizes` after any toolchain change.
+is 19,514). Both Sherwood's CI and this repo's CI gate this — the build step runs `forge build --sizes`
+(`.github/workflows/test.yml`), which fails on an EIP-170 violation, so an optimizer-setting change that
+pushed the manager over the cap would break the build rather than slip through. Still re-check
+`forge build --sizes` locally after any toolchain change.
 
 ## Custody model in one paragraph
 
@@ -107,6 +110,38 @@ line references lives there:
    oracle; `selfManagesFees()` trust stopped by guardian review + owner veto; pending unclaimed AERO not
    in NAV; governance blast radius of the 3650-day duration ceiling; vault-side rescue dormancy under
    the indefinite proposal.
+10. **Hardcoded swap-route `tickSpacing`** — the auxiliary USDC↔leg swap helpers in
+    `LeveragedAeroManager.sol` (`_swapUsdcExactIn`, `_sweepLegToUsdc`, `_redeemCoverShortfall`) pin
+    `tickSpacing: int24(100)` for the USDC/cbBTC and USDC/WETH Slipstream routes, whereas the main LP
+    pool's spacing is config-driven (`$.tickSpacing`, used for range math and mint). This is a
+    single-venue assumption with no fallback: if the 100-spacing pool for a leg is the wrong or an
+    illiquid venue, the swap routes through it regardless. The slippage protection is uneven across
+    call sites: `_settleShortfall`'s `_swapUsdcExactIn` calls pass an oracle-derived
+    `minAmtOut = debtRem × (10000 − maxSlippageBps)/10000`; `_redeemCoverShortfall` is exact-output and
+    bounded by `amountInMax` (a `type(uint256).max`/idle-USDC cap on full redeem, the redeemer's own
+    budget on partial redeem, an oracle+slippage ceiling on the permissionless deleverage path); but the
+    two redeem-path residual-leg sweeps (`redeemUnwindImpl` → `_sweepLegToUsdc($.cbBTC/$.weth, …, 0)`)
+    pass `minOut = 0` and rely solely on the redeem's aggregate `minAssetsOut` floor rather than a
+    per-swap bound. Focus: whether the fixed spacing plus the `minOut = 0` residual sweeps are
+    exploitable under a manipulated/illiquid 100-spacing leg pool, and whether the aggregate floor is a
+    sufficient guard.
+
+## Accepted patterns / known non-issues
+
+Pre-declared so auditors don't re-report them; each is a deliberate, reviewed choice in the vendored code.
+
+- **No-op swap/mint deadlines.** Every Slipstream/Aerodrome swap and mint passes
+  `deadline: block.timestamp + 600`. Because the deadline is computed relative to the execution block,
+  it can never expire and provides no MEV/staleness protection. This is intentional: the real guards are
+  the per-swap min-outs / oracle floors (item 8, item 10) and the redeem/deploy aggregate min-out floors,
+  not the deadline. Accepted.
+- **CEI ordering in `fulfillRedeem` / `emergencyRedeem`.** Both settle via `_proportionalRedeem`, which
+  makes external calls — `IERC20(usdc).safeTransfer(recipient, assetsOut)` then
+  `ISyndicateVault(vault()).strategyBurn(shares)` — *before* the caller writes `r.settled = true`, so the
+  double-spend flag is set after the effects rather than before (a CEI-ordering deviation). Safe in
+  practice: both functions are `nonReentrant` under `ReentrancyGuardTransient`, USDC has no transfer
+  hooks, and the vault is a trusted in-scope contract, so no reentrant path can observe `settled == false`
+  and re-enter. Accepted.
 
 ## Specification & documentation
 

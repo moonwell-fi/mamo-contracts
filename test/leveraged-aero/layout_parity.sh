@@ -24,8 +24,8 @@ norm() { sed 's#//.*##; s/[[:space:]]*$//' | grep -v '^[[:space:]]*$' || true; }
 extract() {
   local file="$1" kind="$2"
   case "$kind" in
-    redeemrequest) awk '/^    struct RedeemRequest \{/,/^    \}$/' "$file" ;;
-    layout)        awk '/^    struct Layout \{/,/^    \}$/' "$file" ;;
+    redeemrequest) awk '/^[[:space:]]*struct RedeemRequest \{/,/^[[:space:]]*\}[[:space:]]*$/' "$file" ;;
+    layout)        awk '/^[[:space:]]*struct Layout \{/,/^[[:space:]]*\}[[:space:]]*$/' "$file" ;;
     storageslot)   grep -E 'bytes32 private constant STORAGE_SLOT' "$file" ;;
     *) echo "unknown kind: $kind" >&2; exit 2 ;;
   esac
