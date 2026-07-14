@@ -3,9 +3,9 @@ pragma solidity 0.8.28;
 
 import {Test, stdError} from "@forge-std/Test.sol";
 
+import {MockERC20} from "./MockERC20.sol";
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
-import {MockERC20} from "./MockERC20.sol";
 
 /// @dev Minimal ICLPool surface for calmGate/consultTwapTick: slot0 + observe. The observe
 ///      cumulatives are set directly so TWAP-tick flooring cases are exact, not simulated.

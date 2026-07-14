@@ -3,11 +3,11 @@ pragma solidity 0.8.28;
 
 import {Test} from "@forge-std/Test.sol";
 
+import {MockERC20} from "./MockERC20.sol";
+import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {LPValuationLib} from "@libraries/LPValuationLib.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
-import {MockERC20} from "./MockERC20.sol";
-import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 
 /// @dev Minimal positions() surface for principalValue: one configurable position.
 contract MiniPositionManager {
