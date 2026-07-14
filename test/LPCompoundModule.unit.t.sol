@@ -177,7 +177,7 @@ contract LPCompoundModuleUnitTest is Test {
     function test_isValidSignature_revertsReceiverNotBalancer() public {
         GPv2Order.Data memory o = _order(aero, token0, address(0xCAFE), uint32(block.timestamp + 10 minutes));
         (bytes32 d, bytes memory e) = _sig(o);
-        vm.expectRevert(bytes("receiver must be balancer"));
+        vm.expectRevert(bytes("bad receiver"));
         module.isValidSignature(d, e);
     }
 
@@ -338,7 +338,7 @@ contract LPCompoundModuleUnitTest is Test {
         spc.setMaxTimePriceValid(token0, 1 hours);
         GPv2Order.Data memory o = _order(token0, token1, makeAddr("attacker"), uint32(block.timestamp + 10 minutes));
         (bytes32 d, bytes memory e) = _sig(o);
-        vm.expectRevert("receiver must be balancer");
+        vm.expectRevert("bad receiver");
         module.validateRebalanceOrder(d, e);
     }
 
@@ -492,6 +492,29 @@ contract LPCompoundModuleUnitTest is Test {
         GPv2Order.Data memory o = _rebalanceOrder(token0, token1);
         (bytes32 d, bytes memory e) = _sig(o);
         assertEq(module.validateRebalanceOrder(d, e), bytes4(0x1626ba7e));
+    }
+
+    // ---------- class disjointness (cross-contract invariant, documented) ----------
+
+    /// @notice The compound class (sellToken == AERO) and the rebalance class (sellToken in
+    ///         {token0, token1}) are structurally disjoint ONLY because LPAutoBalancerV2's
+    ///         _validateAndStore refuses AERO as a pair token at registration. This test documents
+    ///         that dependency: against a hypothetical balancer reporting AERO as token0 — a state
+    ///         the real balancer makes unreachable — ONE order (AERO -> token1) satisfies BOTH
+    ///         classes. The module imports its safety from the balancer's invariant; if that guard
+    ///         is ever weakened, this is the failure shape to expect.
+    function test_classDisjointness_dependsOnBalancerAeroExclusion() public {
+        bal.setTokens(aero, token1); // unreachable on the real balancer (InvalidConfig at registration)
+        bal.setInFlight(true);
+        bal.setSellTokenInFlight(aero);
+        spc.setMaxTimePriceValid(aero, 1 hours);
+        spc.setOracleDiscountBps(-1); // pricing is not the subject here
+
+        GPv2Order.Data memory o = _rebalanceOrder(aero, token1);
+        (bytes32 d, bytes memory e) = _sig(o);
+
+        assertEq(module.validateRebalanceOrder(d, e), MAGIC, "rebalance class accepts the AERO leg");
+        assertEq(module.isValidSignature(d, e), MAGIC, "compound class accepts the SAME order");
     }
 
     // ---------- structural order-shape rejections (both validation paths) ----------

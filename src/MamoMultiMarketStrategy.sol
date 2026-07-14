@@ -12,6 +12,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {WETH9} from "@interfaces/IWETH.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
+import {GPv2OrderChecks} from "@libraries/GPv2OrderChecks.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -36,7 +37,6 @@ interface IMerkleDistributor {
  *      Market definitions are read from MarketRegistry. Per-market splits are stored locally keyed by address.
  */
 contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
-    using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
 
     // Constants
@@ -393,36 +393,15 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
     /// @param orderDigest The EIP-712 signing digest derived from the order
     /// @param encodedOrder Bytes-encoded order information
+    /// @dev Order-CLASS checks (reward token in, strategy token out) run first; the shared GPv2
+    ///      sell-order mechanics + price check live in GPv2OrderChecks.validate — one
+    ///      implementation for this path and both of LPCompoundModule's. Revert strings are the
+    ///      repo-canonical short set (see the library).
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory _order = abi.decode(encodedOrder, (GPv2Order.Data));
 
-        require(_order.hash(DOMAIN_SEPARATOR) == orderDigest, "Order hash does not match the provided digest");
-
-        require(_order.kind == GPv2Order.KIND_SELL, "Order must be a sell order");
-
-        require(
-            _order.validTo >= block.timestamp + 5 minutes,
-            "Order expires too soon - must be valid for at least 5 minutes"
-        );
-
-        require(
-            _order.validTo <= block.timestamp + slippagePriceChecker.maxTimePriceValid(address(_order.sellToken)),
-            "Order expires too far in the future"
-        );
-
-        require(!_order.partiallyFillable, "Order must be fill-or-kill, partial fills not allowed");
-
-        require(_order.sellTokenBalance == GPv2Order.BALANCE_ERC20, "Sell token must be an ERC20 token");
-
-        require(_order.buyTokenBalance == GPv2Order.BALANCE_ERC20, "Buy token must be an ERC20 token");
-
         require(_order.sellToken != token, "Sell token can't be strategy token");
-
         require(_order.buyToken == token, "Buy token must match the strategy token");
-
-        require(_order.feeAmount == 0, "Fee amount must be zero");
-
-        require(_order.receiver == address(this), "Order receiver must be this strategy contract");
 
         uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
 
@@ -445,19 +424,14 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
             )
         );
 
-        bytes32 expectedAppDataBytes = keccak256(bytes(expectedAppData));
-
-        require(_order.appData == expectedAppDataBytes, "Invalid app data");
-
-        require(
-            slippagePriceChecker.checkPrice(
-                _order.sellAmount,
-                address(_order.sellToken),
-                address(_order.buyToken),
-                _order.buyAmount,
-                allowedSlippageInBps
-            ),
-            "Price check failed - output amount too low"
+        GPv2OrderChecks.validate(
+            _order,
+            orderDigest,
+            DOMAIN_SEPARATOR,
+            address(this),
+            keccak256(bytes(expectedAppData)),
+            slippagePriceChecker,
+            allowedSlippageInBps
         );
 
         return MAGIC_VALUE;
