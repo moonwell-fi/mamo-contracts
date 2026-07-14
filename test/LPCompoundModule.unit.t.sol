@@ -502,8 +502,10 @@ contract LPCompoundModuleUnitTest is Test {
     ///         that dependency: against a hypothetical balancer reporting AERO as token0 — a state
     ///         the real balancer makes unreachable — ONE order (AERO -> token1) satisfies BOTH
     ///         classes. The module imports its safety from the balancer's invariant; if that guard
-    ///         is ever weakened, this is the failure shape to expect.
-    function test_classDisjointness_dependsOnBalancerAeroExclusion() public {
+    ///         is ever weakened, this is the failure shape to expect. DOCUMENTS the dependency —
+    ///         it does not enforce the balancer's AERO-exclusion guard (that stays pinned in the
+    ///         balancer's own suite).
+    function test_documents_classDisjointness_dependsOnBalancerAeroExclusion() public {
         bal.setTokens(aero, token1); // unreachable on the real balancer (InvalidConfig at registration)
         bal.setInFlight(true);
         bal.setSellTokenInFlight(aero);

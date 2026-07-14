@@ -426,10 +426,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
         GPv2OrderChecks.validate(
             _order,
-            orderDigest,
-            DOMAIN_SEPARATOR,
+            GPv2OrderChecks.Binding({
+                orderDigest: orderDigest,
+                domainSeparator: DOMAIN_SEPARATOR,
+                expectedAppData: keccak256(bytes(expectedAppData))
+            }),
             address(this),
-            keccak256(bytes(expectedAppData)),
             slippagePriceChecker,
             allowedSlippageInBps
         );

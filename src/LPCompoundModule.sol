@@ -127,7 +127,7 @@ contract LPCompoundModule is AccessControlEnumerable {
     ///      below (sellToken in {token0, token1}) are structurally disjoint ONLY because the
     ///      balancer refuses AERO as a pair token at registration (_validateAndStore's
     ///      InvalidConfig guard). If that invariant ever broke, an AERO leg would satisfy both
-    ///      classes — see test_classDisjointness_dependsOnBalancerAeroExclusion.
+    ///      classes — see test_documents_classDisjointness_dependsOnBalancerAeroExclusion.
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
         require(address(o.sellToken) == AERO, "sellToken must be AERO");
@@ -135,7 +135,15 @@ contract LPCompoundModule is AccessControlEnumerable {
         address t1 = ILPAutoBalancerV2(balancer).token1();
         require(address(o.buyToken) == t0 || address(o.buyToken) == t1, "buyToken must be underlying");
         GPv2OrderChecks.validate(
-            o, orderDigest, DOMAIN_SEPARATOR, balancer, compoundAppData, slippagePriceChecker, allowedSlippageInBps
+            o,
+            GPv2OrderChecks.Binding({
+                orderDigest: orderDigest,
+                domainSeparator: DOMAIN_SEPARATOR,
+                expectedAppData: compoundAppData
+            }),
+            balancer,
+            slippagePriceChecker,
+            allowedSlippageInBps
         );
         return MAGIC_VALUE;
     }
@@ -162,7 +170,15 @@ contract LPCompoundModule is AccessControlEnumerable {
             "sellToken must match in-flight approval"
         );
         GPv2OrderChecks.validate(
-            o, orderDigest, DOMAIN_SEPARATOR, balancer, compoundAppData, slippagePriceChecker, rebalanceSlippageBps
+            o,
+            GPv2OrderChecks.Binding({
+                orderDigest: orderDigest,
+                domainSeparator: DOMAIN_SEPARATOR,
+                expectedAppData: compoundAppData
+            }),
+            balancer,
+            slippagePriceChecker,
+            rebalanceSlippageBps
         );
         return MAGIC_VALUE;
     }
