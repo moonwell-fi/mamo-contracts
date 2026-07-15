@@ -4,6 +4,10 @@ test:
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
 
+# NOTE: `--skip s.sol` suffix-matches ANY file ending in "s.sol" — it excludes deploy scripts
+# (.s.sol) AND test/harness/*Harness.sol only by naming accident. A test helper named e.g.
+# FooHelper.sol or FooMock.sol would match neither s.sol nor t.sol and silently pollute coverage:
+# keep test-only contracts suffixed "Harness.sol" (or extend the skip list here).
 coverage:
 	forge coverage --fork-url base --ffi --report lcov --skip s.sol --no-match-coverage t.sol --ir-minimum -vvv && genhtml lcov.info --branch-coverage --output-dir coverage
 
