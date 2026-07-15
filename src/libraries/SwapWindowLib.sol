@@ -15,12 +15,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///      open/closeForRebuild/closeForExit only. Solidity cannot enforce this (struct fields have
 ///      no visibility) — it is a documented convention, kept honest by review.
 /// @dev Invariants, by construction:
-///      - inFlight == true  ⟺ the vault relayer holds a live approval for `sellToken`
-///        (open sets both together; both closers revoke before clearing).
-///      - inFlight == true  ⟹ sellToken != address(0) (open is the only setter of either).
-///      - inFlight == false ⟺ every field is zero (both closers share the same field-wise
-///        clear — Solidity forbids `delete` on a local storage pointer — so a future field added
-///        to the struct needs BOTH closer tails updated; the compiler will not remind you).
+///      - open() is the ONLY approver and the closers the ONLY revokers of the relayer allowance,
+///        so no approval ever outlives a closed window. (Not a biconditional with inFlight:
+///        CowSwap settlement legitimately consumes the exact-amount approval mid-window, leaving
+///        inFlight == true with allowance 0 until rebuild.)
+///      - inFlight == true  ⟹ sellToken != address(0): open() reverts InvalidSellToken on a zero
+///        sellToken, so closeForExit's forceApprove(sellToken, 0) can never target address(0) and
+///        the escape hatch cannot revert — enforced HERE, independent of any caller prechecks.
+///      - inFlight == false ⟺ every field is zero (both closers clear through the shared _wipe;
+///        a future struct field is a one-place update there).
 ///      - The floor snapshot (valueBeforePos/looseBefore) is only readable through
 ///        closeForRebuild, which has already revoked and is about to clear — a stale snapshot
 ///        cannot outlive its window.
@@ -31,6 +34,7 @@ library SwapWindowLib {
 
     error NotInFlight();
     error AlreadyInFlight();
+    error InvalidSellToken();
 
     /// @dev Same address as LPAutoBalancerV2.VAULT_RELAYER — a module-local constant so
     ///      open/close take no relayer parameter (constants inline for free; the balancer already
@@ -63,6 +67,9 @@ library SwapWindowLib {
         bool wasStaked
     ) internal {
         if (w.inFlight) revert AlreadyInFlight();
+        // Guarantees inFlight ⟹ sellToken != 0 by construction (not by caller precheck): the
+        // escape hatch's forceApprove(sellToken, 0) must never target address(0) and revert.
+        if (sellToken == address(0)) revert InvalidSellToken();
         w.inFlight = true;
         w.wasStaked = wasStaked;
         w.sellToken = sellToken;
@@ -90,23 +97,27 @@ library SwapWindowLib {
         valueBeforePos = w.valueBeforePos;
         looseBefore = w.looseBefore;
         wasStaked = w.wasStaked;
-        delete w.inFlight;
-        delete w.wasStaked;
-        delete w.sellToken;
-        delete w.valueBeforePos;
-        delete w.looseBefore;
-        delete w.startedAt;
+        _wipe(w);
     }
 
     /// @notice Escape-close (exit()'s mid-flight branch). Tolerant: a no-op when no window is
     ///         open — the escape hatch must never revert on window state it does not control.
     ///         When open: revoke, clear, discard the snapshot (nothing left to floor-check; the
     ///         caller sweeps all balances regardless).
-    /// @dev No sellToken null-guard needed: inFlight ⟹ sellToken != address(0) by construction
-    ///      (the old defensive check in exit() guarded a state this module makes unreachable).
+    /// @dev No sellToken null-guard needed: inFlight ⟹ sellToken != address(0) is enforced by
+    ///      open()'s InvalidSellToken revert, so the forceApprove below can never target
+    ///      address(0) (the old defensive check in exit() guarded a state this module makes
+    ///      unreachable).
     function closeForExit(SwapWindow storage w) internal {
         if (!w.inFlight) return;
         IERC20(w.sellToken).forceApprove(VAULT_RELAYER, 0);
+        _wipe(w);
+    }
+
+    /// @dev Shared clear tail for both closers. Solidity forbids `delete` on a local storage
+    ///      pointer, so the fields are deleted one by one — but only HERE: a future struct field
+    ///      is a one-place update.
+    function _wipe(SwapWindow storage w) private {
         delete w.inFlight;
         delete w.wasStaked;
         delete w.sellToken;

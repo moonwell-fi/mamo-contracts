@@ -16,7 +16,6 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
-
 import {LPPositionLib} from "@libraries/LPPositionLib.sol";
 import {LPValuationLib} from "@libraries/LPValuationLib.sol";
 import {SwapWindowLib} from "@libraries/SwapWindowLib.sol";
@@ -161,8 +160,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function rebalanceWasStaked() external view returns (bool) {
         return _window.wasStaked;
     }
-    /// @notice Extra floor tolerance (bps) added to maxRebalanceLossBps for the swap round trip.
 
+    /// @notice Extra floor tolerance (bps) added to maxRebalanceLossBps for the swap round trip.
     uint16 public swapLossAllowanceBps;
 
     error ZeroAddress();
