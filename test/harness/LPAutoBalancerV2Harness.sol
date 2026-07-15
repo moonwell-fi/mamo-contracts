@@ -14,6 +14,14 @@ import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 ///         transparent or a compile error — never silent corruption. Production code is untouched;
 ///         this contract lives in test/ and is never deployed.
 contract LPAutoBalancerV2Harness is LPAutoBalancerV2 {
+    /// @dev Marks this contract as a dev/test contract for tooling. `forge build --sizes` exits 1
+    ///      for any non-test contract over the EIP-170 limit — the harness inherits the full
+    ///      balancer (+ its exposed_ helpers) and sits above 24,576 B runtime, which is fine
+    ///      because it is never deployed. Foundry's dev-contract detection keys off an `IS_TEST()`
+    ///      ABI entry, so this constant removes the harness from the size check without touching
+    ///      CI config.
+    bool public constant IS_TEST = true;
+
     constructor(
         address admin,
         address manager,
