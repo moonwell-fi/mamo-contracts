@@ -18,6 +18,7 @@ import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {LPPositionLib} from "@libraries/LPPositionLib.sol";
 import {LPValuationLib} from "@libraries/LPValuationLib.sol";
+import {SwapWindowLib} from "@libraries/SwapWindowLib.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 
 /// @dev Minimal view surface of LPCompoundModule needed for the EIP-1271 passthrough.
@@ -33,6 +34,7 @@ interface ILPCompoundModuleRebalance {
 ///         and docs/superpowers/specs/2026-07-02-lp-auto-balancer-v2-swap-rebalance-design.md
 contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable, IERC721Receiver {
     using SafeERC20 for IERC20;
+    using SwapWindowLib for SwapWindowLib.SwapWindow;
 
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
     bytes32 public constant REBALANCER_ROLE = keccak256("REBALANCER_ROLE");
@@ -113,26 +115,52 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Cap on the extra rebalance-loss tolerance granted for the CowSwap round trip.
     uint16 public constant MAX_SWAP_LOSS_ALLOWANCE_BPS = 500;
 
+    /// @notice The swap-rebalance in-flight window (see SwapWindowLib): open between
+    ///         unwindForSwap() and rebuildAfterSwap()/exit(). All writes go through the library's
+    ///         open/closeForRebuild/closeForExit — never direct field assignment (write discipline
+    ///         documented on the library). Reads from views are fine. The public getters below
+    ///         preserve the pre-refactor flat-field ABI verbatim.
+    SwapWindowLib.SwapWindow private _window;
+
     /// @notice True between unwindForSwap() and rebuildAfterSwap()/exit(); gates rebalance-order validation.
-    bool public rebalanceInFlight;
-    /// @notice USD (1e8) value snapshot taken at unwind, used as the rebuild value-floor base.
-    ///         Diagnostic total kept for API/test compatibility: positions + loose, COMBINED.
-    ///         The floor math itself uses the split fields below, not this sum.
-    uint256 public rebalanceValueBefore;
+    function rebalanceInFlight() external view returns (bool) {
+        return _window.inFlight;
+    }
+
+    /// @notice USD (1e8) diagnostic total at unwind: positions + loose, COMBINED. Computed from
+    ///         the split fields (no longer stored); the floor math uses the split terms.
+    function rebalanceValueBefore() external view returns (uint256) {
+        return _window.valueBeforePos + _window.looseBefore;
+    }
+
     /// @notice USD (1e8) value of main+alt PRINCIPAL ONLY (no loose), snapshotted at unwind.
     ///         The value floor's loss haircut applies to this term alone.
-    uint256 public rebalanceValueBeforePos;
+    function rebalanceValueBeforePos() external view returns (uint256) {
+        return _window.valueBeforePos;
+    }
+
     /// @notice USD (1e8) value of loose token0/token1 already on the contract at unwind (e.g.
     ///         un-folded AERO-compound proceeds). Added back UN-HAIRCUT to the rebuild floor's
-    ///         RHS, matching rebalanceUsingAlt's H-1 fix — a pre-existing loose balance must not
-    ///         widen the tolerated absolute loss on the swap round trip.
-    uint256 public rebalanceLooseBefore;
+    ///         RHS, matching rebalanceUsingAlt's H-1 fix.
+    function rebalanceLooseBefore() external view returns (uint256) {
+        return _window.looseBefore;
+    }
+
     /// @notice Timestamp of the last unwindForSwap() (diagnostics + snapshot field).
-    uint256 public rebalanceStartedAt;
+    function rebalanceStartedAt() external view returns (uint256) {
+        return _window.startedAt;
+    }
+
     /// @notice Token approved to VAULT_RELAYER during the in-flight window (revoked at rebuild/exit).
-    address public sellTokenInFlight;
+    function sellTokenInFlight() external view returns (address) {
+        return _window.sellToken;
+    }
+
     /// @notice Whether the main position was staked at unwind time (restake at rebuild).
-    bool public rebalanceWasStaked;
+    function rebalanceWasStaked() external view returns (bool) {
+        return _window.wasStaked;
+    }
+
     /// @notice Extra floor tolerance (bps) added to maxRebalanceLossBps for the swap round trip.
     uint16 public swapLossAllowanceBps;
 
@@ -453,17 +481,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // intact until after _exitAll returns.
         p.active = false;
 
-        if (rebalanceInFlight) {
-            // Mid-flight: unwindForSwap already tore down and burned both NFTs before setting
-            // this flag. There is nothing left to decrease/skim/burn — calling _exitAll again
+        if (_window.inFlight) {
+            // Mid-flight: unwindForSwap already tore down and burned both NFTs before opening
+            // the window. There is nothing left to decrease/skim/burn — calling _exitAll again
             // would operate on already-burned tokenIds and revert against the real position
-            // manager. Just revoke the stale relayer approval and clear the in-flight state;
+            // manager. The escape-close revokes the stale relayer approval and clears the window;
             // the shared tail below sweeps whatever principal (± partial settlement proceeds)
             // is currently sitting on the contract.
-            if (sellTokenInFlight != address(0)) {
-                IERC20(sellTokenInFlight).forceApprove(VAULT_RELAYER, 0);
-            }
-            _clearInFlight();
+            _window.closeForExit();
         } else {
             // Interactions: unstake (AERO → feeCollector), skim fees, decreaseAll + collect, burn NFTs.
             // Emergency path: 0 mins on both legs, deadline = block.timestamp (execute immediately).
@@ -590,7 +615,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // shared `_totalValue` below computes the USD value-before floor base.
         (uint160 sqrtP, uint8 dec0, uint8 dec1) = LPPositionLib.unwindPrecheck(
             p.active,
-            rebalanceInFlight,
+            _window.inFlight,
             p.lastRebalance,
             p.minRebalanceInterval,
             compoundModule,
@@ -607,12 +632,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // the floor below) vs. pre-existing loose token0/token1 (added back un-haircut). See H-1.
         uint256 looseBefore = _contractPairValue(p, dec0, dec1);
         uint256 valueBeforePos = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
-        rebalanceValueBefore = valueBeforePos + looseBefore; // diagnostic total (kept for API/test compat)
-        rebalanceValueBeforePos = valueBeforePos;
-        rebalanceLooseBefore = looseBefore;
-        rebalanceStartedAt = block.timestamp;
-        rebalanceWasStaked = p.mainStaked;
-        sellTokenInFlight = params.sellToken;
+        bool wasStaked = p.mainStaked; // MUST be captured before _exitAll un-stakes the main
 
         _exitAll(
             p,
@@ -623,8 +643,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             params.deadline
         );
 
-        IERC20(params.sellToken).forceApprove(VAULT_RELAYER, params.sellAmount);
-        rebalanceInFlight = true;
+        // One call opens the window: snapshot, exact-amount relayer approval and the in-flight
+        // flag are set together — none can be skipped or reordered by this call site.
+        _window.open(params.sellToken, params.sellAmount, valueBeforePos, looseBefore, wasStaked);
 
         emit RebalanceUnwound(params.sellToken, params.sellAmount);
     }
@@ -663,10 +684,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         nonReentrant
         whenNotPaused
     {
-        if (!rebalanceInFlight) revert NotInFlight();
+        // Success-close at the top: guard (NotInFlight), approval revoke and snapshot handoff in
+        // one statement. Safe before the mint/floor logic below — a later revert unwinds this
+        // close too, so a failed rebuild leaves the window open for retry (see SwapWindowLib).
+        (uint256 floorValueBeforePos, uint256 floorLooseBefore, bool wasStaked) = _window.closeForRebuild();
         ManagedPositionV2 storage p = position;
-
-        IERC20(sellTokenInFlight).forceApprove(VAULT_RELAYER, 0);
 
         (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
             LPGeometryLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
@@ -689,10 +711,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
         // Swap round trip gets the extra swapLossAllowanceBps tolerance on top of maxRebalanceLossBps.
-        _enforceValueFloor(rebalanceValueBeforePos, rebalanceLooseBefore, valueAfter, swapLossAllowanceBps);
-
-        bool wasStaked = rebalanceWasStaked;
-        _clearInFlight();
+        _enforceValueFloor(floorValueBeforePos, floorLooseBefore, valueAfter, swapLossAllowanceBps);
 
         _forwardDust(p);
 
@@ -835,19 +854,6 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     }
 
     // ─── rebalanceUsingAlt private helpers ────────────────────────────────────────────────
-
-    /// @dev Zero every swap-rebalance in-flight field. Called by both closers of the window —
-    ///      rebuildAfterSwap (success path) and exit() (mid-flight escape hatch) — so a future
-    ///      field added to the in-flight set only needs updating here, not at both call sites.
-    function _clearInFlight() private {
-        rebalanceInFlight = false;
-        rebalanceValueBefore = 0;
-        rebalanceValueBeforePos = 0;
-        rebalanceLooseBefore = 0;
-        rebalanceStartedAt = 0;
-        sellTokenInFlight = address(0);
-        rebalanceWasStaked = false;
-    }
 
     /// @dev Restake the freshly minted main (+ alt, if any) into the gauge, iff `wasStaked` (the
     ///      position was staked before teardown). Shared by rebalanceUsingAlt and rebuildAfterSwap.
@@ -1100,7 +1106,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // ids until rebuildAfterSwap re-mints (same window getDecisionSnapshot guards); collect() on
         // a burned id reverts deep inside the position manager, and mainStaked is already false here,
         // so fail fast with a clear error instead.
-        if (rebalanceInFlight) revert AlreadyInFlight();
+        if (_window.inFlight) revert AlreadyInFlight();
         if (p.mainStaked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
         // Skim BOTH legs to the feeCollector via the shared helper. Ignoring the alt here would strand
         // its accrued fees. Reuses _skimFees rather than duplicating the collect+forward logic.
@@ -1153,7 +1159,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         s.spotTick = spotTick;
         s.twapTick = twapTick;
 
-        bool inFlight = rebalanceInFlight;
+        bool inFlight = _window.inFlight;
         if (!inFlight) {
             (,,,,, int24 mtl, int24 mtu, uint128 mliq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
             s.mainTickLower = mtl;
@@ -1189,7 +1195,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 dev = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
         s.deviationGateOpen = dev <= p.maxTickDeviation;
         s.rebalanceInFlight = inFlight;
-        s.rebalanceStartedAt = rebalanceStartedAt;
+        s.rebalanceStartedAt = _window.startedAt;
     }
 
     /// @notice EIP-1271 passthrough. The balancer is the CowSwap order owner (tokens pulled
