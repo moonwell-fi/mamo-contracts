@@ -1117,7 +1117,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Create an incorrect digest
         bytes32 incorrectDigest = bytes32(uint256(order.hash(strategy.DOMAIN_SEPARATOR())) + 1);
 
-        vm.expectRevert("Order hash does not match the provided digest");
+        vm.expectRevert("bad digest");
         strategy.isValidSignature(incorrectDigest, encodedOrder);
     }
 
@@ -1149,7 +1149,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order must be a sell order");
+        vm.expectRevert("must be sell");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1182,7 +1182,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order expires too soon - must be valid for at least 5 minutes");
+        vm.expectRevert("expires too soon");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1214,7 +1214,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order must be fill-or-kill, partial fills not allowed");
+        vm.expectRevert("must be fill-or-kill");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1246,7 +1246,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Sell token must be an ERC20 token");
+        vm.expectRevert("sell must be erc20");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1278,7 +1278,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Buy token must be an ERC20 token");
+        vm.expectRevert("buy must be erc20");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1348,7 +1348,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order receiver must be this strategy contract");
+        vm.expectRevert("bad receiver");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1380,7 +1380,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Fee amount must be zero");
+        vm.expectRevert("fee must be zero");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1412,7 +1412,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Invalid app data");
+        vm.expectRevert("bad appData");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1589,7 +1589,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
         // With default slippage, this should revert
-        vm.expectRevert("Price check failed - output amount too low");
+        vm.expectRevert("price check failed");
         strategy.isValidSignature(digest, encodedOrder);
 
         // Now set a higher but still reasonable slippage (10%)
@@ -1602,7 +1602,7 @@ contract MoonwellMorphoStrategyTest is Test {
         );
 
         // With 10% slippage, the extremely low amount should still fail
-        vm.expectRevert("Price check failed - output amount too low");
+        vm.expectRevert("price check failed");
         strategy.isValidSignature(digest, encodedOrder);
 
         // Now create a more reasonable order with a higher buy amount
@@ -1678,7 +1678,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Price check failed - output amount too low");
+        vm.expectRevert("price check failed");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1756,7 +1756,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes32 orderDigest = order.hash(strategy.DOMAIN_SEPARATOR());
 
         // Call isValidSignature and expect it to revert
-        vm.expectRevert("Order expires too far in the future");
+        vm.expectRevert("expires too far");
         strategy.isValidSignature(orderDigest, encodedOrder);
 
         // Clear the mock
@@ -1874,7 +1874,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order expires too far in the future");
+        vm.expectRevert("expires too far");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
