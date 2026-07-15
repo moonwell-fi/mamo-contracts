@@ -2,11 +2,12 @@
 pragma solidity 0.8.28;
 
 import {MockERC20} from "./MockERC20.sol";
+import {LPAutoBalancerV2Harness} from "./harness/LPAutoBalancerV2Harness.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
-import {StdStorage, Test, stdStorage} from "@forge-std/Test.sol";
+import {Test} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -366,9 +367,7 @@ contract MockCLPoolV2 is ICLPool {
 }
 
 contract LPAutoBalancerV2UnitTest is Test {
-    using stdStorage for StdStorage;
-
-    LPAutoBalancerV2 lab;
+    LPAutoBalancerV2Harness lab;
     MockPositionManagerV2 mockPM;
     MockCLPoolV2 mockPool;
     MockERC20 mockAero;
@@ -435,7 +434,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         oracle1 = address(new MockPriceFeed(1e8, 8, block.timestamp));
 
         // V2 constructor: no swapRouter, no quoter
-        lab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, address(mockPM), address(mockAero));
+        lab = new LPAutoBalancerV2Harness(admin, manager, rebalancer, guardian, address(mockPM), address(mockAero));
 
         // Now that lab is deployed, point mockPM owner to lab so ownerOf checks pass
         mockPM.setMockOwner(address(lab));
@@ -573,43 +572,16 @@ contract LPAutoBalancerV2UnitTest is Test {
     function test_deploys_and_registers() public {
         _register(false);
 
-        // ManagedPositionV2 public getter tuple — 21 fields in declaration order:
-        // mainTokenId, altTokenId, pool, token0, token1, tickSpacing,
-        // gauge, mainStaked, altStaked, feeCollector, oracle0, oracle1,
-        // minWidth, maxWidth, maxCenterDeviation, twapWindow, maxTickDeviation,
-        // maxRebalanceLossBps, minRebalanceInterval, lastRebalance, active
-        (
-            uint256 storedMainTokenId,
-            uint256 storedAltTokenId,
-            address storedPool,
-            ,
-            ,
-            int24 storedTickSpacing,
-            ,
-            bool storedMainStaked,
-            bool storedAltStaked,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            uint256 storedLastRebalance,
-            bool storedActive
-        ) = lab.position();
+        LPAutoBalancerV2.ManagedPositionV2 memory stored = lab.exposed_position();
 
-        assertEq(storedMainTokenId, TOKEN_ID); // registered tokenId
-        assertEq(storedAltTokenId, 0); // forced to 0 by _store
-        assertEq(storedPool, pool);
-        assertEq(storedTickSpacing, 200);
-        assertFalse(storedMainStaked); // forced false
-        assertFalse(storedAltStaked); // forced false
-        assertEq(storedLastRebalance, 0); // forced 0 by _store
-        assertTrue(storedActive); // forced true by _store
+        assertEq(stored.mainTokenId, TOKEN_ID); // registered tokenId
+        assertEq(stored.altTokenId, 0); // forced to 0 by _store
+        assertEq(stored.pool, pool);
+        assertEq(stored.tickSpacing, 200);
+        assertFalse(stored.mainStaked); // forced false
+        assertFalse(stored.altStaked); // forced false
+        assertEq(stored.lastRebalance, 0); // forced 0 by _store
+        assertTrue(stored.active); // forced true by _store
     }
 
     // ─── registerPosition validation ─────────────────────────────────────────
@@ -735,8 +707,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         // Verify struct has no swapPolicy: compile-time check via _register succeeding
         // and no runtime revert for any "slippage cap exceeded" path
         _register(false);
-        (,,,,,,,,,,,,,,,,,,,, bool active) = lab.position();
-        assertTrue(active); // just confirm it registered
+        assertTrue(lab.exposed_position().active); // just confirm it registered
     }
 
     // ─── rebalanceUsingAlt() — Task 2: rebuild balanced main, no swap ────────────────────────
@@ -749,10 +720,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.rebalanceUsingAlt(_defaultRebalanceParams());
 
         // position active, main tokenId updated to the freshly minted NFT, alt cleared
-        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,,, bool active) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "mainTokenId updated to new NFT");
-        assertEq(altTokenId, 0, "alt cleared (Task 3 adds it)");
-        assertTrue(active, "position stays active");
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        assertEq(p.mainTokenId, NEW_TOKEN_ID, "mainTokenId updated to new NFT");
+        assertEq(p.altTokenId, 0, "alt cleared (Task 3 adds it)");
+        assertTrue(p.active, "position stays active");
 
         // No-swap property is structural: the new position was rebuilt purely from the
         // withdrawn principal (mint consumed contract-held tokens; nothing was sold).
@@ -765,8 +736,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(tok1.balanceOf(address(lab)), 0, "no token1 dust");
 
         // lastRebalance stamped to the current block.
-        (,,,,,,,,,,,,,,,,,,, uint256 lastRebalance,) = lab.position();
-        assertEq(lastRebalance, block.timestamp, "lastRebalance stamped");
+        assertEq(lab.exposed_position().lastRebalance, block.timestamp, "lastRebalance stamped");
     }
 
     /// @dev Settled CowSwap compound proceeds arrive as loose token0+token1 on the contract.
@@ -827,20 +797,21 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         lab.rebalanceUsingAlt(params);
 
-        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "rebalanceUsingAlt completed with withdraw mins met");
+        assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "rebalanceUsingAlt completed with withdraw mins met");
     }
 
     // ─── rebalanceUsingAlt() — Task 3: single-sided alt mint from leftover ───────────────────
 
-    /// @dev Read (mainTokenId, altTokenId, mainStaked) from the position() getter.
+    /// @dev Read (mainTokenId, altTokenId, mainStaked) by name via the harness getter.
     function _readMainAlt() internal view returns (uint256 main, uint256 alt, bool mainStaked) {
-        (main, alt,,,,,, mainStaked,,,,,,,,,,,,,) = lab.position();
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        return (p.mainTokenId, p.altTokenId, p.mainStaked);
     }
 
-    /// @dev Read (mainStaked, altStaked) from the position() getter.
+    /// @dev Read (mainStaked, altStaked) by name via the harness getter.
     function _readStakeFlags() internal view returns (bool mainStaked, bool altStaked) {
-        (,,,,,,, mainStaked, altStaked,,,,,,,,,,,,) = lab.position();
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        return (p.mainStaked, p.altStaked);
     }
 
     function test_rebalanceUsingAlt_mintsAltFromLeftover() public {
@@ -976,7 +947,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     MockERC20Decimals dtok1; // WETH-like, 18 decimals
     MockPositionManagerV2 dPM;
     MockCLPoolV2 dPool;
-    LPAutoBalancerV2 dLab;
+    LPAutoBalancerV2Harness dLab;
     address dOracle0; // cbBTC/USD: $65,000 (8-dec)
     address dOracle1; // WETH/USD:  $2,500  (8-dec)
 
@@ -997,7 +968,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         dOracle0 = address(new MockPriceFeed(65_000e8, 8, block.timestamp));
         dOracle1 = address(new MockPriceFeed(2_500e8, 8, block.timestamp));
 
-        dLab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, address(dPM), address(mockAero));
+        dLab = new LPAutoBalancerV2Harness(admin, manager, rebalancer, guardian, address(dPM), address(mockAero));
         dPM.setMockOwner(address(dLab));
 
         dPool.setSlot0(SQRT_P, SPOT_TICK); // spot tick 100, twap 0 (same geometry as shared fixture)
@@ -1050,9 +1021,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         dPM.setCollectSequence(0, 0, p0, p1);
     }
 
-    /// @dev Read (mainTokenId, altTokenId, mainStaked) from the mixed-fixture balancer.
+    /// @dev Read (mainTokenId, altTokenId, mainStaked) by name from the mixed-fixture balancer.
     function _readMixedMainAlt() internal view returns (uint256 main, uint256 alt, bool mainStaked) {
-        (main, alt,,,,,, mainStaked,,,,,,,,,,,,,) = dLab.position();
+        LPAutoBalancerV2.ManagedPositionV2 memory p = dLab.exposed_position();
+        return (p.mainTokenId, p.altTokenId, p.mainStaked);
     }
 
     /// @dev DEFECT 1+2: the surplus leg must be chosen by USD VALUE, not raw base units, and the
@@ -1176,36 +1148,18 @@ contract LPAutoBalancerV2UnitTest is Test {
     /// @dev M-2. setGauge must reject when EITHER leg is staked. If a partial unstake ever leaves
     ///      mainStaked=false but altStaked=true, the alt NFT is still custodied by the OLD gauge;
     ///      changing the gauge would strand it. We reach mainStaked=false, altStaked=true (a state the
-    ///      public API never produces directly): stake() sets BOTH true, then we clear ONLY the
-    ///      mainStaked bit in the packed storage word with vm.store. The OLD guard (mainStaked only)
+    ///      public API never produces directly): stake() sets BOTH true, then the harness clears
+    ///      ONLY mainStaked via a named-field write. The OLD guard (mainStaked only)
     ///      would have let setGauge through here; the NEW guard (mainStaked || altStaked) reverts.
     function test_setGauge_revertsWhenAltStaked() public {
         _registerWithAlt(true); // gauge set + altTokenId injected
         vm.prank(rebalancer);
         lab.stake(); // sets mainStaked=true AND altStaked=true
 
-        // Locate the storage word packing (gauge | mainStaked | altStaked) and clear only mainStaked,
-        // leaving altStaked set. Scan the struct words of position for the one whose decoded
-        // (mainStaked, altStaked) round-trips through the getter, then flip the mainStaked bit.
-        bytes32 base = bytes32(_positionBaseSlot());
-        bool flipped = false;
-        for (uint256 w = 0; w < 24 && !flipped; w++) {
-            bytes32 slot = bytes32(uint256(base) + w);
-            bytes32 word = vm.load(address(lab), slot);
-            // Try clearing the mainStaked bit at each byte offset where gauge (20 bytes) ends.
-            // gauge occupies offset 0..19; mainStaked is the byte at offset 20, altStaked at 21.
-            uint256 mainBit = uint256(20) * 8;
-            uint256 altBit = uint256(21) * 8;
-            bool mainSet = (uint256(word) >> mainBit) & 0xff == 1;
-            bool altSet = (uint256(word) >> altBit) & 0xff == 1;
-            if (mainSet && altSet) {
-                // clear mainStaked byte, keep altStaked
-                uint256 cleared = uint256(word) & ~(uint256(0xff) << mainBit);
-                vm.store(address(lab), slot, bytes32(cleared));
-                flipped = true;
-            }
-        }
-        assertTrue(flipped, "located packed staked flags");
+        // Reach mainStaked=false / altStaked=true via the harness's named-field write — no packed-
+        // word scanning or bit flipping — and read it back by name via exposed_position() below:
+        // a struct reorder cannot silently corrupt this state on either side.
+        lab.exposed_setStakedFlags(false, true);
 
         (bool mainStaked, bool altStaked) = _readStakeFlags();
         assertFalse(mainStaked, "main cleared (precondition)");
@@ -1216,29 +1170,21 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.setGauge(makeAddr("newGauge"));
     }
 
-    /// @dev Recover the absolute base slot of the `position` storage variable (layout-robust).
-    ///      stdstore.find() returns the absolute slot of position.mainTokenId directly.
-    function _positionBaseSlot() internal returns (uint256) {
-        return stdstore.target(address(lab)).sig("position()").depth(0).find();
-    }
-
     // ─── Task 4: stake/unstake/claimEmissions (dual-NFT) + exit() ────────────────
 
-    /// @dev Register a gauged (or gaugeless) position and inject a non-zero altTokenId directly
-    ///      into contract storage using stdstore. This bypasses the _store() forced-zero for
-    ///      altTokenId so tests can exercise the alt staking paths without running rebalanceUsingAlt().
+    /// @dev Register a gauged (or gaugeless) position and inject a non-zero altTokenId via the
+    ///      harness (named-field write). This bypasses the _store() forced-zero for altTokenId so
+    ///      tests can exercise the alt staking paths without running rebalanceUsingAlt().
     function _registerWithAlt(bool withGauge) internal {
         _register(withGauge);
         // Also register ALT_TOKEN_ID with the mock PM so ownerOf returns this contract's address.
         // (mockPM.ownerOf always returns mockOwner, so no extra setup needed.)
-        // Inject altTokenId = ALT_TOKEN_ID into position.altTokenId via stdstore.
-        stdstore.target(address(lab)).sig("position()").depth(1) // altTokenId is field index 1
-            .checked_write(ALT_TOKEN_ID);
+        lab.exposed_setAltTokenId(ALT_TOKEN_ID);
     }
 
-    /// @dev Read active flag from position() getter.
+    /// @dev Read active flag by name via the harness getter.
     function _readActive() internal view returns (bool active) {
-        (,,,,,,,,,,,,,,,,,,,, active) = lab.position();
+        return lab.exposed_position().active;
     }
 
     function test_stake_main_altFollows() public {
@@ -1465,13 +1411,9 @@ contract LPAutoBalancerV2UnitTest is Test {
             3600 // minRebalanceInterval = 1 hour
         );
 
-        // Simulate a prior rebalance by warping forward 30 min, then trigger a rebalanceUsingAlt to stamp lastRebalance.
-        // Easier: write lastRebalance directly via stdstore (field index 19 in the struct).
-        // ManagedPositionV2 field order: 0=mainTokenId, 1=altTokenId, 2=pool, 3=token0, 4=token1,
-        // 5=tickSpacing, 6=gauge, 7=mainStaked, 8=altStaked, 9=feeCollector, 10=oracle0, 11=oracle1,
-        // 12=minWidth, 13=maxWidth, 14=maxCenterDeviation, 15=twapWindow, 16=maxTickDeviation,
-        // 17=maxRebalanceLossBps, 18=minRebalanceInterval, 19=lastRebalance, 20=active
-        stdstore.target(address(lab)).sig("position()").depth(19).checked_write(block.timestamp);
+        // Stamp lastRebalance via the harness (named-field write) so the cooldown is genuinely
+        // active without simulating a prior rebalance.
+        lab.exposed_setLastRebalance(block.timestamp);
 
         // Warp 30 min: cooldownRemaining should be ~1800 s
         vm.warp(block.timestamp + 1800);
@@ -1491,7 +1433,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     /// @dev Register a position with a non-zero cooldown interval. `lastRebalance` is forced to 0
     ///      by _store, so callers that need an ACTIVE cooldown must also stamp lastRebalance
-    ///      (see test_rebalanceUsingAlt_revertsBeforeCooldown, which writes it via stdstore).
+    ///      (see test_rebalanceUsingAlt_revertsBeforeCooldown, which stamps it via the harness).
     function _registerWithInterval(uint256 interval) internal {
         LPAutoBalancerV2.ManagedPositionV2 memory cfg = LPAutoBalancerV2.ManagedPositionV2({
             mainTokenId: TOKEN_ID,
@@ -1531,12 +1473,12 @@ contract LPAutoBalancerV2UnitTest is Test {
     }
 
     /// @dev rebalanceUsingAlt must revert while the cooldown is active. Register with a 1h interval and stamp
-    ///      lastRebalance = now via stdstore (field index 19), so block.timestamp < lastRebalance +
+    ///      lastRebalance = now via the harness, so block.timestamp < lastRebalance +
     ///      interval and the Cooldown guard (checked before the deviation gate) fires.
     function test_rebalanceUsingAlt_revertsBeforeCooldown() public {
         _registerWithInterval(3600);
         // _store forces lastRebalance to 0; stamp it to "now" so the cooldown is genuinely active.
-        stdstore.target(address(lab)).sig("position()").depth(19).checked_write(block.timestamp);
+        lab.exposed_setLastRebalance(block.timestamp);
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.Cooldown.selector);
         lab.rebalanceUsingAlt(_defaultRebalanceParams());
@@ -1680,8 +1622,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         cfg.minWidth = 400; // == 2*tickSpacing
         vm.prank(admin);
         lab.registerPosition(cfg);
-        (,,,,,,,,,,,, uint24 storedMinWidth,,,,,,,,) = lab.position();
-        assertEq(storedMinWidth, 400, "minWidth == 2*tickSpacing accepted");
+        assertEq(lab.exposed_position().minWidth, 400, "minWidth == 2*tickSpacing accepted");
     }
 
     /// @dev F1: setPositionConfig must enforce the same 2*tickSpacing floor.
@@ -1879,8 +1820,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         emit LPAutoBalancerV2.PoolChanged(cfg.pool, NEW_TOKEN_ID);
         lab.setPool(cfg);
 
-        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "mainTokenId updated after setPool");
+        assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "mainTokenId updated after setPool");
     }
 
     /// @dev Prove setPool reverts NotEmpty when active=false but mainTokenId is still set
@@ -2056,8 +1996,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(tok1.balanceOf(address(lab)), 1e18);
 
         // no mint in phase 1
-        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, TOKEN_ID, "mainTokenId untouched until rebuild");
+        assertEq(lab.exposed_position().mainTokenId, TOKEN_ID, "mainTokenId untouched until rebuild");
 
         // approval + in-flight state
         assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 5e17);
@@ -2108,8 +2047,8 @@ contract LPAutoBalancerV2UnitTest is Test {
         _registerWithInterval(3600); // default config's minRebalanceInterval is 0 (no gate); use a real interval
         _setRealModule();
         // _store forces lastRebalance to 0; stamp it to "now" so the cooldown is genuinely active
-        // (field index 19 in the struct, same pattern as test_rebalanceUsingAlt_revertsBeforeCooldown).
-        stdstore.target(address(lab)).sig("position()").depth(19).checked_write(block.timestamp);
+        // (harness named-field write, same pattern as test_rebalanceUsingAlt_revertsBeforeCooldown).
+        lab.exposed_setLastRebalance(block.timestamp);
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.Cooldown.selector);
@@ -2206,11 +2145,11 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         lab.rebuildAfterSwap(_defaultRebuildParams());
 
-        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,, uint256 lastRebalance, bool active) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "new main minted");
-        assertEq(altTokenId, ALT_TOKEN_ID, "surplus leg minted as alt");
-        assertTrue(active);
-        assertEq(lastRebalance, block.timestamp, "cooldown stamped at rebuild");
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        assertEq(p.mainTokenId, NEW_TOKEN_ID, "new main minted");
+        assertEq(p.altTokenId, ALT_TOKEN_ID, "surplus leg minted as alt");
+        assertTrue(p.active);
+        assertEq(p.lastRebalance, block.timestamp, "cooldown stamped at rebuild");
 
         // in-flight state fully cleared + approval revoked
         assertFalse(lab.rebalanceInFlight());
@@ -2229,8 +2168,11 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         lab.rebuildAfterSwap(_defaultRebuildParams());
 
-        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "rebuilt from original balances, identical to rebalanceUsingAlt outcome");
+        assertEq(
+            lab.exposed_position().mainTokenId,
+            NEW_TOKEN_ID,
+            "rebuilt from original balances, identical to rebalanceUsingAlt outcome"
+        );
         assertFalse(lab.rebalanceInFlight());
         assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "stale approval revoked");
     }
@@ -2246,8 +2188,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         lab.rebuildAfterSwap(_defaultRebuildParams());
 
-        (,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
-        assertTrue(mainStaked, "restaked after rebuild");
+        assertTrue(lab.exposed_position().mainStaked, "restaked after rebuild");
         assertFalse(lab.rebalanceWasStaked(), "flag cleared");
     }
 
@@ -2312,10 +2253,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         // principal swept to recipient, position deactivated
         assertEq(tok0.balanceOf(to), 1e18);
         assertEq(tok1.balanceOf(to), 1e18);
-        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,,, bool active) = lab.position();
-        assertEq(mainTokenId, 0, "mainTokenId zeroed");
-        assertEq(altTokenId, 0, "altTokenId zeroed");
-        assertFalse(active);
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        assertEq(p.mainTokenId, 0, "mainTokenId zeroed");
+        assertEq(p.altTokenId, 0, "altTokenId zeroed");
+        assertFalse(p.active);
     }
 
     function test_exit_midFlight_sweepsPartialSettlementProceeds() public {
@@ -2491,7 +2432,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     /// @dev Register with a live alt whose range [200,400] sits above spot, holding only token0.
     function _registerWithLiveAlt() internal {
         _register(false);
-        stdstore.target(address(lab)).sig("position()").depth(1).checked_write(ALT_TOKEN_ID);
+        lab.exposed_setAltTokenId(ALT_TOKEN_ID);
         mockPM.setPosition(ALT_TOKEN_ID, OLD_TU, OLD_TU + 200, NEW_LIQ, token0, token1);
     }
 
@@ -2573,8 +2514,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _stagePrincipal(1e18, 1e18);
         vm.prank(rebalancer);
         lab.rebalanceUsingAlt(_defaultRebalanceParams());
-        (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, NEW_TOKEN_ID, "rebalance ran after unpause");
+        assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "rebalance ran after unpause");
     }
 
     // ---------- admin / lifecycle surface ----------
@@ -2592,9 +2532,9 @@ contract LPAutoBalancerV2UnitTest is Test {
         // NFT ids are NOT zeroed by deregister (only exit() zeroes them), so setPool stays
         // blocked and re-pointing goes through registerPosition — asserted here so the
         // documented asymmetry (spec 3.7) does not silently change.
-        (uint256 mainTokenId, uint256 altTokenId,,,,,,,,,,,,,,,,,,,) = lab.position();
-        assertEq(mainTokenId, TOKEN_ID, "main id kept");
-        assertEq(altTokenId, ALT_TOKEN_ID, "alt id kept");
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        assertEq(p.mainTokenId, TOKEN_ID, "main id kept");
+        assertEq(p.altTokenId, ALT_TOKEN_ID, "alt id kept");
     }
 
     function test_deregisterPosition_revertsNotActive() public {
@@ -2641,8 +2581,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         address newCollector = makeAddr("newCollector");
         vm.prank(admin);
         lab.setFeeCollector(newCollector);
-        (,,,,,,,,, address fc,,,,,,,,,,,) = lab.position();
-        assertEq(fc, newCollector);
+        assertEq(lab.exposed_position().feeCollector, newCollector);
     }
 
     function test_setFeeCollector_revertsZeroAddress() public {
@@ -2659,9 +2598,9 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(admin);
         lab.setOracles(newOracle0, newOracle1);
-        (,,,,,,,,,, address o0, address o1,,,,,,,,,) = lab.position();
-        assertEq(o0, newOracle0);
-        assertEq(o1, newOracle1);
+        LPAutoBalancerV2.ManagedPositionV2 memory p = lab.exposed_position();
+        assertEq(p.oracle0, newOracle0);
+        assertEq(p.oracle1, newOracle1);
     }
 
     function test_setOracles_revertsZeroOracle() public {
