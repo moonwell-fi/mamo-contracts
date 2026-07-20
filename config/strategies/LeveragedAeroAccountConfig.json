@@ -1,0 +1,11 @@
+{
+  "symbol": "USDC",
+  "decimals": 6,
+  "token": "USDC",
+  "sherwoodStrategy": "SHERWOOD_LEVERAGED_AERO_STRATEGY",
+  "syndicateVault": "SHERWOOD_SYNDICATE_VAULT",
+  "strategyTypeId": 5,
+  "strategyImplementation": "MAMO_LEVERAGED_AERO_STRATEGY_IMPL",
+  "strategyFactory": "MAMO_LEVERAGED_AERO_STRATEGY_FACTORY",
+  "strategyTypeIdNote": "Next available MamoStrategyRegistry strategy type id. Base mainnet currently has ids 1-4 whitelisted (1=USDC, 2=staking, 3=cbBTC, 4=WETH), so 5 is the first free slot. VERIFY ON-CHAIN before deploy: `cast call $MAMO_STRATEGY_REGISTRY 'latestImplementationById(uint256)(address)' 5 --rpc-url base` MUST return the zero address. NOTE: registry.nextStrategyTypeId() reads 4 (stale) because whitelistImplementation with an explicit non-zero id does NOT advance that counter - the empty-slot check above is the source of truth for availability, not nextStrategyTypeId()."
+}
