@@ -23,6 +23,7 @@ interface ILeveragedAeroCLStrategy {
         Pending, // 0
         Executed, // 1
         Settled // 2
+
     }
 
     /**

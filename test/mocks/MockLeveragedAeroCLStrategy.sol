@@ -118,7 +118,11 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
         id = nextRequestId++;
         requests[id] = RedeemRequest({
-            owner: msg.sender, shares: shares, minAssetsOut: minAssetsOut, requestedAt: block.timestamp, settled: false
+            owner: msg.sender,
+            shares: shares,
+            minAssetsOut: minAssetsOut,
+            requestedAt: block.timestamp,
+            settled: false
         });
     }
 
