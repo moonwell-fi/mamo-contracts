@@ -171,9 +171,15 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     }
 
     function testConstructorNonContractImplementationReverts() public {
+        // makeAddr derives from a publicly-known private key; on a Base fork the well-known "eoa"
+        // address carries an EIP-7702 delegation (non-empty code), so force-clear it to keep this
+        // test deterministic in both fork and non-fork runs (CI's Basic Tests job forks Base).
+        address eoa = makeAddr("eoa");
+        vm.etch(eoa, "");
+
         vm.expectRevert("Implementation must be a contract");
         new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(registry), makeAddr("eoa"), typeId, address(sherwood), address(usdc)
+            admin, backend, address(registry), eoa, typeId, address(sherwood), address(usdc)
         );
     }
 
