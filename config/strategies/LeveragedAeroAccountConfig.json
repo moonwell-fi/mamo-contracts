@@ -1,0 +1,8 @@
+{
+  "token": "USDC",
+  "sherwoodStrategy": "SHERWOOD_LEVERAGED_AERO_STRATEGY",
+  "syndicateVault": "SHERWOOD_SYNDICATE_VAULT",
+  "strategyTypeId": 5,
+  "strategyImplementation": "MAMO_LEVERAGED_AERO_STRATEGY_IMPL",
+  "strategyFactory": "MAMO_LEVERAGED_AERO_STRATEGY_FACTORY"
+}
