@@ -12,6 +12,18 @@
     "compoundFee": 500,
     "strategyTypeId": 1
   },
+  "markets": [
+    {
+      "target": "MOONWELL_USDC",
+      "marketType": "MTOKEN",
+      "splitBps": 10000
+    },
+    {
+      "target": "USDC_METAMORPHO_VAULT",
+      "marketType": "ERC4626",
+      "splitBps": 0
+    }
+  ],
   "rewardTokens": [
     {
       "token": "xWELL_PROXY",

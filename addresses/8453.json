@@ -145,6 +145,16 @@
     "isContract": true
   },
   {
+    "addr": "0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94",
+    "name": "CHAINLINK_MAMO_USD",
+    "isContract": true
+  },
+  {
+    "addr": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0",
+    "name": "CHAINLINK_AERO_USD",
+    "isContract": true
+  },
+  {
     "addr": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
     "name": "SAFE_PROXY",
     "isContract": true
@@ -397,6 +407,16 @@
   {
     "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
     "name": "WETH_STRATEGY_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1",
+    "name": "WETH_CBBTC_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x41b2126661C673C2beDd208cC72E85DC51a5320a",
+    "name": "WETH_CBBTC_CL_GAUGE",
     "isContract": true
   }
 ]

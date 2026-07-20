@@ -8,7 +8,7 @@ import {console} from "@forge-std/console.sol";
 
 import {DeployConfig} from "./DeployConfig.sol";
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
@@ -16,7 +16,7 @@ contract USDCStrategyImplDeployer is Script {
     function deployImplementation(Addresses addresses) public returns (address) {
         vm.startBroadcast();
         // Deploy the implementation contract
-        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
 
         vm.stopBroadcast();
 

@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
-import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
 
 import {MockFailingERC20} from "./MockFailingERC20.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
-import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
-import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {MarketRegistry} from "@contracts/MarketRegistry.sol";
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
+
 import {Test} from "@forge-std/Test.sol";
 import {console} from "@forge-std/console.sol";
 import {IERC4626} from "@interfaces/IERC4626.sol";
+
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
+import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
 import {Surl} from "@surl/Surl.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
@@ -29,6 +31,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 
+import {DeployMultiMarketSystem} from "../multisig/mamo-multisig/011_DeployMultiMarketSystem.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 /**
@@ -64,8 +67,9 @@ contract MoonwellMorphoStrategyTest is Test {
     Addresses public addresses;
 
     // Contracts
-    ERC20MoonwellMorphoStrategy public strategy;
+    MamoMultiMarketStrategy public strategy;
     MamoStrategyRegistry public registry;
+    MarketRegistry public marketRegistry;
     ISlippagePriceChecker public slippagePriceChecker;
     IERC20 public underlying;
     IERC20 public well;
@@ -82,32 +86,33 @@ contract MoonwellMorphoStrategyTest is Test {
 
     uint256 public splitMToken;
     uint256 public splitVault;
+    uint256 public strategyTypeId;
 
     DeployConfig.DeploymentConfig public config;
     DeployAssetConfig.Config public assetConfig;
 
     function setUp() public {
-        // workaround to make test contract work with mappings
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        // Run the multi-market deployment proposal
+        DeployMultiMarketSystem proposal = new DeployMultiMarketSystem();
+        vm.makePersistent(address(proposal));
+        proposal.run();
 
-        // Get the environment from command line arguments or use default
+        // Get addresses and config from proposal
+        addresses = proposal.addresses();
+        string memory assetConfigPath =
+            vm.envOr("ASSET_CONFIG_PATH", string("config/strategies/USDCStrategyConfig.json"));
+        DeployAssetConfig assetCfg = new DeployAssetConfig(assetConfigPath);
+        assetConfig = assetCfg.getConfig();
+        uint256 assetIndex = proposal.findAssetIndex(assetConfig.token);
+        strategyTypeId = proposal.getAssetKeys(assetIndex).strategyTypeId;
+
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));
-
-        string memory assetConfigPath = vm.envString("ASSET_CONFIG_PATH");
-
         DeployConfig configDeploy = new DeployConfig(configPath);
         config = configDeploy.getConfig();
 
-        DeployAssetConfig assetConfigDeploy = new DeployAssetConfig(assetConfigPath);
-        assetConfig = assetConfigDeploy.getConfig();
-
-        // Get the addresses for the roles
         admin = addresses.getAddress(config.admin);
         backend = addresses.getAddress(config.backend);
         guardian = addresses.getAddress(config.guardian);
@@ -118,83 +123,75 @@ contract MoonwellMorphoStrategyTest is Test {
         well = IERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress(assetConfig.moonwellMarket));
         metaMorphoVault = IERC4626(addresses.getAddress(assetConfig.metamorphoVault));
+        slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
 
-        if (addresses.isAddressSet("CHAINLINK_SWAP_CHECKER_PROXY")) {
-            slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
-        } else {
-            _setupSlippagePriceChecker();
-        }
-
-        if (addresses.isAddressSet("MAMO_STRATEGY_REGISTRY")) {
-            registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        } else {
-            registry = new MamoStrategyRegistry(admin, backend, guardian);
-            addresses.changeAddress("MAMO_STRATEGY_REGISTRY", address(registry), true);
-        }
-
-        require(addresses.isAddressSet(assetConfig.strategyImplementation), "Strategy implementation not deployed");
+        registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        marketRegistry = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
 
         splitMToken = assetConfig.strategyParams.splitMToken;
         splitVault = assetConfig.strategyParams.splitVault;
-
-        string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
-        StrategyFactory factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
-
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
-        deltaThreshold = assetConfig.decimals == 18 ? 1e9 : 1e3;
+        // Create strategy for owner using the deployed factory
+        string memory factoryKey = string(abi.encodePacked(assetConfig.token, "_MULTI_MARKET_STRATEGY_FACTORY"));
+        MultiMarketStrategyFactory factory = MultiMarketStrategyFactory(addresses.getAddress(factoryKey));
 
-        vm.startPrank(owner);
-        strategy = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(owner)));
-        vm.stopPrank();
+        vm.prank(owner);
+        strategy = MamoMultiMarketStrategy(payable(factory.createStrategyForUser(owner)));
+
+        deltaThreshold = assetConfig.decimals == 18 ? 1e9 : 1e3;
 
         vm.warp(block.timestamp + 1 minutes);
     }
 
-    function _setupSlippagePriceChecker() private {
-        // Deploy the SlippagePriceChecker using the script
-        DeploySlippagePriceChecker deployScript = new DeploySlippagePriceChecker();
-        slippagePriceChecker = deployScript.deploySlippagePriceChecker(addresses, config);
-
-        vm.startPrank(deployer);
-        for (uint256 i = 0; i < config.rewardTokens.length; i++) {
-            ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-                new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-
-            configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-                chainlinkFeed: addresses.getAddress(config.rewardTokens[i].priceFeed),
-                reverse: config.rewardTokens[i].reverse,
-                heartbeat: config.rewardTokens[i].heartbeat
-            });
-
-            slippagePriceChecker.addTokenConfiguration(
-                address(addresses.getAddress(config.rewardTokens[i].token)), address(underlying), configs
-            );
-        }
-        vm.stopPrank();
-    }
-
     function _getInitData(uint256 _strategyTypeId) private view returns (bytes memory) {
+        uint256[] memory defaultSplitBps = _buildDefaultSplitBps();
+
         return abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
-                splitMToken: splitMToken,
-                splitVault: splitVault,
                 strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: assetConfig.strategyParams.hookGasLimit,
                 allowedSlippageInBps: assetConfig.strategyParams.allowedSlippageInBps,
-                compoundFee: assetConfig.strategyParams.compoundFee
+                compoundFee: assetConfig.strategyParams.compoundFee,
+                marketRegistry: address(marketRegistry),
+                defaultSplitBps: defaultSplitBps
             })
         );
+    }
+
+    function _buildDefaultSplitBps() private view returns (uint256[] memory) {
+        uint256[] memory splits = new uint256[](2);
+        splits[0] = splitMToken;
+        splits[1] = splitVault;
+        return splits;
+    }
+
+    function _buildUpdatePositionArray(uint256 mTokenSplit, uint256 vaultSplit)
+        private
+        view
+        returns (MamoMultiMarketStrategy.MarketSplitUpdate[] memory)
+    {
+        if (vaultSplit > 0) {
+            MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates =
+                new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+            updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
+            updates[1] =
+                MamoMultiMarketStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: vaultSplit});
+            return updates;
+        } else {
+            MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates =
+                new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
+            updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: mTokenSplit});
+            return updates;
+        }
     }
 
     function testOwnerCanDepositFunds() public {
@@ -710,7 +707,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Update position to 70% mToken, 30% vault
         vm.stopPrank();
         vm.prank(multicall);
-        strategy.updatePosition(7000, 3000); // 70% - 30% split
+        strategy.updatePosition(_buildUpdatePositionArray(7000, 3000)); // 70% - 30% split
 
         // Withdraw all as owner
         vm.startPrank(owner);
@@ -740,9 +737,9 @@ contract MoonwellMorphoStrategyTest is Test {
         strategy.deposit(depositAmount);
         vm.stopPrank();
 
-        // Verify initial split
-        assertEq(strategy.splitMToken(), config.splitMToken, "Initial mToken split should be 5000 (50%)");
-        assertEq(strategy.splitVault(), config.splitVault, "Initial vault split should be 5000 (50%)");
+        // Verify initial split via markets
+        MamoMultiMarketStrategy.Market[] memory marketsBefore = strategy.getMarkets();
+        assertEq(marketsBefore[0].splitBps, splitMToken, "Initial mToken market split should match config");
 
         // Verify initial balances match the expected split
         uint256 totalBalance = getTotalBalance(address(strategy));
@@ -772,12 +769,13 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 newSplitVault = 3000; // 30%
 
         vm.startPrank(multicall);
-        strategy.updatePosition(newSplitMToken, newSplitVault);
+        strategy.updatePosition(_buildUpdatePositionArray(newSplitMToken, newSplitVault));
         vm.stopPrank();
 
-        // Verify the split was updated
-        assertEq(strategy.splitMToken(), newSplitMToken, "mToken split should be updated to 7000 (70%)");
-        assertEq(strategy.splitVault(), newSplitVault, "Vault split should be updated to 3000 (30%)");
+        // Verify markets were updated
+        MamoMultiMarketStrategy.Market[] memory marketsAfter = strategy.getMarkets();
+        assertEq(marketsAfter[0].splitBps, newSplitMToken, "mToken market split should be updated to 7000 (70%)");
+        assertEq(marketsAfter[1].splitBps, newSplitVault, "Vault market split should be updated to 3000 (30%)");
 
         // Calculate new balances based on updated split
         uint256 newMTokenBalance = mToken.balanceOfUnderlying(address(strategy));
@@ -815,12 +813,8 @@ contract MoonwellMorphoStrategyTest is Test {
         // Non-backend attempts to update position
         vm.startPrank(nonBackend);
         vm.expectRevert("Not backend");
-        strategy.updatePosition(6000, 4000);
+        strategy.updatePosition(_buildUpdatePositionArray(6000, 4000));
         vm.stopPrank();
-
-        // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfInvalidSplitParameters() public {
@@ -836,12 +830,8 @@ contract MoonwellMorphoStrategyTest is Test {
         // Backend attempts to update position with invalid split parameters
         vm.startPrank(multicall);
         vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
-        strategy.updatePosition(6000, 5000); // 60% + 50% = 110%
+        strategy.updatePosition(_buildUpdatePositionArray(6000, 5000)); // 60% + 50% = 110%
         vm.stopPrank();
-
-        // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfNoFundsToRebalance() public {
@@ -850,12 +840,8 @@ contract MoonwellMorphoStrategyTest is Test {
         // Backend attempts to update position
         vm.startPrank(multicall);
         vm.expectRevert("Nothing to rebalance");
-        strategy.updatePosition(6000, 4000);
+        strategy.updatePosition(_buildUpdatePositionArray(6000, 4000));
         vm.stopPrank();
-
-        // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
     }
 
     function testDepositIdleTokens() public {
@@ -947,7 +933,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 newSplitVault = 3000; // 30%
 
         vm.prank(multicall);
-        strategy.updatePosition(newSplitMToken, newSplitVault);
+        strategy.updatePosition(_buildUpdatePositionArray(newSplitMToken, newSplitVault));
 
         // Mint USDC directly to the strategy contract
         uint256 idleAmount = 500 * 10 ** assetConfig.decimals;
@@ -1131,7 +1117,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Create an incorrect digest
         bytes32 incorrectDigest = bytes32(uint256(order.hash(strategy.DOMAIN_SEPARATOR())) + 1);
 
-        vm.expectRevert("Order hash does not match the provided digest");
+        vm.expectRevert("bad digest");
         strategy.isValidSignature(incorrectDigest, encodedOrder);
     }
 
@@ -1163,7 +1149,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order must be a sell order");
+        vm.expectRevert("must be sell");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1196,7 +1182,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order expires too soon - must be valid for at least 5 minutes");
+        vm.expectRevert("expires too soon");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1228,7 +1214,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order must be fill-or-kill, partial fills not allowed");
+        vm.expectRevert("must be fill-or-kill");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1260,7 +1246,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Sell token must be an ERC20 token");
+        vm.expectRevert("sell must be erc20");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1292,7 +1278,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Buy token must be an ERC20 token");
+        vm.expectRevert("buy must be erc20");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1362,7 +1348,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order receiver must be this strategy contract");
+        vm.expectRevert("bad receiver");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1394,7 +1380,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Fee amount must be zero");
+        vm.expectRevert("fee must be zero");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1426,7 +1412,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Invalid app data");
+        vm.expectRevert("bad appData");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1434,31 +1420,39 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfInvalidInitializationParameters() public {
         // Deploy a new implementation
-        ERC20MoonwellMorphoStrategy implementation = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
 
         // Whitelist the implementation
         vm.prank(admin);
         uint256 _strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
+        // Register markets for the new type (skip if already registered from proposal)
+        if (marketRegistry.getMarketCount(address(underlying)) == 0) {
+            vm.startPrank(backend);
+            marketRegistry.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(address(underlying), address(metaMorphoVault), MarketType.ERC4626);
+            vm.stopPrank();
+        }
+
+        uint256[] memory defaultSplitBps = _buildDefaultSplitBps();
+
         // Test with invalid mamoStrategyRegistry
         bytes memory invalidRegistryData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(0), // Invalid address
                 mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
-                splitMToken: splitMToken,
-                splitVault: splitVault,
                 strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: config.hookGasLimit,
                 allowedSlippageInBps: config.allowedSlippageInBps,
-                compoundFee: config.compoundFee
+                compoundFee: config.compoundFee,
+                marketRegistry: address(marketRegistry),
+                defaultSplitBps: defaultSplitBps
             })
         );
 
@@ -1466,51 +1460,51 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.expectRevert("Invalid mamoStrategyRegistry address");
         new ERC1967Proxy(address(implementation), invalidRegistryData);
 
-        // Test with invalid split parameters
+        // Test with invalid split parameters (splits don't add up to 10000)
+        uint256[] memory badSplits = new uint256[](2);
+        badSplits[0] = 6000;
+        badSplits[1] = 3000;
+
         bytes memory invalidSplitData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
-                splitMToken: 6000, // 60%
-                splitVault: 3000, // 30% - doesn't add up to 100%
                 strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: config.hookGasLimit,
                 allowedSlippageInBps: config.allowedSlippageInBps,
-                compoundFee: config.compoundFee
+                compoundFee: config.compoundFee,
+                marketRegistry: address(marketRegistry),
+                defaultSplitBps: badSplits
             })
         );
 
         vm.prank(backend);
-        vm.expectRevert("Split parameters must add up to 10000");
+        vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
         new ERC1967Proxy(address(implementation), invalidSplitData);
 
         // Test with invalid hook gas limit
         bytes memory invalidHookGasData = abi.encodeWithSelector(
-            ERC20MoonwellMorphoStrategy.initialize.selector,
-            ERC20MoonwellMorphoStrategy.InitParams({
+            MamoMultiMarketStrategy.initialize.selector,
+            MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
                 mamoBackend: backend,
-                mToken: address(mToken),
-                metaMorphoVault: address(metaMorphoVault),
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
-                splitMToken: 5000,
-                splitVault: 5000,
                 strategyTypeId: _strategyTypeId,
                 rewardTokens: new address[](0),
                 owner: owner,
                 hookGasLimit: 0, // Invalid hook gas limit
                 allowedSlippageInBps: config.allowedSlippageInBps,
-                compoundFee: config.compoundFee
+                compoundFee: config.compoundFee,
+                marketRegistry: address(marketRegistry),
+                defaultSplitBps: defaultSplitBps
             })
         );
 
@@ -1595,7 +1589,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
         // With default slippage, this should revert
-        vm.expectRevert("Price check failed - output amount too low");
+        vm.expectRevert("price check failed");
         strategy.isValidSignature(digest, encodedOrder);
 
         // Now set a higher but still reasonable slippage (10%)
@@ -1608,7 +1602,7 @@ contract MoonwellMorphoStrategyTest is Test {
         );
 
         // With 10% slippage, the extremely low amount should still fail
-        vm.expectRevert("Price check failed - output amount too low");
+        vm.expectRevert("price check failed");
         strategy.isValidSignature(digest, encodedOrder);
 
         // Now create a more reasonable order with a higher buy amount
@@ -1684,7 +1678,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Price check failed - output amount too low");
+        vm.expectRevert("price check failed");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -1762,7 +1756,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes32 orderDigest = order.hash(strategy.DOMAIN_SEPARATOR());
 
         // Call isValidSignature and expect it to revert
-        vm.expectRevert("Order expires too far in the future");
+        vm.expectRevert("expires too far");
         strategy.isValidSignature(orderDigest, encodedOrder);
 
         // Clear the mock
@@ -1828,7 +1822,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
-        ERC20MoonwellMorphoStrategy newImplementation = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy();
 
         // Create an unauthorized address
         address unauthorizedAddress = makeAddr("unauthorized");
@@ -1880,7 +1874,7 @@ contract MoonwellMorphoStrategyTest is Test {
         bytes memory encodedOrder = abi.encode(order);
         bytes32 digest = order.hash(strategy.DOMAIN_SEPARATOR());
 
-        vm.expectRevert("Order expires too far in the future");
+        vm.expectRevert("expires too far");
         strategy.isValidSignature(digest, encodedOrder);
     }
 
@@ -2097,43 +2091,53 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testInitializeWithRewardTokens() public {
         // Deploy a new implementation for testing initialization
-        ERC20MoonwellMorphoStrategy newImpl = new ERC20MoonwellMorphoStrategy();
+        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy();
 
         // Whitelist the implementation
         vm.prank(admin);
         uint256 _strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
 
+        // Register markets for the new type (skip if already registered from proposal)
+        if (marketRegistry.getMarketCount(address(underlying)) == 0) {
+            vm.startPrank(backend);
+            marketRegistry.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+            marketRegistry.addMarket(address(underlying), address(metaMorphoVault), MarketType.ERC4626);
+            vm.stopPrank();
+        }
+
         // Create reward tokens array
         address[] memory rewardTokens = new address[](1);
         rewardTokens[0] = address(well);
+
+        uint256[] memory initSplits = new uint256[](2);
+        initSplits[0] = 5000;
+        initSplits[1] = 5000;
 
         // Initialize with reward tokens
         vm.prank(backend);
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(newImpl),
             abi.encodeWithSelector(
-                ERC20MoonwellMorphoStrategy.initialize.selector,
-                ERC20MoonwellMorphoStrategy.InitParams({
+                MamoMultiMarketStrategy.initialize.selector,
+                MamoMultiMarketStrategy.InitParams({
                     mamoStrategyRegistry: address(registry),
                     mamoBackend: backend,
-                    mToken: address(mToken),
-                    metaMorphoVault: address(metaMorphoVault),
                     token: address(underlying),
                     slippagePriceChecker: address(slippagePriceChecker),
                     feeRecipient: admin,
-                    splitMToken: 5000,
-                    splitVault: 5000,
                     strategyTypeId: _strategyTypeId,
                     rewardTokens: rewardTokens, // Non-empty reward tokens array
                     owner: owner,
                     hookGasLimit: config.hookGasLimit,
                     allowedSlippageInBps: config.allowedSlippageInBps,
-                    compoundFee: config.compoundFee
+                    compoundFee: config.compoundFee,
+                    marketRegistry: address(marketRegistry),
+                    defaultSplitBps: initSplits
                 })
             )
         );
 
-        ERC20MoonwellMorphoStrategy strategyWithRewards = ERC20MoonwellMorphoStrategy(payable(address(proxy)));
+        MamoMultiMarketStrategy strategyWithRewards = MamoMultiMarketStrategy(payable(address(proxy)));
 
         // Verify the strategy was initialized properly
         assertEq(strategyWithRewards.owner(), owner);
@@ -2220,7 +2224,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Attempt to update position should fail
         vm.prank(multicall);
         vm.expectRevert("Failed to redeem mToken");
-        strategy.updatePosition(6000, 4000);
+        strategy.updatePosition(_buildUpdatePositionArray(6000, 4000));
 
         // Clear the mock
         vm.clearMockedCalls();
@@ -2290,7 +2294,7 @@ contract MoonwellMorphoStrategyTest is Test {
         // Now update position should fail on mint
         vm.prank(multicall);
         vm.expectRevert("MToken mint failed");
-        strategy.updatePosition(6000, 4000);
+        strategy.updatePosition(_buildUpdatePositionArray(6000, 4000));
 
         // Clear the mocks
         vm.clearMockedCalls();
@@ -2411,12 +2415,12 @@ contract MoonwellMorphoStrategyTest is Test {
     /**
      * @notice Generates app data hash for CoW Swap orders
      * @param sellToken The address of the token being sold
-     * @param feeRecipient The address that will receive the fee
+     * @param _feeRecipient The address that will receive the fee
      * @param sellAmount The amount of tokens being sold
      * @param fromAddress The address the order is from
      * @return bytes32 The app data hash
      */
-    function generateAppDataHash(address sellToken, address feeRecipient, uint256 sellAmount, address fromAddress)
+    function generateAppDataHash(address sellToken, address _feeRecipient, uint256 sellAmount, address fromAddress)
         internal
         returns (bytes32)
     {
@@ -2428,7 +2432,7 @@ contract MoonwellMorphoStrategyTest is Test {
         ffiCommand[3] = "--sell-token";
         ffiCommand[4] = vm.toString(sellToken);
         ffiCommand[5] = "--fee-recipient";
-        ffiCommand[6] = vm.toString(feeRecipient);
+        ffiCommand[6] = vm.toString(_feeRecipient);
         ffiCommand[7] = "--sell-amount";
         ffiCommand[8] = vm.toString(sellAmount);
         ffiCommand[9] = "--compound-fee";

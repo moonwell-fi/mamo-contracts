@@ -4,6 +4,10 @@ test:
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
 
+# NOTE: `--skip s.sol` suffix-matches ANY file ending in "s.sol" — it excludes deploy scripts
+# (.s.sol) AND test/harness/*Harness.sol only by naming accident. A test helper named e.g.
+# FooHelper.sol or FooMock.sol would match neither s.sol nor t.sol and silently pollute coverage:
+# keep test-only contracts suffixed "Harness.sol" (or extend the skip list here).
 coverage:
 	forge coverage --fork-url base --ffi --report lcov --skip s.sol --no-match-coverage t.sol --ir-minimum -vvv && genhtml lcov.info --branch-coverage --output-dir coverage
 
@@ -40,7 +44,42 @@ mamo-staking:
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
 
-test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter
+# NOTE: no --fork-url here. The V2 integration test self-forks at a PINNED block via
+# vm.createSelectFork inside setUp. Passing --fork-url base in addition makes foundry 1.7.x
+# init the OP-stack L1Block handler against the CLI fork and panic ("Missing operator fee
+# scalar for isthmus L1 Block") before the in-test vm.fee(0) workaround runs.
+lp-auto-balancer-v2:
+	forge test --ffi --mc LPAutoBalancerV2Integration -vvv
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+# Same op-revm note as lp-auto-balancer-v2: the FPS setup test self-forks at a PINNED block via
+# vm.createSelectFork in setUp with the vm.fee(0) Isthmus workaround. NO --fork-url here.
+lp-v2-setup:
+	forge test --ffi --mc LPAutoBalancerV2SetupTest -vvv
+
+# MamoLeveragedAeroStrategy account unit tests. Mocks only (no fork): the Sherwood strategy/vault are
+# stubbed, so NO --fork-url. Matches test/MamoLeveragedAeroStrategy*.unit.t.sol.
+leveraged-aero-account:
+	forge test --ffi --match-path "test/MamoLeveragedAeroStrategy*.unit.t.sol" -vvv
+
+test-all:
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account
+
+# Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
+# lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
+# gating, cooldown, exit). Uses TENDERLY_VNET_RPC_URL from .env (or creates a vnet if TENDERLY_*
+# creds are set). See script/tenderly/README.md.
+tenderly-harness:
+	./script/tenderly/run-harness.sh
+
+# LPAutoBalancerV2 price-simulation scenario matrix on a fresh vnet: calm reset→in-range,
+# large-move-down→single-sided (the _mainRange fix under a real price move), calm-gate→TwapDeviation,
+# stale-oracle→StaleOracle. Fresh vnet by default (--reuse to reuse TENDERLY_VNET_RPC_URL).
+tenderly-matrix:
+	./script/tenderly/run-harness.sh lpv2-matrix
+
+# SlippagePriceChecker gate against the live checker + real Chainlink config on a fresh vnet:
+# fair minOut passes, under-priced fails, stale feed reverts.
+tenderly-price-checker:
+	./script/tenderly/run-harness.sh price-checker
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker

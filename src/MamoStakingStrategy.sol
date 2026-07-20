@@ -2,15 +2,15 @@
 pragma solidity 0.8.28;
 
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
-import {IERC20MoonwellMorphoStrategy} from "@interfaces/IERC20MoonwellMorphoStrategy.sol";
+import {IMamoMultiMarketStrategy} from "@interfaces/IMamoMultiMarketStrategy.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IPool} from "@interfaces/IPool.sol";
-import {IQuoter} from "@interfaces/IQuoter.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
@@ -23,7 +23,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title MamoStakingStrategy
  * @notice A per-user staking strategy for MAMO tokens with automated reward claiming and processing
- * @dev This contract is designed to be used as an implementation for proxies, similar to ERC20MoonwellMorphoStrategy
+ * @dev This contract is designed to be used as an implementation for proxies, similar to MamoMultiMarketStrategy
  */
 contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using SafeERC20 for IERC20;
@@ -202,7 +202,9 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
 
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
         ISwapRouter dexRouter = stakingRegistry.dexRouter();
-        IQuoter quoter = stakingRegistry.quoter();
+        ISlippagePriceChecker priceChecker = stakingRegistry.slippagePriceChecker();
+        uint256 accountSlippage = getAccountSlippage();
+        address mamoTokenAddr = address(mamoToken);
 
         // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
@@ -216,20 +218,12 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             address poolAddress = rewardTokens[i].pool;
             int24 tickSpacing = IPool(poolAddress).tickSpacing();
 
-            // Get quote from quoter to calculate minimum amount out with slippage
-            (uint256 amountOut,,,) = quoter.quoteExactInputSingle(
-                IQuoter.QuoteExactInputSingleParams({
-                    tokenIn: address(rewardToken),
-                    tokenOut: address(mamoToken),
-                    amountIn: rewardBalance,
-                    tickSpacing: tickSpacing,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-
-            // Apply slippage tolerance to get minimum amount out
-            uint256 accountSlippage = getAccountSlippage();
-            uint256 amountOutMinimum = (amountOut * (10000 - accountSlippage)) / 10000;
+            // Compute reference output from Chainlink-based price checker.
+            // This anchors the slippage check to an off-pool oracle so that pool-price
+            // manipulation (sandwich attacks) cannot bypass the minimum-out guard the
+            // way an in-pool quoter call would.
+            uint256 expectedOut = priceChecker.getExpectedOut(rewardBalance, address(rewardToken), mamoTokenAddr);
+            uint256 amountOutMinimum = (expectedOut * (10000 - accountSlippage)) / 10000;
 
             // Approve DEX router to spend reward tokens
             rewardToken.forceApprove(address(dexRouter), rewardBalance);
@@ -292,7 +286,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             require(mamoStrategyRegistry.isUserStrategy(owner(), strategyAddress), "Strategy not registered");
 
             // Validate strategy token - strategy must handle the same token as the reward token
-            IERC20MoonwellMorphoStrategy strategy = IERC20MoonwellMorphoStrategy(strategyAddress);
+            IMamoMultiMarketStrategy strategy = IMamoMultiMarketStrategy(strategyAddress);
             require(address(strategy.token()) == address(rewardToken), "Strategy token mismatch");
 
             // Approve strategy to spend reward tokens and deposit
