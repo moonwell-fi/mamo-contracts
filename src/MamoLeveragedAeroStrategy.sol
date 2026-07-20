@@ -29,10 +29,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *      after the existing ones.
  *
  *      Design notes:
- *      - Terminal/Settled vault-queue exit is deliberately NOT implemented as a bespoke flow. If the
- *        Sherwood strategy settles (or an exit path is otherwise unavailable), the owner's escape hatch
- *        is the inherited `recoverERC20(vaultShares, owner, amount)` to pull the raw shares out and
- *        interact with the vault redemption queue directly.
+ *      - Terminal/Settled vault-queue exit is deliberately NOT implemented as a bespoke flow. The
+ *        inherited `recoverERC20(vaultShares, owner, amount)` is an always-available `onlyOwner` hatch
+ *        (no state gate — it does not go through the withdraw slippage/LTV path, consistent with the
+ *        other Mamo strategies); its intended use here is the Settled terminal state, where the owner
+ *        pulls the raw shares out and interacts with the vault redemption queue directly.
  *      - The fast {withdraw}/{withdrawAll} paths are oracle-dependent and LTV-gated: they revert when the
  *        oracle is down or the LTV gate trips, in which case the owner should route through the async
  *        {requestWithdraw} flow instead.
@@ -130,17 +131,24 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     }
 
     /**
-     * @notice Deposit this account's entire idle USDC balance into the Sherwood strategy (permissionless).
+     * @notice Deposit this account's entire idle USDC balance into the Sherwood strategy (owner or backend).
      * @dev Users can plain-transfer USDC to their account; the backend then nudges it in via this call
      *      (mirrors `depositIdleTokens` in MamoMultiMarketStrategy). Reverts if there is no idle USDC.
      *
-     *      Note the interaction with {claimWithdrawnUsdc}: idle USDC is ambiguous — it may be pending
-     *      re-deposit OR a fulfilled async withdrawal. The owner claims withdrawals explicitly via
-     *      {claimWithdrawnUsdc}; the backend should only call this when a re-deposit is intended.
+     *      Gated to the owner or the registry backend — the repo's trusted-actor pattern. This closes the
+     *      anonymous-griefer vector: because idle USDC is ambiguous (it may be pending re-deposit OR a
+     *      fulfilled async withdrawal awaiting {claimWithdrawnUsdc}), a permissionless call let any third
+     *      party front-run the owner's {claimWithdrawnUsdc} and force a fulfilled withdrawal back into the
+     *      leveraged position (repeatable re-lock griefing). A residual footgun remains between the two
+     *      trusted actors: the owner claims withdrawals explicitly via {claimWithdrawnUsdc}, so the backend
+     *      must only call this when a re-deposit is intended, and the owner and backend coordinate which
+     *      idle USDC is which.
      * @param minShares Minimum vault shares to accept (slippage guard).
      * @return shares Vault shares minted to this account (12dp).
      */
     function depositIdle(uint256 minShares) external returns (uint256 shares) {
+        require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
+
         uint256 assets = usdc.balanceOf(address(this));
         require(assets > 0, "No idle USDC to deposit");
 
@@ -223,9 +231,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external onlyOwner returns (uint256 assetsOut) {
         assetsOut = sherwoodStrategy.emergencyRedeem(id, minAssetsOut);
 
-        if (assetsOut > 0) {
-            usdc.safeTransfer(owner(), assetsOut);
-        }
+        _forwardToOwner(assetsOut);
 
         emit WithdrawEmergency(id, assetsOut);
     }
@@ -269,10 +275,10 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
 
     /**
      * @notice The Sherwood strategy's lifecycle state (pass-through).
-     * @return The state as a uint8 (0 = Pending, 1 = Executed, 2 = Settled).
+     * @return The strategy lifecycle state.
      */
-    function strategyState() external view returns (uint8) {
-        return uint8(sherwoodStrategy.state());
+    function strategyState() external view returns (ILeveragedAeroCLStrategy.State) {
+        return sherwoodStrategy.state();
     }
 
     // ==================== INTERNAL ====================
@@ -288,8 +294,16 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         vaultShares.forceApprove(address(sherwoodStrategy), shares);
         assetsOut = sherwoodStrategy.redeem(shares, minAssetsOut);
 
-        if (assetsOut > 0) {
-            usdc.safeTransfer(owner(), assetsOut);
+        _forwardToOwner(assetsOut);
+    }
+
+    /**
+     * @notice Forward `amount` USDC to the owner, skipping the transfer when there is nothing to send.
+     * @param amount USDC to forward to the owner (6dp).
+     */
+    function _forwardToOwner(uint256 amount) private {
+        if (amount > 0) {
+            usdc.safeTransfer(owner(), amount);
         }
     }
 }

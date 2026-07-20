@@ -28,10 +28,6 @@ contract DeployLeveragedAeroAccountConfig is Test {
     Config private config;
 
     struct Config {
-        // Human-readable symbol of the deposit asset (informational).
-        string symbol;
-        // Deposit-asset decimals (USDC = 6).
-        uint8 decimals;
         // Address-book key of the deposit/payout token (USDC).
         string token;
         // Address-book key of the vendored Sherwood leveraged Aerodrome CL strategy.
@@ -39,6 +35,13 @@ contract DeployLeveragedAeroAccountConfig is Test {
         // Address-book key of the SyndicateVault whose deposits must be opened.
         string syndicateVault;
         // MamoStrategyRegistry strategy type id assigned to this account family.
+        //
+        // Next available MamoStrategyRegistry strategy type id. Base mainnet currently has ids 1-4
+        // whitelisted (1=USDC, 2=staking, 3=cbBTC, 4=WETH), so 5 is the first free slot. VERIFY ON-CHAIN
+        // before deploy: `cast call $MAMO_STRATEGY_REGISTRY 'latestImplementationById(uint256)(address)' 5
+        // --rpc-url base` MUST return the zero address. NOTE: registry.nextStrategyTypeId() reads 4 (stale)
+        // because whitelistImplementation with an explicit non-zero id does NOT advance that counter - the
+        // empty-slot check above is the source of truth for availability, not nextStrategyTypeId().
         uint256 strategyTypeId;
         // Address-book key under which the deployed implementation is stored.
         string strategyImplementation;
@@ -59,8 +62,6 @@ contract DeployLeveragedAeroAccountConfig is Test {
         configData = vm.readFile(configPath);
 
         // Field-by-field decode (avoids whole-struct abi.decode ordering pitfalls).
-        config.symbol = abi.decode(vm.parseJson(configData, ".symbol"), (string));
-        config.decimals = abi.decode(vm.parseJson(configData, ".decimals"), (uint8));
         config.token = abi.decode(vm.parseJson(configData, ".token"), (string));
         config.sherwoodStrategy = abi.decode(vm.parseJson(configData, ".sherwoodStrategy"), (string));
         config.syndicateVault = abi.decode(vm.parseJson(configData, ".syndicateVault"), (string));

@@ -132,6 +132,8 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     }
 
     function emergencyRedeem(uint256 id, uint256 minAssetsOut) external override returns (uint256 assetsOut) {
+        require(state == State.Executed, "MockSherwood: not executed");
+
         RedeemRequest storage req = requests[id];
         require(req.owner == msg.sender, "MockSherwood: not request owner");
         require(!req.settled, "MockSherwood: already settled");

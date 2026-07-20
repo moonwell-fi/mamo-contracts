@@ -286,6 +286,56 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(0);
     }
 
+    function testDepositIdleAsBackendSucceeds() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        usdc.mint(address(strategy), DEPOSIT);
+
+        // The registry backend (getBackendAddress) is a trusted actor and may nudge idle USDC in.
+        assertEq(registry.getBackendAddress(), backend, "backend is registry backend");
+        vm.prank(backend);
+        uint256 shares = strategy.depositIdle(0);
+
+        assertEq(shares, EXPECTED_SHARES);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES);
+        assertEq(usdc.balanceOf(address(strategy)), 0, "idle USDC swept");
+    }
+
+    function testDepositIdleAsThirdPartyReverts() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        usdc.mint(address(strategy), DEPOSIT);
+
+        vm.prank(thirdParty);
+        vm.expectRevert("Not owner or backend");
+        strategy.depositIdle(0);
+    }
+
+    /// @notice Regression: an anonymous third party must NOT be able to force a fulfilled async
+    ///         withdrawal back into the leveraged position (repeatable re-lock griefing) by front-running
+    ///         the owner's {claimWithdrawnUsdc} with depositIdle(0). The owner's claim then succeeds.
+    function testDepositIdleReLockGriefingBlocked() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        // Backend/keeper fulfills off-band; the withdrawal USDC lands idle on the wrapper.
+        sherwood.fulfillRedeem(id);
+        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "fulfilled USDC idle on wrapper");
+
+        // Attacker front-runs the owner's claim to re-lock the funds — must revert.
+        vm.prank(thirdParty);
+        vm.expectRevert("Not owner or backend");
+        strategy.depositIdle(0);
+
+        // Owner still claims the fulfilled withdrawal.
+        vm.prank(user);
+        uint256 amount = strategy.claimWithdrawnUsdc();
+        assertEq(amount, DEPOSIT);
+        assertEq(usdc.balanceOf(user), DEPOSIT, "owner claimed the fulfilled withdrawal");
+        assertEq(strategy.sharesBalance(), 0, "not re-locked into the position");
+    }
+
     // ==================== WITHDRAW (FAST PATH) ====================
 
     function testWithdrawHappyPath() public {
@@ -361,6 +411,36 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.prank(user);
         vm.expectRevert("FastRedeemExceedsLtv");
         strategy.withdraw(EXPECTED_SHARES, 0);
+    }
+
+    /// @notice Redemptions must keep working while the vault is paused: pausing gates deposits (mint) but
+    ///         NOT burns, mirroring the real SyndicateVault where redeems stay open while paused.
+    function testWithdrawWhileVaultPausedSucceeds() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vault.setPaused(true);
+
+        vm.prank(user);
+        uint256 assetsOut = strategy.withdraw(EXPECTED_SHARES, DEPOSIT);
+
+        assertEq(assetsOut, DEPOSIT, "fast withdraw pays out while paused");
+        assertEq(usdc.balanceOf(user), DEPOSIT, "owner paid while paused");
+        assertEq(strategy.sharesBalance(), 0, "shares burned while paused");
+    }
+
+    function testWithdrawAllWhileVaultPausedSucceeds() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vault.setPaused(true);
+
+        vm.prank(user);
+        uint256 assetsOut = strategy.withdrawAll(DEPOSIT);
+
+        assertEq(assetsOut, DEPOSIT, "withdrawAll pays out while paused");
+        assertEq(usdc.balanceOf(user), DEPOSIT, "owner paid while paused");
+        assertEq(strategy.sharesBalance(), 0, "shares burned while paused");
     }
 
     function testWithdrawMinAssetsOutReverts() public {
@@ -585,10 +665,10 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
     function testStrategyStatePassThrough() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        assertEq(strategy.strategyState(), uint8(ILeveragedAeroCLStrategy.State.Executed));
+        assertEq(uint8(strategy.strategyState()), uint8(ILeveragedAeroCLStrategy.State.Executed));
 
         sherwood.setState(ILeveragedAeroCLStrategy.State.Settled);
-        assertEq(strategy.strategyState(), uint8(ILeveragedAeroCLStrategy.State.Settled));
+        assertEq(uint8(strategy.strategyState()), uint8(ILeveragedAeroCLStrategy.State.Settled));
     }
 
     function testComputeStrategyAddressMatches() public {
