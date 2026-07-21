@@ -58,6 +58,42 @@ it back through the harness `sender()` entrypoint (`vm.addr`) — so the raw key
 prompt is a poor fit for this non-interactive automation loop, and foundry does not honor an
 `ETH_PRIVATE_KEY` env fallback on the pinned nightly.)
 
+## MamoLeveragedAeroStrategy account harness
+
+`run-leveraged-aero-account.sh` (dispatch: `./run-harness.sh leveraged-aero-account`, or
+`make tenderly-leveraged-aero-account`) drives the **Mamo side** of the leveraged-Aero account
+deployment against a LIVE, **persistent** Base-fork vnet on which the **Sherwood** stack
+(`SyndicateVault` + `LeveragedAerodromeCLStrategy`) is already deployed, then smoke-tests the
+account wrapper end-to-end. It replays multisig proposal `012_DeployLeveragedAeroAccountSystem`
+plus the full user lifecycle as real broadcast txs, driven by Tenderly **unlocked impersonation**
+(no private keys) for `MAMO_MULTISIG` / `DEPLOYER_EOA` / the strategy proposer / a fresh throwaway user.
+
+| Phase | What it does |
+|---|---|
+| **2 — deploy** | `LeveragedAeroAccountHarness.deploy()` runs the real `LeveragedAeroAccountDeployer` (the same code proposal 012 calls) to deploy the impl + factory as `DEPLOYER_EOA`. |
+| **3 — multisig** | As `MAMO_MULTISIG`: `whitelistImplementation(impl,5)`, `grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`; then reproduces every `validate()` assert via `cast` reads. |
+| **4 — e2e** | Fresh throwaway user: `createStrategyForUser` → `deposit` → fast `withdraw(half)` → `requestWithdraw` → proposer `fulfillRedeem` → `claimWithdrawnUsdc` → `depositIdle` gate (third-party reverts, registry backend succeeds) → `withdrawAll` cleanup → clean-state asserts + net-delta report. |
+
+**Why `--reuse` is forced.** The Sherwood strategy/vault exist only on the shared persistent vnet, so
+this harness ALWAYS reuses `TENDERLY_VNET_RPC_URL` (point it at the vnet's **Admin RPC** — it accepts
+`eth_sendTransaction` from any unlocked sender AND serves reads); it never creates or deletes a vnet.
+
+**Address resolution.** The `SHERWOOD_LEVERAGED_AERO_STRATEGY` / `SHERWOOD_SYNDICATE_VAULT` keys are
+deliberately NOT in `addresses/8453.json`: FPS `Addresses` validates `isContract` **eagerly** in its
+constructor (gated on `chainId == block.chainid`), so committing them with `isContract:true` would
+revert the `Addresses` constructor on every real-Base-mainnet CI run (no code lives there). They are
+supplied via env vars (documented defaults = current vnet values) and injected at runtime inside
+`LeveragedAeroAccountHarness.s.sol` with `addresses.addAddress(...)`.
+
+**NEVER time-warp this vnet.** `evm_increaseTime` / `evm_setNextBlockTimestamp` age the frozen
+Chainlink feeds and brick NAV for everyone (`StaleOracle`). This harness does no time travel; the
+2-day `emergencyWithdraw` path is covered by unit tests only, not the live smoke.
+
+```bash
+# current vnet values are the built-in defaults; override to point elsewhere
+TENDERLY_VNET_RPC_URL=<admin-rpc> make tenderly-leveraged-aero-account
+```
+
 ## vnet resolution
 
 Mirrors the goal's "(a) spin up a vnet **or** (b) use the url in `.env`":
@@ -81,6 +117,9 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
     address without putting the raw key on an argv (see "Broadcaster key" above).
 - `SlippagePriceCheckerTenderlyHarness.s.sol` — the SlippagePriceChecker script
   (`run-price-checker.sh`): `checkPriceGating`, `checkStalePrice`.
+- `LeveragedAeroAccountHarness.s.sol` — the MamoLeveragedAeroStrategy account deploy runner
+  (`run-leveraged-aero-account.sh`): `deploy()` wraps the real `LeveragedAeroAccountDeployer` and
+  injects the vnet-only `SHERWOOD_*` keys at runtime.
 - `TenderlySwapHelper.sol` — a tiny deployed swap-callback holder for the price-sim matrix; a
   forge Script can't be its own `uniswapV3SwapCallback`, so `pushTick` routes swaps through this.
 
@@ -93,6 +132,8 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   large move → single-sided, calm-gate → `TwapDeviation`, stale-oracle → `StaleOracle`), each off a
   fresh `evm_snapshot`.
 - `run-price-checker.sh` — SlippagePriceChecker gate against the live checker + real Chainlink config.
+- `run-leveraged-aero-account.sh` — MamoLeveragedAeroStrategy account deploy-drive + e2e smoke against
+  the persistent Sherwood vnet (unlocked impersonation; always `--reuse`). See section above.
 - `setup-staging.sh` — stands up a **persistent** frontend staging vnet (not torn down after the run).
 - `lib/common.sh` — shared plumbing (vnet resolution/teardown, cheat-RPC fund/time helpers, the
   forge-phase runner, address-book lookup, vnet gotcha fixes). Sourced, never executed.

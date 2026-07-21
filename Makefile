@@ -82,4 +82,12 @@ tenderly-matrix:
 tenderly-price-checker:
 	./script/tenderly/run-harness.sh price-checker
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker
+# MamoLeveragedAeroStrategy account deploy-drive + e2e smoke against the LIVE persistent Base-fork vnet
+# where the Sherwood stack is already deployed. Replays proposal 012 (deploy impl+factory, 3 multisig
+# actions, validate) then the full account lifecycle (create→deposit→withdraw→request→fulfill→claim→
+# depositIdle gate) as unlocked-impersonation broadcast txs. ALWAYS reuses TENDERLY_VNET_RPC_URL (the
+# Sherwood stack lives only on the persistent vnet); never time-warps (would brick the frozen feeds).
+tenderly-leveraged-aero-account:
+	./script/tenderly/run-harness.sh leveraged-aero-account
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-leveraged-aero-account
