@@ -1,5 +1,32 @@
 # Leveraged Aero — Frontend integration guide
 
+## The product — Leveraged Aerodrome LP Fund (Sherwood × Mamo)
+
+Leveraged Aerodrome LP fund. Users deposit USDC; the Mamo agent runs a leveraged AERO-farming
+position that earns through emissions. Custody and execution are deliberately separate: the fund runs on
+Sherwood's pooled-vault rails (share ledger, live NAV, withdrawal queue), execution lives in one
+Sherwood strategy contract (supply USDC on Moonwell → borrow cbBTC + ETH → Aerodrome concentrated LP →
+farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and Mamo's backend
+is the agent — the same trusted-operator model as Mamo today: it manages the position but can never
+withdraw user funds. Users redeem anytime at NAV.
+
+| At a glance | |
+|---|---|
+| Chain | Base |
+| Deposit asset | USDC (ETH & cbBTC added later) |
+| Structure | Pooled fund — many depositors, one shared position |
+| Strategy | Supply USDC → borrow cbBTC + ETH → Aerodrome CL LP → farm & compound AERO |
+| Posture | Leveraged Aerodrome CL LP + AERO emissions carry |
+| Custody | Agent manages the position, can never withdraw user funds; users redeem anytime |
+| Lifetime | Runs indefinitely |
+
+**Where this guide sits.** Mamo users don't touch the fund contracts directly. Each user gets a
+per-user **Mamo account** (`MamoLeveragedAeroStrategy`) that custodies their fund shares and exposes a
+USDC-in / USDC-out surface — the same account model as every other Mamo strategy. This guide is the
+frontend integration surface for that account.
+
+---
+
 This is the frontend contract-integration guide for the **leveraged Aerodrome LP** product. The single
 integration surface for the frontend is the per-user **Mamo account** (`MamoLeveragedAeroStrategy`), its
 **factory** (`MamoLeveragedAeroStrategyFactory`), and the **registry** (`MamoStrategyRegistry`). The
