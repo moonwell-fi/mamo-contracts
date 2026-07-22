@@ -371,11 +371,24 @@ function vault() external view returns (address);
   authoritative "unhealthy" signal `_assertHealthy` and `deleverage` both consult). `previewRedeem` also
   indirectly reflects the gate (`fastOk`).
 
-**Events for ops dashboards.** Note there are **no** dedicated position-management events — `deployIdle`,
-`compound`, `rerange`, `adjustLeverage`, and `deleverage` emit **nothing** from the strategy or the
-manager (verified: the manager emits no events at all, and the strategy declares only the five below).
-Dashboards must key off venue-level events (Moonwell mint/borrow/repay/redeem, Slipstream NPM
-increase/decrease, gauge stake/getReward) and transaction receipts, plus:
+**Events for ops dashboards.** The event coverage is asymmetric, and the asymmetry matters:
+
+- **The user-flow events the rebalancer depends on already exist.** Most importantly
+  `RedeemRequested(id, owner, shares)` — the withdraw-request trigger that drives the entire SLA loop —
+  plus the rest of the queue set (`RedeemFulfilled`/`RedeemCancelled`/`RedeemEmergency`) and
+  `FeeCrystallizeDeferred`. Nothing needs to be added for the keeper's core watch-and-fulfill duty.
+- **Position-management ops emit nothing** — `deployIdle`, `compound`, `rerange`, `adjustLeverage`, and
+  `deleverage` are event-silent from both the strategy and the manager (verified: the manager emits no
+  events at all; the strategy declares only the five below). Until that changes, dashboards key off
+  venue-level events (Moonwell mint/borrow/repay/redeem, Slipstream NPM increase/decrease, gauge
+  stake/getReward) and transaction receipts.
+- **Adding events is an open option, not a blocker.** If the rebalancer or an indexer ends up needing
+  first-class `Compounded`/`Reranged`/`LeverageAdjusted`-style events, they can be added — the change
+  goes to the upstream Sherwood repo (the code here is vendored; upstream at the pinned commit is
+  authoritative) and lands here on the next re-vendor. Raise it when a concrete consumer needs it;
+  don't build ops tooling on the assumption they'll never exist.
+
+Strategy events that exist today:
 
 | Strategy event | Use |
 |---|---|
