@@ -248,7 +248,7 @@ Sherwood strategy (custom errors, decode by selector): `NotExecuted()`,
 | Account implementation | `0x3F26d1E36310442453d3aefCf75d5817eceBCF29` |
 | Strategy type id | `5` |
 | Sherwood vault (shares, 12dp) | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` |
-| Sherwood strategy clone | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` |
+| Sherwood strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (PR #14 build; previous clone `0x168a…FB4B` is now Settled) |
 
 Staging endpoints rotate — re-read the current instance from `docs/LEVERAGED_AERO_VNET_RUNBOOK.md` before
 wiring an environment.

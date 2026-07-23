@@ -363,7 +363,9 @@ cast call "$USDC" 'balanceOf(address)(uint256)' "$ACCT"                 --rpc-ur
 | Admin RPC | `https://virtual.base.eu.rpc.tenderly.co/e6961d2a-4711-42eb-b4c1-2a42cbc17d28` |
 | Public RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
 | SyndicateVault | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` |
-| Strategy clone | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` |
+| Strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (PR #14 build; previous clone `0x168a…FB4B` is now Settled) |
+| Live proposal id | `3` (1 = rejected artifact, 2 = settled) — clone init: width `4000` raw ticks, band `[200, 20000]` |
+| Leveraged-aero template | `0x8eE3AD5B3b574b4253985a7F32aB1231474CA381` |
 | SyndicateGovernor | `0x430FA5659cCf6E9c1586007a0A2B7760fb75e105` |
 | Mamo impl | `0x3F26d1E36310442453d3aefCf75d5817eceBCF29` |
 | Mamo factory (typeId 5, latest) | `0x9CDBe7DB9F967E793E7261e0ffd546E5D29b476f` |

@@ -126,21 +126,29 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 | Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`, plus Moonwell/NPM errors on the redeploy; a stale AERO feed fail-closes the whole call. |
 | When to call | On a yield/gas cadence. A stale AERO feed intentionally blocks it — defer and retry. |
 
-### `rerange` — re-center the CL range (no swap)
+### `rerange` — re-center and re-width the CL range (no swap)
+
+> **Version note (2026-07-23).** The live staging clone runs the upstream
+> [sherwood-protocol PR #14](https://github.com/sherwoodagent/sherwood-protocol/pull/14) build, which
+> added the per-cycle `width` parameter below (the Mamo rebalancer chooses a position width every
+> cycle). The copy vendored in this repo at the current pin still shows the older 2-arg
+> `rerange(minLiq0, minLiq1)` — upstream is authoritative; the pin bump/re-vendor is a tracked
+> follow-up. Everything else on the operator surface is unchanged (`deployIdle`/`compound` untouched).
 
 ```solidity
-function rerange(uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant;
+function rerange(uint24 width, uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant;
 ```
 
 | | |
 |---|---|
+| `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain. Staging clone init: width **4000**, band **[200, 20000]**. |
 | `minLiq0` / `minLiq1` | Minimum token0 (WETH) / token1 (cbBTC) the re-add must consume (two-sided slippage guard) → `InsufficientLiquidity()`. |
-| Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a recenter can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** tickSpacing-aligned CL NFT centered on the current tick → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
+| Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a recenter can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** CL NFT spanning `width/2` raw ticks each side of the current tick → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
 | What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** borrowed leg is left idle in the strategy — `nav()` prices it, so the recenter is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
 | Fee interaction | **No crystallization** — supply and NAV are unchanged; the streaming fee simply defers to the next crystallize point and the HWM is unaffected. |
 | Guards | Calm-gate; two-sided `maxSlippageBps` mins + caller `minLiq0/minLiq1`; closing `_assertHealthy()`. |
-| Errors | calm-gate reverts (`TwapDeviation`/`StaleOracle` family), `InsufficientLiquidity`, `UnhealthyPosition`. |
-| When to call | When spot has drifted out of the active range and emissions/fees would benefit from re-centering. |
+| Errors | `WidthOutOfBounds` (out-of-band or misaligned `width`), calm-gate reverts (`TwapDeviation`/`StaleOracle` family), `InsufficientLiquidity`, `UnhealthyPosition`. |
+| When to call | When spot has drifted out of the active range, or when the rebalance model chooses a new width for the cycle. Width selection policy is the rebalancer's (`RebalanceParams.width` in the backend spec); the chain only enforces the band. |
 
 ### `adjustLeverage` — move LTV toward a target
 
@@ -362,7 +370,8 @@ function vault() external view returns (address);
   `hwmPerShare`, `lastFeeAccrualTimestamp`, `protocolFeeOwed`), **venue/feed addresses** (pool, npm,
   gauge, swapRouter, comptroller, the Moonwell markets, the Chainlink feeds incl. `aeroUsdFeed`,
   `sequencerFeed`), **oracle config** (`maxDelay`, `gracePeriod`, `calmDeviationTicks`, `twapWindow`,
-  `tickSpacing`), and **position state** (`tokenId`, `posTickLower`, `posTickUpper`, `nextRedeemRequestId`).
+  `tickSpacing`), **position state** (`tokenId`, `posTickLower`, `posTickUpper`, `nextRedeemRequestId`),
+  and — on the live PR #14 build — the **width band** (`width`, `minWidth`, `maxWidth`).
 - **Current LTV / health.** There is no public LTV getter, but the health basis is
   `collateralUsdc × 1e4 / debtUsdc` on the same hardened-Chainlink reads `_assertHealthy` uses. To compute
   it off-chain the keeper reads collateral/debt from Moonwell directly — `mUsdc.balanceOf × exchangeRateStored / 1e18`
@@ -436,7 +445,9 @@ See [`docs/LEVERAGED_AERO_CL_AUDIT.md`](../LEVERAGED_AERO_CL_AUDIT.md) for the f
 |---|---|
 | Network | Base fork (Tenderly Virtual TestNet) — **current staging instance, rotates** |
 | RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Sherwood strategy clone (the operator target) | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` |
+| Sherwood strategy clone (the operator target) | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` — PR #14 build, live proposal id 3, width 4000 / band [200, 20000] |
+| Previous clone (proposal 2) | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` — now `Settled` (useful as a real Settled-state test target) |
+| Leveraged-aero template | `0x8eE3AD5B3b574b4253985a7F32aB1231474CA381` |
 | Sherwood vault (shares, 12dp) | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` |
 | Proposer / agent (`MAMO_BACKEND`) | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
 
@@ -452,7 +463,7 @@ Production addresses are published separately at deploy.
 - [ ] Gate the whole operator loop on `state() == Executed`; `execute`/`settle` are the governor's (`onlyVault`), not yours.
 - [ ] Periodically `deployIdle(amount, minLiquidity)` accumulated strategy-idle USDC within leverage caps; pass a real `minLiquidity`.
 - [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed.
-- [ ] `rerange(minLiq0, minLiq1)` when spot drifts out of range; expect calm-gate reverts on a shoved pool (retry when calm).
+- [ ] `rerange(width, minLiq0, minLiq1)` when spot drifts out of range or the model picks a new width — `width` in raw ticks, tickSpacing-aligned, inside `[minWidth, maxWidth]` (else `WidthOutOfBounds`); expect calm-gate reverts on a shoved pool (retry when calm).
 - [ ] `adjustLeverage(target, minLiq, minOut)` to hold near `targetLtvBps` — and to lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds.
 - [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
 - [ ] Treat `FULFILL_WINDOW = 2 days` as the hard SLA; alert before it; every `RedeemEmergency` is a missed SLA.
