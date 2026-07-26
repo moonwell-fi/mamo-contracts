@@ -14,5 +14,5 @@
     "syndicateVault": "0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9"
   },
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  "note": "Vnet values rotate by design (frozen Chainlink feeds stale in ~1 day of drift). Re-run make tenderly-leveraged-aero-account after a vnet refresh to regenerate."
+  "note": "Addresses change when the instance rotates or the harness redeploys — always read this file, never hardcode. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run make tenderly-leveraged-aero-account after any refresh to regenerate."
 }

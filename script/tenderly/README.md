@@ -97,13 +97,16 @@ read-safe values go in it; the **admin RPC lives in 1Password**, never in git. S
 
 ### Future reference — redeploying / vnet ops crib
 
-Vnets rotate **by design** (the frozen Chainlink feeds go stale in ~1 day of wall-clock drift, which
-bricks `nav()`-priced paths). When the shared vnet is refreshed:
+Vnet instances rotate occasionally (fork-block hygiene, broken state) — but NOT for feed staleness:
+the shared instance carries FreshFeed mocks (see step 0). When a refresh does happen:
 
-0. **Create the replacement vnet with STATE SYNC ENABLED** (creation-time only; cannot be changed
-   afterward — API-verified). A synced instance keeps the Chainlink feeds fresh from Base mainnet,
-   removing the ~1-day staleness brick entirely. Current shared instance (created 2026-07-21) has
-   sync disabled — it stays on the rotation treadmill until replaced.
+0. **Check whether a refresh is even needed.** The current shared instance has the **FreshFeed**
+   pattern applied (the 5 venue Chainlink feeds code-replaced with mocks whose `updatedAt` tracks
+   `block.timestamp`) — feeds never stale, so there is **no ~1-day rotation treadmill** on it
+   (verified live 2026-07-26: clock +5 days, feed lag 60s, e2e green). Rotate only for fork-block
+   hygiene or a broken instance. Do **NOT** create replacements with state sync — the governance
+   warp desyncs the clock from real time and state-synced feeds would read permanently stale;
+   re-apply FreshFeed instead (recipe: sherwood handoff doc §5.2).
 1. **Sherwood side first** — the vault + `LeveragedAerodromeCLStrategy` clone are deployed from the
    `sherwood-protocol` repo (not here). Full two-repo sequence:
    [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../../docs/LEVERAGED_AERO_VNET_RUNBOOK.md), Phases A–B.

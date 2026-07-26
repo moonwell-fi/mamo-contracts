@@ -257,7 +257,7 @@ jq -n \
     mamo: { accountImplementation: $impl, accountFactory: $factory, strategyRegistry: $registry },
     sherwood: { strategyClone: $strategy, syndicateVault: $vault },
     usdc: $usdc,
-    note: "Vnet values rotate by design (frozen Chainlink feeds stale in ~1 day of drift). Re-run make tenderly-leveraged-aero-account after a vnet refresh to regenerate."
+    note: "Addresses change when the instance rotates or the harness redeploys — always read this file, never hardcode. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run make tenderly-leveraged-aero-account after any refresh to regenerate."
   }' > "$CONFIG_JSON"
 ok "config emitted: $CONFIG_JSON"
 info "Full log: $RESULTS"

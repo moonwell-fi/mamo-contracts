@@ -43,12 +43,21 @@ come from `addresses/8453.json`.
 > 1. **chainId 8453 only.** Mamo's FPS `Addresses` book keys off `block.chainid`, and a matching chain
 >    id keeps real Base addresses (USDC, Moonwell, Aerodrome, Chainlink feeds) fork-native. A different
 >    chain id breaks address resolution and the whole harness.
-> 2. **NEVER time-warp a shared vnet** (`evm_increaseTime` / `evm_setNextBlockTimestamp`). Advancing
->    the clock ages the frozen Chainlink feeds; once `block.timestamp − updatedAt` exceeds the feed's
->    max delay, `nav()` fails closed (`StaleOracle`) and every deposit/fast-redeem bricks for everyone.
->    This is also **why vnets are recreated periodically**: even without deliberate warping, wall-clock
->    drift stales the feeds in ~1 day — plan refreshes accordingly. The Mamo harness does no time
->    travel; the 2-day `emergencyWithdraw` path is covered by unit tests only.
+> 2. **Feed freshness is solved by the FreshFeed pattern, not by rotation or state sync.** On a raw
+>    Base fork, clock drift or any time-warp stales the frozen Chainlink feeds in ~1 day
+>    (`StaleOracle` bricks every priced path). The Sherwood deployment therefore **code-replaces the
+>    5 venue feeds** (BTC, ETH, USDC, AERO, sequencer-uptime) with `FreshFeed` mocks whose
+>    `updatedAt` tracks `block.timestamp` (recipe: sherwood handoff doc §5.2, via
+>    `tenderly_setCode`) — feeds are then permanently fresh, prices frozen-but-movable, and
+>    time-warping is safe (the governance flow itself warps ~73h; verified live 2026-07-26: clock
+>    +5 days, feed lag 60s, full e2e green). Corollaries:
+>    - **Do NOT create the vnet with state sync**: the governance warp puts the vnet clock days
+>      ahead of real time, so state-synced feeds (real mainnet timestamps) would read as days-stale
+>      → permanent `StaleOracle`. State sync is creation-time-only and incompatible with this stack.
+>    - On an instance **without** FreshFeed mocks, the old rule stands: never time-warp, expect
+>      ~1-day staleness, plan rotation. Check which kind you're on before warping.
+>    - The 2-day `emergencyWithdraw` path stays unit-test-covered by default; on a FreshFeed'd
+>      instance a deliberate warp can exercise it live if ever needed.
 > 3. **Base per-tx gas cap = 16,777,216 (2^24).** `estimate × gas-multiplier` must stay under it. Large
 >    `CREATE`s (impl/factory) use a modest multiplier (`DEPLOY_GAS_MULT=200`); deep nested delegatecalls
 >    want more headroom. Watch the multiplier on both bounds.
@@ -63,18 +72,11 @@ Create a **fresh, persistent** Virtual TestNet forking Base:
 
 - Fork network: **Base (8453)**.
 - Virtual network chain id: **8453 — MANDATORY** (see constraint 1).
-- **State sync: ENABLED** for the shared staging instance (creation-time only — the Tenderly API
-  rejects changing it afterward, verified 2026-07-26). With sync on, untouched mainnet accounts —
-  crucially the **Chainlink aggregators** — keep updating from Base, so the ~1-day StaleOracle brick
-  goes away and rotation stops being feed-driven. Caveats:
-  - Any account **written locally forks off and stops syncing**: our deployed contracts (fine), plus
-    the Moonwell markets / Aerodrome pool / gauge the strategy touches — their state freezes except
-    for our txs while oracles keep tracking the real market, so the position's economics slowly
-    diverge from mainnet reality. Acceptable for staging; the strategy's fail-closed/deleverage
-    machinery handles divergence.
-  - **Never write to the Chainlink aggregators** (no mock-aggregator repointing) on a synced vnet —
-    one local write forks them off and reintroduces staleness permanently.
-  - Ephemeral, deterministic test vnets (the harness fresh-mode) keep sync **disabled**.
+- **State sync: DISABLED** (deliberate — see hard constraint 2). It looks tempting for feed
+  freshness, but the governance flow warps the vnet clock days ahead of real time, which would make
+  state-synced feeds (real mainnet timestamps) read as permanently stale. Feed freshness comes from
+  the **FreshFeed code-replacement** applied during the Sherwood deployment instead. (State sync is
+  creation-time-only — API-verified 2026-07-26 — so this choice is locked at creation; get it right.)
 - Explorer: optional.
 - Persistence: **no auto-delete** (the Sherwood stack must survive across the multi-step deploy).
 
