@@ -21,10 +21,12 @@
 # TENDERLY_VNET_RPC_URL (the vnet's ADMIN RPC — it accepts eth_sendTransaction from
 # any unlocked sender AND serves reads). It never creates or tears down a vnet.
 #
-# ── HARD CONSTRAINT ───────────────────────────────────────────────────────────
-# NEVER time-warp this vnet (evm_increaseTime / evm_setNextBlockTimestamp): it ages
-# the frozen Chainlink feeds and bricks NAV for everyone (StaleOracle). This harness
-# does no time travel; the 2-day emergencyWithdraw path is covered by unit tests only.
+# ── FEED FRESHNESS (was a hard constraint; now handled upstream) ───────────────
+# The shared instance's 5 venue Chainlink feeds are code-replaced with FreshFeed mocks
+# whose updatedAt tracks block.timestamp (sherwood handoff §5.2), so time-warping does
+# NOT stale them — the governance flow itself warps days ahead. On an instance WITHOUT
+# those mocks the old rule applies: never warp, feeds stale in ~1 day. This harness does
+# no time travel either way; the 2-day emergencyWithdraw path stays unit-test-covered.
 #
 # ── ADDRESS RESOLUTION ────────────────────────────────────────────────────────
 # The two SHERWOOD_* keys are NOT committed to addresses/8453.json: FPS Addresses

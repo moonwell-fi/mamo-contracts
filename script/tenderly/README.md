@@ -85,14 +85,17 @@ revert the `Addresses` constructor on every real-Base-mainnet CI run (no code li
 supplied via env vars (documented defaults = current vnet values) and injected at runtime inside
 `LeveragedAeroAccountHarness.s.sol` with `addresses.addAddress(...)`.
 
-**NEVER time-warp this vnet.** `evm_increaseTime` / `evm_setNextBlockTimestamp` age the frozen
-Chainlink feeds and brick NAV for everyone (`StaleOracle`). This harness does no time travel; the
-2-day `emergencyWithdraw` path is covered by unit tests only, not the live smoke.
+**Feed freshness.** The shared instance's venue Chainlink feeds are FreshFeed mocks (`updatedAt`
+tracks `block.timestamp`), so warping does not stale them and the vnet clock legitimately runs days
+ahead of real time. On an instance without those mocks, the old rule holds: never time-warp, feeds
+stale in ~1 day. This harness does no time travel either way; the 2-day `emergencyWithdraw` path
+stays unit-test-covered, not part of the live smoke.
 
 **Config for consumers.** Every successful run regenerates
 [`leveraged-aero-vnet.json`](./leveraged-aero-vnet.json) — the machine-consumable source of the
 current vnet's addresses + public RPC for the frontend env, indexer, keeper, and rebalancer. Only
-read-safe values go in it; the **admin RPC lives in 1Password**, never in git. Set
+read-safe values go in it; the **admin RPC is retrieved from the Tenderly dashboard** (org access
+required), never committed. Set
 `TENDERLY_VNET_PUBLIC_RPC_URL` when running so the public RPC lands in the file.
 
 ### Future reference — redeploying / vnet ops crib
