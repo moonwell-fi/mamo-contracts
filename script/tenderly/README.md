@@ -89,6 +89,46 @@ supplied via env vars (documented defaults = current vnet values) and injected a
 Chainlink feeds and brick NAV for everyone (`StaleOracle`). This harness does no time travel; the
 2-day `emergencyWithdraw` path is covered by unit tests only, not the live smoke.
 
+**Config for consumers.** Every successful run regenerates
+[`leveraged-aero-vnet.json`](./leveraged-aero-vnet.json) — the machine-consumable source of the
+current vnet's addresses + public RPC for the frontend env, indexer, keeper, and rebalancer. Only
+read-safe values go in it; the **admin RPC lives in 1Password**, never in git. Set
+`TENDERLY_VNET_PUBLIC_RPC_URL` when running so the public RPC lands in the file.
+
+### Future reference — redeploying / vnet ops crib
+
+Vnets rotate **by design** (the frozen Chainlink feeds go stale in ~1 day of wall-clock drift, which
+bricks `nav()`-priced paths). When the shared vnet is refreshed:
+
+1. **Sherwood side first** — the vault + `LeveragedAerodromeCLStrategy` clone are deployed from the
+   `sherwood-protocol` repo (not here). Full two-repo sequence:
+   [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../../docs/LEVERAGED_AERO_VNET_RUNBOOK.md), Phases A–B.
+2. **Mamo side** (this harness) — with the new vnet's admin RPC and the fresh Sherwood addresses:
+
+   ```bash
+   TENDERLY_VNET_RPC_URL=<admin-rpc> \
+   TENDERLY_VNET_PUBLIC_RPC_URL=<public-rpc> \
+   SHERWOOD_LEVERAGED_AERO_STRATEGY=<clone> SHERWOOD_SYNDICATE_VAULT=<vault> \
+   make tenderly-leveraged-aero-account
+   ```
+
+   Deploys + wires + smokes everything and re-emits `leveraged-aero-vnet.json` — commit that diff so
+   consumers pick up the new instance.
+
+One-off ops against the vnet (all via the **admin** RPC, no keys — unlocked impersonation):
+
+```bash
+# fund ETH / USDC to any address
+cast rpc tenderly_setBalance        '["<addr>","0x56BC75E2D63100000"]'                    --rpc-url "$ADMIN"   # 100 ETH
+cast rpc tenderly_setErc20Balance   '["<usdc>","<addr>","0x2540BE400"]'                   --rpc-url "$ADMIN"   # 10,000 USDC
+
+# act as any actor — e.g. fulfill an async withdrawal as the backend/proposer
+cast send <strategyClone> 'fulfillRedeem(uint256)' <id> --from <MAMO_BACKEND> --unlocked --rpc-url "$ADMIN"
+
+# read anything via the public RPC (share this one freely)
+cast call <account> 'sharesBalance()(uint256)' --rpc-url <public-rpc>
+```
+
 ```bash
 # current vnet values are the built-in defaults; override to point elsewhere
 TENDERLY_VNET_RPC_URL=<admin-rpc> make tenderly-leveraged-aero-account

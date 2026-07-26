@@ -58,8 +58,11 @@ FQ="script/tenderly/LeveragedAeroAccountHarness.s.sol:LeveragedAeroAccountHarnes
 # ── documented vnet defaults (overridable via env) ────────────────────────────
 # Sherwood stack on the current persistent vnet (block ~48.9M Base fork). These are
 # env-var DEFAULTS, not hardcoded logic: pass your own to point at a different vnet.
-export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B}"
+export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-0x5E22913E4C96f816133fbc8E894F652a4f87C760}"
 export SHERWOOD_SYNDICATE_VAULT="${SHERWOOD_SYNDICATE_VAULT:-0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9}"
+# Optional: the vnet's PUBLIC (read-only) RPC — recorded into the emitted config for consumers.
+# NEVER put the admin RPC in the config; it accepts unlocked writes and lives in 1Password only.
+TENDERLY_VNET_PUBLIC_RPC_URL="${TENDERLY_VNET_PUBLIC_RPC_URL:-}"
 
 # Base per-tx gas cap is 16,777,216; the impl+factory CREATEs are well under it at 2x.
 DEPLOY_GAS_MULT=200
@@ -234,5 +237,28 @@ info "user USDC final = $UEND  (net vs 10,000 start = $(python3 -c "print(($UEND
 
 section "Summary"
 ok "Leveraged-Aero account harness complete. impl=$IMPL factory=$FACTORY account=$ACCT"
+
+# ── machine-consumable config for downstream consumers (frontend env / indexer / keeper) ──────
+# Committed alongside the harness and refreshed by every successful run. Contains ONLY read-safe
+# values; the admin RPC is intentionally excluded (1Password only).
+CONFIG_JSON="$ROOT/script/tenderly/leveraged-aero-vnet.json"
+jq -n \
+  --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg publicRpc "$TENDERLY_VNET_PUBLIC_RPC_URL" \
+  --arg impl "$IMPL" --arg factory "$FACTORY" \
+  --arg strategy "$STRAT" --arg vault "$VAULT" \
+  --arg registry "$REG" --arg usdc "$USDC" \
+  '{
+    generatedAt: $ts,
+    chainId: 8453,
+    publicRpc: (if $publicRpc == "" then null else $publicRpc end),
+    adminRpc: "1Password (write-capable — never committed)",
+    strategyTypeId: 5,
+    mamo: { accountImplementation: $impl, accountFactory: $factory, strategyRegistry: $registry },
+    sherwood: { strategyClone: $strategy, syndicateVault: $vault },
+    usdc: $usdc,
+    note: "Vnet values rotate by design (frozen Chainlink feeds stale in ~1 day of drift). Re-run make tenderly-leveraged-aero-account after a vnet refresh to regenerate."
+  }' > "$CONFIG_JSON"
+ok "config emitted: $CONFIG_JSON"
 info "Full log: $RESULTS"
 echo

@@ -1,0 +1,18 @@
+{
+  "generatedAt": "2026-07-26T00:00:00Z",
+  "chainId": 8453,
+  "publicRpc": "https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b",
+  "adminRpc": "1Password (write-capable — never committed)",
+  "strategyTypeId": 5,
+  "mamo": {
+    "accountImplementation": "0x3F26d1E36310442453d3aefCf75d5817eceBCF29",
+    "accountFactory": "0x9CDBe7DB9F967E793E7261e0ffd546E5D29b476f",
+    "strategyRegistry": "0x46a5624C2ba92c08aBA4B206297052EDf14baa92"
+  },
+  "sherwood": {
+    "strategyClone": "0x5E22913E4C96f816133fbc8E894F652a4f87C760",
+    "syndicateVault": "0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9"
+  },
+  "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "note": "Vnet values rotate by design (frozen Chainlink feeds stale in ~1 day of drift). Re-run make tenderly-leveraged-aero-account after a vnet refresh to regenerate."
+}
