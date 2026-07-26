@@ -63,7 +63,19 @@ Create a **fresh, persistent** Virtual TestNet forking Base:
 
 - Fork network: **Base (8453)**.
 - Virtual network chain id: **8453 — MANDATORY** (see constraint 1).
-- State sync: disabled. Explorer: optional.
+- **State sync: ENABLED** for the shared staging instance (creation-time only — the Tenderly API
+  rejects changing it afterward, verified 2026-07-26). With sync on, untouched mainnet accounts —
+  crucially the **Chainlink aggregators** — keep updating from Base, so the ~1-day StaleOracle brick
+  goes away and rotation stops being feed-driven. Caveats:
+  - Any account **written locally forks off and stops syncing**: our deployed contracts (fine), plus
+    the Moonwell markets / Aerodrome pool / gauge the strategy touches — their state freezes except
+    for our txs while oracles keep tracking the real market, so the position's economics slowly
+    diverge from mainnet reality. Acceptable for staging; the strategy's fail-closed/deleverage
+    machinery handles divergence.
+  - **Never write to the Chainlink aggregators** (no mock-aggregator repointing) on a synced vnet —
+    one local write forks them off and reintroduces staleness permanently.
+  - Ephemeral, deterministic test vnets (the harness fresh-mode) keep sync **disabled**.
+- Explorer: optional.
 - Persistence: **no auto-delete** (the Sherwood stack must survive across the multi-step deploy).
 
 Two ways to create it:

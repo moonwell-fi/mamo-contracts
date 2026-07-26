@@ -100,6 +100,10 @@ read-safe values go in it; the **admin RPC lives in 1Password**, never in git. S
 Vnets rotate **by design** (the frozen Chainlink feeds go stale in ~1 day of wall-clock drift, which
 bricks `nav()`-priced paths). When the shared vnet is refreshed:
 
+0. **Create the replacement vnet with STATE SYNC ENABLED** (creation-time only; cannot be changed
+   afterward — API-verified). A synced instance keeps the Chainlink feeds fresh from Base mainnet,
+   removing the ~1-day staleness brick entirely. Current shared instance (created 2026-07-21) has
+   sync disabled — it stays on the rotation treadmill until replaced.
 1. **Sherwood side first** — the vault + `LeveragedAerodromeCLStrategy` clone are deployed from the
    `sherwood-protocol` repo (not here). Full two-repo sequence:
    [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../../docs/LEVERAGED_AERO_VNET_RUNBOOK.md), Phases A–B.
