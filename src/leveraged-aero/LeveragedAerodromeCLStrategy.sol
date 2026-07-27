@@ -500,8 +500,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @inheritdoc IStrategy
     /// @dev Self-fee'd: this strategy crystallises management + HWM performance fees against its
     ///      own NAV (custody model: LPs deposit/redeem into the strategy, shares minted/burned on
-    ///      the vault). The governor MUST skip settle-fee distribution — its float-delta PnL would
-    ///      misread net deposits as profit and double-charge fees already taken via crystallize.
+    ///      the vault). Any vault-side settle-fee distribution MUST be skipped — a float-delta PnL
+    ///      would misread net deposits as profit and double-charge fees already taken via
+    ///      crystallize. `LeveragedAeroVault` has no fee path at all, so there is nothing to skip.
     function selfManagesFees() external pure override returns (bool) {
         return true;
     }
@@ -625,10 +626,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         return _simulateCrystallize(navPre, supply);
     }
 
-    /// @dev The protocol-wide ProtocolConfig, resolved via the vault's factory.
-    ///      Per-vault migration (#421) moved the protocol-fee params off the
-    ///      governor onto this shared config; `address(0)` if the factory is
-    ///      unset (treated as no protocol fee by callers).
+    /// @dev The protocol-wide ProtocolConfig, resolved through the vault's
+    ///      `factory()` hop; `address(0)` when the vault reports no factory,
+    ///      which callers treat as no protocol fee. That is the launch default
+    ///      here — `LeveragedAeroVault.factory()` returns 0 until a fee config
+    ///      is wired.
     function _protocolConfig() private view returns (address) {
         address factory_ = ISyndicateVault(vault()).factory();
         return factory_ == address(0) ? address(0) : ISyndicateFactory(factory_).protocolConfig();
@@ -1072,10 +1074,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     }
 
     /// @notice Sweep a STRAY ERC-20 (airdrop / accidental send) back to the vault. Callable by the
-    ///         proposer OR the vault owner (§8): the strategy runs under an indefinite proposal, so
-    ///         `vault.rescueERC20/721/Eth` are dormant (they revert while `redemptionsLocked()`) — this
-    ///         is the only recovery path, and it must survive a dead proposer key. Target is always
-    ///         `vault()`, never caller-supplied, so neither caller can exfil (§13). Reverts
+    ///         proposer OR the vault owner (§8) — the owner leg is what keeps the sweep reachable
+    ///         through a dead proposer key. Target is always `vault()`, never caller-supplied, so
+    ///         neither caller can exfil (§13); onward recovery is the vault's own owner-only
+    ///         `rescueERC20` (which refuses the vault asset while shares are outstanding). Reverts
     ///         `CannotRescuePositionToken` for any position/accounting token — usdc / cbBTC / weth
     ///         (all NAV-counted) / mUsdc / mCbBTC / mWeth, and AERO (read live from the gauge so a
     ///         sweep can't bypass `compound()`). The position NFT is never swept (no ERC-721 path).
