@@ -1,32 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {ISyndicateGovernor} from "./ISyndicateGovernor.sol";
-
+/// @title ISyndicateFactory
+/// @notice Second hop of the strategy's protocol-fee config lookup:
+///         `ISyndicateFactory(vault.factory()).protocolConfig()`.
+/// @dev Trimmed to the single function the vendored strategy calls. In this repo the vault plays
+///      both roles, so `vault.factory()` points back at the vault itself (see
+///      `LeveragedAeroVault.factory`).
 interface ISyndicateFactory {
-    // ── Events (Task 26) ──
-    event OwnerRotated(address indexed vault, address indexed newOwner);
-    event WithdrawalQueueDeployed(address indexed vault, address indexed queue);
-
-    // ── Errors (Task 26) ──
-    error VaultStillStaked();
-
-    // ── Errors (V-H3) ──
-    error VaultImplMismatch();
-
-    // ── Errors (V-M7) ──
-    error InvalidSyndicateConfig();
-
-    // ── Views ──
-    function governorOf(address vault) external view returns (address);
-    function beacon() external view returns (address);
+    /// @notice The protocol-fee config contract; `address(0)` == no protocol fee.
     function protocolConfig() external view returns (address);
-    function priceRouter() external view returns (address);
-    function vaultImpl() external view returns (address);
-    function vaultToSyndicate(address vault) external view returns (uint256);
-    function guardianRegistry() external view returns (address);
-
-    // ── Admin ──
-    function rotateOwner(address vault, address newOwner) external;
-    function setParamsOverride(address vault, ISyndicateGovernor.GovernorParams calldata params) external;
 }

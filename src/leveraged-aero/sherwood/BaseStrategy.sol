@@ -8,21 +8,18 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /**
  * @title BaseStrategy
- * @notice Abstract base for strategy contracts. The vault calls execute() and
- *         settle() via batch calls — the strategy pulls tokens, deploys them
- *         into DeFi, and returns them on settlement.
+ * @notice Abstract base for the vendored leveraged-Aero strategy: a three-state lifecycle
+ *         (Pending → Executed → Settled) driven by the vault, plus a proposer role for tunable
+ *         params.
  *
- *   Designed for Clones (ERC-1167) — deploy template once, clone per proposal.
+ *   Designed for Clones (ERC-1167) — deploy the template once, clone per position. The
+ *   constructor permanently locks `initialize` on the template itself.
  *
- *   Typical batch calls from the governor:
- *     Execute: [approve(strategy, amount), strategy.execute()]
- *     Settle:  [strategy.settle()]
- *
- *   The strategy holds custody of position tokens (e.g., mUSDC) during the
- *   strategy period. On settlement, underlying returns to the vault.
- *
- *   Proposer can update tunable params (slippage, amounts) between execute
- *   and settle — no new proposal needed.
+ *   The vault owner drives the lifecycle through the vault
+ *   (`LeveragedAeroVault.activateStrategy` → `execute()`, `settleStrategy()` → `settle()`); both
+ *   are `onlyVault`, a raw `msg.sender == vault` compare. Between them the proposer tunes the
+ *   position and the strategy holds custody of every position token; on settlement the realized
+ *   asset balance is pushed back to the vault.
  */
 abstract contract BaseStrategy is IStrategy {
     using SafeERC20 for IERC20;
@@ -43,11 +40,6 @@ abstract contract BaseStrategy is IStrategy {
         Settled
     }
 
-    // slot 0: reserved for HyperCore FirstStorageSlot registration.
-    // HyperliquidGridStrategy._initialize() writes address(this) here so HC
-    // reads slot 0 post-block and confirms it equals the contract address.
-    // Other strategies leave this as address(0) — no functional impact.
-    address internal _hcSelf;
     address private _vault;
     address private _proposer;
     State internal _state;
@@ -76,31 +68,16 @@ abstract contract BaseStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Stamps `_hcSelf = address(this)` at slot 0 BEFORE delegating to
-    ///      `_initialize` so HyperCore's FirstStorageSlot finalize variant
-    ///      always sees the correct value. Foolproof for every strategy that
-    ///      inherits BaseStrategy — strategy-specific `_initialize` overrides
-    ///      cannot forget the stamp. Slot 0 is reserved for this purpose at
-    ///      the storage layout level (see `_hcSelf` declaration above);
-    ///      non-Hyperliquid strategies pay the cost (one SSTORE) but get
-    ///      consistent layout in exchange.
     function initialize(address vault_, address proposer_, bytes calldata data) external {
         if (_initialized) revert AlreadyInitialized();
         if (vault_ == address(0)) revert ZeroAddress();
         if (proposer_ == address(0)) revert ZeroAddress();
         _initialized = true;
-        _hcSelf = address(this);
         _vault = vault_;
         _proposer = proposer_;
         _state = State.Pending;
 
         _initialize(data);
-    }
-
-    /// @notice Slot 0 contents — used by HyperCore FirstStorageSlot variant.
-    ///         Should equal `address(this)` after `initialize`. Diagnostic only.
-    function hcSelf() external view returns (address) {
-        return _hcSelf;
     }
 
     /// @inheritdoc IStrategy
@@ -133,43 +110,26 @@ abstract contract BaseStrategy is IStrategy {
         return _proposer;
     }
 
-    /// @inheritdoc IStrategy
-    function executed() external view returns (bool) {
-        return _state == State.Executed;
-    }
-
     /// @notice Current lifecycle state
     function state() external view returns (State) {
         return _state;
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Default: no instant-priceable positions (queue-only / Lane B).
-    ///      Strategies whose positions the PriceRouter can value override this.
+    /// @dev Default: no locatable positions. Strategies with on-venue positions override this.
     function positions() external view virtual returns (Position[] memory) {
         return new Position[](0);
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Default: governor distributes settle-fees. Self-fee'd strategies override to `true`.
-    ///      NOTE: `true` makes the governor skip ALL settle-fees (protocol + guardian + agent +
-    ///      management) — a self-fee'd strategy MUST self-collect the protocol fee itself (see
-    ///      LeveragedAerodromeCLStrategy's `protocolFeeOwed` leg) or the protocol earns nothing.
+    /// @dev Default: fees are not self-managed. Self-fee'd strategies override to `true` and MUST
+    ///      then collect the protocol fee themselves (see `LeveragedAerodromeCLStrategy`'s
+    ///      `protocolFeeOwed` leg).
     function selfManagesFees() external view virtual returns (bool) {
         return false;
     }
 
     // ── Internal helpers ──
-
-    /// @notice Pull tokens from the vault into this strategy
-    function _pullFromVault(address token, uint256 amount) internal {
-        IERC20(token).safeTransferFrom(_vault, address(this), amount);
-    }
-
-    /// @notice Push tokens from this strategy back to the vault
-    function _pushToVault(address token, uint256 amount) internal {
-        IERC20(token).safeTransfer(_vault, amount);
-    }
 
     /// @notice Push entire balance of a token back to the vault
     function _pushAllToVault(address token) internal {
@@ -182,7 +142,7 @@ abstract contract BaseStrategy is IStrategy {
     /// @notice Strategy-specific initialization (decode params from data)
     function _initialize(bytes calldata data) internal virtual;
 
-    /// @notice Execute the strategy — pull tokens, deploy into DeFi
+    /// @notice Execute the strategy — deploy seeded capital into DeFi
     function _execute() internal virtual;
 
     /// @notice Settle the strategy — unwind positions, push tokens back to vault

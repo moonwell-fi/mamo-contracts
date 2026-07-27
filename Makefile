@@ -61,8 +61,13 @@ lp-v2-setup:
 leveraged-aero-account:
 	forge test --ffi --match-path "test/MamoLeveragedAeroStrategy*.unit.t.sol" -vvv
 
+# LeveragedAeroVault unit tests. Mocks only (no fork): the vendored strategy is stubbed by
+# test/mocks/MockVaultStrategy.sol, so NO --fork-url.
+leveraged-aero-vault:
+	forge test --ffi --match-path "test/LeveragedAeroVault.unit.t.sol" -vvv
+
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
@@ -83,11 +88,11 @@ tenderly-price-checker:
 	./script/tenderly/run-harness.sh price-checker
 
 # MamoLeveragedAeroStrategy account deploy-drive + e2e smoke against the LIVE persistent Base-fork vnet
-# where the Sherwood stack is already deployed. Replays proposal 012 (deploy impl+factory, 3 multisig
-# actions, validate) then the full account lifecycle (create→deposit→withdraw→request→fulfill→claim→
-# depositIdle gate) as unlocked-impersonation broadcast txs. ALWAYS reuses TENDERLY_VNET_RPC_URL (the
-# Sherwood stack lives only on the persistent vnet); never time-warps (would brick the frozen feeds).
+# where the LeveragedAeroVault + strategy stack is already deployed. Replays proposal 012 (deploy
+# impl+factory, 3 multisig actions, validate) then the full account lifecycle (create→deposit→withdraw→
+# request→fulfill→claim→depositIdle gate) as unlocked-impersonation broadcast txs. ALWAYS reuses
+# TENDERLY_VNET_RPC_URL.
 tenderly-leveraged-aero-account:
 	./script/tenderly/run-harness.sh leveraged-aero-account
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-leveraged-aero-account
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-leveraged-aero-account
