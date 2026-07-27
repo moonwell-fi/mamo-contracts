@@ -18,6 +18,10 @@ interface IMoonwellMarket is ICToken {
 
     /// @notice Returns the borrow balance for `account` using the stored (non-accruing) index.
     function borrowBalanceStored(address account) external view returns (uint256);
+
+    /// @notice The ERC-20 this market wraps (MErc20). Read once at init to bind a borrow leg to
+    ///         its market — a mismatch means the caller wired a market for a different token.
+    function underlying() external view returns (address);
 }
 
 /// @notice Moonwell/Compound Comptroller — market entry.

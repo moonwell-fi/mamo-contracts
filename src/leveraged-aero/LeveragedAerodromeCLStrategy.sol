@@ -15,9 +15,10 @@ import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {BaseStrategy} from "./sherwood/BaseStrategy.sol";
 import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
+import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
 import {IProtocolConfig} from "./sherwood/interfaces/IProtocolConfig.sol";
-import {ICLGauge, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
+import {ICLGauge, ICLPool, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
 import {IStrategy} from "./sherwood/interfaces/IStrategy.sol";
 import {ISyndicateFactory} from "./sherwood/interfaces/ISyndicateFactory.sol";
 import {ISyndicateVault} from "./sherwood/interfaces/ISyndicateVault.sol";
@@ -70,11 +71,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error RequestSettled();
     error FulfillWindowOpen(); // emergencyRedeem before FULFILL_WINDOW elapsed
     error ZeroAssetsOut(); // fast redeem would pay 0 (navNet==0 or dust shares floor to 0) — burn-for-zero
+    error LegDecimalsOutOfRange(); // a leg token reports decimals outside [2, 18]
+    error VenueMismatch(); // pool/market wiring does not match the declared legs or tickSpacing
+    error UnsupportedLeg(); // a leg is the unit of account (usdc) or the gauge reward token
+    error WidthOutOfBounds(); // rerange width off the tickSpacing grid or outside [minWidth, maxWidth]
 
     // ── Constants ──
-    uint8 private constant CBBTC_DECIMALS = 8; // cbBTC is 8dp wrapped Bitcoin
-    uint8 private constant WETH_DECIMALS = 18; // WETH9 on Base is 18dp
-
     /// @dev Position `kind` tag for the PriceRouter adapter registry.
     bytes32 public constant POSITION_KIND = keccak256("LEVERAGED_AERO_CL");
 
@@ -108,24 +110,30 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint8 private constant OP_FULFILL = 2; // proportional redeem (fulfill / emergency)
 
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
+    //
+    // LEG SLOTS, not token identities. The `weth`/`mWeth`/`wethFeed` slots are leg A (the slot that
+    // may be delivered natively on borrow — see `wethDeliversNative`); `cbBTC`/`mCbBTC`/`cbBTCFeed`
+    // are leg B. The names are historical (the first deployment was cbBTC/WETH); ANY Slipstream pool
+    // whose two tokens have Moonwell borrow markets and Chainlink feeds can fill them. Decimals and
+    // pool token0/token1 ordering are DERIVED at init, never assumed.
 
     struct InitParams {
         // ── Token addresses ──
         address usdc; // USDC (6dp) — unit of account + collateral asset
         address mUsdc; // Moonwell mUSDC market (collateral)
-        address mCbBTC; // Moonwell mcbBTC market (borrow leg)
-        address mWeth; // Moonwell mWETH market (borrow leg)
+        address mCbBTC; // Moonwell market for leg B (borrow leg)
+        address mWeth; // Moonwell market for leg A (borrow leg)
         address comptroller; // Moonwell Comptroller (enterMarkets / markets())
-        address cbBTC; // cbBTC underlying (8dp)
-        address weth; // WETH9 underlying (18dp)
+        address cbBTC; // leg B underlying
+        address weth; // leg A underlying (the natively-wrappable slot)
         // ── Venue addresses ──
-        address pool; // Aerodrome Slipstream CL pool (cbBTC/WETH tickSpacing=100)
+        address pool; // Aerodrome Slipstream CL pool for the leg A/B pair
         address npm; // Slipstream Non-Fungible Position Manager
         address gauge; // Gauge for the pool (AERO rewards)
         address swapRouter; // Slipstream CL Swap Router
         // ── Chainlink feeds ──
-        address cbBTCFeed; // BTC/USD aggregator (8dp)
-        address wethFeed; // ETH/USD aggregator (8dp)
+        address cbBTCFeed; // leg B/USD aggregator (8dp)
+        address wethFeed; // leg A/USD aggregator (8dp)
         address usdcFeed; // USDC/USD aggregator (8dp)
         address sequencerFeed; // L2 Sequencer Uptime feed (Base)
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors the compound reward swap (L9)
@@ -135,7 +143,13 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint16 calmDeviationTicks; // Max |spotTick − twapTick| before calm-gate fires
         uint32 twapWindow; // TWAP lookback for the calm-gate (seconds)
         // ── Pool config ──
-        int24 tickSpacing; // Slipstream pool tickSpacing (100 for primary pool)
+        int24 tickSpacing; // LP pool tickSpacing (asserted against `pool.tickSpacing()`)
+        int24 cbBTCSwapTickSpacing; // tickSpacing of the leg B↔USDC swap pool (independent of the LP pool's)
+        int24 wethSwapTickSpacing; // tickSpacing of the leg A↔USDC swap pool
+        bool wethDeliversNative; // leg A's Moonwell market pays native ETH on borrow (wrap it to leg A)
+        uint24 width; // initial full range width in ticks (rerange spans width/2 each side)
+        uint24 minWidth; // lower bound for a proposer-supplied rerange width
+        uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── Risk params ──
         uint16 targetLtvBps; // Target LTV in bps (e.g. 5000 = 50%)
         uint16 maxLtvBps; // Maximum LTV cap in bps (e.g. 6500 = 65%)
@@ -168,6 +182,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         bool settled; // set once fulfilled / cancelled / emergency-redeemed (double-spend guard)
     }
 
+    /// @dev LEG SLOTS, not token identities: the `weth`/`mWeth`/`wethFeed`/`weth*` members are leg A
+    ///      (the natively-wrappable slot), the `cbBTC*` members are leg B. The names are historical —
+    ///      neither implies a token. Ordering (`wethIsToken0`) and decimals are derived at init.
     /// @custom:storage-location erc7201:leveraged.aero.cl.storage
     struct Layout {
         // valuation config: token / venue / feed addresses
@@ -211,9 +228,20 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint256 protocolFeeOwed; // accrued protocol-fee USDC liability (6dp); discharged in redeem/compound/settle
         // ── appended for the L9 compound oracle floor (keep byte-identical in the manager) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
-        // ── LAST fields: appended for the escrowed async-redeem queue (keep byte-identical) ──
+        // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
         uint256 nextRedeemRequestId; // monotonic id cursor for `redeemRequests`
         mapping(uint256 => RedeemRequest) redeemRequests; // id → escrowed async redeem
+        // ── appended for any-pool generalization (keep byte-identical) ──
+        uint8 cbBTCDecimals; // leg B decimals, read from the token at init
+        uint8 wethDecimals; // leg A decimals, read from the token at init
+        bool wethIsToken0; // leg A sorts as the pool's token0 (derived from pool.token0() at init)
+        bool wethDeliversNative; // leg A's Moonwell market pays native ETH on borrow → wrap it
+        int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (NOT the LP pool's)
+        int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing (NOT the LP pool's)
+        // ── LAST fields: appended for the per-cycle rerange width band (keep byte-identical) ──
+        uint24 width; // current full range width in ticks (rerange spans width/2 each side)
+        uint24 minWidth; // lower bound for a proposer-supplied rerange width
+        uint24 maxWidth; // upper bound for a proposer-supplied rerange width
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -267,6 +295,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint256 protocolFeeOwed;
         address aeroUsdFeed;
         uint256 nextRedeemRequestId;
+        uint8 cbBTCDecimals;
+        uint8 wethDecimals;
+        bool wethIsToken0;
+        bool wethDeliversNative;
+        int24 cbBTCSwapTickSpacing;
+        int24 wethSwapTickSpacing;
+        uint24 width;
+        uint24 minWidth;
+        uint24 maxWidth;
     }
 
     /// @notice Full strategy storage layout (single accessor for tests / off-chain reads), minus the
@@ -311,6 +348,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         v.protocolFeeOwed = $.protocolFeeOwed;
         v.aeroUsdFeed = $.aeroUsdFeed;
         v.nextRedeemRequestId = $.nextRedeemRequestId;
+        v.cbBTCDecimals = $.cbBTCDecimals;
+        v.wethDecimals = $.wethDecimals;
+        v.wethIsToken0 = $.wethIsToken0;
+        v.wethDeliversNative = $.wethDeliversNative;
+        v.cbBTCSwapTickSpacing = $.cbBTCSwapTickSpacing;
+        v.wethSwapTickSpacing = $.wethSwapTickSpacing;
+        v.width = $.width;
+        v.minWidth = $.minWidth;
+        v.maxWidth = $.maxWidth;
     }
 
     /// @notice A single escrowed async-redeem request by id (queue introspection for tests / UI).
@@ -318,8 +364,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         return _layout().redeemRequests[id];
     }
 
-    /// @dev Moonwell's mWETH market delivers native ETH on `borrow()`; the strategy wraps it to
-    ///      WETH9 before use. Without this receiver the borrow's ETH transfer reverts.
+    /// @dev Some Moonwell markets (mWETH on Base) deliver native ETH on `borrow()`; when
+    ///      `wethDeliversNative` is set the strategy wraps it into the leg-A token before use.
+    ///      Without this receiver that borrow's ETH transfer reverts.
     receive() external payable {}
 
     /// @inheritdoc IStrategy
@@ -360,6 +407,42 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // SHARES_VIRTUAL_OFFSET (1e6) hardcodes a 6-decimal asset — reject any other wiring.
         if (p.usdc != IERC4626(vault()).asset()) revert AssetMismatch();
         if (IERC20Metadata(p.usdc).decimals() != 6) revert UnexpectedAssetDecimals();
+
+        // Venue identity: the pool must BE the declared leg pair at the declared spacing, and each
+        // Moonwell borrow market must wrap its declared leg. Ordering is DERIVED here, never assumed
+        // (the manager maps every (legB, legA) pair onto (amount0, amount1) through `wethIsToken0`).
+        if (ICLPool(p.pool).tickSpacing() != p.tickSpacing) revert VenueMismatch();
+        address t0 = ICLPool(p.pool).token0();
+        bool wethIsToken0_ = t0 == p.weth;
+        if (!wethIsToken0_ && t0 != p.cbBTC) revert VenueMismatch();
+        if (ICLPool(p.pool).token1() != (wethIsToken0_ ? p.cbBTC : p.weth)) revert VenueMismatch();
+        if (IMoonwellMarket(p.mCbBTC).underlying() != p.cbBTC) revert VenueMismatch();
+        if (IMoonwellMarket(p.mWeth).underlying() != p.weth) revert VenueMismatch();
+        // The leg↔USDC swap pools are separate venues from the LP pool — their spacings are inputs.
+        if (p.cbBTCSwapTickSpacing == 0 || p.wethSwapTickSpacing == 0) revert VenueMismatch();
+
+        // Reject legs that break an accounting invariant: USDC is the unit of account (idle-USDC
+        // bookkeeping would double-count), and the gauge reward token is sold wholesale by
+        // `compound()` (which would liquidate an LP leg).
+        address rewardTok = ICLGauge(p.gauge).rewardToken();
+        if (p.cbBTC == p.usdc || p.weth == p.usdc || p.cbBTC == rewardTok || p.weth == rewardTok) {
+            revert UnsupportedLeg();
+        }
+
+        // Leg decimals drive every token↔USDC conversion — read them instead of assuming 8/18. The
+        // [2, 18] band keeps `10 ** dec` well inside uint256 and rejects degenerate 0/1dp tokens.
+        uint8 cbDec = IERC20Metadata(p.cbBTC).decimals();
+        uint8 wethDec = IERC20Metadata(p.weth).decimals();
+        if (cbDec < 2 || cbDec > 18 || wethDec < 2 || wethDec > 18) revert LegDecimalsOutOfRange();
+
+        // Rerange width band: every width (init + per-cycle) must sit on the tickSpacing grid, and
+        // the floor must span at least two spacings so an aligned range is never empty.
+        if (p.tickSpacing <= 0) revert WidthOutOfBounds();
+        uint24 spacing = uint24(p.tickSpacing);
+        if (p.minWidth % spacing != 0 || p.maxWidth % spacing != 0) revert WidthOutOfBounds();
+        if (uint256(p.minWidth) < 2 * uint256(spacing)) revert WidthOutOfBounds();
+        if (p.minWidth > p.maxWidth) revert WidthOutOfBounds();
+        _checkWidth(p.width, p.tickSpacing, p.minWidth, p.maxWidth);
 
         uint16 cfBps = _readCollateralFactor(p.comptroller, p.mUsdc);
         if (p.targetLtvBps > p.maxLtvBps) revert TargetLtvExceedsMax();
@@ -419,7 +502,25 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.performanceFeeBps = p.performanceFeeBps;
         $.feeRecipient = p.feeRecipient;
         $.lastFeeAccrualTimestamp = block.timestamp;
+        $.cbBTCDecimals = cbDec;
+        $.wethDecimals = wethDec;
+        $.wethIsToken0 = wethIsToken0_;
+        $.wethDeliversNative = p.wethDeliversNative;
+        $.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
+        $.wethSwapTickSpacing = p.wethSwapTickSpacing;
+        $.width = p.width;
+        $.minWidth = p.minWidth;
+        $.maxWidth = p.maxWidth;
         // tokenId / posTickLower / posTickUpper / hwmPerShare default to 0 (set in _execute / on first deposit).
+    }
+
+    /// @dev Width band check shared by `_initialize` (the genesis width) and `rerange` (each
+    ///      per-cycle width): on the tickSpacing grid and inside `[minWidth_, maxWidth_]`. The band
+    ///      itself is validated once at init (multiples, `minWidth_ >= 2 × spacing`, min ≤ max).
+    function _checkWidth(uint24 width_, int24 tickSpacing_, uint24 minWidth_, uint24 maxWidth_) private pure {
+        if (tickSpacing_ <= 0) revert WidthOutOfBounds();
+        if (width_ % uint24(tickSpacing_) != 0) revert WidthOutOfBounds();
+        if (width_ < minWidth_ || width_ > maxWidth_) revert WidthOutOfBounds();
     }
 
     /// @dev USDC collateral factor (bps) from `Comptroller.markets(mUsdc)`. ABI is
@@ -773,11 +874,16 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///
     ///         NO fee crystallisation: rerange changes neither supply nor NAV, so the streaming fee is
     ///         deferred to the next crystallize point (not lost) and the HWM is unaffected.
-    /// @param minLiq0 Minimum token0 (WETH) the re-add must consume (two-sided slippage guard).
-    /// @param minLiq1 Minimum token1 (cbBTC) the re-add must consume (two-sided slippage guard).
-    function rerange(uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant {
+    /// @param width_  Full range width in ticks for this cycle (span = `width_/2` each side of the
+    ///                calm tick). Must sit on the tickSpacing grid inside `[minWidth, maxWidth]`;
+    ///                persisted as the new `width` so `nav()`/subsequent mints see it.
+    /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
+    /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
+    function rerange(uint24 width_, uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        LeveragedAeroManager.rerangeImpl(minLiq0, minLiq1);
+        Layout storage $ = _layout();
+        _checkWidth(width_, $.tickSpacing, $.minWidth, $.maxWidth);
+        LeveragedAeroManager.rerangeImpl(width_, minLiq0, minLiq1);
     }
 
     /// @notice Retarget the position's LTV to `targetLtvBps_` (borrow/repay; no new USDC). Collateral
@@ -1097,9 +1203,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     // ── Config builder for LeveragedAeroValuation ──
 
-    /// @dev Build the valuation `Config` from stored state (cbBTC 8dp / WETH 18dp are compile-time
-    ///      constants). Field-by-field (not struct-literal) so the Yul IR emits one sload→mstore per
-    ///      field, avoiding the 18-live-variable overflow struct-literals trigger under via_ir.
+    /// @dev Build the valuation `Config` from stored state (leg decimals are read from the tokens at
+    ///      init and stored). Field-by-field (not struct-literal) so the Yul IR emits one sload→mstore
+    ///      per field, avoiding the 18-live-variable overflow struct-literals trigger under via_ir.
     function _config() internal view returns (LeveragedAeroValuation.Config memory c) {
         Layout storage $ = _layout();
         c.usdc = $.usdc;
@@ -1109,8 +1215,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         c.wethMarket = $.mWeth;
         c.cbBTC = $.cbBTC;
         c.weth = $.weth;
-        c.cbBTCDecimals = CBBTC_DECIMALS;
-        c.wethDecimals = WETH_DECIMALS;
+        c.cbBTCDecimals = $.cbBTCDecimals;
+        c.wethDecimals = $.wethDecimals;
         c.pool = $.pool;
         c.cbBTCFeed = $.cbBTCFeed;
         c.wethFeed = $.wethFeed;

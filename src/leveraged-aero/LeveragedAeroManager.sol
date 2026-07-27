@@ -72,9 +72,6 @@ library LeveragedAeroManager {
     error FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps); // fast-path redeem would breach maxLtvBps
 
     // ── Constants (compile-time literals, duplicated from the strategy) ──
-    uint8 private constant CBBTC_DECIMALS = 8; // cbBTC is 8dp wrapped Bitcoin
-    uint8 private constant WETH_DECIMALS = 18; // WETH9 on Base is 18dp
-    uint8 private constant RANGE_TICK_SPACINGS = 20; // tick-spacings each side of tick for the initial range
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
     ///      minimum so a rescue doesn't land on the threshold and immediately re-trigger.
     uint16 private constant DELEVERAGE_BUFFER_BPS = 500; // +5% above minHealthBps
@@ -99,6 +96,9 @@ library LeveragedAeroManager {
         bool settled; // set once fulfilled / cancelled / emergency-redeemed (double-spend guard)
     }
 
+    /// @dev LEG SLOTS, not token identities: the `weth`/`mWeth`/`wethFeed`/`weth*` members are leg A
+    ///      (the natively-wrappable slot), the `cbBTC*` members are leg B. The names are historical —
+    ///      neither implies a token. Ordering (`wethIsToken0`) and decimals are derived at init.
     /// @custom:storage-location erc7201:leveraged.aero.cl.storage
     struct Layout {
         // valuation config: token / venue / feed addresses
@@ -142,9 +142,20 @@ library LeveragedAeroManager {
         uint256 protocolFeeOwed; // accrued protocol-fee USDC liability (6dp); discharged in redeem/compound/settle
         // ── appended for the L9 compound oracle floor (keep byte-identical in the strategy) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
-        // ── LAST fields: appended for the escrowed async-redeem queue (keep byte-identical) ──
+        // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
         uint256 nextRedeemRequestId; // monotonic id cursor for `redeemRequests`
         mapping(uint256 => RedeemRequest) redeemRequests; // id → escrowed async redeem
+        // ── appended for any-pool generalization (keep byte-identical) ──
+        uint8 cbBTCDecimals; // leg B decimals, read from the token at init
+        uint8 wethDecimals; // leg A decimals, read from the token at init
+        bool wethIsToken0; // leg A sorts as the pool's token0 (derived from pool.token0() at init)
+        bool wethDeliversNative; // leg A's Moonwell market pays native ETH on borrow → wrap it
+        int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (NOT the LP pool's)
+        int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing (NOT the LP pool's)
+        // ── LAST fields: appended for the per-cycle rerange width band (keep byte-identical) ──
+        uint24 width; // current full range width in ticks (rerange spans width/2 each side)
+        uint24 minWidth; // lower bound for a proposer-supplied rerange width
+        uint24 maxWidth; // upper bound for a proposer-supplied rerange width
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -191,12 +202,12 @@ library LeveragedAeroManager {
             uint256 slip = uint256($.maxSlippageBps);
             _swapTokenToUsdc(
                 $.weth,
-                _tokenToUsdc(IERC20($.weth).balanceOf(address(this)), WETH_DECIMALS, pETH, pUsdc) * (10000 - slip)
+                _tokenToUsdc(IERC20($.weth).balanceOf(address(this)), $.wethDecimals, pETH, pUsdc) * (10000 - slip)
                     / 10000
             );
             _swapTokenToUsdc(
                 $.cbBTC,
-                _tokenToUsdc(IERC20($.cbBTC).balanceOf(address(this)), CBBTC_DECIMALS, pBTC, pUsdc) * (10000 - slip)
+                _tokenToUsdc(IERC20($.cbBTC).balanceOf(address(this)), $.cbBTCDecimals, pBTC, pUsdc) * (10000 - slip)
                     / 10000
             );
         }
@@ -401,9 +412,11 @@ library LeveragedAeroManager {
     ///         remainder of ONE borrowed leg is left idle (NAV-counted, stays redeployable). A new
     ///         tokenId is minted (Slipstream ticks are immutable); the old empty NFT is harmless dust.
     ///         No-op on a flat book.
-    /// @param minLiq0 Minimum token0 (WETH) the re-add must consume (two-sided slippage guard).
-    /// @param minLiq1 Minimum token1 (cbBTC) the re-add must consume (two-sided slippage guard).
-    function rerangeImpl(uint256 minLiq0, uint256 minLiq1) public {
+    /// @param width_  Full range width in ticks for this cycle (validated against the stored band by
+    ///                the strategy entrypoint, then persisted here as the new `width`).
+    /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
+    /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
+    function rerangeImpl(uint24 width_, uint256 minLiq0, uint256 minLiq1) public {
         Layout storage $ = _layout();
         if ($.tokenId == 0) return; // flat book — nothing to recenter
 
@@ -414,7 +427,9 @@ library LeveragedAeroManager {
         //    left empty + unstaked; a recenter needs a fresh range == fresh tokenId.
         _unwindLiquidity(1, 1);
 
-        // 3. New tickSpacing-aligned range centered on the current (calm) tick.
+        // 3. Persist this cycle's width, then derive the tickSpacing-aligned range centered on the
+        //    current (calm) tick. Every later mint (deployIdle / compound) reuses the stored width.
+        $.width = width_;
         (int24 tickLower, int24 tickUpper) = _computeTickRange();
 
         // 4. Re-add the collected legs (full balances as desired) into the new range. No swap →
@@ -422,9 +437,9 @@ library LeveragedAeroManager {
         //    (the §8 always-on floor) and approves the NPM; the caller's `minLiq0/minLiq1` add an
         //    explicit two-sided guard on the consumed amounts (proposer-tightenable, like
         //    compound's `minUsdcOut`).
-        uint256 wethBal = IERC20($.weth).balanceOf(address(this));
-        uint256 cbBal = IERC20($.cbBTC).balanceOf(address(this));
-        (uint256 newTokenId, uint256 used0, uint256 used1) = _mintPosition(wethBal, cbBal, tickLower, tickUpper);
+        (uint256 amt0, uint256 amt1) =
+            _amounts01(IERC20($.cbBTC).balanceOf(address(this)), IERC20($.weth).balanceOf(address(this)));
+        (uint256 newTokenId, uint256 used0, uint256 used1) = _mintPosition(amt0, amt1, tickLower, tickUpper);
         if (used0 < minLiq0 || used1 < minLiq1) revert InsufficientLiquidity();
 
         // 5. Restake the new NFT to resume AERO gauge rewards (mirrors _mintAndStake).
@@ -549,7 +564,7 @@ library LeveragedAeroManager {
         uint256 surplusBal = IERC20(surplusTok).balanceOf(address(this));
         if (surplusBal > 0) {
             bool isCbBTC = surplusTok == $.cbBTC;
-            uint8 dec = isCbBTC ? CBBTC_DECIMALS : WETH_DECIMALS;
+            uint8 dec = isCbBTC ? $.cbBTCDecimals : $.wethDecimals;
             uint256 pSurplus = _readUsd8(isCbBTC ? $.cbBTCFeed : $.wethFeed);
             uint256 oracleFloor =
                 _tokenToUsdc(surplusBal, dec, pSurplus, pUsdc) * (10000 - uint256($.maxSlippageBps)) / 10000;
@@ -560,7 +575,7 @@ library LeveragedAeroManager {
         // can't overpay past the oracle+slippage bound. The redeem path passes max (oracle-free).
         bool deficitIsCb = deficitTok == $.cbBTC;
         uint256 pDeficit = _readUsd8(deficitIsCb ? $.cbBTCFeed : $.wethFeed);
-        uint256 buyMax = _tokenToUsdc(shortAmt, deficitIsCb ? CBBTC_DECIMALS : WETH_DECIMALS, pDeficit, pUsdc)
+        uint256 buyMax = _tokenToUsdc(shortAmt, deficitIsCb ? $.cbBTCDecimals : $.wethDecimals, pDeficit, pUsdc)
             * (10000 + uint256($.maxSlippageBps)) / 10000;
         _redeemCoverShortfall(deficitTok, deficitMkt, shortAmt, buyMax);
     }
@@ -578,7 +593,7 @@ library LeveragedAeroManager {
         if (cbDebt == 0 && wethDebt == 0) return (collateralUsdc, 0);
         (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
         debtUsdc =
-            _tokenToUsdc(cbDebt, CBBTC_DECIMALS, pBTC, pUsdc) + _tokenToUsdc(wethDebt, WETH_DECIMALS, pETH, pUsdc);
+            _tokenToUsdc(cbDebt, $.cbBTCDecimals, pBTC, pUsdc) + _tokenToUsdc(wethDebt, $.wethDecimals, pETH, pUsdc);
     }
 
     // ── Moonwell call+check helpers (bytecode offset: 7 repay sites, 3 redeem sites) ──
@@ -626,68 +641,84 @@ library LeveragedAeroManager {
         uint256 pBTC = _readUsd8($.cbBTCFeed);
         uint256 pETH = _readUsd8($.wethFeed);
         // halfBorrowUsd8: borrowUsd6 (6dp) → 8dp via ×100, then halve for the per-leg USD value.
+        // The `10 ** legDecimals` factors rescale that USD amount into each leg's own units.
         uint256 halfBorrowUsd8 = (borrowUsd6 * 100) / 2;
-        cbBTCAmt = (halfBorrowUsd8 * 1e8) / pBTC;
-        wethAmt = (halfBorrowUsd8 * 1e18) / pETH;
+        cbBTCAmt = (halfBorrowUsd8 * (10 ** uint256($.cbBTCDecimals))) / pBTC;
+        wethAmt = (halfBorrowUsd8 * (10 ** uint256($.wethDecimals))) / pETH;
         uint256 cbErr = IMoonwellMarket($.mCbBTC).borrow(cbBTCAmt);
         if (cbErr != 0) revert MoonwellBorrowFailed(cbErr);
         uint256 wethErr = IMoonwellMarket($.mWeth).borrow(wethAmt);
         if (wethErr != 0) revert MoonwellBorrowFailed(wethErr);
     }
 
-    /// @dev Wrap all native ETH held by the strategy into ERC-20 WETH9.
+    /// @dev Wrap all native ETH held by the strategy into the leg-A wrapper token. No-op unless the
+    ///      leg-A Moonwell market delivers native on `borrow()` (`wethDeliversNative`, set at init) —
+    ///      a plain ERC-20 leg has nothing to wrap and its token has no `deposit()`.
     function _wrapNativeEth() private {
+        Layout storage $ = _layout();
+        if (!$.wethDeliversNative) return;
         uint256 ethBal = address(this).balance;
         if (ethBal > 0) {
-            IWETH9(_layout().weth).deposit{value: ethBal}();
+            IWETH9($.weth).deposit{value: ethBal}();
         }
     }
 
-    /// @dev Compute a tickSpacing-aligned range centred on the current pool tick.
+    /// @dev Compute a tickSpacing-aligned range centred on the current pool tick, spanning
+    ///      `width/2` ticks each side (the stored per-cycle width, validated by the entrypoint).
     function _computeTickRange() private view returns (int24 tickLower, int24 tickUpper) {
         Layout storage $ = _layout();
         (, int24 currentTick,,,,) = ICLPool($.pool).slot0();
         int24 tickSpacing_ = $.tickSpacing;
-        int24 span = int24(uint24(RANGE_TICK_SPACINGS)) * tickSpacing_;
+        int24 span = int24($.width / 2);
         tickLower = _alignTick(currentTick - span, tickSpacing_);
         tickUpper = _alignTick(currentTick + span, tickSpacing_);
         if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing_;
     }
 
+    /// @dev The pool's (token0, token1) resolved from the leg ordering derived at init.
+    function _tokens01() private view returns (address t0, address t1) {
+        Layout storage $ = _layout();
+        return $.wethIsToken0 ? ($.weth, $.cbBTC) : ($.cbBTC, $.weth);
+    }
+
+    /// @dev Map a (leg B, leg A) amount pair onto the pool's (amount0, amount1) ordering.
+    function _amounts01(uint256 cbBTCAmt, uint256 wethAmt) private view returns (uint256 amt0, uint256 amt1) {
+        return _layout().wethIsToken0 ? (wethAmt, cbBTCAmt) : (cbBTCAmt, wethAmt);
+    }
+
     /// @dev Mint the Slipstream CL position and return its tokenId + the amounts actually
-    ///      consumed. token0 = WETH (18dp), token1 = cbBTC (8dp). Two-sided slippage mins are
-    ///      derived from the expected-actual deposit amounts at the calm-gated sqrtP (the §8
-    ///      always-on floor); `rerange` layers an additional caller-supplied two-sided guard on
-    ///      the returned `used0`/`used1`.
-    function _mintPosition(uint256 wethAmt, uint256 cbBTCAmt, int24 tickLower, int24 tickUpper)
+    ///      consumed. `amt0`/`amt1` are POSITIONAL (pool token0/token1) — callers map their leg
+    ///      amounts through `_amounts01`. Two-sided slippage mins are derived from the
+    ///      expected-actual deposit amounts at the calm-gated sqrtP (the §8 always-on floor);
+    ///      `rerange` layers an additional caller-supplied two-sided guard on `used0`/`used1`.
+    function _mintPosition(uint256 amt0, uint256 amt1, int24 tickLower, int24 tickUpper)
         private
         returns (uint256 tokenId_, uint256 used0, uint256 used1)
     {
         Layout storage $ = _layout();
         address npm_ = $.npm;
-        address weth_ = $.weth;
-        address cbBTC_ = $.cbBTC;
+        (address tok0, address tok1) = _tokens01();
 
         // Compute expected actual deposits at the calm-gated sqrtP.
         (uint160 sqrtP,,,,,) = ICLPool($.pool).slot0();
         uint160 sqrtLower = TickMath.getSqrtRatioAtTick(tickLower);
         uint160 sqrtUpper = TickMath.getSqrtRatioAtTick(tickUpper);
-        uint128 L = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, wethAmt, cbBTCAmt);
+        uint128 L = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, amt0, amt1);
         (uint256 exp0, uint256 exp1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, L);
         uint256 slip = uint256($.maxSlippageBps);
         uint256 amt0Min = exp0 * (10000 - slip) / 10000;
         uint256 amt1Min = exp1 * (10000 - slip) / 10000;
 
-        IERC20(weth_).forceApprove(npm_, wethAmt);
-        IERC20(cbBTC_).forceApprove(npm_, cbBTCAmt);
+        IERC20(tok0).forceApprove(npm_, amt0);
+        IERC20(tok1).forceApprove(npm_, amt1);
         INonfungiblePositionManager.MintParams memory mp = INonfungiblePositionManager.MintParams({
-            token0: weth_,
-            token1: cbBTC_,
+            token0: tok0,
+            token1: tok1,
             tickSpacing: $.tickSpacing,
             tickLower: tickLower,
             tickUpper: tickUpper,
-            amount0Desired: wethAmt,
-            amount1Desired: cbBTCAmt,
+            amount0Desired: amt0,
+            amount1Desired: amt1,
             amount0Min: amt0Min,
             amount1Min: amt1Min,
             recipient: address(this),
@@ -704,7 +735,8 @@ library LeveragedAeroManager {
         Layout storage $ = _layout();
         LeveragedAeroValuation._calmGate(_config());
         (int24 tickLower, int24 tickUpper) = _computeTickRange();
-        (uint256 tokenId_,,) = _mintPosition(wethAmt, cbBTCAmt, tickLower, tickUpper);
+        (uint256 amt0, uint256 amt1) = _amounts01(cbBTCAmt, wethAmt);
+        (uint256 tokenId_,,) = _mintPosition(amt0, amt1, tickLower, tickUpper);
         _approveAndStake($.gauge, tokenId_);
         // Persist position state (so nav()/positions() see the live position)
         $.tokenId = tokenId_;
@@ -814,8 +846,8 @@ library LeveragedAeroManager {
         // Read Chainlink prices (8dp each)
         (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
         // USDC needed for each shortfall leg (+10% buffer)
-        uint256 cbUsdcNeed = _tokenToUsdc(cbDebtRem, 8, pBTC, pUsdc) * 11000 / 10000;
-        uint256 wethUsdcNeed = _tokenToUsdc(wethDebtRem, 18, pETH, pUsdc) * 11000 / 10000;
+        uint256 cbUsdcNeed = _tokenToUsdc(cbDebtRem, $.cbBTCDecimals, pBTC, pUsdc) * 11000 / 10000;
+        uint256 wethUsdcNeed = _tokenToUsdc(wethDebtRem, $.wethDecimals, pETH, pUsdc) * 11000 / 10000;
         // Dust floor: nonzero debt but oracle cost rounds to 0 (e.g. 1 wei WETH) → redeem enough
         // to acquire at least 1 unit of that token.
         if (cbDebtRem > 0 && cbUsdcNeed == 0) cbUsdcNeed = 1e5;
@@ -845,6 +877,13 @@ library LeveragedAeroManager {
         }
     }
 
+    /// @dev tickSpacing of the `leg`↔USDC SWAP pool — a different venue from the LP pool, so it
+    ///      carries its own spacing (both are init inputs, neither is derivable from the other).
+    function _legSwapSpacing(address leg) private view returns (int24) {
+        Layout storage $ = _layout();
+        return leg == $.cbBTC ? $.cbBTCSwapTickSpacing : $.wethSwapTickSpacing;
+    }
+
     /// @dev Swap a fixed USDC amount in for `tokenOut` via Slipstream exactInputSingle.
     ///      Caps actualIn at the current USDC balance.
     function _swapUsdcExactIn(address tokenOut, uint256 amountIn, uint256 minAmtOut) private {
@@ -857,7 +896,7 @@ library LeveragedAeroManager {
             ICLSwapRouter.ExactInputSingleParams({
                 tokenIn: $.usdc,
                 tokenOut: tokenOut,
-                tickSpacing: int24(100),
+                tickSpacing: _legSwapSpacing(tokenOut),
                 recipient: address(this),
                 deadline: block.timestamp + 600,
                 amountIn: actualIn,
@@ -884,7 +923,7 @@ library LeveragedAeroManager {
             ICLSwapRouter.ExactInputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: $.usdc,
-                tickSpacing: int24(100),
+                tickSpacing: _legSwapSpacing(tokenIn),
                 recipient: address(this),
                 deadline: block.timestamp + 600,
                 amountIn: amt,
@@ -941,8 +980,9 @@ library LeveragedAeroManager {
     }
 
     /// @dev Add liquidity to the existing tokenId position via NPM.increaseLiquidity.
-    ///      Caller must own the NFT (position unstaked from the gauge).
-    function _addLiquidity(uint256 wethAmt, uint256 cbBTCAmt, uint256 minLiquidity) private {
+    ///      Caller must own the NFT (position unstaked from the gauge). `amt0`/`amt1` are
+    ///      POSITIONAL (pool token0/token1) — callers map their leg amounts through `_amounts01`.
+    function _addLiquidity(uint256 amt0, uint256 amt1, uint256 minLiquidity) private {
         Layout storage $ = _layout();
         LeveragedAeroValuation._calmGate(_config());
         uint256 tokenId_ = $.tokenId;
@@ -950,16 +990,17 @@ library LeveragedAeroManager {
         (uint160 sqrtP,,,,,) = ICLPool($.pool).slot0();
         uint160 sqrtLower = TickMath.getSqrtRatioAtTick($.posTickLower);
         uint160 sqrtUpper = TickMath.getSqrtRatioAtTick($.posTickUpper);
-        uint128 L = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, wethAmt, cbBTCAmt);
+        uint128 L = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, amt0, amt1);
         (uint256 exp0, uint256 exp1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, L);
         uint256 slip = uint256($.maxSlippageBps);
-        IERC20($.weth).forceApprove(npm_, wethAmt);
-        IERC20($.cbBTC).forceApprove(npm_, cbBTCAmt);
+        (address tok0, address tok1) = _tokens01();
+        IERC20(tok0).forceApprove(npm_, amt0);
+        IERC20(tok1).forceApprove(npm_, amt1);
         (uint128 liq,,) = INonfungiblePositionManager(npm_).increaseLiquidity(
             INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId_,
-                amount0Desired: wethAmt,
-                amount1Desired: cbBTCAmt,
+                amount0Desired: amt0,
+                amount1Desired: amt1,
                 amount0Min: exp0 * (10000 - slip) / 10000,
                 amount1Min: exp1 * (10000 - slip) / 10000,
                 deadline: block.timestamp + 600
@@ -977,7 +1018,8 @@ library LeveragedAeroManager {
         uint256 tokenId_ = $.tokenId;
         address gauge_ = $.gauge;
         ICLGauge(gauge_).withdraw(tokenId_);
-        _addLiquidity(wethAmt, cbBTCAmt, minLiquidity);
+        (uint256 amt0, uint256 amt1) = _amounts01(cbBTCAmt, wethAmt);
+        _addLiquidity(amt0, amt1, minLiquidity);
         _approveAndStake(gauge_, tokenId_);
     }
 
@@ -1047,7 +1089,7 @@ library LeveragedAeroManager {
             ICLSwapRouter.ExactOutputSingleParams({
                 tokenIn: $.usdc,
                 tokenOut: tokenOut,
-                tickSpacing: int24(100),
+                tickSpacing: _legSwapSpacing(tokenOut),
                 recipient: address(this),
                 deadline: block.timestamp + 600,
                 amountOut: amountOut,
@@ -1106,7 +1148,7 @@ library LeveragedAeroManager {
 
         // ── Debt (USDC face, 6dp) ──
         uint256 debtUsd =
-            _tokenToUsdc(cbDebt, CBBTC_DECIMALS, pBTC, pUsdc) + _tokenToUsdc(wethDebt, WETH_DECIMALS, pETH, pUsdc);
+            _tokenToUsdc(cbDebt, $.cbBTCDecimals, pBTC, pUsdc) + _tokenToUsdc(wethDebt, $.wethDecimals, pETH, pUsdc);
         if (debtUsd == 0) return; // dust-level debt rounds to 0 → trivially healthy
 
         // ── LTV check — binding post-op gate ──
@@ -1139,25 +1181,18 @@ library LeveragedAeroManager {
         }
     }
 
-    /// @dev Build the `LeveragedAeroValuation.Config` from stored state (for the calm-gate).
+    /// @dev CALM-GATE-ONLY, PARTIAL `LeveragedAeroValuation.Config`: populates exactly the three
+    ///      fields `_calmGate` reads (`pool`, `twapWindow`, `calmDeviationTicks`) and leaves every
+    ///      other member at its zero default. The manager never prices — all three call sites
+    ///      (`rerangeImpl`, `_mintAndStake`, `_addLiquidity`) pass this straight to `_calmGate`.
+    ///
+    ///      DO NOT hand the result to `netEquityUsdc` (or anything else that reads the feed /
+    ///      market / decimals members) — it would silently value against address(0). If `_calmGate`
+    ///      ever grows a new field read, populate it HERE too. The strategy keeps its own FULL
+    ///      `_config()` builder, which is the one valuation genuinely consumes.
     function _config() private view returns (LeveragedAeroValuation.Config memory c) {
         Layout storage $ = _layout();
-        c.usdc = $.usdc;
-        c.vault = address(0); // calm-gate ignores vault; only the strategy's nav() needs the float term
-        c.mUsdc = $.mUsdc;
-        c.cbBTCMarket = $.mCbBTC;
-        c.wethMarket = $.mWeth;
-        c.cbBTC = $.cbBTC;
-        c.weth = $.weth;
-        c.cbBTCDecimals = CBBTC_DECIMALS;
-        c.wethDecimals = WETH_DECIMALS;
         c.pool = $.pool;
-        c.cbBTCFeed = $.cbBTCFeed;
-        c.wethFeed = $.wethFeed;
-        c.usdcFeed = $.usdcFeed;
-        c.sequencerFeed = $.sequencerFeed;
-        c.maxDelay = $.maxDelay;
-        c.gracePeriod = $.gracePeriod;
         c.calmDeviationTicks = $.calmDeviationTicks;
         c.twapWindow = $.twapWindow;
     }
