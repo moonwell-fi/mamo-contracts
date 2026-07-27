@@ -2,10 +2,10 @@
 # ==============================================================================
 # run-leveraged-aero-account.sh — MamoLeveragedAeroStrategy account Tenderly harness
 # ==============================================================================
-# Executes the Mamo side of the leveraged-Aero account deployment against a LIVE,
-# PERSISTENT Tenderly Base-fork vnet on which the Sherwood stack (SyndicateVault +
-# LeveragedAerodromeCLStrategy) is ALREADY deployed, then runs an end-to-end smoke
-# of the account wrapper. Replays proposal 012's build()+validate() plus the full
+# Executes the ACCOUNT LAYER of the leveraged-Aero deployment against a LIVE,
+# PERSISTENT Tenderly Base-fork vnet on which the POOLED LAYER (LeveragedAeroVault +
+# a LeveragedAerodromeCLStrategy clone) is ALREADY deployed, then runs an end-to-end
+# smoke of the account wrapper. Replays proposal 012's build()+validate() plus the full
 # user lifecycle as real broadcast txs, using Tenderly UNLOCKED impersonation (no
 # private keys) for MAMO_MULTISIG / DEPLOYER_EOA / the strategy proposer / a fresh
 # throwaway user.
@@ -15,25 +15,37 @@
 #   Phase 4  e2e: create → deposit → fast withdraw → requestWithdraw → fulfill →
 #            claim → depositIdle gate → withdrawAll → clean-state asserts
 #
+# Both layers live in THIS repo as of PR #66 (the Sherwood dependency is gone), but the
+# pooled layer's deploy tooling has not been written yet — see docs/LEVERAGED_AERO_VNET_
+# RUNBOOK.md Phase B for the spec of what it must do.
+#
 # ── WHY --reuse IS FORCED ─────────────────────────────────────────────────────
-# The Sherwood strategy/vault live ONLY on the shared persistent vnet; a freshly
+# The vault + strategy clone live ONLY on the shared persistent vnet; a freshly
 # API-created Base fork would not have them. So this harness ALWAYS reuses
 # TENDERLY_VNET_RPC_URL (the vnet's ADMIN RPC — it accepts eth_sendTransaction from
 # any unlocked sender AND serves reads). It never creates or tears down a vnet.
 #
-# ── FEED FRESHNESS (was a hard constraint; now handled upstream) ───────────────
-# The shared instance's 5 venue Chainlink feeds are code-replaced with FreshFeed mocks
-# whose updatedAt tracks block.timestamp (sherwood handoff §5.2), so time-warping does
-# NOT stale them — the governance flow itself warps days ahead. On an instance WITHOUT
-# those mocks the old rule applies: never warp, feeds stale in ~1 day. This harness does
-# no time travel either way; the 2-day emergencyWithdraw path stays unit-test-covered.
+# ── FEED FRESHNESS ────────────────────────────────────────────────────────────
+# A Base fork's Chainlink answers are frozen, so updatedAt recedes as the clock advances
+# and every priced path bricks with StaleOracle in ~1 day. Fix = the FreshFeed pattern:
+# code-replace the 5 venue feeds (leg A/USD, leg B/USD, USDC/USD, AERO/USD, L2 sequencer
+# uptime) with mocks whose updatedAt tracks block.timestamp, so warping never stales them.
+# The shared instance carries those mocks. NOTE: the recipe shipped with the Sherwood-side
+# deploy script and has NO in-repo implementation yet — it must be re-written here as part
+# of the pooled-layer tooling (runbook Phase B.0). On an instance WITHOUT the mocks the old
+# rule applies: never warp, feeds stale in ~1 day. This harness does no time travel either
+# way; the 2-day emergencyWithdraw path stays unit-test-covered.
 #
 # ── ADDRESS RESOLUTION ────────────────────────────────────────────────────────
-# The two SHERWOOD_* keys are NOT committed to addresses/8453.json: FPS Addresses
+# The two address keys are NOT committed to addresses/8453.json: FPS Addresses
 # validates isContract EAGERLY in its constructor (gated on chainId==block.chainid),
 # so committing them with isContract:true would revert the Addresses constructor on
 # every real-Base-mainnet CI run. They are supplied here via env vars (documented
 # defaults = current vnet values) and injected at runtime inside the deploy .s.sol.
+# The env-var names are STALE BUT REAL: SHERWOOD_LEVERAGED_AERO_STRATEGY (also
+# factory.sherwoodStrategy()) and SHERWOOD_SYNDICATE_VAULT, even though proposal 012 now
+# resolves the vault under the LEVERAGED_AERO_VAULT key. Dropping the SHERWOOD_ prefix is
+# a pending cleanup; it implies no remaining Sherwood dependency.
 #
 # Usage:
 #   TENDERLY_VNET_RPC_URL=<admin-rpc> ./script/tenderly/run-leveraged-aero-account.sh
@@ -58,8 +70,11 @@ source "$SCRIPT_DIR/lib/common.sh"
 FQ="script/tenderly/LeveragedAeroAccountHarness.s.sol:LeveragedAeroAccountHarness"
 
 # ── documented vnet defaults (overridable via env) ────────────────────────────
-# Sherwood stack on the current persistent vnet (block ~48.9M Base fork). These are
-# env-var DEFAULTS, not hardcoded logic: pass your own to point at a different vnet.
+# Pooled layer on the current persistent vnet (block ~48.9M Base fork). NOTE: that
+# instance is Sherwood-era — its vault is Sherwood's SyndicateVault, so it exposes
+# openDeposits() rather than depositsOpen() and has no redeemSettled(). The account ABI is
+# unchanged, so the smoke below is still valid; see the runbook's "Current live instance".
+# These are env-var DEFAULTS, not hardcoded logic: pass your own to point elsewhere.
 export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-0x5E22913E4C96f816133fbc8E894F652a4f87C760}"
 export SHERWOOD_SYNDICATE_VAULT="${SHERWOOD_SYNDICATE_VAULT:-0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9}"
 # Optional: the vnet's PUBLIC (read-only) RPC — recorded into the emitted config for consumers.
@@ -74,7 +89,7 @@ DEPOSIT=5000000000                   # 5,000 USDC
 IDLE_XFER=100000000                  # 100 USDC
 
 # ── args ──────────────────────────────────────────────────────────────────────
-# Force reuse: the Sherwood stack exists only on the persistent vnet (see header).
+# Force reuse: the pooled layer exists only on the persistent vnet (see header).
 REUSE_VNET=1
 KEEP_VNET=0
 while [ $# -gt 0 ]; do
@@ -87,7 +102,7 @@ done
 # Minimal env load (this harness uses UNLOCKED impersonation, so — unlike the LPV2
 # harness — it needs NO broadcaster private key; do not require MAMO_DEPLOYER_PRIVATE_KEY).
 # A TENDERLY_VNET_RPC_URL passed on the command line MUST win over .env (the .env value may point at
-# a different vnet without the Sherwood stack), so preserve a caller-set value across the source.
+# a different vnet without the pooled layer), so preserve a caller-set value across the source.
 _CLI_VNET_RPC="${TENDERLY_VNET_RPC_URL:-}"
 [ -f "$ROOT/.env" ] && { set -a; . "$ROOT/.env"; set +a; }
 [ -n "$_CLI_VNET_RPC" ] && export TENDERLY_VNET_RPC_URL="$_CLI_VNET_RPC"
@@ -113,8 +128,19 @@ DEPLOYER="$(addr DEPLOYER_EOA)"
 STRAT="$SHERWOOD_LEVERAGED_AERO_STRATEGY"
 VAULT="$SHERWOOD_SYNDICATE_VAULT"
 [ "$(ccall "$STRAT" 'vault()(address)' | field | tr 'A-Z' 'a-z')" = "$(echo "$VAULT" | tr 'A-Z' 'a-z')" ] \
-  || die "sherwoodStrategy.vault() != SHERWOOD_SYNDICATE_VAULT"
-ok "Sherwood wired: strategy=$STRAT vault=$VAULT state=$(ccall "$STRAT" 'state()(uint8)' | field)"
+  || die "strategy.vault() != SHERWOOD_SYNDICATE_VAULT (env var name is stale; it holds the LeveragedAeroVault)"
+ok "pooled layer wired: strategy=$STRAT vault=$VAULT state=$(ccall "$STRAT" 'state()(uint8)' | field)"
+# Which vault generation is under us? The in-repo LeveragedAeroVault exposes depositsOpen()
+# (+ redeemSettled); the pre-PR-#66 Sherwood SyndicateVault exposed openDeposits(). The account
+# ABI is identical either way, so the smoke below is valid on both — but the getter name and the
+# emitted config must follow the live contract.
+if [ -n "$(ccall "$VAULT" 'depositsOpen()(bool)')" ]; then
+  VAULT_GEN="leveraged-aero-vault"; DEPOSITS_OPEN_SIG='depositsOpen()(bool)'
+else
+  VAULT_GEN="sherwood-syndicate-vault (legacy: openDeposits(), no redeemSettled)"
+  DEPOSITS_OPEN_SIG='openDeposits()(bool)'
+fi
+info "vault generation: $VAULT_GEN"
 
 # ── Phase 2: deploy impl + factory ────────────────────────────────────────────
 section "Phase 2 — deploy implementation + factory (DEPLOYER_EOA, unlocked)"
@@ -145,7 +171,8 @@ assert_eq "whitelistedImplementations(impl)" "$(ccall "$REG" 'whitelistedImpleme
 assert_eq "implementationToId(impl)"         "$(ccall "$REG" 'implementationToId(address)(uint256)' "$IMPL" | field)" "5"
 assert_eq "latestImplementationById(5)"      "$(ccall "$REG" 'latestImplementationById(uint256)(address)' 5 | field)" "$IMPL"
 assert_eq "factory hasRole(BACKEND_ROLE)"    "$(ccall "$REG" 'hasRole(bytes32,address)(bool)' "$BR" "$FACTORY")" "true"
-assert_eq "vault.openDeposits()"             "$(ccall "$VAULT" 'openDeposits()(bool)')" "true"
+# $DEPOSITS_OPEN_SIG was resolved above from the live vault generation (depositsOpen vs openDeposits).
+assert_eq "vault deposits open"              "$(ccall "$VAULT" "$DEPOSITS_OPEN_SIG")" "true"
 assert_eq "factory.strategyTypeId()"         "$(ccall "$FACTORY" 'strategyTypeId()(uint256)' | field)" "5"
 assert_eq "factory.sherwoodStrategy()"       "$(ccall "$FACTORY" 'sherwoodStrategy()(address)' | field | tr A-Z a-z)" "$(echo "$STRAT" | tr A-Z a-z)"
 assert_eq "factory.usdc()"                   "$(ccall "$FACTORY" 'usdc()(address)' | field | tr A-Z a-z)" "$(echo "$USDC" | tr A-Z a-z)"
@@ -250,6 +277,7 @@ jq -n \
   --arg impl "$IMPL" --arg factory "$FACTORY" \
   --arg strategy "$STRAT" --arg vault "$VAULT" \
   --arg registry "$REG" --arg usdc "$USDC" \
+  --arg vaultGen "$VAULT_GEN" \
   '{
     generatedAt: $ts,
     chainId: 8453,
@@ -257,9 +285,11 @@ jq -n \
     adminRpc: "1Password (write-capable — never committed)",
     strategyTypeId: 5,
     mamo: { accountImplementation: $impl, accountFactory: $factory, strategyRegistry: $registry },
+    pooled: { strategyClone: $strategy, vault: $vault },
     sherwood: { strategyClone: $strategy, syndicateVault: $vault },
     usdc: $usdc,
-    note: "Addresses change when the instance rotates or the harness redeploys — always read this file, never hardcode. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run make tenderly-leveraged-aero-account after any refresh to regenerate."
+    note: "Addresses change when the instance rotates or the harness redeploys — always read this file, never hardcode. The pooled object is the LeveragedAeroVault + LeveragedAerodromeCLStrategy clone, both in-repo since PR #66 removed the Sherwood dependency; the sherwood object is a deprecated alias of the same two addresses, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run make tenderly-leveraged-aero-account after any refresh to regenerate.",
+    vaultGeneration: $vaultGen
   }' > "$CONFIG_JSON"
 ok "config emitted: $CONFIG_JSON"
 info "Full log: $RESULTS"

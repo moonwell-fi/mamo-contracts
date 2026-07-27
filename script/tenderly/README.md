@@ -61,12 +61,17 @@ prompt is a poor fit for this non-interactive automation loop, and foundry does 
 ## MamoLeveragedAeroStrategy account harness
 
 `run-leveraged-aero-account.sh` (dispatch: `./run-harness.sh leveraged-aero-account`, or
-`make tenderly-leveraged-aero-account`) drives the **Mamo side** of the leveraged-Aero account
-deployment against a LIVE, **persistent** Base-fork vnet on which the **Sherwood** stack
-(`SyndicateVault` + `LeveragedAerodromeCLStrategy`) is already deployed, then smoke-tests the
-account wrapper end-to-end. It replays multisig proposal `012_DeployLeveragedAeroAccountSystem`
+`make tenderly-leveraged-aero-account`) drives the **account layer** of the leveraged-Aero deployment
+against a LIVE, **persistent** Base-fork vnet on which the **pooled layer** (`LeveragedAeroVault` +
+a `LeveragedAerodromeCLStrategy` clone) is already deployed, then smoke-tests the account wrapper
+end-to-end. It replays multisig proposal `012_DeployLeveragedAeroAccountSystem`
 plus the full user lifecycle as real broadcast txs, driven by Tenderly **unlocked impersonation**
 (no private keys) for `MAMO_MULTISIG` / `DEPLOYER_EOA` / the strategy proposer / a fresh throwaway user.
+
+Both layers now live in **this** repo — the Sherwood dependency was removed in PR #66. The pooled
+layer's deploy tooling has **not** been written yet; see
+[`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../../docs/LEVERAGED_AERO_VNET_RUNBOOK.md) Phase B for the spec
+of what it must do.
 
 | Phase | What it does |
 |---|---|
@@ -74,22 +79,33 @@ plus the full user lifecycle as real broadcast txs, driven by Tenderly **unlocke
 | **3 — multisig** | As `MAMO_MULTISIG`: `whitelistImplementation(impl,5)`, `grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`; then reproduces every `validate()` assert via `cast` reads. |
 | **4 — e2e** | Fresh throwaway user: `createStrategyForUser` → `deposit` → fast `withdraw(half)` → `requestWithdraw` → proposer `fulfillRedeem` → `claimWithdrawnUsdc` → `depositIdle` gate (third-party reverts, registry backend succeeds) → `withdrawAll` cleanup → clean-state asserts + net-delta report. |
 
-**Why `--reuse` is forced.** The Sherwood strategy/vault exist only on the shared persistent vnet, so
+**Why `--reuse` is forced.** The vault + strategy clone exist only on the shared persistent vnet, so
 this harness ALWAYS reuses `TENDERLY_VNET_RPC_URL` (point it at the vnet's **Admin RPC** — it accepts
 `eth_sendTransaction` from any unlocked sender AND serves reads); it never creates or deletes a vnet.
 
-**Address resolution.** The `SHERWOOD_LEVERAGED_AERO_STRATEGY` / `SHERWOOD_SYNDICATE_VAULT` keys are
-deliberately NOT in `addresses/8453.json`: FPS `Addresses` validates `isContract` **eagerly** in its
-constructor (gated on `chainId == block.chainid`), so committing them with `isContract:true` would
-revert the `Addresses` constructor on every real-Base-mainnet CI run (no code lives there). They are
-supplied via env vars (documented defaults = current vnet values) and injected at runtime inside
+**Address resolution.** The strategy/vault keys are deliberately NOT in `addresses/8453.json`: FPS
+`Addresses` validates `isContract` **eagerly** in its constructor (gated on
+`chainId == block.chainid`), so committing them with `isContract:true` would revert the `Addresses`
+constructor on every real-Base-mainnet CI run (no code lives there). They are supplied via env vars
+(documented defaults = current vnet values) and injected at runtime inside
 `LeveragedAeroAccountHarness.s.sol` with `addresses.addAddress(...)`.
 
-**Feed freshness.** The shared instance's venue Chainlink feeds are FreshFeed mocks (`updatedAt`
-tracks `block.timestamp`), so warping does not stale them and the vnet clock legitimately runs days
-ahead of real time. On an instance without those mocks, the old rule holds: never time-warp, feeds
-stale in ~1 day. This harness does no time travel either way; the 2-day `emergencyWithdraw` path
-stays unit-test-covered, not part of the live smoke.
+The env-var / key names are **stale but real**: the strategy is `SHERWOOD_LEVERAGED_AERO_STRATEGY`
+(also `factory.sherwoodStrategy()`) and the vault is passed as `SHERWOOD_SYNDICATE_VAULT` even though
+proposal 012 now resolves it under the `LEVERAGED_AERO_VAULT` key. Use the names as written or lookups
+fail; dropping the `SHERWOOD_` prefix is a pending cleanup and implies no remaining Sherwood
+dependency.
+
+**Feed freshness.** A Base fork's Chainlink answers are frozen, so `updatedAt` recedes as the clock
+advances and every priced path bricks with `StaleOracle` in ~1 day. The fix is the **FreshFeed**
+pattern: code-replace the 5 venue feeds (leg A/USD, leg B/USD, USDC/USD, AERO/USD, L2 sequencer
+uptime) with mocks whose `updatedAt` tracks `block.timestamp` — feeds never stale, prices
+frozen-but-movable, warping safe. The shared instance carries those mocks (verified live 2026-07-26:
+clock +5 days, feed lag 60 s, e2e green). **The recipe came from the Sherwood-side deploy script and
+has no in-repo implementation yet** — it must be re-written here as part of the pooled-layer tooling
+(runbook Phase B.0). On an instance without the mocks: never time-warp, expect ~1-day staleness. This
+harness does no time travel either way; the 2-day `emergencyWithdraw` path stays unit-test-covered,
+not part of the live smoke.
 
 **Config for consumers.** Every successful run regenerates
 [`leveraged-aero-vnet.json`](./leveraged-aero-vnet.json) — the machine-consumable source of the
@@ -97,6 +113,12 @@ current vnet's addresses + public RPC for the frontend env, indexer, keeper, and
 read-safe values go in it; the **admin RPC is retrieved from the Tenderly dashboard** (org access
 required), never committed. Set
 `TENDERLY_VNET_PUBLIC_RPC_URL` when running so the public RPC lands in the file.
+
+The pooled layer is published under `pooled.{vault, strategyClone}`; the old `sherwood.{syndicateVault,
+strategyClone}` object is kept as a **deprecated alias** of the same two addresses so existing consumers
+keep working, and will be dropped. `vaultGeneration` records which vault is live —
+`leveraged-aero-vault` or `sherwood-syndicate-vault (legacy: …)` — probed at run time from whether the
+vault answers `depositsOpen()`.
 
 ### Future reference — redeploying / vnet ops crib
 
@@ -107,13 +129,18 @@ the shared instance carries FreshFeed mocks (see step 0). When a refresh does ha
    pattern applied (the 5 venue Chainlink feeds code-replaced with mocks whose `updatedAt` tracks
    `block.timestamp`) — feeds never stale, so there is **no ~1-day rotation treadmill** on it
    (verified live 2026-07-26: clock +5 days, feed lag 60s, e2e green). Rotate only for fork-block
-   hygiene or a broken instance. Do **NOT** create replacements with state sync — the governance
-   warp desyncs the clock from real time and state-synced feeds would read permanently stale;
-   re-apply FreshFeed instead (recipe: sherwood handoff doc §5.2).
-1. **Sherwood side first** — the vault + `LeveragedAerodromeCLStrategy` clone are deployed from the
-   `sherwood-protocol` repo (not here). Full two-repo sequence:
-   [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../../docs/LEVERAGED_AERO_VNET_RUNBOOK.md), Phases A–B.
-2. **Mamo side** (this harness) — with the new vnet's admin RPC and the fresh Sherwood addresses:
+   hygiene or a broken instance. Do **NOT** create replacements with state sync: it is
+   creation-time-only, it is unnecessary once FreshFeed is applied, and it would re-hydrate the
+   *mainnet feed addresses* the FreshFeed override lives at — silently restoring the real aggregators
+   and the staleness treadmill with them. Re-apply FreshFeed instead.
+1. **Pooled layer first** — `LeveragedAeroVault` + the `LeveragedAerodromeCLStrategy` clone. Both are
+   in **this** repo as of PR #66, but **the deploy tooling does not exist yet**:
+   [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../../docs/LEVERAGED_AERO_VNET_RUNBOOK.md) Phases A–B carry
+   the full spec (FreshFeed overrides → deploy vault owned by `MAMO_MULTISIG` → template/clone/init in
+   one broadcast → `setStrategy` → `activateStrategy(seed)`), plus the post-conditions this harness
+   assumes. Writing that script is a tracked gap.
+2. **Account layer** (this harness) — with the new vnet's admin RPC and the fresh pooled-layer
+   addresses:
 
    ```bash
    TENDERLY_VNET_RPC_URL=<admin-rpc> \
@@ -124,6 +151,11 @@ the shared instance carries FreshFeed mocks (see step 0). When a refresh does ha
 
    Deploys + wires + smokes everything and re-emits `leveraged-aero-vnet.json` — commit that diff so
    consumers pick up the new instance.
+
+> **The current shared instance is Sherwood-era.** It predates PR #66, so the vault beneath it is
+> Sherwood's `SyndicateVault`: no `redeemSettled`, `openDeposits()` instead of `depositsOpen()`,
+> governor-driven lifecycle. The account ABI is unchanged (`MamoLeveragedAeroStrategy` is byte-identical
+> across PR #66), so it stays valid for account-side FE/BE work — but not for anything vault-shaped.
 
 One-off ops against the vnet (all via the **admin** RPC, no keys — unlocked impersonation):
 
@@ -169,7 +201,7 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   (`run-price-checker.sh`): `checkPriceGating`, `checkStalePrice`.
 - `LeveragedAeroAccountHarness.s.sol` — the MamoLeveragedAeroStrategy account deploy runner
   (`run-leveraged-aero-account.sh`): `deploy()` wraps the real `LeveragedAeroAccountDeployer` and
-  injects the vnet-only `SHERWOOD_*` keys at runtime.
+  injects the vnet-only vault / strategy-clone keys at runtime (env vars still named `SHERWOOD_*`).
 - `TenderlySwapHelper.sol` — a tiny deployed swap-callback holder for the price-sim matrix; a
   forge Script can't be its own `uniswapV3SwapCallback`, so `pushTick` routes swaps through this.
 
@@ -183,7 +215,8 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   fresh `evm_snapshot`.
 - `run-price-checker.sh` — SlippagePriceChecker gate against the live checker + real Chainlink config.
 - `run-leveraged-aero-account.sh` — MamoLeveragedAeroStrategy account deploy-drive + e2e smoke against
-  the persistent Sherwood vnet (unlocked impersonation; always `--reuse`). See section above.
+  the persistent vnet carrying the pooled layer (unlocked impersonation; always `--reuse`). See section
+  above.
 - `setup-staging.sh` — stands up a **persistent** frontend staging vnet (not torn down after the run).
 - `lib/common.sh` — shared plumbing (vnet resolution/teardown, cheat-RPC fund/time helpers, the
   forge-phase runner, address-book lookup, vnet gotcha fixes). Sourced, never executed.

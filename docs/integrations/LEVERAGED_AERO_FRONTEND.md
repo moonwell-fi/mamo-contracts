@@ -1,14 +1,14 @@
 # Leveraged Aero — Frontend integration guide
 
-## The product — Leveraged Aerodrome LP Fund (Sherwood × Mamo)
+## The product — Leveraged Aerodrome LP Fund
 
 Leveraged Aerodrome LP fund. Users deposit USDC; the Mamo agent runs a leveraged AERO-farming
-position that earns through emissions. Custody and execution are deliberately separate: the fund runs on
-Sherwood's pooled-vault rails (share ledger, live NAV, withdrawal queue), execution lives in one
-Sherwood strategy contract (supply USDC on Moonwell → borrow cbBTC + ETH → Aerodrome concentrated LP →
-farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and Mamo's backend
-is the agent — the same trusted-operator model as Mamo today: it manages the position but can never
-withdraw user funds. Users redeem anytime at NAV.
+position that earns through emissions. Custody and execution are deliberately separate: the fund's share
+ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares only, priced off the strategy's NAV),
+execution lives in one strategy contract (supply USDC on Moonwell → borrow cbBTC + ETH → Aerodrome
+concentrated LP → farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and
+Mamo's backend is the agent — the same trusted-operator model as Mamo today: it manages the position but
+can never withdraw user funds. Users redeem anytime at NAV.
 
 | At a glance | |
 |---|---|
@@ -18,7 +18,7 @@ withdraw user funds. Users redeem anytime at NAV.
 | Strategy | Supply USDC → borrow cbBTC + ETH → Aerodrome CL LP → farm & compound AERO |
 | Posture | Leveraged Aerodrome CL LP + AERO emissions carry |
 | Custody | Agent manages the position, can never withdraw user funds; users redeem anytime |
-| Lifetime | Runs indefinitely |
+| Lifetime | Runs indefinitely — no fixed term; the terminal `Settled` state is driven by the vault owner (MAMO multisig) |
 
 **Where this guide sits.** Mamo users don't touch the fund contracts directly. Each user gets a
 per-user **Mamo account** (`MamoLeveragedAeroStrategy`) that custodies their fund shares and exposes a
@@ -29,34 +29,46 @@ frontend integration surface for that account.
 
 This is the frontend contract-integration guide for the **leveraged Aerodrome LP** product. The single
 integration surface for the frontend is the per-user **Mamo account** (`MamoLeveragedAeroStrategy`), its
-**factory** (`MamoLeveragedAeroStrategyFactory`), and the **registry** (`MamoStrategyRegistry`). The
-Sherwood strategy internals (`LeveragedAerodromeCLStrategy`, `SyndicateVault`, the leverage engine) are
-**out of scope** for the frontend — the account wraps them and exposes a USDC-in / USDC-out surface.
+**factory** (`MamoLeveragedAeroStrategyFactory`), and the **registry** (`MamoStrategyRegistry`). The fund
+internals (`LeveragedAerodromeCLStrategy`, `LeveragedAeroVault`, the leverage engine) are **out of scope**
+for the frontend — the account wraps them and exposes a USDC-in / USDC-out surface.
 
 - **In:** USDC (6dp). **Out:** USDC (6dp). The user never sees or touches vault shares.
-- Vault shares are **12dp** and are custodied by the account contract on the user's behalf.
+- Vault shares are **12dp** (`LeveragedAeroVault.decimals() == assetDecimals + 6`) and are custodied by
+  the account contract on the user's behalf.
 - Each user has exactly one account per factory, at a **deterministic (CREATE2) address** the frontend
   can precompute before it exists.
 - `account.owner() == user`. Every state-changing user action is `onlyOwner`; the user's wallet signs
   directly against their own account.
+- **Legacy naming, unchanged ABI:** the account's strategy pointer is still the public getter
+  `sherwoodStrategy()` (and the initializer guard `"Invalid sherwoodStrategy address"`). The name is
+  historical — it points at the in-repo `LeveragedAerodromeCLStrategy` clone. Keep it as-is in
+  ABIs/typings; nothing on the account's integration surface was renamed.
 
 ---
 
 ## Contracts & chain (staging)
 
+> ⚠️ **The live staging instance is STALE.** It still runs the pre-de-Sherwood stack: the vault beneath
+> the accounts is Sherwood's `SyndicateVault`, so `redeemSettled` **does not exist there** and the Settled
+> flow below cannot be exercised on it. The **account** surface (factory, implementation, ABI, every flow
+> in this guide) is unaffected and still valid for FE work. A redeploy onto the `LeveragedAeroVault`
+> architecture is **pending** (the deploy tooling for it is not written yet). Re-read
+> `script/tenderly/leveraged-aero-vnet.json` and `docs/LEVERAGED_AERO_VNET_RUNBOOK.md` before wiring an
+> environment — the addresses below are a snapshot of the old instance and the config file already lists a
+> newer account impl/factory pair.
+
 | Field | Value |
 |---|---|
-| Network | Base fork (Tenderly Virtual TestNet) — **current staging instance, rotates** |
+| Network | Base fork (Tenderly Virtual TestNet) — **stale instance, pending redeploy** |
 | RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Factory | `0x9CDBe7DB9F967E793E7261e0ffd546E5D29b476f` |
-| Account implementation | `0x3F26d1E36310442453d3aefCf75d5817eceBCF29` |
+| Factory | see `script/tenderly/leveraged-aero-vnet.json` (`mamo.accountFactory`) |
+| Account implementation | see `script/tenderly/leveraged-aero-vnet.json` (`mamo.accountImplementation`) |
 | Strategy type id | `5` |
-| Sherwood vault (shares, 12dp) | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` |
-| Sherwood strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (PR #14 build; previous clone `0x168a…FB4B` is now Settled) |
+| Vault (shares, 12dp) | Sherwood-era `SyndicateVault` on the current instance — **not** `LeveragedAeroVault` |
+| Strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (Sherwood-era build) |
 
-> Staging endpoints rotate. Always re-read the current instance from
-> `docs/LEVERAGED_AERO_VNET_RUNBOOK.md` before wiring an environment. Production addresses are published
-> separately at deploy.
+> Production addresses are published separately at deploy.
 
 ---
 
@@ -84,7 +96,7 @@ const exists  = (await client.getBytecode({ address: account }))?.length > 0;
 
 ## Lifecycle state — gate every action on it
 
-The account passes through the Sherwood strategy's lifecycle enum:
+The account passes through the strategy's lifecycle enum:
 
 ```solidity
 function strategyState() external view returns (State); // enum State { Pending, Executed, Settled }
@@ -94,18 +106,43 @@ function strategyState() external view returns (State); // enum State { Pending,
 |---|---|---|
 | `Pending` | 0 | Not live yet — deposits/withdrawals revert `NotExecuted()`. Show "not open". |
 | `Executed` | 1 | Live — all deposit/withdraw entrypoints work. Normal operating state. |
-| `Settled` | 2 | **Terminal.** No deposits/withdrawals. Exit only via the owner share-recovery hatch (below). |
+| `Settled` | 2 | **Terminal.** No deposits/withdrawals. Exit only via the two-step Settled path (below). |
 
-**Settled exit hatch.** When the strategy is `Settled`, the user exits by pulling the raw vault shares
-out of the account with the inherited `BaseStrategy` hatch and redeeming them at the vault queue
-directly (Sherwood UI / manual):
+The transitions are driven by the **vault owner** (MAMO multisig) — `activateStrategy(seed)` moves
+`Pending → Executed`, `settleStrategy()` moves `Executed → Settled`. Both are one-way; there is no vote,
+proposal, or external governance in the path. The frontend only ever *reads* the state.
+
+**Settled exit — two steps.** `settleStrategy()` unwinds the whole levered book and pushes the realized
+USDC to the **vault**, while holders still hold their shares. The strategy's own `redeem` /
+`requestRedeem` paths are gated on `Executed`, so the exit runs through the vault instead:
 
 ```solidity
-// BaseStrategy — always-open onlyOwner, no state gate
-function recoverERC20(address token, address to, uint256 amount) external; // token = vault shares
+// 1. Pull the raw shares out of the account — BaseStrategy hatch, always-open onlyOwner, no state gate
+function recoverERC20(address token, address to, uint256 amount) external; // token = vaultShares, to = user
+
+// 2. Burn them at the vault for a pro-rata slice of the settled USDC — LeveragedAeroVault, PERMISSIONLESS
+function redeemSettled(uint256 shares) external returns (uint256 assetsOut);
 ```
 
-Read the share balance to fill `amount` (see Views). This bypasses the slippage/LTV redeem path by design.
+```ts
+const shares = await accountContract.read.sharesBalance();
+await accountContract.write.recoverERC20([vaultShares, user, shares]); // shares now in the user's wallet
+await vault.write.redeemSettled([shares]);                              // USDC paid to the user
+```
+
+- Step 2 is **permissionless and unconditional post-settle**, so a holder can never be stranded:
+  `assetsOut = shares × vaultAssetBalance / totalSupply`, computed on the **pre-burn** supply and
+  **pre-transfer** balance, rounding down in the stayers' favour.
+- The shares must sit in the caller's own wallet for step 2 — the account contract has no
+  `redeemSettled` passthrough, which is exactly why step 1 exists.
+- Reverts on step 2: `"LAV: not settled"` (called before `settleStrategy()`), `"LAV: zero shares"`,
+  `"LAV: no shares outstanding"`.
+- Step 1 bypasses the slippage/LTV redeem path by design and emits `TokenRecovered`; step 2 emits the
+  vault's `SettledRedeem(owner, shares, assetsOut)`.
+- **Pending async requests must be cancelled first.** `fulfillRedeem` and `emergencyWithdraw` both require
+  `Executed`, so a request outstanding at settlement can never be fulfilled — but `cancelWithdraw(id)` is
+  callable in **any** state and returns the escrowed shares to the account. Prompt the user to cancel, then
+  run the two steps above; otherwise those shares stay escrowed on the strategy.
 
 ---
 
@@ -131,6 +168,13 @@ function owner() external view returns (address);
 > **Never cache a quote across blocks.** Fees crystallize inside user transactions and supply/NAV move,
 > so `previewWithdraw` and any derived `minShares` / `minAssetsOut` must come from a fresh read in the
 > same UX step as the tx.
+
+> **Fees at launch — don't promise what isn't charged.** The vault deploys with
+> `feeConfig == address(0)`, so the **protocol-fee** leg is **off** (enableable later by the vault owner
+> without touching the strategy). The **management** and **performance** fees are the strategy clone's own
+> init params — read `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
+> hardcoding a schedule in copy, and treat any "APY net of fees" display as moot for whichever legs read
+> zero.
 
 ---
 
@@ -170,7 +214,7 @@ sequenceDiagram
     participant F as Factory
     participant R as Registry
     participant A as Account (MamoLeveragedAeroStrategy)
-    participant S as Sherwood strategy
+    participant S as Strategy (LeveragedAerodromeCL)
 
     U->>F: computeStrategyAddress(user)  (view, precompute)
     U->>F: createStrategyForUser(user)
@@ -204,6 +248,12 @@ Because idle USDC on an account is ambiguous (pending re-deposit vs. a fulfilled
 claim), `depositIdle` is gated to `owner() || registry.getBackendAddress()` and reverts `"Not owner or
 backend"` otherwise. Prefer the explicit `approve`+`deposit` flow in the UI.
 
+> **Deposits can be frozen.** New share issuance is gated by a single owner-controlled flag on the vault,
+> `setOpenDeposits(bool)`; while it is off, every deposit path reverts `"LAV: deposits closed"`.
+> Withdrawals are deliberately **not** gated on it and keep working. There is no depositor whitelist and
+> no pause — that one flag is the entire gate — so surface the revert as "deposits are temporarily closed",
+> not as a user error. Read it with `vault.depositsOpen()` to pre-disable the deposit CTA.
+
 ---
 
 ## Flow 2 — fast withdraw (synchronous)
@@ -222,7 +272,7 @@ function withdrawAll(uint256 minAssetsOut) external returns (uint256 assetsOut);
 sequenceDiagram
     participant U as User wallet
     participant A as Account
-    participant S as Sherwood strategy
+    participant S as Strategy (LeveragedAerodromeCL)
 
     U->>A: previewWithdraw(shares)  (view)
     A->>S: previewRedeem(shares)
@@ -263,7 +313,7 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 sequenceDiagram
     participant U as User wallet
     participant A as Account
-    participant S as Sherwood strategy
+    participant S as Strategy (LeveragedAerodromeCL)
     participant B as Mamo backend
 
     U->>A: requestWithdraw(shares, minAssetsOut)
@@ -354,8 +404,7 @@ Factory (`require` strings):
 | `"Only backend or user can create strategy"` | caller is neither backend nor `user` |
 | `"Strategy already exists"` | account already deployed for `user` |
 
-Sherwood strategy errors surfaced through the account (fast/async paths) — custom errors, decode by
-selector:
+Strategy errors surfaced through the account (fast/async paths) — custom errors, decode by selector:
 
 | Error | Trigger | Frontend action |
 |---|---|---|
@@ -364,12 +413,22 @@ selector:
 | `FulfillWindowOpen()` | `emergencyWithdraw` before the 2-day window | Disable until window elapses |
 | oracle-staleness reverts | fast path while the oracle is down | Fall back to `requestWithdraw` |
 
+Vault (`LeveragedAeroVault`) `require` strings, surfaced through the account's deposit paths and the
+Settled exit:
+
+| Revert | Trigger | Suggested UX |
+|---|---|---|
+| `"LAV: deposits closed"` | any deposit while `depositsOpen == false` | "Deposits temporarily closed" — withdrawals still work |
+| `"LAV: not settled"` | `redeemSettled` before `settleStrategy()` | Only offer the Settled exit at `strategyState() == Settled` |
+| `"LAV: zero shares"` / `"LAV: no shares outstanding"` | `redeemSettled` with 0 shares / empty ledger | Nothing to redeem |
+
 ---
 
 ## Frontend checklist
 
 - [ ] Precompute the account address with `computeStrategyAddress(user)`; treat `code.length == 0` as "not created".
-- [ ] Gate all deposit/withdraw UI on `strategyState() == Executed`; render a Settled exit path via `recoverERC20(vaultShares, user, sharesBalance())`.
+- [ ] Gate all deposit/withdraw UI on `strategyState() == Executed`; render the two-step Settled exit — `recoverERC20(vaultShares, user, sharesBalance())` then `vault.redeemSettled(shares)`.
+- [ ] Read `vault.depositsOpen()` and pre-disable the deposit CTA when issuance is closed (`"LAV: deposits closed"`); never gate withdrawals on it.
 - [ ] Show position value from `previewWithdraw(sharesBalance())`; never cache the quote across blocks.
 - [ ] Fast withdraw: preflight `previewWithdraw`, default to async when `fastOk == false`, and catch `FastRedeemExceedsLtv` / oracle reverts as an async fallback.
 - [ ] Async withdraw: surface pending requests from `WithdrawRequested`/`WithdrawCancelled`, offer `cancelWithdraw`, poll idle USDC for fulfillment, and expose `claimWithdrawnUsdc`.

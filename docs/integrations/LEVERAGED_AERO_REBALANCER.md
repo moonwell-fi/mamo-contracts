@@ -1,14 +1,14 @@
 # Leveraged Aero — Rebalancer (fund-ops) integration guide
 
-## The product — Leveraged Aerodrome LP Fund (Sherwood × Mamo)
+## The product — Leveraged Aerodrome LP Fund
 
 Leveraged Aerodrome LP fund. Users deposit USDC; the Mamo agent runs a leveraged AERO-farming
-position that earns through emissions. Custody and execution are deliberately separate: the fund runs
-on Sherwood's pooled-vault rails (share ledger, live NAV, withdrawal queue), execution lives in one
-Sherwood strategy contract (supply USDC on Moonwell → borrow cbBTC + ETH → Aerodrome concentrated LP →
-farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and Mamo's backend
-is the agent — the same trusted-operator model as Mamo today: it manages the position but can never
-withdraw user funds. Users redeem anytime at NAV.
+position that earns through emissions. Custody and execution are deliberately separate: the fund's share
+ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares plus an owner-driven execute/settle
+lifecycle, no pricing of its own), execution lives in one strategy contract (supply USDC on Moonwell →
+borrow the two CL legs → Aerodrome concentrated LP → farm & compound AERO, with onchain leverage caps and
+a permissionless deleverage), and Mamo's backend is the agent — the same trusted-operator model as Mamo
+today: it manages the position but can never withdraw user funds. Users redeem anytime at NAV.
 
 | At a glance | |
 |---|---|
@@ -18,10 +18,10 @@ withdraw user funds. Users redeem anytime at NAV.
 | Strategy | Supply USDC → borrow cbBTC + ETH → Aerodrome CL LP → farm & compound AERO |
 | Posture | Leveraged Aerodrome CL LP + AERO emissions carry |
 | Custody | Agent manages the position, can never withdraw user funds; users redeem anytime |
-| Lifetime | Runs indefinitely |
+| Lifetime | Runs indefinitely — no fixed term; the terminal `Settled` state is driven by the vault owner (MAMO multisig) |
 
 **Where this guide sits.** This is the fund-ops surface — the Mamo agent driving the **one shared**
-Sherwood strategy position directly, as its **proposer**: position management (deploy / compound /
+strategy position directly, as its **proposer**: position management (deploy / compound /
 re-range / leverage), and the withdraw-queue drain. It is the third guide in the family; the per-user,
 user-facing account integration is the sibling docs
 ([`LEVERAGED_AERO_BACKEND.md`](./LEVERAGED_AERO_BACKEND.md),
@@ -32,17 +32,20 @@ this single position. This doc completes the backend picture: everything the acc
 
 > The strategy delegates its venue ops to `LeveragedAeroManager.sol` (impl-call/delegatecall pattern).
 > This guide documents the **strategy-facing** behavior the agent observes; manager internals are cited
-> only where they explain a guard or a failure mode. For fund-ops **procedure** beyond this repo
-> (rebalance policy, monitoring cadence, incident playbooks) the upstream Sherwood repo docs are
-> authoritative — the same posture the sibling docs take for the account surface.
+> only where they explain a guard or a failure mode. **This repo is the authority.** The
+> `src/leveraged-aero/` package is an in-repo fork: upstream Sherwood at the vendoring pin is a historical
+> baseline useful only for diffing, and where the two disagree the code here wins (see
+> [`docs/LEVERAGED_AERO_CL_AUDIT.md`](../LEVERAGED_AERO_CL_AUDIT.md)). There is no upstream doc set to
+> defer to for fund-ops procedure any more — rebalance policy, monitoring cadence and incident playbooks
+> are Mamo's to define.
 
 ---
 
-This is the contract-integration guide for the **keeper / agent** that operates the inner Sherwood
-strategy, `LeveragedAerodromeCLStrategy` (a live ERC-1167 clone on staging). The single integration
-surface here is that clone; the agent calls it as **proposer**. Units: USDC is 6dp; vault shares are
-12dp; LTV / health / fees are all in **bps** (1% = 100). Every operator op requires the strategy to be
-in state `Executed`.
+This is the contract-integration guide for the **keeper / agent** that operates the in-repo strategy,
+`LeveragedAerodromeCLStrategy` (deployed as an ERC-1167 clone bound to one `LeveragedAeroVault`). The
+single integration surface here is that clone; the agent calls it as **proposer**. Units: USDC is 6dp;
+vault shares are 12dp; LTV / health / fees are all in **bps** (1% = 100). Every operator op requires the
+strategy to be in state `Executed`.
 
 ---
 
@@ -58,9 +61,10 @@ modifier onlyProposer() { if (msg.sender != _proposer) revert NotProposer(); _; 
 ```
 
 On this deployment `proposer() == MAMO_BACKEND == 0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` — the
-Mamo agent. This is the **same** key the account docs call the Sherwood proposer for `fulfillRedeem`;
+Mamo agent. This is the **same** key the account docs call the strategy proposer for `fulfillRedeem`;
 it is **not** the registry `getBackendAddress()` member-0 key used for the account-level `depositIdle`
-nudge (see the backend doc's "two BACKEND_ROLE domains"). Keep the keys wired separately.
+nudge (see the backend doc's "two BACKEND_ROLE domains"). Keep the keys wired separately. The role is a
+per-clone immutable, granted at `initialize`, and is unaffected by the removal of the Sherwood stack.
 
 Three authorization tiers appear on the strategy:
 
@@ -69,16 +73,19 @@ Three authorization tiers appear on the strategy:
 | Proposer-only | `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams` | `onlyProposer` (== `MAMO_BACKEND`) |
 | Permissionless | `deleverage` | anyone (by design — safety backstop) |
 | Proposer **or** vault owner | `rescueToVault` | `proposer() \|\| Ownable(vault()).owner()` |
-| Vault-only (lifecycle) | `execute`, `settle` | `onlyVault` — the governor drives these, not the agent |
+| Vault-only (lifecycle) | `execute`, `settle` | `onlyVault` — the vault **owner** drives these, not the agent |
 
 - **State gate.** Every proposer op (and `deleverage`) opens with `if (_state != State.Executed) revert
   NotExecuted();`. The agent operates the position only while `state() == Executed` (enum
-  `State { Pending=0, Executed=1, Settled=2 }`). `execute()`/`settle()` are `onlyVault` and belong to
-  the Sherwood governor's proposal lifecycle — out of the agent's hands.
+  `State { Pending=0, Executed=1, Settled=2 }`). `execute()`/`settle()` are `onlyVault` and are reachable
+  only through the vault owner's `LeveragedAeroVault.activateStrategy(seedAmount)` (pulls the seed from the
+  owner to the strategy, then `execute()`) and `settleStrategy()` (`settle()` → full unwind → realized USDC
+  pushed to the vault). One-way, owner-only, no proposal or vote behind them — out of the agent's hands
+  either way.
 - **`deleverage` is permissionless by design.** It is deliberately **not** `onlyProposer`: a public
-  deleverage is the user-safety backstop for the indefinite proposal. It reverts `HealthyNoDeleverage`
-  unless the position is genuinely unhealthy (conditions in §B). The agent should run it proactively,
-  but anyone (a watcher bot, a user) can trigger it when health slips.
+  deleverage is the user-safety backstop for an open-ended position (no fixed term, no scheduled unwind).
+  It reverts `HealthyNoDeleverage` unless the position is genuinely unhealthy (conditions in §B). The
+  agent should run it proactively, but anyone (a watcher bot, a user) can trigger it when health slips.
 - **`rescueToVault` always pays the vault.** The recovery target is hardcoded to `vault()`, never
   caller-supplied, so neither the proposer nor the vault owner can exfiltrate; it only sweeps stray
   (non-position) tokens.
@@ -105,7 +112,7 @@ function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer 
 |---|---|
 | `amount` | USDC (6dp) to deploy; must be ≤ the strategy's idle USDC balance, else `InsufficientIdle()`. |
 | `minLiquidity` | Minimum CL liquidity the add must produce (slippage floor). |
-| Position effect | supply `amount` USDC → mUSDC → borrow cbBTC+WETH at **`targetLtvBps`** (50/50 split) → wrap ETH → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
+| Position effect | supply `amount` USDC → mUSDC → borrow both legs at **`targetLtvBps`** (50/50 by USD value) → wrap native ETH **iff** `wethDeliversNative` (§G) → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
 | Guards | Borrow sized at `amount × targetLtvBps / 1e4`; two-sided `maxSlippageBps` mins on the add plus the caller's `minLiquidity`; closes with `_assertHealthy()` (post-op LTV ≤ `maxLtvBps` **and** no Moonwell shortfall). |
 | Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`. |
 | When to call | Deposits land as idle USDC (see §D) and earn nothing until deployed. Run periodically to sweep accumulated idle into the position, within leverage caps. |
@@ -128,21 +135,17 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 
 ### `rerange` — re-center and re-width the CL range (no swap)
 
-> **Version note (2026-07-23).** The live staging clone runs the upstream
-> [sherwood-protocol PR #14](https://github.com/sherwoodagent/sherwood-protocol/pull/14) build, which
-> added the per-cycle `width` parameter below (the Mamo rebalancer chooses a position width every
-> cycle). The copy vendored in this repo at the current pin still shows the older 2-arg
-> `rerange(minLiq0, minLiq1)` — upstream is authoritative; the pin bump/re-vendor is a tracked
-> follow-up. Everything else on the operator surface is unchanged (`deployIdle`/`compound` untouched).
-
 ```solidity
 function rerange(uint24 width, uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant;
 ```
 
+The 3-arg form (per-cycle width) is the in-repo signature — `src/leveraged-aero/LeveragedAerodromeCLStrategy.sol`
+is the authority for it; there is no older 2-arg variant to reconcile against any more.
+
 | | |
 |---|---|
-| `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain. Staging clone init: width **4000**, band **[200, 20000]**. |
-| `minLiq0` / `minLiq1` | Minimum token0 (WETH) / token1 (cbBTC) the re-add must consume (two-sided slippage guard) → `InsufficientLiquidity()`. |
+| `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain — always read them off the clone you actually point at (the stale staging clone was init'd width **4000**, band **[200, 20000]**). |
+| `minLiq0` / `minLiq1` | Minimum **token0** / **token1** the re-add must consume (two-sided slippage guard) → `InsufficientLiquidity()`. `token0`/`token1` are **pool ordering**, derived at init from `pool.token0()` and exposed as `layout().wethIsToken0` — do not assume which leg is which (see §G). |
 | Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a recenter can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** CL NFT spanning `width/2` raw ticks each side of the current tick → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
 | What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** borrowed leg is left idle in the strategy — `nav()` prices it, so the recenter is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
 | Fee interaction | **No crystallization** — supply and NAV are unchanged; the streaming fee simply defers to the next crystallize point and the HWM is unaffected. |
@@ -207,17 +210,33 @@ function rescueToVault(address token) external nonReentrant;  // proposer OR vau
 ```
 
 Pushes the full balance of a **stray** ERC-20 (airdrop / accidental send) to `vault()`. Reverts
-`NotProposerOrOwner()` if the caller is neither the proposer nor the vault owner. Reverts
-`CannotRescuePositionToken()` for any position/accounting token: `usdc`, `cbBTC`, `weth`, `mUsdc`,
-`mCbBTC`, `mWeth`, and **AERO** (read live from the gauge so a sweep can't bypass `compound()`). The
-position NFT is never swept (no ERC-721 path). This is the only recovery path while the indefinite
-proposal keeps the vault's own `rescueERC20/721/Eth` dormant.
+`NotProposerOrOwner()` if the caller is neither the proposer nor the vault owner (`Ownable(vault()).owner()`
+— on `LeveragedAeroVault` that is the accepted `Ownable2Step` owner, MAMO_MULTISIG). Reverts
+`CannotRescuePositionToken()` for any position/accounting token: `usdc`, leg B, leg A, `mUsdc`, `mCbBTC`,
+`mWeth`, and the gauge reward token (read live from the gauge so a sweep can't bypass `compound()`). The
+position NFT is never swept (no ERC-721 path), and **native ETH is not sweepable at all** (§G).
+
+This is a two-hop recovery: the strategy can only push to the vault, and the vault owner then moves it out
+with the vault's own `rescueERC20(token, to, amount)` — which can take any non-asset token at any time, but
+refuses the **asset** (USDC) while `totalSupply() > 0` (`"LAV: asset reserved for redemptions"`), so a
+settled redemption pot can never be pulled out from under holders.
 
 ### Fee surface (proposer-relevant summary)
 
-The strategy is self-fee'd (`selfManagesFees() == true`), so the Sherwood governor skips all
-settle-fee distribution and this strategy collects fees itself:
+The strategy is self-fee'd (`selfManagesFees() == true`) — the vault performs no fee distribution of its
+own at settle; this strategy collects fees itself:
 
+- **Launch state: the protocol-fee leg is OFF.** The strategy resolves it live through
+  `vault.factory()` → `.protocolConfig()`, and `LeveragedAeroVault` returns `address(0)` on the first hop
+  while its `feeConfig` is unset — the deploy default. So `protocolFeeOwed` stays 0 and the protocol skim
+  never fires until the vault owner calls `setFeeConfig(...)` (no strategy change needed). The
+  **management** and **performance** fees are separate: they are the clone's own init params
+  (`managementFeeBps` / `performanceFeeBps` / `feeRecipient` in `layout()`) and are live iff they were
+  init'd non-zero. Read the three values rather than assuming a schedule.
+- **Fee-share mints are gated on the vault's `depositsOpen`.** Crystallized management/performance fees are
+  minted via `strategyMint`, which reverts `"LAV: deposits closed"` while issuance is frozen. On the
+  best-effort paths that surfaces as `FeeCrystallizeDeferred`; on `compound` / `deposit` it hard-reverts.
+  Closing deposits therefore also stalls `compound` until fees can mint again.
 - **Crystallization triggers.** `deposit` (hard, fail-closed pre-deposit NAV), `compound` (hard,
   pre-compound NAV), fast `redeem` and the async `fulfillRedeem`/`emergencyRedeem` (best-effort, may
   emit `FeeCrystallizeDeferred`). `rerange`, `adjustLeverage`, `deleverage` **do not** crystallize.
@@ -265,6 +284,11 @@ can trustlessly self-service via `emergencyRedeem(id, minAssetsOut)` (owner-gate
 `WithdrawEmergency`/`RedeemEmergency`. **Every emergency exit is a missed SLA** and strips the agent
 from the loop. Treat 2 days as the hard fulfillment SLA; alert well before it.
 
+**Drain the queue before settlement.** `fulfillRedeem` and `emergencyRedeem` both require `Executed`, so any
+request still outstanding when the vault owner calls `settleStrategy()` becomes unfulfillable — its owner
+must `cancelRedeem(id)` (callable in **any** state) to get the shares back and then exit via the vault's
+`redeemSettled`. If a settlement is planned, clear the queue first and flag any request you can't fulfill.
+
 ### Why deleverage before fulfill — the self-funding unwind
 
 `fulfillRedeem` runs `_proportionalRedeem` → `redeemUnwindImpl(shares, supply)`: it removes
@@ -301,7 +325,7 @@ can also `cancelRedeem` to reclaim the shares).
 sequenceDiagram
     participant A as Mamo account
     participant K as Agent keeper (proposer)
-    participant S as Sherwood strategy
+    participant S as Strategy (LeveragedAerodromeCL)
 
     A->>S: requestRedeem(shares, minAssetsOut)
     S-->>K: RedeemRequested(id, account, shares)
@@ -336,7 +360,7 @@ and earn nothing until deployed. Key facts for the agent:
 - **Do not confuse this with the account-level `depositIdle` nudge.** That is a *separate* surface on the
   per-user `MamoLeveragedAeroStrategy` account (sibling backend doc), gated to the owner or registry
   backend member-0, and it moves a user's plain-transferred USDC into the fund. This section is about
-  **strategy-level** idle USDC — the pooled deposits sitting on the Sherwood strategy — deployed with the
+  **strategy-level** idle USDC — the pooled deposits sitting on the strategy clone — deployed with the
   **proposer** key via `deployIdle`.
 
 ---
@@ -371,7 +395,9 @@ function vault() external view returns (address);
   gauge, swapRouter, comptroller, the Moonwell markets, the Chainlink feeds incl. `aeroUsdFeed`,
   `sequencerFeed`), **oracle config** (`maxDelay`, `gracePeriod`, `calmDeviationTicks`, `twapWindow`,
   `tickSpacing`), **position state** (`tokenId`, `posTickLower`, `posTickUpper`, `nextRedeemRequestId`),
-  and — on the live PR #14 build — the **width band** (`width`, `minWidth`, `maxWidth`).
+  the **width band** (`width`, `minWidth`, `maxWidth`), and the **venue-shape fields the keeper must not
+  assume** (`cbBTCDecimals`, `wethDecimals`, `wethIsToken0`, `wethDeliversNative`, `cbBTCSwapTickSpacing`,
+  `wethSwapTickSpacing` — see §G).
 - **Current LTV / health.** There is no public LTV getter, but the health basis is
   `collateralUsdc × 1e4 / debtUsdc` on the same hardened-Chainlink reads `_assertHealthy` uses. To compute
   it off-chain the keeper reads collateral/debt from Moonwell directly — `mUsdc.balanceOf × exchangeRateStored / 1e18`
@@ -392,17 +418,16 @@ function vault() external view returns (address);
   venue-level events (Moonwell mint/borrow/repay/redeem, Slipstream NPM increase/decrease, gauge
   stake/getReward) and transaction receipts.
 - **Adding events is an open option, not a blocker.** If the rebalancer or an indexer ends up needing
-  first-class `Compounded`/`Reranged`/`LeverageAdjusted`-style events, they can be added — the change
-  goes to the upstream Sherwood repo (the code here is vendored; upstream at the pinned commit is
-  authoritative) and lands here on the next re-vendor. Raise it when a concrete consumer needs it;
-  don't build ops tooling on the assumption they'll never exist.
+  first-class `Compounded`/`Reranged`/`LeverageAdjusted`-style events, they can be added **directly in this
+  repo** — the package is an in-repo fork now, so there is no upstream round-trip or re-vendor wait. Raise
+  it when a concrete consumer needs it; don't build ops tooling on the assumption they'll never exist.
 
 Strategy events that exist today:
 
 | Strategy event | Use |
 |---|---|
 | `RedeemRequested / RedeemFulfilled / RedeemCancelled / RedeemEmergency` | withdraw-queue tracking (§C) |
-| `FeeCrystallizeDeferred(uint8 op, uint256 navPre)` | a best-effort crystallize deferred (`op`: 0=deposit, 1=fast redeem, 2=proportional redeem). A vault-paused / feeRecipient-de-whitelisted fee-mint — investigate. |
+| `FeeCrystallizeDeferred(uint8 op, uint256 navPre)` | a best-effort crystallize deferred (`op`: 0=deposit, 1=fast redeem, 2=proportional redeem). The fee-share mint failed — on the vanilla vault the realistic cause is `depositsOpen == false` (`"LAV: deposits closed"`); investigate. |
 
 ---
 
@@ -419,18 +444,26 @@ Strategy events that exist today:
   bounded by the always-on `maxSlippageBps` (∈ (0, 1000] = ≤10%, set at init). `compound` is further
   floored by the AERO/USD oracle (`BelowOracleFloor`). Pass **tight, freshly-quoted** floors; `0` is not
   legal for `compound.minUsdcOut` (`ZeroMinOut`).
-- **Hardcoded swap-route `tickSpacing` (audit item 10).** The auxiliary USDC↔leg swap helpers
-  (`_swapUsdcExactIn`, `_sweepLegToUsdc`, `_redeemCoverShortfall`) pin `tickSpacing = 100` for the
-  USDC/cbBTC and USDC/WETH Slipstream routes (the main LP pool's spacing is config-driven). Two redeem-path
-  residual-leg sweeps pass `minOut = 0` and rely on the redeem's **aggregate** `minAssetsOut` floor.
-  Operationally: this is a single-venue assumption with no fallback — if a 100-spacing leg pool is thin or
-  manipulated, lever-down residual rebalances and full-redeem shortfall covers route through it regardless.
-  Prefer sizing exits so the fast/priced path or a pre-deleverage carries them, rather than leaning on the
-  `minOut = 0` sweeps under stressed leg-pool conditions.
+- **Swap-route `tickSpacing` is now configured, not hardcoded (was audit item 10).** The three
+  `int24(100)` literals are gone: the auxiliary USDC↔leg swap helpers (`_swapUsdcExactIn`,
+  `_sweepLegToUsdc`, `_redeemCoverShortfall`) resolve the route spacing per leg from the init params
+  `cbBTCSwapTickSpacing` / `wethSwapTickSpacing` (non-zero enforced at init; readable via `layout()`),
+  independently of the LP pool's `tickSpacing`. The single-venue-at-spacing-100 assumption is **gone** —
+  but the route is still **one pool per leg**, fixed at init and not switchable at runtime, so keep an eye
+  on the depth of whichever two swap pools the clone was wired to.
+  What has **not** changed: the redeem path's two residual-leg sweeps still pass `minOut = 0`
+  (`_sweepLegToUsdc($.cbBTC, stayersCb, 0)` / `(…$.weth, stayersWeth, 0)`) and lean entirely on the
+  redeem's **aggregate** `minAssetsOut` floor, and a full redeem's phase-1 shortfall cover runs with
+  `amountInMax = type(uint256).max`. Prefer sizing exits so the fast/priced path or a pre-deleverage
+  carries them, rather than leaning on those sweeps under stressed leg-pool conditions. (The
+  *deleverage/adjustLeverage* residual swap is separately oracle-floored — `_rebalanceCover` raises any
+  caller `minOut` to `oracleValue × (1 − maxSlippageBps)` — so the permissionless `deleverage(0)` is not
+  sandwichable.)
 - **Fee-path asymmetry (audit item 7).** Crystallize is **best-effort** on user-exit paths (defers +
   emits `FeeCrystallizeDeferred`) but **hard-reverts** on `compound`/`settle`/the redeem skim. A persistent
-  `FeeCrystallizeDeferred` on deposits/redeems while `compound` reverts points at a vault-pause or a
-  de-whitelisted `feeRecipient` — an ops issue to clear.
+  `FeeCrystallizeDeferred` on deposits/redeems while `compound` reverts points at a **frozen vault**
+  (`depositsOpen == false` → the fee-share mint reverts `"LAV: deposits closed"`) — an ops issue to clear.
+  Note the vanilla vault has **no pause and no depositor whitelist**; that one flag is the whole gate.
 - **`deleverage` accepted residual (audit item 9).** Our-feed staleness can block `deleverage` in a window
   where Moonwell's own oracle is fresh enough to liquidate; documented and accepted. Monitor Moonwell
   account liquidity independently.
@@ -439,28 +472,72 @@ See [`docs/LEVERAGED_AERO_CL_AUDIT.md`](../LEVERAGED_AERO_CL_AUDIT.md) for the f
 
 ---
 
+## G. Per-clone venue shape — read it, don't assume it
+
+The strategy now initializes against **any** Slipstream pool whose two tokens have Moonwell borrow markets
+and Chainlink feeds. Nothing about the pair is hardcoded any more, so the keeper must read the shape off
+the clone rather than assuming the launch pair:
+
+- **`weth*` / `cbBTC*` are leg SLOTS, not tokens.** `weth`/`mWeth`/`wethFeed`/`wethDecimals` are **leg A**
+  (the slot that may be delivered natively on borrow); `cbBTC`/`mCbBTC`/`cbBTCFeed`/`cbBTCDecimals` are
+  **leg B**. The names are historical — read the actual token addresses from `layout()`. Every error
+  message and field name in this guide that says "cbBTC" or "WETH" means the corresponding slot.
+- **Decimals are read, not assumed.** `cbBTCDecimals` / `wethDecimals` come from `IERC20Metadata.decimals()`
+  at init and are bounded to `[2, 18]` (`LegDecimalsOutOfRange()` otherwise). They drive every leg↔USDC
+  conversion, so an off-chain model that hardcodes 8/18 will disagree with the chain on a different pair.
+- **Pool ordering is derived.** `wethIsToken0` comes from `pool.token0()` at init. It is what maps
+  (leg B, leg A) onto (amount0, amount1) — including for `rerange`'s `minLiq0`/`minLiq1`. Read it; never
+  infer ordering from the slot names.
+- **Native wrap is conditional (`wethDeliversNative`).** With `true` (Base mWETH's behavior) the strategy
+  wraps borrowed native ETH into the leg-A token. With `false` the wrap helper is a **no-op**, so any ETH
+  that reaches the strategy's `receive()` is **stranded** — `rescueToVault` is ERC-20-only and there is no
+  ETH sweep. Do not send ETH to the clone.
+- **Init venue guards** (all `VenueMismatch()` unless noted): pool `tickSpacing` must equal the declared
+  one; the pool's token set must be exactly the two declared legs; each Moonwell market's `underlying()`
+  must be its declared leg; both leg-swap spacings must be non-zero. Plus `UnsupportedLeg()` if a leg is
+  USDC (the unit of account) or the gauge's reward token (which `compound()` sells wholesale).
+
+### Known gaps the operator must know (disclosed in PR #66)
+
+- **No behavioral fork coverage for these rewrites yet.** The ordering / leg-decimals / swap-spacing
+  changes are argued equivalent under the legacy (cbBTC+WETH, spacing-100) config and are proven **at init
+  only** — never through a mint, compound, rerange or redeem on a fork. A Slipstream+Moonwell fork suite is
+  the named **top follow-up before mainnet**; treat any non-legacy pair as unvalidated until it lands.
+- **`underlying()` unverified on the live Moonwell markets.** The new init guard will **brick
+  initialization** if the live mWETH / mcbBTC markets don't expose `underlying()`. Confirm on a Base fork
+  before any deploy.
+
+---
+
 ## Staging
+
+> ⚠️ **The live staging instance is STALE.** The clone below is a Sherwood-era build sitting under
+> Sherwood's `SyndicateVault`, so its lifecycle, rescue and fee-config surfaces are the *old* ones — none of
+> `activateStrategy` / `settleStrategy` / `redeemSettled` / `setFeeConfig` exist there, and the clone
+> predates the any-pool init and per-leg swap spacings documented above. A redeploy onto the
+> `LeveragedAeroVault` architecture is **pending** (deploy tooling not written yet). Re-read
+> `script/tenderly/leveraged-aero-vnet.json` and
+> [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../LEVERAGED_AERO_VNET_RUNBOOK.md) before wiring an environment,
+> and read every risk/venue value off `layout()` on the clone you actually target.
 
 | Field | Value |
 |---|---|
-| Network | Base fork (Tenderly Virtual TestNet) — **current staging instance, rotates** |
+| Network | Base fork (Tenderly Virtual TestNet) — **stale instance, pending redeploy** |
 | RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Sherwood strategy clone (the operator target) | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` — PR #14 build, live proposal id 3, width 4000 / band [200, 20000] |
-| Previous clone (proposal 2) | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` — now `Settled` (useful as a real Settled-state test target) |
+| Strategy clone (the operator target) | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` — Sherwood-era build, width 4000 / band [200, 20000] |
+| Previous clone | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` — now `Settled` (useful as a real Settled-state test target) |
 | Leveraged-aero template | `0x8eE3AD5B3b574b4253985a7F32aB1231474CA381` |
-| Sherwood vault (shares, 12dp) | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` |
+| Vault (shares, 12dp) | Sherwood-era `SyndicateVault` on the current instance — **not** `LeveragedAeroVault` |
 | Proposer / agent (`MAMO_BACKEND`) | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
 
-Staging endpoints and clone addresses rotate — re-read the current instance from
-[`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../LEVERAGED_AERO_VNET_RUNBOOK.md) before wiring an environment.
 Production addresses are published separately at deploy.
 
 ---
 
 ## Rebalancer checklist
 
-- [ ] Sign every operator op with the Sherwood **proposer** key (`MAMO_BACKEND`, `0x2Ab0…5e73`); confirm `strategy.proposer()` matches before wiring.
-- [ ] Gate the whole operator loop on `state() == Executed`; `execute`/`settle` are the governor's (`onlyVault`), not yours.
+- [ ] Sign every operator op with the strategy **proposer** key (`MAMO_BACKEND`, `0x2Ab0…5e73`); confirm `strategy.proposer()` matches before wiring.
+- [ ] Gate the whole operator loop on `state() == Executed`; `execute`/`settle` are `onlyVault` and belong to the vault owner's `activateStrategy` / `settleStrategy`, not to you.
 - [ ] Periodically `deployIdle(amount, minLiquidity)` accumulated strategy-idle USDC within leverage caps; pass a real `minLiquidity`.
 - [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed.
 - [ ] `rerange(width, minLiq0, minLiq1)` when spot drifts out of range or the model picks a new width — `width` in raw ticks, tickSpacing-aligned, inside `[minWidth, maxWidth]` (else `WidthOutOfBounds`); expect calm-gate reverts on a shoved pool (retry when calm).
@@ -468,5 +545,7 @@ Production addresses are published separately at deploy.
 - [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
 - [ ] Treat `FULFILL_WINDOW = 2 days` as the hard SLA; alert before it; every `RedeemEmergency` is a missed SLA.
 - [ ] Run `deleverage(minOut)` proactively as health nears `minHealthBps`; remember it is permissionless (others will trigger it too).
-- [ ] Monitor `nav()` reverts as a "priced paths degraded to async" signal — **not** a fulfill blocker (the queue is oracle-free); monitor `FeeCrystallizeDeferred` for vault-pause / feeRecipient issues.
+- [ ] Monitor `nav()` reverts as a "priced paths degraded to async" signal — **not** a fulfill blocker (the queue is oracle-free); monitor `FeeCrystallizeDeferred`, whose realistic cause is a frozen vault (`depositsOpen == false`).
+- [ ] Read the venue shape off `layout()` before wiring anything numeric — leg tokens, `cbBTCDecimals`/`wethDecimals`, `wethIsToken0`, the two leg-swap spacings, the width band (§G). Never hardcode the launch pair.
+- [ ] Know the open gaps: the any-pool rewrites have **no behavioral fork coverage** yet, and the Moonwell `underlying()` init guard is unverified on the live markets (§G).
 - [ ] Use `rescueToVault(token)` only for genuine stray tokens; it reverts on any position/accounting token and always pays the vault.

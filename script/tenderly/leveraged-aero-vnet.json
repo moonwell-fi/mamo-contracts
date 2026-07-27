@@ -9,10 +9,15 @@
     "accountFactory": "0x9f548228A41d18e2DC736ceF048cfBeC8fFC55E6",
     "strategyRegistry": "0x46a5624C2ba92c08aBA4B206297052EDf14baa92"
   },
+  "pooled": {
+    "strategyClone": "0x5E22913E4C96f816133fbc8E894F652a4f87C760",
+    "vault": "0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9"
+  },
   "sherwood": {
     "strategyClone": "0x5E22913E4C96f816133fbc8E894F652a4f87C760",
     "syndicateVault": "0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9"
   },
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  "note": "Addresses change when the instance rotates or the harness redeploys — always read this file, never hardcode. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run make tenderly-leveraged-aero-account after any refresh to regenerate."
+  "note": "Addresses change when the instance rotates or the harness redeploys — always read this file, never hardcode. The pooled object is the LeveragedAeroVault + LeveragedAerodromeCLStrategy clone, both in-repo since PR #66 removed the Sherwood dependency; the sherwood object is a deprecated alias of the same two addresses, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run make tenderly-leveraged-aero-account after any refresh to regenerate.",
+  "vaultGeneration": "sherwood-syndicate-vault (legacy: openDeposits(), no redeemSettled)"
 }

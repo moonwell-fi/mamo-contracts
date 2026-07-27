@@ -87,11 +87,12 @@ tenderly-matrix:
 tenderly-price-checker:
 	./script/tenderly/run-harness.sh price-checker
 
-# MamoLeveragedAeroStrategy account deploy-drive + e2e smoke against the LIVE persistent Base-fork vnet
-# where the LeveragedAeroVault + strategy stack is already deployed. Replays proposal 012 (deploy
-# impl+factory, 3 multisig actions, validate) then the full account lifecycle (create→deposit→withdraw→
-# request→fulfill→claim→depositIdle gate) as unlocked-impersonation broadcast txs. ALWAYS reuses
-# TENDERLY_VNET_RPC_URL.
+# Account-layer deploy-drive + e2e smoke against the LIVE persistent Base-fork vnet where the POOLED
+# layer (LeveragedAeroVault + a LeveragedAerodromeCLStrategy clone) is already deployed. Replays
+# proposal 012 (deploy impl+factory, the 3 multisig actions, validate) then the full account lifecycle
+# (create→deposit→withdraw→request→fulfill→claim→depositIdle gate) as unlocked-impersonation broadcast
+# txs. ALWAYS reuses TENDERLY_VNET_RPC_URL. NOTE: the pooled layer's deploy tooling is not written yet
+# (see docs/LEVERAGED_AERO_VNET_RUNBOOK.md Phase B); the current instance is Sherwood-era.
 tenderly-leveraged-aero-account:
 	./script/tenderly/run-harness.sh leveraged-aero-account
 
