@@ -25,8 +25,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///
 ///         The **protocol** slice is taken off the GROSS gain above the HWM *first*
 ///         (`protocol = gain × protocolFeeBps / 10 000`), then the performance fee accrues
-///         on the reduced `gain − protocol` — mirroring the governor's "protocol before agent"
-///         ordering in `_distributeFees`. The protocol slice is a USDC LIABILITY the strategy
+///         on the reduced `gain − protocol` (protocol-before-performance ordering).
+///         The protocol slice is a USDC LIABILITY the strategy
 ///         discharges where USDC flows (redeem / compound / settle), NOT a fee-share mint.
 ///         The **HWM still advances to the gross-peak `navPerShareX`** (computed on `navPre`),
 ///         so no gain is ever charged twice and the next cycle measures from the gross peak

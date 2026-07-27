@@ -28,7 +28,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 /// @notice Net-short leveraged Aerodrome CL strategy: USDC collateral → Moonwell (mUSDC)
 ///         → borrow cbBTC + WETH → Slipstream CL position → AERO gauge.
 ///
-///         ERC-1167 clone, one per proposal (BaseStrategy's constructor locks the template).
+///         ERC-1167 clone, one per vault (BaseStrategy's constructor locks the template).
 ///         NAV is oracle-priced via `LeveragedAeroValuation.netEquityUsdc`, fail-closed.
 ///         `ReentrancyGuardTransient` guards every state-changing external op.
 contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient, ERC721Holder {
@@ -661,7 +661,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
             return;
         }
         // Protocol fee is read LIVE from ProtocolConfig via `factory.protocolConfig()` (a
-        // self-fee'd strategy is skipped by the governor's settle-fee path, so the protocol
+        // self-fee'd strategy handles all fee accounting itself, so the protocol
         // leg is collected here instead). Treat a missing factory/config as 0 bps.
         //
         // SHARED ARG-LIST CONTRACT: the 8-arg `LeveragedAeroFees.crystallize(...)` call below is the
@@ -905,7 +905,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @notice Permissionless safety valve: when health falls below `minHealthBps`, ANYONE may unwind
     ///         CL liquidity and repay debt to restore the buffer. Deliberately NOT `onlyProposer` — a
-    ///         public deleverage is the user-safety backstop for the indefinite proposal (§8). Logic in
+    ///         public deleverage is the user-safety backstop for the indefinitely-lived position. Logic in
     ///         `LeveragedAeroManager.deleverageImpl`: same hardened-Chainlink health basis as
     ///         `_assertHealthy`, reverts `HealthyNoDeleverage` when safe / no debt, else repays down to
     ///         a small buffer above the minimum (a recovery op, not the full LTV-≤-max gate).
@@ -1093,7 +1093,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @notice Cancel an unsettled request and return the escrowed shares to its owner. Request owner
     ///         only, callable in ANY strategy state (no `State.Executed` gate): a request outstanding
-    ///         when the proposal settles must stay cancellable so the owner can exit via the vault
+    ///         when the strategy settles must stay cancellable so the owner can exit via the vault
     ///         normally.
     /// @param id Request id to cancel.
     function cancelRedeem(uint256 id) external nonReentrant {

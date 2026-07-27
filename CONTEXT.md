@@ -65,3 +65,33 @@ _Avoid_: reinvestment rate
 **Escape hatch**:
 An admin-gated recovery path that works regardless of operational state: the balancer's `exit()` (always available, including mid-flight and paused) and both `recoverERC20` functions (balancer and module).
 _Avoid_: emergency exit (only `exit()` is the mid-flight escape; recoverERC20 is narrower), rescue function
+
+### Leveraged Aero Vault
+
+**Vanilla vault**:
+`LeveragedAeroVault` — the in-repo share ledger + owner-driven lifecycle driver the vendored leveraged-aero strategy binds to, replacing Sherwood's `SyndicateVault`. Not ERC-4626, not upgradeable, holds no position and computes no price.
+_Avoid_: SyndicateVault (the replaced upstream contract), 4626 vault, minimal vault
+
+**Leg A / Leg B**:
+The two borrowed tokens of the CL pair, carried in `Layout` under the historical names `weth`/`mWeth`/`wethFeed` (leg A) and `cbBTC`/`mCbBTC`/`cbBTCFeed` (leg B). Slot names only — the actual tokens are init parameters, validated against the pool.
+_Avoid_: WETH leg / cbBTC leg as if fixed, token0/token1 (that is pool ordering, derived separately via `wethIsToken0`)
+
+**Deposits open**:
+The vault's `depositsOpen` flag. Gates `strategyMint` only — new share issuance including fee-share crystallise. Never gates `strategyBurn`: exits keep working while issuance is frozen.
+_Avoid_: paused, pause (there is no pause), deposits enabled
+
+**Activate / Settle**:
+The owner-only lifecycle drivers `activateStrategy(seed)` (pull seed to the strategy → `execute()`) and `settleStrategy()` (`settle()` → unwind → assets pushed to the vault). One-way, no proposal or vote behind them.
+_Avoid_: execute/settle unqualified (those are the strategy-side calls), propose, proposal lifecycle
+
+**Redeem-settled**:
+The vault's permissionless post-settle exit `redeemSettled(shares)`: pro-rata against the vault's settled asset balance, priced on pre-burn supply. The only exit once the strategy is Settled — the strategy's own redeem paths require `Executed`.
+_Avoid_: withdraw, redeem (reserved for the strategy's in-position `redeem`)
+
+**Fee-config hops**:
+The two-call protocol-fee lookup the strategy inherits (`vault.factory()` → `.protocolConfig()`). The vault plays both roles and returns `address(0)` on the first hop while `feeConfig` is unset — the launch default, meaning the protocol-fee leg is off.
+_Avoid_: factory (nothing is deployed by it), ProtocolConfig as a contract we ship
+
+**Width band**:
+The init-time `[minWidth, maxWidth]` bounds, on the `tickSpacing` grid, that every rerange width must satisfy — the genesis width included. Enforced by `_checkWidth`, rejected with `WidthOutOfBounds()`.
+_Avoid_: range (that is the resulting tickLower/tickUpper), tick spacing (the grid the band sits on)
