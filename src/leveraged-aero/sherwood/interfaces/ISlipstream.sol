@@ -154,6 +154,18 @@ interface ICLPool {
 
     /// @notice The gauge address associated with this pool (set by the Voter on first epoch).
     function gauge() external view returns (address);
+
+    /// @notice The CLFactory that deployed this pool.
+    function factory() external view returns (address);
+}
+
+/// @title Aerodrome Slipstream CL Factory
+/// @notice Minimal interface for pool-existence probes. Slipstream keys pools by
+///         `(tokenA, tokenB, tickSpacing)` — there is no `fee` dimension.
+interface ICLFactory {
+    /// @notice The pool for `(tokenA, tokenB, tickSpacing)`, or `address(0)` when none exists.
+    /// @dev Token order is irrelevant — the factory sorts the pair internally.
+    function getPool(address tokenA, address tokenB, int24 tickSpacing) external view returns (address pool);
 }
 
 /// @title Aerodrome Slipstream CL Gauge

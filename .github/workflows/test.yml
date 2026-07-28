@@ -311,7 +311,9 @@ jobs:
         with:
           version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
 
-      - name: Run leveraged aero vault tests
+      # Covers BOTH test/LeveragedAeroVault.unit.t.sol and test/leveraged-aero/*.unit.t.sol —
+      # the make target names each path explicitly rather than relying on the test-unit glob.
+      - name: Run leveraged aero vault + vendored strategy tests
         run: make leveraged-aero-vault
 
       - name: Run leveraged aero account tests

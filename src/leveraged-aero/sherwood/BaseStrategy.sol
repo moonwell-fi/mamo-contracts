@@ -40,6 +40,12 @@ abstract contract BaseStrategy is IStrategy {
         Settled
     }
 
+    // SLOT DISCIPLINE: these four live in SEQUENTIAL storage (slots 0-1), NOT in a concrete
+    // strategy's ERC-7201 `Layout`. Inserting, reordering or removing any of them shifts every
+    // sequential slot in every inheriting strategy. Clones are not upgradeable, so a change here is
+    // safe ONLY before a template is deployed and cloned — afterwards it silently re-points `_vault`
+    // / `_proposer` / `_state` on every live clone, with no migration path. Append-only, and only
+    // pre-deployment. (A concrete strategy's diamond `Layout` is unaffected: fixed hashed slot.)
     address private _vault;
     address private _proposer;
     State internal _state;

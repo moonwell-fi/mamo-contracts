@@ -18,10 +18,11 @@ import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
 import {IProtocolConfig} from "./sherwood/interfaces/IProtocolConfig.sol";
-import {ICLGauge, ICLPool, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
+import {ICLFactory, ICLGauge, ICLPool, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
 import {IStrategy} from "./sherwood/interfaces/IStrategy.sol";
 import {ISyndicateFactory} from "./sherwood/interfaces/ISyndicateFactory.sol";
 import {ISyndicateVault} from "./sherwood/interfaces/ISyndicateVault.sol";
+import {TickMath} from "./sherwood/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title LeveragedAerodromeCLStrategy
@@ -75,6 +76,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error VenueMismatch(); // pool/market wiring does not match the declared legs or tickSpacing
     error UnsupportedLeg(); // a leg is the unit of account (usdc) or the gauge reward token
     error WidthOutOfBounds(); // rerange width off the tickSpacing grid or outside [minWidth, maxWidth]
+    error ZeroShares(); // deposit would mint 0 shares (dust assets against a large book) — pay-for-nothing
 
     // ── Constants ──
     /// @dev Position `kind` tag for the PriceRouter adapter registry.
@@ -108,6 +110,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint8 private constant OP_DEPOSIT = 0;
     uint8 private constant OP_REDEEM = 1; // fast redeem
     uint8 private constant OP_FULFILL = 2; // proportional redeem (fulfill / emergency)
+    uint8 private constant OP_COMPOUND = 3; // harvest / redeploy
 
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
     //
@@ -418,8 +421,21 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (ICLPool(p.pool).token1() != (wethIsToken0_ ? p.cbBTC : p.weth)) revert VenueMismatch();
         if (IMoonwellMarket(p.mCbBTC).underlying() != p.cbBTC) revert VenueMismatch();
         if (IMoonwellMarket(p.mWeth).underlying() != p.weth) revert VenueMismatch();
-        // The leg↔USDC swap pools are separate venues from the LP pool — their spacings are inputs.
-        if (p.cbBTCSwapTickSpacing == 0 || p.wethSwapTickSpacing == 0) revert VenueMismatch();
+        // Symmetric with the two borrow legs: the collateral market must wrap the unit of account,
+        // or every `_supplyCollateral` / `_redeemCollateral` would move a token the NAV never prices.
+        if (IMoonwellMarket(p.mUsdc).underlying() != p.usdc) revert VenueMismatch();
+        // The leg↔USDC swap pools are separate venues from the LP pool — their spacings are inputs,
+        // so they get the same treatment as the LP pool: positive, and an EXISTING pool at that
+        // spacing. Unprobed, a typo'd spacing routes every swap at a nonexistent pool and bricks
+        // settle / deleverage / shortfall-cover on a live levered book.
+        if (p.cbBTCSwapTickSpacing <= 0 || p.wethSwapTickSpacing <= 0) revert VenueMismatch();
+        address clFactory = ICLPool(p.pool).factory();
+        if (ICLFactory(clFactory).getPool(p.usdc, p.cbBTC, p.cbBTCSwapTickSpacing) == address(0)) {
+            revert VenueMismatch();
+        }
+        if (ICLFactory(clFactory).getPool(p.usdc, p.weth, p.wethSwapTickSpacing) == address(0)) {
+            revert VenueMismatch();
+        }
 
         // Reject legs that break an accounting invariant: USDC is the unit of account (idle-USDC
         // bookkeeping would double-count), and the gauge reward token is sold wholesale by
@@ -428,6 +444,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (p.cbBTC == p.usdc || p.weth == p.usdc || p.cbBTC == rewardTok || p.weth == rewardTok) {
             revert UnsupportedLeg();
         }
+        // `compoundImpl`'s oracle floor hardcodes `mulDiv(aeroBal, price8, 1e20)` — i.e. an 18dp
+        // reward token against an 8dp feed. A reward token of any other denomination would mis-scale
+        // that floor by orders of magnitude, so pin it here (reusing the feed-decimals error).
+        if (IERC20Metadata(rewardTok).decimals() != 18) revert UnexpectedFeedDecimals();
 
         // Leg decimals drive every token↔USDC conversion — read them instead of assuming 8/18. The
         // [2, 18] band keeps `10 ** dec` well inside uint256 and rejects degenerate 0/1dp tokens.
@@ -442,6 +462,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (p.minWidth % spacing != 0 || p.maxWidth % spacing != 0) revert WidthOutOfBounds();
         if (uint256(p.minWidth) < 2 * uint256(spacing)) revert WidthOutOfBounds();
         if (p.minWidth > p.maxWidth) revert WidthOutOfBounds();
+        // Ceiling on the band: `_computeTickRange` spans `width/2` ticks each side of the pool tick,
+        // so a width beyond the full tick domain can only ever produce out-of-domain bounds (and, at
+        // the uint24 extreme, an int24 wrap in the `currentTick ± span` arithmetic).
+        if (uint256(p.maxWidth) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert WidthOutOfBounds();
         _checkWidth(p.width, p.tickSpacing, p.minWidth, p.maxWidth);
 
         uint16 cfBps = _readCollateralFactor(p.comptroller, p.mUsdc);
@@ -819,6 +843,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // First deposit (supply==0) legitimately has navNet==0 (empty book) → must stay allowed.
         if (navNet == 0 && supply > 0) revert NavUnpriceable();
         shares = Math.mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navNet + 1);
+        // Reject a pay-for-nothing deposit (mirrors redeem's `ZeroAssetsOut`): dust `assets` against
+        // a large book floor to 0 shares, and with the common `minShares == 0` the guard below would
+        // fall through and take the USDC for no claim.
+        if (shares == 0) revert ZeroShares();
         if (shares < minShares) revert InsufficientShares();
         ISyndicateVault(vault_).strategyMint(msg.sender, shares);
     }
@@ -848,8 +876,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @param minLiquidity Minimum CL liquidity on the redeploy (slippage guard).
     function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        // Crystallize on the pre-compound NAV (fail-closed; mirrors deposit's 3.6 fee model).
-        _crystallizeFees(nav());
+        // Crystallize on the pre-compound NAV (fail-closed on the PRICE; `nav()` stays outside the
+        // try, mirroring deposit's 3.6 fee model). Best-effort on the MINT (H3): the vault's issuance
+        // gate can be shut while the position stays live, and a harvest must not brick on a fee-share
+        // mint — this widens the accepted H3 fee-shifting residual (a deferred slice accrues to
+        // holders until the next crystallise point) from deposit/redeem to compound.
+        _crystallizeBestEffort(nav(), OP_COMPOUND);
         // Discharge the protocol fee from the swapped-out USDC BEFORE it's redeployed. `skimCap`
         // is 0 when there's no recipient (accrual persists; discharge defers). The manager pays
         // `min(skimCap, usdcOut)` internally, redeploys the remainder, and returns the amount paid;
@@ -876,7 +908,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         deferred to the next crystallize point (not lost) and the HWM is unaffected.
     /// @param width_  Full range width in ticks for this cycle (span = `width_/2` each side of the
     ///                calm tick). Must sit on the tickSpacing grid inside `[minWidth, maxWidth]`;
-    ///                persisted as the new `width` so `nav()`/subsequent mints see it.
+    ///                persisted as the new `width` so `nav()`/subsequent mints see it — including on
+    ///                a FLAT book, where the recenter itself is a no-op but the width still takes
+    ///                effect for the next `deployIdle` / `compound` mint. Centring is grid-approximate:
+    ///                both bounds round DOWN onto the spacing grid, so the realised range sits off the
+    ///                calm tick by up to one spacing (largest when `width_ / tickSpacing` is odd).
     /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
     /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
     function rerange(uint24 width_, uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant {
@@ -1182,18 +1218,30 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @notice Sweep a STRAY ERC-20 (airdrop / accidental send) back to the vault. Callable by the
     ///         proposer OR the vault owner (§8) — the owner leg is what keeps the sweep reachable
     ///         through a dead proposer key. Target is always `vault()`, never caller-supplied, so
-    ///         neither caller can exfil (§13); onward recovery is the vault's own owner-only
-    ///         `rescueERC20` (which refuses the vault asset while shares are outstanding). Reverts
-    ///         `CannotRescuePositionToken` for any position/accounting token — usdc / cbBTC / weth
-    ///         (all NAV-counted) / mUsdc / mCbBTC / mWeth, and AERO (read live from the gauge so a
-    ///         sweep can't bypass `compound()`). The position NFT is never swept (no ERC-721 path).
+    ///         neither caller picks the destination (§13); onward recovery is the vault's own
+    ///         owner-only `rescueERC20`, which refuses BOTH the vault asset (while shares are
+    ///         outstanding) and the share token itself. Reverts `CannotRescuePositionToken` for any
+    ///         position/accounting token — usdc / cbBTC / weth (all NAV-counted) / mUsdc / mCbBTC /
+    ///         mWeth — and for two more:
+    ///
+    ///         - the VAULT SHARE token: this strategy custodies live shares (`requestRedeem` escrows,
+    ///           and the shares pulled mid-`redeem`), which are depositor claims, not strays. Without
+    ///           this the pair `rescueToVault(vault) → vault.rescueERC20(vault, attacker)` would
+    ///           exfiltrate every escrowed claim. Escrows are recovered via `cancelRedeem`.
+    ///         - the gauge reward token (read live from the gauge) WHILE EXECUTED, so a sweep can't
+    ///           bypass `compound()`. Once `Settled` that reason is gone — `compound` reverts
+    ///           `NotExecuted` and the unwind's `gauge.withdraw` auto-claims a final AERO tranche
+    ///           that `settleImpl` never sells — so post-settle it IS a stray and sweeping it to the
+    ///           vault (where the owner's non-asset `rescueERC20` applies) is the only recovery.
+    ///
+    ///         The position NFT is never swept (no ERC-721 path).
     function rescueToVault(address token) external nonReentrant {
         if (msg.sender != proposer() && msg.sender != Ownable(vault()).owner()) revert NotProposerOrOwner();
         Layout storage $ = _layout();
         address aero = ICLGauge($.gauge).rewardToken();
         if (
-            token == $.usdc || token == $.cbBTC || token == $.weth || token == $.mUsdc || token == $.mCbBTC
-                || token == $.mWeth || token == aero
+            token == vault() || token == $.usdc || token == $.cbBTC || token == $.weth || token == $.mUsdc
+                || token == $.mCbBTC || token == $.mWeth || (token == aero && _state != State.Settled)
         ) revert CannotRescuePositionToken();
         _pushAllToVault(token);
     }

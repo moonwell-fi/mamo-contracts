@@ -5,6 +5,7 @@ import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -82,15 +83,22 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /**
      * @notice Share decimals: the asset's decimals plus a fixed 6-decimal offset (USDC 6dp → 12dp
      *         shares).
-     * @dev The offset is LOAD-BEARING, not cosmetic. The vendored strategy prices the genesis
-     *      deposit through an ERC-4626-style virtual offset hardcoded as
-     *      `SHARES_VIRTUAL_OFFSET = 1e6`, i.e. `shares = assets × (supply + 1e6) / (nav + 1)`. On an
-     *      empty book that mints `assets × 1e6` shares — exactly a 6-decimal step up from the 6dp
-     *      asset. Returning anything but `assetDecimals + 6` makes the share token's advertised
-     *      denomination disagree with the units the strategy actually mints.
+     * @dev The offset is LOAD-BEARING, not cosmetic. The vendored strategy prices every deposit
+     *      through an ERC-4626-style virtual offset hardcoded as `SHARES_VIRTUAL_OFFSET = 1e6`,
+     *      i.e. `shares = assets × (supply + 1e6) / (nav + 1)`. Against a zero supply AND a zero
+     *      NAV that collapses to `assets × 1e6` — exactly a 6-decimal step up from the 6dp asset,
+     *      which is the rate {activateStrategy} mints the seed at so later deposits price against a
+     *      book whose supply and NAV agree. Returning anything but `assetDecimals + 6` makes the
+     *      share token's advertised denomination disagree with the units the strategy mints.
      */
     function decimals() public view override returns (uint8) {
         return IERC20Metadata(asset).decimals() + 6;
+    }
+
+    /// @notice Disabled: the owner is the strategy's rescue authority and the only lifecycle driver
+    ///         (`activateStrategy` / `settleStrategy`), so renouncing would strand the book.
+    function renounceOwnership() public pure override {
+        revert("LAV: renounce disabled");
     }
 
     // ==================== STRATEGY SHARE HOOKS ====================
@@ -144,13 +152,46 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     // ==================== OWNER: WIRING ====================
 
     /**
-     * @notice Bind the strategy clone. Set-once: the share ledger's integrity rests entirely on
-     *         `msg.sender == strategy`, so a rotatable pointer would let a future owner mint freely
-     *         against existing holders.
+     * @notice Bind an ALREADY-initialized strategy clone. Set-once: the share ledger's integrity
+     *         rests entirely on `msg.sender == strategy`, so a rotatable pointer would let a future
+     *         owner mint freely against existing holders.
+     * @dev The clone must already point back here (`strategy_.vault() == address(this)`). Binding a
+     *      clone initialized against a DIFFERENT vault would hand this ledger's mint/burn hooks to a
+     *      contract pricing another book — the only way to catch that is to ask the clone.
      */
     function setStrategy(address strategy_) external onlyOwner {
+        _bind(strategy_);
+    }
+
+    /**
+     * @notice Deploy an ERC-1167 clone of `template`, initialize it against THIS vault, and bind it
+     *         — atomically, in one owner transaction.
+     * @dev Closes the init/bind race the two-transaction flow leaves open: a clone deployed and left
+     *      uninitialized can be `initialize`d by anyone (the template's constructor only locks the
+     *      TEMPLATE), so between a bare `Clones.clone` and the owner's `initialize` a front-runner
+     *      can seize the proposer role. Cloning + initializing + binding in one call removes the gap;
+     *      `_bind` re-checks the binding, so this cannot bind a foreign-vault clone either.
+     * @param template  The strategy template to clone (its constructor locked its own `initialize`).
+     * @param proposer_ The proposer role for the new clone.
+     * @param initData  ABI-encoded strategy-specific init params.
+     * @return clone    The deployed, initialized and bound clone.
+     */
+    function cloneAndBind(address template, address proposer_, bytes calldata initData)
+        external
+        onlyOwner
+        returns (address clone)
+    {
+        require(strategy == address(0), "LAV: strategy already set");
+        clone = Clones.clone(template);
+        IStrategy(clone).initialize(address(this), proposer_, initData);
+        _bind(clone);
+    }
+
+    /// @dev Shared set-once bind. Both entrypoints route here so the checks can never drift apart.
+    function _bind(address strategy_) private {
         require(strategy == address(0), "LAV: strategy already set");
         require(strategy_ != address(0), "LAV: invalid strategy");
+        require(IStrategy(strategy_).vault() == address(this), "LAV: strategy not bound to this vault");
         strategy = strategy_;
         emit StrategySet(strategy_);
     }
@@ -163,6 +204,14 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
 
     /// @notice Point the strategy's protocol-fee lookup at a config contract, or clear it
     ///         (`address(0)` → fees off). Read live by the strategy on every crystallise.
+    /// @dev OWNER-TRUSTED, and deliberately unvalidated + mutable. The pointed-at contract supplies
+    ///      both `protocolFeeBps()` and `protocolFeeRecipient()` LIVE on every crystallise — no cap,
+    ///      no timelock, no snapshot — so an owner may raise the protocol fee or redirect the
+    ///      recipient with effect from the next accrual. The management + performance ceilings are
+    ///      enforced at strategy init and are NOT affected; this is the protocol leg only. The owner
+    ///      is expected to be MAMO_MULTISIG. Blast radius the other way too: a config whose reads
+    ///      REVERT hard-reverts `compound()` / `_settle()` / the redeem skim (those reads are
+    ///      deliberately un-try'd), so point this only at a contract known to answer.
     function setFeeConfig(address feeConfig_) external onlyOwner {
         feeConfig = feeConfig_;
         emit FeeConfigUpdated(feeConfig_);
@@ -171,12 +220,24 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     // ==================== OWNER: LIFECYCLE ====================
 
     /**
-     * @notice Seed the strategy and drive it Pending → Executed.
+     * @notice Seed the strategy, drive it Pending → Executed, and mint the seeder the genesis
+     *         shares backing that seed.
      * @dev The seed is pulled from the CALLER (owner) straight to the strategy — the vault never
      *      custodies it. A seed is mandatory in practice: the strategy's `_supplyCollateral` reads
      *      its OWN asset balance and reverts `ExecuteZeroBalance` at 0, so `seedAmount == 0` fails
      *      inside `execute()`, not here. Calling from this contract is what satisfies the strategy's
      *      `onlyVault` (a raw `msg.sender == vault` compare).
+     *
+     *      The mint is NOT optional bookkeeping. The seed raises the strategy's NAV while supply is
+     *      still 0, and the strategy prices deposits as `shares = assets × (supply + 1e6)/(nav + 1)`
+     *      — so an unminted seed makes the FIRST depositor mint against `supply == 0` but a nonzero
+     *      NAV, handing them ~100% of a book they only half funded. Minting at the genesis rate
+     *      (`seedAmount × 10 ** offset`, the same `assets × 1e6` the strategy's own formula produces
+     *      on a truly empty book) keeps supply and NAV in step, so the next depositor mints a fair
+     *      claim. Deliberately `_mint`, not {strategyMint}: this is the owner's own capital going in
+     *      at a fixed, un-priced rate, so it is not subject to the {depositsOpen} issuance gate.
+     *
+     *      Minted AFTER `execute()` so a strategy that reverts on activation leaves no shares behind.
      * @param seedAmount Asset units (6dp) to transfer to the strategy before executing.
      */
     function activateStrategy(uint256 seedAmount) external onlyOwner {
@@ -184,6 +245,7 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         require(strategy_ != address(0), "LAV: strategy not set");
         IERC20(asset).safeTransferFrom(msg.sender, strategy_, seedAmount);
         IStrategy(strategy_).execute();
+        _mint(msg.sender, seedAmount * 10 ** (decimals() - IERC20Metadata(asset).decimals()));
         emit StrategyActivated(strategy_, seedAmount);
     }
 
@@ -231,14 +293,21 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
 
     /**
      * @notice Sweep a token out of the vault.
-     * @dev Any non-asset token, any time — the vault is a plain transfer target for the strategy's
-     *      `rescueToVault` sweeps, and those airdrops/strays back no shares. The ASSET is claimable
-     *      only once `totalSupply() == 0`: pre-settlement any asset balance is dust/donations, and
-     *      post-settlement it is the {redeemSettled} pot, so the owner may not touch it while a
-     *      single share is outstanding.
+     * @dev Any third-party token, any time — the vault is a plain transfer target for the strategy's
+     *      `rescueToVault` sweeps, and those airdrops/strays back no shares. Two exclusions:
+     *
+     *      - The ASSET is claimable only once `totalSupply() == 0`: pre-settlement any asset balance
+     *        is dust/donations, and post-settlement it is the {redeemSettled} pot, so the owner may
+     *        not touch it while a single share is outstanding.
+     *      - The vault's OWN share token is never rescuable. The strategy custodies live shares
+     *        (`requestRedeem` escrows, and the shares it pulls mid-`redeem`); a share balance that
+     *        reaches this contract is someone's un-burned claim on the pot, not a stray, so
+     *        forwarding it to an owner-chosen address would be an exfiltration of depositor value.
+     *        Escrowed shares are recovered by their owner through the strategy's `cancelRedeem`.
      */
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "LAV: invalid recipient");
+        require(token != address(this), "LAV: cannot rescue shares");
         require(token != asset || totalSupply() == 0, "LAV: asset reserved for redemptions");
         IERC20(token).safeTransfer(to, amount);
         emit Rescued(token, to, amount);
