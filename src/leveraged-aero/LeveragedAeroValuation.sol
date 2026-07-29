@@ -2,14 +2,35 @@
 pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {ICToken} from "./sherwood/interfaces/ICToken.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
+import {ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
 import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
 import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "./sherwood/libraries/TickMath.sol";
+
+/// @dev Minimal Aerodrome v2 (AMM) Router — used for the `compound` AERO→USDC reward swap (see
+///      `swapAeroToUsdc`). The Slipstream CL SwapRouter only serves CL pools, so the reward leg needs
+///      its own venue interface.
+interface IAeroRouter {
+    struct Route {
+        address from;
+        address to;
+        bool stable;
+        address factory;
+    }
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        Route[] calldata routes,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
 
 /// @title  LeveragedAeroValuation
 /// @notice Net-equity **oracle** NAV for the leveraged Aerodrome CL strategy. This is
@@ -49,6 +70,8 @@ import {TickMath} from "./sherwood/libraries/TickMath.sol";
 ///         mint mark cannot be tick-shoved; the same two feeds price the debt, so the
 ///         whole net-short book nets on a single Chainlink basis.
 library LeveragedAeroValuation {
+    using SafeERC20 for IERC20;
+
     /// @notice Spot tick deviated from the pool TWAP beyond `calmDeviationTicks`.
     error CalmGateBreached();
     /// @notice Net equity is ≤ 0 — minting is fail-closed (no shares at/under water).
@@ -76,6 +99,11 @@ library LeveragedAeroValuation {
     ///         selector matches the same-signature declarations in `LeveragedAeroManager` /
     ///         `LeveragedAerodromeCLStrategy`, so a test may expect it off any of the three.
     error InsufficientIdleForLeverUp(uint256 needed, uint256 available);
+    /// @notice A Moonwell `repayBorrow` returned a non-zero Compound error code. Declared here because
+    ///         `hedgeBorrowInterest` repays inside this library; the selector matches the
+    ///         same-signature declarations in `LeveragedAeroManager` / `LeveragedAerodromeCLStrategy`,
+    ///         so a test may expect it off any of the three.
+    error MoonwellRepayFailed(uint256 errCode);
 
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
@@ -433,6 +461,266 @@ library LeveragedAeroValuation {
         if (lpUsdc > idleUsdc) revert InsufficientIdleForLeverUp(lpUsdc, idleUsdc);
     }
 
+    // ── Slipstream swap plumbing ──
+
+    /// @notice Slipstream `exactInputSingle` (plus the approval), as ONE definition.
+    /// @dev VENUE PLUMBING ONLY — every decision stays with the caller: which token, how much (and the
+    ///      caps that bound it), and what `minOut` bound applies. `LeveragedAeroManager` calls this from
+    ///      `_swapUsdcExactIn` and `_sweepLegToUsdc` AFTER their identity guards / balance caps, and
+    ///      `_hedgeLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
+    ///      construction exists once instead of three times. Relocated out of the manager for EIP-170
+    ///      headroom; a 6-argument flat surface is why it is a net saving there.
+    /// @param router      Slipstream CL SwapRouter.
+    /// @param tokenIn     Token sold. Never equal to `tokenOut` — callers guard the identity case.
+    /// @param tokenOut    Token bought.
+    /// @param tickSpacing tickSpacing of the `tokenIn`↔`tokenOut` SWAP pool (NOT any LP pool's).
+    /// @param amountIn    Exact input (callers have already capped this against a live balance).
+    /// @param minOut      Minimum output; 0 only where an aggregate guard covers the caller.
+    function swapExactIn(
+        address router,
+        address tokenIn,
+        address tokenOut,
+        int24 tickSpacing,
+        uint256 amountIn,
+        uint256 minOut
+    ) public {
+        IERC20(tokenIn).forceApprove(router, amountIn);
+        ICLSwapRouter(router).exactInputSingle(
+            ICLSwapRouter.ExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                tickSpacing: tickSpacing,
+                recipient: address(this),
+                deadline: block.timestamp + 600,
+                amountIn: amountIn,
+                amountOutMinimum: minOut,
+                sqrtPriceLimitX96: 0
+            })
+        );
+    }
+
+    /// @notice Slipstream `exactOutputSingle` (approve, swap, then RESET the approval to 0).
+    /// @dev The mirror of `swapExactIn`, same division of labour: this is plumbing, and the caller owns
+    ///      the decisions — `LeveragedAeroManager._redeemCoverShortfall` derives `amountInMax` (the
+    ///      redeemer's own budget, an oracle+slippage ceiling, or unbounded on a full redeem) and does the
+    ///      repay. The trailing `forceApprove(router, 0)` is load-bearing and part of the primitive: an
+    ///      exact-output swap generally spends LESS than `amountInMax`, so the residue would otherwise be
+    ///      left standing as an allowance to the router.
+    /// @param router      Slipstream CL SwapRouter.
+    /// @param tokenIn     Token sold (the unit of account, at every current call site).
+    /// @param tokenOut    Token bought. Never equal to `tokenIn` — callers guard the identity case.
+    /// @param tickSpacing tickSpacing of the `tokenIn`↔`tokenOut` SWAP pool.
+    /// @param amountOut   Exact output required.
+    /// @param amountInMax Ceiling on the input; the swap reverts rather than exceeding it.
+    function swapExactOut(
+        address router,
+        address tokenIn,
+        address tokenOut,
+        int24 tickSpacing,
+        uint256 amountOut,
+        uint256 amountInMax
+    ) public {
+        IERC20(tokenIn).forceApprove(router, amountInMax);
+        ICLSwapRouter(router).exactOutputSingle(
+            ICLSwapRouter.ExactOutputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                tickSpacing: tickSpacing,
+                recipient: address(this),
+                deadline: block.timestamp + 600,
+                amountOut: amountOut,
+                amountInMaximum: amountInMax,
+                sqrtPriceLimitX96: 0
+            })
+        );
+        IERC20(tokenIn).forceApprove(router, 0);
+    }
+
+    // ── Reward harvest (compound) ──
+
+    /// @dev Aerodrome v2 (AMM) Router on Base — `compound`'s AERO→USDC swap routes through its volatile
+    ///      pool, the deepest AERO/USDC liquidity on Base (~$10.4M vs ~$1.2M for the deepest Slipstream CL
+    ///      pool, fork-measured). Canonical immutable Base infra. Lives HERE rather than in the manager
+    ///      only because `swapAeroToUsdc` does, and that moved for the manager's EIP-170 budget.
+    address private constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+    /// @dev Aerodrome v2 PoolFactory on Base (`router.defaultFactory()`), required by the Route.
+    address private constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @notice Swap `amountIn` AERO to USDC through the Aerodrome v2 volatile pool and report the
+    ///         MEASURED fill (balance delta, not the router's own return value).
+    /// @dev Only the VENUE MECHANICS live here. The safety-critical parts of the harvest stay in
+    ///      `LeveragedAeroManager.compoundImpl`: it derives the AERO/USD oracle floor, passes the
+    ///      caller's `minUsdcOut` down as `minOut`, and post-checks the returned fill against
+    ///      `max(minUsdcOut, floor)` — so a dishonest router return cannot widen the bound. Relocated out
+    ///      of the manager (which is at the EIP-170 cap) because the `Route[]` construction plus this
+    ///      venue interface is pure plumbing with a 4-argument surface, i.e. the cheapest possible move.
+    /// @param aero     The gauge reward token (read from the gauge by the caller).
+    /// @param usdc     The unit of account.
+    /// @param amountIn AERO to sell (the whole claimed balance).
+    /// @param minOut   Router-enforced minimum USDC out.
+    /// @return usdcOut USDC actually received, measured as this call's own balance delta.
+    function swapAeroToUsdc(address aero, address usdc, uint256 amountIn, uint256 minOut)
+        public
+        returns (uint256 usdcOut)
+    {
+        uint256 usdcBefore = IERC20(usdc).balanceOf(address(this));
+        IERC20(aero).forceApprove(AERO_V2_ROUTER, amountIn);
+        IAeroRouter.Route[] memory routes = new IAeroRouter.Route[](1);
+        routes[0] = IAeroRouter.Route({from: aero, to: usdc, stable: false, factory: AERO_V2_FACTORY});
+        IAeroRouter(AERO_V2_ROUTER).swapExactTokensForTokens(
+            amountIn, minOut, routes, address(this), block.timestamp + 600
+        );
+        usdcOut = IERC20(usdc).balanceOf(address(this)) - usdcBefore;
+    }
+
+    // ── Borrow-interest hedge (compound) ──
+
+    /// @notice Everything `hedgeBorrowInterest` needs to neutralise interest drift on a WHOLE book.
+    /// @dev ONE struct covering BOTH legs, and the library does its own hardened price reads off the
+    ///      feeds, so the manager's call site is a single struct build plus a single cross-library call.
+    ///      That shape is deliberate: the reason this body lives here at all is the manager's EIP-170
+    ///      budget, and a per-leg entrypoint would have put the marshalling cost back where the budget is.
+    ///      `marketB == address(0)` selects the asset-mode single-leg book (see the ASSET-MODE note on
+    ///      `hedgeBorrowInterest`).
+    struct HedgeBook {
+        address usdc; // the unit of account, and the only funding source
+        address swapRouter; // Slipstream CL SwapRouter for the USDC→leg buys
+        address usdcFeed; // Chainlink USDC/USD (8dp)
+        address sequencerFeed; // L2 sequencer-uptime feed
+        uint256 maxDelay; // per-feed max staleness (seconds)
+        uint256 gracePeriod; // sequencer grace period (seconds)
+        uint256 maxSlippageBps; // floors each buy's min-out against the oracle
+        uint256 budgetUsdc; // harvest proceeds available (6dp) — a HARD ceiling across BOTH legs
+        address marketA; // leg A's Moonwell borrow market (always borrowed, both shapes)
+        address legA; // leg A token
+        address feedA; // leg A Chainlink USD feed (8dp)
+        int24 spacingA; // leg A↔USDC SWAP pool tickSpacing (NOT the LP pool's)
+        uint8 decimalsA; // leg A token decimals
+        uint256 hedgedA; // `Layout.hedgedDebtA`
+        address marketB; // leg B's borrow market, or address(0) in asset-mode (leg B carries no debt)
+        address legB; // leg B token
+        address feedB; // leg B Chainlink USD feed (8dp)
+        int24 spacingB; // leg B↔USDC SWAP pool tickSpacing
+        uint8 decimalsB; // leg B token decimals
+        uint256 hedgedB; // `Layout.hedgedDebtB`
+    }
+
+    /// @notice Neutralise the ACCRUED BORROW INTEREST on one borrowed leg by buying exactly that much of
+    ///         the leg with harvest proceeds and repaying it to Moonwell — turning a financing cost that
+    ///         would otherwise accumulate as unintended SHORT exposure into plain NAV drag.
+    ///
+    /// @dev WHY THE MEASURE IS `debt − hedged` AND NOT `debt − lpLeg`.
+    ///      A concentrated-liquidity position's leg composition MOVES WITH PRICE BY DESIGN: as the leg
+    ///      appreciates the LP sells into the rise and `lpLeg` falls, while `debt` is roughly constant.
+    ///      So `debt − lpLeg` is the SUM of two unrelated things — (a) accrued borrow interest, which is
+    ///      an unintended short we want gone, and (b) a price-driven component that is the LP mechanism
+    ///      working as intended. Closing the whole of `debt − lpLeg` on every harvest would make
+    ///      `compound` a momentum-chasing delta rebalancer (buying the leg precisely as the leg rises),
+    ///      fighting the LP's own mechanics and bleeding fees. It would also mis-handle a post-`rerange`
+    ///      book, where part of the hedge sits as an IDLE leg remainder rather than inside `lpLeg`.
+    ///
+    ///      `Layout.hedgedDebtA/B` is instead a pure ACCOUNTING quantity — the borrowed principal the LP
+    ///      side was funded with — maintained at the two chokepoints that can change it
+    ///      (`LeveragedAeroManager._borrowLegA`/`_borrowHalfEach` add the borrow; `_repay` clamps it down
+    ///      to the post-repay debt; `redeemUnwindImpl` scales it pro-rata). It is PRICE-INDEPENDENT by
+    ///      construction, so `debt − hedged` isolates component (a) exactly and contains none of (b).
+    ///      Every borrow of `x` grows the debt by `x` and the LP leg by `x` simultaneously, so the
+    ///      difference can only be moved by interest.
+    ///
+    ///      EXACTNESS vs. Moonwell's own accounting. Compound-fork markets CAPITALISE interest into the
+    ///      account's `principal` on every `borrow`/`repayBorrow` (`principal = borrowBalanceStored ± amt;
+    ///      interestIndex = borrowIndex`), so the market's `principal` is NOT an interest-free basis and
+    ///      the per-account `interestIndex` has no public getter. `borrowBalanceStored` immediately after
+    ///      a borrow/repay IS that capitalised principal, which is exactly what the manager's chokepoints
+    ///      track — making `debt − hedged` the market's own "interest accrued since our last touch",
+    ///      obtained with no `borrowIndex()` read and no extra Layout field per leg beyond the basis
+    ///      itself. Any interest not yet reflected in the STORED index is not lost: it stays inside
+    ///      `debt − hedged` and is picked up by the next harvest.
+    ///
+    ///      WHY REPAY RATHER THAN BUY-AND-ADD. Adding the interest amount into the LP would keep leverage
+    ///      constant, but a CL add needs PAIRED USDC at the live range ratio, so it re-levers the book and
+    ///      needs the asset-mode pairing solve — more moving parts on a path whose only job is to remove
+    ///      an unintended exposure. Repaying uses plumbing that already exists, moves the DEBT side back
+    ///      onto the LP instead of the other way round, and lands the cost exactly where it belongs: less
+    ///      harvest reinvested, i.e. clean NAV drag, with leverage dipping slightly (the safe direction).
+    ///
+    ///      BOUNDED AND GRACEFUL. `budgetUsdc` is a hard ceiling and is the HARVEST's own USDC — never
+    ///      stayers' idle USDC and never collateral (funding a hedge from either would be the same class
+    ///      of mistake as a swap-funded lever-up: it would silently rewrite the book's delta profile).
+    ///      A budget too small to cover the whole drift buys and repays what it can and the remainder
+    ///      STAYS in `debt − hedged`, so the next harvest resumes exactly where this one stopped — the
+    ///      call never reverts the harvest for insufficiency. Only the leg BALANCE DELTA of this call's
+    ///      own swap is repaid, so a pre-existing idle leg remainder (which is already hedging the debt)
+    ///      is never consumed.
+    ///
+    ///      ASSET-MODE. The manager calls this for leg A only when `legBIsAsset` (leg B is the unit of
+    ///      account there and structurally carries no debt), so `h.leg != h.usdc` always holds and the
+    ///      identity swap that `_swapUsdcExactIn` guards against is unreachable from here.
+    /// @param b       The whole book's inputs; see `HedgeBook`.
+    /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget).
+    function hedgeBorrowInterest(HedgeBook memory b) public returns (uint256 spent) {
+        if (b.budgetUsdc == 0) return 0;
+        uint256 pUsdc = readUsd8(b.usdcFeed, b.sequencerFeed, b.maxDelay, b.gracePeriod);
+        spent = _hedgeLeg(b, b.marketA, b.legA, b.feedA, b.spacingA, b.decimalsA, b.hedgedA, b.budgetUsdc, pUsdc);
+        // Leg B drifts too whenever it is BORROWED — the two-borrowed-legs shape LPs both borrows against
+        // each other, so both accrue interest the LP never grows to match. `marketB == 0` is the
+        // asset-mode book, where leg B IS the unit of account, is never borrowed, and cannot drift.
+        if (b.marketB != address(0)) {
+            // `budgetUsdc - spent`: leg A already committed its share of the one shared ceiling.
+            spent += _hedgeLeg(
+                b, b.marketB, b.legB, b.feedB, b.spacingB, b.decimalsB, b.hedgedB, b.budgetUsdc - spent, pUsdc
+            );
+        }
+    }
+
+    /// @dev One leg of `hedgeBorrowInterest`. See that function's header for the measure, the
+    ///      repay-vs-add decision, the budget bound and the graceful-degradation contract.
+    function _hedgeLeg(
+        HedgeBook memory b,
+        address market,
+        address leg,
+        address feed,
+        int24 spacing,
+        uint8 legDecimals,
+        uint256 hedged,
+        uint256 budgetUsdc,
+        uint256 pUsdc
+    ) private returns (uint256 spentUsdc) {
+        uint256 debt = IMoonwellMarket(market).borrowBalanceStored(address(this));
+        if (budgetUsdc == 0 || debt <= hedged) return 0;
+        uint256 drift = debt - hedged;
+
+        // `num/den` is the manager's `_tokenToUsdc` basis, kept as its two factors so the INVERSE
+        // (USDC→leg, for the min-out) is the same numbers read the other way and the two cannot drift.
+        uint256 num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
+        uint256 den = (10 ** uint256(legDecimals)) * pUsdc;
+        uint256 spend = Math.mulDiv(drift, num, den);
+        if (spend > budgetUsdc) spend = budgetUsdc; // graceful: partial hedge, remainder carries
+        if (spend == 0) return 0; // drift priced below 1 USDC unit — leave it to accumulate
+
+        // Oracle-floored exact-IN buy (the `_settleShortfall` posture, not the exact-OUT one): exact-out
+        // would REVERT the whole harvest the moment `budgetUsdc` could not cover the drift, and this path
+        // must degrade instead. The min-out is the oracle-implied leg amount for `spend`, haircut by
+        // `maxSlippageBps`, so a sandwiched buy reverts rather than overpaying.
+        uint256 minOut = (Math.mulDiv(spend, den, num) * (10000 - b.maxSlippageBps)) / 10000;
+        uint256 legBefore = IERC20(leg).balanceOf(address(this));
+        swapExactIn(b.swapRouter, b.usdc, leg, spacing, spend, minOut);
+        spentUsdc = spend;
+
+        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `drift` is what
+        // keeps `Layout.hedgedDebtA/B` untouched by this repay: post-repay debt is `hedged + (drift −
+        // repaid) >= hedged`, so the manager's `_repay` clamp is provably a no-op here and the basis
+        // discipline stays single-sited. Any tiny overshoot of the buy stays as an idle leg balance,
+        // which is NAV-counted and redeployable.
+        uint256 got = IERC20(leg).balanceOf(address(this)) - legBefore;
+        uint256 repaid = got < drift ? got : drift;
+        if (repaid > 0) {
+            IERC20(leg).forceApprove(market, repaid);
+            uint256 err = IMoonwellMarket(market).repayBorrow(repaid);
+            if (err != 0) revert MoonwellRepayFailed(err);
+        }
+    }
+
     /// @dev THE SHARED RATIO PROBE for both asset-mode sizing entrypoints: the (leg A : USDC)
     ///      token-amount ratio the range `[tickLower, tickUpper]` requires at the pool's live `sqrtP`.
     ///      Probed at `REF_LIQUIDITY` — both amounts are linear in L for a fixed range + `sqrtP`, so the
@@ -533,8 +821,25 @@ library LeveragedAeroValuation {
     ///      a redeployed feed at a different precision fail-closes with `FeedDecimalsMismatch`
     ///      instead of silently inflating the term by 10^(d-8).
     function _readUsd8(Config memory c, address feed) private view returns (uint256 price) {
+        return readUsd8(feed, c.sequencerFeed, c.maxDelay, c.gracePeriod);
+    }
+
+    /// @notice The same hardened 8-decimal USD read, with the sequencer/staleness inputs passed flat
+    ///         instead of inside a `Config`.
+    /// @dev EXISTS FOR THE MANAGER'S EIP-170 BUDGET. `ChainlinkReader` is an `internal` library, so every
+    ///      contract that calls it inlines the whole sequencer + round + staleness ladder. The manager was
+    ///      carrying its own copy for a `_readUsd8` identical to this one; routing it here (one
+    ///      DELEGATECALL per price read, on paths that already make several venue calls) removes that copy
+    ///      from a library sitting at the cap. Callers get the identical fail-closed semantics — this IS
+    ///      the definition `netEquityUsdc` prices with, so the execution basis and the NAV basis cannot
+    ///      drift apart, which was previously only true by inspection of two copies.
+    function readUsd8(address feed, address sequencerFeed, uint256 maxDelay, uint256 gracePeriod)
+        public
+        view
+        returns (uint256 price)
+    {
         uint8 dec;
-        (price, dec) = ChainlinkReader.readUsd(feed, c.sequencerFeed, c.maxDelay, c.gracePeriod);
+        (price, dec) = ChainlinkReader.readUsd(feed, sequencerFeed, maxDelay, gracePeriod);
         if (dec != USD_FEED_DECIMALS) revert FeedDecimalsMismatch();
     }
 

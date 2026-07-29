@@ -4,36 +4,17 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {ICToken, IComptroller, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLGauge, ICLPool, ICLSwapRouter, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
-import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
+import {ICLGauge, ICLPool, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
 import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "./sherwood/libraries/TickMath.sol";
 
 /// @dev Minimal WETH9 interface — wraps native ETH into ERC-20 WETH.
 interface IWETH9 {
     function deposit() external payable;
-}
-
-/// @dev Minimal Aerodrome v2 (AMM) Router — used for the `compoundImpl` AERO→USDC reward swap
-///      (see `AERO_V2_ROUTER`). The CL SwapRouter only serves Slipstream pools.
-interface IAeroRouter {
-    struct Route {
-        address from;
-        address to;
-        bool stable;
-        address factory;
-    }
-
-    function swapExactTokensForTokens(
-        uint256 amountIn,
-        uint256 amountOutMin,
-        Route[] calldata routes,
-        address to,
-        uint256 deadline
-    ) external returns (uint256[] memory amounts);
 }
 
 /// @title  LeveragedAeroManager
@@ -95,6 +76,9 @@ library LeveragedAeroManager {
     error InsufficientLiquidity();
     error InsufficientIdle();
     error HealthyNoDeleverage();
+    // NOTE: raised by `LeveragedAeroValuation.readUsd8`, which `_readUsd8` now forwards to. Kept declared
+    // here (same signature, same selector) under this library's mirroring convention, so a test may
+    // expect it off the manager, the strategy or the valuation library interchangeably.
     error FeedDecimalsMismatch();
     error ZeroMinOut();
     error BelowOracleFloor(); // compound swap fill < AERO/USD oracle floor (L9)
@@ -108,13 +92,6 @@ library LeveragedAeroManager {
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
     ///      minimum so a rescue doesn't land on the threshold and immediately re-trigger.
     uint16 private constant DELEVERAGE_BUFFER_BPS = 500; // +5% above minHealthBps
-
-    /// @dev Aerodrome v2 (AMM) Router on Base — the `compoundImpl` AERO→USDC swap routes through its
-    ///      volatile pool, the deepest AERO/USDC liquidity on Base (~$10.4M vs ~$1.2M for the deepest
-    ///      Slipstream CL pool, fork-measured). Canonical immutable Base infra.
-    address private constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
-    /// @dev Aerodrome v2 PoolFactory on Base (`router.defaultFactory()`), required by the Route.
-    address private constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
     // ── Diamond storage — Layout/STORAGE_SLOT/_layout()/RedeemRequest byte-identical to
     //    LeveragedAerodromeCLStrategy (delegatecall slot discipline) ──
@@ -189,8 +166,11 @@ library LeveragedAeroManager {
         uint24 width; // current full range width in ticks (rerange spans width/2 each side)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
-        // ── LAST field: appended for the config-emergent pool shape (keep byte-identical) ──
+        // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
+        // ── LAST fields: appended for the borrow-interest hedge (keep byte-identical) ──
+        uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with the widths above)
+        uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -295,6 +275,16 @@ library LeveragedAeroManager {
         // of account, leaving the whole USDC balance for the `stayersIdle` arithmetic at the end).
         uint256 stayersCb = $.legBIsAsset ? 0 : _stayerLeg($.cbBTC, shares, supply);
         uint256 stayersWeth = _stayerLeg($.weth, shares, supply);
+
+        // SCALE the hedged-principal basis pro-rata, BEFORE any repay reaches `_repay`'s clamp. A partial
+        // redeem sheds `f` of the LP AND repays `f` of the debt, so the interest drift that SURVIVES is
+        // `(1−f)·drift` — the exposure is scaled, not cleared. Scaling the basis by `(1−f)` keeps
+        // `debt − hedged` equal to that survivor so the next harvest still removes it; letting `_repay`'s
+        // clamp re-anchor the basis to the post-repay debt instead would silently FORGIVE the survivor,
+        // leaving a real (if slower) accumulating short — the very bug this basis exists to close.
+        // f == 1 (full redeem) drives both to 0, matching the flat book this branch leaves behind.
+        $.hedgedDebtA -= uint128(Math.mulDiv(uint256($.hedgedDebtA), shares, supply));
+        $.hedgedDebtB -= uint128(Math.mulDiv(uint256($.hedgedDebtB), shares, supply));
 
         // A — partial CL unwind (pool-based mins, oracle-free).
         _unwindLiquidity(shares, supply);
@@ -446,14 +436,10 @@ library LeveragedAeroManager {
         // 3. Swap ALL claimed AERO → USDC via the Aerodrome v2 volatile pool, passing the caller's
         //    minUsdcOut to the router. The measured-fill floor below is the robust guard (router-honesty
         //    independent); the effective bound is max(minUsdcOut, floor), enforced independently.
-        uint256 usdcBefore = IERC20($.usdc).balanceOf(address(this));
-        IERC20(aero).forceApprove(AERO_V2_ROUTER, aeroBal);
-        IAeroRouter.Route[] memory routes = new IAeroRouter.Route[](1);
-        routes[0] = IAeroRouter.Route({from: aero, to: $.usdc, stable: false, factory: AERO_V2_FACTORY});
-        IAeroRouter(AERO_V2_ROUTER).swapExactTokensForTokens(
-            aeroBal, minUsdcOut, routes, address(this), block.timestamp + 600
-        );
-        uint256 usdcOut = IERC20($.usdc).balanceOf(address(this)) - usdcBefore;
+        //    The venue mechanics (Route[] + the v2 router interface) live in
+        //    `LeveragedAeroValuation.swapAeroToUsdc` for EIP-170 headroom; it returns the MEASURED fill,
+        //    so the post-check below is unchanged and still independent of what the router claims.
+        uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(aero, $.usdc, aeroBal, minUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor(); // post-check on the measured fill (L9)
         if (usdcOut == 0) return 0; // unreachable when floor > 0 (aeroBal > 0), kept as defence
 
@@ -462,10 +448,62 @@ library LeveragedAeroManager {
         pay = skimCap < usdcOut ? skimCap : usdcOut;
         uint256 redeploy = usdcOut - pay;
 
-        // 5. Redeploy the net yield into the position at target leverage (supply → borrow →
+        // 5. RE-HEDGE ACCRUED BORROW INTEREST out of the harvest, BEFORE the redeploy. Interest grows the
+        //    debt leg without growing the LP leg, so without this step every harvest left the book a
+        //    little more SHORT and nothing ever removed it (the fund is sold as delta-neutral on leg A).
+        //    Buying that interest back and repaying it lands the financing cost as NAV DRAG — less
+        //    harvest reinvested — instead of as accumulating exposure. Bounded by the harvest's own
+        //    proceeds, so stayers' idle USDC and the collateral are never touched; a short budget hedges
+        //    partially and carries the remainder to the next harvest rather than reverting.
+        //    Ordering: ahead of the redeploy so `deployIdleImpl` sizes its NEW borrow off the corrected
+        //    debt and the post-op `_assertHealthy` sees the final book.
+        redeploy -= _hedgeInterestDrift(redeploy);
+
+        // 6. Redeploy the net yield into the position at target leverage (supply → borrow →
         //    increaseLiquidity → restake → _assertHealthy). Any pre-existing idle USDC is left
         //    untouched — compound deploys the AERO yield, nothing else. Skip if all was skimmed.
         if (redeploy > 0) deployIdleImpl(redeploy, minLiquidity);
+    }
+
+    /// @dev Marshal the Layout reads for `LeveragedAeroValuation.hedgeBorrowInterest` and drive it over
+    ///      whichever legs actually carry debt. THE MEASURE, the repay-vs-add reasoning, the budget bound
+    ///      and the graceful-degradation contract all live in that function's header — this is only the
+    ///      call site, and it is deliberately thin: the body sits in the valuation library because the
+    ///      manager is at the EIP-170 cap (the same relief valve `assetModeSplit` / `calmGate` /
+    ///      `depositMins` already use).
+    /// @param budget Harvest proceeds available (6dp). A hard ceiling on total USDC spent.
+    /// @return spent USDC consumed across both legs.
+    function _hedgeInterestDrift(uint256 budget) private returns (uint256 spent) {
+        if (budget == 0) return 0;
+        Layout storage $ = _layout();
+        LeveragedAeroValuation.HedgeBook memory b;
+        b.usdc = $.usdc;
+        b.swapRouter = $.swapRouter;
+        b.usdcFeed = $.usdcFeed;
+        b.sequencerFeed = $.sequencerFeed;
+        b.maxDelay = $.maxDelay;
+        b.gracePeriod = $.gracePeriod;
+        b.maxSlippageBps = uint256($.maxSlippageBps);
+        b.budgetUsdc = budget;
+        // Leg A — the always-borrowed volatile leg, in BOTH shapes.
+        b.marketA = $.mWeth;
+        b.legA = $.weth;
+        b.feedA = $.wethFeed;
+        b.spacingA = $.wethSwapTickSpacing;
+        b.decimalsA = $.wethDecimals;
+        b.hedgedA = uint256($.hedgedDebtA);
+        // Leg B — borrowed, and therefore drifting, ONLY in the two-borrowed-legs shape. In asset-mode
+        // leg B IS the unit of account, init pins `mCbBTC == mUsdc`, and nothing ever borrows it, so its
+        // drift is structurally zero; leaving `marketB` at 0 is how that is signalled.
+        if (!$.legBIsAsset) {
+            b.marketB = $.mCbBTC;
+            b.legB = $.cbBTC;
+            b.feedB = $.cbBTCFeed;
+            b.spacingB = $.cbBTCSwapTickSpacing;
+            b.decimalsB = $.cbBTCDecimals;
+            b.hedgedB = uint256($.hedgedDebtB);
+        }
+        return LeveragedAeroValuation.hedgeBorrowInterest(b);
     }
 
     /// @notice Recenter the CL position on the current tick WITHOUT swapping (body of the strategy's
@@ -761,9 +799,32 @@ library LeveragedAeroManager {
     // ── Moonwell call+check helpers (bytecode offset: 7 repay sites, 3 redeem sites) ──
 
     /// @dev `market.repayBorrow(amt)` with the uniform error-check. Approve the underlying first.
+    ///
+    ///      ALSO THE ONE PLACE THE HEDGED-PRINCIPAL BASIS IS CLAMPED DOWN (7 repay sites, one rule).
+    ///      `Layout.hedgedDebtA/B` is the borrowed principal the LP side hedges; the unhedged accrued
+    ///      interest that `compound` neutralises is `borrowBalanceStored − hedged`, so the basis must
+    ///      NEVER exceed the live debt or that subtraction underflows. Clamping DOWN to the post-repay
+    ///      debt is exact in both directions, which is why this is a `min` and not a `-=`:
+    ///        - repay ≤ accrued interest (the `compound` drift repay): post-repay debt still ≥ hedged,
+    ///          the clamp is a NO-OP, and the un-repaid remainder correctly stays measured as drift.
+    ///        - repay > accrued interest (lever-down, settle, IL cover): the excess is principal coming
+    ///          off, and the clamp reduces the basis by exactly that excess, leaving drift at 0.
+    ///      A `-=` by the repaid amount would instead cancel the drift repay against its own basis and
+    ///      leave the gap permanently open. The PRO-RATA case (partial redeem) needs the basis scaled by
+    ///      `(1−f)` rather than re-anchored, so `redeemUnwindImpl` scales it before its repays land here.
     function _repay(address market, uint256 amt) private {
         uint256 err = IMoonwellMarket(market).repayBorrow(amt);
         if (err != 0) revert MoonwellRepayFailed(err);
+        Layout storage $ = _layout();
+        uint256 debtAfter = IMoonwellMarket(market).borrowBalanceStored(address(this));
+        if (market == $.mWeth) {
+            if (uint256($.hedgedDebtA) > debtAfter) $.hedgedDebtA = uint128(debtAfter);
+        } else if (uint256($.hedgedDebtB) > debtAfter) {
+            // Leg B. Reached with `market == $.mCbBTC` at every call site; and in ASSET-MODE, where init
+            // pins `mCbBTC == mUsdc`, `hedgedDebtB` is structurally 0, so the guard above is already
+            // false and no write can land on the collateral market's behalf.
+            $.hedgedDebtB = uint128(debtAfter);
+        }
     }
 
     /// @dev `mUsdc.redeemUnderlying(amt)` with the uniform error-check.
@@ -815,6 +876,9 @@ library LeveragedAeroManager {
     function _borrowLegA(uint256 amt) private {
         uint256 err = IMoonwellMarket(_layout().mWeth).borrow(amt);
         if (err != 0) revert MoonwellBorrowFailed(err);
+        // Every borrowed unit goes straight into the LP side (the caller adds it in the same tx), so the
+        // hedged principal grows by exactly `amt` — see `_repay` for the rest of the basis discipline.
+        _layout().hedgedDebtA += SafeCast.toUint128(amt);
     }
 
     /// @dev Borrow `borrowUsd6` of debt (USDC face, 6dp) split 50/50 by USD across cbBTC + WETH, at
@@ -834,6 +898,12 @@ library LeveragedAeroManager {
         if (cbErr != 0) revert MoonwellBorrowFailed(cbErr);
         uint256 wethErr = IMoonwellMarket($.mWeth).borrow(wethAmt);
         if (wethErr != 0) revert MoonwellBorrowFailed(wethErr);
+        // TWO-LEG DRIFT IS THE SAME DRIFT. Both legs are borrowed and both are LP'd against each other,
+        // so both accrue interest the LP never grows to match — this shape drifts on BOTH legs, and both
+        // bases are tracked so `compound` can neutralise both. (See `_borrowLegA` for the single-leg
+        // shape and `LeveragedAeroValuation.hedgeBorrowInterest` for the measure.)
+        $.hedgedDebtB += SafeCast.toUint128(cbBTCAmt);
+        $.hedgedDebtA += SafeCast.toUint128(wethAmt);
     }
 
     /// @dev Wrap all native ETH held by the strategy into the leg-A wrapper token. No-op unless the
@@ -1070,18 +1140,8 @@ library LeveragedAeroManager {
         uint256 usdcBal = IERC20($.usdc).balanceOf(address(this));
         uint256 actualIn = usdcBal < amountIn ? usdcBal : amountIn;
         if (actualIn == 0) return;
-        IERC20($.usdc).forceApprove($.swapRouter, actualIn);
-        ICLSwapRouter($.swapRouter).exactInputSingle(
-            ICLSwapRouter.ExactInputSingleParams({
-                tokenIn: $.usdc,
-                tokenOut: tokenOut,
-                tickSpacing: _legSwapSpacing(tokenOut),
-                recipient: address(this),
-                deadline: block.timestamp + 600,
-                amountIn: actualIn,
-                amountOutMinimum: minAmtOut,
-                sqrtPriceLimitX96: 0
-            })
+        LeveragedAeroValuation.swapExactIn(
+            $.swapRouter, $.usdc, tokenOut, _legSwapSpacing(tokenOut), actualIn, minAmtOut
         );
     }
 
@@ -1103,19 +1163,7 @@ library LeveragedAeroManager {
         uint256 bal = IERC20(tokenIn).balanceOf(address(this));
         if (bal <= keep) return;
         uint256 amt = bal - keep;
-        IERC20(tokenIn).forceApprove($.swapRouter, amt);
-        ICLSwapRouter($.swapRouter).exactInputSingle(
-            ICLSwapRouter.ExactInputSingleParams({
-                tokenIn: tokenIn,
-                tokenOut: $.usdc,
-                tickSpacing: _legSwapSpacing(tokenIn),
-                recipient: address(this),
-                deadline: block.timestamp + 600,
-                amountIn: amt,
-                amountOutMinimum: minOut,
-                sqrtPriceLimitX96: 0
-            })
-        );
+        LeveragedAeroValuation.swapExactIn($.swapRouter, tokenIn, $.usdc, _legSwapSpacing(tokenIn), amt, minOut);
     }
 
     /// @dev (1-f) of the strategy's current `token` balance, f = shares/supply. Used by redeem to
@@ -1132,15 +1180,15 @@ library LeveragedAeroManager {
         return (amt * pToken * 1e6) / ((10 ** uint256(dec)) * pUsdc);
     }
 
-    /// @dev Hardened USD read that also asserts the feed is 8-decimal (the scaling assumption),
-    ///      mirroring `LeveragedAeroValuation._readUsd8`. The execution-path price reads previously
-    ///      trusted `decimals()` implicitly; consolidating them here closes that gap (L1) — a
-    ///      redeployed feed at a different precision fail-closes instead of mis-scaling the term.
+    /// @dev Hardened USD read that also asserts the feed is 8-decimal (the scaling assumption). Now a
+    ///      thin forward to `LeveragedAeroValuation.readUsd8` — the SAME definition `netEquityUsdc`
+    ///      prices with, so the execution basis and the NAV basis are one function rather than two
+    ///      copies that agreed only by inspection. Relocated for EIP-170 headroom: `ChainlinkReader` is
+    ///      an `internal` library, so keeping the call here inlined its whole staleness ladder into this
+    ///      library, which is at the cap. Same fail-closed behaviour, one DELEGATECALL per read.
     function _readUsd8(address feed) private view returns (uint256 price) {
         Layout storage $ = _layout();
-        (uint256 p, uint8 dec) = ChainlinkReader.readUsd(feed, $.sequencerFeed, $.maxDelay, $.gracePeriod);
-        if (dec != 8) revert FeedDecimalsMismatch();
-        return p;
+        return LeveragedAeroValuation.readUsd8(feed, $.sequencerFeed, $.maxDelay, $.gracePeriod);
     }
 
     /// @dev The 3-price bundle (cbBTC / WETH / USDC, all 8dp) read on the debt/health/sweep basis.
@@ -1272,20 +1320,7 @@ library LeveragedAeroManager {
         uint256 usdcBal = IERC20($.usdc).balanceOf(address(this));
         if (usdcBal == 0 || amountOut == 0) return;
         uint256 maxIn = usdcBal < amountInMax ? usdcBal : amountInMax;
-        IERC20($.usdc).forceApprove($.swapRouter, maxIn);
-        ICLSwapRouter($.swapRouter).exactOutputSingle(
-            ICLSwapRouter.ExactOutputSingleParams({
-                tokenIn: $.usdc,
-                tokenOut: tokenOut,
-                tickSpacing: _legSwapSpacing(tokenOut),
-                recipient: address(this),
-                deadline: block.timestamp + 600,
-                amountOut: amountOut,
-                amountInMaximum: maxIn,
-                sqrtPriceLimitX96: 0
-            })
-        );
-        IERC20($.usdc).forceApprove($.swapRouter, 0);
+        LeveragedAeroValuation.swapExactOut($.swapRouter, $.usdc, tokenOut, _legSwapSpacing(tokenOut), amountOut, maxIn);
         uint256 tokenBal = IERC20(tokenOut).balanceOf(address(this));
         if (tokenBal > 0) {
             IERC20(tokenOut).forceApprove(market, tokenBal);

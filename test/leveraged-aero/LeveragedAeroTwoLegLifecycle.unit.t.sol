@@ -4,13 +4,20 @@ pragma solidity 0.8.28;
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
+import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
-import {MockChainlinkFeed, MockClSwapRouter, MockLendingMarket, MockNpm} from "./LeveragedAeroVenuesHarness.sol";
+import {
+    MockAeroV2Router,
+    MockChainlinkFeed,
+    MockClSwapRouter,
+    MockLendingMarket,
+    MockNpm
+} from "./LeveragedAeroVenuesHarness.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -59,6 +66,9 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     LeveragedAeroVault internal vault;
     LeveragedAerodromeCLStrategy internal strategy;
+
+    /// @dev The Aerodrome v2 Router address `LeveragedAeroManager` hardcodes for the AERO->USDC swap.
+    address internal constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
 
     int24 internal constant SPACING = 100;
     int24 internal constant LEG_B_SWAP_SPACING = 100;
@@ -449,5 +459,122 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         navBefore = strategy.nav();
         legA.mint(address(strategy), 1e18); // 1 legA == $3k
         assertApproxEqRel(strategy.nav(), navBefore + 3_000e6, 1e13, "idle leg A counted");
+    }
+
+    // ==================== BORROW-INTEREST RE-HEDGE (both legs drift here) ====================
+
+    /**
+     * @dev THE TWO-LEG FINDING, pinned. This shape borrows BOTH legs and LPs them against each other, so
+     *      BOTH accrue interest that the LP never grows to match — the drift is not an asset-mode
+     *      peculiarity, it is a property of "borrow a leg, LP the leg". `compound` therefore tracks a
+     *      hedged-principal basis per leg (`Layout.hedgedDebtA/B`) and neutralises both out of the one
+     *      shared harvest budget.
+     *
+     *      Treating this shape as a no-op (the tempting reading of "asset-mode bug") would have left the
+     *      audited shape with the ORIGINAL bug intact on two legs instead of one.
+     */
+    function testCompoundRehedgesBorrowInterestOnBOTHLegs() public {
+        // Etch + fund the Aerodrome-v2 router the AERO->USDC harvest leg hardcodes.
+        MockAeroV2Router aeroRouterImpl = new MockAeroV2Router(address(aero), address(usdc), 1e6);
+        vm.etch(AERO_V2_ROUTER, address(aeroRouterImpl).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+
+        // Genesis is hedged on both legs to the wei.
+        (uint128 hedgedA0, uint128 hedgedB0) = strategy.hedgedDebt();
+        assertEq(uint256(hedgedA0), mLegA.borrowBalance(address(strategy)), "leg-A basis == leg-A debt");
+        assertEq(uint256(hedgedB0), mLegB.borrowBalance(address(strategy)), "leg-B basis == leg-B debt");
+        assertGt(uint256(hedgedB0), 0, "leg B really is borrowed in this shape");
+
+        // Interest accrues on BOTH legs (50 bps each), with no LP change on either side.
+        uint256 interestA = mLegA.borrowBalance(address(strategy)) / 200;
+        uint256 interestB = mLegB.borrowBalance(address(strategy)) / 200;
+        mLegA.accrueBorrowInterest(address(strategy), interestA);
+        mLegB.accrueBorrowInterest(address(strategy), interestB);
+        assertEq(mLegA.borrowBalance(address(strategy)) - hedgedA0, interestA, "leg-A drift armed");
+        assertEq(mLegB.borrowBalance(address(strategy)) - hedgedB0, interestB, "leg-B drift armed");
+
+        // Harvest, with proceeds covering both accruals and still leaving something to redeploy.
+        uint256 aeroAmt = 40_000e18; // $40k vs two ~$1.25k accruals
+        aero.mint(address(gauge), aeroAmt);
+        gauge.setAeroToPayOnGetReward(aeroAmt);
+        gauge.setEarnedAmount(aeroAmt);
+
+        uint256 collateralBefore = (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18;
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        // BOTH drifts neutralised (tolerance = integer-division dust on the two-way oracle convert).
+        (uint128 hedgedA1, uint128 hedgedB1) = strategy.hedgedDebt();
+        assertApproxEqAbs(mLegA.borrowBalance(address(strategy)), uint256(hedgedA1), 1e10, "leg-A drift neutralised");
+        assertApproxEqAbs(mLegB.borrowBalance(address(strategy)), uint256(hedgedB1), 100, "leg-B drift neutralised");
+        // ...and the harvest still redeployed: the hedge is a cost off the proceeds, not the whole of them.
+        assertGt(
+            (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18,
+            collateralBefore,
+            "the remainder of the harvest was still reinvested"
+        );
+    }
+
+    /// @dev The discrimination property holds in this shape too: with ZERO interest accrued, a price move
+    ///      that legitimately shifts the LP's leg mix must not be mistaken for drift and bought back.
+    function testTwoLegCompoundDoesNotChaseAPriceDrivenLegDivergence() public {
+        MockAeroV2Router aeroRouterImpl = new MockAeroV2Router(address(aero), address(usdc), 1e6);
+        vm.etch(AERO_V2_ROUTER, address(aeroRouterImpl).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+
+        // Move the pool (spot AND twap, so the calm-gate stays open) and re-peg leg B's oracle to it, so
+        // the fixture stays internally consistent. Leg B is token0, so a HIGHER tick makes leg B dearer.
+        int24 newTick = TICK + 400;
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
+        pool.setTick(newTick);
+        pool.setTwapTick(newTick);
+        // 1.0001^400 = 1.040807 -- keep the oracle on the SAME mark as the pool, or the fixture would be
+        // testing an oracle/pool divergence instead of an LP leg-mix move.
+        uint256 newPB = (P_LEG_B * 1_040_807) / 1_000_000;
+        legBFeed.setAnswer(int256(newPB));
+        router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
+        router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
+
+        uint256 debtA = mLegA.borrowBalance(address(strategy));
+        uint256 debtB = mLegB.borrowBalance(address(strategy));
+
+        // The move really did shift the LP's leg mix: leg B rose, so the LP sold leg B into it and now
+        // holds materially LESS leg B than the leg-B debt. That is the gap a `debt - lpLeg` measure would
+        // have chased. (Leg B is token0 in this fixture.)
+        (uint256 lpLegB,) = LiquidityAmounts.getAmountsForLiquidity(
+            pool.sqrtPriceX96(),
+            TickMath.getSqrtRatioAtTick(strategy.layout().posTickLower),
+            TickMath.getSqrtRatioAtTick(strategy.layout().posTickUpper),
+            npm.liquidityOf(strategy.layout().tokenId)
+        );
+        assertGt(debtB - lpLegB, debtB / 100, "the price move opened a MATERIAL leg-B gap (>1% of debt)");
+        (uint128 hA, uint128 hB) = strategy.hedgedDebt();
+        assertEq(debtA, uint256(hA), "...but leg-A interest drift is exactly zero");
+        assertEq(debtB, uint256(hB), "...and so is leg-B's");
+
+        uint256 aeroAmt = 40_000e18;
+        aero.mint(address(gauge), aeroAmt);
+        gauge.setAeroToPayOnGetReward(aeroAmt);
+        gauge.setEarnedAmount(aeroAmt);
+
+        uint256 legAInRouter = legA.balanceOf(address(router));
+        uint256 legBInRouter = legB.balanceOf(address(router));
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        // The CL router pays the bought leg out of its own balance, so unchanged balances prove that no
+        // hedge buy was routed on either leg despite the LP's leg mix having moved.
+        assertEq(legA.balanceOf(address(router)), legAInRouter, "no leg-A hedge buy on a pure price move");
+        assertEq(legB.balanceOf(address(router)), legBInRouter, "no leg-B hedge buy on a pure price move");
+        assertGt(mLegA.borrowBalance(address(strategy)), debtA, "leg-A debt only grew (redeploy borrow)");
+        assertGt(mLegB.borrowBalance(address(strategy)), debtB, "leg-B debt only grew (redeploy borrow)");
     }
 }

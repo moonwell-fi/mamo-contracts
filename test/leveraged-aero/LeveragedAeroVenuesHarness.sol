@@ -87,6 +87,17 @@ contract MockLendingMarket {
         return borrowBalance[account];
     }
 
+    /// @notice Accrue `amount` of BORROW INTEREST onto `account`'s debt, with no token movement — the
+    ///         one thing a Compound-fork market does that grows the debt leg while the borrower's LP
+    ///         side stays put.
+    /// @dev This is the mock's stand-in for `accrueInterest()` advancing `borrowIndex`. Real Moonwell
+    ///      stores `(principal, interestIndex)` and returns `principal × borrowIndex / interestIndex`;
+    ///      this mock stores the product directly, so bumping the balance IS an index advance as far as
+    ///      `borrowBalanceStored` — the only borrow-side read the strategy makes — can tell.
+    function accrueBorrowInterest(address account, uint256 amount) external {
+        borrowBalance[account] += amount;
+    }
+
     function balanceOfUnderlying(address account) external view returns (uint256) {
         return (balanceOf[account] * exchangeRateStored) / 1e18;
     }
@@ -249,6 +260,57 @@ contract MockNpm {
     function _pull(address token0, address token1, uint256 amount0, uint256 amount1) internal {
         if (amount0 > 0) IERC20(token0).safeTransferFrom(msg.sender, address(this), amount0);
         if (amount1 > 0) IERC20(token1).safeTransferFrom(msg.sender, address(this), amount1);
+    }
+}
+
+/// @notice Aerodrome **v2 (AMM)** Router stand-in for `compoundImpl`'s AERO→USDC reward swap.
+/// @dev The manager routes that one swap through a HARDCODED mainnet address (`AERO_V2_ROUTER`), so a
+///      fork-free test has to place code there. All state is in `immutable`s precisely so the contract
+///      survives `vm.etch(AERO_V2_ROUTER, address(m).code)` — immutables live in the deployed runtime
+///      bytecode, whereas storage-based config would be left behind at the original address. To change
+///      the rate, deploy a second instance and etch again.
+///      Fund it with `tokenOut` before use; it pays fills out of its own balance.
+contract MockAeroV2Router {
+    using SafeERC20 for IERC20;
+
+    address public immutable tokenIn;
+    address public immutable tokenOut;
+    /// @dev `out per in`, 1e18-scaled, spanning the decimal gap between the two tokens.
+    uint256 public immutable rateE18;
+
+    error MockAeroRouterBadRoute();
+    error MockAeroRouterMinOut();
+
+    struct Route {
+        address from;
+        address to;
+        bool stable;
+        address factory;
+    }
+
+    constructor(address tokenIn_, address tokenOut_, uint256 rateE18_) {
+        tokenIn = tokenIn_;
+        tokenOut = tokenOut_;
+        rateE18 = rateE18_;
+    }
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        Route[] calldata routes,
+        address to,
+        uint256
+    ) external returns (uint256[] memory amounts) {
+        if (routes.length != 1 || routes[0].from != tokenIn || routes[0].to != tokenOut) {
+            revert MockAeroRouterBadRoute();
+        }
+        uint256 out = (amountIn * rateE18) / 1e18;
+        if (out < amountOutMin) revert MockAeroRouterMinOut();
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+        IERC20(tokenOut).safeTransfer(to, out);
+        amounts = new uint256[](2);
+        amounts[0] = amountIn;
+        amounts[1] = out;
     }
 }
 

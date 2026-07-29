@@ -261,8 +261,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 width; // current full range width in ticks (rerange spans width/2 each side)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
-        // ── LAST field: appended for the config-emergent pool shape (keep byte-identical) ──
+        // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
+        // ── LAST fields: appended for the borrow-interest hedge (keep byte-identical) ──
+        uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with the widths above)
+        uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -326,6 +329,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 minWidth;
         uint24 maxWidth;
         bool legBIsAsset;
+        uint128 hedgedDebtA;
+        uint128 hedgedDebtB;
     }
 
     /// @notice Full strategy storage layout (single accessor for tests / off-chain reads), minus the
@@ -380,6 +385,22 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         v.minWidth = $.minWidth;
         v.maxWidth = $.maxWidth;
         v.legBIsAsset = $.legBIsAsset;
+        v.hedgedDebtA = $.hedgedDebtA;
+        v.hedgedDebtB = $.hedgedDebtB;
+    }
+
+    /// @notice The borrowed PRINCIPAL each leg's LP side currently hedges, and therefore the
+    ///         UNHEDGED accrued borrow interest a rebalancer can compute as
+    ///         `borrowBalanceStored(market) − hedgedDebt*`. `compound()` neutralises that difference
+    ///         out of harvest proceeds (see `LeveragedAeroValuation.hedgeBorrowInterest`), so a
+    ///         keeper can use these two numbers to decide whether a harvest is worth calling and to
+    ///         verify afterwards that the drift went back to ~0. Leg B is structurally 0 in
+    ///         asset-mode (leg B is the unit of account there and is never borrowed).
+    /// @dev Same storage reads as `layout().hedgedDebtA/B`; exposed as its own selector purely for
+    ///      keeper ergonomics, exactly as `targetLtvBps()` is.
+    function hedgedDebt() external view returns (uint128 legA, uint128 legB) {
+        Layout storage $ = _layout();
+        return ($.hedgedDebtA, $.hedgedDebtB);
     }
 
     /// @notice A single escrowed async-redeem request by id (queue introspection for tests / UI).
@@ -724,6 +745,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // vault. Pays `min(owed, balance)` to the live recipient; skips silently when recipient == 0
         // or owed == 0 (liability persists until a recipient exists — see edge note on `redeem`).
         Layout storage $ = _layout();
+        // Flat-book invariant, completed here: `settleImpl` clears `tokenId`/ticks and its repays drive
+        // both hedged-principal bases to 0 through `_repay`'s clamp — EXCEPT in the pathological case
+        // where residual debt could not be covered at all, where no repay runs and the basis would
+        // survive a book that no longer exists. Zeroed in THIS frame (not in the manager) because it
+        // already holds `_layout()` for the fee discharge below, so the two `sstore`s cost ~20 bytes here
+        // versus ~70 in the manager, which is at the EIP-170 cap — the same relocation `adjustLeverage`'s
+        // target-LTV write already makes.
+        $.hedgedDebtA = 0;
+        $.hedgedDebtB = 0;
         uint256 owed = $.protocolFeeOwed;
         address recipient = _protocolFeeRecipient();
         if (owed > 0 && recipient != address(0)) {
@@ -937,14 +967,60 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         sandwich or a careless/compromised proposer can't realise emissions below the bound. A
     ///         stale AERO feed fail-closes → `compound` reverts (defer the harvest, intended posture).
     ///
-    ///         Fee fairness (§10): crystallise on the PRE-compound NAV first (same fail-closed model
-    ///         as `deposit`) so the realized yield can't escape the performance fee. Crystallisation
-    ///         lives here (it mints fee-shares); unlike the redeem path an oracle read is correct —
-    ///         `compound` is `onlyProposer`, so a stale oracle should defer, not mis-price.
+    ///         A GENUINE NO-OP HAS NO SIDE EFFECTS. `compound` is a keeper-polled entrypoint, so a call
+    ///         with nothing to harvest — a flat book, or a staked position with zero claimable AERO —
+    ///         returns BEFORE crystallising. Crystallisation is not free: it mints fee-shares, accrues the
+    ///         protocol slice and RATCHETS THE HWM, so a poll that moved no funds used to still dilute
+    ///         holders and advance the fee clock. The probe reads `earned + held AERO` (held, so a stray
+    ///         AERO balance from a previous partial fill or a donation is still a real harvest) and is
+    ///         ahead of every state write. The manager repeats the same two bail-outs as belts.
+    ///
+    ///         WHY CRYSTALLISATION STAYS *BEFORE* THE HARVEST (fee-model note — read before "fixing" it).
+    ///         Gauge rewards are not in `nav()`, so the pre-compound crystallise cannot see the value this
+    ///         harvest is about to add: a harvest charges NO performance fee on its own yield, and the fee
+    ///         lands at the NEXT crystallisation point instead. That lag is DEFERRAL, NOT LEAKAGE, and it
+    ///         is the correct choice, for three reasons:
+    ///           1. NOBODY ESCAPES AND NOBODY OVERPAYS. Every crystallisation point in this contract runs
+    ///              strictly BEFORE any share is issued or burned (`deposit` crystallises pre-mint — that
+    ///              is its documented phantom-fee fix — `redeem`/`fulfillRedeem` pre-burn). So the yield
+    ///              sits in NAV until the next such point and is then charged to exactly the holders who
+    ///              held while it accrued. A depositor entering after the harvest cannot be diluted by a
+    ///              fee on gains they never received, and a redeemer leaving after it cannot dodge one.
+    ///           2. A POST-HARVEST CRYSTALLISE WOULD RAISE FEES, NOT CORRECT THEM. Under a high-water
+    ///              mark, expected fees increase monotonically with crystallisation FREQUENCY (each
+    ///              up-move is charged, while down-moves only recover against an already-ratcheted HWM).
+    ///              Adding a second, harvest-timed crystallisation point would therefore silently
+    ///              increase the fee load and hand the `onlyProposer` keeper a lever over fee timing —
+    ///              manager-favourable, and not something a fee schedule quoted in bps implies.
+    ///           3. NOTHING IS SPECIAL ABOUT A HARVEST. LP swap fees and Moonwell collateral interest
+    ///              accrue into NAV continuously and are likewise un-crystallised between points. NAV
+    ///              always carries un-crystallised performance-fee liability in a discrete-crystallisation
+    ///              model; the harvest is one more contribution to it.
+    ///         The one-sentence version for a fee-model reviewer: *the performance fee on harvested yield
+    ///         is deferred to the next crystallisation point, never waived, and because every
+    ///         crystallisation point precedes share issuance and redemption, the deferral cannot shift the
+    ///         fee onto or away from any holder.* KNOWN AND ACCEPTED RESIDUAL: `_settle()` does not
+    ///         crystallise, so the final harvest before a settle escapes the performance fee — in the
+    ///         HOLDERS' favour, and terminal (there is no next point to shift it to).
     /// @param minUsdcOut   Minimum USDC out of the AERO→USDC swap (slippage guard).
     /// @param minLiquidity Minimum CL liquidity on the redeploy (slippage guard).
     function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
+        // GENUINE-NO-OP PROBE — must precede the crystallise (see the header). Order matches the
+        // manager's own bail-outs: flat book first, then the caller-arg belt, then "is there any reward".
+        Layout storage $ = _layout();
+        uint256 tokenId_ = $.tokenId;
+        if (tokenId_ == 0) return; // flat book — nothing staked, nothing to harvest
+        // Kept AHEAD of the reward probe so `compound(0, …)` on a LIVE book still reverts loudly whether
+        // or not AERO happens to be claimable — the exact order `compoundImpl` had before the probe moved
+        // here. Qualified name: the error is declared once, in the manager, and shares one selector.
+        if (minUsdcOut == 0) revert LeveragedAeroManager.ZeroMinOut();
+        address gauge_ = $.gauge;
+        if (ICLGauge(gauge_).earned(address(this), tokenId_) == 0) {
+            // Nothing claimable. A stray AERO balance (previous partial fill, donation) is still real
+            // yield, so only a zero on BOTH counts is a no-op.
+            if (IERC20(ICLGauge(gauge_).rewardToken()).balanceOf(address(this)) == 0) return;
+        }
         // Crystallize on the pre-compound NAV (fail-closed on the PRICE; `nav()` stays outside the
         // try, mirroring deposit's 3.6 fee model). Best-effort on the MINT (H3): the vault's issuance
         // gate can be shut while the position stays live, and a harvest must not brick on a fee-share
@@ -957,11 +1033,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // the STRATEGY transfers it out + decrements owed (config read + external transfer stay
         // out of the manager).
         address recipient = _protocolFeeRecipient();
-        uint256 skimCap = recipient == address(0) ? 0 : _layout().protocolFeeOwed;
+        uint256 skimCap = recipient == address(0) ? 0 : $.protocolFeeOwed;
         uint256 pay = LeveragedAeroManager.compoundImpl(minUsdcOut, minLiquidity, skimCap);
         if (pay > 0) {
-            _layout().protocolFeeOwed -= pay;
-            IERC20(_layout().usdc).safeTransfer(recipient, pay);
+            $.protocolFeeOwed -= pay;
+            IERC20($.usdc).safeTransfer(recipient, pay);
         }
     }
 

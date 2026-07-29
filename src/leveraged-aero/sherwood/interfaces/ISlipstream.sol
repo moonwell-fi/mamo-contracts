@@ -186,6 +186,11 @@ interface ICLGauge {
 
     /// @notice The ERC-20 token distributed as gauge rewards (AERO on Base).
     function rewardToken() external view returns (address);
+
+    /// @notice Rewards currently claimable by `account` for the staked position `tokenId`.
+    /// @dev Read by `LeveragedAerodromeCLStrategy.compound` to tell a GENUINE no-op (nothing to harvest)
+    ///      apart from a real harvest BEFORE it crystallises fees — a poll must have no side effects.
+    function earned(address account, uint256 tokenId) external view returns (uint256);
 }
 
 /// @title Aerodrome Slipstream CL Swap Router

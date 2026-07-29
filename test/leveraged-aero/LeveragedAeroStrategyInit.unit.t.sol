@@ -908,13 +908,48 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     /**
-     * @dev `compound` must not brick when share issuance is closed. It crystallises a management fee
-     *      by MINTING fee-shares, and the vault's `strategyMint` is gated on `depositsOpen`; routing
-     *      that mint through the best-effort path (as deposit / redeem already do) makes the fee
-     *      DEFER — emitting `FeeCrystallizeDeferred` — instead of reverting the whole harvest on a
-     *      live levered book. The accrual clock stays put, so the deferred fee is not lost.
+     * @dev A `compound` WITH NOTHING TO HARVEST MUST HAVE NO SIDE EFFECTS. `compound` is a
+     *      keeper-polled entrypoint, and crystallisation is not free: it mints fee-shares, accrues the
+     *      protocol slice and ratchets the HWM. This fixture is the maximally-armed no-op — a flat book
+     *      (`tokenId == 0`), shares outstanding, a 1%/yr management fee and 30 days of `dt` — so the
+     *      management leg alone WOULD mint if the entrypoint crystallised before checking. It must not:
+     *      the genuine-no-op probe in `compound` runs ahead of every state write.
+     *
+     *      (The counterpart positive controls — a REAL harvest crystallising, and a real harvest
+     *      DEFERRING the fee when share issuance is shut — need a live position and the AERO→USDC venue,
+     *      so they live in `LeveragedAeroCompoundHedge.unit.t.sol`, which etches the Aerodrome-v2 router
+     *      and drives the whole claim → swap → re-hedge → redeploy sequence.)
      */
-    function testCompoundDefersFeeCrystalliseWhenIssuanceIsClosed() public {
+    function testCompoundOnAFlatBookIsATrueNoOp() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        _armForCompound(s, 1_000e12, 1_000e6, 30 days);
+        assertEq(s.layout().tokenId, 0, "flat book");
+
+        uint256 lastAccrualBefore = s.layout().lastFeeAccrualTimestamp;
+        uint256 idleBefore = usdc.balanceOf(address(s));
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        s.compound(1, 0);
+
+        assertEq(vault.totalSupply(), 1_000e12, "no fee-shares minted");
+        assertEq(vault.balanceOf(feeRecipient), 0, "fee recipient untouched");
+        assertEq(s.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "fee clock NOT advanced");
+        assertEq(s.layout().hwmPerShare, 0, "HWM NOT ratcheted");
+        assertEq(usdc.balanceOf(address(s)), idleBefore, "idle USDC byte-identical");
+        assertEq(gauge.getRewardCallCount(), 0, "the gauge was never even touched");
+
+        // Not a deferral either — there was simply nothing to crystallise.
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != FeeCrystallizeDeferred.selector, "a no-op defers nothing");
+        }
+    }
+
+    /// @dev The same no-op holds with share issuance SHUT: nothing is minted, nothing is deferred, and
+    ///      the call does not revert. (With a live book the fee genuinely defers — see the H3 test in
+    ///      `LeveragedAeroCompoundHedge.unit.t.sol`.)
+    function testCompoundOnAFlatBookIsANoOpEvenWithIssuanceClosed() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         _armForCompound(s, 1_000e12, 1_000e6, 30 days);
 
@@ -922,35 +957,12 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         vault.setOpenDeposits(false);
 
-        vm.expectEmit(false, false, false, true, address(s));
-        emit FeeCrystallizeDeferred(OP_COMPOUND, 1_000e6);
-
         vm.prank(proposer);
         s.compound(1, 0);
 
         assertEq(vault.totalSupply(), 1_000e12, "no fee-shares minted");
-        assertEq(s.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "accrual clock unmoved (fee deferred)");
+        assertEq(s.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "accrual clock unmoved");
         assertEq(s.layout().hwmPerShare, 0, "HWM unmoved");
-    }
-
-    /// @dev Positive control: with issuance open the SAME call crystallises for real — fee-shares are
-    ///      minted, the clock advances, and nothing is deferred.
-    function testCompoundCrystallisesWhenIssuanceIsOpen() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        _armForCompound(s, 1_000e12, 1_000e6, 30 days);
-
-        vm.recordLogs();
-        vm.prank(proposer);
-        s.compound(1, 0);
-
-        assertGt(vault.totalSupply(), 1_000e12, "management fee-shares minted");
-        assertGt(vault.balanceOf(feeRecipient), 0, "fee recipient paid in shares");
-        assertEq(s.layout().lastFeeAccrualTimestamp, vm.getBlockTimestamp(), "accrual clock advanced");
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i; i < logs.length; ++i) {
-            assertTrue(logs[i].topics[0] != FeeCrystallizeDeferred.selector, "no deferral when issuance is open");
-        }
     }
 
     function testCompoundRevertsForNonProposer() public {
