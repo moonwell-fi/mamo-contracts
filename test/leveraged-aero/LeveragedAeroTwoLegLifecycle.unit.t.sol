@@ -295,6 +295,94 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertLt(mLegB.borrowBalance(address(strategy)), debtBUp, "lever DOWN repaid leg B");
     }
 
+    // ==================== TARGET-LTV PERSISTENCE (two-borrowed-legs) ====================
+
+    /// @dev The persist is SHAPE-INDEPENDENT — it is one write on the shared `adjustLeverageImpl` path,
+    ///      so it holds in the two-borrowed-legs shape exactly as in asset-mode, both directions. The
+    ///      dedicated getter and `layout()` are the same storage read and are asserted together.
+    function testAdjustLeveragePersistsTheStandingTarget() public {
+        _execute(SEED);
+        assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "genesis: the init target IS the standing target");
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "genesis: getter == layout()");
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(6000, 0, 0); // lever UP (self-funding in this shape)
+        assertEq(strategy.targetLtvBps(), 6000, "lever UP persisted the new standing target");
+        assertEq(strategy.layout().targetLtvBps, 6000, "getter == layout() after lever UP");
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(3000, 0, 0); // lever DOWN
+        assertEq(strategy.targetLtvBps(), 3000, "lever DOWN persisted the new standing target");
+        assertEq(strategy.layout().targetLtvBps, 3000, "getter == layout() after lever DOWN");
+    }
+
+    /**
+     * @dev THE REGRESSION THIS FIXES, END TO END (two-leg shape). Pre-fix the retarget was per-call only,
+     *      so the next `deployIdle` re-read the stale stored 5000 and borrowed 50% of the top-up instead
+     *      of 60% — blending realized LTV back down off the 6000 the rebalancer had just set.
+     *
+     *      This shape makes the arithmetic exact and readable: the whole top-up becomes collateral and the
+     *      borrow is `topUp × storedTarget`, so the added debt IS the stored target, directly observable.
+     */
+    function testDeployIdleAfterAdjustLeverageSizesAtTheNewTarget() public {
+        _execute(SEED);
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(6000, 0, 0);
+        // Deliberately NOT asserting the getter here — `testAdjustLeveragePersistsTheStandingTarget`
+        // owns that. This test must fail on the OBSERVABLE BORROW instead, so the regression it guards
+        // is the economic one (the redeploy sizing) and not merely a storage read.
+
+        uint256 debtBBefore = mLegB.borrowBalance(address(strategy));
+        uint256 debtABefore = mLegA.borrowBalance(address(strategy));
+
+        uint256 topUp = 250_000e6;
+        usdc.mint(address(strategy), topUp);
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+
+        // The borrow the redeploy added, in USDC face: 60% of the top-up, NOT the stale 50%.
+        uint256 addedDebt = _valueUsdc(mLegB.borrowBalance(address(strategy)) - debtBBefore, P_LEG_B, 8)
+            + _valueUsdc(mLegA.borrowBalance(address(strategy)) - debtABefore, P_LEG_A, 18);
+        assertApproxEqRel(addedDebt, (topUp * 6000) / 10_000, 1e12, "the redeploy borrowed at the NEW target");
+        assertGt(
+            addedDebt,
+            (topUp * uint256(TARGET_LTV_BPS)) / 10_000,
+            "strictly more than the stale 5000 sizing would have borrowed"
+        );
+
+        // And realized LTV held at the new target instead of blending down toward 5800.
+        uint256 collateral = mUsdc.balanceOf(address(strategy));
+        uint256 debtUsdc = _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
+            + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18);
+        assertApproxEqAbs((debtUsdc * 10_000) / collateral, 6000, 2, "realized LTV HELD at 6000");
+    }
+
+    /// @dev Out-of-band target: refused at the entrypoint, stores nothing, standing target untouched.
+    function testAdjustLeverageAboveMaxRevertsAndLeavesTheStoredTargetUntouched() public {
+        _execute(SEED);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        strategy.adjustLeverage(6501, 0, 0); // maxLtvBps == 6500
+
+        assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "a rejected target stores nothing");
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "layout() agrees: still the init target");
+
+        // A redeploy still borrows at the untouched init target.
+        uint256 debtBefore = _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
+            + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18);
+        uint256 topUp = 100_000e6;
+        usdc.mint(address(strategy), topUp);
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+        uint256 addedDebt = _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
+            + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18) - debtBefore;
+        assertApproxEqRel(
+            addedDebt, (topUp * uint256(TARGET_LTV_BPS)) / 10_000, 1e12, "redeploy sized at the untouched init target"
+        );
+    }
+
     // ==================== REDEEM ====================
 
     /// @dev The stayer reservation in the ORIGINAL shape: with no LP-shed USDC (both LP legs are

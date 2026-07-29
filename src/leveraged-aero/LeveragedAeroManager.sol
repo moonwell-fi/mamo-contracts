@@ -536,10 +536,38 @@ library LeveragedAeroManager {
     ///         into the LP, not a loss) but it shrinks the redeem cover budget until the next deposit, so
     ///         size lever-ups against available idle; an under-funded one reverts
     ///         `InsufficientIdleForLeverUp(needed, available)` and changes nothing.
-    /// @param targetLtvBps_ Target LTV in bps (≤ `maxLtvBps`).
+    /// @param targetLtvBps_ Target LTV in bps (≤ `maxLtvBps`). PERSISTED as the fund's standing target —
+    ///                      `execute` / `deployIdle` size their borrow off the STORED value, so a retarget
+    ///                      that did not persist would be silently undone by the next redeploy.
     /// @param minLiq        Minimum CL liquidity on a lever-UP add (slippage guard).
     /// @param minOut        Minimum USDC out of a lever-DOWN residual swap (slippage guard).
     function adjustLeverageImpl(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut) public {
+        // Persist the (already max-validated) target BEFORE the venue ops, exactly as `rerangeImpl`
+        // persists `width`. Three reasons this ordering is the right one:
+        //
+        //   1. SAFETY IS UNAFFECTED. The strategy entrypoint already rejected `targetLtvBps_ >
+        //      maxLtvBps`, and this is the ONLY caller — so no out-of-band value can reach this write.
+        //      A later venue revert rolls the whole tx back atomically (there is no partial-failure
+        //      state in the EVM), so "stored target that doesn't match the position" is unreachable
+        //      either way: writing first cannot leave a stale target behind.
+        //   2. IT MUST APPLY EVEN WHEN NEITHER BRANCH RUNS. When `targetDebt == debtUsdc` (already at
+        //      target, or zero collateral pre-`execute`) both branches are skipped and the op is a
+        //      venue no-op — but the proposer's new target must still take effect, or it is silently
+        //      dropped. Identical to `rerange`-on-a-flat-book, and why the write is ahead of the
+        //      branches rather than tucked inside them.
+        //   3. NOTHING ON THE LEVERAGE PATH READS IT. `_leverUp` / `_leverDown` / `_assertHealthy` size
+        //      off the `targetDebt` computed below and off `maxLtvBps` / `minHealthBps`, never off
+        //      `$.targetLtvBps` (its only reader is `_supplyAndBorrow`, the deploy path). So this write
+        //      is behaviourally independent of the venue work in THIS call and only changes what the
+        //      NEXT `deployIdle` / `compound` sizes at.
+        //   4. WHERE THE WRITE LIVES. The `sstore` itself is performed by the STRATEGY entrypoint
+        //      (`LeveragedAerodromeCLStrategy.adjustLeverage`) rather than here, purely for EIP-170
+        //      headroom: that frame already loads `_layout()` for the `maxLtvBps` check, so the write
+        //      costs ~20 bytes there versus ~71 in this library, and this library is at the cap.
+        //      Semantics are identical — same transaction, same all-or-nothing revert, and still ahead
+        //      of the no-op branch below. (`rerangeImpl` persists `width` in-library because the
+        //      manager had room when it was written; if this file is ever refactored for space, that
+        //      write is the same candidate for relocation.)
         (uint256 collateralUsdc, uint256 debtUsdc) = _readCollateralDebt();
         uint256 targetDebt = (uint256(targetLtvBps_) * collateralUsdc) / 10000;
         if (targetDebt > debtUsdc) {

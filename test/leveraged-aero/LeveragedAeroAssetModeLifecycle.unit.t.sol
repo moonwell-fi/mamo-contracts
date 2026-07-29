@@ -196,8 +196,19 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         view
         returns (uint256 c, uint256 u, uint256 a)
     {
+        return _expectedSplitAtLtv(amount, tickLower, tickUpper, TARGET_LTV_BPS);
+    }
+
+    /// @dev Same, at an ARBITRARY target LTV — the target-persistence tests need to size the SAME
+    ///      deployment two ways (at the new standing target vs. at the stale init one) to show which
+    ///      value the production path actually used.
+    function _expectedSplitAtLtv(uint256 amount, int24 tickLower, int24 tickUpper, uint16 ltvBps)
+        internal
+        view
+        returns (uint256 c, uint256 u, uint256 a)
+    {
         return LeveragedAeroValuation.assetModeSplit(
-            address(pool), tickLower, tickUpper, amount, uint256(TARGET_LTV_BPS), LEG_A_DECIMALS, false, legAPrice8
+            address(pool), tickLower, tickUpper, amount, uint256(ltvBps), LEG_A_DECIMALS, false, legAPrice8
         );
     }
 
@@ -487,6 +498,106 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(proposer);
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         strategy.adjustLeverage(6000, 0, 0);
+    }
+
+    // ==================== TARGET-LTV PERSISTENCE (asset-mode) ====================
+
+    /// @dev `adjustLeverage` sets the fund's STANDING target, both directions — the same contract
+    ///      `rerange` has for `width`. The dedicated getter and `layout()` are the same storage read,
+    ///      so they are asserted together at every step: they can never legitimately disagree.
+    function testAdjustLeveragePersistsTheStandingTarget() public {
+        _execute(SEED);
+        assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "genesis: the init target IS the standing target");
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "genesis: getter == layout()");
+
+        // Lever UP persists.
+        (, uint256 needed) = _expectedLeverUpPair(6000);
+        usdc.mint(address(strategy), needed);
+        vm.prank(proposer);
+        strategy.adjustLeverage(6000, 0, 0);
+        assertEq(strategy.targetLtvBps(), 6000, "lever UP persisted the new standing target");
+        assertEq(strategy.layout().targetLtvBps, 6000, "getter == layout() after lever UP");
+
+        // Lever DOWN persists too — the write is on the shared path, not the up-branch.
+        vm.prank(proposer);
+        strategy.adjustLeverage(3000, 0, 0);
+        assertEq(strategy.targetLtvBps(), 3000, "lever DOWN persisted the new standing target");
+        assertEq(strategy.layout().targetLtvBps, 3000, "getter == layout() after lever DOWN");
+    }
+
+    /**
+     * @dev THE REGRESSION THIS FIXES, END TO END (asset-mode). Pre-fix, `adjustLeverage` consumed the
+     *      target as a per-call parameter and never stored it, so the retarget held only until the next
+     *      redeploy: `deployIdle` re-read the STALE stored 5000, sized its collateral/borrow split at
+     *      5000, and silently dragged realized LTV back down off the 6000 the rebalancer had just set.
+     *
+     *      The discriminator is the sizing itself, not just the end LTV: `C` at 6000 (`topUp/1.6`) and
+     *      `C` at 5000 (`topUp/1.5`) are different numbers, and the test pins which one the chain used.
+     *      It then computes the LTV the stale sizing WOULD have produced and asserts it is materially
+     *      lower — so a future regression can't pass by accident on a loose tolerance.
+     */
+    function testDeployIdleAfterAdjustLeverageSizesAtTheNewTarget() public {
+        _execute(SEED);
+
+        // 1. Retarget to 6000 and confirm the position really got there.
+        (, uint256 needed) = _expectedLeverUpPair(6000);
+        usdc.mint(address(strategy), needed);
+        vm.prank(proposer);
+        strategy.adjustLeverage(6000, 0, 0);
+
+        (uint256 collateralBefore, uint256 debtBefore) = _collateralAndDebt();
+        assertApproxEqAbs((debtBefore * 10_000) / collateralBefore, 6000, 2, "the retarget landed at 6000");
+
+        // 2. Redeploy fresh idle. The two candidate sizings must differ, or this proves nothing.
+        uint256 topUp = 250_000e6;
+        usdc.mint(address(strategy), topUp);
+        int24 tickLower = strategy.layout().posTickLower;
+        int24 tickUpper = strategy.layout().posTickUpper;
+        (uint256 expCNew,,) = _expectedSplitAtLtv(topUp, tickLower, tickUpper, 6000);
+        (uint256 expCStale,,) = _expectedSplitAtLtv(topUp, tickLower, tickUpper, TARGET_LTV_BPS);
+        assertTrue(expCNew != expCStale, "the new-target and stale-target sizings must differ");
+
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+
+        // 3. The redeploy sized off the PERSISTED 6000 — this is the assertion that fails pre-fix.
+        (uint256 collateralAfter, uint256 debtAfter) = _collateralAndDebt();
+        assertEq(collateralAfter - collateralBefore, expCNew, "deployIdle sized C at the NEW standing target");
+        assertApproxEqAbs(
+            (debtAfter * 10_000) / collateralAfter, 6000, 3, "realized LTV HELD at 6000 (not dragged back to 5000)"
+        );
+
+        // 4. The pre-fix drag as a number: sizing this same top-up at the stale 5000 would have blended
+        //    realized LTV down to ~5800, i.e. ~200 bps of silent fight with the rebalancer.
+        uint256 staleLtv =
+            ((debtBefore + (uint256(TARGET_LTV_BPS) * expCStale) / 10_000) * 10_000) / (collateralBefore + expCStale);
+        assertLt(staleLtv, 5900, "the stale-target sizing really would have dragged realized LTV down");
+    }
+
+    /// @dev An out-of-band target is refused at the entrypoint and stores NOTHING — the persist sits
+    ///      behind the `targetLtvBps_ <= maxLtvBps` gate, so a rejected value can never become the
+    ///      standing target that later redeploys size at.
+    function testAdjustLeverageAboveMaxRevertsAndLeavesTheStoredTargetUntouched() public {
+        _execute(SEED);
+        usdc.mint(address(strategy), 500_000e6); // idle is NOT what blocks it
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        strategy.adjustLeverage(6501, 0, 0); // maxLtvBps == 6500
+
+        assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "a rejected target stores nothing");
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "layout() agrees: still the init target");
+
+        // And the standing target is still what a redeploy sizes at.
+        uint256 topUp = 100_000e6;
+        usdc.mint(address(strategy), topUp);
+        (uint256 expC,,) =
+            _expectedSplitAtLtv(topUp, strategy.layout().posTickLower, strategy.layout().posTickUpper, TARGET_LTV_BPS);
+        (uint256 collateralBefore,) = _collateralAndDebt();
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+        (uint256 collateralAfter,) = _collateralAndDebt();
+        assertEq(collateralAfter - collateralBefore, expC, "redeploy still sized at the untouched init target");
     }
 
     // ==================== ASSET-MODE LEVER DOWN / DELEVERAGE (regression) ====================

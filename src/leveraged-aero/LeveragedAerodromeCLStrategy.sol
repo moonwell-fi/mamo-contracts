@@ -387,6 +387,17 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         return _layout().redeemRequests[id];
     }
 
+    /// @notice The fund's STANDING target LTV in bps — set at init and re-set by every `adjustLeverage`.
+    ///         This is what `execute` / `deployIdle` / `compound` size their borrow at, so it is the value
+    ///         a rebalancer needs before deciding whether to retarget. Exposed as its own selector purely
+    ///         for keeper ergonomics: `layout()` already carries it, but decoding a 40-plus-field
+    ///         `LayoutView` to read one uint16 is needless work off-chain.
+    /// @dev Same single storage read as `layout().targetLtvBps` (`_layout().targetLtvBps`, one diamond
+    ///      slot, no cached copy anywhere) — the two CANNOT disagree by construction.
+    function targetLtvBps() external view returns (uint16) {
+        return _layout().targetLtvBps;
+    }
+
     /// @dev Some Moonwell markets (mWETH on Base) deliver native ETH on `borrow()`; when
     ///      `wethDeliversNative` is set the strategy wraps it into the leg-A token before use.
     ///      Without this receiver that borrow's ETH transfer reverts.
@@ -996,12 +1007,27 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///
     ///         NO fee crystallisation (like `rerange`): no supply change, no PnL realized; the
     ///         streaming fee is deferred and the HWM is unaffected.
-    /// @param targetLtvBps_ Target LTV in bps (must be ≤ `maxLtvBps`).
+    ///         PERSISTED, like `rerange`'s `width`: `targetLtvBps_` becomes the fund's STANDING target
+    ///         (readable via `targetLtvBps()` / `layout().targetLtvBps`), not a one-shot per-call knob.
+    ///         `execute` / `deployIdle` / `compound` size their borrow off the STORED target, so a
+    ///         retarget that did not persist would be silently dragged back by the next redeploy —
+    ///         the rebalancer would be fighting its own book.
+    /// @param targetLtvBps_ Target LTV in bps (must be ≤ `maxLtvBps`). Persisted as the new standing
+    ///                      target once that check passes; a rejected value stores nothing.
     /// @param minLiq        Minimum CL liquidity on a lever-UP add (slippage guard).
     /// @param minOut        Minimum USDC out of a lever-DOWN residual swap (slippage guard).
     function adjustLeverage(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        if (targetLtvBps_ > _layout().maxLtvBps) revert TargetLtvExceedsMax();
+        Layout storage $ = _layout();
+        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
+        // Persist the new standing target HERE, not in the manager: this frame already holds `$` for
+        // the bound check above, so the write is ~20 bytes here versus ~71 in the manager library,
+        // which sits at the EIP-170 cap. Semantics are unchanged — the write is in the same
+        // transaction as the venue work (a later revert rolls it back), it happens only after the
+        // `maxLtvBps` check, and it lands even when the retarget is a venue no-op
+        // (`targetDebt == debtUsdc`), which is the `rerange`-on-a-flat-book analogue. See the ordering
+        // note in `LeveragedAeroManager.adjustLeverageImpl`.
+        $.targetLtvBps = targetLtvBps_;
         LeveragedAeroManager.adjustLeverageImpl(targetLtvBps_, minLiq, minOut);
     }
 

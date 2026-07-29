@@ -1,24 +1,36 @@
 {
-  "generatedAt": "2026-07-26T20:44:45Z",
+  "generatedAt": "2026-07-29T16:40:22Z",
   "chainId": 8453,
   "publicRpc": "https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b",
   "adminRpc": "1Password (write-capable — never committed)",
   "strategyTypeId": 5,
   "mamo": {
-    "accountImplementation": "0x699318E0641518eF39418a8D86F93BF8b0715c88",
-    "accountFactory": "0x9f548228A41d18e2DC736ceF048cfBeC8fFC55E6",
+    "accountImplementation": null,
+    "accountFactory": null,
     "strategyRegistry": "0x46a5624C2ba92c08aBA4B206297052EDf14baa92"
   },
   "pooled": {
-    "strategyClone": "0x5E22913E4C96f816133fbc8E894F652a4f87C760",
-    "vault": "0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9"
+    "strategyClone": "0x7A5AB25eb56f2DB5095B4FF5aaEBF4BDd57d01Fd",
+    "vault": "0x8BcAff042cD86b238093063a39C0D8721CF5B0F5",
+    "template": "0x5CF29f7cA275E243A7c5Fe2A1E05239d8f0Dc6CF",
+    "proposer": "0x73f6B456d063F78129113D42DBC315b9eEee8FAf",
+    "seed": "100000000000",
+    "lpPool": "0x4e962BB3889Bf030368F56810A9c96B83CB3E778"
   },
   "sherwood": {
-    "strategyClone": "0x5E22913E4C96f816133fbc8E894F652a4f87C760",
-    "syndicateVault": "0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9"
+    "strategyClone": "0x7A5AB25eb56f2DB5095B4FF5aaEBF4BDd57d01Fd",
+    "syndicateVault": "0x8BcAff042cD86b238093063a39C0D8721CF5B0F5"
   },
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  "note": "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
-  "vaultGeneration": 1,
-  "vaultGenerationName": "sherwood-syndicate-vault (legacy: openDeposits(), no redeemSettled)"
+  "note": "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66); mamo = the account layer, filled by run-leveraged-aero-account.sh (null right after a pooled redeploy — the factory binds the clone at construction, so the account layer must be redeployed too). sherwood is a deprecated alias of pooled, kept for existing consumers. The 5 feeds are FreshFeed-mocked (never stale). proposer is the rebalancer operator key, deliberately distinct from MAMO_BACKEND.",
+  "vaultGeneration": 2,
+  "vaultGenerationName": "leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)",
+  "feeds": {
+    "pattern": "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
+    "legAUsd": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+    "legBUsd": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
+    "usdcUsd": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
+    "aeroUsd": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0",
+    "sequencerUptime": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
+  }
 }

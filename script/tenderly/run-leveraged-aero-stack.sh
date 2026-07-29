@@ -225,6 +225,68 @@ fund_eth "$DEPLOYER" "$ETH_FUND_HEX"
 fund_eth "$MULTISIG" "$ETH_FUND_HEX"
 fund_eth "$MAMO_REBALANCER" "$ETH_FUND_HEX"
 
+# ── Phase B.-1: STATE SYNC must be OFF, and the LP pool's TWAP must be servable ─
+# Runbook constraint 3 says state sync MUST be disabled, and it is a CREATION-TIME-ONLY flag —
+# so a state-synced instance cannot be repaired, only replaced. It was previously enforced only
+# by prose, which cost a full pooled deploy on 2026-07-29: the instance had
+# `sync_state_config.enabled = true`, Tenderly kept re-hydrating the LP pool's Slipstream oracle
+# ring buffer from the LIVE parent chain while `slot0.observationIndex` stayed frozen at OUR last
+# swap, so `oldest = observations[index+1]` became a *recent* live entry and
+# `pool.observe([twapWindow, 0])` reverted `'OLD'`. That is the calm gate inside
+# `LeveragedAeroValuation.netEquityUsdc`, i.e. EVERY priced path — `nav()`, `deposit`, `redeem`,
+# `compound`, `deployIdle`'s health assert — fail-closes, and it does NOT self-heal.
+#
+# Two checks, cheapest first:
+#   (a) the Tenderly API's `sync_state_config.enabled` when creds are present (unambiguous), and
+#   (b) an always-on FUNCTIONAL probe: `pool.observe([twapWindow, 0])` must not revert. (b) is the
+#       one that matters — it catches a synced instance with no creds, and any other reason the
+#       pool's oracle window is too short (a very fresh pool, a wrapped ring buffer).
+section "Phase B.-1 — vnet sanity: state sync OFF + LP-pool TWAP servable"
+TWAP_WINDOW="${TWAP_WINDOW:-1800}"
+if [ -n "${TENDERLY_ACCESS_KEY:-}" ]; then
+  # A vnet's UUID-form RPC (`…rpc.tenderly.co/<uuid>`) matches `rpcs[].url` directly. The ALIASED
+  # form (`…rpc.tenderly.co/<account>/<project>/<slug>`) does NOT — the API only ever returns the
+  # UUID urls — but its path carries the account/project the vnet actually lives in, which may
+  # differ from .env's. So try .env's slug pair AND the URL-derived one, matching on either the
+  # UUID or the trailing alias slug.
+  #
+  # ── AND the known home of the SHARED instance, which is why this check was silently inert ──
+  # Observed 2026-07-29: `.env` carries TENDERLY_PROJECT_SLUG=moonwell-automations (correct for the
+  # LPV2 / price-checker harnesses), but the shared leveraged-Aero vnet lives in `moonwell/project`.
+  # The .env pair therefore lists 4 unrelated vnets and never matches, and the URL-derived fallback
+  # can't help because a UUID-form RPC has no account/project in its path — so this check, the ONE
+  # that would have caught the state-synced instance up front, reported "could not confirm" and fell
+  # through to the functional probe every time. Appending the known pair makes it actually fire.
+  # It is a CANDIDATE list, not an override: the first pair that resolves the vnet wins, so adding
+  # this cannot mis-report a vnet that .env's pair already matches.
+  _vnet_key="${RPC##*/}"
+  _rpc_path="${RPC#*rpc.tenderly.co/}"
+  _synced=""
+  for _pair in "${TENDERLY_ACCOUNT_SLUG:-}/${TENDERLY_PROJECT_SLUG:-}" \
+               "$(printf '%s' "$_rpc_path" | cut -d/ -f1)/$(printf '%s' "$_rpc_path" | cut -d/ -f2)" \
+               "${TENDERLY_ACCOUNT_SLUG:-moonwell}/project"; do
+    _acct="${_pair%%/*}"; _proj="${_pair##*/}"
+    { [ -n "$_acct" ] && [ -n "$_proj" ] && [ "$_acct" != "$_rpc_path" ]; } || continue
+    _synced="$(curl -s "$TENDERLY_API/account/$_acct/project/$_proj/vnets?page=1&perPage=100" \
+      -H "X-Access-Key: $TENDERLY_ACCESS_KEY" -H "Accept: application/json" 2>/dev/null \
+      | jq -r --arg u "$_vnet_key" '.[]? | select(([.rpcs[]?.url] | join(" ") | contains($u)) or (.slug == $u)) | .sync_state_config.enabled' 2>/dev/null | head -1)"
+    [ -n "$_synced" ] && break
+  done
+  case "$_synced" in
+    true)  die "vnet has sync_state_config.enabled = true — runbook constraint 3. It is CREATION-TIME-ONLY: recreate the vnet with sync_state_config.enabled=false (it re-hydrates mainnet accounts, which breaks the pool TWAP and would silently undo the FreshFeed code overrides)" ;;
+    false) ok "state sync disabled (Tenderly API)" ;;
+    *)     info "state sync: could not confirm via API (vnet not matched) — relying on the functional probe" ;;
+  esac
+else
+  info "state sync: no API creds to check — relying on the functional probe"
+fi
+if cast call "$LP_POOL" 'observe(uint32[])(int56[],uint160[])' "[$TWAP_WINDOW,0]" --rpc-url "$RPC" >/dev/null 2>&1; then
+  ok "LP pool TWAP servable over ${TWAP_WINDOW}s (calm gate can run)"
+else
+  _obs_err="$(cast call "$LP_POOL" 'observe(uint32[])(int56[],uint160[])' "[$TWAP_WINDOW,0]" --rpc-url "$RPC" 2>&1 | tail -1)"
+  die "pool.observe([$TWAP_WINDOW,0]) reverts on $LP_POOL — the calm gate in every priced path will fail-close. Almost always a STATE-SYNCED vnet (recreate it with sync_state_config.enabled=false). Raw: $_obs_err"
+fi
+
 # ── Phase B.0: FreshFeed code-replacement ─────────────────────────────────────
 # Per feed: read the LIVE decimals + answer, deploy a FreshFeed carrying them as
 # immutables, then copy its RUNTIME code onto the canonical mainnet feed address with
@@ -247,8 +309,12 @@ apply_freshfeed() {
   code="$(jq -r '.bytecode.object' "$FRESHFEED_ART")"
   [ -n "$code" ] && [ "$code" != "null" ] || die "FreshFeed artifact missing bytecode ($FRESHFEED_ART)"
   args="$(cast abi-encode 'ctor(int256,uint8)' "$ans" "$dec")"
-  deployed="$(cast send --create "${code}${args#0x}" --from "$DEPLOYER" --unlocked \
-    --rpc-url "$RPC" --json 2>/dev/null | jq -r '.contractAddress')"
+  # NOTE flag ORDER: every option MUST precede `--create`. In cast >= 1.7 `--create` takes the
+  # bytecode as a positional and then greedily consumes the rest of argv as [SIG] [ARGS]..., so a
+  # trailing `--from` dies with "unexpected argument '--from' found" (and the 2>/dev/null here turns
+  # that into a bare "FreshFeed deploy failed"). Keep --create LAST.
+  deployed="$(cast send --from "$DEPLOYER" --unlocked --rpc-url "$RPC" --json \
+    --create "${code}${args#0x}" 2>/dev/null | jq -r '.contractAddress')"
   [ -n "$deployed" ] && [ "$deployed" != "null" ] || die "$label: FreshFeed deploy failed"
   runtime="$(cast code "$deployed" --rpc-url "$RPC" 2>/dev/null)"
   [ -n "$runtime" ] && [ "$runtime" != "0x" ] || die "$label: FreshFeed has no runtime code"

@@ -90,6 +90,24 @@ Two keys are **created by this runbook** and are deliberately **not** committed 
 >    addresses, exactly the accounts a state-syncing vnet re-hydrates from the parent network, which
 >    would silently restore the real aggregators and bring the staleness treadmill back. Deployed
 >    stack addresses are vnet-only and unaffected; the overridden feeds are the exposure.
+>
+>    **Reason (c), observed live 2026-07-29 — it also breaks the LP pool's TWAP, which is the
+>    expensive failure.** A state-synced instance keeps re-hydrating the Slipstream pool's oracle
+>    ring buffer from the parent chain while `slot0.observationIndex` stays frozen at the vnet's own
+>    last swap. `oldest = observations[index + 1]` then resolves to a *recent* live entry, so
+>    `pool.observe([twapWindow, 0])` reverts `'OLD'` — that is the calm gate inside
+>    `LeveragedAeroValuation.netEquityUsdc`, i.e. **every** priced path (`nav()`, `deposit`,
+>    `redeem`, `compound`, `deployIdle`'s health assert) fail-closes. It does **not** self-heal, and
+>    since the flag is creation-time-only the instance cannot be repaired — only replaced. Note the
+>    FreshFeed asserts still pass on such an instance (`tenderly_setCode` writes are vnet-local), so
+>    green feeds are **not** evidence that state sync is off.
+>
+>    `run-leveraged-aero-stack.sh` now enforces this in **phase B.-1**, before it deploys anything:
+>    it checks `sync_state_config.enabled` through the Tenderly API when creds resolve the instance,
+>    and — always — functionally probes `pool.observe([twapWindow, 0])` and dies if it reverts. The
+>    functional probe is the load-bearing one: an aliased RPC URL
+>    (`…rpc.tenderly.co/<account>/<project>/<slug>`) cannot be mapped back to an API record, because
+>    the API only returns UUID-form rpc urls and the alias slug is unrelated to the vnet slug.
 > 4. **Base per-tx gas cap = 16,777,216 (2^24).** `estimate × gas-multiplier` must stay under it. Large
 >    `CREATE`s (impl/factory, the strategy template + its three libraries) use a modest multiplier
 >    (`DEPLOY_GAS_MULT=200`); deep nested delegatecalls want more headroom. Watch the multiplier on
@@ -585,6 +603,220 @@ cast call "$ACCT" 'owner()(address)'                                     --rpc-u
 cast call "$ACCT" 'sharesBalance()(uint256)'                             --rpc-url "$PUB"  # 0 after full withdraw
 cast call "$USDC" 'balanceOf(address)(uint256)' "$ACCT"                  --rpc-url "$PUB"  # 0 clean state
 ```
+
+---
+
+## Rebalance-cycle testing on the vnet (time-warp procedure)
+
+Phase B stands the book up; it cannot prove the **harvest** path. At the fork block the CL position has
+just been minted, so `gauge.earned() == 0` and `compound()` is a no-op no matter what you pass it.
+Getting real accrued AERO needs a time warp — and on a Base fork that is only safe because of the
+FreshFeed pattern (constraint 2). Everything below is driven by one in-repo helper:
+
+```bash
+# admin (write-capable) RPC for THE leveraged-aero instance — NOT the shared TENDERLY_VNET_RPC_URL,
+# which points at the LPV2 vnet. The helper prefers this var and resolves every address from
+# script/tenderly/leveraged-aero-vnet.json.
+export LEVERAGED_AERO_ADMIN_RPC_URL="https://virtual.base.<...>.rpc.tenderly.co/<admin-uuid>"
+
+./script/tenderly/compound-cycle.sh check-feeds   # ← the gate. Run it BEFORE and AFTER every warp.
+./script/tenderly/compound-cycle.sh snap T0
+./script/tenderly/compound-cycle.sh gauge         # are emissions armed at all?
+./script/tenderly/compound-cycle.sh arm           # voter.distribute([gauge]) — permissionless
+./script/tenderly/compound-cycle.sh warp-to-finish
+./script/tenderly/compound-cycle.sh quote         # derives minUsdcOut
+./script/tenderly/compound-cycle.sh compound <minUsdcOut> <minLiquidity>
+./script/tenderly/compound-cycle.sh snap T3
+```
+
+> **Warping is safe HERE, and only here, because of FreshFeed.** The 5 venue feeds (leg A/USD, leg
+> B/USD, USDC/USD, AERO/USD, L2 sequencer uptime) are `FreshFeed` mocks whose `updatedAt` is
+> `block.timestamp - 60`, so freshness is clock-independent. `check-feeds` is the executable form of
+> that claim: it reads all 5 `latestRoundData()` and asserts `head - updatedAt <= maxDelay`
+> (`172800` s on the live clone). **On an instance WITHOUT the FreshFeed code-replacement, warping
+> bricks the fund** — the frozen forked answers go stale and every priced path
+> (`nav()`, `deposit`, `redeem`, `compound`, `deployIdle`'s health assert) fail-closes with
+> `StaleOracle`. There is no repair short of re-running phase B.0. Treat a red `check-feeds` as
+> "do not warp", not as "warp and see".
+>
+> `check-feeds` also catches the commonest operator error: pointing the helper at the wrong vnet. A
+> non-FreshFeed instance fails the gate instantly (observed 2026-07-29 — the stale
+> `TENDERLY_VNET_RPC_URL` in `.env` resolved to the LPV2 vnet and every feed came back empty).
+
+> **Warping a SHARED instance is a side effect everyone else sees.** The clock only moves forward,
+> Moonwell interest is realized against it, and any FE/BE session on the same vnet will see the jump.
+> It is **currently sanctioned** because no integration work is live on this instance yet. Once FE/BE
+> are wired up, warping needs an owner's sign-off or its own throwaway instance. Record the total
+> warp in the run log; the live clone was already ~5 d ahead of real time before this procedure and
+> ~14 d after it.
+
+### The blocker nobody expects: gauge emissions are not armed
+
+A Base fork inherits the Slipstream pool's reward accounting frozen at the fork block, and **nothing
+on a vnet ever runs Aerodrome's weekly epoch flip**. Once the clock passes the inherited
+`periodFinish`, gauge accrual is permanently zero and *more* warping accrues *nothing*:
+
+```bash
+cast call "$POOL" 'periodFinish()(uint256)'   --rpc-url "$RPC"   # < head  → dead
+cast call "$POOL" 'rewardReserve()(uint256)'  --rpc-url "$RPC"   # 0       → dead
+```
+
+Re-arm it the **production** way rather than faking a balance — `Voter.distribute(address[])` is
+permissionless and internally does `minter.updatePeriod()` (mints the week) →
+`gauge.notifyRewardAmount(claimable)` (sets `rewardReserve`, `rewardRate`, and
+`periodFinish = epochNext(now)`). No impersonation, no minted AERO, real weights, real amounts:
+
+```bash
+./script/tenderly/compound-cycle.sh arm
+```
+
+> **Order matters.** `notifyRewardAmount` spreads the whole week's allocation over
+> `epochNext(now) - now`, so arming mid-epoch compresses a week of emissions into the remaining
+> hours and makes any APR you compute from the warp duration nonsense. Warp **past the next Thursday
+> 00:00 UTC epoch boundary first**, then `arm`, then `warp-to-finish`. That gives a clean
+> "≈7 days of warp == exactly one epoch of emissions" window. `arm` is idempotent per epoch — a
+> second call in the same epoch distributes nothing.
+
+### Deriving `minUsdcOut` (and the `ZeroMinOut` trap)
+
+> **`compound(0, …)` always reverts `ZeroMinOut()` — `0x2870c094`.** The check sits *before* the
+> zero-AERO early return (`LeveragedAeroManager.sol` step 1 vs the `aeroBal == 0` return), so even a
+> deliberate no-op harvest must pass a nonzero floor. Use `1` when you only want to poke the path.
+
+`compound` enforces `max(minUsdcOut, oracleFloor)` on the realized fill, where the manager derives
+
+```
+fair6      = aeroBal(18dp) × AERO/USD(8dp) / 1e20                    # USDC 6dp
+oracleFloor = fair6 × (10000 − maxSlippageBps) / 10000               # BelowOracleFloor bound
+```
+
+`compound-cycle.sh quote` prints `fair6`, `oracleFloor`, and the venue's actual
+`router.getAmountsOut` for the same amount, then suggests `max(oracleFloor, quote × 0.995)` — i.e.
+tighten the proposer bound onto the live quote rather than relying on the 1 % oracle band.
+
+> Two revert paths that are easy to confuse:
+> - An **absurdly high `minUsdcOut` does NOT test `BelowOracleFloor`.** `minUsdcOut` is forwarded to
+>   the Aerodrome v2 router, whose own guard fires first: `InsufficientOutputAmount()` —
+>   `0x42301c23`.
+> - `BelowOracleFloor()` — `0xc872b206` — needs the *venue* to fill below the *oracle* band, which
+>   you cannot induce with call arguments. Probe it with a **zero-side-effect `eth_call`** that
+>   overrides the AERO/USD feed's code with another FreshFeed carrying a much higher answer:
+>   ```bash
+>   CODE=$(cast code "$LEGA_FEED" --rpc-url "$RPC")           # cbBTC/USD FreshFeed: answer 6514631800000
+>   cast call --from "$PROPOSER" --override-code "$AERO_FEED:$CODE" \
+>     "$STRAT" 'compound(uint256,uint256)' 1 0 --rpc-url "$RPC"   # → 0xc872b206
+>   ```
+
+### What to assert after a `compound`
+
+| # | Assertion | How |
+|---|---|---|
+| 1 | all 5 feeds still fresh | `check-feeds` (green before *and* after the warp) |
+| 2 | AERO was claimed | `gauge.earned` → `0`; a gauge→strategy AERO `Transfer` in the receipt |
+| 3 | AERO was swapped, not stranded | strategy AERO balance `0`; pool→strategy USDC `Transfer` = `usdcOut` |
+| 4 | fill beat both bounds | `usdcOut ≥ minUsdcOut` **and** `≥ oracleFloor` (no `0xc872b206`) |
+| 5 | realized vs oracle price | `usdcOut / aeroClaimed` vs the feed answer — expect ≈ venue fee ± pool basis |
+| 6 | yield was redeployed | `supply` + `borrow` + pool `Mint` legs in the receipt; NPM `liquidity` up |
+| 7 | NFT still staked, same `tokenId` | `gauge.stakedContains` `true`; `tokenId` unchanged (this is `increaseLiquidity`, not a re-mint — only `rerange` mints a new id) |
+| 8 | `nav()` up | delta should equal `usdcOut` + realized Moonwell carry (see the decomposition note below) |
+| 9 | fee crystallisation reconciles | `totalSupply` delta == `feeRecipient` share delta, and the minted shares equal `A·supply/(nav−A)` for `A` = mgmt + perf fee |
+| 10 | delta-neutrality | LP leg-A amount vs leg-A debt (expect a small short by the *accrued borrow interest* — see below) |
+| 11 | LTV | moves **toward the stored `targetLtvBps`**, not toward the book's current LTV |
+
+> **`nav()` lags Moonwell interest until something touches the market.** `nav()` reads
+> `borrowBalanceStored` / the stored exchange rate, so a 9-day warp shows **zero** NAV change until a
+> tx accrues. `compound`'s supply+borrow does accrue, so the NAV jump you measure is
+> `harvest + the whole warp's carry` at once. To separate them, read the accruing getters by
+> `eth_call` *before* compounding — `mUSDC.balanceOfUnderlying(strategy)` and
+> `mLegA.borrowBalanceCurrent(strategy)` are non-view and therefore simulate accrual.
+
+### Live results — 2026-07-29 on the persistent clone (`0x7A5A…01Fd` / vault `0x8BcA…B0F5`)
+
+Asset-mode cbBTC/USDC clone, `state() == 1`, proposer `0x73f6…8FAf`, tokenId `73341624`, fee config
+`managementFeeBps 100` / `performanceFeeBps 1000`, `targetLtvBps 5000`, `maxSlippageBps 100`.
+
+| Metric (6dp USDC / 12dp shares unless noted) | T0 pre-warp | T2 post-warp, pre-compound | T3 post-`compound` | T4 post 2nd `compound` |
+|---|---|---|---|---|
+| head timestamp | `1785787243` | `1786579343` | `1786579597` | `1786579818` |
+| feed lag (all 5) | `60 s` | `60 s` | `60 s` | `60 s` |
+| `nav()` | `162000007892` | `162000007892` | `162385919143` | `162385919143` |
+| `gauge.earned` (AERO wei) | `0` | `703124673914631803080` | `0` | `0` |
+| strategy AERO | `0` | `0` | `0` | `0` |
+| idle USDC | `2122005703` | `2122005703` | `2122005813` | `2122005813` |
+| collateral / debt (USD) | `100134099996` / `60082539479` | idem | `100435461575` / `60198901805` | idem |
+| leg-A debt (cbBTC sats) | `92208022` | `92208022` | `92386602` | `92386602` |
+| LP liquidity | `32484548216` | `32484548216` | `32539014655` | `32539014655` |
+| LP leg-A (cbBTC sats) | `92207993` | `92207993` | `92362597` | `92362597` |
+| LTV (bps) | `6000.21` | `6000.21` | `5993.79` | `5993.79` |
+| `vault.totalSupply()` | `162000068997039915` | idem | `162040953045528785` | `162075394597995434` |
+| `feeRecipient` shares | `61241094234` | idem | `40945289583104` | `75386842049753` |
+| `hwmPerShare` | `1000000027415` | idem | `1000000027415` | `1002128882180` |
+| `lastFeeAccrualTimestamp` | `1785783922` | idem | `1786579597` | `1786579818` |
+
+Mechanics and transactions:
+
+| Step | Detail |
+|---|---|
+| warp 1 | `evm_increaseTime` `+187321 s` (2.17 d) — cross the epoch boundary `1785974400` |
+| `arm` | `0xbf47ac31a2f362e40f21ea22e7a4230526ab16edc65c4a2aca9eef06b277bac9` · gas `582672` · notified **59 233.496977 AERO**, `periodFinish 1786579200`, `rewardRate 98025695641991250` |
+| warp 2 | `evm_increaseTime` `+604408 s` (6.995 d) — to `periodFinish`; total warp `791729 s` ≈ 9.16 d |
+| `compound` | `0x08395cad259a238b83afdc56c1a4c129cd9fd591314466768d67d7f4a6169615` · gas `1620482` · args `(300101811, 0)` |
+| 2nd `compound` | `0x71461db86d30b14cdbcf6692d38a628f823957b9c84ba13e68e0350b1e5d6c10` · gas `393372` · args `(1, 0)` |
+
+Swap, bound, and price (the whole point of the exercise):
+
+| Quantity | Value |
+|---|---|
+| AERO claimed | `703124673914631803080` = **703.124674 AERO** (1.187039 % of the gauge's epoch) |
+| USDC realized | `301609861` = **301.609861 USDC** — matched `getAmountsOut` to the unit |
+| effective price | **$0.42895645** / AERO |
+| oracle price (frozen FreshFeed) | **$0.42977212** / AERO |
+| realized slippage vs oracle | **18.98 bps** = 30 bps Aerodrome v2 volatile fee − 11 bps pool-above-oracle basis |
+| on-chain `fair6` | `302183381` |
+| `oracleFloor` (1 % band) | `299161547` — realized fill cleared it by **0.8184 %**, no `BelowOracleFloor` |
+| proposer `minUsdcOut` | `300101811` = `quote × 0.995`, i.e. **tighter than** the contract's own floor |
+| redeploy split | supplied `201437848` USDC → borrowed `154604` sats → LP add `100171903` USDC + `154604` sats; `110` left idle |
+
+Fee crystallisation reconciles to the wei:
+
+| | `compound` #1 | `compound` #2 |
+|---|---|---|
+| management fee | `$40.873718` = 1 %/yr × 9.20920 d × pre-NAV `162000.007892` | `$0.011380` (221 s) |
+| performance fee | **`$0` — deferred.** `navPerShare` pre-compound `999999622809` < `hwmPerShare` `1000000027415` | `$34.496166` = 10 % × `$344.961655` above HWM |
+| shares minted | `40884048488870` | `34441552466649` |
+| minted == `feeRecipient` delta | yes (all fee shares, nothing to holders) | yes |
+| `A·supply/(nav − A)` check | exact match at `A = 40873718` | `$34.507545` predicted vs `$34.507540` minted-share value (5e-6 rounding) |
+
+Yield decomposition over the cycle:
+
+| Component | USDC | Annualised |
+|---|---|---|
+| AERO harvest redeployed | `+301.609861` | **9.7165 %** over the 6.99381 d armed emission window |
+| net Moonwell carry realized by the accrual | `+84.301390` | 2.0625 % over the 9.20920 d warp |
+| **`nav()` delta** | **`+385.911251`** | 9.4416 % |
+| per-share, net of the 1 % management fee | `999999622809 → 1002128882181` (+0.212926 %) | 8.4392 % |
+
+Behaviours worth knowing (observed, **not** defects to fix from this runbook):
+
+1. **`compound` does not re-hedge accrued borrow interest.** It hedges only the *new* borrow, so the
+   realized leg-A interest lands in the debt unhedged. Here the LP went from `−29` sats vs debt to
+   `−24005` sats (`−$15.64`) — exactly the `23976` sats of cbBTC interest the tx accrued. The drift is
+   proportional to `debt × borrowAPY × time` and **accumulates across harvests**; nothing in
+   `compound` / `rerange` removes it (only a `deposit`/`adjustLeverage` resize does).
+2. **The redeploy sizes at the *stored* `targetLtvBps`, not the book's current LTV.** With the book at
+   6000 bps and `targetLtvBps == 5000`, the `201.44` USDC increment was levered at exactly 50.00 %,
+   nudging LTV `6000.21 → 5993.79` bps. Expect harvests to walk LTV toward `targetLtvBps` forever.
+3. **A no-AERO `compound` is not free.** It still crystallises: run #2 moved no funds at all (NAV, LP,
+   collateral, debt, idle all byte-identical) yet minted `34.44` shares of deferred performance fee
+   and ratcheted the HWM. Harmless, but do not treat `compound` as a read-only probe.
+4. **Gauge rewards do not enter `nav()` before the harvest**, which is *why* run #1 charged no
+   performance fee: crystallisation runs on the pre-compound NAV, the harvest lifts NAV *after* it,
+   and the profit is charged at the next crystallisation point (run #2 above). Fee-fair, but it means
+   one `compound` never fully settles its own performance fee.
+
+Could not be verified on this instance: nothing in the harvest path. `BelowOracleFloor` was proven
+only by `eth_call` state override (a genuine venue dislocation > `maxSlippageBps` cannot be induced
+without moving the AERO/USDC pool, which is a large, shared side effect).
 
 ---
 
