@@ -6,32 +6,42 @@ import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedA
 import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
-import {MockCLPool} from "../mocks/MockCLPool.sol";
+import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller, MockMoonwellMarket} from "../mocks/MockMoonwellMarket.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockToken} from "../mocks/MockToken.sol";
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 /**
  * @title LeveragedAerodromeCLStrategy init + width-band unit tests
- * @notice Fork-free suite covering the any-pool generalization of the vendored strategy: the init
- *         venue/identity guards, the DERIVED leg config (decimals, pool token ordering), the
- *         separately-configured leg<->USDC swap-pool spacings, and the rerange width band.
+ * @notice Fork-free suite covering `_initialize` in full — every guard in the validation ladder
+ *         (zero addresses, feed/asset decimals, venue identity, swap-pool existence, leg support,
+ *         width band, risk-param bounds, oracle-param bounds, fee ceilings), the DERIVED leg config
+ *         (decimals, pool token ordering) it persists, and the entrypoint gating on `rerange`.
  * @dev Venue-mock harness only — the position lifecycle (execute / deployIdle / compound / rerange
- *      bodies) needs real Slipstream + Moonwell venues and is fork-test territory, out of scope
- *      here. What IS covered is everything reachable without opening a position: `_initialize`'s
- *      full validation ladder, what it persists, and the entrypoint gating on `rerange`.
+ *      BODIES) needs real Slipstream + Moonwell venues and is fork-test territory, out of scope
+ *      here. Coverage stops at what is reachable without opening a position.
+ *
+ *      Guards are ORDERED, so each negative test starts from a fully valid `_baseParams()` and
+ *      perturbs exactly one field — otherwise an earlier guard would mask the one under test.
  *
  *      LEG SLOTS: the strategy's `weth*` fields are leg A and its `cbBTC*` fields are leg B; the
  *      names are historical and imply no token. This suite deliberately fills them with generic
  *      `legA`/`legB` mock tokens to prove that.
  */
 contract LeveragedAeroStrategyInitUnitTest is Test {
+    /// @dev Mirrored from {LeveragedAerodromeCLStrategy} for `vm.expectEmit` / topic matching.
+    event FeeCrystallizeDeferred(uint8 op, uint256 navPre);
+
+    /// @dev The strategy's `OP_COMPOUND` deferral code (private there).
+    uint8 internal constant OP_COMPOUND = 3;
+
     address public owner = makeAddr("owner");
     address public proposer = makeAddr("proposer");
     address public feeRecipient = makeAddr("feeRecipient");
+    address public lp = makeAddr("lp");
     address public npm = makeAddr("npm");
     address public swapRouter = makeAddr("swapRouter");
 
@@ -44,6 +54,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     LeveragedAerodromeCLStrategy public template;
 
     MockCLPool public pool;
+    MockCLFactory public clFactory;
     MockCLGauge public gauge;
     MockComptroller public comptroller;
     MockMoonwellMarket public mUsdc;
@@ -52,6 +63,14 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     MockPriceFeed public feed; // 8dp — shared by every feed slot
 
     int24 internal constant SPACING = 100;
+    int24 internal constant LEG_B_SWAP_SPACING = 100;
+    int24 internal constant LEG_A_SWAP_SPACING = 200;
+
+    /// @dev Count of `address` members in `InitParams` — the ZeroAddress ladder walks all of them.
+    uint256 internal constant ADDRESS_PARAM_COUNT = 16;
+
+    /// @dev `2 * TickMath.MAX_TICK` — the ceiling `_initialize` enforces on `maxWidth`.
+    uint24 internal constant MAX_BAND_WIDTH = 1_774_544;
 
     function setUp() public {
         usdc = new MockToken("USD Coin", "USDC", 6);
@@ -64,6 +83,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
         // Default ordering: leg B is token0, leg A is token1 (i.e. `wethIsToken0 == false`).
         pool = new MockCLPool(address(legB), address(legA), SPACING);
+        clFactory = new MockCLFactory();
+        pool.setFactory(address(clFactory));
+        // Both leg<->USDC swap venues exist at their configured spacings (init probes for them).
+        _registerSwapPools(address(legB), address(legA));
+
         gauge = new MockCLGauge(address(aero));
         comptroller = new MockComptroller();
         mUsdc = new MockMoonwellMarket(address(usdc));
@@ -98,8 +122,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.calmDeviationTicks = 100;
         p.twapWindow = 600;
         p.tickSpacing = SPACING;
-        p.cbBTCSwapTickSpacing = 100;
-        p.wethSwapTickSpacing = 200;
+        p.cbBTCSwapTickSpacing = LEG_B_SWAP_SPACING;
+        p.wethSwapTickSpacing = LEG_A_SWAP_SPACING;
         p.wethDeliversNative = true;
         p.width = 4000;
         p.minWidth = 200; // 2 x SPACING
@@ -131,12 +155,47 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.initialize(address(vault), proposer, abi.encode(p));
     }
 
-    /// @dev Rewire the pool pair + both borrow markets so `legB_`/`legA_` clear the venue-identity
-    ///      guards; lets a test reach a LATER guard (leg identity, decimals) with a swapped leg.
+    /// @dev Register the two leg<->USDC swap venues so the init existence probe finds them.
+    function _registerSwapPools(address legB_, address legA_) internal {
+        clFactory.setPool(address(usdc), legB_, LEG_B_SWAP_SPACING, makeAddr("legBSwapPool"));
+        clFactory.setPool(address(usdc), legA_, LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
+    }
+
+    /// @dev Rewire the pool pair + both borrow markets + both swap venues so `legB_`/`legA_` clear
+    ///      the venue-identity guards; lets a test reach a LATER guard (leg identity, decimals) with
+    ///      a swapped leg.
     function _wireLegs(address legB_, address legA_) internal {
         pool.setTokens(legB_, legA_);
         mLegB.setUnderlying(legB_);
         mLegA.setUnderlying(legA_);
+        _registerSwapPools(legB_, legA_);
+    }
+
+    /// @dev `_baseParams()` with the `i`-th address member zeroed. An if-ladder rather than a loop
+    ///      over a packed array so the mapping index -> field name stays readable and total.
+    function _paramsWithZeroedAddress(uint256 i)
+        internal
+        view
+        returns (LeveragedAerodromeCLStrategy.InitParams memory p)
+    {
+        p = _baseParams();
+        if (i == 0) p.usdc = address(0);
+        else if (i == 1) p.mUsdc = address(0);
+        else if (i == 2) p.mCbBTC = address(0);
+        else if (i == 3) p.mWeth = address(0);
+        else if (i == 4) p.comptroller = address(0);
+        else if (i == 5) p.cbBTC = address(0);
+        else if (i == 6) p.weth = address(0);
+        else if (i == 7) p.pool = address(0);
+        else if (i == 8) p.npm = address(0);
+        else if (i == 9) p.gauge = address(0);
+        else if (i == 10) p.swapRouter = address(0);
+        else if (i == 11) p.cbBTCFeed = address(0);
+        else if (i == 12) p.wethFeed = address(0);
+        else if (i == 13) p.usdcFeed = address(0);
+        else if (i == 14) p.sequencerFeed = address(0);
+        else if (i == 15) p.aeroUsdFeed = address(0);
+        else revert("index out of range");
     }
 
     // ==================== HAPPY PATH ====================
@@ -190,6 +249,58 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertTrue(_init(_baseParams()).layout().wethIsToken0, "leg A sorts first");
     }
 
+    // ==================== ZERO-ADDRESS LADDER ====================
+
+    /// @dev EVERY address member is individually rejected — a gap here means one venue/feed slot can
+    ///      be left unset and only surfaces as an unexplained revert on the first live call.
+    function testInitRevertsOnEveryZeroAddressParam() public {
+        for (uint256 i; i < ADDRESS_PARAM_COUNT; ++i) {
+            _expectInitRevert(_paramsWithZeroedAddress(i), BaseStrategy.ZeroAddress.selector);
+        }
+    }
+
+    // ==================== FEED / ASSET DECIMALS ====================
+
+    /// @dev The AERO/USD floor in `compoundImpl` scales an 8dp price — a non-8dp aggregator would
+    ///      mis-scale it silently, so it is pinned at init.
+    function testInitRevertsOnNonEightDecimalAeroFeed() public {
+        MockPriceFeed odd = new MockPriceFeed(1e18, 18, block.timestamp);
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.aeroUsdFeed = address(odd);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
+    }
+
+    /// @dev The same floor hardcodes an 18dp reward token (`mulDiv(aeroBal, price8, 1e20)`).
+    function testInitRevertsOnNonEighteenDecimalRewardToken() public {
+        MockToken sixDpReward = new MockToken("Reward", "RWD", 6);
+        MockCLGauge oddGauge = new MockCLGauge(address(sixDpReward));
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.gauge = address(oddGauge);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
+    }
+
+    /// @dev The strategy's unit of account MUST be the bound vault's asset.
+    function testInitRevertsWhenUsdcIsNotTheVaultAsset() public {
+        MockToken foreign = new MockToken("Foreign", "FRN", 6);
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.usdc = address(foreign);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.AssetMismatch.selector);
+    }
+
+    /// @dev `SHARES_VIRTUAL_OFFSET = 1e6` hardcodes a 6dp asset — any other denomination is rejected
+    ///      even when the vault and the params agree on the token.
+    function testInitRevertsOnNonSixDecimalAsset() public {
+        MockToken eightDp = new MockToken("Eight", "EIGHT", 8);
+        LeveragedAeroVault oddVault = new LeveragedAeroVault(address(eightDp), owner, "n", "s");
+
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.usdc = address(eightDp);
+
+        LeveragedAerodromeCLStrategy s = _clone();
+        vm.expectRevert(LeveragedAerodromeCLStrategy.UnexpectedAssetDecimals.selector);
+        s.initialize(address(oddVault), proposer, abi.encode(p));
+    }
+
     // ==================== VENUE IDENTITY GUARDS ====================
 
     function testInitRevertsOnPoolTickSpacingMismatch() public {
@@ -223,6 +334,13 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
+    /// @dev The collateral market must wrap the unit of account, symmetrically with the two borrow
+    ///      legs — otherwise every supply/redeem moves a token the NAV never prices.
+    function testInitRevertsWhenCollateralMarketWrapsAnotherToken() public {
+        mUsdc.setUnderlying(address(aero));
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
     function testInitRevertsOnZeroLegBSwapSpacing() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.cbBTCSwapTickSpacing = 0;
@@ -233,6 +351,47 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.wethSwapTickSpacing = 0;
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev `int24` is signed: a negative spacing is not "nonzero and therefore fine". It would be
+    ///      handed straight to the swap router as a pool key.
+    function testInitRevertsOnNegativeLegBSwapSpacing() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.cbBTCSwapTickSpacing = -100;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    function testInitRevertsOnNegativeLegASwapSpacing() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.wethSwapTickSpacing = -200;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev Positive-and-nonzero is not enough: a spacing with NO pool behind it routes every
+    ///      leg<->USDC swap at a nonexistent venue, bricking settle / deleverage / shortfall-cover on
+    ///      a live levered book. Init probes the factory for each.
+    function testInitRevertsWhenLegBSwapPoolDoesNotExist() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.cbBTCSwapTickSpacing = 2000; // valid-looking, but nothing registered at that spacing
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    function testInitRevertsWhenLegASwapPoolDoesNotExist() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.wethSwapTickSpacing = 2000;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev The probe is a real lookup, not a formality: de-registering an existing venue rejects the
+    ///      exact params that pass in `setUp`.
+    function testInitRevertsWhenLegBSwapPoolIsDeregistered() public {
+        clFactory.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, address(0));
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    function testInitRevertsWhenLegASwapPoolIsDeregistered() public {
+        clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, address(0));
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
     // ==================== UNSUPPORTED LEGS ====================
@@ -347,6 +506,214 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
     }
 
+    /// @dev A NEGATIVE spacing must fail the same way — `int24` is signed and `<= 0`, not `== 0`, is
+    ///      the correct predicate (the pool is rewired so the identity guard passes first).
+    function testInitRevertsOnNegativeTickSpacing() public {
+        pool.setTickSpacing(-100);
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.tickSpacing = -100;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+    }
+
+    /// @dev `_computeTickRange` spans `width/2` each side of the pool tick, so the band is capped at
+    ///      the full tick domain (`2 x TickMath.MAX_TICK`). Both edges of the cap.
+    function testInitRevertsWhenMaxWidthExceedsTheTickDomain() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.maxWidth = MAX_BAND_WIDTH + uint24(uint24(SPACING)); // aligned, but past the ceiling
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+    }
+
+    function testInitAcceptsMaxWidthAtTheTickDomainEdge() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        // Largest aligned width that still fits under the ceiling.
+        p.maxWidth = (MAX_BAND_WIDTH / uint24(uint24(SPACING))) * uint24(uint24(SPACING));
+        assertEq(_init(p).layout().maxWidth, p.maxWidth, "band edge accepted");
+    }
+
+    // ==================== RISK PARAMS ====================
+
+    function testInitRevertsWhenTargetLtvExceedsMax() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.targetLtvBps = 7000;
+        p.maxLtvBps = 6500;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+    }
+
+    function testInitRevertsWhenMinHealthBelowFloor() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 10_499;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.MinHealthTooLow.selector);
+    }
+
+    function testInitAcceptsMinHealthAtTheFloor() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 10_500;
+        p.maxLtvBps = 6500; // 10500 * 6500 = 6.825e7 < 1e8, so the L4 conflict guard still clears
+        assertEq(_init(p).layout().minHealthBps, 10_500, "floor accepted");
+    }
+
+    /// @dev `maxLtvBps` must sit strictly BELOW the Moonwell collateral factor (8800 bps here).
+    function testInitRevertsWhenMaxLtvReachesTheCollateralFactor() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 11_000; // keep 11000 * 8800 = 9.68e7 < 1e8 so THIS guard is the one that fires
+        p.maxLtvBps = 8800;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.MaxLtvExceedsCF.selector);
+    }
+
+    /// @dev L4: the permissionless-deleverage trigger LTV (`1e8 / minHealthBps`) must sit strictly
+    ///      above `maxLtvBps`, else there is an in-band range anyone can grief-deleverage.
+    function testInitRevertsOnMinHealthMaxLtvConflict() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.maxLtvBps = 8400; // 12000 * 8400 = 1.008e8 >= 1e8, and 8400 < 8800 so MaxLtvExceedsCF clears
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.MinHealthMaxLtvConflict.selector);
+    }
+
+    /// @dev The conflict guard is a strict `>=`: the product landing exactly one bps-product below
+    ///      the bound is accepted.
+    function testInitAcceptsMinHealthMaxLtvAtTheBoundary() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 12_500;
+        p.maxLtvBps = 8000; // 12500 * 8000 == 1e8 exactly -> rejected
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.MinHealthMaxLtvConflict.selector);
+
+        p = _baseParams();
+        p.minHealthBps = 12_500;
+        p.maxLtvBps = 7900; // 9.875e7 < 1e8 -> accepted
+        assertEq(_init(p).layout().maxLtvBps, 7900, "just under the bound accepted");
+    }
+
+    /// @dev A comptroller reporting a zero collateral factor is unusable — the read must fail loudly
+    ///      rather than yield `cfBps == 0` and make every `maxLtvBps` look too high.
+    function testInitRevertsOnZeroCollateralFactor() public {
+        comptroller.setCollateralFactorMantissa(0);
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.ComptrollerCallFailed.selector);
+    }
+
+    // ==================== ORACLE / CALM-GATE PARAM BOUNDS ====================
+
+    /// @dev `maxDelay` in (0, 7 days] — 0 or a huge value disables staleness detection.
+    function testInitMaxDelayBounds() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.maxDelay = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.maxDelay = 7 days + 1;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.maxDelay = 7 days;
+        assertEq(_init(p).layout().maxDelay, 7 days, "upper edge accepted");
+    }
+
+    /// @dev `gracePeriod` in [0, 1 days] — zero IS valid (no sequencer grace).
+    function testInitGracePeriodBounds() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.gracePeriod = 1 days + 1;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.gracePeriod = 0;
+        assertEq(_init(p).layout().gracePeriod, 0, "zero grace accepted");
+
+        p = _baseParams();
+        p.gracePeriod = 1 days;
+        assertEq(_init(p).layout().gracePeriod, 1 days, "upper edge accepted");
+    }
+
+    /// @dev `twapWindow` in (0, 1 days] — 0 disables the TWAP and with it the calm-gate.
+    function testInitTwapWindowBounds() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.twapWindow = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.twapWindow = uint32(1 days) + 1;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.twapWindow = uint32(1 days);
+        assertEq(_init(p).layout().twapWindow, uint32(1 days), "upper edge accepted");
+    }
+
+    /// @dev `calmDeviationTicks` in (0, 5000] — a huge value disables the calm-gate.
+    function testInitCalmDeviationBounds() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.calmDeviationTicks = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.calmDeviationTicks = 5001;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.calmDeviationTicks = 5000;
+        assertEq(_init(p).layout().calmDeviationTicks, 5000, "upper edge accepted");
+    }
+
+    /// @dev `maxSlippageBps` in (0, 1000] — 0 or a huge value disables swap-slippage protection.
+    function testInitMaxSlippageBounds() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.maxSlippageBps = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.maxSlippageBps = 1001;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OracleParamOutOfRange.selector);
+
+        p = _baseParams();
+        p.maxSlippageBps = 1000;
+        assertEq(_init(p).layout().maxSlippageBps, 1000, "upper edge accepted");
+    }
+
+    // ==================== FEE PARAMS ====================
+
+    /// @dev Any nonzero fee requires a recipient — fee-shares have nowhere to go otherwise.
+    function testInitRevertsWhenManagementFeeHasNoRecipient() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.performanceFeeBps = 0;
+        p.feeRecipient = address(0);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.FeeRecipientRequired.selector);
+    }
+
+    function testInitRevertsWhenPerformanceFeeHasNoRecipient() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.managementFeeBps = 0;
+        p.feeRecipient = address(0);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.FeeRecipientRequired.selector);
+    }
+
+    /// @dev With BOTH fees off, a zero recipient is legitimate.
+    function testInitAcceptsZeroRecipientWhenAllFeesAreZero() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.managementFeeBps = 0;
+        p.performanceFeeBps = 0;
+        p.feeRecipient = address(0);
+        assertEq(_init(p).layout().feeRecipient, address(0), "no recipient needed when fees are off");
+    }
+
+    /// @dev Performance fee ceiling: `FeeConstants.MAX_PERFORMANCE_FEE_BPS` (1500 = 15%).
+    function testInitPerformanceFeeCeiling() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.performanceFeeBps = 1501;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.PerformanceFeeTooHigh.selector);
+
+        p = _baseParams();
+        p.performanceFeeBps = 1500;
+        assertEq(_init(p).layout().performanceFeeBps, 1500, "ceiling accepted");
+    }
+
+    /// @dev Management fee ceiling: `MAX_MANAGEMENT_FEE_BPS` (500 = 5%/yr).
+    function testInitManagementFeeCeiling() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.managementFeeBps = 501;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.ManagementFeeTooHigh.selector);
+
+        p = _baseParams();
+        p.managementFeeBps = 500;
+        assertEq(_init(p).layout().managementFeeBps, 500, "ceiling accepted");
+    }
+
     /// @dev The aligned/in-band matrix: every width that is a multiple of the spacing and lands
     ///      inside `[minWidth, maxWidth]` is accepted at the band edges included.
     function testInitAcceptsWidthMatrix() public {
@@ -389,5 +756,192 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         vm.expectRevert(BaseStrategy.NotProposer.selector);
         s.rerange(4000, 0, 0);
+    }
+
+    // ==================== COMPOUND FEE-CRYSTALLISE ROUTING ====================
+    //
+    // `compound` runs against a FLAT book here: `nav()` reads its `tokenId == 0` branch (face value
+    // of idle USDC, no oracle) and `compoundImpl` returns immediately on the same condition. That
+    // leaves the fee crystallise — the part under test — as the only thing that executes, so the
+    // routing can be exercised without Slipstream/Moonwell venues.
+
+    /// @dev Force the lifecycle state without running `_execute()` / `_settle()` (both of which need
+    ///      live Slipstream + Moonwell venues). `_state` shares slot 1 with `_proposer` (offset 0)
+    ///      and `_initialized` (offset 21), so the byte at offset 20 is rewritten in place and the
+    ///      neighbours are preserved.
+    function _forceState(LeveragedAerodromeCLStrategy s, BaseStrategy.State st) internal {
+        uint256 slot1 = uint256(vm.load(address(s), bytes32(uint256(1))));
+        slot1 = (slot1 & ~(uint256(0xff) << 160)) | (uint256(st) << 160);
+        vm.store(address(s), bytes32(uint256(1)), bytes32(slot1));
+        assertEq(uint256(s.state()), uint256(st), "forced state");
+    }
+
+    /// @dev Bind `s` to the vault, mint `shares` of supply through the vault hook, and leave the
+    ///      strategy Executed with `idleUsdc` on hand and `dt` elapsed since init.
+    function _armForCompound(LeveragedAerodromeCLStrategy s, uint256 shares, uint256 idleUsdc, uint256 dt) internal {
+        vm.startPrank(owner);
+        vault.setStrategy(address(s));
+        vault.setOpenDeposits(true);
+        vm.stopPrank();
+
+        vm.prank(address(s));
+        vault.strategyMint(lp, shares);
+
+        usdc.mint(address(s), idleUsdc);
+        _forceState(s, BaseStrategy.State.Executed);
+        vm.warp(block.timestamp + dt);
+    }
+
+    /**
+     * @dev `compound` must not brick when share issuance is closed. It crystallises a management fee
+     *      by MINTING fee-shares, and the vault's `strategyMint` is gated on `depositsOpen`; routing
+     *      that mint through the best-effort path (as deposit / redeem already do) makes the fee
+     *      DEFER — emitting `FeeCrystallizeDeferred` — instead of reverting the whole harvest on a
+     *      live levered book. The accrual clock stays put, so the deferred fee is not lost.
+     */
+    function testCompoundDefersFeeCrystalliseWhenIssuanceIsClosed() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        _armForCompound(s, 1_000e12, 1_000e6, 30 days);
+
+        uint256 lastAccrualBefore = s.layout().lastFeeAccrualTimestamp;
+        vm.prank(owner);
+        vault.setOpenDeposits(false);
+
+        vm.expectEmit(false, false, false, true, address(s));
+        emit FeeCrystallizeDeferred(OP_COMPOUND, 1_000e6);
+
+        vm.prank(proposer);
+        s.compound(1, 0);
+
+        assertEq(vault.totalSupply(), 1_000e12, "no fee-shares minted");
+        assertEq(s.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "accrual clock unmoved (fee deferred)");
+        assertEq(s.layout().hwmPerShare, 0, "HWM unmoved");
+    }
+
+    /// @dev Positive control: with issuance open the SAME call crystallises for real — fee-shares are
+    ///      minted, the clock advances, and nothing is deferred.
+    function testCompoundCrystallisesWhenIssuanceIsOpen() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        _armForCompound(s, 1_000e12, 1_000e6, 30 days);
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        s.compound(1, 0);
+
+        assertGt(vault.totalSupply(), 1_000e12, "management fee-shares minted");
+        assertGt(vault.balanceOf(feeRecipient), 0, "fee recipient paid in shares");
+        assertEq(s.layout().lastFeeAccrualTimestamp, vm.getBlockTimestamp(), "accrual clock advanced");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != FeeCrystallizeDeferred.selector, "no deferral when issuance is open");
+        }
+    }
+
+    function testCompoundRevertsForNonProposer() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        _armForCompound(s, 1_000e12, 1_000e6, 30 days);
+
+        vm.prank(owner);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        s.compound(1, 0);
+    }
+
+    function testCompoundRevertsBeforeExecute() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(proposer);
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        s.compound(1, 0);
+    }
+
+    // ==================== RESCUE-TO-VAULT DENY LIST ====================
+
+    /**
+     * @dev The VAULT SHARE token is not rescuable. This strategy custodies live shares
+     *      (`requestRedeem` escrows, and the shares pulled mid-`redeem`) — they are depositor claims,
+     *      not strays. Sweeping them to the vault would put them behind the vault's owner-only
+     *      `rescueERC20`, so the pair `rescueToVault(vault) -> vault.rescueERC20(vault, attacker)`
+     *      would exfiltrate every escrowed claim. (The vault refuses its own shares too — belt and
+     *      braces on both sides.)
+     */
+    function testRescueToVaultRefusesTheShareToken() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(owner);
+        vault.setStrategy(address(s));
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
+        s.rescueToVault(address(vault));
+
+        // Same answer through the owner leg, and after settlement.
+        _forceState(s, BaseStrategy.State.Settled);
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
+        s.rescueToVault(address(vault));
+    }
+
+    /// @dev Every position / accounting token stays denied in ALL states.
+    function testRescueToVaultRefusesPositionTokens() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(owner);
+        vault.setStrategy(address(s));
+
+        address[6] memory denied =
+            [address(usdc), address(legB), address(legA), address(mUsdc), address(mLegB), address(mLegA)];
+        for (uint256 i; i < denied.length; ++i) {
+            vm.prank(proposer);
+            vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
+            s.rescueToVault(denied[i]);
+        }
+    }
+
+    /// @dev While Executed the gauge reward token is denied — a sweep would bypass `compound()`,
+    ///      which is the only path that prices the AERO -> USDC leg against its oracle floor.
+    function testRescueToVaultRefusesRewardTokenWhileExecuted() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(owner);
+        vault.setStrategy(address(s));
+        _forceState(s, BaseStrategy.State.Executed);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
+        s.rescueToVault(address(aero));
+    }
+
+    /**
+     * @dev ...but once Settled it must be sweepable, or it is stranded forever: the settle unwind's
+     *      `gauge.withdraw` auto-claims a final AERO tranche that `settleImpl` never sells (it sweeps
+     *      only the two legs), and `compound` — the usual outlet — reverts `NotExecuted` from then on.
+     *      Post-settle it is a genuine stray, so it goes to the vault where the owner's non-asset
+     *      `rescueERC20` can recover it.
+     */
+    function testRescueToVaultAllowsRewardTokenOnceSettled() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(owner);
+        vault.setStrategy(address(s));
+
+        aero.mint(address(s), 7e18); // the settle-claimed tranche
+        _forceState(s, BaseStrategy.State.Settled);
+
+        vm.prank(proposer);
+        s.rescueToVault(address(aero));
+
+        assertEq(aero.balanceOf(address(s)), 0, "strategy swept");
+        assertEq(aero.balanceOf(address(vault)), 7e18, "landed on the vault");
+
+        // And onward: the vault's owner-only rescue accepts it (non-asset, not the share token).
+        vm.prank(owner);
+        vault.rescueERC20(address(aero), lp, 7e18);
+        assertEq(aero.balanceOf(lp), 7e18, "recovered");
+    }
+
+    function testRescueToVaultRejectsStrangers() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(owner);
+        vault.setStrategy(address(s));
+
+        vm.prank(lp);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotProposerOrOwner.selector);
+        s.rescueToVault(address(aero));
     }
 }

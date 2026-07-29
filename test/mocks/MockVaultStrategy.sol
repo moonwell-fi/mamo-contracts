@@ -6,6 +6,7 @@ import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy
 import {ISyndicateVault} from "@contracts/leveraged-aero/sherwood/interfaces/ISyndicateVault.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title MockVaultStrategy
@@ -25,6 +26,11 @@ contract MockVaultStrategy is IStrategy {
         Executed,
         Settled
     }
+
+    /// @dev The real strategy's `SHARES_VIRTUAL_OFFSET` — the ERC-4626 virtual offset its deposit
+    ///      pricing hardcodes for a 6dp asset. Mirrored verbatim so {depositPriced} exercises the
+    ///      genuine formula against the vault's share ledger.
+    uint256 internal constant SHARES_VIRTUAL_OFFSET = 1e6;
 
     address private _vault;
     address private _proposer;
@@ -106,5 +112,24 @@ contract MockVaultStrategy is IStrategy {
     /// @notice Pulls `shares` from `from` (needs a prior vault-side approval), mirroring redeem.
     function pullShares(address from, uint256 shares) external {
         IERC20(_vault).safeTransferFrom(from, address(this), shares);
+    }
+
+    /**
+     * @notice Prices a deposit with the REAL strategy's formula, so the vault's share-ledger
+     *         invariants can be asserted end-to-end without a fork.
+     * @dev Mirrors `LeveragedAerodromeCLStrategy.deposit` on its flat-book branch:
+     *      `navPre` is read BEFORE the asset is pulled and equals the strategy's own idle asset
+     *      balance (`nav()`'s `tokenId == 0` branch), then
+     *      `shares = assets × (supply + SHARES_VIRTUAL_OFFSET) / (navPre + 1)` mints through the
+     *      vault hook. Fees / oracle / crystallise are out of scope for this mock.
+     * @param assets Asset units to deposit; caller must have approved this contract.
+     * @return shares Vault shares minted to the caller.
+     */
+    function depositPriced(uint256 assets) external returns (uint256 shares) {
+        uint256 navPre = IERC20(assetToken).balanceOf(address(this));
+        IERC20(assetToken).safeTransferFrom(msg.sender, address(this), assets);
+        uint256 supply = IERC20(_vault).totalSupply();
+        shares = Math.mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navPre + 1);
+        ISyndicateVault(_vault).strategyMint(msg.sender, shares);
     }
 }

@@ -70,6 +70,7 @@ library LeveragedAeroManager {
     error ZeroMinOut();
     error BelowOracleFloor(); // compound swap fill < AERO/USD oracle floor (L9)
     error FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps); // fast-path redeem would breach maxLtvBps
+    error UnsupportedLeg(); // a swap was routed for a token that is neither configured leg
 
     // ── Constants (compile-time literals, duplicated from the strategy) ──
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
@@ -418,7 +419,12 @@ library LeveragedAeroManager {
     /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
     function rerangeImpl(uint24 width_, uint256 minLiq0, uint256 minLiq1) public {
         Layout storage $ = _layout();
-        if ($.tokenId == 0) return; // flat book — nothing to recenter
+        // Persist the (already band-validated) width BEFORE the flat-book bail-out. `deployIdle` /
+        // `compound` mint at the STORED width, so a rerange on a flat book must still take effect —
+        // otherwise the proposer's width choice is silently dropped and the next redeploy reopens at
+        // the stale one.
+        $.width = width_;
+        if ($.tokenId == 0) return; // flat book — nothing to recenter (width above already stored)
 
         // 1. Calm-gate BEFORE touching the pool — never recenter at a manipulated tick.
         LeveragedAeroValuation._calmGate(_config());
@@ -427,9 +433,8 @@ library LeveragedAeroManager {
         //    left empty + unstaked; a recenter needs a fresh range == fresh tokenId.
         _unwindLiquidity(1, 1);
 
-        // 3. Persist this cycle's width, then derive the tickSpacing-aligned range centered on the
-        //    current (calm) tick. Every later mint (deployIdle / compound) reuses the stored width.
-        $.width = width_;
+        // 3. Derive the tickSpacing-aligned range centered on the current (calm) tick from the width
+        //    stored above. Every later mint (deployIdle / compound) reuses that stored width.
         (int24 tickLower, int24 tickUpper) = _computeTickRange();
 
         // 4. Re-add the collected legs (full balances as desired) into the new range. No swap →
@@ -654,17 +659,40 @@ library LeveragedAeroManager {
     /// @dev Wrap all native ETH held by the strategy into the leg-A wrapper token. No-op unless the
     ///      leg-A Moonwell market delivers native on `borrow()` (`wethDeliversNative`, set at init) —
     ///      a plain ERC-20 leg has nothing to wrap and its token has no `deposit()`.
+    ///
+    ///      The wrap is BEST-EFFORT on purpose. `wethDeliversNative` is an init input, and the leg-A
+    ///      token is not required to be a WETH9 (no `deposit()` payable fallback): a flag set on a
+    ///      plain ERC-20 leg turns every forced-ETH arrival — `selfdestruct`, a coinbase payout, or
+    ///      any other push a `receive()` cannot refuse — into a permanent revert on this line, which
+    ///      would brick `executeImpl` / `deployIdleImpl` / `compoundImpl` / `_leverUp` on a LIVE
+    ///      levered book for 1 wei. Swallowing the failure leaves the ETH idle, exactly as the
+    ///      flag-false path does, and the venue op proceeds. Stray ETH under a false flag (or a
+    ///      failed wrap) is NOT recoverable — `rescueToVault` is ERC-20 only and there is no native
+    ///      sweep — an accepted, bounded loss versus a bricked position.
     function _wrapNativeEth() private {
         Layout storage $ = _layout();
         if (!$.wethDeliversNative) return;
         uint256 ethBal = address(this).balance;
         if (ethBal > 0) {
-            IWETH9($.weth).deposit{value: ethBal}();
+            try IWETH9($.weth).deposit{value: ethBal}() {} catch {}
         }
     }
 
     /// @dev Compute a tickSpacing-aligned range centred on the current pool tick, spanning
     ///      `width/2` ticks each side (the stored per-cycle width, validated by the entrypoint).
+    ///
+    ///      "Centred" is grid-approximate, not exact. Both bounds round DOWN onto the grid, so the
+    ///      realised centre can sit up to one `tickSpacing` below the calm tick and the realised
+    ///      width can differ from `width` by up to one spacing; when `width / tickSpacing` is ODD the
+    ///      half-span is itself off-grid, which is where the skew is largest. Accepted: the band is
+    ///      orders of magnitude wider than one spacing, and re-centring exactly would need an
+    ///      align-up on one side, silently widening the range past the validated band.
+    ///
+    ///      Both bounds are clamped into the aligned tick domain: `width` is capped at `2 × MAX_TICK`
+    ///      at init so the arithmetic cannot wrap int24, but a wide band near either end of the
+    ///      domain still pushes a bound past ±MAX_TICK, where `getSqrtRatioAtTick` would revert
+    ///      unhelpfully deep inside TickMath. `maxAligned` sits ON the spacing grid by construction,
+    ///      so clamping keeps the range mintable rather than merely non-panicking.
     function _computeTickRange() private view returns (int24 tickLower, int24 tickUpper) {
         Layout storage $ = _layout();
         (, int24 currentTick,,,,) = ICLPool($.pool).slot0();
@@ -672,6 +700,9 @@ library LeveragedAeroManager {
         int24 span = int24($.width / 2);
         tickLower = _alignTick(currentTick - span, tickSpacing_);
         tickUpper = _alignTick(currentTick + span, tickSpacing_);
+        int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing_);
+        if (tickLower < -maxAligned) tickLower = -maxAligned;
+        if (tickUpper > maxAligned) tickUpper = maxAligned;
         if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing_;
     }
 
@@ -879,9 +910,13 @@ library LeveragedAeroManager {
 
     /// @dev tickSpacing of the `leg`↔USDC SWAP pool — a different venue from the LP pool, so it
     ///      carries its own spacing (both are init inputs, neither is derivable from the other).
+    ///      Only the two legs have a configured swap pool; anything else reverts rather than silently
+    ///      borrowing leg A's spacing and routing at an unrelated (or nonexistent) venue.
     function _legSwapSpacing(address leg) private view returns (int24) {
         Layout storage $ = _layout();
-        return leg == $.cbBTC ? $.cbBTCSwapTickSpacing : $.wethSwapTickSpacing;
+        if (leg == $.cbBTC) return $.cbBTCSwapTickSpacing;
+        if (leg == $.weth) return $.wethSwapTickSpacing;
+        revert UnsupportedLeg();
     }
 
     /// @dev Swap a fixed USDC amount in for `tokenOut` via Slipstream exactInputSingle.

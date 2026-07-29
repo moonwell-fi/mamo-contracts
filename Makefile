@@ -61,10 +61,17 @@ lp-v2-setup:
 leveraged-aero-account:
 	forge test --ffi --match-path "test/MamoLeveragedAeroStrategy*.unit.t.sol" -vvv
 
-# LeveragedAeroVault unit tests. Mocks only (no fork): the vendored strategy is stubbed by
-# test/mocks/MockVaultStrategy.sol, so NO --fork-url.
+# LeveragedAeroVault + vendored-strategy unit tests. Mocks only (no fork): the vendored strategy is
+# stubbed by test/mocks/MockVaultStrategy.sol for the vault suite, and the strategy's own suite runs
+# against venue mocks, so NO --fork-url.
+#
+# BOTH paths are listed explicitly. `test-unit`'s "test/*.unit.t.sol" glob does cross `/` on the
+# pinned forge nightly and picks up test/leveraged-aero/ as well, but that is a property of the
+# matcher, not something the suite should depend on — naming the directory here keeps the vendored
+# strategy's tests running if a toolchain bump ever tightens the glob.
 leveraged-aero-vault:
 	forge test --ffi --match-path "test/LeveragedAeroVault.unit.t.sol" -vvv
+	forge test --ffi --match-path "test/leveraged-aero/*.unit.t.sol" -vvv
 
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault

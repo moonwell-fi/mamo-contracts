@@ -15,6 +15,10 @@ contract MockCLPool {
     address public token1;
     int24 public tickSpacing;
 
+    /// @notice The {MockCLFactory} this pool reports as its deployer — read by the strategy's init
+    ///         swap-pool existence probe (`pool.factory().getPool(usdc, leg, spacing)`).
+    address public factory;
+
     uint160 public sqrtPriceX96 = 79228162514264337593543950336; // 1:1
     int24 public tick;
 
@@ -28,6 +32,10 @@ contract MockCLPool {
     }
 
     // ── Setters ──
+
+    function setFactory(address factory_) external {
+        factory = factory_;
+    }
 
     function setTokens(address token0_, address token1_) external {
         token0 = token0_;
@@ -78,5 +86,30 @@ contract MockCLPool {
 
     function gauge() external pure returns (address) {
         return address(0);
+    }
+}
+
+/**
+ * @title MockCLFactory
+ * @notice Minimal Slipstream CLFactory stand-in: the `(tokenA, tokenB, tickSpacing) -> pool`
+ *         registry the strategy's init probes for the two leg<->USDC swap venues.
+ * @dev Registration is order-independent (the real factory sorts the pair), so a test may register
+ *      `(usdc, leg)` and the probe may ask for `(leg, usdc)`.
+ */
+contract MockCLFactory {
+    mapping(bytes32 => address) internal _pools;
+
+    /// @notice Register (or clear, with `pool == address(0)`) the pool for a pair + spacing.
+    function setPool(address tokenA, address tokenB, int24 tickSpacing, address pool) external {
+        _pools[_key(tokenA, tokenB, tickSpacing)] = pool;
+    }
+
+    function getPool(address tokenA, address tokenB, int24 tickSpacing) external view returns (address) {
+        return _pools[_key(tokenA, tokenB, tickSpacing)];
+    }
+
+    function _key(address tokenA, address tokenB, int24 tickSpacing) internal pure returns (bytes32) {
+        (address t0, address t1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        return keccak256(abi.encode(t0, t1, tickSpacing));
     }
 }
