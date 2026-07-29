@@ -69,7 +69,10 @@ AERO_V2_ROUTER=0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43
 AERO_V2_FACTORY=0x420DD381b31aEf6683db6B902084cB0FFECe40Da
 NPM=0x827922686190790b37229fd06084350E74485b72
 
-LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool))'
+# NB: keep in lockstep with LeveragedAerodromeCLStrategy.LayoutView. b9ea6ac appended
+# `uint128 hedgedDebtA` + `uint128 hedgedDebtB` (fields 47/48) for the borrow-interest hedge; a
+# short signature here makes `cast call` fail to decode and every `lay N` read comes back empty.
+LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint128,uint128))'
 
 c() { cast call --rpc-url "$RPC" "$@" 2>/dev/null; }
 num() { echo "${1%% *}"; }
@@ -258,7 +261,17 @@ cmd_snap() {
   echo "feeRecipient shares   $(num "$(c "$VAULT" 'balanceOf(address)(uint256)' "$(lay 31)")")"
   echo "-- venue --"
   echo "collateral/debt USDC  $(c --from "$STRAT" "$STRAT" 'previewCollateralDebt()(uint256,uint256)' | tr '\n' ' ')"
-  echo "cbBTC debt (8dp)      $(num "$(c "$(lay 4)" 'borrowBalanceStored(address)(uint256)' "$STRAT")")"
+  local dbtA hedA hedB
+  dbtA="$(num "$(c "$(lay 4)" 'borrowBalanceStored(address)(uint256)' "$STRAT")")"
+  # THE HEDGE MEASURE (b9ea6ac): drift = borrowBalanceStored - hedgedDebtA is the UNHEDGED accrued
+  # borrow interest. Price-independent by construction, so it isolates interest from the LP's
+  # price-driven leg drift. `compound` should collapse it to ~0; on the pre-fix code it grew every
+  # harvest. hedgedDebt() is the additive keeper getter (selector 0xead99a57).
+  hedA="$(num "$(c "$STRAT" 'hedgedDebt()(uint128,uint128)' | sed -n 1p)")"
+  hedB="$(num "$(c "$STRAT" 'hedgedDebt()(uint128,uint128)' | sed -n 2p)")"
+  echo "legA debt (borrowStored) $dbtA"
+  echo "hedgedDebtA / B       $hedA / $hedB"
+  echo "DRIFT (debt-hedgedA)  $(python3 -c "print($dbtA - $hedA)")"
   echo "gauge.earned AERO     $(num "$(c "$g" 'earned(address,uint256)(uint256)' "$STRAT" "$tid")")"
   echo "gauge staked?         $(c "$g" 'stakedContains(address,uint256)(bool)' "$STRAT" "$tid")"
   echo "tokenId               $tid"

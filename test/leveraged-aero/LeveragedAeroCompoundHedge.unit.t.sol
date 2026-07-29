@@ -266,6 +266,16 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         return debt > hedgedA ? debt - hedgedA : 0;
     }
 
+    /// @dev THE TRUE DRIFT: the FULLY ACCRUED debt (including interest that no transaction has folded into
+    ///      the market's `borrowIndex` yet) minus the hedged basis. `_driftLegA` above is the same measure
+    ///      on the STALE stored basis. The two are equal except while un-accrued interest is outstanding,
+    ///      and that gap is exactly what `testCompoundHedgesInterestTheStoredIndexCannotYetSee` is about.
+    function _trueDriftLegA() internal view returns (uint256) {
+        (uint128 hedgedA,) = strategy.hedgedDebt();
+        uint256 debt = mLegA.borrowBalanceAccrued(address(strategy));
+        return debt > hedgedA ? debt - hedgedA : 0;
+    }
+
     function _collateralUsdc() internal view returns (uint256) {
         return (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18;
     }
@@ -358,6 +368,75 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         uint256 hedgeSpend = usdc.balanceOf(address(router)) - routerUsdcBefore;
         assertApproxEqRel(hedgeSpend, interestValueUsdc, 1e15, "spend == the oracle value of the accrual");
         assertLt(hedgeSpend, proceeds, "the hedge is funded ENTIRELY out of harvest proceeds");
+    }
+
+    /**
+     * @dev REGRESSION — THE STALE-INDEX HEDGE. Identical in shape to the test above, with ONE difference
+     *      that is the entire point: the interest is armed as UN-ACCRUED
+     *      (`accruePendingBorrowInterest`, not `accrueBorrowInterest`). It exists in wall-clock time, but
+     *      no transaction has folded it into the leg market's `borrowIndex` yet — which is the NORMAL state
+     *      of that market at the top of a `compound` tx, because nothing earlier in the tx accrues it:
+     *      `nav()` is a view, and neither the gauge claim nor the AERO→USDC swap touches Moonwell.
+     *
+     *      A hedge that measured `borrowBalanceStored` therefore saw a drift of ~0 and bought ~nothing,
+     *      while the interest was capitalised moments LATER — by the hedge's own `repayBorrow` and by
+     *      `deployIdleImpl`'s borrow, both strictly after the measurement. Live-fork numbers behind this
+     *      test: `borrowBalanceStored` 76,853,210 vs `borrowBalanceCurrent` 76,868,617, so 15,407 of 15,412
+     *      accrued sats were invisible and that harvest hedged 4 of them. The residual was bounded at one
+     *      inter-harvest period (harvest #2 saw the by-then-capitalised interest and hedged it exactly), so
+     *      it did not grow without bound — but "drift ≈ 0 after a harvest" was false, and the first harvest
+     *      after any quiet period hedged essentially nothing.
+     *
+     *      THIS TEST FAILS ON THE PRE-FIX CODE (`borrowBalanceStored` in `LeveragedAeroValuation._hedgeLeg`)
+     *      and passes with `borrowBalanceCurrent`. The suite could not previously express the condition at
+     *      all: the market mock stored a single debt scalar, so stored and current were equal by
+     *      construction — see the header on `MockLendingMarket`.
+     */
+    function testCompoundHedgesInterestTheStoredIndexCannotYetSee() public {
+        _armBook();
+        uint256 debtAtGenesis = _debtLegA();
+        assertEq(_driftLegA(), 0, "genesis book carries no interest drift");
+
+        // ── Interest accrues in WALL-CLOCK time; nothing has accrued the market ──
+        uint256 interest = debtAtGenesis / 200; // 50 bps of the debt
+        assertGt(interest, 0, "fixture must produce a measurable accrual");
+        mLegA.accruePendingBorrowInterest(address(strategy), interest);
+
+        // THE SETUP THE OLD MOCK COULD NOT EXPRESS. The debt is really there, and the stored read cannot
+        // see it: `_driftLegA()` is what the pre-fix `_hedgeLeg` measured, `_trueDriftLegA()` is the truth.
+        assertEq(_debtLegA(), debtAtGenesis, "borrowBalanceStored is UNCHANGED - the index is stale");
+        assertEq(_driftLegA(), 0, "...so the stale drift measure sees NOTHING to hedge");
+        assertApproxEqAbs(_trueDriftLegA(), interest, 2, "...but the TRUE drift is the whole accrual");
+        uint256 interestValueUsdc = _legAValueUsdc(interest);
+
+        // ── Harvest, with proceeds comfortably larger than the accrual ──
+        uint256 aeroAmt = 20_000e18; // $20k of AERO vs a ~$1.6k accrual
+        _armRewards(aeroAmt);
+        assertGt(_usdcFromAero(aeroAmt), interestValueUsdc * 2, "fixture must fund the whole hedge");
+
+        uint256 routerUsdcBefore = usdc.balanceOf(address(router));
+        uint256 legAInRouterBefore = legA.balanceOf(address(router));
+        _compound(1);
+
+        // THE ASSERTION: the FULL accrued drift was neutralised, not merely the capitalised part. By now the
+        // hedge's repay and the redeploy's borrow have both capitalised, so stored == accrued and the two
+        // measures agree; PRE-FIX both land at ~`interest` instead of ~0.
+        assertApproxEqAbs(_trueDriftLegA(), 0, 100, "the FULL accrued drift was hedged");
+        assertApproxEqAbs(_driftLegA(), 0, 100, "...and the now-capitalised book agrees");
+
+        // The spend proves it independently: ~the oracle value of the WHOLE accrual left the book through
+        // the leg-A buy, and leg A really was bought. Pre-fix BOTH of these are zero.
+        uint256 hedgeSpend = usdc.balanceOf(address(router)) - routerUsdcBefore;
+        assertApproxEqRel(hedgeSpend, interestValueUsdc, 1e15, "spend == the oracle value of the FULL accrual");
+        assertLt(legA.balanceOf(address(router)), legAInRouterBefore, "the router paid out leg A: a buy happened");
+
+        // ...and the delta-hedge is restored: the LP leg (plus any idle dust) matches the debt leg again.
+        assertApproxEqRel(
+            _lpLegAAmount() + legA.balanceOf(address(strategy)),
+            _debtLegA(),
+            1e15,
+            "LP leg A (+ idle dust) == leg-A debt: the hedge is restored"
+        );
     }
 
     /**

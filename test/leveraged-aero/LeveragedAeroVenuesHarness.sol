@@ -9,6 +9,7 @@ import {MockCLPool} from "../mocks/MockCLPool.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title Leveraged-Aero venue harness — CUSTODIAL mocks for the position lifecycle
@@ -63,9 +64,36 @@ contract MockChainlinkFeed {
     }
 }
 
-/// @notice Custodial Moonwell/Compound-fork market: real transfers on mint / redeem / borrow / repay.
+/// @notice Custodial Moonwell/Compound-fork market: real transfers on mint / redeem / borrow / repay,
+///         and a FAITHFUL `(principal, interestIndex)` / `borrowIndex` borrow book.
+///
 /// @dev Fund it with the underlying before use (it pays borrows and redemptions out of its own
 ///      balance). `exchangeRateStored` is settable so a test can move the collateral basis.
+///
+///      THE STORED-vs-CURRENT DISTINCTION IS MODELLED ON PURPOSE, and it is the whole reason this
+///      contract carries a borrow index at all. The previous version stored a single
+///      `borrowBalance[account]` scalar that every read and every setter touched directly, so
+///      `borrowBalanceStored` and `borrowBalanceCurrent` were IDENTICAL BY CONSTRUCTION — and the one
+///      real-world condition that matters for `LeveragedAeroValuation._hedgeLeg` (interest that has
+///      accrued in wall-clock time but that no transaction has yet folded into the market's
+///      `borrowIndex`) was simply not representable. A hedge that measured the stale index therefore
+///      looked perfect in the suite and hedged ~0 on a live fork.
+///
+///      Semantics copied from Moonwell `MToken` / Compound v2:
+///        - `borrowBalanceStored(a) = principal[a] × borrowIndex / interestIndex[a]`, on the LAST-ACCRUED
+///          `borrowIndex` — no accrual, `view`.
+///        - `accrueInterest()` adopts the pending index (returns a Compound error code, always 0 here).
+///        - `borrowBalanceCurrent(a)` accrues, THEN returns the stored read — non-`view`.
+///        - `borrow` / `repayBorrow` CAPITALISE first: accrue, then
+///          `principal = borrowBalanceStored ± amt; interestIndex = borrowIndex`. This is what makes
+///          `borrowBalanceStored` immediately after a borrow/repay exactly the capitalised principal the
+///          production `Layout.hedgedDebtA/B` basis tracks.
+///
+///      Two test helpers arm interest, and WHICH ONE a test uses is the point:
+///        - `accrueBorrowInterest`         — visible to `borrowBalanceStored` (a third party already
+///                                           accrued the market for us). The pre-existing behaviour.
+///        - `accruePendingBorrowInterest`  — INVISIBLE to `borrowBalanceStored`; only `accrueInterest` /
+///                                           `borrowBalanceCurrent` reveals it. The bug condition.
 contract MockLendingMarket {
     using SafeERC20 for IERC20;
 
@@ -73,7 +101,22 @@ contract MockLendingMarket {
     uint256 public exchangeRateStored = 1e18;
 
     mapping(address => uint256) public balanceOf; // cToken balance
-    mapping(address => uint256) public borrowBalance;
+
+    // ── Compound borrow book ──
+
+    /// @notice The market's LAST-ACCRUED borrow index (1e18-scaled), exactly as `MToken.borrowIndex`.
+    uint256 public borrowIndex = 1e18;
+    /// @dev The index the next `accrueInterest()` will adopt; 0 means "nothing pending" (see
+    ///      `pendingBorrowIndex()`). Real Moonwell derives this from `borrowRate × elapsed`; a test double
+    ///      sets it directly so a suite can arm an exact amount of un-accrued interest.
+    uint256 internal _pendingBorrowIndex;
+
+    /// @notice Per-account capitalised principal (`MToken.accountBorrows[a].principal`).
+    mapping(address => uint256) public principal;
+    /// @notice Per-account index snapshot (`MToken.accountBorrows[a].interestIndex`).
+    mapping(address => uint256) public interestIndex;
+
+    error MockLendingMarketNoDebt();
 
     constructor(address underlying_) {
         underlying = underlying_;
@@ -83,20 +126,80 @@ contract MockLendingMarket {
         exchangeRateStored = rate;
     }
 
-    function borrowBalanceStored(address account) external view returns (uint256) {
-        return borrowBalance[account];
+    // ── Borrow-balance reads ──
+
+    /// @notice Last-accrued borrow balance. STALE whenever a pending accrual is armed.
+    function borrowBalanceStored(address account) public view returns (uint256) {
+        return _balanceAt(account, borrowIndex);
     }
 
-    /// @notice Accrue `amount` of BORROW INTEREST onto `account`'s debt, with no token movement — the
-    ///         one thing a Compound-fork market does that grows the debt leg while the borrower's LP
-    ///         side stays put.
-    /// @dev This is the mock's stand-in for `accrueInterest()` advancing `borrowIndex`. Real Moonwell
-    ///      stores `(principal, interestIndex)` and returns `principal × borrowIndex / interestIndex`;
-    ///      this mock stores the product directly, so bumping the balance IS an index advance as far as
-    ///      `borrowBalanceStored` — the only borrow-side read the strategy makes — can tell.
-    function accrueBorrowInterest(address account, uint256 amount) external {
-        borrowBalance[account] += amount;
+    /// @notice Accrue, then return the balance — the production read `_hedgeLeg` now uses.
+    function borrowBalanceCurrent(address account) external returns (uint256) {
+        accrueInterest();
+        return borrowBalanceStored(account);
     }
+
+    /// @notice Adopt the pending index. Returns a Compound error code (always 0 in the mock).
+    function accrueInterest() public returns (uint256) {
+        if (_pendingBorrowIndex != 0) {
+            borrowIndex = _pendingBorrowIndex;
+            _pendingBorrowIndex = 0;
+        }
+        return 0;
+    }
+
+    /// @notice The index `accrueInterest()` would adopt right now.
+    function pendingBorrowIndex() public view returns (uint256) {
+        return _pendingBorrowIndex == 0 ? borrowIndex : _pendingBorrowIndex;
+    }
+
+    /// @notice VIEW observer for the TRUE (fully accrued) debt — what `borrowBalanceCurrent` would
+    ///         return, without mutating. Test-only; production never reads this.
+    function borrowBalanceAccrued(address account) public view returns (uint256) {
+        return _balanceAt(account, pendingBorrowIndex());
+    }
+
+    /// @notice Back-compat alias for `borrowBalanceStored` (the suites read `borrowBalance(x)` as "the
+    ///         debt the strategy can see"). Equal to `borrowBalanceAccrued` unless a pending accrual is
+    ///         armed — which is exactly the gap the pending helper exists to open.
+    function borrowBalance(address account) external view returns (uint256) {
+        return borrowBalanceStored(account);
+    }
+
+    // ── Interest arming (test-only) ──
+
+    /// @notice Accrue `amount` of BORROW INTEREST onto `account`'s debt, with no token movement, and make
+    ///         it IMMEDIATELY VISIBLE to `borrowBalanceStored` — i.e. the market has already been accrued
+    ///         (by anyone's transaction) since the interest arose.
+    /// @dev Capitalises first, so `borrowBalanceStored` grows by EXACTLY `amount` with no index rounding.
+    ///      This is the state a Compound-fork market is left in by any third-party touch, and it is the
+    ///      state in which a stale-index hedge still measures the drift correctly — which is precisely why
+    ///      a suite built only on this helper cannot see the stale-index bug. Use
+    ///      `accruePendingBorrowInterest` for that.
+    function accrueBorrowInterest(address account, uint256 amount) external {
+        _capitalise(account);
+        principal[account] += amount;
+    }
+
+    /// @notice Accrue `amount` of BORROW INTEREST onto `account`'s debt that is NOT yet folded into the
+    ///         market's index: `borrowBalanceStored` keeps reporting the OLD number until someone calls
+    ///         `accrueInterest()` / `borrowBalanceCurrent()` (or performs a borrow/repay, which accrue).
+    ///
+    /// @dev THE CONDITION THE STALE-INDEX BUG LIVES IN, and the one the old scalar mock could not express.
+    ///      Implemented as a pending advance of the GLOBAL index sized so that THIS account's balance grows
+    ///      by `amount` once adopted (`newIndex = base × (cur + amount) / cur`), which is how real interest
+    ///      reaches a borrower. Integer division can leave the realised growth 1–2 units short of `amount`;
+    ///      assert with a small tolerance. Composes: arming twice stacks onto the already-pending index.
+    /// @param account Borrower whose debt should grow by `amount` once the market is accrued.
+    /// @param amount  Un-accrued interest to arm, in underlying units.
+    function accruePendingBorrowInterest(address account, uint256 amount) external {
+        uint256 base = pendingBorrowIndex();
+        uint256 cur = _balanceAt(account, base);
+        if (cur == 0) revert MockLendingMarketNoDebt(); // no principal ⇒ an index advance moves nothing
+        _pendingBorrowIndex = Math.mulDiv(base, cur + amount, cur);
+    }
+
+    // ── Supply side ──
 
     function balanceOfUnderlying(address account) external view returns (uint256) {
         return (balanceOf[account] * exchangeRateStored) / 1e18;
@@ -120,19 +223,44 @@ contract MockLendingMarket {
         return 0;
     }
 
+    // ── Borrow side ──
+
+    /// @dev Accrues + capitalises before growing the principal, as `MToken.borrowFresh` does.
     function borrow(uint256 amount) external returns (uint256) {
-        borrowBalance[msg.sender] += amount;
+        _capitalise(msg.sender);
+        principal[msg.sender] += amount;
         IERC20(underlying).safeTransfer(msg.sender, amount);
         return 0;
     }
 
     /// @dev `amount == type(uint256).max` repays the full balance (the sentinel the strategy passes).
+    ///      Accrues + capitalises first, as `MToken.repayBorrowFresh` does — so a repay is one of the
+    ///      events that makes previously-invisible interest visible to `borrowBalanceStored`.
     function repayBorrow(uint256 amount) external returns (uint256) {
-        uint256 debt = borrowBalance[msg.sender];
+        _capitalise(msg.sender);
+        uint256 debt = principal[msg.sender];
         if (amount > debt) amount = debt;
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
-        borrowBalance[msg.sender] = debt - amount;
+        principal[msg.sender] = debt - amount;
         return 0;
+    }
+
+    // ── Internals ──
+
+    /// @dev `principal × index / interestIndex`, with Compound's zero-principal short circuit (which also
+    ///      keeps a never-borrowed account's zero `interestIndex` out of the divisor).
+    function _balanceAt(address account, uint256 index) internal view returns (uint256) {
+        uint256 p = principal[account];
+        if (p == 0) return 0;
+        return (p * index) / interestIndex[account];
+    }
+
+    /// @dev Accrue, then fold the account's accrued balance into its principal and re-snapshot its index —
+    ///      `principal = borrowBalanceStored; interestIndex = borrowIndex`, verbatim Compound.
+    function _capitalise(address account) internal {
+        accrueInterest();
+        principal[account] = borrowBalanceStored(account);
+        interestIndex[account] = borrowIndex;
     }
 }
 

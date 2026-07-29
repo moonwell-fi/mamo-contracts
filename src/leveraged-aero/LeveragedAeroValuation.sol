@@ -634,8 +634,8 @@ library LeveragedAeroValuation {
     ///      a borrow/repay IS that capitalised principal, which is exactly what the manager's chokepoints
     ///      track — making `debt − hedged` the market's own "interest accrued since our last touch",
     ///      obtained with no `borrowIndex()` read and no extra Layout field per leg beyond the basis
-    ///      itself. Any interest not yet reflected in the STORED index is not lost: it stays inside
-    ///      `debt − hedged` and is picked up by the next harvest.
+    ///      itself. The `debt` side of that subtraction is read with `borrowBalanceCurrent`, i.e. AFTER
+    ///      accruing the market — see `_hedgeLeg` for why the stored index is not good enough here.
     ///
     ///      WHY REPAY RATHER THAN BUY-AND-ADD. Adding the interest amount into the LP would keep leverage
     ///      constant, but a CL add needs PAIRED USDC at the live range ratio, so it re-levers the book and
@@ -675,6 +675,39 @@ library LeveragedAeroValuation {
 
     /// @dev One leg of `hedgeBorrowInterest`. See that function's header for the measure, the
     ///      repay-vs-add decision, the budget bound and the graceful-degradation contract.
+    ///
+    ///      ACCRUE, *THEN* MEASURE — `borrowBalanceCurrent`, never `borrowBalanceStored`.
+    ///      `borrowBalanceStored` is `principal × borrowIndex / interestIndex` on the market's LAST-ACCRUED
+    ///      `borrowIndex`, and nothing earlier in a `compound` transaction accrues a borrow leg: `nav()` is
+    ///      a view, the gauge `getReward` and the AERO→USDC swap never touch Moonwell. So the interest
+    ///      accrued since the market's last accrual is un-capitalised and INVISIBLE to a stored read — and
+    ///      it gets capitalised moments later, by this function's own `repayBorrow` and by
+    ///      `deployIdleImpl`'s borrow, i.e. strictly AFTER the point where it needed to be measured.
+    ///
+    ///      Measured on a live fork run (7-day warp, single-borrower book, then pre-`compound` reads on the
+    ///      leg market): `borrowBalanceStored` 76,853,210 vs `borrowBalanceCurrent` 76,868,617 — a TRUE
+    ///      drift of 15,412 sats of which only 5 were visible to the stored read. That harvest hedged 4
+    ///      sats. The residual was bounded (harvest #2 saw the by-then-capitalised interest and hedged it
+    ///      exactly, so it did not accumulate without bound) but the intended "drift ≈ 0 after a harvest"
+    ///      did not hold, and the first harvest after any quiet period hedged essentially nothing.
+    ///
+    ///      The MAGNITUDE above is fork-amplified: on a fork nobody else transacts, so `borrowIndex` sits
+    ///      frozen for the whole warp, whereas a live Moonwell market is accrued by other borrowers'
+    ///      supply/borrow/repay/liquidate txs constantly and the stale window is short. That is exactly why
+    ///      the stored read must not be relied on: correctness of our own hedge cannot be a function of
+    ///      third-party transaction flow.
+    ///
+    ///      COST is not an extra call — it is the SAME single call, promoted from a staticcall to a
+    ///      state-changing one, on a path that is already state-changing (it swaps and repays). The accrual
+    ///      also leaves the leg market fresh for everything later in the same tx. `borrowBalanceCurrent`
+    ///      rather than a bare `accrueInterest()` for a correctness reason, not a gas one: `accrueInterest`
+    ///      RETURNS a Compound MATH_ERROR code on its failure branches *without* writing the new index, so a
+    ///      caller that dropped the code would carry on reading the stale index — the very failure being
+    ///      fixed. Moonwell wraps it in `require(... == NO_ERROR)`, so using their wrapper makes the
+    ///      fail-closed behaviour structural and un-droppable (see `IMoonwellMarket`).
+    ///
+    ///      `budgetUsdc == 0` is checked BEFORE the call so a leg whose share of the shared ceiling was
+    ///      already spent by the other leg does not pay for an accrual it cannot act on.
     function _hedgeLeg(
         HedgeBook memory b,
         address market,
@@ -686,8 +719,9 @@ library LeveragedAeroValuation {
         uint256 budgetUsdc,
         uint256 pUsdc
     ) private returns (uint256 spentUsdc) {
-        uint256 debt = IMoonwellMarket(market).borrowBalanceStored(address(this));
-        if (budgetUsdc == 0 || debt <= hedged) return 0;
+        if (budgetUsdc == 0) return 0;
+        uint256 debt = IMoonwellMarket(market).borrowBalanceCurrent(address(this));
+        if (debt <= hedged) return 0;
         uint256 drift = debt - hedged;
 
         // `num/den` is the manager's `_tokenToUsdc` basis, kept as its two factors so the INVERSE

@@ -783,6 +783,33 @@ library LeveragedAeroManager {
     /// @dev Collateral + debt in USDC face (6dp) on the SAME hardened-Chainlink basis as
     ///      `_assertHealthy` (the LTV/health basis) — sizes the adjustLeverage / deleverage targets.
     ///      Returns `debtUsdc == 0` (skipping the price reads) when both borrows are clear.
+    ///
+    ///      STORED-INDEX STALENESS HERE IS A KNOWN, DELIBERATELY UNCHANGED RESIDUAL — do not "fix" it by
+    ///      analogy with `LeveragedAeroValuation._hedgeLeg` (which reads `borrowBalanceCurrent`). The two
+    ///      cases are not alike:
+    ///
+    ///        - The hedge MEASURES accrued interest, so a stale read makes its answer ~0 and the feature
+    ///          simply does not work. Here the reads feed a RATIO, and BOTH sides are stale on the same
+    ///          basis: `collateralUsdc` comes from `exchangeRateStored` (also last-accrued). The sign of
+    ///          the error therefore depends on the relative accrual recency of THREE markets (mUSDC and the
+    ///          two borrow markets), not on one, and is not monotonically unsafe.
+    ///        - This function is `view`, and its public wrapper `readCollateralDebtImpl` is reached under
+    ///          STATICCALL from the strategy's `previewRedeem`. It structurally cannot accrue. Accruing
+    ///          would mean splitting it into view/mutating twins and accruing in each state-changing caller
+    ///          (`fastRedeemImpl`, `adjustLeverageImpl`, `deleverageImpl`) — a behaviour change on the
+    ///          permissionless `deleverage` valve (a stale, health-OVERSTATING read currently refuses
+    ///          `HealthyNoDeleverage`; a fresh one would let it fire in states it presently rejects, and
+    ///          would also make its before/after health comparison fresh-vs-fresh where today "before" is
+    ///          stale and "after" is post-`repayBorrow`, i.e. accrued) and on the gate that runs after every
+    ///          op. That needs its own review and test matrix, not a ride-along.
+    ///        - The authoritative belt in `_assertHealthy` is Moonwell's own `getAccountLiquidity`, which is
+    ///          computed on the SAME stored basis Moonwell's liquidation-eligibility check uses; a real
+    ///          liquidation tx accrues both markets first, so the residual is a window, not a blind spot.
+    ///
+    ///      Bounded direction of the residual, for the record: understated debt ⇒ overstated health /
+    ///      understated LTV ⇒ `adjustLeverage` may lever up marginally past target, `fastRedeem`'s LTV gate
+    ///      is marginally loose, and `deleverage` may trigger marginally late. All are bps-scale over a live
+    ///      market's short inter-accrual window; none is exploitable (nobody can hold the index still).
     function _readCollateralDebt() private view returns (uint256 collateralUsdc, uint256 debtUsdc) {
         Layout storage $ = _layout();
         uint256 cBal = ICToken($.mUsdc).balanceOf(address(this));
