@@ -8,7 +8,7 @@ The stack is **two layers, both in this repo**:
 
 | Layer | Contracts | Who drives it |
 |---|---|---|
-| **Pooled** | `LeveragedAeroVault` (share ERC-20 + lifecycle driver) + one `LeveragedAerodromeCLStrategy` ERC-1167 clone | vault owner = `MAMO_MULTISIG`; position operator = the strategy's `proposer` (`MAMO_BACKEND`) |
+| **Pooled** | `LeveragedAeroVault` (share ERC-20 + lifecycle driver) + one `LeveragedAerodromeCLStrategy` ERC-1167 clone | vault owner = `MAMO_MULTISIG`; position operator = the strategy's `proposer` (`MAMO_REBALANCER`) |
 | **Account** | `MamoLeveragedAeroStrategy` (per-user UUPS wrapper) + `MamoLeveragedAeroStrategyFactory` | multisig proposal `012` + `MAMO_BACKEND` |
 
 Audience: Mamo engineers with a checkout of **this repo only**.
@@ -41,7 +41,8 @@ come from `addresses/8453.json`.
 | Role | Key | Address |
 |---|---|---|
 | Mamo multisig (registry admin / **vault owner**) | `MAMO_MULTISIG` | `0x26c158A4CD56d148c554190A95A921d90F00C160` |
-| Mamo backend (operator / strategy `proposer`) | `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
+| Mamo backend (account-layer operator) | `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
+| Rebalancer ops (strategy `proposer`) — **vnet throwaway** | `MAMO_REBALANCER` | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` |
 | Deployer EOA | `DEPLOYER_EOA` | `0xDca82E03057329f53Ed4173429D46B0511E46Fb8` |
 | Mamo strategy registry | `MAMO_STRATEGY_REGISTRY` | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` |
 | USDC | `USDC` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
@@ -77,9 +78,9 @@ Two keys are **created by this runbook** and are deliberately **not** committed 
 >    sequencer-uptime) with `FreshFeed` mocks whose `updatedAt` tracks `block.timestamp`, via
 >    `tenderly_setCode`. Feeds are then permanently fresh, prices frozen-but-movable, and time-warping
 >    is safe. Verified live 2026-07-26 on the Sherwood-era instance (clock +5 days, feed lag 60 s, full
->    e2e green). **This recipe used to ship with the Sherwood deploy script and now has no in-repo
->    implementation — see the tooling gap in Phase B.0. It is not optional: without it the instance is
->    dead in about a day.**
+>    e2e green). The in-repo implementation is `script/tenderly/FreshFeed.sol`, applied by
+>    `run-leveraged-aero-stack.sh` phase B.0. **It is not optional: without it the instance is dead in
+>    about a day.**
 > 3. **State sync stays OFF.** It is a creation-time-only flag (API-verified 2026-07-26), so this is
 >    locked when you create the vnet — get it right. Two reasons, and note that the *old* reason has
 >    changed: with the governance warp gone the vnet clock no longer runs days ahead of real time, so
@@ -143,58 +144,106 @@ POST once by hand and record the id. Do not rely on a harness to keep it alive.
 
 ## Phase B — pooled layer: vault + strategy clone (this repo)
 
-> **TOOLING NOT YET WRITTEN — tracked gap.** `script/` contains only the **account-side**
-> `LeveragedAeroAccountDeployer.s.sol` + `DeployLeveragedAeroAccountConfig.sol`. There is **no**
-> in-repo script for the vault, the strategy template, the clone/init, the activation, or the
-> FreshFeed overrides — that tooling died with the Sherwood repo dependency and has not been
-> re-written here. Everything in this phase is therefore a **specification for the script that has to
-> be built**, not a command you can run today. Do not invent filenames: nothing below exists yet.
-> Steps B.0–B.5 are the required order; B.6 is the acceptance gate Phase C depends on.
+**One command runs this whole phase:**
+
+```bash
+TENDERLY_VNET_RPC_URL=<admin-rpc> \
+TENDERLY_VNET_PUBLIC_RPC_URL=<public-rpc> \
+MAMO_REBALANCER=<rebalancer-ops-addr> \
+SEED=100000000000 \
+make tenderly-leveraged-aero-stack
+```
+
+`make tenderly-leveraged-aero-stack` → `./script/tenderly/run-harness.sh leveraged-aero-stack` →
+`./script/tenderly/run-leveraged-aero-stack.sh`, whose phases are exactly B.0–B.5 below and which
+**asserts every B.6 post-condition** before it exits. Like the account harness it **always reuses**
+`TENDERLY_VNET_RPC_URL` (the pooled layer must land on the shared persistent vnet — an ephemeral fork
+would be deleted with the stack on it), needs **no broadcaster key** (unlocked impersonation for
+`MAMO_MULTISIG` / `DEPLOYER_EOA`), and **never time-warps**. A CLI-supplied `TENDERLY_VNET_RPC_URL`
+wins over the `.env` value.
+
+The tooling:
+
+| File | Role |
+|---|---|
+| `script/tenderly/run-leveraged-aero-stack.sh` | orchestrator (B.0 cheat-RPCs, the impersonated multisig sends, all asserts, config emit) |
+| `script/tenderly/LeveragedAeroStackHarness.s.sol` | `deployTemplate()` (B.1) and `buildInitData()` (B.2) |
+| `script/tenderly/FreshFeed.sol` | the B.0 aggregator stand-in |
 
 Reference implementation contract for this phase: `docs/LEVERAGED_AERO_CL_AUDIT.md`, *Deploy flow*.
 
-Shell variables used by the snippets below:
+Everything is env-driven; the venue book's Base defaults live in the two script files (kept in
+lockstep) and are documented in `script/tenderly/README.md`. The snippets in B.0–B.5 are the
+**equivalent raw `cast`** for a by-hand run or a debug session:
 
 ```bash
 ADMIN="https://virtual.base.<...>.rpc.tenderly.co/<admin-uuid>"    # writes (unlocked impersonation)
 PUB="https://virtual.base.<...>.rpc.tenderly.co/<public-uuid>"     # reads
 MULTISIG=0x26c158A4CD56d148c554190A95A921d90F00C160                # MAMO_MULTISIG (vault owner)
 USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+REBALANCER=0x...   # MAMO_REBALANCER — the strategy proposer (NOT MAMO_BACKEND, see below)
+TEMPLATE=0x...     # from B.1
 VAULT=0x...        # from B.1
 STRAT=0x...        # the clone from B.3
 ```
 
+> **The `proposer` role is `MAMO_REBALANCER`, a NEW dedicated operator address — deliberately NOT
+> `MAMO_BACKEND`.** The strategy has exactly one operator role (`onlyProposer`: `rerange`, `compound`,
+> `fulfillRedeem`, deleverage) and the **rebalancer service** owns it; the Mamo backend drives the
+> *account* layer. Collapsing them would hand account-layer keys the levered book's operator surface.
+> The vnet default is a throwaway keypair (`0x73f6B456d063F78129113D42DBC315b9eEee8FAf`; its private
+> key is published in the runner header so anyone can drive the role on the fork).
+> **Mainnet must pass the real rebalancer ops key via `MAMO_REBALANCER`.** Unless `FEE_RECIPIENT`
+> overrides it, the proposer is also the strategy's fee recipient.
+
 ### B.0 — FreshFeed code-replacement (do this first, per constraint 2)
 
-Replace the 5 venue Chainlink aggregators with `FreshFeed` mocks that return the forked answer but
-report `updatedAt == block.timestamp`. What the script must do, per feed address:
+Replace the 5 venue Chainlink aggregators with `script/tenderly/FreshFeed.sol` mocks that return the
+forked answer but report a permanently fresh `updatedAt`. Per feed address the script:
 
-1. Read the live aggregator's `decimals()`, `latestRoundData()` answer and `description()` off the
-   fork.
-2. Deploy (or precompute the runtime bytecode of) a `FreshFeed` that returns that frozen answer with
-   `updatedAt = block.timestamp`, keeps `decimals()` identical (AERO/USD **must** stay 8dp — the
-   strategy asserts `UnexpectedFeedDecimals` at init), and exposes a setter so the price can be moved
-   for scenario tests.
+1. Reads the live aggregator's `decimals()` and `latestRoundData()` answer off the fork.
+2. Deploys a `FreshFeed` carrying that answer + decimals as **immutables** (`cast send --create`, so
+   no broadcaster key is needed). `updatedAt` is reported as `block.timestamp - 60` and `startedAt` as
+   `block.timestamp - 30 days`. `decimals()` is preserved verbatim — AERO/USD **must** stay 8dp (the
+   strategy asserts `UnexpectedFeedDecimals` at init) and `_readUsd8` re-checks the others per read.
 3. `cast rpc tenderly_setCode '["<feedAddr>","0x<freshFeedRuntime>"]'` on the **admin** RPC, so the
-   override lands at the *mainnet feed address* the strategy will be initialized with.
-4. The **sequencer-uptime** feed is the same treatment but a different shape: `answer == 0` (up) and a
-   `startedAt` far enough in the past to clear `gracePeriod`.
+   override lands at the *mainnet feed address* the strategy is initialized with. `FreshFeed` is
+   storage-free by construction (immutables only), which is what makes a code-only override sound.
+4. The **sequencer-uptime** feed gets the same treatment, different shape: `answer == 0` (up), and the
+   30-day-old `startedAt` clears any `gracePeriod` (bounded to `<= 1 day` at init).
+5. Asserts `updatedAt` is within seconds of the head timestamp — a large lag means the override did
+   not land. Re-asserted at the end of the run (B.5).
 
-Feeds to cover: leg A/USD, leg B/USD, USDC/USD, AERO/USD, L2 sequencer uptime — i.e. exactly the five
-`*Feed` members of `LeveragedAerodromeCLStrategy.InitParams`.
+Feeds covered: leg A/USD, leg B/USD, USDC/USD, AERO/USD, L2 sequencer uptime — i.e. exactly the five
+`*Feed` members of `LeveragedAerodromeCLStrategy.InitParams`, addresses env-driven
+(`LEG_A_FEED` / `LEG_B_FEED` / `USDC_FEED` / `AERO_FEED` / `SEQ_FEED`).
 
-There is no `FreshFeed` contract in this repo yet either; it has to be written alongside the script.
+Prices are frozen but **movable**: deploy another `FreshFeed` with a different answer and
+`tenderly_setCode` it over the same address again. `--no-freshfeed` skips the whole phase on an
+instance that already carries the mocks (re-running it is harmless — it is idempotent, since reading
+an already-overridden feed yields the same answer).
 
-### B.1 — deploy `LeveragedAeroVault`
+### B.1 — deploy the strategy template + `LeveragedAeroVault`
 
-`src/LeveragedAeroVault.sol`, constructor
+`LeveragedAeroStackHarness.deployTemplate()`, broadcast as `DEPLOYER_EOA`
+(`--unlocked --sender DEPLOYER_EOA --gas-estimate-multiplier 200`).
+
+**The template.** `LeveragedAerodromeCLStrategy`'s three libraries (`LeveragedAeroManager`,
+`LeveragedAeroValuation`, `LeveragedAeroFees`) have external functions and are `delegatecall`ed — a
+`forge script` broadcast deploys and links them automatically; a raw `cast` deploy does not, which is
+why B.1 is a forge script at all. Each library is its own tx, so the Base per-tx gas cap
+(16,777,216) applies per `CREATE` and the 200% multiplier clears all of them. The template's
+constructor sets `_initialized = true`, permanently locking `initialize` on the template itself
+(ERC-1167 clones skip constructors, so clones stay initializable).
+
+**The vault.** `src/LeveragedAeroVault.sol`, constructor
 `(address asset_, address owner_, string name_, string symbol_)`:
 
 | Arg | Value |
 |---|---|
 | `asset_` | `USDC` (`0x8335…2913`) — must equal the strategy's unit of account or init reverts `AssetMismatch` |
 | `owner_` | `MAMO_MULTISIG` |
-| `name_` / `symbol_` | share-token metadata |
+| `name_` / `symbol_` | share-token metadata — `"Mamo Leveraged Aero Vault"` / `"mlaUSDC"` (`VAULT_NAME` / `VAULT_SYMBOL`) |
 
 > **`decimals()` is derived, not stored: `asset.decimals() + 6` = 12dp for USDC.** Load-bearing — the
 > strategy's genesis pricing uses a hardcoded `SHARES_VIRTUAL_OFFSET = 1e6`
@@ -205,39 +254,53 @@ State after deploy: `strategy == address(0)`, `depositsOpen == false`, `feeConfi
 (**fees OFF at launch** — `factory()` returns `address(0)` and the strategy's fee lookup
 short-circuits). Non-upgradeable by design.
 
-### B.2 — multisig **accepts** vault ownership
+### B.2 — vault ownership: nothing to accept
 
-The vault is `Ownable2Step`. `Ownable(owner_)` in the constructor makes `MAMO_MULTISIG` owner
-immediately, so if you deploy with `owner_ = MAMO_MULTISIG` there is nothing to accept. **If you
-instead deploy as `DEPLOYER_EOA` and hand off**, `transferOwnership(MAMO_MULTISIG)` only *nominates* —
-the multisig must call `acceptOwnership()` or every `onlyOwner` path (including proposal 012's
-`setOpenDeposits(true)`) reverts.
+The vault is `Ownable2Step`, but `Ownable(owner_)` in the constructor makes `MAMO_MULTISIG` owner
+**immediately** — Ownable2Step's acceptance only gates *later* transfers. B.1 passes
+`owner_ = MAMO_MULTISIG`, so there is no `acceptOwnership()` step and the script asserts
+`owner() == MAMO_MULTISIG` / `pendingOwner() == 0x0` right after the deploy.
+
+**If you instead deploy as `DEPLOYER_EOA` and hand off**, `transferOwnership(MAMO_MULTISIG)` only
+*nominates* — the multisig must call `acceptOwnership()` or every `onlyOwner` path (`cloneAndBind`,
+`activateStrategy`, proposal 012's `setOpenDeposits(true)`) reverts:
 
 ```bash
 # only needed on the deploy-then-hand-off path
 cast send "$VAULT" 'acceptOwnership()' --from "$MULTISIG" --unlocked --rpc-url "$ADMIN"
-cast call "$VAULT" 'owner()(address)' --rpc-url "$PUB"          # == MAMO_MULTISIG
-cast call "$VAULT" 'pendingOwner()(address)' --rpc-url "$PUB"   # == 0x0
 ```
 
 Prefer `owner_ = MAMO_MULTISIG` in the constructor and skip the two-step entirely.
 
-### B.3 — deploy the strategy template, clone it, and `initialize` **in one broadcast**
+### B.3 — clone + `initialize` + bind, atomically: `cloneAndBind`
 
-1. Deploy `LeveragedAerodromeCLStrategy` as a template. Its three libraries
-   (`LeveragedAeroManager`, `LeveragedAeroValuation`, `LeveragedAeroFees`) have external functions and
-   are `delegatecall`ed — a `forge script` broadcast deploys and links them automatically; a raw
-   `cast` deploy does not. The template's constructor sets `_initialized = true`, permanently locking
-   `initialize` on the template itself (ERC-1167 clones skip constructors, so clones stay
-   initializable).
-2. `Clones.clone(template)` → the clone address.
-3. `clone.initialize(vault, proposer, abi.encode(InitParams))` with `proposer = MAMO_BACKEND`.
+`buildInitData()` ABI-encodes `InitParams` from the venue book (env vars, Base defaults in the script;
+no RPC needed — it is a pure `env → abi.encode`), and the owner calls **one** vault function:
 
-> **The clone is initializable by ANYONE between `clone` and `initialize`.** There is no template
-> allowlist and no atomic `cloneAndInit` helper in this repo. The two calls **must** be in the same
-> broadcast (one script tx / one contract), or the deploy must be re-checked by hand before use. The
-> binding that actually protects holders is `vault.setStrategy` in B.4 — a clone someone else
-> initialized against a different vault can never mint here.
+```bash
+cast send "$VAULT" 'cloneAndBind(address,address,bytes)' "$TEMPLATE" "$REBALANCER" "$INITDATA" \
+  --from "$MULTISIG" --unlocked --gas-limit 8000000 --rpc-url "$ADMIN"
+cast call "$VAULT" 'strategy()(address)' --rpc-url "$PUB"     # the clone
+```
+
+`cloneAndBind(template, proposer_, initData)` is `onlyOwner` and does `Clones.clone` →
+`clone.initialize(address(this), proposer_, initData)` → `_bind(clone)` in a single transaction.
+
+> **This closes a real window.** A bare `Clones.clone` leaves the fresh clone initializable by
+> **anyone** (the template's constructor only locks the *template*), so between a two-step
+> clone-then-initialize a front-runner could seize the `proposer` role. `cloneAndBind` removes the gap
+> entirely, and `_bind` still re-checks `clone.vault() == address(this)` — a clone initialized against
+> a different vault can never be bound here. `setStrategy(address)` remains as the manual path for an
+> already-initialized clone; both route through the same set-once `_bind`.
+
+The proposer passed here is **`MAMO_REBALANCER`**, not `MAMO_BACKEND` (see the note at the top of this
+phase).
+
+**A wrong venue value fails HERE, loudly** — which is the point of doing it in one owner tx:
+`VenueMismatch` (pool spacing or token set, a Moonwell `underlying()` that does not match its leg, or a
+leg↔USDC swap pool that does not exist at the configured spacing — both swap spacings are
+existence-probed through the CL factory), `UnsupportedLeg`, `LegDecimalsOutOfRange`, `AssetMismatch`,
+`UnexpectedFeedDecimals`, `WidthOutOfBounds`, or one of the risk / oracle / fee bound errors.
 
 `InitParams` is **leg slots, not token identities** (`weth*` = leg A, the natively-wrappable slot;
 `cbBTC*` = leg B — the names are historical). Any Slipstream pool whose two tokens have Moonwell borrow
@@ -272,37 +335,45 @@ per-cycle width, re-checked against the init band → `WidthOutOfBounds()`, sele
 old "the vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — delete it on
 sight.
 
-### B.4 — bind the strategy to the vault
+### B.4 — the bind (already done by B.3)
 
-```bash
-cast send "$VAULT" 'setStrategy(address)' "$STRAT" --from "$MULTISIG" --unlocked --rpc-url "$ADMIN"
-```
+`cloneAndBind` bound the clone in the same transaction it created it, so there is no separate step —
+the script just asserts both directions (`vault.strategy() == clone`, `clone.vault() == vault`) plus
+`clone.proposer() == MAMO_REBALANCER` and `clone.state() == 0` (Pending).
 
-**Set-once** (`onlyOwner`, reverts `LAV: strategy already set`). `msg.sender == strategy` is the sole
-protection against arbitrary share inflation, so there is no rotation path. Get the clone right before
-you call this — a wrong clone means a new vault.
+The bind is **set-once** (`onlyOwner`, reverts `LAV: strategy already set`, and `cloneAndBind` re-checks
+it before cloning). `msg.sender == strategy` is the sole protection against arbitrary share inflation,
+so there is no rotation path: a wrong clone means a new vault.
 
 ### B.5 — activate: `Pending → Executed`
 
-`activateStrategy` pulls the seed **from the caller** (the owner) straight to the strategy, then calls
-`strategy.execute()`. The vault being the caller is what satisfies the strategy's `onlyVault` (a raw
-`msg.sender == vault` compare) — that is the whole reason activation goes through the vault.
+`activateStrategy` pulls the seed **from the caller** (the owner) straight to the strategy, calls
+`strategy.execute()`, then mints the seeder the genesis shares. The vault being the caller is what
+satisfies the strategy's `onlyVault` (a raw `msg.sender == vault` compare) — that is the whole reason
+activation goes through the vault.
 
 ```bash
-SEED=50000000000                                    # 50,000 USDC (6dp)
-cast rpc tenderly_setErc20Balance "[\"$USDC\",\"$MULTISIG\",\"0xBA43B7400\"]" --rpc-url "$ADMIN"
+SEED=100000000000                                   # 100,000 USDC (6dp) — the harness default
+cast rpc tenderly_setErc20Balance "[\"$USDC\",\"$MULTISIG\",\"0x2E90EDD000\"]" --rpc-url "$ADMIN"
 cast send "$USDC"  'approve(address,uint256)' "$VAULT" "$SEED" --from "$MULTISIG" --unlocked --rpc-url "$ADMIN"
-cast send "$VAULT" 'activateStrategy(uint256)' "$SEED"         --from "$MULTISIG" --unlocked --rpc-url "$ADMIN"
+cast send "$VAULT" 'activateStrategy(uint256)' "$SEED" --from "$MULTISIG" --unlocked \
+  --gas-limit 12000000 --rpc-url "$ADMIN"
 ```
 
 > - The owner must **approve the vault** for the seed — the transfer is
 >   `safeTransferFrom(msg.sender, strategy, seedAmount)` and the vault never custodies it.
 > - `seedAmount == 0` does **not** fail in the vault: it fails inside `execute()` with
 >   `ExecuteZeroBalance` (`_supplyCollateral` reads the strategy's own balance). A seed is mandatory.
-> - **The seed mints no shares.** `_execute` issues nothing, so the seed is unowned NAV that accrues to
->   the first depositor via `shares = assets × (supply + 1e6) / (nav + 1)`. Size it deliberately: it is
->   a gift, not a position. On mainnet, decide whether the multisig seeds and then deposits, or seeds
->   the minimum that clears `ExecuteZeroBalance`.
+> - **The seed DOES mint shares** — `seedAmount × 10^(vault.decimals() − asset.decimals())` =
+>   `seed × 1e6`, minted to the caller after `execute()` (added in the PR #66 review remediation,
+>   commit `db57584`; the earlier "the seed mints no shares / it is a gift to the first depositor"
+>   note is **obsolete**). That is the same `assets × 1e6` the strategy's own
+>   `shares = assets × (supply + 1e6) / (nav + 1)` produces on an empty book, so supply and NAV stay in
+>   step and the first real depositor mints a fair claim. The mint is a direct `_mint`, deliberately
+>   **not** `strategyMint`, so it is not subject to the `depositsOpen` gate.
+> - `--gas-limit` is set explicitly: `execute()` supplies collateral, borrows both legs, swaps, mints
+>   the CL position and stakes it, and the vnet under-estimates deep nested delegatecalls. Stay under
+>   the Base per-tx cap of 16,777,216.
 > - Leave `depositsOpen == false` here. Phase C (proposal 012's `build()`) flips it — keeping the flip
 >   in 012 is what makes the vnet run a faithful rehearsal of the mainnet proposal.
 
@@ -314,7 +385,9 @@ require `State.Executed` and there is no path back.
 
 ### B.6 — post-conditions Phase C requires
 
-Verify on the **public RPC** (reads only).
+**The harness asserts all of these itself** and fails the run on any mismatch (phase `B.5 —
+post-conditions` in `script/tenderly/harness-results-leveraged-aero-stack.log`). The equivalent reads,
+on the **public RPC**:
 
 ```bash
 PUB="https://virtual.base.<...>.rpc.tenderly.co/<public-uuid>"
@@ -323,12 +396,17 @@ STRAT=0x...; VAULT=0x...
 cast call "$STRAT" 'state()(uint8)'       --rpc-url "$PUB"   # 1  (BaseStrategy.State: Pending=0, Executed=1, Settled=2)
 cast call "$STRAT" 'nav()(uint256)'       --rpc-url "$PUB"   # > 0
 cast call "$STRAT" 'vault()(address)'     --rpc-url "$PUB"   # == $VAULT
-cast call "$STRAT" 'proposer()(address)'  --rpc-url "$PUB"   # == MAMO_BACKEND
+cast call "$STRAT" 'proposer()(address)'  --rpc-url "$PUB"   # == MAMO_REBALANCER
 cast call "$VAULT" 'strategy()(address)'  --rpc-url "$PUB"   # == $STRAT
 cast call "$VAULT" 'owner()(address)'     --rpc-url "$PUB"   # == MAMO_MULTISIG
+cast call "$VAULT" 'pendingOwner()(address)' --rpc-url "$PUB"   # 0x0
+cast call "$VAULT" 'asset()(address)'     --rpc-url "$PUB"   # == USDC
 cast call "$VAULT" 'depositsOpen()(bool)' --rpc-url "$PUB"   # false  (Phase C flips it to true)
+cast call "$VAULT" 'settled()(bool)'      --rpc-url "$PUB"   # false
 cast call "$VAULT" 'feeConfig()(address)' --rpc-url "$PUB"   # 0x0    (protocol fees off at launch)
 cast call "$VAULT" 'decimals()(uint8)'    --rpc-url "$PUB"   # 12     (USDC 6dp + 6)
+cast call "$VAULT" 'totalSupply()(uint256)' --rpc-url "$PUB" # == SEED * 1e6 (the genesis mint)
+cast call "$VAULT" 'balanceOf(address)(uint256)' "$MULTISIG" --rpc-url "$PUB"   # == SEED * 1e6
 ```
 
 | Post-condition | Expected |
@@ -336,12 +414,22 @@ cast call "$VAULT" 'decimals()(uint8)'    --rpc-url "$PUB"   # 12     (USDC 6dp 
 | `strategy.state()` | `1` — Executed |
 | `strategy.nav()` | `> 0` (seeded and executed) |
 | `strategy.vault()` | the `LeveragedAeroVault` |
-| `strategy.proposer()` | `MAMO_BACKEND` |
+| `strategy.proposer()` | `MAMO_REBALANCER` (the rebalancer ops address — **not** `MAMO_BACKEND`) |
 | `vault.strategy()` | the clone (both directions bound) |
 | `vault.owner()` | `MAMO_MULTISIG`, with `pendingOwner() == 0x0` |
+| `vault.asset()` | `USDC` |
 | `vault.depositsOpen()` | `false` (Phase C flips it) |
+| `vault.settled()` / `feeConfig()` | `false` / `0x0` (fees off at launch) |
 | `vault.decimals()` | `12` |
+| `vault.totalSupply()` = `balanceOf(MAMO_MULTISIG)` | `SEED × 1e6` — the genesis mint |
 | all 5 venue feeds | FreshFeed'd (`updatedAt` within seconds of `block.timestamp`) |
+
+On success the harness merge-writes `script/tenderly/leveraged-aero-vnet.json` — the machine-consumable
+address book downstream consumers read. It owns the `pooled` (`vault`, `strategyClone`, `template`,
+`proposer`, `seed`, `lpPool`) and `feeds` objects plus `vaultGeneration: 2`, and **nulls the account
+addresses**: a new pooled layer invalidates the account factory (it binds the strategy clone at
+construction), so Phase C must run again. The account harness merge-writes the `mamo` object back in,
+so the two never clobber each other.
 
 ---
 
@@ -352,8 +440,6 @@ Unchanged by the de-Sherwood work. Once B.6 passes:
 ```bash
 TENDERLY_VNET_RPC_URL="<admin-rpc>" \
 TENDERLY_VNET_PUBLIC_RPC_URL="<public-rpc>" \
-SHERWOOD_LEVERAGED_AERO_STRATEGY="<clone>" \
-SHERWOOD_SYNDICATE_VAULT="<vault>" \
 make tenderly-leveraged-aero-account
 ```
 
@@ -364,8 +450,10 @@ would not have it) and **never** creates, tears down, or time-warps the vnet. It
 broadcaster key — everything is unlocked impersonation.
 
 A CLI-supplied `TENDERLY_VNET_RPC_URL` wins over the `.env` value (the `.env` one may point at an older
-vnet without the stack). The two address env vars have documented defaults matching the current
-instance; override them to target a different vnet.
+vnet without the stack). The two pooled-address env vars
+(`SHERWOOD_LEVERAGED_AERO_STRATEGY` / `SHERWOOD_SYNDICATE_VAULT`) resolve **env → the `pooled` object
+Phase B just wrote into `script/tenderly/leveraged-aero-vnet.json` → a hardcoded fallback**, so after a
+Phase B run they normally need no override; pass them to target a different vnet.
 
 > **Env-var name vs address-book key — known skew.** Proposal 012 resolves the vault under the
 > `LEVERAGED_AERO_VAULT` key, but `LeveragedAeroAccountHarness.s.sol` still injects the env var
@@ -403,8 +491,9 @@ instance; override them to target a different vnet.
 > `csend` actions + the `assert_eq` block) — same actions, same asserts, live on the vnet. On mainnet
 > the actual multisig executes the FPS proposal itself.
 
-Results log: `script/tenderly/harness-results-leveraged-aero.log`.
-Machine-consumable output (regenerated every successful run, committed):
+Results logs: `script/tenderly/harness-results-leveraged-aero-stack.log` (Phase B) and
+`script/tenderly/harness-results-leveraged-aero.log` (Phase C).
+Machine-consumable output (merge-written by both harnesses on every successful run, committed):
 `script/tenderly/leveraged-aero-vnet.json`.
 
 ---
@@ -415,15 +504,19 @@ The de-Sherwood change **removes the external blocker**: there is no Sherwood ma
 wait on, no upstream governance to schedule around, and no third-party contract in the trust path. The
 whole sequence is Mamo's to execute:
 
-1. **Deploy the pooled layer** (Phase B, minus the vnet-only parts): `LeveragedAeroVault` with
-   `owner_ = MAMO_MULTISIG`, then template → clone → `initialize` in one tx. **No FreshFeed** — real
-   Chainlink feeds are genuinely fresh on mainnet, and `tenderly_*` cheat-RPCs do not exist. No
-   impersonation: real signers throughout.
+1. **Deploy the pooled layer** (Phase B, minus the vnet-only parts): the strategy template +
+   `LeveragedAeroVault` with `owner_ = MAMO_MULTISIG`, then `cloneAndBind(template, MAMO_REBALANCER,
+   initData)` from the multisig. **No FreshFeed** — real Chainlink feeds are genuinely fresh on mainnet,
+   and `tenderly_*` cheat-RPCs do not exist. No impersonation: real signers throughout. **`proposer`
+   must be the real rebalancer ops key** (`MAMO_REBALANCER`), never the vnet throwaway and never
+   `MAMO_BACKEND`. Decide `LP_POOL` (pending product decision) before this step.
 2. **Confirm vault ownership is live**, not pending — `owner() == MAMO_MULTISIG` and
    `pendingOwner() == 0x0`. `Ownable2Step` means a nomination is not enough, and 012's
    `setOpenDeposits(true)` reverts if the multisig has not accepted.
-3. `vault.setStrategy(clone)` then `vault.activateStrategy(seed)` from the multisig (with the USDC
-   approval to the vault first). Decide the seed size knowing it mints no shares.
+3. `vault.activateStrategy(seed)` from the multisig (with the USDC approval to the vault first — the
+   seed is pulled from the caller). The seed **does** mint the multisig `seed × 1e6` shares, so it is a
+   real position, not a gift; size it as capital, and keep it large enough to clear
+   `ExecuteZeroBalance` and to make the first deposits price sanely.
 4. **Proposal 012 executed by the actual multisig**, not unlocked impersonation. The **typeId-5
    availability guard** still applies: `preBuildMock` asserts
    `latestImplementationById(5) == address(0)` and `nextStrategyTypeId() <= 5` before whitelisting (the
@@ -450,6 +543,7 @@ VAULT=0x...        STRAT=0x...
 IMPL=0x...         FACTORY=0x...
 MULTISIG=0x26c158A4CD56d148c554190A95A921d90F00C160
 BACKEND=0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73
+REBALANCER=0x73f6B456d063F78129113D42DBC315b9eEee8FAf   # MAMO_REBALANCER (vnet default)
 USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 ```
 
@@ -460,12 +554,13 @@ cast chain-id --rpc-url "$PUB"                                   # 8453
 cast call "$STRAT" 'state()(uint8)'      --rpc-url "$PUB"        # 1  (Executed)
 cast call "$STRAT" 'nav()(uint256)'      --rpc-url "$PUB"        # > 0
 cast call "$STRAT" 'vault()(address)'    --rpc-url "$PUB"        # == $VAULT
-cast call "$STRAT" 'proposer()(address)' --rpc-url "$PUB"        # == $BACKEND
+cast call "$STRAT" 'proposer()(address)' --rpc-url "$PUB"        # == $REBALANCER
 cast call "$VAULT" 'strategy()(address)' --rpc-url "$PUB"        # == $STRAT
 cast call "$VAULT" 'owner()(address)'    --rpc-url "$PUB"        # == $MULTISIG
 cast call "$VAULT" 'asset()(address)'    --rpc-url "$PUB"        # == $USDC
 cast call "$VAULT" 'decimals()(uint8)'   --rpc-url "$PUB"        # 12
 cast call "$VAULT" 'factory()(address)'  --rpc-url "$PUB"        # 0x0 while feeConfig == 0 (fees off)
+cast call "$VAULT" 'totalSupply()(uint256)' --rpc-url "$PUB"     # == SEED * 1e6 (genesis mint)
 ```
 
 **Account layer (after Phase C):**

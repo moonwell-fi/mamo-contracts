@@ -64,9 +64,28 @@ library LeveragedAeroValuation {
     /// @notice A Chainlink feed reported decimals != the assumed 8 — fail-closed rather than
     ///         silently mis-scale the USD→USDC conversion (a redeployed/misconfigured feed).
     error FeedDecimalsMismatch();
+    /// @notice ASSET-MODE sizing could not produce a two-sided split (see `_rangeRatio`, shared by
+    ///         `assetModeSplit` and `assetModeLeverUpPair`): the current tick sits entirely outside the
+    ///         target range (one leg's required amount is 0), or the solved collateral portion collapsed
+    ///         to 0 / the whole deposit. Fail-closed — opening an unhedged or unlevered leg would
+    ///         silently break the delta-hedge premise.
+    error DegenerateRange();
+    /// @notice ASSET-MODE lever-up needs `needed` USDC from idle to pair with the borrowed leg A, but the
+    ///         book only holds `available` (see `assetModeLeverUpPair`). Fail-closed and LOUD: a partial
+    ///         fill or a silent cap would leave the position under-levered and, worse, mis-hedged. The
+    ///         selector matches the same-signature declarations in `LeveragedAeroManager` /
+    ///         `LeveragedAerodromeCLStrategy`, so a test may expect it off any of the three.
+    error InsufficientIdleForLeverUp(uint256 needed, uint256 available);
 
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
+
+    /// @dev Reference liquidity for the `assetModeSplit` ratio probe. Only the RATIO of the two
+    ///      required amounts matters (both are linear in L for a fixed range + sqrtP, so L cancels),
+    ///      and `2^96` is the natural choice: it makes the token1 term exactly `sqrtP − sqrtLower`,
+    ///      keeping both probe amounts large enough that integer rounding is negligible (relative
+    ///      error ~1/needX, i.e. ≲1e-20 for real pools) while staying inside `uint128`.
+    uint128 private constant REF_LIQUIDITY = uint128(1) << 96;
 
     /// @notice Everything `netEquityUsdc` needs — no per-call magic numbers. The caller
     ///         (`strategy.nav()`, a later task) reads `NPM.positions(tokenId)` and passes
@@ -132,7 +151,16 @@ library LeveragedAeroValuation {
         // NAV-neutral (the remainder is redeployable and swept on the next exit, not leaked). In
         // steady state these balances are ~dust (execute/deploy/compound/settle/redeem leave ~0),
         // and `_usdcValue` returns 0 for a 0 amount, so this is a clean no-op outside a rerange.
-        assets += _usdcValue(IERC20(c.cbBTC).balanceOf(strategy), c.cbBTCDecimals, pCbBTC, pUsdc);
+        //
+        // ASSET-MODE (`c.cbBTC == c.usdc`, i.e. the leg-B slot IS the unit of account — a legA/USDC
+        // pool): the leg-B idle term would RE-ADD the idle USDC already counted as `idleStrategy`
+        // above, double-counting it into NAV and mis-minting deposit shares. Skip it — in asset-mode
+        // the LP-side USDC that is not yet in the position is exactly `idleStrategy`, counted once.
+        // (Leg A is never the unit of account: `_initialize` rejects `weth == usdc`, so its term is
+        // unconditional.) See `assetModeSplit` for the shape itself.
+        if (c.cbBTC != c.usdc) {
+            assets += _usdcValue(IERC20(c.cbBTC).balanceOf(strategy), c.cbBTCDecimals, pCbBTC, pUsdc);
+        }
         assets += _usdcValue(IERC20(c.weth).balanceOf(strategy), c.wethDecimals, pWeth, pUsdc);
 
         // --- debt (same Chainlink basis) ---
@@ -180,6 +208,260 @@ library LeveragedAeroValuation {
         // @dev). Revert rather than pass a nonzero sub-range price that `uint160(...)` won't truncate.
         if (s < TickMath.MIN_SQRT_RATIO) revert OracleSqrtPriceOutOfRange();
         sqrtPriceX96 = uint160(s);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Range geometry + ASSET-MODE deploy sizing
+    // ---------------------------------------------------------------------------
+
+    /// @notice The tickSpacing-aligned range centred on `pool`'s current tick, spanning `width/2` ticks
+    ///         each side. Lives here (rather than in `LeveragedAeroManager`, which is at the EIP-170
+    ///         margin) alongside `assetModeSplit`, the sizing math that consumes it.
+    ///
+    /// @dev "Centred" is grid-approximate, not exact. Both bounds round DOWN onto the grid, so the
+    ///      realised centre can sit up to one `tickSpacing` below the current tick and the realised
+    ///      width can differ from `width` by up to one spacing; when `width / tickSpacing` is ODD the
+    ///      half-span is itself off-grid, which is where the skew is largest. Accepted: the band is
+    ///      orders of magnitude wider than one spacing, and re-centring exactly would need an align-up
+    ///      on one side, silently widening the range past the band validated at init.
+    ///
+    ///      Both bounds are clamped into the aligned tick domain: `width` is capped at `2 × MAX_TICK` at
+    ///      init so the arithmetic cannot wrap int24, but a wide band near either end of the domain
+    ///      still pushes a bound past ±MAX_TICK, where `getSqrtRatioAtTick` would revert unhelpfully
+    ///      deep inside TickMath. `maxAligned` sits ON the spacing grid by construction, so clamping
+    ///      keeps the range mintable rather than merely non-panicking.
+    ///
+    ///      The returned range always STRICTLY BRACKETS the current tick (`tickLower <= tick <
+    ///      tickUpper`) whenever `width >= 2 × tickSpacing`, which init enforces — this is what makes a
+    ///      freshly centred range two-sided, and therefore always sizeable by `assetModeSplit`.
+    ///
+    ///      Callers must calm-gate BEFORE this: it reads the manipulable spot tick.
+    function centeredTickRange(address pool, int24 tickSpacing, uint24 width)
+        public
+        view
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        (, int24 currentTick,,,,) = ICLPool(pool).slot0();
+        int24 span = int24(width / 2);
+        tickLower = _alignTick(currentTick - span, tickSpacing);
+        tickUpper = _alignTick(currentTick + span, tickSpacing);
+        int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing);
+        if (tickLower < -maxAligned) tickLower = -maxAligned;
+        if (tickUpper > maxAligned) tickUpper = maxAligned;
+        if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing;
+    }
+
+    /// @dev Align `tick` down to the nearest multiple of `spacing` (handles negatives).
+    function _alignTick(int24 tick, int24 spacing) private pure returns (int24) {
+        int24 rem = tick % spacing;
+        if (rem < 0) rem += spacing;
+        return tick - rem;
+    }
+
+    /// @notice THE §8 ALWAYS-ON TWO-SIDED SLIPPAGE FLOOR for a CL mint / increaseLiquidity, defined in
+    ///         exactly one place. Given the desired deposit `(amt0, amt1)` at the calm-gated `sqrtP`,
+    ///         returns the amounts the position would ACTUALLY consume, haircut by `slippageBps`.
+    ///
+    /// @dev Logic is verbatim what `LeveragedAeroManager._mintPosition` and `_addLiquidity` each had
+    ///      inline; extracted so the floor has ONE definition (the two copies could drift) and so the
+    ///      manager — at the EIP-170 margin — stops inlining `LiquidityAmounts` twice over. Callers must
+    ///      calm-gate before sourcing `sqrtP`; a caller may layer an ADDITIONAL explicit guard on the
+    ///      consumed amounts on top of this (as `rerange` does with `minLiq0`/`minLiq1`).
+    /// @param sqrtP       Current pool sqrt price (Q64.96), read behind the calm-gate.
+    /// @param tickLower   Lower tick of the target range.
+    /// @param tickUpper   Upper tick of the target range.
+    /// @param amt0        Desired token0 deposit (POSITIONAL — pool ordering).
+    /// @param amt1        Desired token1 deposit (POSITIONAL).
+    /// @param slippageBps `maxSlippageBps`; bounded to (0, 1000] at init so `10000 - slippageBps`
+    ///                    cannot underflow.
+    function depositMins(
+        uint160 sqrtP,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amt0,
+        uint256 amt1,
+        uint256 slippageBps
+    ) public pure returns (uint256 amt0Min, uint256 amt1Min) {
+        uint160 sqrtLower = TickMath.getSqrtRatioAtTick(tickLower);
+        uint160 sqrtUpper = TickMath.getSqrtRatioAtTick(tickUpper);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, amt0, amt1);
+        (uint256 exp0, uint256 exp1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liquidity);
+        amt0Min = exp0 * (10000 - slippageBps) / 10000;
+        amt1Min = exp1 * (10000 - slippageBps) / 10000;
+    }
+
+    /// @notice ASSET-MODE deploy sizing, closed form. Splits an incoming USDC `amount` into the
+    ///         collateral portion `C` (supplied to Moonwell) and the LP-side portion `U` (kept for the
+    ///         mint), such that the leg-A amount borrowed against `C` at `targetLtvBps` pairs with `U`
+    ///         at EXACTLY the ratio the range `[tickLower, tickUpper]` requires at the pool's current
+    ///         `sqrtP`. `C + U == amount` by construction.
+    ///
+    ///         Only reachable in asset-mode (leg-B slot == USDC — a legA/USDC pool). The two-borrowed-
+    ///         legs shape does not call this: it splits the borrow 50/50 by USD and supplies the whole
+    ///         deposit as collateral.
+    ///
+    /// @dev DERIVATION. Let `needA : needU` be the (leg A : USDC) token-amount ratio the range
+    ///      requires at the current `sqrtP` — obtained by probing `getAmountsForLiquidity` at a
+    ///      reference liquidity and mapping token0/token1 onto the legs (both amounts are linear in L
+    ///      for a fixed range + sqrtP, so the reference cancels out of the ratio).
+    ///
+    ///      The borrow is sized off `C` exactly as `LeveragedAeroManager._borrowLegA` executes it
+    ///      (the two MUST agree or the mint is left with a residual):
+    ///
+    ///        borrowUsd6 = C · targetLtvBps / 1e4                                     (USDC face, 6dp)
+    ///        A          = borrowUsd6 · 100 · 10^dA / pA = C · targetLtvBps · 10^dA / (100 · pA)
+    ///
+    ///      (`× 100` lifts 6dp USDC face to the feed's 8dp USD; USDC face is taken as USD 1:1 here,
+    ///      matching `_borrowHalfEach`.) Requiring the pair to land on the range ratio:
+    ///
+    ///        A / U = needA / needU     and     U = amount − C
+    ///
+    ///        ⇒ C · targetLtvBps · 10^dA · needU = (amount − C) · needA · 100 · pA
+    ///        ⇒ C · [targetLtvBps·10^dA·needU + 100·pA·needA] = amount · 100·pA·needA
+    ///        ⇒ C = amount · w / (w + x),   w = 100·pA·needA,   x = targetLtvBps·10^dA·needU
+    ///
+    ///      Worked check (cbBTC/USDC, pA = 1e13 i.e. $100k, dA = 8, targetLtvBps = 5000, a range whose
+    ///      required amounts are 50/50 by value ⇒ needU = 1000·needA): w = 1e15·needA,
+    ///      x = 5e14·needA ⇒ C = ⅔·amount, U = ⅓·amount, borrowUsd6 = ⅓·amount. LP legs are ⅓/⅓ by
+    ///      value (balanced ✓) and LTV = (⅓)/(⅔) = 50% = target ✓.
+    ///
+    ///      OVERFLOW. `needA`/`needU` are bounded by `MAX_SQRT_RATIO` (~1.5e48) at the reference
+    ///      liquidity, so `w ≲ 1e2 · pA · 1.5e48` and `x ≲ 1e4 · 1e18 · 1.5e48 ≈ 1.5e70`; both and
+    ///      their sum stay inside uint256 for any Chainlink 8dp price below ~1e22 ($1e14/token). The
+    ///      `Math.mulDiv` carries the `amount · w` product in 512 bits. An out-of-band price would
+    ///      revert (panic 0x11) rather than wrap — fail-closed.
+    ///
+    ///      RATIO BASIS. `needA:needU` comes from the POOL's live `sqrtP` (what the NPM will actually
+    ///      consume) while the borrow converts at the CHAINLINK price `pA`. A pool/oracle divergence
+    ///      therefore leaves a small residual of one side idle after the mint — NAV-counted and
+    ///      redeployable, never a solvency issue. Callers run the calm-gate before this so `sqrtP`
+    ///      cannot be a shoved tick.
+    ///
+    /// @param pool           The Slipstream CL pool (read for the live `sqrtP`).
+    /// @param tickLower      Lower tick of the range the mint/add will target.
+    /// @param tickUpper      Upper tick of that range.
+    /// @param amount         Total USDC (6dp) to split.
+    /// @param targetLtvBps   Target LTV in bps that sizes the borrow against `C`.
+    /// @param legADecimals   Leg-A token decimals.
+    /// @param legAIsToken0   True when leg A sorts as the pool's token0 (`Layout.wethIsToken0`).
+    /// @param legAPrice8     Leg-A USD price, 8dp, from a hardened Chainlink read.
+    /// @return collateralUsdc `C` — USDC to supply as Moonwell collateral.
+    /// @return lpUsdc         `U` — USDC to hold back for the LP mint (`amount − C`).
+    /// @return legABorrow     `A` — leg-A units to borrow. Returned from HERE, not recomputed by the
+    ///                        caller, so the borrow can never drift from the derivation that sized `U`.
+    function assetModeSplit(
+        address pool,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 amount,
+        uint256 targetLtvBps,
+        uint8 legADecimals,
+        bool legAIsToken0,
+        uint256 legAPrice8
+    ) public view returns (uint256 collateralUsdc, uint256 lpUsdc, uint256 legABorrow) {
+        (uint256 needA, uint256 needU) = _rangeRatio(pool, tickLower, tickUpper, legAIsToken0);
+
+        uint256 unit = 10 ** uint256(legADecimals);
+        uint256 w = 100 * legAPrice8 * needA;
+        uint256 x = targetLtvBps * unit * needU;
+        collateralUsdc = Math.mulDiv(amount, w, w + x);
+        // `C == 0` (dust `amount`, or a range so USDC-heavy the borrow rounds away) would supply no
+        // collateral and borrow nothing; `C >= amount` would leave no USDC for the pair. Neither can
+        // produce the intended delta-hedged position.
+        if (collateralUsdc == 0 || collateralUsdc >= amount) revert DegenerateRange();
+        lpUsdc = amount - collateralUsdc;
+        // The borrow, in leg-A units — the SAME `borrowUsd6 · 100 · 10^dA / pA` conversion
+        // `_borrowHalfEach` applies per leg, un-halved. Computed here (not in the manager) so the two
+        // sides of `A / U = needA / needU` are produced by one expression and cannot diverge.
+        legABorrow = _legABorrow(collateralUsdc * targetLtvBps / 10000, unit, legAPrice8);
+    }
+
+    /// @notice ASSET-MODE **lever-up** sizing, closed form. Given a debt delta `borrowUsd6` (USDC face,
+    ///         6dp) that a `adjustLeverage` retarget wants to add against UNCHANGED collateral, returns
+    ///         the leg-A units to borrow and the USDC that must pair with them in the range
+    ///         `[tickLower, tickUpper]` — reverting `InsufficientIdleForLeverUp` if the book's idle USDC
+    ///         (`idleUsdc`, passed by the caller) cannot fund that pairing.
+    ///
+    /// @dev THE PAIRING RELATION IS THE SAME ONE `assetModeSplit` SOLVES — only the unknown differs.
+    ///      `assetModeSplit` is handed a total `amount` and solves for the split point `C` such that the
+    ///      borrow against `C` pairs with `amount − C`. A lever-up has NO new deposit to split: the debt
+    ///      delta is already fixed by `targetLtvBps_ × collateral` (collateral is untouched by contract),
+    ///      so `A` is determined outright and `U′` is simply read off the same range ratio:
+    ///
+    ///        A  = borrowUsd6 · 100 · 10^dA / pA                (the un-halved `_borrowHalfEach` convert)
+    ///        U′ = A · needU / needA                            (the range's required (legA : USDC) ratio)
+    ///
+    ///      Both `needA:needU` and the `A` conversion come from the SAME helpers `assetModeSplit` uses
+    ///      (`_rangeRatio`, `_legABorrow`), so the two entrypoints cannot drift apart. Substituting
+    ///      `A(C·ltv)` into `U′` reproduces `assetModeSplit`'s `U = amount − C` exactly, which is the
+    ///      algebraic statement that a lever-up to `targetLtvBps` lands the same leg ratio genesis does.
+    ///
+    ///      `U′` IS DRAWN FROM IDLE USDC, and this is where that requirement is ENFORCED (the bound lives
+    ///      with the arithmetic that produced `U′`, and the manager calls this BEFORE its borrow, so a
+    ///      short book reverts with nothing touched). See `LeveragedAeroManager._leverUp` for WHY the
+    ///      pairing must be idle-funded rather than funded by swapping part of the borrow, and for the
+    ///      operator consequence (idle moves into the LP, shrinking the redeem cover budget).
+    ///      Deliberately NOT a partial fill and NOT a silent cap — a quietly under-levered position is
+    ///      worse for a rebalancer than a loud, diagnosable `(needed, available)` refusal.
+    ///
+    ///      Ratio basis / overflow / one-sided-range behaviour are exactly `assetModeSplit`'s (shared
+    ///      `_rangeRatio`): the pool's live `sqrtP` (calm-gate is the caller's job), `Math.mulDiv` for
+    ///      the 512-bit intermediate, and `DegenerateRange` when the stored range is one-sided.
+    /// @param pool         The Slipstream CL pool (read for the live `sqrtP`).
+    /// @param tickLower    Lower tick of the STORED range the add will target.
+    /// @param tickUpper    Upper tick of that range.
+    /// @param borrowUsd6   The debt delta to add, USDC face (6dp).
+    /// @param idleUsdc     The strategy's live idle USDC balance — the only funding source for `U′`.
+    /// @param legADecimals Leg-A token decimals.
+    /// @param legAIsToken0 True when leg A sorts as the pool's token0 (`Layout.wethIsToken0`).
+    /// @param legAPrice8   Leg-A USD price, 8dp, from a hardened Chainlink read.
+    /// @return legABorrow  `A` — leg-A units to borrow.
+    /// @return lpUsdc      `U′` — USDC that must pair with `A` in the range (≤ `idleUsdc`).
+    function assetModeLeverUpPair(
+        address pool,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 borrowUsd6,
+        uint256 idleUsdc,
+        uint8 legADecimals,
+        bool legAIsToken0,
+        uint256 legAPrice8
+    ) public view returns (uint256 legABorrow, uint256 lpUsdc) {
+        (uint256 needA, uint256 needU) = _rangeRatio(pool, tickLower, tickUpper, legAIsToken0);
+        legABorrow = _legABorrow(borrowUsd6, 10 ** uint256(legADecimals), legAPrice8);
+        lpUsdc = Math.mulDiv(legABorrow, needU, needA);
+        if (lpUsdc > idleUsdc) revert InsufficientIdleForLeverUp(lpUsdc, idleUsdc);
+    }
+
+    /// @dev THE SHARED RATIO PROBE for both asset-mode sizing entrypoints: the (leg A : USDC)
+    ///      token-amount ratio the range `[tickLower, tickUpper]` requires at the pool's live `sqrtP`.
+    ///      Probed at `REF_LIQUIDITY` — both amounts are linear in L for a fixed range + `sqrtP`, so the
+    ///      reference cancels out of the ratio.
+    ///
+    ///      One-sided range (`sqrtP` at or outside a bound) ⇒ one required amount is 0 and the ratio
+    ///      degenerates: a 0 `needU` would demand a borrow with no USDC to pair, a 0 `needA` would demand
+    ///      no borrow at all (an unhedged USDC-only add). Both fail closed — `rerange` recentres on the
+    ///      current tick, which is always two-sided.
+    function _rangeRatio(address pool, int24 tickLower, int24 tickUpper, bool legAIsToken0)
+        private
+        view
+        returns (uint256 needA, uint256 needU)
+    {
+        (uint160 sqrtP,,,,,) = ICLPool(pool).slot0();
+        (uint256 amt0, uint256 amt1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtP, TickMath.getSqrtRatioAtTick(tickLower), TickMath.getSqrtRatioAtTick(tickUpper), REF_LIQUIDITY
+        );
+        (needA, needU) = legAIsToken0 ? (amt0, amt1) : (amt1, amt0);
+        if (needA == 0 || needU == 0) revert DegenerateRange();
+    }
+
+    /// @dev `borrowUsd6` (USDC face, 6dp) → leg-A token units at the 8dp Chainlink price `legAPrice8`.
+    ///      ONE definition of the conversion `LeveragedAeroManager._borrowHalfEach` applies per leg
+    ///      (un-halved): `× 100` lifts 6dp USDC face to the feed's 8dp USD (USDC face taken as USD 1:1),
+    ///      `× 10^dA / pA` rescales into leg-A units. Shared by `assetModeSplit` and
+    ///      `assetModeLeverUpPair` so a genesis borrow and a lever-up borrow convert identically.
+    function _legABorrow(uint256 borrowUsd6, uint256 legAUnit, uint256 legAPrice8) private pure returns (uint256) {
+        return (borrowUsd6 * 100 * legAUnit) / legAPrice8;
     }
 
     // ---------------------------------------------------------------------------
@@ -291,24 +573,40 @@ library LeveragedAeroValuation {
     ///      Visibility is `public` so `LeveragedAerodromeCLStrategy` can call it before
     ///      minting to guard tick-band placement and slippage-min computation (delegatecall
     ///      via the deployed library).
-    ///      Logic is unchanged — do NOT edit this function without also updating the
-    ///      strategy's `_mintAndStake` caller.
+    ///
+    ///      This is now a thin `Config`-shaped forwarder onto `calmGate` — the logic lives there and is
+    ///      UNCHANGED. `netEquityUsdc` and any `Config`-holding caller keep using this entrypoint; the
+    ///      manager uses the lean one. Do NOT edit the logic without re-reading both.
     function _calmGate(Config memory c) public view {
-        if (c.twapWindow == 0) revert InvalidConfig();
-        (, int24 spotTick,,,,) = ICLPool(c.pool).slot0();
+        calmGate(c.pool, c.twapWindow, c.calmDeviationTicks);
+    }
+
+    /// @notice Lean, struct-free twin of `_calmGate`: identical logic, three scalars instead of the
+    ///         18-field `Config`.
+    /// @dev `LeveragedAeroManager` is at the EIP-170 margin and gates on every mint/add (4 sites).
+    ///      Building + ABI-encoding a mostly-zero `Config` per site to deliver exactly these three
+    ///      fields cost it hundreds of bytes of encode logic, so the manager calls this instead and
+    ///      holds no partial-`Config` builder at all (which also removes the standing footgun that
+    ///      builder carried: a partial `Config` must never reach a pricing function).
+    /// @param pool               Slipstream CL pool to gate on.
+    /// @param twapWindow         TWAP lookback in seconds; 0 is rejected (`InvalidConfig`).
+    /// @param calmDeviationTicks Max |spotTick − twapTick| before `CalmGateBreached`.
+    function calmGate(address pool, uint32 twapWindow, uint16 calmDeviationTicks) public view {
+        if (twapWindow == 0) revert InvalidConfig();
+        (, int24 spotTick,,,,) = ICLPool(pool).slot0();
 
         uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = c.twapWindow;
+        secondsAgos[0] = twapWindow;
         secondsAgos[1] = 0;
-        (int56[] memory cum,) = ICLPool(c.pool).observe(secondsAgos);
+        (int56[] memory cum,) = ICLPool(pool).observe(secondsAgos);
 
         int56 delta = cum[1] - cum[0];
-        int24 twapTick = int24(delta / int56(uint56(c.twapWindow)));
+        int24 twapTick = int24(delta / int56(uint56(twapWindow)));
         // Round toward negative infinity (Uniswap convention) when the cumulative delta is
         // negative and does not divide evenly, so the mean matches the TWAP oracle.
-        if (delta < 0 && (delta % int56(uint56(c.twapWindow)) != 0)) twapTick--;
+        if (delta < 0 && (delta % int56(uint56(twapWindow)) != 0)) twapTick--;
 
         int24 diff = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
-        if (uint24(diff) > c.calmDeviationTicks) revert CalmGateBreached();
+        if (uint24(diff) > calmDeviationTicks) revert CalmGateBreached();
     }
 }

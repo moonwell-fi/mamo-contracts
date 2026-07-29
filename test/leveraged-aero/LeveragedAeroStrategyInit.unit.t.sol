@@ -394,12 +394,127 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
+    // ==================== ASSET-AS-A-LEG (asset-mode) INIT LADDER ====================
+    //
+    // The shape is EMERGENT FROM CONFIG: `legBIsAsset` is DERIVED as `cbBTC == usdc`, never passed.
+    // Only the LEG-B slot may be the unit of account. These tests pin the whole asset-mode ladder.
+
+    /// @dev Wire the venues for asset-mode (a legA/USDC LP pool) and return valid params. `legAFirst`
+    ///      selects the pool token ordering so both `wethIsToken0` branches are reachable.
+    function _assetModeParams(bool legAFirst) internal returns (LeveragedAerodromeCLStrategy.InitParams memory p) {
+        pool.setTokens(legAFirst ? address(legA) : address(usdc), legAFirst ? address(usdc) : address(legA));
+        mLegA.setUnderlying(address(legA));
+        clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
+
+        p = _baseParams();
+        p.cbBTC = address(usdc); // ← the leg-B slot IS the asset; this alone selects the shape
+        p.mCbBTC = address(mUsdc); // leg B is never borrowed → pinned to the collateral market
+        p.cbBTCFeed = address(feed); // == usdcFeed, so leg B prices at face
+        p.cbBTCSwapTickSpacing = 0; // declared UNUSED (no USDC/USDC swap pool exists)
+    }
+
+    /// @dev THE headline case: leg B == usdc is ACCEPTED and derives asset-mode, in BOTH orderings.
+    function testInitAcceptsLegBAsTheAssetBothOrderings() public {
+        LeveragedAerodromeCLStrategy.LayoutView memory v = _init(_assetModeParams(false)).layout();
+        assertTrue(v.legBIsAsset, "asset-mode derived from cbBTC == usdc");
+        assertFalse(v.wethIsToken0, "leg A sorts second here");
+        assertEq(v.cbBTC, address(usdc), "leg-B slot holds the unit of account");
+        assertEq(v.cbBTCDecimals, 6, "leg-B decimals are USDC's");
+        assertEq(v.cbBTCSwapTickSpacing, 0, "leg-B swap spacing stays unused");
+
+        v = _init(_assetModeParams(true)).layout();
+        assertTrue(v.legBIsAsset, "asset-mode derived in the other ordering too");
+        assertTrue(v.wethIsToken0, "leg A sorts first here");
+    }
+
+    /// @dev The two-borrowed-legs shape must keep deriving `legBIsAsset == false` — the flag is not a
+    ///      default-on footgun.
+    function testInitDerivesTwoLegShapeWhenNeitherLegIsTheAsset() public {
+        assertFalse(_init(_baseParams()).layout().legBIsAsset, "two borrowed legs");
+    }
+
+    /// @dev Leg B is never borrowed in asset-mode, so its market slot MUST be the collateral market.
+    ///      Pinning it is what makes every `borrowBalanceStored($.mCbBTC)` read structurally 0, which is
+    ///      why no debt/health/repay path needs an asset-mode branch.
+    function testInitRevertsWhenAssetModeLegBMarketIsNotTheCollateralMarket() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _assetModeParams(false);
+        MockMoonwellMarket otherUsdcMarket = new MockMoonwellMarket(address(usdc));
+        p.mCbBTC = address(otherUsdcMarket); // wraps usdc, so the underlying check passes...
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector); // ...but it is not mUsdc
+    }
+
+    /// @dev The leg-B swap spacing is DECLARED UNUSED in asset-mode: a nonzero value would advertise a
+    ///      USDC↔USDC route that must never be taken. (The old sign-check + factory probe would also
+    ///      have demanded a nonexistent USDC/USDC pool — this replaces it, it does not skip it.)
+    function testInitRevertsWhenAssetModeLegBSwapSpacingIsSet() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _assetModeParams(false);
+        p.cbBTCSwapTickSpacing = LEG_B_SWAP_SPACING;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+
+        p = _assetModeParams(false);
+        p.cbBTCSwapTickSpacing = -100; // negative is no better than positive: it must be exactly 0
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev Leg B must price at FACE. A leg-B feed left pointing at a volatile aggregator would value
+    ///      idle USDC at that token's price — a silent NAV blow-up straight into deposit share-pricing.
+    function testInitRevertsWhenAssetModeLegBFeedIsNotTheUsdcFeed() public {
+        MockPriceFeed volatileFeed = new MockPriceFeed(1e13, 8, block.timestamp);
+        LeveragedAerodromeCLStrategy.InitParams memory p = _assetModeParams(false);
+        p.cbBTCFeed = address(volatileFeed);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev Leg A's swap venue stays checked UNCONDITIONALLY — it is a real borrowed leg in both shapes,
+    ///      and every shortfall-cover / sweep routes through it.
+    function testInitRevertsWhenAssetModeLegASwapPoolMissing() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _assetModeParams(false);
+        p.wethSwapTickSpacing = 2000; // valid-looking, nothing registered
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+
+        p = _assetModeParams(false);
+        p.wethSwapTickSpacing = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev The pool's token SET must be exactly {legA, usdc} in asset-mode. A pool holding a foreign
+    ///      token — or the degenerate all-USDC pool — is rejected by the same pair check as before.
+    function testInitRevertsWhenAssetModePoolIsNotTheLegAUsdcPair() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _assetModeParams(false);
+        pool.setTokens(address(usdc), address(legB)); // legB is a foreign token now, not a slot
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+
+        p = _assetModeParams(false);
+        pool.setTokens(address(usdc), address(usdc)); // degenerate USDC/USDC
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev Leg B may be the asset but NEVER the gauge reward token — `compound()` sells that wholesale.
+    function testInitRevertsWhenAssetModeLegBIsRewardToken() public {
+        // Reward-token-as-leg-B is rejected regardless of shape; assert it from the asset-mode wiring.
+        _wireLegs(address(aero), address(legA));
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.cbBTC = address(aero);
+        p.mCbBTC = address(mLegB);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnsupportedLeg.selector);
+    }
+
     // ==================== UNSUPPORTED LEGS ====================
 
-    function testInitRevertsWhenLegBIsUsdc() public {
-        _wireLegs(address(usdc), address(legA));
+    /// @dev LEG A may never be the unit of account, in EITHER shape — it is USDC's counterparty and
+    ///      owns the `wethDeliversNative` wrap path, so the asymmetry with leg B is deliberate.
+    ///      Fully wired as if it were "asset-mode on the wrong slot", to prove the rejection is the leg
+    ///      identity itself and not some earlier venue guard.
+    function testInitRevertsWhenLegAIsUsdcEvenFullyWired() public {
+        pool.setTokens(address(legB), address(usdc));
+        mLegB.setUnderlying(address(legB));
+        clFactory.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("legBSwapPool"));
+        clFactory.setPool(address(usdc), address(usdc), LEG_A_SWAP_SPACING, makeAddr("bogusSelfPool"));
+
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
-        p.cbBTC = address(usdc);
+        p.weth = address(usdc);
+        p.mWeth = address(mUsdc);
+        p.wethFeed = address(feed);
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnsupportedLeg.selector);
     }
 
