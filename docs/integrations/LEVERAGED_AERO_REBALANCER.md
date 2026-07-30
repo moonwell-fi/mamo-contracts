@@ -566,13 +566,138 @@ the clone rather than assuming the launch pair:
 
 ### Known gaps the operator must know (disclosed in PR #66)
 
-- **No behavioral fork coverage for these rewrites yet.** The ordering / leg-decimals / swap-spacing
-  changes are argued equivalent under the legacy (cbBTC+WETH, spacing-100) config and are proven **at init
-  only** — never through a mint, compound, rerange or redeem on a fork. A Slipstream+Moonwell fork suite is
-  the named **top follow-up before mainnet**; treat any non-legacy pair as unvalidated until it lands.
-- **`underlying()` unverified on the live Moonwell markets.** The new init guard will **brick
-  initialization** if the live mWETH / mcbBTC markets don't expose `underlying()`. Confirm on a Base fork
-  before any deploy.
+- **No behavioural fork suite in CI.** The lifecycle *has* now been driven on a Base-fork vnet by hand —
+  `deployIdle` (real mint), `compound` (real accrued AERO), `rerange`, `adjustLeverage`, `fulfillRedeem`
+  and the full account lifecycle all executed as broadcast txs — but those are **manual harness drives,
+  not automated coverage**. A Slipstream+Moonwell fork suite remains the named top follow-up before
+  mainnet. Treat any pair *other than* the driven cbBTC/USDC asset-mode shape as unvalidated.
+- **`underlying()` confirmed present** on the live Moonwell markets — initialization succeeds against
+  mcbBTC / mUSDC on the fork, so the init guard does not brick. (Previously listed here as unverified.)
+- **`_readCollateralDebt` reads un-accrued Moonwell state**, so the permissionless `deleverage` valve
+  trips marginally late. Analysed and deliberately scoped out of PR #66 — tracked as **MOO-684**.
+
+---
+
+## H. Testing rebalance operations on the vnet
+
+Rebalance operations **are** testable on the Tenderly vnet — the fork is not frozen in the way it first
+appears. But there is one misconception worth killing up front, because it wastes a day:
+
+> **Moving the mock Chainlink feed does NOT move the position.** The feed and the pool are two
+> independent price sources, and they drive different things. A feed-only move produces a fund whose
+> *accounting* thinks the price moved while its *LP position* has not moved at all — and whose swaps then
+> revert, because the oracle and the pool disagree.
+
+### Which price drives what
+
+| Driven by the **Chainlink feed** (the FreshFeed mock) | Driven by the **pool tick** (a real swap) |
+| --- | --- |
+| `nav()` and all USD valuation (`readUsd8`) | LP leg composition (how much cbBTC vs USDC the position holds) |
+| Slippage floors / `minOut` sizing, `BelowOracleFloor` | Whether the position is in or out of range |
+| The interest hedge's oracle-priced buy sizing | Where `rerange` re-centres (it centres on the pool tick) |
+| The staleness gate (`maxDelay`, currently 172800 s) | `calmGate` — **both** sides of it |
+| Health / LTV ratios and the `deleverage` trigger | Realized swap price, and therefore actual slippage |
+
+**`calmGate` never reads a Chainlink feed.** It is a pool-internal manipulation check comparing the pool's
+spot tick against the pool's own TWAP:
+
+```solidity
+// LeveragedAeroValuation.calmGate
+(, int24 spotTick,,,,) = ICLPool(pool).slot0();
+// twapTick = mean tick over `twapWindow`, from pool.observe([twapWindow, 0])
+if (|spotTick - twapTick| > calmDeviationTicks) revert CalmGateBreached();
+```
+
+So a large instantaneous swap breaches the gate *by design* until the TWAP catches up. That is the
+mechanism protecting the fund from being rebalanced at a manipulated price — and on a vnet it means
+**you must warp after moving the pool**, not just swap and immediately call.
+
+### Live parameters (read them, don't copy them — they are per-clone)
+
+| Field | `layout()` idx | Current staging value | Meaning |
+| --- | --- | --- | --- |
+| `calmDeviationTicks` | 14 | **500** | max \|spot − TWAP\|; 500 ticks ≈ **5.1 %** |
+| `twapWindow` | 15 | **1800 s** | TWAP averaging window (30 min) |
+| `tickSpacing` | 20 | 100 | LP pool spacing |
+| `maxSlippageBps` | 24 | 100 | 1 % — also the oracle-floor tolerance on swaps |
+| `posTickLower` / `posTickUpper` | 27 / 28 | −66300 / −63300 | current range (width 3000 ≈ 35 % span) |
+| width band | 44 / 45 | [200, 20000] | `rerange` width bounds (`WidthOutOfBounds` outside) |
+| `legBIsAsset` | 46 | `true` | asset mode: leg B **is** USDC |
+
+At the time of writing spot tick is **−64796** and the TWAP tick is **−64796** (identical — no recent
+swaps), so the gate has full headroom. Note the range edges are ~1500 ticks away, i.e. it takes roughly a
+**16 % price move to push the position out of range** — which is 3× `calmDeviationTicks`, so such a move
+*cannot* be done in one swap and then immediately rebalanced. Warp first.
+
+### The procedure for a price-move rebalance test
+
+You need the **admin RPC** throughout (`tenderly_setCode`, `evm_increaseTime`, unlocked impersonation).
+The public RPC cannot do any of this.
+
+1. **Move the pool** — execute a real swap in the LP pool to push the tick where you want it. This is what
+   changes the position's composition. Use `script/tenderly/TenderlySwapHelper.sol`: the pool calls back
+   into the swapper, so it must be a funded persistent contract, which a `forge script` is not.
+2. **Warp ≥ `twapWindow` (1800 s)** so the whole averaging window sits at the new tick and the TWAP
+   converges on spot. Skip this and every priced path reverts `CalmGateBreached`.
+3. **Move the feed to match** — deploy a new `FreshFeed` carrying the new answer and `tenderly_setCode` it
+   over the **same** feed address. The answer is an `immutable`, so **there is no setter**; "moving" the
+   price means replacing the code. If you skip this, the oracle still reports the old price, the router
+   quote diverges from oracle fair by more than `maxSlippageBps`, and swaps revert `BelowOracleFloor`.
+4. **Re-assert freshness** — `./script/tenderly/compound-cycle.sh check-feeds` after *every* warp. This is
+   the gate that catches a non-FreshFeed instance before you waste a run.
+5. **Now rebalance** — `rerange`, `adjustLeverage`, or `compound` as the scenario requires.
+
+Steps 2–5 already have tooling; **step 1 and step 3 do not yet have a `compound-cycle.sh` subcommand** —
+see the gap note below.
+
+### The AERO harvest cycle (fully tooled today)
+
+Independent of price, and the more common test. `gauge.earned()` is 0 on a fresh fork and **warping alone
+accrues nothing**: a Base fork inherits `periodFinish` in the past with `rewardReserve == 0`, and no vnet
+runs Aerodrome's weekly epoch flip. Re-arm it the production way:
+
+```bash
+./script/tenderly/compound-cycle.sh check-feeds       # gate — all 5 feeds fresh
+./script/tenderly/compound-cycle.sh arm               # voter.distribute([gauge]) — PERMISSIONLESS
+./script/tenderly/compound-cycle.sh warp-to-finish    # drain the epoch
+./script/tenderly/compound-cycle.sh check-feeds       # re-gate after the warp
+./script/tenderly/compound-cycle.sh quote             # oracle fair / floor / router quote → minUsdcOut
+./script/tenderly/compound-cycle.sh compound <minUsdcOut> 0
+```
+
+**Emissions must be re-armed every cycle** — `earned` returns to 0 after each harvest.
+
+### Failure modes and what they mean
+
+| Revert | Cause | Fix |
+| --- | --- | --- |
+| `CalmGateBreached` | pool moved > `calmDeviationTicks` from its TWAP | warp ≥ `twapWindow`, then retry |
+| `BelowOracleFloor` | pool and feed disagree by > `maxSlippageBps` | move the feed to match the pool (step 3) |
+| `StaleOracle` | warped on a **non**-FreshFeed instance | wrong instance — check `check-feeds` |
+| `OLD` from `pool.observe` | state sync is ON — observation ring re-hydrated from mainnet while `observationIndex` froze | not repairable; recreate the vnet with sync OFF |
+| `ZeroMinOut` | `minUsdcOut == 0` | derive one from `quote` |
+| `WidthOutOfBounds` | width outside [200, 20000] or off the spacing grid | pick a valid width |
+| `TargetLtvExceedsMax` | target above `maxLtvBps` | lower the target |
+| `InsufficientIdleForLeverUp` | lever-up needs idle USDC it doesn't have | deposit more, then retry — this is correct fail-closed behaviour |
+| `NotProposer` | signed with the wrong key | sign as the **rebalancer**, not `MAMO_BACKEND` |
+
+### Hard rules on the vnet
+
+- **State sync must be OFF.** Creation-time-only, so it cannot be fixed after the fact. Green FreshFeed
+  checks are **not** evidence sync is off — `tenderly_setCode` writes are vnet-local, so feed asserts pass
+  on a broken instance. The reliable check is functional: `pool.observe([twapWindow, 0])` must not revert.
+- **Never write to the feed addresses** except via the FreshFeed replacement recipe.
+- **Never publish the admin RPC** — it is write-capable. 1Password only, never a committed file.
+- **Don't `settleStrategy()` a shared instance.** Settling is a one-way door and will strand everyone
+  else's deposit testing.
+
+### Tooling gap
+
+`compound-cycle.sh` covers arming, warping, quoting, compounding, and the feed gate. It does **not** yet
+wrap step 1 (pool swap to a target tick) or step 3 (FreshFeed redeploy at a new answer). The building
+blocks exist — `TenderlySwapHelper.sol` plus the price-simulation matrix already used for
+`LPAutoBalancerV2` (`make tenderly-matrix`) — but they are not wired into the leveraged-aero cycle script.
+Until they are, a price-move scenario means driving those two steps by hand against the admin RPC.
 
 ---
 
