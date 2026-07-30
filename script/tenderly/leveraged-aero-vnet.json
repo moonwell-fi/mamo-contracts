@@ -1,25 +1,25 @@
 {
-  "generatedAt": "2026-07-29T20:13:13Z",
+  "generatedAt": "2026-07-30T14:38:24Z",
   "chainId": 8453,
   "publicRpc": "https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b",
   "adminRpc": "1Password (write-capable — never committed)",
   "strategyTypeId": 5,
   "mamo": {
-    "accountImplementation": "0x9703a770FF62280Cf6220421D83A245dA7B60E24",
-    "accountFactory": "0x46108914a8c2EFadF7Ab69e45B5C1cb657A9003E",
+    "accountImplementation": "0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9",
+    "accountFactory": "0x3E1304044c31907379c00dd24Bd648327Ac2F20b",
     "strategyRegistry": "0x46a5624C2ba92c08aBA4B206297052EDf14baa92"
   },
   "pooled": {
-    "strategyClone": "0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c",
-    "vault": "0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1",
-    "template": "0x5B33a96509C32b523eaE1b778173e735Fc4fcdA0",
+    "strategyClone": "0xA26557fA6823881327fca5b8C4eD5857997A49da",
+    "vault": "0x8343b35617326A2B416e17388e1BdF10d5Fd22D7",
+    "template": "0xafcA85Df8e058A7a755889884d87026e8e118943",
     "proposer": "0x73f6B456d063F78129113D42DBC315b9eEee8FAf",
     "seed": "100000000000",
     "lpPool": "0x4e962BB3889Bf030368F56810A9c96B83CB3E778"
   },
   "sherwood": {
-    "strategyClone": "0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c",
-    "syndicateVault": "0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1"
+    "strategyClone": "0xA26557fA6823881327fca5b8C4eD5857997A49da",
+    "syndicateVault": "0x8343b35617326A2B416e17388e1BdF10d5Fd22D7"
   },
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   "note": "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
