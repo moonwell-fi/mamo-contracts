@@ -31,6 +31,12 @@
 #   ./compound-cycle.sh compound-expect-revert <minUsdcOut> [minLiquidity]
 #   ./compound-cycle.sh floor-probe            # prove BelowOracleFloor with a zero-side-effect eth_call
 #
+# Price movement (see "Which price drives what" in docs/integrations/LEVERAGED_AERO_REBALANCER.md §H):
+#   ./compound-cycle.sh calm                   # spot tick vs pool TWAP vs calmDeviationTicks — PASS/FAIL
+#   ./compound-cycle.sh move-pool <tick>       # real swap through the LP pool to land on <tick>
+#   ./compound-cycle.sh move-feed <asset> <ans>  # asset = legA|legB|usdc|aero; ans at the feed's decimals
+#   ./compound-cycle.sh move-price <tick>      # THE ONE-SHOT: move-pool → warp twapWindow → move-feed → calm
+#
 # RPC: LEVERAGED_AERO_ADMIN_RPC_URL (admin, write-capable), falling back to TENDERLY_VNET_RPC_URL.
 # Set the former explicitly — TENDERLY_VNET_RPC_URL is shared with the LPV2 harness and routinely
 # points at a different vnet. Never commit either.
@@ -94,6 +100,132 @@ lay() { c "$STRAT" "$LAYOUT_SIG" | tr ',' '\n' | sed -n "${1}p" | tr -d ' ()' | 
 GAUGE_CACHE=""
 gauge() { [[ -n "$GAUGE_CACHE" ]] || GAUGE_CACHE="$(lay 18)"; echo "$GAUGE_CACHE"; }
 tokenid() { lay 26; }
+
+# ═══════════════════════════════════════════════════════════════ pool / tick primitives
+# Used by calm, move-pool, move-feed and move-price. Everything is read off the live pool — the
+# instance rotates and the LP pool is per-clone (`lpPool` in leveraged-aero-vnet.json), so nothing
+# about the venue's token ordering or decimals may be assumed.
+
+slot0() { c "$POOL" 'slot0()(uint160,int24,uint16,uint16,uint16,bool)'; }
+spot_tick() { num "$(slot0 | sed -n 2p)"; }
+spot_sqrt() { num "$(slot0 | sed -n 1p)"; }
+
+POOL_T0="" POOL_T1="" POOL_D0="" POOL_D1="" POOL_S0="" POOL_S1=""
+pool_tokens() {
+  [[ -n "$POOL_T0" ]] && return 0
+  POOL_T0="$(c "$POOL" 'token0()(address)')"; POOL_T1="$(c "$POOL" 'token1()(address)')"
+  POOL_D0="$(num "$(c "$POOL_T0" 'decimals()(uint8)')")"; POOL_D1="$(num "$(c "$POOL_T1" 'decimals()(uint8)')")"
+  POOL_S0="$(c "$POOL_T0" 'symbol()(string)' | tr -d '"')"; POOL_S1="$(c "$POOL_T1" 'symbol()(string)' | tr -d '"')"
+  [[ -n "$POOL_D0" && -n "$POOL_D1" ]] || { echo "could not read pool token decimals off $POOL"; return 1; }
+}
+
+# Mean tick over `<window>` seconds, computed EXACTLY as LeveragedAeroValuation.calmGate does:
+# (cum[now] − cum[window ago]) / window, rounded toward negative infinity when it does not divide
+# evenly (the Uniswap convention). Python's `//` already floors, so it matches the Solidity
+# `if (delta < 0 && delta % w != 0) twapTick--` correction with no extra branch. Off-by-one here
+# would silently mis-report the calm-gate margin, which is the number people act on.
+twap_tick() {
+  local w="$1" line c0 c1
+  line="$(c "$POOL" 'observe(uint32[])(int56[],uint160[])' "[$w,0]" | sed -n 1p | tr -d '[]')"
+  [[ -n "$line" ]] || { echo "pool.observe([$w,0]) reverted on $POOL — state-synced vnet? see runbook" >&2; return 1; }
+  c0="$(num "$(echo "$line" | tr ',' '\n' | sed -n 1p | sed 's/^ *//')")"
+  c1="$(num "$(echo "$line" | tr ',' '\n' | sed -n 2p | sed 's/^ *//')")"
+  python3 -c "print((($c1) - ($c0)) // $w)"
+}
+
+# tick → sqrtPriceX96 = floor(sqrt(1.0001^tick) · 2^96).
+#
+# Decimal at 80 digits, NOT floats: sqrtPriceX96 here is ~3.1e27, which a double's 53-bit mantissa
+# cannot represent to better than ~1e11 — hundreds of ticks of error at these magnitudes.
+#
+# LIVE CROSS-CHECK (the reason to trust it): at spot tick −64796 this returns
+#   3104006828174357832433965996   vs the pool's live slot0().sqrtPriceX96
+#   3104046187183545523226514787   → +0.00127 %, i.e. an eighth of one 0.01 %-wide tick. That gap is
+# expected and correct: sqrtRatioAtTick(t) is the price at the tick's LOWER edge, and the live price
+# sits partway between tick −64796 and −64795. A wrong implementation is off by whole percent.
+sqrt_at_tick() {
+  python3 -c "
+from decimal import Decimal, getcontext
+getcontext().prec = 80
+print(int((Decimal('1.0001') ** ($1)).sqrt() * (Decimal(2) ** 96)))
+"
+}
+
+# Uniswap-v3 tick / sqrt-price domain (TickMath). A target outside this is rejected by the pool.
+MIN_TICK=-887272
+MAX_TICK=887272
+
+# tick → the leg-A/USD answer the pool implies, at <feedDecimals> fixed point.
+#
+# DERIVATION. In the Uniswap/Slipstream convention `1.0001^tick` is RAW token1 per RAW token0 — i.e.
+# the price OF token0 QUOTED IN token1. Converting to whole units rescales by the decimal difference:
+#
+#     price(token0 in token1, whole units) = 1.0001^tick · 10^(d0 − d1)
+#
+# Which of the two legs is token0 therefore decides whether that is already what we want or its
+# reciprocal, so `pool.token0()` is load-bearing and is read live:
+#
+#   • token0 == USDC  → 1.0001^tick prices USDC in leg A, so leg A/USD is the RECIPROCAL:
+#         legA_usd = 1.0001^(−tick) · 10^(d1 − d0)
+#   • token0 == leg A → 1.0001^tick already prices leg A in USDC:
+#         legA_usd = 1.0001^(tick)  · 10^(d0 − d1)
+#
+# Then scale by 10^feedDecimals. USDC is taken as exactly $1: the USDC/USD feed reads 0.99979, a 2 bp
+# gap that is an order of magnitude inside maxSlippageBps (100 bp) and not worth propagating.
+#
+# LIVE CROSS-CHECK. This pool is token0 = USDC (6dp) / token1 = cbBTC (8dp), so the first branch
+# applies and reduces to 100 · 1.0001^(−tick). At the live spot tick −64796 that is $65,149.91 →
+# 6514991172390 at 8dp, against the live leg-A/USD FreshFeed answer 6514631800000 ($65,146.32):
+# +0.0055 %, about half a tick of pool-mid-vs-Chainlink basis. If an edit here makes the live tick
+# disagree with the live feed by more than ~0.1 %, the conversion is wrong — do not ship it.
+usd_at_tick() { # usd_at_tick <tick> <feedDecimals>
+  pool_tokens || return 1
+  python3 - "$1" "$2" "$POOL_T0" "$USDC" "$POOL_D0" "$POOL_D1" <<'PY'
+import sys
+from decimal import Decimal, getcontext
+getcontext().prec = 60
+tick, fdec = int(sys.argv[1]), int(sys.argv[2])
+t0, usdc = sys.argv[3].lower(), sys.argv[4].lower()
+d0, d1 = int(sys.argv[5]), int(sys.argv[6])
+r = Decimal('1.0001') ** tick
+p = (1 / r) * (Decimal(10) ** (d1 - d0)) if t0 == usdc else r * (Decimal(10) ** (d0 - d1))
+print(int(p * (Decimal(10) ** fdec)))
+PY
+}
+
+# ── vnet-only harness identities ────────────────────────────────────────────────────────────
+# The swap helper lives at a CONSTANT address, placed by `tenderly_setCode` rather than remembered
+# from a deploy. TenderlySwapHelper is storage-free — it holds only token balances and reads
+# `msg.sender` in the pool callback — so code-only placement is sound, the same argument that makes
+# the FreshFeed override sound. That keeps `move-pool` idempotent and stateless: no address cache
+# file to go stale when the instance rotates, and no deploy tx after the first run.
+# HARNESS_EOA is a throwaway broadcaster for the harness's own txs, kept SEPARATE from $PROPOSER so
+# pool swaps can never be confused with rebalancer activity in the vnet tx history.
+HARNESS_SWAPPER=0x5ca1ab1e00000000000000000000000000000001
+HARNESS_EOA=0x5ca1ab1e00000000000000000000000000000002
+SWAPPER_ART="$ROOT/out/TenderlySwapHelper.sol/TenderlySwapHelper.json"
+FRESHFEED_ART="$ROOT/out/FreshFeed.sol/FreshFeed.json"
+
+# 100 ETH by default. Hex via python, not printf: 1e20 wei overflows bash's signed-64-bit arithmetic.
+fund_eth() { rpc tenderly_setBalance "[[\"$1\"],\"$(python3 -c "print(hex(${2:-100 * 10**18}))")\"]" >/dev/null; }
+fund_erc20() { rpc tenderly_setErc20Balance "[\"$1\",\"$2\",\"$3\"]" >/dev/null; }
+
+# Ensure the swap-callback holder exists at HARNESS_SWAPPER. Uses the artifact's `deployedBytecode`
+# directly (valid ONLY because the helper declares no immutables — a placeholder-bearing artifact
+# would need the deploy-then-copy dance `move-feed` does for FreshFeed).
+ensure_swapper() {
+  local code
+  code="$(cast code "$HARNESS_SWAPPER" --rpc-url "$RPC" 2>/dev/null)"
+  if [[ -n "$code" && "$code" != "0x" ]]; then echo "swap helper already at $HARNESS_SWAPPER"; return 0; fi
+  [[ -f "$SWAPPER_ART" ]] || (cd "$ROOT" && forge build script/tenderly/TenderlySwapHelper.sol >/dev/null 2>&1)
+  [[ -f "$SWAPPER_ART" ]] || { echo "missing $SWAPPER_ART — run: forge build script/tenderly/TenderlySwapHelper.sol"; return 1; }
+  local runtime; runtime="$(jq -r '.deployedBytecode.object' "$SWAPPER_ART")"
+  [[ -n "$runtime" && "$runtime" != "null" ]] || { echo "artifact has no deployedBytecode"; return 1; }
+  rpc tenderly_setCode "[\"$HARNESS_SWAPPER\",\"$runtime\"]" >/dev/null
+  code="$(cast code "$HARNESS_SWAPPER" --rpc-url "$RPC" 2>/dev/null)"
+  [[ -n "$code" && "$code" != "0x" ]] || { echo "tenderly_setCode did not land on $HARNESS_SWAPPER"; return 1; }
+  echo "swap helper installed at $HARNESS_SWAPPER (tenderly_setCode, $((${#runtime} / 2)) bytes)"
+}
 
 # ─────────────────────────────────────────────────────────────────────────────── check-feeds
 cmd_check_feeds() {
@@ -240,6 +372,213 @@ cmd_compound_expect_revert() {
   [[ -n "$sel" ]] && echo "  selector $sel"
 }
 
+# ═══════════════════════════════════════════════════════════ price movement (calm / move-*)
+# WHY THIS EXISTS. A rebalance test on the vnet needs FOUR coordinated steps (see
+# docs/integrations/LEVERAGED_AERO_REBALANCER.md §H). The Chainlink mock and the pool tick are
+# INDEPENDENT price sources driving different things:
+#   • the FEED drives nav()/valuation, slippage floors and `BelowOracleFloor`, hedge sizing, the
+#     staleness gate, health/LTV;
+#   • the POOL TICK drives LP leg composition, in/out-of-range, where `rerange` re-centres, and the
+#     realized swap price;
+#   • `calmGate` reads NO feed at all — it compares pool spot against the pool's OWN TWAP.
+# So moving exactly one of them fails closed, in two different ways: pool-only reverts
+# `CalmGateBreached` until the TWAP catches up and then `BelowOracleFloor` because the oracle is
+# still on the old price; feed-only moves the fund's accounting while the position has not moved at
+# all, and its swaps then revert `BelowOracleFloor` too. `move-price` is the composition that keeps
+# all three in agreement — it is what you want 95 % of the time. `move-pool` and `move-feed` are the
+# halves, exposed for scenarios that deliberately want them OUT of agreement (e.g. proving the gate).
+
+# ─────────────────────────────────────────────────────────────────────────────── calm
+# The read people run constantly: does a priced path pass `calmGate` right now? Read-only, no txs.
+cmd_calm() {
+  local w cd spot twap diff lo hi
+  w="$(num "$(lay 15)")"; cd="$(num "$(lay 14)")"
+  lo="$(num "$(lay 27)")"; hi="$(num "$(lay 28)")"
+  spot="$(spot_tick)"; twap="$(twap_tick "$w")" || return 1
+  diff=$(( spot > twap ? spot - twap : twap - spot ))
+  echo "pool                $POOL"
+  echo "spot tick           $spot"
+  echo "TWAP tick (${w}s)   $twap"
+  # 1 tick = 1.0001x = 0.01 %; the compounding matters by 500 ticks (5.13 %, not 5.00 %).
+  echo "|spot - twap|       $diff ticks  ($(python3 -c "print(f'{(1.0001**$diff - 1) * 100:.3f}')") %)"
+  echo "calmDeviationTicks  $cd"
+  # `calmGate` reverts on `>` (strictly greater), so diff == calmDeviationTicks still passes.
+  if (( diff > cd )); then
+    echo ">> FAIL — every priced path reverts CalmGateBreached. Warp >= ${w}s and re-check."
+  else
+    echo ">> PASS — calmGate is satisfied ($((cd - diff)) ticks of headroom); a rebalance can run."
+  fi
+  if (( spot < lo || spot > hi )); then
+    echo "position range      $lo / $hi  ->  spot is OUT OF RANGE (single-sided; rerange to re-centre)"
+  else
+    echo "position range      $lo / $hi  ->  spot is in range"
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────── move-pool
+# Swap the LP pool onto a target tick.
+#
+# THE TRICK — no binary search on the input amount. `sqrtPriceLimitX96` is a hard stop the pool
+# honours mid-swap, so setting the limit to sqrtRatioAtTick(target) and passing an effectively
+# unbounded exact input makes the pool walk its ticks and halt EXACTLY at the target. One tx, exact
+# landing, no iteration. The input amount only has to be large enough not to bind before the limit
+# does — hence the deliberately over-generous funding below (unspent balance is harmless).
+#
+# DIRECTION is token-ordering INDEPENDENT: in the v3 convention price = token1/token0, so selling
+# token0 always lowers sqrtPrice and therefore the tick. `zeroForOne = target < current`, always.
+# What token ordering DOES change is the economic meaning (which asset got cheaper), so token0/token1
+# are read live and printed by symbol, and the limit is asserted to be on the correct side of the
+# live sqrtPrice — the pool would otherwise revert `SPL` and burn a tx to tell us the same thing.
+cmd_move_pool() {
+  local target="$1"
+  echo "$target" | grep -qE '^-?[0-9]+$' || { echo "move-pool <target-tick>: '$target' is not an integer"; return 1; }
+  (( target > MIN_TICK && target < MAX_TICK )) || { echo "target tick $target outside TickMath domain"; return 1; }
+  pool_tokens || return 1
+  local cur curSqrt lim z0 inTok inSym inDec amtIn spent out after
+  cur="$(spot_tick)"; curSqrt="$(spot_sqrt)"
+  [[ -n "$cur" && -n "$curSqrt" ]] || { echo "could not read slot0 off $POOL"; return 1; }
+  if (( target == cur )); then echo "pool already at tick $cur — nothing to do"; return 0; fi
+
+  lim="$(sqrt_at_tick "$target")"
+  if (( target < cur )); then z0=true; inTok="$POOL_T0"; inSym="$POOL_S0"; inDec="$POOL_D0"
+  else                        z0=false; inTok="$POOL_T1"; inSym="$POOL_S1"; inDec="$POOL_D1"; fi
+  # A previous move-pool halts EXACTLY at its limit price, so re-running the same target is a genuine
+  # no-op — the spot tick may read one below the target (boundary rounding) while the price is already
+  # there. Return success, don't fail: `move-price` must be re-runnable without aborting steps 2–4.
+  if [[ "$lim" == "$curSqrt" ]]; then
+    echo "pool already sits exactly at the sqrt price for tick $target (spot tick $cur) — no swap needed"
+    echo
+    cmd_calm
+    return 0
+  fi
+  # Guard the pool's own SPL precondition before spending a tx on it.
+  python3 -c "
+import sys
+cur, lim, z0 = $curSqrt, $lim, '$z0' == 'true'
+sys.exit(0 if ((lim < cur) if z0 else (lim > cur)) else 1)
+" || { echo "sqrt limit $lim is on the wrong side of live sqrtPrice $curSqrt — pool would revert SPL"; return 1; }
+
+  echo "pool  $POOL   token0 $POOL_S0 (${POOL_D0}dp)  token1 $POOL_S1 (${POOL_D1}dp)"
+  echo "tick  $cur -> target $target   (delta $((target - cur)) ticks)"
+  echo "swap  zeroForOne=$z0  selling $inSym  sqrtPriceLimitX96=$lim  (live sqrt $curSqrt)"
+
+  ensure_swapper || return 1
+  fund_eth "$HARNESS_EOA"
+  # Fund BOTH legs: the helper pays whichever side the callback asks for, and a later move in the
+  # opposite direction reuses the same balances. 1e8 whole units each — it only has to dominate the
+  # pool's depth over the requested tick span, and leftover vnet balance costs nothing.
+  fund_erc20 "$POOL_T0" "$HARNESS_SWAPPER" "$(python3 -c "print(hex(10 ** ($POOL_D0 + 8)))")"
+  fund_erc20 "$POOL_T1" "$HARNESS_SWAPPER" "$(python3 -c "print(hex(10 ** ($POOL_D1 + 8)))")"
+  amtIn="$(num "$(c "$inTok" 'balanceOf(address)(uint256)' "$HARNESS_SWAPPER")")"
+  echo "helper $HARNESS_SWAPPER funded; amountIn = full $inSym balance ($amtIn) — the limit binds, not this"
+
+  out="$(cast send "$HARNESS_SWAPPER" 'doSwap(address,bool,uint256,uint160)' "$POOL" "$z0" "$amtIn" "$lim" \
+        --from "$HARNESS_EOA" --unlocked --gas-limit 12000000 --rpc-url "$RPC" --json 2>&1)"
+  echo "$out" | receipt || { echo "  REVERT — raw:"; echo "$out" | tail -5; return 1; }
+
+  after="$(spot_tick)"
+  spent="$(python3 -c "print($amtIn - $(num "$(c "$inTok" 'balanceOf(address)(uint256)' "$HARNESS_SWAPPER")"))")"
+  echo "tick  $cur -> $after   (realized delta $((after - cur)) ticks; target was $target, residual $((after - target)))"
+  echo "spent $spent $inSym raw ($(python3 -c "print(f'{$spent / 10**$inDec:,.6f}')") whole) — the rest of the funding was never touched"
+  # Success is "within one tick", not exact equality. The pool halts at exactly our limit price, but
+  # our limit is computed from real sqrt() while the pool reads it back through TickMath's fixed-point
+  # `getTickAtSqrtRatio`; a few wei of disagreement at the tick boundary lands us one tick either
+  # side. Observed: target −64600 → landed −64601. One tick is 0.01 %, so this is noise. A miss of
+  # MORE than a tick is the real failure, and means the input amount bound before the limit did.
+  local miss=$(( after - target ))
+  if (( miss < 0 )); then miss=$(( -miss )); fi
+  if (( miss <= 1 )); then
+    echo ">> target REACHED (the sqrt-price limit bound the swap; +/-1 tick is TickMath boundary rounding)"
+  else
+    echo ">> target NOT reached — off by $miss ticks, i.e. the input amount bound before the price"
+    echo "   limit did. Raise the funding exponent in cmd_move_pool, or move in smaller hops."
+  fi
+  echo
+  cmd_calm
+}
+
+# ─────────────────────────────────────────────────────────────────────────────── move-feed
+# Replace a FreshFeed with a new answer. The answer is an `immutable` — THERE IS NO SETTER — so
+# "moving" a feed means deploying a fresh FreshFeed and `tenderly_setCode`-ing its runtime over the
+# same address. Sound only because FreshFeed is storage-free (immutables only), so the answer travels
+# inline in the code and nothing has to be migrated. See FreshFeed.sol's contract docs.
+#
+# `decimals()` is read off the REPLACED feed rather than assumed 8: `_initialize` asserts
+# `aeroUsdFeed.decimals() == 8` (`UnexpectedFeedDecimals`) and `_readUsd8` re-checks the others at
+# read time, so a mismatched replacement bricks every priced path.
+cmd_move_feed() {
+  local asset="$1" answer="$2" feed label
+  case "$(echo "$asset" | tr 'A-Z' 'a-z')" in
+    lega|legausd|lega/usd) feed="$LEGA_FEED"; label="legA/USD" ;;
+    legb|legbusd|legb/usd) feed="$LEGB_FEED"; label="legB/USD" ;;
+    usdc|usdcusd|usdc/usd) feed="$USDC_FEED"; label="USDC/USD" ;;
+    aero|aerousd|aero/usd) feed="$AERO_FEED"; label="AERO/USD" ;;
+    *) echo "move-feed <legA|legB|usdc|aero> <answer-at-feed-decimals>"; return 1 ;;
+  esac
+  echo "$answer" | grep -qE '^-?[0-9]+$' || { echo "move-feed: answer '$answer' is not an integer"; return 1; }
+
+  local dec old code args deployed runtime got
+  dec="$(num "$(c "$feed" 'decimals()(uint8)')")"
+  old="$(num "$(c "$feed" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' | sed -n 2p)")"
+  [[ -n "$dec" ]] || { echo "cannot read decimals() off $feed — is it FreshFeed-overridden?"; return 1; }
+
+  echo "$label feed $feed   decimals $dec (read live, not assumed)"
+  echo "answer $old -> $answer   $(python3 -c "print(f'(\${$old / 10**$dec:,.8f} -> \${$answer / 10**$dec:,.8f})')")"
+  # On an asset-mode clone (legBIsAsset) legB/USD and USDC/USD are the SAME aggregator, so a legB
+  # move silently moves USDC/USD too. Say so rather than let it surprise someone.
+  for other in "legA/USD:$LEGA_FEED" "legB/USD:$LEGB_FEED" "USDC/USD:$USDC_FEED" "AERO/USD:$AERO_FEED"; do
+    local on="${other%%:*}" oa="${other##*:}"
+    [[ "$oa" == "$feed" && "$on" != "$label" ]] && echo "NOTE: $oa is ALSO the $on feed — that slot moves too"
+  done
+
+  [[ -f "$FRESHFEED_ART" ]] || (cd "$ROOT" && forge build script/tenderly/FreshFeed.sol >/dev/null 2>&1)
+  [[ -f "$FRESHFEED_ART" ]] || { echo "missing $FRESHFEED_ART — run: forge build script/tenderly/FreshFeed.sol"; return 1; }
+  code="$(jq -r '.bytecode.object' "$FRESHFEED_ART")"
+  [[ -n "$code" && "$code" != "null" ]] || { echo "FreshFeed artifact has no bytecode"; return 1; }
+  args="$(cast abi-encode 'ctor(int256,uint8)' "$answer" "$dec")"
+  fund_eth "$HARNESS_EOA"
+  # Unlike the swap helper this CANNOT use the artifact's deployedBytecode: the answer is an
+  # immutable, so the runtime code only carries it after a real construction. Deploy, then copy.
+  # NOTE flag ORDER — every option must precede `--create`, which greedily eats the rest of argv.
+  deployed="$(cast send --from "$HARNESS_EOA" --unlocked --rpc-url "$RPC" --json \
+    --create "${code}${args#0x}" 2>/dev/null | python3 -c 'import json,sys
+raw = sys.stdin.read(); i = raw.find("{")
+print(json.loads(raw[i:])["contractAddress"] if i >= 0 else "")')"
+  [[ -n "$deployed" && "$deployed" != "null" ]] || { echo "FreshFeed deploy failed"; return 1; }
+  runtime="$(cast code "$deployed" --rpc-url "$RPC" 2>/dev/null)"
+  [[ -n "$runtime" && "$runtime" != "0x" ]] || { echo "deployed FreshFeed has no runtime code"; return 1; }
+  rpc tenderly_setCode "[\"$feed\",\"$runtime\"]" >/dev/null
+  got="$(num "$(c "$feed" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' | sed -n 2p)")"
+  [[ "$got" == "$answer" ]] || { echo "override did NOT land: $feed still reports $got"; return 1; }
+  echo "$label <- FreshFeed(answer=$answer, decimals=$dec)  [mock deployed at $deployed]"
+  echo
+  cmd_check_feeds
+}
+
+# ─────────────────────────────────────────────────────────────────────────────── move-price
+# The one-shot: the whole four-step §H procedure, with pool, TWAP and oracle left in agreement.
+# Move the pool, warp past twapWindow so the averaging window sits entirely at the new spot, move
+# leg-A/USD to the price the new tick implies, then re-gate the feeds and report the calm margin.
+cmd_move_price() {
+  local target="$1" w dec want
+  echo "════ step 1/4: move the pool tick (real swap) ════"
+  cmd_move_pool "$target" || return 1
+  # twapWindow from layout()[15] — per-clone, never hardcoded (1800 s on the current staging clone).
+  w="$(num "$(lay 15)")"
+  [[ -n "$w" ]] && (( w > 0 )) || { echo "could not read twapWindow (layout()[15])"; return 1; }
+  echo
+  echo "════ step 2/4: warp past twapWindow (${w}s) so the TWAP converges on the new spot ════"
+  cmd_warp $(( w + 60 )) || return 1
+  dec="$(num "$(c "$LEGA_FEED" 'decimals()(uint8)')")"
+  want="$(usd_at_tick "$target" "$dec")"
+  echo
+  echo "════ step 3/4: move leg-A/USD to the price tick $target implies ════"
+  cmd_move_feed legA "$want" || return 1
+  echo
+  echo "════ step 4/4: calm-gate margin ════"
+  cmd_calm
+}
+
 # ─────────────────────────────────────────────────────────────────────────────── snap
 cmd_snap() {
   local label="${1:-snapshot}" ts bn g tid
@@ -290,5 +629,11 @@ case "${1:-}" in
   compound)                 shift; cmd_compound "$@" ;;
   compound-expect-revert)   shift; cmd_compound_expect_revert "$@" ;;
   floor-probe)              cmd_floor_probe ;;
-  *) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 1 ;;
+  calm)                     cmd_calm ;;
+  move-pool)                cmd_move_pool "${2:?move-pool <target-tick>}" ;;
+  move-feed)                cmd_move_feed "${2:?move-feed <legA|legB|usdc|aero> <answer>}" "${3:?move-feed <asset> <answer>}" ;;
+  move-price)               cmd_move_price "${2:?move-price <target-tick>}" ;;
+  # Usage = the header comment block, scraped rather than a hardcoded line range, so adding a
+  # subcommand can never leave the printed usage silently truncated.
+  *) awk 'NR > 1 && /^#/ { print } /^set -uo pipefail/ { exit }' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

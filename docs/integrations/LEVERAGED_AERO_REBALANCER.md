@@ -647,8 +647,89 @@ The public RPC cannot do any of this.
    the gate that catches a non-FreshFeed instance before you waste a run.
 5. **Now rebalance** — `rerange`, `adjustLeverage`, or `compound` as the scenario requires.
 
-Steps 2–5 already have tooling; **step 1 and step 3 do not yet have a `compound-cycle.sh` subcommand** —
-see the gap note below.
+**All five steps are tooled**, and steps 1–4 collapse into a single command — see *Tooling: moving the
+price* immediately below. You only have to think about the four steps when you deliberately want the pool
+and the oracle to *disagree* (e.g. to prove a gate fires).
+
+### Tooling: moving the price
+
+`script/tenderly/compound-cycle.sh` wraps the whole procedure. Every subcommand reads its addresses and
+its parameters (`twapWindow`, `calmDeviationTicks`, feed decimals, pool token ordering) **live** — nothing
+is hardcoded, so they keep working when the instance rotates or the clone is re-deployed.
+
+| Command | Writes? | What it does |
+| --- | --- | --- |
+| `calm` | no | Prints spot tick, TWAP tick, \|spot − TWAP\|, `calmDeviationTicks`, **PASS/FAIL**, and whether spot is inside the position range. The check to run constantly. |
+| `move-pool <target-tick>` | 1 tx | Real swap through the LP pool to land on `<target-tick>`. |
+| `move-feed <asset> <answer>` | 1 tx + `tenderly_setCode` | Replaces one FreshFeed with a new answer. `<asset>` ∈ `legA` \| `legB` \| `usdc` \| `aero`; `<answer>` is at **that feed's own `decimals()`**, read live (8 on every current feed). Runs `check-feeds` afterwards. |
+| `move-price <target-tick>` | 2 tx + warp | **The one-shot.** `move-pool` → warp `twapWindow + 60` → `move-feed legA <price the new tick implies>` → `check-feeds` → `calm`. Leaves pool, TWAP and oracle in agreement. |
+
+Notes that will save you a confused hour:
+
+- **`move-pool` does not binary-search an input amount.** It sets `sqrtPriceLimitX96` to the sqrt price at
+  the target tick and passes an unbounded exact input, so the pool walks its ticks and halts exactly at the
+  limit. One tx, exact landing. Landing **±1 tick** off the target is normal (the limit is computed with
+  real `sqrt()`, the pool reads it back through TickMath's fixed-point `getTickAtSqrtRatio`); a miss of
+  *more* than a tick means the funding bound before the limit did, and the command says so explicitly.
+- **Direction is not intuitive on this pool.** `pool.token0()` is **USDC** and `token1` is **cbBTC**, so the
+  tick prices *USDC in cbBTC*: a **lower** tick means a **higher** cbBTC/USD price. The tool derives all of
+  this from `pool.token0()` at runtime — but read its output rather than reasoning about the sign yourself.
+- **`move-feed legB` also moves `usdc`** on an asset-mode clone: `legBIsAsset == true` means both slots point
+  at the *same* USDC/USD aggregator. The command prints a `NOTE:` when the address it is about to overwrite
+  is shared, so watch for it.
+- The harness uses two fixed vnet-only addresses: `0x5ca1…0001` (the `TenderlySwapHelper`, installed by
+  `tenderly_setCode`, storage-free so a code-only placement is sound) and `0x5ca1…0002` (a throwaway
+  broadcaster, deliberately **not** the proposer, so pool swaps never look like rebalancer activity in the
+  vnet tx history). Both are created on first use and reused afterwards.
+- The swaps are real, so they pay real pool fees (`pool.fee()` is **246**, i.e. 0.0246 %). A move-and-return
+  round trip does **not** land back on the exact starting tick; expect ~1 tick of residual and say so if you
+  are handing the instance back to someone.
+
+#### Tick ↔ percentage intuition
+
+A tick is a fixed **1.0001×** step, so ticks compose multiplicatively — 500 ticks is 5.13 %, not 5.00 %.
+
+| Ticks | Price move | What it means here |
+| --- | --- | --- |
+| 1 | 0.01 % | the landing tolerance of `move-pool` — noise |
+| 100 | 1.005 % | one `tickSpacing` on this pool |
+| **500** | **5.13 %** | `calmDeviationTicks` — the largest instantaneous move that still passes `calmGate` |
+| 1000 | 10.5 % | needs a warp before anything priced will run |
+| ~1500 | ~16.2 % | distance from spot to either range edge (−66300 / −63300 vs spot −64796) |
+| 3000 | 35.0 % | the full width of the current position |
+
+Because the range edges are ~3× `calmDeviationTicks` away, **an out-of-range scenario can never be swapped
+and rebalanced in the same breath** — the warp in step 2 is mandatory, which is exactly what `move-price`
+does for you.
+
+#### Worked example — drive the position out of range and `rerange` it
+
+```bash
+cd script/tenderly
+# LEVERAGED_AERO_ADMIN_RPC_URL must be set (admin RPC — NOT TENDERLY_VNET_RPC_URL)
+
+./compound-cycle.sh calm                       # baseline: spot ≈ TWAP, "spot is in range"
+./compound-cycle.sh snap before-rerange        # full state dump to diff against
+
+# 1600 ticks BELOW spot = past the −66300 lower edge = cbBTC ~17 % MORE expensive.
+# One command: swap the pool → warp 1860 s → re-price leg-A/USD → re-gate the feeds → calm.
+./compound-cycle.sh move-price -66400
+#   ... expect: ">> target REACHED", then "PASS" with 0 ticks of deviation (the TWAP has
+#   ... converged), then "spot is OUT OF RANGE (single-sided; rerange to re-centre)"
+
+# The rebalance under test. rerange re-centres on the NEW pool tick; width must be a multiple
+# of tickSpacing (100) and inside the clone's [minWidth, maxWidth] band — read them from layout().
+cast send "$STRAT" 'rerange(uint24,uint256,uint256)' 3000 0 0 \
+  --from "$PROPOSER" --unlocked --gas-limit 14000000 --rpc-url "$LEVERAGED_AERO_ADMIN_RPC_URL"
+
+./compound-cycle.sh calm                       # expect "spot is in range" again — new range, same spot
+./compound-cycle.sh snap after-rerange         # principal conserved; one leg left idle (see §B)
+
+./compound-cycle.sh move-price -64796          # put the instance back for the next person
+```
+
+Pass real `minLiq0`/`minLiq1` rather than `0 0` when you are testing the slippage guards; `0 0` is only
+acceptable on a vnet where you are the only source of flow.
 
 ### The AERO harvest cycle (fully tooled today)
 
@@ -691,13 +772,26 @@ runs Aerodrome's weekly epoch flip. Re-arm it the production way:
 - **Don't `settleStrategy()` a shared instance.** Settling is a one-way door and will strand everyone
   else's deposit testing.
 
-### Tooling gap
+### Tooling coverage
 
-`compound-cycle.sh` covers arming, warping, quoting, compounding, and the feed gate. It does **not** yet
-wrap step 1 (pool swap to a target tick) or step 3 (FreshFeed redeploy at a new answer). The building
-blocks exist — `TenderlySwapHelper.sol` plus the price-simulation matrix already used for
-`LPAutoBalancerV2` (`make tenderly-matrix`) — but they are not wired into the leveraged-aero cycle script.
-Until they are, a price-move scenario means driving those two steps by hand against the admin RPC.
+`compound-cycle.sh` now covers the whole loop: emission arming, warping, quoting, compounding, the feed
+gate (`check-feeds`), the calm-gate read (`calm`), the pool swap to a target tick (`move-pool`), the
+FreshFeed redeploy at a new answer (`move-feed`), and the four-step composition (`move-price`). Nothing in
+a price-move scenario needs to be driven by hand against the admin RPC any more.
+
+What is still **not** wrapped, and is deliberate:
+
+- **The strategy writes themselves** — `rerange`, `adjustLeverage`, `deployIdle`, `fulfillRedeem`. These are
+  the thing under test and their arguments are a policy decision (width, target LTV, `minLiq`/`minOut`), so
+  they stay explicit `cast send` calls signed as the proposer. `compound` is the one exception, because
+  deriving a safe `minUsdcOut` needs the oracle-floor arithmetic that `quote` already does.
+- **Time-dependent venue state.** Moonwell's price oracle is *not* a gap: it resolves the same aggregator
+  addresses the FreshFeeds are code-replaced over, so `move-feed legA` moves the lending market's collateral
+  valuation in lockstep — verified on staging by nudging leg A/USD by one unit at the 8th decimal and
+  watching `ChainlinkOracle.getUnderlyingPrice(mcbBTC)` track it. Health and LTV therefore stay coherent
+  with the fund's own math. What `move-price` does not simulate is anything that only *time* produces:
+  Moonwell borrow-interest accrual, gauge emissions (use `arm` + `warp-to-finish`), or the third-party flow
+  that would surround a real price move.
 
 ---
 
