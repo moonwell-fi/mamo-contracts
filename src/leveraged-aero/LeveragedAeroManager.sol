@@ -191,7 +191,23 @@ library LeveragedAeroManager {
     ///         between collateral and LP-side USDC is `_supplyAndBorrow`'s job (see the library head).
     /// @dev The calm-gate is hoisted HERE (it used to sit inside `_mintAndStake`) so the fresh range is
     ///      derived ONCE, off an already-validated tick, and then threaded through both the asset-mode
-    ///      sizing and the mint. A shoved tick reverts before any venue call.
+    ///      sizing and the mint. A shoved tick therefore reverts before any FUND-MOVING venue call —
+    ///      before the supply, the borrow and the mint. The `enterMarkets` above it is the one venue
+    ///      call that precedes the gate: it is idempotent market-entry bookkeeping that moves no value
+    ///      and reads no tick, so gating it would buy nothing. (Do not restate this as "before any
+    ///      venue call" — that was the previous wording and it was literally false.)
+    ///
+    ///      GATE ORDERING IS NOT UNIFORM ACROSS THE IMPLS, BY DESIGN. `rerangeImpl` gates FIRST, before
+    ///      any venue call at all. `executeImpl` gates after `enterMarkets`, as above. `deployIdleImpl`
+    ///      and `_leverUp` do NOT gate up front — they reach the gate inside `_addLiquidity`, i.e. after
+    ///      the Moonwell supply/borrow has already executed. That is safe and deliberate: the gate is
+    ///      still strictly BEFORE the pool is touched, a breach reverts the whole transaction atomically
+    ///      (there is no partial-failure state in the EVM), and every one of those paths reaches
+    ///      `_addLiquidity` unconditionally, so none of them can skip the gate. Hoisting a second
+    ///      `calmGate` into `deployIdleImpl` would add a duplicate gate on the hot path and bytecode to a
+    ///      library already at the EIP-170 margin, for no behavioural change. Asset-mode is the case that
+    ///      LOOKS worst — `assetModeSplit` reads the live `sqrtP` for its sizing before any gate — but
+    ///      the mint that consumes that sizing is gated, so a shoved tick still unwinds the whole op.
     function executeImpl() public {
         Layout storage $ = _layout();
         uint256 usdcAmt = IERC20($.usdc).balanceOf(address(this));
@@ -394,6 +410,10 @@ library LeveragedAeroManager {
     ///      `_addLiquidity` will actually add into, NOT a freshly centred one. A stored range the price
     ///      has since left is one-sided, so the split fails closed (`DegenerateRange`); `rerange`
     ///      recentres and unblocks it.
+    ///
+    ///      NO UP-FRONT CALM-GATE HERE — the gate lives inside `_addLiquidity`, so it runs AFTER the
+    ///      supply/borrow below and before the pool is touched. See the ordering note on `executeImpl`
+    ///      for why that asymmetry is deliberate and why it is not a weakening.
     function deployIdleImpl(uint256 amount, uint256 minLiquidity) public {
         Layout storage $ = _layout();
         if (amount > IERC20($.usdc).balanceOf(address(this))) revert InsufficientIdle();
@@ -1054,23 +1074,25 @@ library LeveragedAeroManager {
             (uint256 exp0, uint256 exp1) =
                 LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liqToRemove);
             uint256 slip = uint256($.maxSlippageBps);
-            INonfungiblePositionManager(npm_).decreaseLiquidity(
-                INonfungiblePositionManager.DecreaseLiquidityParams({
+            INonfungiblePositionManager(npm_)
+                .decreaseLiquidity(
+                    INonfungiblePositionManager.DecreaseLiquidityParams({
                     tokenId: tokenId_,
                     liquidity: liqToRemove,
                     amount0Min: exp0 * (10000 - slip) / 10000,
                     amount1Min: exp1 * (10000 - slip) / 10000,
                     deadline: block.timestamp + 600
                 })
-            );
-            INonfungiblePositionManager(npm_).collect(
-                INonfungiblePositionManager.CollectParams({
+                );
+            INonfungiblePositionManager(npm_)
+                .collect(
+                    INonfungiblePositionManager.CollectParams({
                     tokenId: tokenId_,
                     recipient: address(this),
                     amount0Max: type(uint128).max,
                     amount1Max: type(uint128).max
                 })
-            );
+                );
         }
 
         // Re-stake only when remaining liquidity is non-zero.
@@ -1255,8 +1277,9 @@ library LeveragedAeroManager {
         (address tok0, address tok1) = _tokens01();
         IERC20(tok0).forceApprove(npm_, amt0);
         IERC20(tok1).forceApprove(npm_, amt1);
-        (uint128 liq,,) = INonfungiblePositionManager(npm_).increaseLiquidity(
-            INonfungiblePositionManager.IncreaseLiquidityParams({
+        (uint128 liq,,) = INonfungiblePositionManager(npm_)
+            .increaseLiquidity(
+                INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId_,
                 amount0Desired: amt0,
                 amount1Desired: amt1,
@@ -1264,7 +1287,7 @@ library LeveragedAeroManager {
                 amount1Min: amt1Min,
                 deadline: block.timestamp + 600
             })
-        );
+            );
         if (uint256(liq) < minLiquidity) revert InsufficientLiquidity();
     }
 

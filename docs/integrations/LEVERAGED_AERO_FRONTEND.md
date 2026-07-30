@@ -5,7 +5,7 @@
 Leveraged Aerodrome LP fund. Users deposit USDC; the Mamo agent runs a leveraged AERO-farming
 position that earns through emissions. Custody and execution are deliberately separate: the fund's share
 ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares only, priced off the strategy's NAV),
-execution lives in one strategy contract (supply USDC on Moonwell → borrow cbBTC + ETH → Aerodrome
+execution lives in one strategy contract (supply USDC on Moonwell → borrow the CL leg(s) → Aerodrome
 concentrated LP → farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and
 Mamo's backend is the agent — the same trusted-operator model as Mamo today: it manages the position but
 can never withdraw user funds. Users redeem anytime at NAV.
@@ -15,7 +15,8 @@ can never withdraw user funds. Users redeem anytime at NAV.
 | Chain | Base |
 | Deposit asset | USDC (ETH & cbBTC added later) |
 | Structure | Pooled fund — many depositors, one shared position |
-| Strategy | Supply USDC → borrow cbBTC + ETH → Aerodrome CL LP → farm & compound AERO |
+| Strategy | Supply USDC → borrow the CL leg(s) → Aerodrome CL LP → farm & compound AERO |
+| Pool shape | Per-clone: *two borrowed legs* (e.g. cbBTC + ETH) **or** *asset-as-leg-B* (one borrowed leg paired with USDC). Affects **copy only** — no flow, ABI or guard in this guide changes. See "Describing the position" below. |
 | Posture | Leveraged Aerodrome CL LP + AERO emissions carry |
 | Custody | Agent manages the position, can never withdraw user funds; users redeem anytime |
 | Lifetime | Runs indefinitely — no fixed term; the terminal `Settled` state is driven by the vault owner (MAMO multisig) |
@@ -175,6 +176,37 @@ function owner() external view returns (address);
 > init params — read `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
 > hardcoding a schedule in copy, and treat any "APY net of fees" display as moot for whichever legs read
 > zero.
+
+### Describing the position — don't hardcode "cbBTC + ETH"
+
+The fund is **not** fixed to one pair, and it is not even fixed to one *shape*. A clone initializes against
+any Slipstream pool whose tokens have Moonwell markets and Chainlink feeds, and there are two shapes,
+derived at init:
+
+| `strategy.layout().legBIsAsset` | Shape | How to describe it |
+|---|---|---|
+| `false` | **Two borrowed legs** — the whole deposit is collateral, both pool tokens are borrowed | "Supply USDC, borrow *`legA`* + *`legB`*, LP the pair" |
+| `true` | **Asset-as-leg-B** — the leg-B slot **is** USDC; part of the deposit is collateral, one volatile leg is borrowed and paired with the rest | "Supply USDC, borrow *`legA`*, LP it against USDC" |
+
+```ts
+const l = await strategy.read.layout();
+const legA = l.weth;   // leg A slot — always the borrowed volatile leg
+const legB = l.cbBTC;  // leg B slot — a second borrowed leg, or USDC in asset-mode
+const assetMode = l.legBIsAsset;
+```
+
+- **`weth` / `cbBTC` in `LayoutView` are leg SLOTS, not tokens.** The field names are historical. Resolve
+  symbols/decimals from the actual addresses; never render the field name.
+- **Nothing else in this guide changes.** In / out is USDC (6dp) in both shapes; every flow, ABI, event,
+  revert and guard above is shape-invariant. `previewWithdraw(sharesBalance())` remains the position value
+  in both — there is no per-leg breakdown to render and none is needed.
+- **`hedgedDebt()` and `targetLtvBps()` on the strategy are fund-ops reads, not frontend reads.** They
+  exist for the rebalancer (see [`LEVERAGED_AERO_REBALANCER.md`](./LEVERAGED_AERO_REBALANCER.md) §E). The
+  only reason to touch them here is an optional "strategy details" panel — and if you do surface
+  `hedgedDebt()`, note `legB` is structurally `0` in asset-mode, so render it as "n/a", not as a zero
+  balance.
+- The strategy clone is otherwise **out of scope** for the frontend (see the scope note at the top); this
+  subsection exists purely so marketing/product copy tracks the clone it is actually pointed at.
 
 ---
 
@@ -430,6 +462,7 @@ Settled exit:
 - [ ] Gate all deposit/withdraw UI on `strategyState() == Executed`; render the two-step Settled exit — `recoverERC20(vaultShares, user, sharesBalance())` then `vault.redeemSettled(shares)`.
 - [ ] Read `vault.depositsOpen()` and pre-disable the deposit CTA when issuance is closed (`"LAV: deposits closed"`); never gate withdrawals on it.
 - [ ] Show position value from `previewWithdraw(sharesBalance())`; never cache the quote across blocks.
+- [ ] Derive position copy from the clone (`layout().legBIsAsset` + the leg-slot addresses) rather than hardcoding "cbBTC + ETH"; both shapes are USDC-in / USDC-out and every flow below is shape-invariant.
 - [ ] Fast withdraw: preflight `previewWithdraw`, default to async when `fastOk == false`, and catch `FastRedeemExceedsLtv` / oracle reverts as an async fallback.
 - [ ] Async withdraw: surface pending requests from `WithdrawRequested`/`WithdrawCancelled`, offer `cancelWithdraw`, poll idle USDC for fulfillment, and expose `claimWithdrawnUsdc`.
 - [ ] Warn that async payout value floats until fulfill (no price freeze at request time).

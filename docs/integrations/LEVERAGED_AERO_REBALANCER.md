@@ -15,7 +15,8 @@ today: it manages the position but can never withdraw user funds. Users redeem a
 | Chain | Base |
 | Deposit asset | USDC (ETH & cbBTC added later) |
 | Structure | Pooled fund — many depositors, one shared position |
-| Strategy | Supply USDC → borrow cbBTC + ETH → Aerodrome CL LP → farm & compound AERO |
+| Strategy | Supply USDC on Moonwell → borrow the CL leg(s) → Aerodrome CL LP → farm & compound AERO |
+| Pool shape | **Two** per-clone shapes, derived at init and read from `layout().legBIsAsset` — *two borrowed legs* (e.g. cbBTC + ETH) or *asset-as-leg-B* (borrow one volatile leg, pair it with USDC). Several ops behave differently between them — see §G. |
 | Posture | Leveraged Aerodrome CL LP + AERO emissions carry |
 | Custody | Agent manages the position, can never withdraw user funds; users redeem anytime |
 | Lifetime | Runs indefinitely — no fixed term; the terminal `Settled` state is driven by the vault owner (MAMO multisig) |
@@ -112,9 +113,10 @@ function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer 
 |---|---|
 | `amount` | USDC (6dp) to deploy; must be ≤ the strategy's idle USDC balance, else `InsufficientIdle()`. |
 | `minLiquidity` | Minimum CL liquidity the add must produce (slippage floor). |
-| Position effect | supply `amount` USDC → mUSDC → borrow both legs at **`targetLtvBps`** (50/50 by USD value) → wrap native ETH **iff** `wethDeliversNative` (§G) → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
-| Guards | Borrow sized at `amount × targetLtvBps / 1e4`; two-sided `maxSlippageBps` mins on the add plus the caller's `minLiquidity`; closes with `_assertHealthy()` (post-op LTV ≤ `maxLtvBps` **and** no Moonwell shortfall). |
-| Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`. |
+| Position effect (two borrowed legs) | supply **all** of `amount` USDC → mUSDC → borrow both legs at **`targetLtvBps`** (50/50 by USD value) → wrap native ETH **iff** `wethDeliversNative` (§G) → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
+| Position effect (asset-mode) | `LeveragedAeroValuation.assetModeSplit` solves the split closed-form against the **STORED** range: only `C < amount` is supplied as collateral, a **single** leg-A borrow is taken against `C` at `targetLtvBps`, and `U = amount − C` is held back as the LP's USDC side so the add lands at exactly the ratio the stored range needs. Net leg-A exposure stays 0 (LP leg == debt leg). |
+| Guards | Two-borrowed-legs: borrow sized at `amount × targetLtvBps / 1e4`. Asset-mode: borrow sized at `C × targetLtvBps / 1e4` with `C` from the split — so the **effective** collateral is less than `amount` and a naive `amount × targetLtvBps` model will over-predict the borrow. Both: two-sided `maxSlippageBps` mins on the add plus the caller's `minLiquidity`; closes with `_assertHealthy()` (post-op LTV ≤ `maxLtvBps` **and** no Moonwell shortfall). |
+| Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`; **asset-mode also** `DegenerateRange()` — the split is sized against the STORED range (`posTickLower`/`posTickUpper`), so a range the price has already left is one-sided and fails closed. `rerange` recenters and unblocks it. |
 | When to call | Deposits land as idle USDC (see §D) and earn nothing until deployed. Run periodically to sweep accumulated idle into the position, within leverage caps. |
 
 ### `compound` — harvest AERO, reinvest, crystallize fees
@@ -127,11 +129,14 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 |---|---|
 | `minUsdcOut` | Minimum USDC out of the AERO→USDC swap. **Must be non-zero** — `ZeroMinOut()` otherwise. |
 | `minLiquidity` | Minimum CL liquidity on the redeploy of the net yield. |
-| Position effect | claim AERO from the gauge → swap **all** AERO → USDC via the Aerodrome v2 volatile pool → skim the protocol-fee slice → redeploy the remainder at `targetLtvBps` (same path as `deployIdle`). No-op if flat book (`tokenId == 0`) or no AERO accrued. |
-| Fee interaction | Crystallizes management + HWM **performance** fees on the **pre-compound** NAV first (fail-closed on the price — a stale oracle reverts, so the harvest defers rather than mis-prices), so realized yield can't escape the performance fee. Then discharges `protocolFeeOwed` out of the swapped USDC before redeploy. |
-| Guards | Effective swap floor = `max(minUsdcOut, oracleFloor)` where `oracleFloor = aeroBal × AERO/USD(8dp) / 1e20 × (1 − maxSlippageBps)`, post-checked on the measured fill → `BelowOracleFloor()`. Redeploy runs `_assertHealthy()`. |
-| Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`, plus Moonwell/NPM errors on the redeploy; a stale AERO feed fail-closes the whole call. |
-| When to call | On a yield/gas cadence. A stale AERO feed intentionally blocks it — defer and retry. |
+| Position effect | claim AERO from the gauge → swap **all** AERO → USDC via the Aerodrome v2 volatile pool → skim the protocol-fee slice → **re-hedge accrued borrow interest out of what's left** (below) → redeploy the remainder at `targetLtvBps` (same path as `deployIdle`, so asset-mode redeploys through `assetModeSplit`). No-op if flat book (`tokenId == 0`) or no AERO accrued/held. |
+| **Redeploy size — read this before predicting it** | The redeploy is **not** `usdcOut − protocolFeeSkim`. In order: `pay = min(skimCap, usdcOut)`; `redeploy = usdcOut − pay`; then `redeploy -= _hedgeInterestDrift(redeploy)`. The hedge step spends part of the harvest **buying back and repaying accrued borrow interest** before anything is redeployed, so the CL add is smaller than the gross yield by that amount. |
+| Interest re-hedge (what it spends) | Per borrowed leg, drift = `borrowBalanceCurrent(market) − hedgedDebt*` — the market is **accrued first** (`borrowBalanceCurrent`, not `…Stored`), so it sees interest that has not yet been capitalised. That drift is priced to USDC on the hardened leg + USDC feeds, bought on the Slipstream leg↔USDC pool with an oracle-floored min-out, and repaid to Moonwell. Leg A is served first; in the two-borrowed-legs shape leg B then gets `budget − spentA` (asset-mode has one drifting leg — leg B is the unit of account and never borrows, so its drift is structurally 0). |
+| Interest re-hedge (bounds) | Hard-bounded by the harvest's own proceeds: it **never** touches stayers' idle USDC or the collateral. A budget too small for the whole drift hedges what it can and carries the remainder to the next harvest — it does **not** revert for insufficiency. Drift priced below 1 USDC unit is left to accumulate. Effect on the book: financing cost lands as **NAV drag** (less yield reinvested) instead of accumulating as unintended short leg exposure, and leverage dips slightly (the safe direction). |
+| Fee interaction | Crystallizes management + HWM **performance** fees on the **pre-compound** NAV first (fail-closed on the price — a stale oracle reverts, so the harvest defers rather than mis-prices), so realized yield can't escape the performance fee. Then discharges `protocolFeeOwed` out of the swapped USDC before the hedge and the redeploy. |
+| Guards | Effective swap floor = `max(minUsdcOut, oracleFloor)` where `oracleFloor = aeroBal × AERO/USD(8dp) / 1e20 × (1 − maxSlippageBps)`, post-checked on the measured fill → `BelowOracleFloor()`. The hedge's USDC→leg buy is separately floored at the oracle-implied leg amount haircut by `maxSlippageBps`. Redeploy runs `_assertHealthy()`. |
+| Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`; **`MoonwellRepayFailed(errCode)` from the interest re-hedge**; `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `InsufficientLiquidity` and (asset-mode) `DegenerateRange()` from the redeploy. A stale/mismatched feed fail-closes the whole call — the AERO feed at the swap floor, and the leg + USDC feeds at the hedge (`compound` already fail-closes on those via the pre-compound `nav()`, so the hedge widens no oracle exposure). |
+| When to call | On a yield/gas cadence. A stale AERO feed intentionally blocks it — defer and retry. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
 
 ### `rerange` — re-center and re-width the CL range (no swap)
 
@@ -147,7 +152,8 @@ is the authority for it; there is no older 2-arg variant to reconcile against an
 | `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain — always read them off the clone you actually point at (the stale staging clone was init'd width **4000**, band **[200, 20000]**). |
 | `minLiq0` / `minLiq1` | Minimum **token0** / **token1** the re-add must consume (two-sided slippage guard) → `InsufficientLiquidity()`. `token0`/`token1` are **pool ordering**, derived at init from `pool.token0()` and exposed as `layout().wethIsToken0` — do not assume which leg is which (see §G). |
 | Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a recenter can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** CL NFT spanning `width/2` raw ticks each side of the current tick → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
-| What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** borrowed leg is left idle in the strategy — `nav()` prices it, so the recenter is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
+| What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** leg is left idle in the strategy — `nav()` prices it, so the recenter is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
+| Asset-mode difference | The re-add offers the mint the strategy's **whole balance of each leg slot as `amountDesired`** — and in asset-mode the leg-B slot **is USDC** (`layout().cbBTC == layout().usdc`). So the amount of USDC the mint consumes is whatever the new range needs to pair with the collected leg A, which can be **more than the unwind itself collected**, drawing the difference from idle USDC. That is value-conserving (idle → LP, `nav()` unchanged) but it shrinks the redeem cover budget, the same operator consequence as an asset-mode lever-up. Conversely the leftover remainder is plain USDC rather than a borrowed leg. Size reranges against available idle when the clone is asset-mode. |
 | Fee interaction | **No crystallization** — supply and NAV are unchanged; the streaming fee simply defers to the next crystallize point and the HWM is unaffected. |
 | Guards | Calm-gate; two-sided `maxSlippageBps` mins + caller `minLiq0/minLiq1`; closing `_assertHealthy()`. |
 | Errors | `WidthOutOfBounds` (out-of-band or misaligned `width`), calm-gate reverts (`TwapDeviation`/`StaleOracle` family), `InsufficientLiquidity`, `UnhealthyPosition`. |
@@ -165,10 +171,13 @@ function adjustLeverage(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut)
 | `targetLtvBps_` | Desired LTV in bps. **Checked at the entrypoint**: `targetLtvBps_ > maxLtvBps` reverts `TargetLtvExceedsMax()`. |
 | `minLiq` | Minimum CL liquidity on a lever-**UP** add. |
 | `minOut` | Minimum USDC out of a lever-**DOWN** residual rebalancing swap. |
-| Position effect | Collateral untouched; LTV moves on the **debt** side. `targetDebt = targetLtvBps_ × collateralUsdc / 1e4`. Lever **up**: borrow the cbBTC/WETH delta and add it (`minLiq`). Lever **down**: unwind the matching CL fraction and repay, per-leg residual rebalanced through USDC (`minOut`). Closes with `_assertHealthy()`. |
+| Position effect (both shapes) | Collateral untouched; LTV moves on the **debt** side. `targetDebt = targetLtvBps_ × collateralUsdc / 1e4`. Lever **down**: unwind the matching CL fraction and repay, per-leg residual rebalanced through USDC (`minOut`) — unchanged in asset-mode, where the leg-B residual **is** USDC and flows straight into the leg-A cover. Closes with `_assertHealthy()`. |
+| Lever **up** — two borrowed legs | Borrow the delta 50/50 by USD across both legs and LP them against each other. **Self-funding**: the pair *is* the two borrows, so no idle USDC is consumed. |
+| Lever **up** — asset-mode | Borrows **only leg A** and pairs it with USDC **drawn from the strategy's idle balance**, sized closed-form (`assetModeLeverUpPair`) so the LP's leg-A amount equals the added leg-A debt — that is what preserves the delta-hedge (swapping part of the borrow to USDC would leave the book net short). **Operator consequence: an asset-mode lever-up CONSUMES idle USDC.** Value-conserving (a NAV component moving idle → LP, not a loss) but it shrinks the redeem cover budget until the next deposit. **Size lever-ups against available idle**; an under-funded one reverts `InsufficientIdleForLeverUp(needed, available)` and changes nothing — deliberately not a partial fill and not a silent cap. |
+| `targetLtvBps_` is **persisted** | The value is stored as the fund's standing target, so `execute` / `deployIdle` / `compound` size their **next** borrow at it. This holds even when neither branch runs (`targetDebt == debtUsdc`) — the retarget still takes effect, exactly like `rerange`-on-a-flat-book persisting `width`. Read it back with `targetLtvBps()` or `layout().targetLtvBps` (§E). |
 | Fee interaction | **No crystallization** (like `rerange`): no supply change, no PnL realized; streaming fee defers, HWM unaffected. |
-| Errors | `TargetLtvExceedsMax`, `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`. |
-| When to call | To hold the fund near `targetLtvBps`, and — critically — **before `fulfillRedeem`** to lever **down** so the oracle-free proportional unwind self-funds its IL/debt shortfall (see §C). |
+| Errors | `TargetLtvExceedsMax`, `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`; **asset-mode lever-up also** `InsufficientIdleForLeverUp(uint256 needed, uint256 available)` and `DegenerateRange()` (the pairing is sized against the STORED range — a one-sided one fails closed; `rerange` unblocks it). `InsufficientIdleForLeverUp` is raised inside `LeveragedAeroValuation` but **re-declared on the strategy** (`LeveragedAerodromeCLStrategy.sol:93`, same selector) so it is on the clone's own ABI for the rebalancer / frontend — decode it off the strategy ABI, no library ABI needed. |
+| When to call | To hold the fund near `targetLtvBps`, and — critically — **before `fulfillRedeem`** to lever **down** so the oracle-free proportional unwind self-funds its IL/debt shortfall (see §C). In asset-mode note the two directions are asymmetric on idle: lever **down** frees USDC, lever **up** spends it. |
 
 ### `fulfillRedeem` — drain the withdraw queue
 
@@ -376,7 +385,25 @@ function redeemRequest(uint256 id) external view returns (RedeemRequest memory);
 function positions() external view returns (Position[] memory);                 // PriceRouter reporting
 function proposer() external view returns (address);
 function vault() external view returns (address);
+
+// Two dedicated keeper getters — the same storage `layout()` returns, given their own selectors
+// so a rebalancer can read them without decoding the whole LayoutView.
+function targetLtvBps() external view returns (uint16);                         // the STANDING target
+function hedgedDebt() external view returns (uint128 legA, uint128 legB);       // hedged borrow PRINCIPAL
 ```
+
+- **`targetLtvBps()`** is the fund's **standing** target — set at init and re-set by every `adjustLeverage`
+  — and it is what `execute` / `deployIdle` / `compound` size their borrow at. Read it **before** deciding
+  whether to retarget; do not infer it from the position's current LTV, which drifts with price.
+- **`hedgedDebt()`** returns the borrowed **principal** each leg's LP side currently hedges. The unhedged
+  accrued borrow interest is `borrowBalanceStored(market) − hedgedDebt*` per leg, and that difference is
+  exactly what `compound` buys back and repays out of harvest proceeds (§B). Use it two ways: to decide
+  whether a harvest is worth calling, and to confirm afterwards that drift returned to ~0. `legB` is
+  structurally **0** in asset-mode (leg B is the unit of account there and is never borrowed). Note the
+  contract itself measures with `borrowBalanceCurrent` (accrue-then-measure), so an off-chain
+  `borrowBalanceStored` read **understates** the drift by whatever has not yet been capitalised on that
+  market — treat it as a lower bound. The same two values are also on `layout()` as
+  `hedgedDebtA`/`hedgedDebtB`.
 
 - **`nav()` fail-closed semantics.** With an active position (`tokenId != 0`), `nav()` prices the levered
   book at an oracle-implied `sqrtP` and **reverts** on any oracle/calm-gate failure or ≤0 equity (a stale
@@ -395,8 +422,9 @@ function vault() external view returns (address);
   gauge, swapRouter, comptroller, the Moonwell markets, the Chainlink feeds incl. `aeroUsdFeed`,
   `sequencerFeed`), **oracle config** (`maxDelay`, `gracePeriod`, `calmDeviationTicks`, `twapWindow`,
   `tickSpacing`), **position state** (`tokenId`, `posTickLower`, `posTickUpper`, `nextRedeemRequestId`),
-  the **width band** (`width`, `minWidth`, `maxWidth`), and the **venue-shape fields the keeper must not
-  assume** (`cbBTCDecimals`, `wethDecimals`, `wethIsToken0`, `wethDeliversNative`, `cbBTCSwapTickSpacing`,
+  the **width band** (`width`, `minWidth`, `maxWidth`), the **hedged-debt basis** (`hedgedDebtA`,
+  `hedgedDebtB`), and the **venue-shape fields the keeper must not assume** (`legBIsAsset`,
+  `cbBTCDecimals`, `wethDecimals`, `wethIsToken0`, `wethDeliversNative`, `cbBTCSwapTickSpacing`,
   `wethSwapTickSpacing` — see §G).
 - **Current LTV / health.** There is no public LTV getter, but the health basis is
   `collateralUsdc × 1e4 / debtUsdc` on the same hardened-Chainlink reads `_assertHealthy` uses. To compute
@@ -437,9 +465,16 @@ Strategy events that exist today:
   `deleverage`) read hardened Chainlink with `maxDelay` staleness, `gracePeriod` sequencer-restart grace,
   and a calm-gate. A stale feed or a down sequencer **fail-closes** — the op reverts. This is intended
   posture: defer the harvest / re-range / deleverage and rely on the oracle-free async queue for exits.
-- **Calm gate.** `rerange` (and NAV pricing) run the calm-gate (`|spotTick − twapTick| ≤ calmDeviationTicks`
-  over `twapWindow`) **before** touching the pool, so the agent can never recenter or price at a
-  manipulated tick. A shoved pool blocks `rerange`; retry once calm.
+- **Calm gate.** Every mint/add path runs the calm-gate (`|spotTick − twapTick| ≤ calmDeviationTicks` over
+  `twapWindow`) before the pool is touched, as does NAV pricing — so the agent can never recenter, add or
+  price at a manipulated tick. A shoved pool blocks `rerange`, `deployIdle`, `compound`'s redeploy and a
+  lever-**up**; retry once calm. **Where in the op the gate fires is not uniform**, and an operator reading
+  a reverted trace should expect it: `rerange` gates first, before any venue call; `execute` gates after
+  `enterMarkets` but before the supply/borrow/mint; `deployIdle` and lever-**up** reach the gate inside the
+  CL add, i.e. *after* the Moonwell supply/borrow already executed in that transaction. In all cases the
+  breach reverts the **whole** transaction atomically — there is no state to unwind by hand and no partial
+  deploy to reconcile — but a shoved-tick `deployIdle` trace will show a Moonwell borrow before the
+  `CalmGateBreached` revert. That is expected, not a partial failure.
 - **Per-op slippage bounds.** Every value-moving op takes a caller `min*` floor **and** is additionally
   bounded by the always-on `maxSlippageBps` (∈ (0, 1000] = ≤10%, set at init). `compound` is further
   floored by the AERO/USD oracle (`BelowOracleFloor`). Pass **tight, freshly-quoted** floors; `0` is not
@@ -478,6 +513,25 @@ The strategy now initializes against **any** Slipstream pool whose two tokens ha
 and Chainlink feeds. Nothing about the pair is hardcoded any more, so the keeper must read the shape off
 the clone rather than assuming the launch pair:
 
+- **There are TWO pool shapes, and the clone tells you which (`legBIsAsset`).** This is the single most
+  consequential shape field — it changes what several ops do, not just what they're denominated in. It is
+  **derived at init**, not configured: `legBIsAsset == (cbBTC slot address == usdc)`. Branch on
+  `layout().legBIsAsset`, never on the token addresses by hand.
+
+  | | `legBIsAsset == false` — two borrowed legs | `legBIsAsset == true` — asset-as-leg-B |
+  |---|---|---|
+  | Pool | both legs are volatile (e.g. cbBTC/WETH) | leg B **is USDC**, the unit of account (e.g. WETH/USDC) |
+  | Collateral on `deployIdle` | the **whole** `amount` | only `C < amount` from `assetModeSplit`; `U = amount − C` becomes the LP's USDC side |
+  | Borrows | **both** legs, 50/50 by USD | **leg A only** |
+  | `hedgedDebt()` | both `legA` and `legB` move | `legB` is structurally **0** |
+  | `compound` interest hedge | hedges **both** legs from one shared budget | hedges **leg A only** (leg B can't drift) |
+  | Lever **up** | self-funding (the pair is the two borrows) | **consumes idle USDC**; reverts `InsufficientIdleForLeverUp(needed, available)` if short |
+  | `rerange` | remainder left idle is a borrowed leg | may **draw idle USDC** into the add; the remainder left idle is USDC |
+  | Range-sensitivity | none on the deploy path | `deployIdle` / lever-up size against the **STORED** range → `DegenerateRange()` when it is one-sided; `rerange` first |
+
+  The operator rule of thumb for asset-mode: **idle USDC is no longer just a redeem buffer, it is an input
+  to `deployIdle`, `adjustLeverage` (up) and `rerange`.** Track it as a budget, and prefer a `rerange` to
+  recenter before any op that sizes against the stored range.
 - **`weth*` / `cbBTC*` are leg SLOTS, not tokens.** `weth`/`mWeth`/`wethFeed`/`wethDecimals` are **leg A**
   (the slot that may be delivered natively on borrow); `cbBTC`/`mCbBTC`/`cbBTCFeed`/`cbBTCDecimals` are
   **leg B**. The names are historical — read the actual token addresses from `layout()`. Every error
@@ -539,7 +593,10 @@ Production addresses are published separately at deploy.
 - [ ] Sign every operator op with the strategy **proposer** key (`MAMO_BACKEND`, `0x2Ab0…5e73`); confirm `strategy.proposer()` matches before wiring.
 - [ ] Gate the whole operator loop on `state() == Executed`; `execute`/`settle` are `onlyVault` and belong to the vault owner's `activateStrategy` / `settleStrategy`, not to you.
 - [ ] Periodically `deployIdle(amount, minLiquidity)` accumulated strategy-idle USDC within leverage caps; pass a real `minLiquidity`.
-- [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed.
+- [ ] **Read `layout().legBIsAsset` first and branch on it** — asset-mode changes `deployIdle` sizing, makes lever-**up** consume idle USDC, lets `rerange` draw on idle, and adds `InsufficientIdleForLeverUp` / `DegenerateRange` to the error set (§G).
+- [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed. **Do not predict the redeploy as `usdcOut − fee`** — `compound` first repays accrued borrow interest out of the harvest (§B), so the CL add is smaller by that amount; `MoonwellRepayFailed` is on that path.
+- [ ] Track drift with `hedgedDebt()` vs. each market's `borrowBalanceStored` (§E) to size the harvest cadence, and confirm it returns to ~0 after a compound; remember the on-chain measure accrues first, so the off-chain `…Stored` read is a lower bound.
+- [ ] Read the standing target with `targetLtvBps()`, not from the position's current LTV — `adjustLeverage` **persists** it and the next `deployIdle`/`compound` borrows at it.
 - [ ] `rerange(width, minLiq0, minLiq1)` when spot drifts out of range or the model picks a new width — `width` in raw ticks, tickSpacing-aligned, inside `[minWidth, maxWidth]` (else `WidthOutOfBounds`); expect calm-gate reverts on a shoved pool (retry when calm).
 - [ ] `adjustLeverage(target, minLiq, minOut)` to hold near `targetLtvBps` — and to lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds.
 - [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.

@@ -5,7 +5,7 @@
 Leveraged Aerodrome LP fund. Users deposit USDC; the Mamo agent runs a leveraged AERO-farming
 position that earns through emissions. Custody and execution are deliberately separate: the fund's share
 ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares only, priced off the strategy's NAV),
-execution lives in one strategy contract (supply USDC on Moonwell → borrow cbBTC + ETH → Aerodrome
+execution lives in one strategy contract (supply USDC on Moonwell → borrow the CL leg(s) → Aerodrome
 concentrated LP → farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and
 Mamo's backend is the agent — the same trusted-operator model as Mamo today: it manages the position but
 can never withdraw user funds. Users redeem anytime at NAV.
@@ -15,7 +15,8 @@ can never withdraw user funds. Users redeem anytime at NAV.
 | Chain | Base |
 | Deposit asset | USDC (ETH & cbBTC added later) |
 | Structure | Pooled fund — many depositors, one shared position |
-| Strategy | Supply USDC → borrow cbBTC + ETH → Aerodrome CL LP → farm & compound AERO |
+| Strategy | Supply USDC → borrow the CL leg(s) → Aerodrome CL LP → farm & compound AERO |
+| Pool shape | Per-clone, derived at init: *two borrowed legs* (e.g. cbBTC + ETH) **or** *asset-as-leg-B* (borrow one volatile leg, pair it with USDC). **Nothing on this integration surface branches on it** — see below. |
 | Posture | Leveraged Aerodrome CL LP + AERO emissions carry |
 | Custody | Agent manages the position, can never withdraw user funds; users redeem anytime |
 | Lifetime | Runs indefinitely — no fixed term; the terminal `Settled` state is driven by the vault owner (MAMO multisig) |
@@ -44,6 +45,47 @@ fund-ops runbook, not this integration boundary.
   guard `"Invalid sherwoodStrategy address"`; the address-book key is still
   `SHERWOOD_LEVERAGED_AERO_STRATEGY`. Historical names — they point at the in-repo
   `LeveragedAerodromeCLStrategy` clone. Nothing on this integration surface was renamed or resigned.
+
+---
+
+## Pool shape (`legBIsAsset`) — the backend does **not** branch on it
+
+The strategy supports two pool shapes, derived per clone at init and readable as
+`strategy.layout().legBIsAsset` (`true` ⇒ the leg-B slot **is** USDC, so the fund borrows one volatile leg
+and pairs it with USDC; `false` ⇒ both legs are borrowed). The distinction is real and it changes several
+**fund-ops** behaviors — see the rebalancer runbook
+([`LEVERAGED_AERO_REBALANCER.md`](./LEVERAGED_AERO_REBALANCER.md) §G).
+
+**On this integration boundary it changes nothing, and that is the load-bearing statement.** Verified
+against the code rather than assumed:
+
+| Backend call | Shape-dependent? | Why |
+|---|---|---|
+| `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
+| `depositIdle(minShares)` | No | USDC in, shares out. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. |
+| `fulfillRedeem(id)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
+| `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
+
+So: **do not add a `legBIsAsset` branch to the account keeper.** Read it only if you are surfacing the
+fund's composition in ops tooling.
+
+Two fund-ops reads exist for that tooling and are worth knowing about even though this doc's loop does not
+call them — both are plain views on the strategy clone:
+
+```solidity
+function targetLtvBps() external view returns (uint16);                   // standing target LTV
+function hedgedDebt() external view returns (uint128 legA, uint128 legB); // hedged borrow principal per leg
+```
+
+`hedgedDebt().legB` is structurally **0** in asset-mode (leg B is the unit of account and is never
+borrowed) — treat a zero there as "shape", not as "missing data".
+
+**One place the shape leaks into the SLA loop indirectly.** Step 2 of the keeper loop below optionally
+levers **down** before a fulfill. That direction is safe in both shapes and, in asset-mode, actually
+*frees* idle USDC. Levering **up** is the asymmetric one — in asset-mode it **consumes** idle USDC and
+reverts `InsufficientIdleForLeverUp(needed, available)` if the book is short — but lever-up is not part of
+the fulfill loop and belongs to the fund-ops runbook. If the same service ever drives both, size lever-ups
+against available idle.
 
 ---
 
