@@ -1,9 +1,11 @@
 # LeveragedAerodromeCLStrategy — audit package
 
 This document is the entry point for auditing `src/leveraged-aero/` plus `src/LeveragedAeroVault.sol`,
-the contracts of the Mamo **leveraged Aerodrome LP fund**: a net-short, leveraged Aerodrome Slipstream
+the contracts of the Mamo **leveraged Aerodrome LP fund**: a leg-neutral, leveraged Aerodrome Slipstream
 CL position (supply USDC to Moonwell → borrow two legs → concentrated LP → farm & compound the gauge
-reward) run by the Mamo backend as operator against a minimal in-repo share vault.
+reward) run by the Mamo **rebalancer** as operator (the strategy's `proposer`) against a minimal in-repo
+share vault. Leg-neutral by construction: each long LP leg is funded by debt in that same asset, so the
+fund is not net-short the legs.
 
 ## Provenance
 

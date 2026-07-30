@@ -7,8 +7,8 @@ position that earns through emissions. Custody and execution are deliberately se
 ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares only, priced off the strategy's NAV),
 execution lives in one strategy contract (supply USDC on Moonwell → borrow the CL leg(s) → Aerodrome
 concentrated LP → farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and
-Mamo's backend is the agent — the same trusted-operator model as Mamo today: it manages the position but
-can never withdraw user funds. Users redeem anytime at NAV.
+Mamo's **rebalancer** service is the agent — the same trusted-operator model as Mamo today: it manages the
+position but can never withdraw user funds. Users redeem anytime at NAV.
 
 | At a glance | |
 |---|---|
@@ -24,23 +24,23 @@ can never withdraw user funds. Users redeem anytime at NAV.
 **Where this guide sits.** Mamo users don't touch the fund contracts directly. Each user gets a
 per-user **Mamo account** (`MamoLeveragedAeroStrategy`) that custodies their fund shares and exposes a
 USDC-in / USDC-out surface. This guide is the backend integration surface for that account system:
-provisioning, the `depositIdle` nudge, and fulfilling async withdrawals. (Running the fund itself —
-deploy/compound/re-range/leverage — is the agent's fund-ops surface, a separate runbook.)
+provisioning and the `depositIdle` nudge. (Running the fund itself — deploy/compound/re-range/leverage
+**and fulfilling async withdrawals** — is the rebalancer's fund-ops surface, a separate runbook:
+[`LEVERAGED_AERO_REBALANCER.md`](./LEVERAGED_AERO_REBALANCER.md).)
 
 ---
 
 This is the backend contract-integration guide for the **leveraged Aerodrome LP** product. The backend
 integrates with the per-user **Mamo account** (`MamoLeveragedAeroStrategy`), its **factory**
-(`MamoLeveragedAeroStrategyFactory`), and the **registry** (`MamoStrategyRegistry`) — **plus exactly one
-strategy touchpoint** (`fulfillRedeem`, below). Everything else about the strategy (deployIdle / compound
-/ rerange / adjustLeverage / deleverage — the fund-ops surface) is a separate concern covered by the
-fund-ops runbook, not this integration boundary.
+(`MamoLeveragedAeroStrategyFactory`), and the **registry** (`MamoStrategyRegistry`). The strategy itself
+(`fulfillRedeem` / deployIdle / compound / rerange / adjustLeverage / deleverage — the whole fund-ops
+surface) is **not** a backend touchpoint: every one of those is `onlyProposer`, and the proposer is the
+**rebalancer**, covered by [`LEVERAGED_AERO_REBALANCER.md`](./LEVERAGED_AERO_REBALANCER.md).
 
 - USDC (6dp) in and out; vault shares are **12dp** (`LeveragedAeroVault.decimals() == assetDecimals + 6`),
   custodied by each account, never handled by users.
 - The account is `onlyOwner` for user actions; the backend's contract-level responsibilities are
-  **account provisioning**, the optional **`depositIdle` nudge**, and **`fulfillRedeem` of async
-  withdrawals**.
+  **account provisioning** and the optional **`depositIdle` nudge** — that is all.
 - **Legacy naming, unchanged ABI:** the account still exposes `sherwoodStrategy()` and the initializer
   guard `"Invalid sherwoodStrategy address"`; the address-book key is still
   `SHERWOOD_LEVERAGED_AERO_STRATEGY`. Historical names — they point at the in-repo
@@ -121,18 +121,28 @@ Base registry that is `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` (the registry
 members; index ≠ 0 members do **not** pass the `depositIdle` gate). This is **not** the
 `MAMO_BACKEND` address-book entry. So:
 
-| Backend action | Key that must sign | Address (Base) |
-|---|---|---|
-| `depositIdle(minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` |
-| `fulfillRedeem(id)` on the strategy | strategy **proposer** = `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
-| `createStrategyForUser(user)` on the factory | factory BACKEND_ROLE = `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
+| Action | Key that must sign | Address (Base) | Whose key |
+|---|---|---|---|
+| `createStrategyForUser(user)` on the factory | factory BACKEND_ROLE = `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` | backend |
+| `depositIdle(minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` | backend |
+| `fulfillRedeem(id)` on the strategy | strategy **proposer** = `MAMO_REBALANCER` | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | **rebalancer — NOT the backend** |
 
-Signing `depositIdle` with the proposer key (or any non-index-0 backend key) reverts `"Not owner or
-backend"`. Wire the two keys explicitly.
+Signing `depositIdle` with a non-index-0 backend key reverts `"Not owner or backend"`. Wire the keys
+explicitly, and note that the two backend keys above are **different addresses**.
 
-> **The `proposer` role survives the de-Sherwood change.** The backend is still the strategy's proposer —
-> the role is a per-clone immutable set at `initialize(vault_, proposer_, data)` on the strategy itself,
-> not something the old Sherwood governance granted. This two-key table is unchanged and still correct.
+> ### ⚠️ The strategy `proposer` is the REBALANCER, not `MAMO_BACKEND`
+>
+> Earlier revisions of this guide claimed the backend was the strategy's proposer. **That was wrong.** The
+> strategy has exactly one operator role (`proposer`, a per-clone immutable set at
+> `initialize(vault_, proposer_, data)`), and it is held by a **dedicated rebalancer address**
+> (`MAMO_REBALANCER`, `pooled.proposer` in `script/tenderly/leveraged-aero-vnet.json`) — deliberately
+> **not** `MAMO_BACKEND`. The split is the point: account-layer keys must not reach the levered book's
+> operator surface.
+>
+> **`fulfillRedeem` is `onlyProposer`, so the REBALANCER fulfils user withdrawal requests — not the
+> backend.** The backend drives the account layer (`createStrategyForUser`, `depositIdle`); the rebalancer
+> drives the strategy (`compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`). Confirm with
+> `strategy.proposer()` before wiring any keeper.
 
 ---
 
@@ -157,59 +167,66 @@ Revert strings: `"Invalid user address"`, `"Only backend or user can create stra
 
 ---
 
-## The one strategy touchpoint — `fulfillRedeem`
+## Async withdrawals — the backend does NOT fulfil them
 
-Async withdrawals are the only place the backend reaches past the Mamo account into the strategy. The
-account's `ILeveragedAeroCLStrategy` interface **deliberately omits** `fulfillRedeem` (it is a
-proposer-only op, out of the wrapper's surface), so the backend calls it on the strategy clone directly,
-as the strategy **proposer**:
+There is **no** backend touchpoint on the strategy. `fulfillRedeem` is `onlyProposer` and the proposer is
+the **rebalancer** (`MAMO_REBALANCER`), so the fulfil loop belongs to the fund-ops keeper documented in
+[`LEVERAGED_AERO_REBALANCER.md`](./LEVERAGED_AERO_REBALANCER.md) §C:
 
 ```solidity
-// LeveragedAerodromeCLStrategy (ERC-1167 clone) — onlyProposer, requires state == Executed
+// LeveragedAerodromeCLStrategy (ERC-1167 clone) — onlyProposer (rebalancer), requires state == Executed
 function fulfillRedeem(uint256 id) external;
 ```
 
-Strategy events for indexing (note: `owner` here is the **Mamo account address**, i.e. the
+The account's `ILeveragedAeroCLStrategy` interface **deliberately omits** `fulfillRedeem` for exactly this
+reason: it is out of the wrapper's surface and out of the backend's. Calling it with a backend key reverts
+`NotProposer()`.
+
+What the backend **does** own here is **observability** — the async flow is the user's slowest path, so the
+backend indexes it and drives product state / notifications off it, and escalates to the rebalancer when the
+SLA is at risk. Strategy events for that (note: `owner` here is the **Mamo account address**, i.e. the
 `msg.sender` that escrowed the shares — not the end user):
 
 | Event | Meaning |
 |---|---|
 | `RedeemRequested(uint256 indexed id, address indexed owner, uint256 shares)` | request escrowed (owner = account) |
-| `RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)` | backend fulfilled; USDC paid to the account |
+| `RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)` | **rebalancer** fulfilled; USDC paid to the account |
 | `RedeemCancelled(uint256 indexed id, address indexed owner, uint256 shares)` | request cancelled by the account owner |
 | `RedeemEmergency(uint256 indexed id, address indexed owner, uint256 assetsOut)` | deadman self-fulfill after the window |
 
-### Keeper loop
+### Who does what
 
 ```mermaid
 sequenceDiagram
     participant A as User account
-    participant B as Backend keeper (proposer)
+    participant BE as Mamo backend (account layer)
+    participant RB as Rebalancer keeper (proposer)
     participant S as Strategy (LeveragedAerodromeCL)
 
-    A-->>B: WithdrawRequested(id, shares, minAssetsOut)   (account event)
-    Note over B: optionally deleverage first (adjustLeverage) — fund-ops concern, separate runbook
-    B->>S: fulfillRedeem(id)                              (proposer key)
+    A-->>BE: WithdrawRequested(id, shares, minAssetsOut)   (account event — backend indexes it)
+    A-->>RB: RedeemRequested(id, account, shares)          (strategy event — the keeper trigger)
+    Note over RB: optionally adjustLeverage down first so the unwind self-funds
+    RB->>S: fulfillRedeem(id)                              (PROPOSER key = rebalancer)
     S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
     Note over A: owner then sweeps via claimWithdrawnUsdc() → UsdcClaimed(amount)
+    Note over BE: backend observes RedeemFulfilled / UsdcClaimed and updates product state
 ```
 
-1. Watch each account's `WithdrawRequested(id, shares, minAssetsOut)` (equivalently the strategy's
-   `RedeemRequested(id, account, shares)`). The `id` is the strategy request id — pass it straight to
-   `fulfillRedeem`.
-2. Optionally deleverage first so the oracle-free proportional unwind self-funds its IL (via
-   `adjustLeverage` — **fund-ops**, separate runbook; not part of this integration surface).
-3. `fulfillRedeem(id)` with the **proposer** key. USDC lands on the account; the owner claims it with
-   `claimWithdrawnUsdc()`.
+1. The backend watches each account's `WithdrawRequested(id, shares, minAssetsOut)` (equivalently the
+   strategy's `RedeemRequested(id, account, shares)`) for UX/product state — **not** to fulfil it.
+2. The rebalancer optionally levers down first (`adjustLeverage`) so the oracle-free proportional unwind
+   self-funds its IL, then calls `fulfillRedeem(id)` with the **proposer** key.
+3. USDC lands on the account; the **owner** claims it with `claimWithdrawnUsdc()`.
 4. Confirm downstream via the account's `UsdcClaimed(amount)` (owner-initiated) or the strategy's
    `RedeemFulfilled`.
 
 ### SLA — the 2-day deadman
 
-`FULFILL_WINDOW = 2 days`. If the backend does not fulfill within that window, the request owner (the
+`FULFILL_WINDOW = 2 days`. If the **rebalancer** does not fulfil within that window, the request owner (the
 account, owner-gated) can trustlessly self-service via `emergencyWithdraw(id, minAssetsOut)` →
-`emergencyRedeem` (oracle-free proportional unwind). Treat 2 days as the hard fulfillment SLA:
-unfulfilled requests become user-executable and remove the backend from the loop.
+`emergencyRedeem` (oracle-free proportional unwind). 2 days is the hard fulfillment SLA — it is the
+rebalancer's to meet, and the backend's to alert on: unfulfilled requests become user-executable and remove
+the operator from the loop.
 
 ---
 
@@ -238,7 +255,9 @@ would silently re-lock users' fulfilled withdrawals.
 |---|---|---|---|
 | `createStrategyForUser(user)` | Factory | factory BACKEND_ROLE or `user` | provisioning; deterministic address |
 | `depositIdle(minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent |
-| `fulfillRedeem(id)` | Strategy clone | proposer (`MAMO_BACKEND`) | the one strategy touchpoint |
+
+That is the whole backend write surface. `fulfillRedeem(id)` on the strategy clone is **not** on it —
+`onlyProposer`, i.e. the **rebalancer** (`MAMO_REBALANCER`), never `MAMO_BACKEND`.
 
 Account entrypoints the backend does **not** call (owner-only, for reference): `deposit` (permissionless,
 but normally user-driven), `withdraw` / `withdrawAll` / `requestWithdraw` / `cancelWithdraw` /
@@ -254,8 +273,8 @@ Account (`MamoLeveragedAeroStrategy`):
 |---|---|
 | `Deposit(address indexed depositor, uint256 assets, uint256 shares)` | fund inflows (deposit/depositIdle) |
 | `Withdraw(address indexed owner, uint256 shares, uint256 assetsOut)` | fast-path exits |
-| `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | **keeper trigger** for `fulfillRedeem` |
-| `WithdrawCancelled(uint256 indexed id)` | request cancelled — drop from the fulfill queue |
+| `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | pending async withdrawal — product state + SLA alerting (the `fulfillRedeem` trigger itself is the **rebalancer's**) |
+| `WithdrawCancelled(uint256 indexed id)` | request cancelled — drop it from the pending set |
 | `WithdrawEmergency(uint256 indexed id, uint256 assetsOut)` | deadman fired (backend missed SLA) |
 | `UsdcClaimed(uint256 amount)` | owner swept fulfilled USDC |
 
@@ -290,7 +309,7 @@ Strategy (custom errors, decode by selector): `NotExecuted()`,
 Vault (`LeveragedAeroVault`, `require` strings the backend can hit): `"LAV: deposits closed"` — every
 share mint, including `deposit`/`depositIdle` through an account, while the vault owner has
 `depositsOpen == false`. It is the **only** issuance gate (no depositor whitelist, no pause), and
-withdrawals are deliberately not gated on it, so the fulfill loop is unaffected. Read `depositsOpen()`
+withdrawals are deliberately not gated on it, so the rebalancer's fulfil loop is unaffected. Read `depositsOpen()`
 before a `depositIdle` nudge and treat the revert as retryable, not as a bad request.
 
 ---
@@ -306,40 +325,44 @@ in the path any more. Operationally for the backend:
 - After `settleStrategy()` the whole book is unwound and the realized USDC sits on the **vault**. Holders
   exit permissionlessly with `vault.redeemSettled(shares)`, which needs the shares in the caller's own
   wallet — i.e. each account owner first pulls them out with `recoverERC20(vaultShares, owner, …)`. The
-  backend has **no role** in the Settled exit; drop accounts from the fulfill queue once state is
+  backend has **no role** in the Settled exit; drop accounts from the async watch list once state is
   `Settled`.
 
 ---
 
 ## Staging
 
-> ⚠️ **The live staging instance is STALE.** It still runs the pre-de-Sherwood stack: the vault beneath the
-> accounts is Sherwood's `SyndicateVault`, so `redeemSettled` does not exist there and `setOpenDeposits` /
-> `activateStrategy` / `settleStrategy` behave as the old vault did. The **account + factory + registry**
-> surface and the `fulfillRedeem` touchpoint are unaffected and still valid for BE work. A redeploy onto
-> the `LeveragedAeroVault` architecture is **pending** (deploy tooling not written yet). Re-read
-> `script/tenderly/leveraged-aero-vnet.json` and `docs/LEVERAGED_AERO_VNET_RUNBOOK.md` before wiring an
-> environment — the rows below snapshot the old instance and the config file already lists a newer account
-> impl/factory pair.
+> **The staging instance runs the current in-repo stack** (vault generation 2): `LeveragedAeroVault`
+> replaces Sherwood's `SyndicateVault`, so `depositsOpen()` / `setOpenDeposits` / `activateStrategy` /
+> `settleStrategy` / `redeemSettled` are all the in-repo ones. No governor, no proposal lifecycle.
+>
+> ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table — a harness
+> redeploy changes these addresses (and a new pooled layer invalidates the account factory, which binds the
+> strategy clone at construction). Read the config and `docs/LEVERAGED_AERO_VNET_RUNBOOK.md` before wiring
+> an environment.
 
-| Field | Value |
-|---|---|
-| Network | Base fork (Tenderly Virtual TestNet) — **stale instance, pending redeploy** |
-| RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Factory | see `script/tenderly/leveraged-aero-vnet.json` (`mamo.accountFactory`) |
-| Account implementation | see `script/tenderly/leveraged-aero-vnet.json` (`mamo.accountImplementation`) |
-| Strategy type id | `5` |
-| Vault (shares, 12dp) | Sherwood-era `SyndicateVault` on the current instance — **not** `LeveragedAeroVault` |
-| Strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (Sherwood-era build) |
+| Field | Value | Config key |
+|---|---|---|
+| Network | Base fork (Tenderly Virtual TestNet), chainId `8453` | `chainId` |
+| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
+| Factory | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
+| Account implementation | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
+| Registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
+| Strategy type id | `5` | `strategyTypeId` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
+| Strategy clone | `0xA26557fA6823881327fca5b8C4eD5857997A49da` | `pooled.strategyClone` |
+| Strategy `proposer` (rebalancer — fulfils redeems) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
+| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
 
 ---
 
 ## Backend checklist
 
-- [ ] Provision accounts via `createStrategyForUser` with the factory `MAMO_BACKEND` key; guard with `computeStrategyAddress`.
+- [ ] Provision accounts via `createStrategyForUser` with the factory `MAMO_BACKEND` key (`0x2Ab0…5e73`); guard with `computeStrategyAddress`.
 - [ ] Sign `depositIdle` with registry BACKEND_ROLE **member 0** (`0x7cb2…1f4c`), and only on explicit re-deposit intent — never as an auto-sweep.
-- [ ] Sign `fulfillRedeem` with the strategy **proposer** key (`MAMO_BACKEND`, `0x2Ab0…5e73`).
-- [ ] Keeper watches `WithdrawRequested`, (optionally deleverages), `fulfillRedeem(id)`, confirms via `RedeemFulfilled` / `UsdcClaimed`.
-- [ ] Treat `FULFILL_WINDOW = 2 days` as the fulfillment SLA; monitor for `WithdrawEmergency` (missed SLA).
+- [ ] Do **not** wire a backend key to `fulfillRedeem` — it is `onlyProposer` (the **rebalancer**, `0x73f6…8FAf`) and reverts `NotProposer()` for the backend.
+- [ ] Index `WithdrawRequested` / `RedeemFulfilled` / `UsdcClaimed` for product state, and alert the rebalancer when a request nears its SLA.
+- [ ] Treat `FULFILL_WINDOW = 2 days` as the (rebalancer's) fulfillment SLA; monitor for `WithdrawEmergency` (missed SLA).
 - [ ] Gate deposit nudges on `strategy.state() == Executed` **and** `vault.depositsOpen()`; treat `"LAV: deposits closed"` as retryable.
-- [ ] Stop fulfilling once the strategy is `Settled` — exits then run owner-side via `recoverERC20` + `vault.redeemSettled`, with no backend involvement.
+- [ ] Stop nudging deposits once the strategy is `Settled` — exits then run owner-side via `recoverERC20` + `vault.redeemSettled`, with no backend involvement.

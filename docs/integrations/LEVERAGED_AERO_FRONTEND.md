@@ -7,8 +7,8 @@ position that earns through emissions. Custody and execution are deliberately se
 ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares only, priced off the strategy's NAV),
 execution lives in one strategy contract (supply USDC on Moonwell → borrow the CL leg(s) → Aerodrome
 concentrated LP → farm & compound AERO, with onchain leverage caps and a permissionless deleverage), and
-Mamo's backend is the agent — the same trusted-operator model as Mamo today: it manages the position but
-can never withdraw user funds. Users redeem anytime at NAV.
+Mamo's **rebalancer** service is the agent — the same trusted-operator model as Mamo today: it manages the
+position but can never withdraw user funds. Users redeem anytime at NAV.
 
 | At a glance | |
 |---|---|
@@ -50,24 +50,27 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
 
 ## Contracts & chain (staging)
 
-> ⚠️ **The live staging instance is STALE.** It still runs the pre-de-Sherwood stack: the vault beneath
-> the accounts is Sherwood's `SyndicateVault`, so `redeemSettled` **does not exist there** and the Settled
-> flow below cannot be exercised on it. The **account** surface (factory, implementation, ABI, every flow
-> in this guide) is unaffected and still valid for FE work. A redeploy onto the `LeveragedAeroVault`
-> architecture is **pending** (the deploy tooling for it is not written yet). Re-read
-> `script/tenderly/leveraged-aero-vnet.json` and `docs/LEVERAGED_AERO_VNET_RUNBOOK.md` before wiring an
-> environment — the addresses below are a snapshot of the old instance and the config file already lists a
-> newer account impl/factory pair.
+> **The staging instance now runs the current in-repo stack** (vault generation 2): the vault beneath the
+> accounts is `LeveragedAeroVault`, so `depositsOpen()` and the permissionless `redeemSettled` Settled
+> flow below are both live and exercisable. Sherwood is gone — no `SyndicateVault`, no governor, no
+> propose→vote→execute.
+>
+> ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table. Addresses
+> change whenever a harness redeploys; read the config file (and
+> `docs/LEVERAGED_AERO_VNET_RUNBOOK.md`) before wiring an environment.
 
-| Field | Value |
-|---|---|
-| Network | Base fork (Tenderly Virtual TestNet) — **stale instance, pending redeploy** |
-| RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Factory | see `script/tenderly/leveraged-aero-vnet.json` (`mamo.accountFactory`) |
-| Account implementation | see `script/tenderly/leveraged-aero-vnet.json` (`mamo.accountImplementation`) |
-| Strategy type id | `5` |
-| Vault (shares, 12dp) | Sherwood-era `SyndicateVault` on the current instance — **not** `LeveragedAeroVault` |
-| Strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (Sherwood-era build) |
+| Field | Value | Config key |
+|---|---|---|
+| Network | Base fork (Tenderly Virtual TestNet), chainId `8453` | `chainId` |
+| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
+| Factory | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
+| Account implementation | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
+| Registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
+| Strategy type id | `5` | `strategyTypeId` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
+| Strategy clone | `0xA26557fA6823881327fca5b8C4eD5857997A49da` | `pooled.strategyClone` |
+| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
 
 > Production addresses are published separately at deploy.
 
@@ -328,7 +331,13 @@ sequenceDiagram
 ## Flow 3 — async withdraw (request → pending → claim)
 
 For sizes the fast path can't serve, or when the oracle is down, the owner escrows shares into a request;
-the backend fulfills it; the USDC lands **on the account** as idle balance; the owner sweeps it.
+the **rebalancer** fulfils it; the USDC lands **on the account** as idle balance; the owner sweeps it.
+
+> **Who fulfils:** `fulfillRedeem` is `onlyProposer` on the strategy, and the proposer is the dedicated
+> **rebalancer** address — **not** the Mamo backend. The backend drives the account layer
+> (`createStrategyForUser`, `depositIdle`); the rebalancer drives the strategy (`compound`, `rerange`,
+> `adjustLeverage`, `fulfillRedeem`). Irrelevant to the frontend's calls, but do not label the pending
+> state "waiting for the backend" in copy or in ops tooling.
 
 ```solidity
 function requestWithdraw(uint256 shares, uint256 minAssetsOut) external returns (uint256 id); // onlyOwner
@@ -337,7 +346,7 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 ```
 
 > **Value floats until fulfill.** `requestWithdraw` escrows the shares but does **not** freeze a price —
-> the escrowed shares keep bearing the position's PnL until the backend fulfills. The USDC the user
+> the escrowed shares keep bearing the position's PnL until the rebalancer fulfils. The USDC the user
 > ultimately receives is priced at fulfill time, not request time. Surface this clearly (e.g. "amount
 > finalizes when processed") and do not display the request-time preview as a locked payout.
 
@@ -346,14 +355,14 @@ sequenceDiagram
     participant U as User wallet
     participant A as Account
     participant S as Strategy (LeveragedAerodromeCL)
-    participant B as Mamo backend
+    participant B as Mamo rebalancer (proposer)
 
     U->>A: requestWithdraw(shares, minAssetsOut)
     A->>S: forceApprove(shares) + requestRedeem
     S-->>A: id
     A-->>U: WithdrawRequested(id, shares, minAssetsOut)
     Note over U: state = PENDING — show request + offer cancelWithdraw(id)
-    B->>S: fulfillRedeem(id)  (backend, off-frontend)
+    B->>S: fulfillRedeem(id)  (rebalancer, off-frontend)
     S-->>A: USDC lands ON the account (idle)
     Note over U,A: poll usdc.balanceOf(account) → claimable
     U->>A: claimWithdrawnUsdc()
@@ -373,7 +382,7 @@ the account's idle USDC balance:
 
 ## Flow 4 — emergency deadman withdraw
 
-If the backend never fulfills a request, after a **2-day** fulfill window the owner can trustlessly
+If the rebalancer never fulfils a request, after a **2-day** fulfill window the owner can trustlessly
 self-service the request; USDC is forwarded to the owner in the same tx.
 
 ```solidity

@@ -154,8 +154,8 @@ POST once by hand and record the id. Do not rely on a harness to keep it alive.
 | Field | Where it's used |
 |---|---|
 | vnet id | teardown / bookkeeping |
-| **Admin RPC** | every write in Phases B and C; `TENDERLY_VNET_RPC_URL` (accepts `eth_sendTransaction` from any unlocked sender **and** serves reads) |
-| Public RPC | read-only `cast` verification; the value published in `script/tenderly/leveraged-aero-vnet.json` |
+| **Admin RPC** | every write in Phases B and C; `TENDERLY_VNET_RPC_URL` (accepts `eth_sendTransaction` from any unlocked sender **and** serves reads). **Store it in 1Password, never in a committed file** — `.env` and `adminRpc` in the config stay pointers, not URLs |
+| Public RPC | read-only `cast` verification; the only RPC published in `script/tenderly/leveraged-aero-vnet.json` (`publicRpc`) and in docs |
 | fork block | reproducibility |
 
 ---
@@ -560,8 +560,8 @@ REG=0x46a5624C2ba92c08aBA4B206297052EDf14baa92     # MAMO_STRATEGY_REGISTRY
 VAULT=0x...        STRAT=0x...
 IMPL=0x...         FACTORY=0x...
 MULTISIG=0x26c158A4CD56d148c554190A95A921d90F00C160
-BACKEND=0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73
-REBALANCER=0x73f6B456d063F78129113D42DBC315b9eEee8FAf   # MAMO_REBALANCER (vnet default)
+BACKEND=0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73        # MAMO_BACKEND — factory BACKEND_ROLE only
+REBALANCER=0x73f6B456d063F78129113D42DBC315b9eEee8FAf   # MAMO_REBALANCER (vnet default) — the strategy proposer
 USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 ```
 
@@ -615,9 +615,10 @@ FreshFeed pattern (constraint 2). Everything below is driven by one in-repo help
 
 ```bash
 # admin (write-capable) RPC for THE leveraged-aero instance — NOT the shared TENDERLY_VNET_RPC_URL,
-# which points at the LPV2 vnet. The helper prefers this var and resolves every address from
-# script/tenderly/leveraged-aero-vnet.json.
-export LEVERAGED_AERO_ADMIN_RPC_URL="https://virtual.base.<...>.rpc.tenderly.co/<admin-uuid>"
+# which points at the LPV2 vnet. Get it from 1Password; it is deliberately never committed to this repo
+# (the config file records only the public RPC). The helper prefers this var and resolves every address
+# from script/tenderly/leveraged-aero-vnet.json.
+export LEVERAGED_AERO_ADMIN_RPC_URL="https://virtual.base.<...>.rpc.tenderly.co/<admin-uuid>"   # 1Password
 
 ./script/tenderly/compound-cycle.sh check-feeds   # ← the gate. Run it BEFORE and AFTER every warp.
 ./script/tenderly/compound-cycle.sh snap T0
@@ -730,7 +731,11 @@ tighten the proposer bound onto the live quote rather than relying on the 1 % or
 > `eth_call` *before* compounding — `mUSDC.balanceOfUnderlying(strategy)` and
 > `mLegA.borrowBalanceCurrent(strategy)` are non-view and therefore simulate accrual.
 
-### Live results — 2026-07-29 on the persistent clone (`0x7A5A…01Fd` / vault `0x8BcA…B0F5`)
+### Live results — 2026-07-29 on clone `0x7A5A…01Fd` / vault `0x8BcA…B0F5` (since superseded)
+
+> **Historical record, kept for the measurements.** That clone/vault pair has since been replaced on the
+> same instance; the current pair is `0xA265…49da` / `0x8343…22D7` (see *Current live instance* below and
+> `script/tenderly/leveraged-aero-vnet.json`). The mechanics below still hold — only the addresses moved.
 
 Asset-mode cbBTC/USDC clone, `state() == 1`, proposer `0x73f6…8FAf`, tokenId `73341624`, fee config
 `managementFeeBps 100` / `performanceFeeBps 1000`, `targetLtvBps 5000`, `maxSlippageBps 100`.
@@ -820,34 +825,59 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 
 ---
 
-## Current live instance — STALE (Sherwood-era stack)
+## Current live instance — vault generation 2 (in-repo stack)
 
-> **This instance predates the de-Sherwood change (PR #66).** The vault beneath it is Sherwood's
-> `SyndicateVault`, deployed from the old two-repo Phase B — **not** `LeveragedAeroVault`. Concretely:
-> `redeemSettled` does **not** exist there, the getter is `openDeposits()` rather than
-> `depositsOpen()`, and the lifecycle is still governor-driven (live proposal id `3`), so nothing in
-> Phase B above describes it.
+> **This instance carries the post-de-Sherwood stack**, deployed by Phase B + Phase C above:
+> `LeveragedAeroVault` + a `LeveragedAerodromeCLStrategy` clone, plus the account layer. No
+> `SyndicateVault`, no governor, no proposal lifecycle — the getter is `depositsOpen()` and the
+> post-settlement exit is the permissionless `redeemSettled(shares)`.
 >
-> **It is still usable for account-side FE/BE work**: `MamoLeveragedAeroStrategy` and
-> `ILeveragedAeroCLStrategy` are code-untouched by PR #66 (runtime byte-identical; only a NatSpec hunk
-> changed), so the account ABI, the factory, and the whole user lifecycle behave exactly as they will
-> on the new stack. Do not use it to validate anything vault-shaped.
+> **`script/tenderly/leveraged-aero-vnet.json` is authoritative**; this table is the human copy and can
+> lag it. Re-run both harnesses after any refresh and re-read the config before wiring anything.
 >
-> A fresh instance built with Phase B above supersedes this table — replace it then. The authoritative
-> machine-readable values are in `script/tenderly/leveraged-aero-vnet.json`; this table is the human
-> copy and can lag it.
+> **Never commit the admin RPC.** It is write-capable (unlocked impersonation of every privileged role,
+> `tenderly_setCode`, `tenderly_setErc20Balance`, time warps). It lives in **1Password** only — the config
+> file records the string `"1Password (write-capable — never committed)"` in `adminRpc` for exactly this
+> reason. Only the **public** RPC may appear in docs.
 
-| Field | Value |
-|---|---|
-| vnet id | `8975a20b-5cf0-4399-9165-08e2b19229db` |
-| chainId | `8453` |
-| fork block | `48,901,646` |
-| Admin RPC | `https://virtual.base.eu.rpc.tenderly.co/e6961d2a-4711-42eb-b4c1-2a42cbc17d28` |
-| Public RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Vault (**Sherwood `SyndicateVault`**) | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` |
-| Strategy clone | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` (PR #14 build; previous clone `0x168a…FB4B` is Settled) |
-| Live proposal id (Sherwood governor) | `3` (1 = rejected artifact, 2 = settled) — clone init: width `4000` raw ticks, band `[200, 20000]` |
-| Leveraged-aero template (Sherwood-deployed) | `0x8eE3AD5B3b574b4253985a7F32aB1231474CA381` |
-| SyndicateGovernor (**no longer part of the stack**) | `0x430FA5659cCf6E9c1586007a0A2B7760fb75e105` |
-| Mamo account impl | `0x699318E0641518eF39418a8D86F93BF8b0715c88` |
-| Mamo account factory (typeId 5, latest) | `0x9f548228A41d18e2DC736ceF048cfBeC8fFC55E6` |
+| Field | Value | Config key |
+|---|---|---|
+| vnet id | `8975a20b-5cf0-4399-9165-08e2b19229db` | — |
+| chainId | `8453` | `chainId` |
+| fork block | `48,901,646` | — |
+| **Admin RPC** (writes) | **1Password** — write-capable, never committed | `adminRpc` |
+| Public RPC (reads) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Vault generation | `2` — `leveraged-aero-vault` (`depositsOpen()`, `cloneAndBind`, `redeemSettled`) | `vaultGeneration` |
+| Vault (`LeveragedAeroVault`) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
+| Strategy clone (operator target) | `0xA26557fA6823881327fca5b8C4eD5857997A49da` — width `4000` raw ticks, band `[200, 20000]` | `pooled.strategyClone` |
+| Strategy template (clone source) | `0xafcA85Df8e058A7a755889884d87026e8e118943` | `pooled.template` |
+| Strategy `proposer` (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
+| LP pool (Slipstream, tickSpacing 100; asset-mode cbBTC/USDC) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
+| Seed | `100000000000` = 100,000 USDC (6dp) | `pooled.seed` |
+| Mamo account impl | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
+| Mamo account factory (typeId 5, latest) | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
+| Mamo strategy registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
+| Strategy type id | `5` | `strategyTypeId` |
+| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
+
+FreshFeed-overridden venue feeds (mainnet addresses, code-replaced per B.0 — `updatedAt` tracks
+`block.timestamp`, so they are never stale and warping is safe):
+
+| Feed | Address | Config key |
+|---|---|---|
+| leg A / USD (cbBTC) | `0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F` | `feeds.legAUsd` |
+| leg B / USD | `0x7e860098F58bBFC8648a4311b374B1D669a2bc6B` | `feeds.legBUsd` |
+| USDC / USD | `0x7e860098F58bBFC8648a4311b374B1D669a2bc6B` | `feeds.usdcUsd` |
+| AERO / USD | `0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0` | `feeds.aeroUsd` |
+| L2 sequencer uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` | `feeds.sequencerUptime` |
+
+### Deliberate history — retired, do not target
+
+Kept only so old logs and links resolve. None of these is part of the current stack; all are Sherwood-era
+(vault generation 1: `openDeposits()`, no `redeemSettled`, governor-driven lifecycle).
+
+| Retired | Address | Note |
+|---|---|---|
+| Sherwood `SyndicateVault` | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` | replaced by `LeveragedAeroVault` |
+| `SyndicateGovernor` | `0x430FA5659cCf6E9c1586007a0A2B7760fb75e105` | no longer part of the stack (PR #66) |
+| Sherwood-era clone | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` | `Settled` — historical `Settled`-state reference only |

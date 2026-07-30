@@ -7,8 +7,9 @@ position that earns through emissions. Custody and execution are deliberately se
 ledger is a minimal in-repo vault (`LeveragedAeroVault` — shares plus an owner-driven execute/settle
 lifecycle, no pricing of its own), execution lives in one strategy contract (supply USDC on Moonwell →
 borrow the two CL legs → Aerodrome concentrated LP → farm & compound AERO, with onchain leverage caps and
-a permissionless deleverage), and Mamo's backend is the agent — the same trusted-operator model as Mamo
-today: it manages the position but can never withdraw user funds. Users redeem anytime at NAV.
+a permissionless deleverage), and Mamo's **rebalancer** service is the agent — the same trusted-operator
+model as Mamo today: it manages the position but can never withdraw user funds. Users redeem anytime at
+NAV.
 
 | At a glance | |
 |---|---|
@@ -61,17 +62,29 @@ function proposer() public view returns (address);          // read the operator
 modifier onlyProposer() { if (msg.sender != _proposer) revert NotProposer(); _; }
 ```
 
-On this deployment `proposer() == MAMO_BACKEND == 0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` — the
-Mamo agent. This is the **same** key the account docs call the strategy proposer for `fulfillRedeem`;
-it is **not** the registry `getBackendAddress()` member-0 key used for the account-level `depositIdle`
-nudge (see the backend doc's "two BACKEND_ROLE domains"). Keep the keys wired separately. The role is a
+> ### ⚠️ The `proposer` is `MAMO_REBALANCER` — **not** `MAMO_BACKEND`
+>
+> Earlier revisions of this guide claimed `proposer() == MAMO_BACKEND`. **That was wrong.** Verified live:
+> the proposer is a **dedicated rebalancer address**, `MAMO_REBALANCER` —
+> `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` on the staging instance (`pooled.proposer` in
+> `script/tenderly/leveraged-aero-vnet.json`; mainnet gets the real rebalancer ops key). The two roles are
+> separate **on purpose**, so account-layer keys never reach the levered-book surface.
+>
+> **`fulfillRedeem` is `onlyProposer`, so the REBALANCER fulfils user withdrawal requests — not the
+> backend.** The backend drives the account layer (`createStrategyForUser`, `depositIdle`); the rebalancer
+> drives the strategy (`compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`).
+
+The proposer key is also **not** the registry `getBackendAddress()` member-0 key used for the account-level
+`depositIdle` nudge (see the backend doc's "two BACKEND_ROLE domains") — three distinct addresses in total.
+Read `strategy.proposer()` off the clone you actually target before wiring a keeper. The role is a
 per-clone immutable, granted at `initialize`, and is unaffected by the removal of the Sherwood stack.
+Unless `FEE_RECIPIENT` overrides it at init, the proposer is also the strategy's fee recipient.
 
 Three authorization tiers appear on the strategy:
 
 | Tier | Functions | Gate |
 |---|---|---|
-| Proposer-only | `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams` | `onlyProposer` (== `MAMO_BACKEND`) |
+| Proposer-only | `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams` | `onlyProposer` (== `MAMO_REBALANCER`) |
 | Permissionless | `deleverage` | anyone (by design — safety backstop) |
 | Proposer **or** vault owner | `rescueToVault` | `proposer() \|\| Ownable(vault()).owner()` |
 | Vault-only (lifecycle) | `execute`, `settle` | `onlyVault` — the vault **owner** drives these, not the agent |
@@ -149,7 +162,7 @@ is the authority for it; there is no older 2-arg variant to reconcile against an
 
 | | |
 |---|---|
-| `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain — always read them off the clone you actually point at (the stale staging clone was init'd width **4000**, band **[200, 20000]**). |
+| `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain — always read them off the clone you actually point at (the current staging clone was init'd width **4000**, band **[200, 20000]**). |
 | `minLiq0` / `minLiq1` | Minimum **token0** / **token1** the re-add must consume (two-sided slippage guard) → `InsufficientLiquidity()`. `token0`/`token1` are **pool ordering**, derived at init from `pool.token0()` and exposed as `layout().wethIsToken0` — do not assume which leg is which (see §G). |
 | Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a recenter can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** CL NFT spanning `width/2` raw ticks each side of the current tick → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
 | What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** leg is left idle in the strategy — `nav()` prices it, so the recenter is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
@@ -565,24 +578,33 @@ the clone rather than assuming the launch pair:
 
 ## Staging
 
-> ⚠️ **The live staging instance is STALE.** The clone below is a Sherwood-era build sitting under
-> Sherwood's `SyndicateVault`, so its lifecycle, rescue and fee-config surfaces are the *old* ones — none of
-> `activateStrategy` / `settleStrategy` / `redeemSettled` / `setFeeConfig` exist there, and the clone
-> predates the any-pool init and per-leg swap spacings documented above. A redeploy onto the
-> `LeveragedAeroVault` architecture is **pending** (deploy tooling not written yet). Re-read
-> `script/tenderly/leveraged-aero-vnet.json` and
+> **The live staging instance runs the current in-repo stack** (vault generation 2): a
+> `LeveragedAerodromeCLStrategy` clone bound to `LeveragedAeroVault`, deployed by
+> `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue / fee-config surface documented
+> above (`activateStrategy`, `settleStrategy`, `redeemSettled`, `setFeeConfig`) and the any-pool init +
+> per-leg swap spacings. Sherwood is gone — no `SyndicateVault`, no governor, no proposal lifecycle.
+>
+> ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table — a harness
+> redeploy changes these addresses. Re-read it and
 > [`docs/LEVERAGED_AERO_VNET_RUNBOOK.md`](../LEVERAGED_AERO_VNET_RUNBOOK.md) before wiring an environment,
 > and read every risk/venue value off `layout()` on the clone you actually target.
 
-| Field | Value |
-|---|---|
-| Network | Base fork (Tenderly Virtual TestNet) — **stale instance, pending redeploy** |
-| RPC | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` |
-| Strategy clone (the operator target) | `0x5E22913E4C96f816133fbc8E894F652a4f87C760` — Sherwood-era build, width 4000 / band [200, 20000] |
-| Previous clone | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` — now `Settled` (useful as a real Settled-state test target) |
-| Leveraged-aero template | `0x8eE3AD5B3b574b4253985a7F32aB1231474CA381` |
-| Vault (shares, 12dp) | Sherwood-era `SyndicateVault` on the current instance — **not** `LeveragedAeroVault` |
-| Proposer / agent (`MAMO_BACKEND`) | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` |
+| Field | Value | Config key |
+|---|---|---|
+| Network | Base fork (Tenderly Virtual TestNet), chainId `8453` | `chainId` |
+| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
+| Strategy clone (the operator target) | `0xA26557fA6823881327fca5b8C4eD5857997A49da` — width 4000 / band [200, 20000] | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
+| Strategy template (clone source) | `0xafcA85Df8e058A7a755889884d87026e8e118943` | `pooled.template` |
+| **Proposer / agent** (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
+| LP pool (Slipstream, tickSpacing 100) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
+| Seed (USDC, 6dp) | `100000000000` = 100,000 USDC | `pooled.seed` |
+| Venue feeds | FreshFeed-mocked via `tenderly_setCode` — never stale, warping safe | `feeds.*` |
+
+**Deliberate history — do not target these.** `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` is a retired
+Sherwood-era clone, now `Settled`; it is kept on record only as a historical `Settled`-state reference and
+its ABI/lifecycle is the *old* one.
 
 Production addresses are published separately at deploy.
 
@@ -590,7 +612,7 @@ Production addresses are published separately at deploy.
 
 ## Rebalancer checklist
 
-- [ ] Sign every operator op with the strategy **proposer** key (`MAMO_BACKEND`, `0x2Ab0…5e73`); confirm `strategy.proposer()` matches before wiring.
+- [ ] Sign every operator op with the strategy **proposer** key (`MAMO_REBALANCER`, `0x73f6…8FAf` on staging) — **never** the backend key (`MAMO_BACKEND`); confirm `strategy.proposer()` matches before wiring.
 - [ ] Gate the whole operator loop on `state() == Executed`; `execute`/`settle` are `onlyVault` and belong to the vault owner's `activateStrategy` / `settleStrategy`, not to you.
 - [ ] Periodically `deployIdle(amount, minLiquidity)` accumulated strategy-idle USDC within leverage caps; pass a real `minLiquidity`.
 - [ ] **Read `layout().legBIsAsset` first and branch on it** — asset-mode changes `deployIdle` sizing, makes lever-**up** consume idle USDC, lets `rerange` draw on idle, and adds `InsufficientIdleForLeverUp` / `DegenerateRange` to the error set (§G).
