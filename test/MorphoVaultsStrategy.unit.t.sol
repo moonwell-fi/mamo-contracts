@@ -6,14 +6,14 @@ import {Test} from "@forge-std/Test.sol";
 import {MamoVaultConfig} from "@contracts/robinhood/MamoVaultConfig.sol";
 import {MorphoVaultsStrategy} from "@contracts/robinhood/MorphoVaultsStrategy.sol";
 
-import {MockERC20} from "@test/MockERC20.sol";
+import {MockERC20} from "./MockERC20.sol";
 import {
     MockERC4626,
     MockMerkleDistributor,
     MockSlippagePriceChecker,
     MockStrategyRegistry,
     MockSwapRouter
-} from "@test/mocks/RobinhoodMocks.sol";
+} from "./mocks/RobinhoodMocks.sol";
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
