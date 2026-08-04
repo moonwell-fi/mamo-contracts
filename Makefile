@@ -44,9 +44,9 @@ fee-splitter:
 robinhood-vaults-v2:
 	forge test --ffi --match-path "test/MorphoVaultsStrategyVaultV2.integration.t.sol" -vv
 
-# Robinhood Chain: the live fork suite. Skips itself unless ROBINHOOD_RPC_URL is set.
+# Robinhood Chain: the live fork suites (chassis + baskets). Skip themselves unless ROBINHOOD_RPC_URL is set.
 robinhood-fork:
-	forge test --ffi --match-path "test/RobinhoodFork.integration.t.sol" -vv
+	forge test --ffi --match-path "test/Robinhood*Fork.integration.t.sol" -vv
 
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter robinhood-vaults-v2 robinhood-fork

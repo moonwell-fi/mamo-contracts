@@ -204,8 +204,8 @@ contract StockBasketStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         for (uint256 i = 0; i < stockTokens.length; i++) {
             uint256 stockBalance = IERC20(stockTokens[i]).balanceOf(address(this));
             if (stockBalance > 0) {
-                _swap(stockTokens[i], address(token), stockBalance);
-                emit StockSold(stockTokens[i], stockBalance, 0);
+                uint256 received = _swap(stockTokens[i], address(token), stockBalance);
+                emit StockSold(stockTokens[i], stockBalance, received);
             }
         }
 
