@@ -135,6 +135,23 @@ contract MamoVaultConfig is Ownable2Step {
         emit WithdrawRecorded(msg.sender, clamped, totalDeposited);
     }
 
+    /**
+     * @notice Records a full exit, releasing the strategy's entire tracked principal
+     * @dev ERC-4626 rounds down on both entry and exit, so once the share price moves off 1.0 a full
+     *      round trip realizes slightly less than the tracked principal. Debiting the realized amount
+     *      would strand the difference in totalDeposited forever — trackedDeposits has no other write
+     *      path — and every later round trip would ratchet it further. A full exit therefore frees the
+     *      whole tracked amount rather than the realized one.
+     */
+    function recordFullExit() external onlyStrategy {
+        uint256 tracked = trackedDeposits[msg.sender];
+
+        trackedDeposits[msg.sender] = 0;
+        totalDeposited -= tracked;
+
+        emit WithdrawRecorded(msg.sender, tracked, totalDeposited);
+    }
+
     // ==================== VIEW FUNCTIONS ====================
 
     /**

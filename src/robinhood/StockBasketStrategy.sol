@@ -175,7 +175,9 @@ contract StockBasketStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             uint256 remaining = amount - idleBalance;
 
             // pull from the yield sleeve first
-            uint256 sleeveAvailable = yieldVault.maxWithdraw(address(this));
+            // NOTE: Morpho Vault V2 (the intended sleeve) returns 0 from maxWithdraw by design, so
+            // available liquidity is derived from the share balance instead of the max* views
+            uint256 sleeveAvailable = yieldVault.convertToAssets(yieldVault.balanceOf(address(this)));
             if (sleeveAvailable > 0) {
                 uint256 fromSleeve = remaining > sleeveAvailable ? sleeveAvailable : remaining;
                 yieldVault.withdraw(fromSleeve, address(this), address(this));
@@ -270,7 +272,8 @@ contract StockBasketStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
 
                 uint256 idleBalance = token.balanceOf(address(this));
                 if (idleBalance < needed) {
-                    uint256 sleeveAvailable = yieldVault.maxWithdraw(address(this));
+                    // same no-max* rule as in withdraw(): Vault V2 hardcodes maxWithdraw to 0
+                    uint256 sleeveAvailable = yieldVault.convertToAssets(yieldVault.balanceOf(address(this)));
                     uint256 fromSleeve = needed - idleBalance;
                     if (fromSleeve > sleeveAvailable) fromSleeve = sleeveAvailable;
                     if (fromSleeve > 0) {
@@ -417,7 +420,6 @@ contract StockBasketStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
                 tokenOut: tokenOut,
                 fee: poolFee,
                 recipient: address(this),
-                deadline: block.timestamp,
                 amountIn: amountIn,
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0

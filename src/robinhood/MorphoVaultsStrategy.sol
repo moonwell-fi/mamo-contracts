@@ -189,7 +189,13 @@ contract MorphoVaultsStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
 
         require(token.balanceOf(address(this)) >= amount, "Withdrawal failed: insufficient funds");
 
-        vaultConfig.recordWithdraw(amount);
+        // a withdrawal that empties the position is a full exit: free the entire tracked principal so
+        // round-down rounding can never strand residue in the supply-cap meter
+        if (getTotalBalance() == amount) {
+            vaultConfig.recordFullExit();
+        } else {
+            vaultConfig.recordWithdraw(amount);
+        }
 
         token.safeTransfer(msg.sender, amount);
 
@@ -205,7 +211,8 @@ contract MorphoVaultsStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         uint256 finalBalance = token.balanceOf(address(this));
         require(finalBalance > 0, "No tokens to withdraw");
 
-        vaultConfig.recordWithdraw(finalBalance);
+        // realized assets round down against tracked principal; a full exit frees the whole tracking
+        vaultConfig.recordFullExit();
 
         token.safeTransfer(msg.sender, finalBalance);
 
@@ -288,7 +295,6 @@ contract MorphoVaultsStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
                 tokenOut: address(token),
                 fee: poolFee,
                 recipient: address(this),
-                deadline: block.timestamp,
                 amountIn: amountIn,
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0

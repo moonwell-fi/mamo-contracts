@@ -13,9 +13,7 @@ import {
     MockStrategyRegistry,
     MockSwapRouter
 } from "./mocks/RobinhoodMocks.sol";
-import {
-    CannotReceiveShares, CannotSendShares, IMorphoVaultV2, IMorphoWhitelistGate
-} from "./vendor/IMorphoVaultV2.sol";
+import {CannotReceiveShares, CannotSendShares, IMorphoVaultV2, IMorphoWhitelistGate} from "./vendor/IMorphoVaultV2.sol";
 import {MorphoVaultV2Deployer, MorphoWhitelistGateDeployer} from "./vendor/MorphoVaultV2Bytecode.sol";
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -424,6 +422,40 @@ contract MorphoVaultsStrategyVaultV2IntegrationTest is Test {
 
         assertEq(usdg.balanceOf(user) - balanceBefore, total, "exact-balance withdrawal always settles");
         assertEq(strategy.getTotalBalance(), 0, "position fully drained");
+    }
+
+    /// @notice Regression from the live-chain fork run: with the share price off 1.0 (the live
+    ///         Steakhouse vault sits at ~1.003) entry/exit round-down makes a full round trip realize
+    ///         1-2 units less than the tracked principal. Debiting the cap meter by the realized amount
+    ///         left `totalDeposited == 1` forever — trackedDeposits has no other write path — so a full
+    ///         exit must free the entire tracked principal instead.
+    function testWithdrawAllAtNonParSharePriceLeavesNoCapResidue() public {
+        // outside deposits + accrued yield move both vaults off par BEFORE the strategy enters
+        address seeder = makeAddr("seeder");
+        usdg.mint(seeder, 2000e6);
+        vm.startPrank(seeder);
+        usdg.approve(address(vaultA), type(uint256).max);
+        usdg.approve(address(vaultB), type(uint256).max);
+        vaultA.deposit(1000e6, seeder);
+        vaultB.deposit(1000e6, seeder);
+        vm.stopPrank();
+
+        _accrueYield(vaultA, 3e6, 30 days);
+        _accrueYield(vaultB, 3e6, 30 days);
+        assertGt(vaultA.convertToAssets(1e18), 1e6, "share price must be off par for the repro");
+
+        vm.prank(user);
+        strategy.deposit(1000e6);
+
+        assertLt(strategy.getTotalBalance(), 1000e6, "entry round-down: position worth less than principal");
+        assertEq(config.totalDeposited(), 1000e6, "principal tracked in full");
+
+        vm.prank(user);
+        strategy.withdrawAll();
+
+        assertEq(strategy.getTotalBalance(), 0, "position fully closed");
+        assertEq(config.totalDeposited(), 0, "no cap residue after full exit");
+        assertEq(config.trackedDeposits(address(strategy)), 0, "per-strategy tracking cleared");
     }
 
     // ==================== REBALANCING ====================
