@@ -7,10 +7,7 @@ import {StockBasketStrategy} from "@contracts/robinhood/StockBasketStrategy.sol"
 
 import {MockERC20} from "@test/MockERC20.sol";
 import {
-    MockERC4626,
-    MockSlippagePriceChecker,
-    MockStrategyRegistry,
-    MockSwapRouter
+    MockERC4626, MockSlippagePriceChecker, MockStrategyRegistry, MockSwapRouter
 } from "@test/mocks/RobinhoodMocks.sol";
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
