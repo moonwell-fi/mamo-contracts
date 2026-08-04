@@ -114,7 +114,20 @@ All under `src/robinhood/` + `test/`, unit-tested with mocks (no fork needed —
 | `test/StockBasketStrategy.unit.t.sol` | 14 tests: buy-to-target, trim-winner, NAV under price moves, sleeve yield accrual, market-deviation revert, mandate enforcement. |
 | `test/mocks/RobinhoodMocks.sol` | MockERC4626 (the #1 test-infra gap flagged by the portability audit), registry/oracle/router/Merkl mocks. |
 
-Deliberate simplifications (prototype, not production): 18-dp mocks (USDG is 6 — the accounting is decimals-agnostic but tests should add a 6-dp matrix); no sequencer-uptime/market-hours staleness module yet (§5); `MamoVaultConfig` not yet reconciled with the audit branch's `MarketRegistry`; no factory/deploy scripts.
+Deliberate simplifications (prototype, not production): no sequencer-uptime/market-hours staleness module yet (§5); `MamoVaultConfig` not yet reconciled with the audit branch's `MarketRegistry`; no factory/deploy scripts.
+
+### Real-bytecode verification (fork-fidelity layer)
+
+Per the "test against a fork" directive — with all chain RPCs blocked by this environment's egress policy — the strategy was additionally validated against **Morpho's actual compiled Vault V2 bytecode** (`morpho-org/vault-v2` @ `b1e9005`, built with Morpho's own compiler profile, deployed in-EVM from vendored initcode in `test/vendor/`), with a 6-decimal USDG-like underlying:
+
+- `test/MorphoVaultsStrategyVaultV2.integration.t.sol` — **25 tests green** (`make robinhood-vaults-v2`, no fork needed). Confirms the no-`max*` design, deposit/withdraw/rebalance/cap flows, and exact rounding behavior (fuzzed withdraw-exact-balance with live vault performance fees) against the real thing. **No bugs found in `src/robinhood/`.**
+- `test/RobinhoodFork.integration.t.sol` — the true mainnet-fork suite, env-gated on `ROBINHOOD_RPC_URL` (`make robinhood-fork`; skips cleanly without it). Once an RPC is reachable it asserts the §6 ground truths on-chain (USDG decimals, Steakhouse vault `max*==0`, the four gate reads with an explicit GO/NO-GO log, SwapRouter02 code) and runs a funded E2E against the live Steakhouse vault. Smoke-tested end-to-end against a staged chain-4663 anvil.
+
+Behavioral differences vs. plain ERC-4626 mocks discovered in the process (all now captured as tests):
+1. **Donations are invisible on real V2**: interest is clamped by an allocator-set `maxRate` (default 0) and elapsed time — "assets appeared in the vault" ≠ yield. Backend/analytics must read `convertToAssets`, never vault balances.
+2. **Interest accrues at most once per transaction** (transient-storage snapshot): batching several strategy calls through Multicall yields a single accrual snapshot.
+3. **6-dp assets produce 18-dp shares with `virtualShares = 1e12`** — different share scaling and inflation-attack surface than OZ's offset-0 mock.
+4. **A `sendSharesGate` can trap an already-funded position** (`withdrawAll`/`updatePosition` revert with `CannotSendShares()`): venue vetting must check all four gates *and monitor them ongoing*, not just `receiveSharesGate` at listing time.
 
 ---
 
@@ -148,7 +161,7 @@ Every stock-token-touching product needs one shared module; nobody on the chain 
 
 Single reads/calls, blocked from this environment (RPC egress denied), cheap from anywhere else:
 
-1. **Vault V2 gates on the Steakhouse vaults**: `receiveSharesGate()`/`sendSharesGate()` on `0xBeEff033…`. If a gate blocks third-party contracts, the chassis needs different target vaults — this one read could reshape idea #2.
+1. **Vault V2 gates on the Steakhouse vaults**: all four of `receiveSharesGate()`/`sendSharesGate()`/`receiveAssetsGate()`/`sendAssetsGate()` on `0xBeEff033…`. If a receive gate blocks third-party contracts, the chassis needs different target vaults — this one read could reshape idea #2. A **send** gate is worse: real-bytecode testing showed it traps an already-funded position (exits revert with `CannotSendShares()`), so gates need ongoing monitoring, not just a listing-time check. `test/RobinhoodFork.integration.t.sol` performs all four reads with a GO/NO-GO verdict the moment an RPC is available.
 2. `eth_getCode` the Morpho/Uniswap addresses above (SDK-sourced, not chain-verified).
 3. **USDG depth + realistic slippage** at our trade sizes on Uniswap v3/v4; stock/USDG pool depth for the basket's rebalance cap.
 4. Chainlink feed directory for 4663 (`feeds-robinhood-mainnet.json`): confirm USDG/USD exists + per-equity feed coverage, heartbeats, decimals.

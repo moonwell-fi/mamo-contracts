@@ -40,7 +40,15 @@ mamo-staking:
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
 
-test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter
+# Robinhood Chain: MorphoVaultsStrategy against real Morpho Vault V2 bytecode. No fork needed.
+robinhood-vaults-v2:
+	forge test --ffi --match-path "test/MorphoVaultsStrategyVaultV2.integration.t.sol" -vv
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+# Robinhood Chain: the live fork suite. Skips itself unless ROBINHOOD_RPC_URL is set.
+robinhood-fork:
+	forge test --ffi --match-path "test/RobinhoodFork.integration.t.sol" -vv
+
+test-all:
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter robinhood-vaults-v2 robinhood-fork
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking robinhood-vaults-v2 robinhood-fork test-all
