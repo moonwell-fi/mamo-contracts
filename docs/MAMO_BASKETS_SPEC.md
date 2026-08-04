@@ -41,6 +41,17 @@ $1.1M of combined capacity at full caps. That is small on purpose: capacity is t
 
 **Withdraw.** `withdraw(amount)` drains idle USDG first, then the sleeve, and only sells stock pro-rata if those two cannot cover it. `withdrawAll()` liquidates everything. In practice the common exit — a partial withdrawal smaller than the sleeve — never touches an equity pool, which is what makes the market-hours halt survivable rather than a product defect.
 
+### Why not just hold the stocks yourself?
+
+The question every reviewer should ask, so it goes in the spec. For a single-stock buy-and-holder we have no pitch, and the copy must never pretend otherwise. The product is for portfolio holders, and the value stack is concrete:
+
+1. **The cash half works.** A self-directed holder's dry powder sits in wallet USDG earning zero (Robinhood Earn is app-gated savings, disconnected from a portfolio). Here every idle dollar is in the sleeve from the moment of deposit.
+2. **Execution they can't easily replicate.** One USDG ticket becomes a weighted basket instead of four manual DEX swaps through the same pools at the same-or-worse spreads — and every fill is oracle-bounded, so the user structurally cannot trade against a frozen weekend price or a manipulated pool, which a manual trader can and will. The measured 26 bps round trip at retail size is competitive with careful manual execution and strictly better than careless.
+3. **Portfolio hygiene nobody does by hand.** Drift-band rebalancing and winner-trimming, on schedule, inside a mandate the agent cannot exceed.
+4. **Custody preserved.** It is the user's own contract, not a pooled fund; sleeve-covered withdrawals work 24/7.
+
+Dividends are a wash against self-custody — the issuer auto-reinvests them into the multiplier for every holder equally. What we charge for the difference is the 50 bps management fee on the equity share.
+
 ### Fee model
 
 Two legs, both matching existing repo precedent:
@@ -64,15 +75,23 @@ At the top of the precedent band (95 bps on the equity share) Basket 1's net cas
 
 The honest positioning that follows: **the sleeve is not the return driver — equity performance is.** The sleeve makes the cash half non-dead and pays most of the management fee. We should say exactly that and not imply a yield product.
 
+**What we report as yield: no blended basket APY, ever.** Most of the return is equity performance, which is not an APY; projecting it as one invites both user harm and exactly the regulatory attention a securities-adjacent product cannot afford. The UI shows two separate numbers: the **live sleeve APY** read from the vault (~1.6–1.9% today; net ~1.4–1.7% on sleeve dollars after `compoundFee`) and **basket price performance** as a return, not a rate. Merkl or Drop rewards are quoted as variable, never projected. If the curated 2–4.5% vaults verify (§7 item 6), the cash-yield line improves materially: with a 4.3% sleeve, Basket 1's net cash yield rises from 28–38 bps to ~125 bps of NAV, Basket 2's from 86–105 bps to ~256 bps.
+
+**How the user is paid, mechanically.** Everything accrues in NAV and realizes in USDG on withdrawal — no claim flows. Three streams: equity marked to the Chainlink feeds; sleeve yield via `steakUSDG` share-price appreciation; Merkl rewards, when campaigns pay the strategy, compounded into the sleeve minus the fee. Dividends *do* reach the user economically — the feed price includes the multiplier, so issuer-reinvested dividends surface as NAV appreciation (§2, "What the user actually holds").
+
+**Revenue at the launch caps, honestly.** Basket 1 at a full $750k: 50 bps × 60% equity = $2,250/yr management, plus ~$525/yr from `compoundFee` on the sleeve. Basket 2 at $350k: ~$525 + ~$430. **Total ≈ $3.7k/yr at full launch caps — a rounding error, and the spec should say so before anyone else does.** The launch buys the uncontested seat and proves the flywheel; the revenue line scales with caps (which scale with pool depth), with sleeve yield (curated vaults), and above all with wave-2 Boosted USDG, which is pooled and has no per-name capacity ceiling. After the gas subsidy expires (~2026-09-29), backend-paid rebalance gas nets against this fee base — the re-check is already on the clock (§7).
+
 ### The MAMO flywheel hook
 
-Fees are real revenue, not emissions. `FeeSplitter` and `MultiRewards` redeploy verbatim; `RewardsDistributorSafeModule` ports as-is (Safe 1.3.0 + 1.4.1 are fully deployed on 4663 and in production use — Morpho Blue's own owner is a 5-threshold Safe). Separately, the supply cap makes capacity scarce by construction, so a staking-gated carve-out in `MamoVaultConfig` — X% of remaining capacity reserved for users staking ≥ N MAMO — turns the cap into MAMO utility at essentially zero code cost. See `ROBINHOOD_CHAIN_SPEC.md` §2 idea 4.
+Fees are real revenue, not emissions. `FeeSplitter` and `MultiRewards` redeploy verbatim; `RewardsDistributorSafeModule` ports as-is (Safe 1.3.0 + 1.4.1 are fully deployed on 4663 and in production use — Morpho Blue's own owner is a 5-threshold Safe). Separately, the supply cap makes capacity scarce by construction — and the scarcity is measured, not manufactured — so a staking-gated carve-out in `MamoVaultConfig` — X% of remaining capacity reserved for users staking ≥ N MAMO — turns the cap into MAMO utility at essentially zero code cost. Wave-2 Boosted USDG, the product that honestly beats the subsidized 7%, is the natural first fully staking-gated, hard-capped launch. See `ROBINHOOD_CHAIN_SPEC.md` §2 idea 4.
+
+**MAMO reaches 4663 via Wormhole — we bridge it ourselves, and the infra is ready.** (`Mamo.sol`'s Superchain bridge leg does not port to Orbit; Wormhole is our path and is already operational for MAMO.) Sequencing is deliberately decoupled from launch: fees accrue from day one regardless. Until the bridge is live, the weekly Drop pays in USDG and the staking-gated carve-out is enforced against backend-attested Base staking balances; once MAMO is native on 4663, the Drop can pay USDG + MAMO and gating can move fully on-chain. Not launch-blocking, but the bridge should land before the first staking-gated cap raise so the utility story is native when it matters.
 
 ### What the user actually holds
 
 A `StockBasketStrategy` behind an ERC1967 proxy, owned by them, registered to them in `MamoStrategyRegistry`. Inside it: ERC-20 tokens issued by **Robinhood Assets (Jersey) Ltd** — tokenized *debt notes* giving economic exposure to the reference share, 1:1 share-backed, with **no shareholder rights and no voting** — plus `steakUSDG` shares of the Steakhouse USDG Vault V2.
 
-There is **no dividend cash flow**. Dividends auto-reinvest into the ERC-8056 `uiMultiplier` rather than paying out. "We compound your dividends" is not a feature we have; the multiplier mechanism is real and live (CRWD carries `uiMultiplier() == 4e18` from an actual 4:1 split).
+There is **no dividend cash flow**. Dividends auto-reinvest into the ERC-8056 `uiMultiplier` rather than paying out. The economics still reach the user: the Chainlink feed price includes the multiplier, so reinvested dividends surface as NAV appreciation. But the issuer does that compounding, not us — "we compound your dividends" is not a feature we have, and the multiplier mechanism is real and live (CRWD carries `uiMultiplier() == 4e18` from an actual 4:1 split).
 
 ### What we promise, and what we do not
 
@@ -358,4 +377,4 @@ Ordered. Owner shape in brackets.
 9. **Legal review + geo-gated front end.** [external] The Jersey base prospectus: whether third-party contracts holding tokens for a mixed-jurisdiction user base is a technical gap or a contractual breach, and the issuer's policy on contract addresses. **This is the launch gate** — it can change the product's shape, not just its copy, so it should start now and in parallel with everything above.
 10. **Audit.** [external] After items 1–5 land. Focus areas: the mandate and oracle-bound invariants, the cap accounting under non-par share prices, and the NAV path's `uiMultiplier` handling.
 
-Not blocking launch, but on the clock: the gas subsidy expires around **2026-09-29**, after which per-user rebalance economics need re-checking against the fee model in §2.
+Not blocking launch, but on the clock: the gas subsidy expires around **2026-09-29**, after which per-user rebalance economics need re-checking against the fee model in §2 — the fee base at launch caps is ~$3.7k/yr, so gas netting is not academic. Also queued: **bridge MAMO to 4663 via Wormhole** [infra — ready]. Enables the MAMO leg of the weekly Drop and fully on-chain staking-gated capacity; until then the Drop pays USDG and gating uses backend-attested Base staking balances. Should land before the first staking-gated cap raise.
