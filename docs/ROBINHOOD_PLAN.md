@@ -36,7 +36,7 @@ Key facts proven against real Vault V2 bytecode (not mocks): the no-`max*` desig
 
 ## 3. Deep dive: Boosted USDG (wave 2 headline)
 
-**Product.** The Robinhood sibling of Boosted USDC with Morpho Blue as the venue: loop yield-bearing collateral (sUSDe ~4.5%, syrupUSDG ~4.6%, spUSDG ~3.2–4.2%) against USDG borrow at a target LTV. Reported looped ROE ~15–20% today; even compressed it clears the subsidized 7% honestly — the answer to "why not just use Robinhood Earn?"
+**Product.** The Robinhood sibling of Boosted USDC with Morpho Blue as the venue: loop yield-bearing collateral against USDG borrow at a target LTV. **The "~15–20% reported ROE" premise did not survive measurement** (2026-08-05, `docs/BOOSTED_USDG_SIZING.md`): sUSDe is not on the chain, USDe yields 0% (carry fully Merkl-manufactured), the organic syrupUSDG/spUSDG spreads are 97/47bps at 90% utilization, and the loop's own rate impact caps carry capacity at ~$0.6M today, ~$1–2M in six months. It still becomes the honest 7%-beater *if* spreads widen or new collateral lists — the revisit triggers are in the sizing doc.
 
 **Why it's cheap for us.** It reuses the audited Boosted USDC stack minus the hard parts: `LeveragedAeroVault` share-ledger lifecycle (Pending/Executed/Settled, atomic `cloneAndBind`, permissionless `redeemSettled`), the `LeveragedAeroFees` HWM/crystallization library (pure, chain-agnostic), and the deposit-cap + admin-scoped-venue governance. No LP legs, no tick management, no hedge drift — the new work is the loop engine (with the `adjustLeverage` target-persistence lesson applied) and the risk framework.
 
