@@ -2,6 +2,8 @@
 
 *Measured on-chain 2026-08-05, canonical Morpho Blue `0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010`, primary state block 28,035,587. Full provenance in §8. This dataset supersedes the reported "~15–20% looped ROE" figure carried in `ROBINHOOD_CHAIN_SPEC.md` §2 idea #3 and `ROBINHOOD_PLAN.md` §3 — those were [R]-grade; this is measured.*
 
+**Update 2026-08-05 (late):** re-measured at block ~28.71M — syrupUSDG's borrow APY has risen **4.04% → 5.52%** against its 5.01% collateral yield: the one organic positive spread on the chain has **flipped negative** (−51bps). spUSDG remains +47bps with ~$67k of headroom. Every USDG-loan market now carries zero or negative organic loop spread, which strengthens this document's verdict. Also: $53.97M of USDG sits as idle, non-yielding margin in the Arcus/Lighter deposit contracts (arcUSDG $18.96M verified 1:1 non-yield-bearing; gateway $35.01M) — 1.8× all of Morpho Blue — relevant to venue-partnership sizing, not to the loop.
+
 **Verdict: Boosted USDG is not a revenue product on today's chain.** The three USDG-loan markets that matter sit at the AdaptiveCurveIRM's 90% target utilization with borrow rates arbitraged to within 50–100bps of collateral yield. The binding constraint is **rate impact, not liquidity**: the loop's own borrowing pushes the rate through the collateral yield after ~$0.6M of size. Launch-viable shape is a **$500k, 2x-leverage, syrupUSDG-only plumbing pilot** (~$400/yr of fee revenue at a 15% performance fee). Six-month outlook: $1–2M of viable size, not $20M.
 
 ---
