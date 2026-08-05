@@ -44,11 +44,15 @@ fee-splitter:
 robinhood-vaults-v2:
 	forge test --ffi --match-path "test/MorphoVaultsStrategyVaultV2.integration.t.sol" -vv
 
-# Robinhood Chain: the live fork suites (chassis + baskets). Skip themselves unless ROBINHOOD_RPC_URL is set.
+# Robinhood Chain: Boosted USDG (pooled Morpho Blue loop) unit suite. No fork needed.
+robinhood-boosted:
+	forge test --ffi --match-path "test/BoostedUsdgVault.unit.t.sol" -vv
+
+# Robinhood Chain: the live fork suites (chassis + baskets + boosted). Skip themselves unless ROBINHOOD_RPC_URL is set.
 robinhood-fork:
 	forge test --ffi --match-path "test/Robinhood*Fork.integration.t.sol" -vv
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter robinhood-vaults-v2 robinhood-fork
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter robinhood-vaults-v2 robinhood-boosted robinhood-fork
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking robinhood-vaults-v2 robinhood-fork test-all
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking robinhood-vaults-v2 robinhood-boosted robinhood-fork test-all
