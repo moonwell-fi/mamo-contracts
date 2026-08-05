@@ -14,7 +14,7 @@ Three things make it worth building rather than porting another yield router:
 
 1. **Subsidy-immune surface.** Robinhood Earn pays a subsidized ~7% on USDG savings, app-gated, for roughly a year. A yield router loses to that in the incumbent's own app. A portfolio product does not compete with it at all — it competes with holding stock tokens idle, which is ~$70M of dead assets today. Nobody pays users to hold NVDA-token; we would.
 2. **Per-user custody as a safety claim, not a preference.** The Jersey issuer retains pause, burn and confiscate powers, and its `AccessControlsRegistry` can blocklist a contract address in one transaction. Every pooled competitor concentrates that blast radius across all depositors. One user's basket is one user's contract. This is the only honest differentiated safety claim available on this chain.
-3. **Every idle dollar earns.** The cash half sits in the Steakhouse USDG Vault V2 (~$269.6M TVL) from the moment of deposit, not in a hot wallet awaiting a build.
+3. **Every idle dollar earns — at the best visible on-chain rate.** The cash half sits in the sleeve from the moment of deposit (Spark spUSDG, 3.50% contractual; Steakhouse steakUSDG as fallback), not in a hot wallet awaiting a build. Measured 2026-08-05: the Earn vault's on-chain all-in rate is only ~2.1–2.4% (the ~7% headline is app-side), so the sleeve honestly beats what Earn actually delivers on-chain (§2).
 
 **Headline verified numbers.** A full live round trip — deposit 2,000 USDG → agent rebalance to a 45% NVDA/AAPL/TSLA basket → `withdrawAll` — cost **26 bps of NAV**, executed against real Chainlink feeds, real 0.30% Uniswap pools and the real Steakhouse vault. The rebalance leg alone drifted 17 bps and landed the mix at 4490/5509 bps against a 4500/5500 target. Per-leg pool-vs-oracle cost including the 30 bps pool fee: NVDA 26 bps, AAPL 52 bps, TSLA 49 bps.
 
@@ -66,16 +66,18 @@ The reason for both choices is arithmetic, and it is the least comfortable numbe
 | | Basket 1 (60/40) | Basket 2 (30/70) |
 |---|---|---|
 | Sleeve share of NAV | 40% | 70% |
-| Sleeve gross yield @ 1.6–1.9% (Steakhouse today) | 64–76 bps | 112–133 bps |
-| less `compoundFee` (10% of sleeve yield) | 6–8 bps | 11–13 bps |
+| Sleeve gross yield @ **3.50%** (spUSDG, contractual — verified 2026-08-05) | 140 bps | 245 bps |
+| less `compoundFee` (10% of sleeve yield) | 14 bps | 24 bps |
 | less management fee @ 50 bps on equity share | 30 bps | 15 bps |
-| **Net cash yield to user** | **28–38 bps** | **86–105 bps** |
+| **Net cash yield to user** | **~96 bps** | **~205 bps** |
 
-At the top of the precedent band (95 bps on the equity share) Basket 1's net cash yield is 1–11 bps — the fee consumes the entire sleeve. **A 60/40 basket cannot carry a 95 bps fee at today's Steakhouse yield.** Two things restore headroom, neither available today: routing the sleeve to a 2–4.5% curated vault (Turbo / Ethena / Grove, all unverified — §7), or a higher equity share, which capacity does not permit. Until then, 50 bps.
+The sleeve routes to **Spark's spUSDG `0xde770c84fe66e063336b31737cfe9790f18c4087`** — verified 2026-08-05: permissionless (contracts already deposit; per-address `maxDeposit` identical for any caller), honest full ERC-4626 surface (unlike Morpho V2's zeroed `max*`), **exactly 3.500% APY by contract** (`chi`/`rho`), 99.96% cash-backed with instant exit at any size we'd deploy, $487M of unused deposit cap. Steakhouse steakUSDG (1.6–1.9% organic) stays in the allowlist as the fallback venue; the backend routes to best rate — the multi-vault chassis doing its actual job. Residual spUSDG risk is governance-shaped, not access-shaped (UUPS-upgradeable; admin-settable rate under a 6% ceiling) — a standing monitor item. At the old Steakhouse-only sleeve the numbers were 28–38 / 86–105 bps and a 95 bps fee would have consumed Basket 1's entire sleeve; at 3.50% the 50 bps fee has real headroom, and 50 bps remains the call.
 
 The honest positioning that follows: **the sleeve is not the return driver — equity performance is.** The sleeve makes the cash half non-dead and pays most of the management fee. We should say exactly that and not imply a yield product.
 
-**What we report as yield: no blended basket APY, ever.** Most of the return is equity performance, which is not an APY; projecting it as one invites both user harm and exactly the regulatory attention a securities-adjacent product cannot afford. The UI shows two separate numbers: the **live sleeve APY** read from the vault (~1.6–1.9% today; net ~1.4–1.7% on sleeve dollars after `compoundFee`) and **basket price performance** as a return, not a rate. Merkl or Drop rewards are quoted as variable, never projected. If the curated 2–4.5% vaults verify (§7 item 6), the cash-yield line improves materially: with a 4.3% sleeve, Basket 1's net cash yield rises from 28–38 bps to ~125 bps of NAV, Basket 2's from 86–105 bps to ~256 bps.
+**Positioning unlock (measured 2026-08-05): Earn's ~7% headline is app-side, not on-chain.** The Earn vault's visible on-chain economics are 1.6–1.9% organic plus a Merkl campaign whose *funded* size is $1.385M against $279M of TVL — **~48 bps/yr, with the "100M over 365d" nominal ~83× unfunded** — for an all-in on-chain rate of **~2.1–2.4%**. The remaining ~4.5–5% of the headline is invisible on-chain (app-side credit). With spUSDG at 3.50% in the sleeve, **"the best visible on-chain USDG rate on Robinhood Chain" is an honest Mamo claim today** — for exactly the audience (on-chain holders, not app users) this product serves. The subsidy-capture idea is correspondingly dead: mechanically ungated on-chain, but worth ~48 bps at best and gated by off-chain Merkl tree construction we can never verify in advance.
+
+**What we report as yield: no blended basket APY, ever.** Most of the return is equity performance, which is not an APY; projecting it as one invites both user harm and exactly the regulatory attention a securities-adjacent product cannot afford. The UI shows two separate numbers: the **live sleeve APY** read from the venue (3.50% contractual on spUSDG today; net ~3.15% on sleeve dollars after `compoundFee`) and **basket price performance** as a return, not a rate. Merkl or Drop rewards are quoted as variable, never projected. Turbo/Ethena/Grove (reported 2–4.5%, unverified) remain optional further upside per §7 item 6.
 
 **How the user is paid, mechanically.** Everything accrues in NAV and realizes in USDG on withdrawal — no claim flows. Three streams: equity marked to the Chainlink feeds; sleeve yield via `steakUSDG` share-price appreciation; Merkl rewards, when campaigns pay the strategy, compounded into the sleeve minus the fee. Dividends *do* reach the user economically — the feed price includes the multiplier, so issuer-reinvested dividends surface as NAV appreciation (§2, "What the user actually holds").
 
@@ -91,7 +93,7 @@ Fees are real revenue, not emissions. `FeeSplitter` and `MultiRewards` redeploy 
 
 A `StockBasketStrategy` behind an ERC1967 proxy, owned by them, registered to them in `MamoStrategyRegistry`. Inside it: ERC-20 tokens issued by **Robinhood Assets (Jersey) Ltd** — tokenized *debt notes* giving economic exposure to the reference share, 1:1 share-backed, with **no shareholder rights and no voting** — plus `steakUSDG` shares of the Steakhouse USDG Vault V2.
 
-There is **no dividend cash flow**. Dividends auto-reinvest into the ERC-8056 `uiMultiplier` rather than paying out. The economics still reach the user: the Chainlink feed price includes the multiplier, so reinvested dividends surface as NAV appreciation. But the issuer does that compounding, not us — "we compound your dividends" is not a feature we have, and the multiplier mechanism is real and live (CRWD carries `uiMultiplier() == 4e18` from an actual 4:1 split).
+There is **no dividend cash flow**. Dividends auto-reinvest into the ERC-8056 `uiMultiplier` rather than paying out. The economics *should* still reach the user — the Chainlink feed price includes the multiplier, so credited dividends surface as NAV appreciation — and the multiplier mechanism is real (CRWD carries `uiMultiplier() == 4e18` from an actual 4:1 split). **Crediting caveat (2026-08-05): SGOV's Aug-3 distribution dropped its feed price −0.27% and the multiplier has not stepped in the days since.** Plausibly a crediting lag, but until one full cycle is observed landing, dividend capture appears in **no user-facing copy**, and the corporate-action monitor (automations A7) reconciles every ex-div against multiplier steps. Either way the compounding is the issuer's, never claimed as ours.
 
 ### What we promise, and what we do not
 
@@ -172,7 +174,7 @@ single-clip build limit = $34,000 / 0.30  = $113k  ->  round down to $100k
 | `stockWeightsBps` | 3000 / 1500 / 800 / 700 | 3000 |
 | Equity / sleeve target | 6000 / 4000 | 3000 / 7000 |
 | `maxTotalStockBps` (mandate) | 6500 | 3500 |
-| `yieldVault` | Steakhouse USDG Vault V2 `0xBeEff033…` | same |
+| `yieldVault` (sleeve) | Spark spUSDG `0xde770c84…` (3.50% contractual, verified permissionless); Steakhouse `0xBeEff033…` as fallback venue. MVP takes one vault at init — multi-venue sleeve lands with §7 item 1 | same |
 | `poolFee` | 3000 (0.30%) | 3000 (0.30%) |
 | `allowedSlippageInBps` | 150 | 150 |
 | Supply cap | $750k | $350k |
@@ -373,7 +375,7 @@ Ordered. Owner shape in brackets.
 3. **Wire the cap and the fees into `StockBasketStrategy`.** [contracts] One `MamoVaultConfig` per basket family with the §3d caps; `recordDeposit` / `recordWithdraw` / `recordFullExit`; `compoundFee` + `feeRecipient` matching the chassis; management-fee accrual on the equity share. Also lower `MAX_SLIPPAGE_IN_BPS` from 2500 to 500. Small, but the product has no revenue and no cap until it is done.
 4. **Per-stock fee tiers + v4 routing.** [contracts — **deferred to the first cap raise**] Replace the single `poolFee` with a per-leg tier and route across v3 + v4. Roughly **2x capacity**, and it is what lets NVDA use the 0.05% tier — but capacity is not binding at genesis caps, and the 0.30% tiers serve the launch lineup. Not on the critical path.
 5. **Factories + deploy tooling.** [contracts] Basket factory on the multi-market factory pattern; `addresses/4663.json`; `deploy/4663_*.json` with the §3d parameters; parameterize the hardcoded keys in `DeploySystem.s.sol`; verify Cancun / via-IR support on the Orbit node.
-6. **Finish venue verification.** [backend] Turbo, Ethena and Grove USDG vaults: all four gates, TVL, organic yield, share-price behaviour. Their 2–4.5% versus Steakhouse's 1.6–1.9% is the difference between a 28 bps and a 132 bps net cash yield on Basket 1 (§2). Plus the standing gate monitor on every allowlisted vault.
+6. **Venue set.** [backend] **spUSDG verified and added 2026-08-05** (permissionless honest ERC-4626, 3.50% contractual, 99.96% cash-backed, $487M cap headroom) — add its UUPS admin and rate-setter to the standing governance monitor. Turbo, Ethena and Grove still pending the same verification (gates, TVL, organic yield, share-price behaviour). Plus the standing gate monitor on every allowlisted vault.
 7. **Measure COST's 100 bps trade cap; identify SPCX's underlying.** [backend + external] Both are cheap and both unlock a listing decision. SPCX in particular must not ship on liquidity alone.
 8. **Tenderly automations.** [backend] Rebalance scheduling, TWAP clip execution, gate monitoring, Merkl claims — all of it, since neither Chainlink Automation nor Gelato exists on 4663. Being specced in parallel: `docs/ROBINHOOD_TENDERLY_AUTOMATIONS.md`.
 9. **Legal review + geo-gated front end.** [external — org-level, in hand] The Jersey base prospectus question (third-party contracts holding tokens for a mixed-jurisdiction user base; the issuer's policy on contract addresses) is handled outside engineering. The launch date keys to its completion; nothing else waits on it.
