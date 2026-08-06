@@ -12,17 +12,16 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 import {LeveragedAeroFees} from "./LeveragedAeroFees.sol";
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
+import {LeveragedAeroVenue} from "./LeveragedAeroVenue.sol";
 import {BaseStrategy} from "./sherwood/BaseStrategy.sol";
 import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
-import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
 import {IProtocolConfig} from "./sherwood/interfaces/IProtocolConfig.sol";
-import {ICLFactory, ICLGauge, ICLPool, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
+import {ICLGauge, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
 import {IStrategy} from "./sherwood/interfaces/IStrategy.sol";
 import {ISyndicateFactory} from "./sherwood/interfaces/ISyndicateFactory.sol";
 import {ISyndicateVault} from "./sherwood/interfaces/ISyndicateVault.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title LeveragedAerodromeCLStrategy
@@ -93,6 +92,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error InsufficientIdleForLeverUp(uint256 needed, uint256 available);
     error WidthOutOfBounds(); // rerange width off the tickSpacing grid or outside [minWidth, maxWidth]
     error ZeroShares(); // deposit would mint 0 shares (dust assets against a large book) — pay-for-nothing
+    error NotVaultOwner(); // stageVenue caller is not the vault's owner (the venue-selection authority)
 
     // ── Constants ──
     /// @dev Position `kind` tag for the PriceRouter adapter registry.
@@ -263,9 +263,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
-        // ── LAST fields: appended for the borrow-interest hedge (keep byte-identical) ──
+        // ── appended for the borrow-interest hedge (keep byte-identical) ──
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with the widths above)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
+        // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
+        bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -331,6 +333,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         bool legBIsAsset;
         uint128 hedgedDebtA;
         uint128 hedgedDebtB;
+        bytes32 stagedVenueHash;
     }
 
     /// @notice Full strategy storage layout (single accessor for tests / off-chain reads), minus the
@@ -387,6 +390,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         v.legBIsAsset = $.legBIsAsset;
         v.hedgedDebtA = $.hedgedDebtA;
         v.hedgedDebtB = $.hedgedDebtB;
+        v.stagedVenueHash = $.stagedVenueHash;
     }
 
     /// @notice The borrowed PRINCIPAL each leg's LP side currently hedges, and therefore the
@@ -463,108 +467,19 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (p.usdc != IERC4626(vault()).asset()) revert AssetMismatch();
         if (IERC20Metadata(p.usdc).decimals() != 6) revert UnexpectedAssetDecimals();
 
-        // ── SHAPE DERIVATION — the ONE line that selects the pool shape ──
-        //
-        // There is NO mode flag in `InitParams`: the shape is EMERGENT FROM CONFIG. The leg-B slot
-        // being the unit of account IS the asset-as-a-leg configuration (e.g. a cbBTC/USDC pool, where
-        // part of the deposit is supplied as collateral, only leg A is borrowed, and the borrowed leg
-        // is LP'd against the REMAINING USDC). Anything else is the original two-borrowed-legs shape.
-        //
-        // THE ASYMMETRY IS DELIBERATE: only LEG B may be the asset. Leg A must always be a real
-        // volatile borrowed leg — it carries the `wethDeliversNative` wrap path and is the SINGLE
-        // borrow in asset-mode — so `weth == usdc` stays rejected outright below.
-        bool legBIsAsset_ = p.cbBTC == p.usdc;
+        // ── VENUE BLOCK — extracted verbatim to `LeveragedAeroVenue.applyVenue` so the owner-staged
+        // venue migration (`migrateVenue`) re-runs the EXACT same validation. Everything from the
+        // shape derivation through the CF/LTV invariants — plus one ADDED `gauge.pool() == pool`
+        // binding check — lives there now; check order is preserved so the same input reverts with
+        // the same error. The lib reads the non-migratable core (usdc / mUsdc / usdcFeed /
+        // comptroller) from live storage, which is why those four are stored FIRST below.
+        Layout storage $ = _layout();
+        $.usdc = p.usdc;
+        $.mUsdc = p.mUsdc;
+        $.usdcFeed = p.usdcFeed;
+        $.comptroller = p.comptroller;
+        LeveragedAeroVenue.applyVenue(_venueParamsOf(p));
 
-        // Venue identity: the pool must BE the declared leg pair at the declared spacing, and each
-        // Moonwell borrow market must wrap its declared leg. Ordering is DERIVED here, never assumed
-        // (the manager maps every (legB, legA) pair onto (amount0, amount1) through `wethIsToken0`).
-        // The pair check below doubles as the asset-mode pool-token-set check: with `cbBTC == usdc` it
-        // requires exactly `{legA, usdc}`, and rejects a degenerate `(usdc, usdc)` pool.
-        if (ICLPool(p.pool).tickSpacing() != p.tickSpacing) revert VenueMismatch();
-        address t0 = ICLPool(p.pool).token0();
-        bool wethIsToken0_ = t0 == p.weth;
-        if (!wethIsToken0_ && t0 != p.cbBTC) revert VenueMismatch();
-        if (ICLPool(p.pool).token1() != (wethIsToken0_ ? p.cbBTC : p.weth)) revert VenueMismatch();
-        if (IMoonwellMarket(p.mCbBTC).underlying() != p.cbBTC) revert VenueMismatch();
-        if (IMoonwellMarket(p.mWeth).underlying() != p.weth) revert VenueMismatch();
-        // Symmetric with the two borrow legs: the collateral market must wrap the unit of account,
-        // or every `_supplyCollateral` / `_redeemCollateral` would move a token the NAV never prices.
-        if (IMoonwellMarket(p.mUsdc).underlying() != p.usdc) revert VenueMismatch();
-        // The leg↔USDC swap pools are separate venues from the LP pool — their spacings are inputs,
-        // so they get the same treatment as the LP pool: positive, and an EXISTING pool at that
-        // spacing. Unprobed, a typo'd spacing routes every swap at a nonexistent pool and bricks
-        // settle / deleverage / shortfall-cover on a live levered book.
-        address clFactory = ICLPool(p.pool).factory();
-        if (legBIsAsset_) {
-            // ── ASSET-MODE: the three leg-B slots that only make sense for a BORROWED leg ──
-            //
-            // 1. Market: leg B is never borrowed here, so its market slot must be the COLLATERAL market
-            //    (already asserted to wrap `cbBTC == usdc` just above). Pinning it is what makes every
-            //    `borrowBalanceStored($.mCbBTC)` read in the manager/valuation structurally 0 — nothing
-            //    ever calls `borrow()` on mUSDC — so the debt / health / repay / shortfall paths need no
-            //    asset-mode branch at all and can never disagree with each other.
-            if (p.mCbBTC != p.mUsdc) revert VenueMismatch();
-            // 2. Swap spacing: DECLARED UNUSED (must be 0). There is no USDC/USDC pool to probe, and a
-            //    nonzero value would advertise a leg-B↔USDC route that must never be taken (the manager
-            //    makes every such swap an early-return identity instead).
-            if (p.cbBTCSwapTickSpacing != 0) revert VenueMismatch();
-            // 3. Feed: leg B prices at FACE. Pinning its feed to the USDC/USD feed makes
-            //    `_tokenToUsdc(x, 6, pUsdc, pUsdc) == x` identically, so face-valuing leg B needs no
-            //    special case anywhere. Left pointing at a volatile aggregator it would price idle USDC
-            //    at that token's price — a silent NAV blow-up on the deposit path.
-            if (p.cbBTCFeed != p.usdcFeed) revert VenueMismatch();
-        } else {
-            if (p.cbBTCSwapTickSpacing <= 0) revert VenueMismatch();
-            if (ICLFactory(clFactory).getPool(p.usdc, p.cbBTC, p.cbBTCSwapTickSpacing) == address(0)) {
-                revert VenueMismatch();
-            }
-        }
-        // Leg A is a real borrowed leg in BOTH shapes, so its swap venue is checked unconditionally.
-        if (p.wethSwapTickSpacing <= 0) revert VenueMismatch();
-        if (ICLFactory(clFactory).getPool(p.usdc, p.weth, p.wethSwapTickSpacing) == address(0)) {
-            revert VenueMismatch();
-        }
-
-        // Reject legs that break an accounting invariant. LEG A may never be the unit of account (it is
-        // USDC's counterparty in both shapes and owns the native-wrap path) nor the gauge reward token.
-        // LEG B may be the unit of account — that IS asset-mode, validated above — but never the reward
-        // token, which `compound()` sells wholesale (and would otherwise liquidate an LP leg).
-        address rewardTok = ICLGauge(p.gauge).rewardToken();
-        if (p.weth == p.usdc || p.weth == rewardTok || p.cbBTC == rewardTok) {
-            revert UnsupportedLeg();
-        }
-        // `compoundImpl`'s oracle floor hardcodes `mulDiv(aeroBal, price8, 1e20)` — i.e. an 18dp
-        // reward token against an 8dp feed. A reward token of any other denomination would mis-scale
-        // that floor by orders of magnitude, so pin it here (reusing the feed-decimals error).
-        if (IERC20Metadata(rewardTok).decimals() != 18) revert UnexpectedFeedDecimals();
-
-        // Leg decimals drive every token↔USDC conversion — read them instead of assuming 8/18. The
-        // [2, 18] band keeps `10 ** dec` well inside uint256 and rejects degenerate 0/1dp tokens.
-        uint8 cbDec = IERC20Metadata(p.cbBTC).decimals();
-        uint8 wethDec = IERC20Metadata(p.weth).decimals();
-        if (cbDec < 2 || cbDec > 18 || wethDec < 2 || wethDec > 18) revert LegDecimalsOutOfRange();
-
-        // Rerange width band: every width (init + per-cycle) must sit on the tickSpacing grid, and
-        // the floor must span at least two spacings so an aligned range is never empty.
-        if (p.tickSpacing <= 0) revert WidthOutOfBounds();
-        uint24 spacing = uint24(p.tickSpacing);
-        if (p.minWidth % spacing != 0 || p.maxWidth % spacing != 0) revert WidthOutOfBounds();
-        if (uint256(p.minWidth) < 2 * uint256(spacing)) revert WidthOutOfBounds();
-        if (p.minWidth > p.maxWidth) revert WidthOutOfBounds();
-        // Ceiling on the band: `_computeTickRange` spans `width/2` ticks each side of the pool tick,
-        // so a width beyond the full tick domain can only ever produce out-of-domain bounds (and, at
-        // the uint24 extreme, an int24 wrap in the `currentTick ± span` arithmetic).
-        if (uint256(p.maxWidth) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert WidthOutOfBounds();
-        _checkWidth(p.width, p.tickSpacing, p.minWidth, p.maxWidth);
-
-        uint16 cfBps = _readCollateralFactor(p.comptroller, p.mUsdc);
-        if (p.targetLtvBps > p.maxLtvBps) revert TargetLtvExceedsMax();
-        if (p.minHealthBps < 10500) revert MinHealthTooLow();
-        if (p.maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
-        // L4: permissionless deleverage triggers at LTV = 1e8 / minHealthBps; that trigger LTV MUST
-        // sit strictly above maxLtvBps, else there is an in-band range anyone can grief-deleverage.
-        // Cross-multiplied (overflow-free): require minHealthBps * maxLtvBps < 1e8.
-        if (uint256(p.minHealthBps) * uint256(p.maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
         // L3 (+L5): bound the oracle / calm-gate params so a misconfig can't silently disable a guard.
         // Bounds admit the confirmed config yet block degenerate values:
         //   maxDelay           ∈ (0, 7 days] — a huge value disables staleness detection
@@ -584,47 +499,22 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (p.performanceFeeBps > FeeConstants.MAX_PERFORMANCE_FEE_BPS) revert PerformanceFeeTooHigh();
         if (p.managementFeeBps > MAX_MANAGEMENT_FEE_BPS) revert ManagementFeeTooHigh();
 
-        Layout storage $ = _layout();
-        $.usdc = p.usdc;
-        $.mUsdc = p.mUsdc;
-        $.mCbBTC = p.mCbBTC;
-        $.mWeth = p.mWeth;
-        $.comptroller = p.comptroller;
-        $.cbBTC = p.cbBTC;
-        $.weth = p.weth;
-        $.pool = p.pool;
+        // Non-migratable core stores (the venue subset — legs, markets, pool, gauge, feeds,
+        // spacings, widths, LTV band, derived decimals/ordering/shape — was persisted inside
+        // `applyVenue` above; usdc / mUsdc / usdcFeed / comptroller were stored ahead of it).
         $.npm = p.npm;
-        $.gauge = p.gauge;
         $.swapRouter = p.swapRouter;
-        $.cbBTCFeed = p.cbBTCFeed;
-        $.wethFeed = p.wethFeed;
-        $.usdcFeed = p.usdcFeed;
         $.sequencerFeed = p.sequencerFeed;
         $.aeroUsdFeed = p.aeroUsdFeed;
         $.maxDelay = p.maxDelay;
         $.gracePeriod = p.gracePeriod;
         $.calmDeviationTicks = p.calmDeviationTicks;
         $.twapWindow = p.twapWindow;
-        $.tickSpacing = p.tickSpacing;
-        $.targetLtvBps = p.targetLtvBps;
-        $.maxLtvBps = p.maxLtvBps;
-        $.minHealthBps = p.minHealthBps;
         $.maxSlippageBps = p.maxSlippageBps;
-        $.usdcCollateralFactorBps = cfBps;
         $.managementFeeBps = p.managementFeeBps;
         $.performanceFeeBps = p.performanceFeeBps;
         $.feeRecipient = p.feeRecipient;
         $.lastFeeAccrualTimestamp = block.timestamp;
-        $.cbBTCDecimals = cbDec;
-        $.wethDecimals = wethDec;
-        $.wethIsToken0 = wethIsToken0_;
-        $.wethDeliversNative = p.wethDeliversNative;
-        $.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
-        $.wethSwapTickSpacing = p.wethSwapTickSpacing;
-        $.width = p.width;
-        $.minWidth = p.minWidth;
-        $.maxWidth = p.maxWidth;
-        $.legBIsAsset = legBIsAsset_;
         // tokenId / posTickLower / posTickUpper / hwmPerShare default to 0 (set in _execute / on first deposit).
     }
 
@@ -637,18 +527,28 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (width_ < minWidth_ || width_ > maxWidth_) revert WidthOutOfBounds();
     }
 
-    /// @dev USDC collateral factor (bps) from `Comptroller.markets(mUsdc)`. ABI is
-    ///      `(bool isListed, uint256 collateralFactorMantissa, ...)`; read the 2nd word (1e18-scaled).
-    function _readCollateralFactor(address comptroller_, address mUsdc_) private view returns (uint16 cfBps) {
-        (bool ok, bytes memory ret) = comptroller_.staticcall(abi.encodeWithSignature("markets(address)", mUsdc_));
-        if (!ok || ret.length < 64) revert ComptrollerCallFailed();
-        uint256 cfMantissa;
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            cfMantissa := mload(add(ret, 0x40))
-        }
-        cfBps = uint16(cfMantissa / 1e14); // 0.88e18 / 1e14 = 8800
-        if (cfBps == 0) revert ComptrollerCallFailed();
+    /// @dev The venue subset of `InitParams`, marshalled for `LeveragedAeroVenue.applyVenue` (one
+    ///      shared validation + store path for init and `migrateVenue`). Field-by-field so the Yul
+    ///      IR streams memory copies instead of holding a wide struct-literal live.
+    function _venueParamsOf(InitParams memory p) private pure returns (LeveragedAeroVenue.VenueParams memory v) {
+        v.mCbBTC = p.mCbBTC;
+        v.mWeth = p.mWeth;
+        v.cbBTC = p.cbBTC;
+        v.weth = p.weth;
+        v.pool = p.pool;
+        v.gauge = p.gauge;
+        v.cbBTCFeed = p.cbBTCFeed;
+        v.wethFeed = p.wethFeed;
+        v.tickSpacing = p.tickSpacing;
+        v.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
+        v.wethSwapTickSpacing = p.wethSwapTickSpacing;
+        v.wethDeliversNative = p.wethDeliversNative;
+        v.width = p.width;
+        v.minWidth = p.minWidth;
+        v.maxWidth = p.maxWidth;
+        v.targetLtvBps = p.targetLtvBps;
+        v.maxLtvBps = p.maxLtvBps;
+        v.minHealthBps = p.minHealthBps;
     }
 
     // ── NAV ──
@@ -1412,6 +1312,60 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
                 || token == $.mCbBTC || token == $.mWeth || (token == aero && _state != State.Settled)
         ) revert CannotRescuePositionToken();
         _pushAllToVault(token);
+    }
+
+    // ── Owner-staged venue migration (see LeveragedAeroVenue for the impls) ──
+
+    /// @notice Commit the destination venue for an in-place pool/pair migration, as
+    ///         `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))`; `bytes32(0)` clears. VAULT
+    ///         OWNER ONLY — this is the venue-selection authority (the same trust root as
+    ///         `rescueToVault`'s owner leg and the vault's fee config), so the hot proposer key can
+    ///         never choose where the fund's liquidity goes. Staging is inert: nothing about the
+    ///         live venue, the position, or share pricing changes until the proposer executes
+    ///         `migrateVenue` with the byte-exact params. Re-staging replaces the previous hash.
+    /// @param venueHash keccak256 of the ABI-encoded `VenueParams` to authorize (0 = clear).
+    function stageVenue(bytes32 venueHash) external {
+        if (msg.sender != Ownable(vault()).owner()) revert NotVaultOwner();
+        LeveragedAeroVenue.stageImpl(venueHash);
+    }
+
+    /// @notice Unwind the WHOLE book to idle USDC while staying `Executed` — the migration's first
+    ///         leg, and a general proposer de-risk lever. Runs `settleImpl`'s exact unwind (exit
+    ///         gauge + CL, repay both legs self-funding any shortfall, redeem all collateral, sweep
+    ///         residual legs to USDC, Chainlink-floored slippage via `maxSlippageBps`) but does NOT
+    ///         settle: no state transition, no push-to-vault, no protocol-fee discharge. Deposits
+    ///         and redeems keep working against the flat book (NAV == idle USDC, oracle-free); the
+    ///         proposer re-enters via `deployIdle` — into the current venue, or into a new one after
+    ///         `migrateVenue`. Idempotent on an already-flat book.
+    function flatten() external onlyProposer nonReentrant {
+        if (_state != State.Executed) revert NotExecuted();
+        LeveragedAeroVenue.flattenImpl();
+    }
+
+    /// @notice Execute the owner-staged venue rewrite. PROPOSER ONLY, and only when `p` byte-matches
+    ///         the staged hash AND the book is flat (no CL position, no hedged basis, no live debt
+    ///         on either current leg market — flatten first). Re-runs the full init-grade venue
+    ///         validation against `p` (venue identity, swap-pool probes, gauge↔pool binding, leg /
+    ///         feed decimals, width band, CF/LTV/health invariants, shape re-derivation), rewrites
+    ///         the venue subset of storage, and consumes the staged hash. Share-ledger continuity is
+    ///         structural: on a flat book NAV is the idle USDC balance, which no venue field
+    ///         touches, so the vault, share balances, HWM, and pending redeem requests are
+    ///         unaffected. Old-leg dust becomes rescuable via `rescueToVault` (its deny-list reads
+    ///         the LIVE legs).
+    /// @param p The full destination venue config; must hash to the staged commitment.
+    function migrateVenue(LeveragedAeroVenue.VenueParams calldata p) external onlyProposer nonReentrant {
+        if (_state != State.Executed) revert NotExecuted();
+        LeveragedAeroVenue.migrateImpl(p);
+    }
+
+    /// @notice Open a FRESH position from a flat `Executed` book, deploying the entire idle USDC
+    ///         balance — the re-entry after a `flatten` (with or without an intervening
+    ///         `migrateVenue`). Runs `executeImpl`'s exact genesis sequence via
+    ///         `LeveragedAeroVenue.redeployImpl`; reverts `PositionAlreadyOpen` when a position is
+    ///         live (top-ups go through `deployIdle`, which conversely cannot mint from flat).
+    function redeploy() external onlyProposer nonReentrant {
+        if (_state != State.Executed) revert NotExecuted();
+        LeveragedAeroVenue.redeployImpl();
     }
 
     /// @dev No tunable params.

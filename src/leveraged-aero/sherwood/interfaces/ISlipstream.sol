@@ -187,6 +187,9 @@ interface ICLGauge {
     /// @notice The ERC-20 token distributed as gauge rewards (AERO on Base).
     function rewardToken() external view returns (address);
 
+    /// @notice The Slipstream CL pool this gauge is bound to (used by the venue gauge↔pool binding check).
+    function pool() external view returns (address);
+
     /// @notice Rewards currently claimable by `account` for the staked position `tokenId`.
     /// @dev Read by `LeveragedAerodromeCLStrategy.compound` to tell a GENUINE no-op (nothing to harvest)
     ///      apart from a real harvest BEFORE it crystallises fees — a poll must have no side effects.
