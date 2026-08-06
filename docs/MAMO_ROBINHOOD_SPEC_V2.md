@@ -8,9 +8,11 @@
 
 ## 1. Summary
 
+**The opportunity.** Tokenized real-world assets are the strongest narrative in crypto, and equities are its center of gravity. Robinhood — a top consumer brokerage — has made its chain the flagship venue for on-chain stocks: ~95 tickers live, ~$70M of stock-token AUM within weeks of launch and growing, and institutional rails (Morpho, Chainlink, Uniswap) deployed from genesis. What the chain does not yet have is a credible manager for those assets — the competitive field is measured-empty ($41 of competitor TVL at last teardown), and the seat for *the money manager of on-chain stocks* is open. Mamo is built for exactly that seat: audited history, per-user custody, hard on-chain mandates. This spec is the plan to take it.
+
 **One launch, two doors, one flywheel.**
 
-**Mamo arrives on Robinhood Chain. Same companion, new ground.** Until now Mamo helped your money earn. Now it can help your money own. **Door 1 — Mamo Baskets:** you deposit USDG, Mamo builds your basket of tokenized stocks, keeps it on target, and keeps the cash half earning. Calm, capped, per-user, exactly as specced in v1. **Door 2 — the Initiation:** MAMO arrives on the chain with its own market, and that market's trading fees do one thing — they buy real tokenized stocks for MAMO stakers. Every trade buys a piece of the market for the people who hold the token. *(Voice rule §11: user-facing copy says "trading fees" or "pool fee", never "tax".)*
+**Mamo arrives on Robinhood Chain. Same companion, new ground.** Until now Mamo helped your money earn. Now it can help your money own. **Door 1 — Mamo Baskets:** you deposit USDG, Mamo builds your basket of tokenized stocks, keeps it on target, and keeps the cash half earning. Calm, capped, per-user, exactly as specced in v1. **Door 2 — the Stock Drop:** MAMO arrives on the chain with its own market, and that market's trading fees do one thing — they buy real tokenized stocks for MAMO stakers. Every trade buys a piece of the market for the people who hold the token. *(Voice rule §11: user-facing copy says "trading fees" or "pool fee", never "tax".)*
 
 The two doors are not two products with a shared logo. They are wired:
 
@@ -20,7 +22,7 @@ The two doors are not two products with a shared logo. They are wired:
 
 | | v1 (baskets spec) | v2 (this document) |
 |---|---|---|
-| Products | Baskets only | Baskets + the Initiation pool |
+| Products | Baskets only | Baskets + the MAMO pool (the Stock Drop) |
 | MAMO on 4663 | "bridge pre-launch, nice to have" | **launch-critical** — the second door is denominated in it |
 | Staking utility | capacity carve-out, backend-attested against Base balances | **three streams**, all native on-chain: stock rewards, capacity priority, the Drop |
 | Reward assets | USDG (+MAMO later) | + **one tokenized stock per epoch, chosen by stakers** |
@@ -29,7 +31,7 @@ The two doors are not two products with a shared logo. They are wired:
 
 **What does not change.** Baskets remain the headline product and the thing we ask people to trust. Boosted USDG stays dark (`BOOSTED_USDG_SIZING.md` §6 — the carry does not exist at scale, and it has *worsened*: syrupUSDG's organic spread flipped **−51 bps** on the 2026-08-05 re-measure). No leverage ships. The launch is still bought for stance and the option, not for revenue.
 
-**The honest frame for Door 2.** The trade tax is **not yield and must never be quoted as an APY.** It is a launch-phase distribution event with a **hardcoded sunset baked into the hook's bytecode**: after the Initiation window the tax reads zero and cannot be re-enabled by anyone, including us. The reason is measured, not philosophical — The Index's own volume is down ~97% from its peak window (§3). Trade-tax revenue is reflexive and dies. Shipping it with an end date built into the deployed code converts a decaying mechanism into honest urgency, and removes the temptation to defend a revenue line that was never real.
+**The honest frame for Door 2.** The pool fee is **not yield and must never be quoted as an APY** — The Index's own volume is down ~97% from its peak window (§3); trade-fee revenue is reflexive and varies with the trading it rides on. **By default the Stock Drop runs indefinitely.** The hook carries exactly one lever: a **one-way, irrevocable `disable()`** held by the admin multisig that can set the fee to zero forever — it can never raise the fee, never redirect it, never re-enable it. A **hardcoded sunset** (a fixed end date in bytecode) is retained as a consideration, not the default (§3e, decision 3).
 
 ---
 
@@ -66,11 +68,11 @@ $1.1M of combined capacity. Small on purpose: capacity is the binding constraint
 
 ---
 
-## 3. Door 2 — the Initiation pool
+## 3. Door 2 — the MAMO pool and the Stock Drop
 
 ### 3a. What it is
 
-A **MAMO/USDG Uniswap v4 pool on chain 4663** with one hook attached. The hook takes an immutable percentage of the USDG leg of every swap and sends it to an immutable destination. A keeper converts that USDG into **one tokenized stock per epoch — the stock MAMO stakers voted for** — and streams it to stakers through `MultiRewards`. The hook stops taking anything on a hardcoded date.
+A **MAMO/USDG Uniswap v4 pool on chain 4663** with one hook attached. The hook takes an immutable percentage of the USDG leg of every swap and sends it to an immutable destination. A keeper converts that USDG into **one tokenized stock per epoch — the stock MAMO stakers voted for** — and streams it to stakers through `MultiRewards`. The program is **the Stock Drop** — the on-chain extension of The Mamo Drop, the reward ritual Mamo already ships. By default it runs indefinitely; its only lever is a one-way retire (§3c, §3e).
 
 MAMO reaches 4663 via **Wormhole** (per v1 §2 — `Mamo.sol`'s Superchain leg does not port to Orbit; the Wormhole path is already operational for MAMO). Bridge execution moves from "nice to have" to launch-critical, because Door 2 is denominated in it.
 
@@ -96,20 +98,20 @@ Two conclusions, both load-bearing:
 
 ### 3c. Hook design — copy the good leg, fix the failures
 
-| Design point | The Index (measured) | Mamo Initiation hook | Why |
+| Design point | The Index (measured) | Mamo Stock Drop hook | Why |
 |---|---|---|---|
 | State / ownership | stateless, ownerless, hardcoded bps | **same** | The only reason a tax is credible. No admin, no setter, no upgrade path. |
 | Fee denomination | ETH side of an ETH-paired pool | **USDG side of a MAMO/USDG pool** | The accrual is bankable in the numeraire we buy stocks with. No second swap to price the tax; no ETH-price reflexivity in the reward stream. |
 | Rate | 300 bps | **200 bps (recommended, §10)** | Total per-side cost = 200 tax + 30 LP = 230 bps. 300 bps taxes the volume the mechanism exists to monetize. |
-| Destination | treasury EOA | **`InitiationTaxVault`** — immutable, ownerless | Removes the redirect lever entirely. |
+| Destination | treasury EOA | **`StockDropVault`** — immutable, ownerless | Removes the redirect lever entirely. |
 | Distribution | push, hourly, off-chain list, ~925M gas/round | **pull-based `MultiRewards`** | Pull scales to any holder count at zero marginal gas to us, has no list, and cannot omit anyone. |
 | Eligibility floor | ~$74 of implied gas | **none** | Accrual is per-second and continuous; the user chooses when claiming is worth the gas. |
-| Duration | indefinite | **immutable sunset in bytecode** | Trade-tax yield is measurably reflexive (−97%). An end date is honest and removes the temptation to defend it. |
+| Duration | indefinite, no off-switch | **indefinite by default, with a one-way irrevocable `disable()`** (fee→0 only; nothing else settable) | Reflexive revenue (−97% on the precedent) should be retirable deliberately, not promised forever; a hardcoded sunset stays on the table as a consideration (§3e, decision 3). |
 | Reward asset | 18 stocks, pro-rata dust | **one voted stock per epoch** | Concentration makes the accumulation visible and keeps every buy inside measured depth. |
 
-**Mechanics.** `beforeSwap` (buy: USDG in) takes `taxBps` of `amountSpecified` and `afterSwap` (sell: USDG out) takes `taxBps` of the realized USDG output, both via return-delta accounting, transferring to the vault in the same call. `taxBps`, `INITIATION_END` (unix timestamp), the USDG address and the vault address are **`immutable` constructor arguments**; after `block.timestamp >= INITIATION_END` both callbacks return a zero delta and the pool behaves as an ordinary v4 pool forever. There is no owner, no `setFee`, no proxy.
+**Mechanics.** `beforeSwap` (buy: USDG in) takes `taxBps` of `amountSpecified` and `afterSwap` (sell: USDG out) takes `taxBps` of the realized USDG output, both via return-delta accounting, transferring to the vault in the same call. `taxBps`, the USDG address and the vault address are **`immutable` constructor arguments**. The hook's single storage slot is a one-way `disabled` flag: the admin multisig may call `disable()` once, after which both callbacks return a zero delta and the pool behaves as an ordinary v4 pool forever. There is no `setFee`, no re-enable, no proxy — the only reachable state change is the fee ending.
 
-**The vault is where the mandate lives.** `InitiationTaxVault` holds USDG and has exactly one outbound path:
+**The vault is where the mandate lives.** `StockDropVault` holds USDG and has exactly one outbound path:
 
 ```
 swapAndNotify(address winner, uint256 amountIn, uint256 backendMinOut)
@@ -137,13 +139,13 @@ blended $300k as specced  ->  100 bps at roughly a $4k ticket, and the full-rang
 never goes out of range no matter what MAMO does
 ```
 
-$300–400k is also the working scale the precedent operated at, which is the only empirical anchor available. Policy, stated in public and not enforced in code: **the POL is not withdrawn before the sunset.** We do not want a credible-neutrality claim that depends on a multisig's restraint, so we say what we will do and let the on-chain record be the proof — the same posture v1 takes on the drift band being off-chain policy.
+$300–400k is also the working scale the precedent operated at, which is the only empirical anchor available. Policy, stated in public and not enforced in code: **the POL is committed for a published minimum term of 12 months.** We do not want a credible-neutrality claim that depends on a multisig's restraint, so we say what we will do and let the on-chain record be the proof — the same posture v1 takes on the drift band being off-chain policy.
 
-### 3e. The sunset
+### 3e. Program duration — and the sunset as a consideration
 
-**182 days = exactly 13 epochs of 14 days**, hardcoded as a timestamp in the hook. Epoch boundaries and the sunset coincide, so no epoch is truncated mid-flight and the last conversion has a full window.
+**Default: the Stock Drop runs indefinitely.** The hook carries no end date; its only lever is the one-way `disable()` (§3c) — the program can be retired deliberately, in public, and never resurrected or repriced. Whenever it ends, nothing breaks: the pool keeps trading with an inert hook, `MultiRewards` streams out whatever the last conversion funded, and the staking hub keeps its durable streams (capacity priority, the Drop).
 
-What happens after: the pool keeps trading with an inert hook, `MultiRewards` keeps streaming whatever the last `notifyRewardAmount` funded, and the staking hub keeps its other two streams (capacity priority, the Drop) — which are the durable ones. Nothing breaks; a launch-phase mechanism simply ends, on schedule, in public.
+**Consideration — a hardcoded sunset.** An earlier draft defaulted to a fixed end date in bytecode (182 days = 13 exact epochs). For it: it removes all discretion, bounds the legal exposure window mechanically, and turns a decaying mechanism into stated urgency. Against it: it kills a working program on a timer, sits uncomfortably close to the countdown theater the brand rules exclude (§11), and the precedent's −97% decay suggests these programs end themselves without help. It remains a live option — decision 3 — and if chosen, epoch alignment (13 × 14d) should be preserved so no epoch is truncated.
 
 ---
 
@@ -186,11 +188,11 @@ Concentration is a product decision with an execution justification.
 - **Narrative visibility.** "This epoch, MAMO stakers bought NVDA" is a legible sentence. Eighteen simultaneous dust distributions is what The Index does, and its measured median distribution is $1.64.
 - **Depth.** At the realistic revenue range (§7: **$5–25k per epoch**), one name is trivially inside every core name's measured capacity. Even a **$100k** epoch clears NVDA ($170k), AAPL ($60k) and SPY ($34k) in one clip.
 - **Clipping, where it binds.** If projected proceeds exceed **50% of the winner's measured 100 bps cap**, the keeper splits the buy into clips ≥15 min apart across the conversion window — reusing A3's TWAP executor. A $30k epoch on TSLA (cap ~$16k) is four clips, not an exclusion. Names are never dropped for size; buys are.
-- **Reward-token bound.** Over 13 epochs at most 8 distinct tokens can ever enter `MultiRewards.rewardTokens`, keeping `getReward()`'s loop at ~10 tokens including MAMO and USDG.
+- **Reward-token bound.** The menu cap (12) bounds what can ever enter `MultiRewards.rewardTokens`, keeping `getReward()`'s loop at ~10 tokens including MAMO and USDG.
 
 ### 4e. Build
 
-**One small contract** — `InitiationEpochController` (~150 lines): epoch clock, menu, checkpointed tally, `settledWinner()`. Immutable except the menu setter (multisig) and non-upgradeable. Plus **a one-line keeper change**: A11 reads `settledWinner()` instead of a config constant.
+**One small contract** — `StockDropEpochController` (~150 lines): epoch clock, menu, checkpointed tally, `settledWinner()`. Immutable except the menu setter (multisig) and non-upgradeable. Plus **a one-line keeper change**: A11 reads `settledWinner()` instead of a config constant.
 
 **One deviation from v1, stated plainly.** v1 says `FeeSplitter` and `MultiRewards` "redeploy verbatim". Stake-weighted snapshot voting needs a staked-balance history that the Synthetix-fork `MultiRewards` does not keep. The 4663 deployment therefore adds an OZ `Checkpoints`-backed staked-balance trace (~25 lines, one extra SSTORE on `stake`/`withdraw`) and is **not byte-identical to Base**. That is an audit delta, small but real, and it is the honest cost of native on-chain voting. `addReward` for each menu token is a one-time multisig action at genesis; the tax vault is set as each token's `rewardsDistributor`.
 
@@ -254,9 +256,9 @@ User-facing framing (in voice), mirroring the existing "Reinvest (Grow your Bitc
 
 `MultiRewards` on 4663 (checkpointed variant, §4e) is the single place all three streams land. Staking is native and local — no cross-chain attestation anywhere in the design.
 
-| Stream | Source | Cadence | Durable after sunset? |
+| Stream | Source | Cadence | Durable? |
 |---|---|---|---|
-| **Stock rewards** | trade tax → epoch winner | streamed over each 14d epoch | **No** — ends with the Initiation, by design |
+| **Stock rewards** | trade tax → epoch winner | streamed over each 14d epoch | Runs while the pool trades; retirable via the one-way `disable()` |
 | **Capacity priority** | basket supply caps | continuous | Yes |
 | **The Drop** | `compoundFee` + management fee → `FeeSplitter` | quarterly, then weekly (below) | Yes |
 
@@ -270,7 +272,7 @@ if (deposit consumes into `reserved`)  require(multiRewards.balanceOf(user) >= m
 
 Roughly ten lines in `recordDeposit`, no oracle, no off-chain input, no trusted attester — a strict security improvement over v1's design, not just a convenience. Capacity utilization is already published by automation **A8**; the front end reads the same feed and shows two numbers: open capacity and staker-reserved capacity. **Both baskets need the `MamoVaultConfig` wiring that v1 §7 item 3 already schedules** — baskets are not metered today at all, so this rides an existing critical-path item rather than adding one.
 
-**Drop cadence.** v1's judgment stands: at $1.1M of caps a weekly Drop is ~$70 and reads as parody. **Accrue and distribute quarterly until the run-rate clears $2,500/week (~$130k/yr of fee base), then switch to weekly.** The trigger is published in advance so the switch is a milestone rather than an announcement. Note that during the Initiation the *stock* stream will dominate the Drop by an order of magnitude — say so rather than letting the comparison be discovered.
+**Drop cadence.** v1's judgment stands: at $1.1M of caps a weekly Drop is ~$70 and reads as parody. **Accrue and distribute quarterly until the run-rate clears $2,500/week (~$130k/yr of fee base), then switch to weekly.** The trigger is published in advance so the switch is a milestone rather than an announcement. Note that while the Stock Drop runs, the *stock* stream will dominate the Drop by an order of magnitude — say so rather than letting the comparison be discovered.
 
 ---
 
@@ -279,7 +281,7 @@ Roughly ten lines in `recordDeposit`, no oracle, no off-chain input, no trusted 
 **Neither door is a revenue product on day one, and the spec says so first.**
 
 - **Door 1**: ≈**$3.7k/yr** at full launch caps (v1 §2). Unchanged.
-- **Door 2**: **$0 to Mamo.** The tax goes **100% to stakers**, with no treasury cut, for the entire Initiation. There is no revenue line to defend, which is exactly why the sunset is credible.
+- **Door 2**: **$0 to Mamo.** The tax goes **100% to stakers**, with no treasury cut, for the program's life. There is no revenue line to defend, which is exactly why the sunset is credible.
 
 **Sizing Door 2's output, from the precedent.** The Index at its *decayed* floor still moves ~45.7 ETH/day ≈ $85.6k/day of taxable throughput. A new MAMO/USDG pool with $300k of POL should be sized against a fraction of that:
 
@@ -314,13 +316,13 @@ v1 §5 stands in full (issuer blocklist, regulatory, stale feeds, decoy feeds, i
 
 | Risk | L / I | Mitigation |
 |---|---|---|
-| **Legal scope growth** — (a) paying **securities tokens** as staking rewards to token holders, (b) stakers **collectively directing purchases of named securities**, (c) if the §4f agent-pick fallback ships, **Mamo selecting named securities on analysis-based criteria**. All three are new activities, not extensions of "managed basket". | **High / Severe** | The dominant new risk. Both go on the Jersey/regulatory review list **by name**, not as a footnote to the basket review. Door 2 does not ship without a specific sign-off on both; Door 1 ships regardless. Sunset bounds the exposure window to 182 days. |
+| **Legal scope growth** — (a) paying **securities tokens** as staking rewards to token holders, (b) stakers **collectively directing purchases of named securities**, (c) if the §4f agent-pick fallback ships, **Mamo selecting named securities on analysis-based criteria**. All three are new activities, not extensions of "managed basket". | **High / Severe** | The dominant new risk. All three go on the Jersey/regulatory review list **by name**, not as a footnote to the basket review. Door 2 does not ship without specific sign-off; Door 1 ships regardless. The one-way `disable()` can end the program on demand if counsel requires. |
 | **Pooled stock custody in `MultiRewards`** — the reward buffer holds stock tokens for all stakers, which is precisely the pooling baskets avoid. The issuer can blocklist that one address. | Medium / High | Bounded by size: only *undistributed* rewards sit there — one epoch's proceeds, $5–25k central case. `claimAndDeposit` shortens residence time structurally. Buffer balance is a monitored quantity (extend A9's blocklist watch to the `MultiRewards` address). Disclose it: this is the one place Mamo pools stock tokens. |
-| **Reflexivity** — trade-tax revenue is measurably self-consuming (−97% peak-to-now on the precedent) | **High / Medium** | The sunset **is** the mitigation: a decaying mechanism with a hardcoded end cannot become a promise we have to keep. Never quoted as APY; never in a yield table; the front end shows realized purchases, not projected rates. |
+| **Reflexivity** — trade-fee revenue is measurably self-consuming (−97% peak-to-now on the precedent) | **High / Medium** | Never quoted as APY; never in a yield table; the front end shows realized purchases, not projected rates. The one-way `disable()` retires the program deliberately if it decays to noise; a hardcoded sunset remains a consideration (decision 3). |
 | **MAMO becomes a speculation object** — a tax hook and a stock-buying flywheel invite trading behaviour Mamo has not previously courted | Medium / Medium | **A token-governance decision, not an engineering one — flag it for the owners of the token.** Containment: baskets stay the headline, the tax sunsets, and no MAMO emissions are introduced anywhere in v2. |
-| **Comms sequencing** — the pool is the loud thing; the baskets are the trustworthy thing. Lead with the pool and Mamo becomes a memecoin with a portfolio feature. | Medium / High | Hard sequencing rule: **baskets launch first and stay the headline**; the Initiation is framed as *how MAMO arrives on the chain*, always downstream of the product. Every Door 2 asset must name Door 1 first. |
-| **Hook immutability cuts both ways** — no fix path, no pause, no upgrade. A bug is permanent. | Low / Severe | Audit it like it is forever, because it is. Keep the hook under ~150 lines with zero storage; differential-test against the precedent's live behaviour; deploy the mined address only after audit sign-off. Blast radius is bounded to the tax leg — a broken hook cannot touch baskets, the vault's mandate, or user funds. |
-| **POL exposure** — $300k of treasury capital in a two-sided position, impermanent-loss-exposed and unhedged | Medium / Medium | Sized as a launch cost, not an investment. Half full-range so it cannot go out of range. Public no-withdraw-before-sunset policy makes the exposure a stated commitment rather than a surprise. |
+| **Comms sequencing** — the pool is the loud thing; the baskets are the trustworthy thing. Lead with the pool and Mamo becomes a memecoin with a portfolio feature. | Medium / High | Hard sequencing rule: **baskets launch first and stay the headline**; the Stock Drop is framed as *how MAMO arrives on the chain*, always downstream of the product. Every Door 2 asset must name Door 1 first. |
+| **Hook immutability cuts both ways** — no fix path, no pause, no upgrade. A bug is permanent. | Low / Severe | Audit it like it is forever, because it is. Keep the hook under ~150 lines with a single one-way storage flag; differential-test against the precedent's live behaviour; deploy the mined address only after audit sign-off. Blast radius is bounded to the tax leg — a broken hook cannot touch baskets, the vault's mandate, or user funds. |
+| **POL exposure** — $300k of treasury capital in a two-sided position, impermanent-loss-exposed and unhedged | Medium / Medium | Sized as a launch cost, not an investment. Half full-range so it cannot go out of range. A published minimum commitment term (12 months) makes the exposure a stated commitment rather than a surprise. |
 | **Keeper liveness on conversions** | Low / Low | `swapAndNotify` goes permissionless 7 days after epoch close; bounds are immutable, so an anonymous caller gets the same outcome the backend would. |
 
 ---
@@ -335,13 +337,13 @@ Added to v1 §7's ordered path. **Nothing here reorders it**; the audit gate is 
 | V2 | **`MultiRewards` (checkpointed) + `FeeSplitter` deploy on 4663** | contracts | ~1 wk | +25 lines of checkpoints; `addReward` for the menu at genesis; audit delta. |
 | V3 | **`StockBasketStrategy.depositStock`** | contracts | ~40 lines | Prerequisite for §5 **and** a standalone capacity unlock. Ships with v1 item 3 (cap + fee wiring). |
 | V4 | **Native staker capacity gating in `MamoVaultConfig`** | contracts | ~10 lines | Replaces backend attestation. Rides v1 item 3. |
-| V5 | **`InitiationEpochController`** | contracts | ~150 lines | Clock, menu, checkpointed tally, `settledWinner()`. |
-| V6 | **Trade-tax hook + `InitiationTaxVault`** | contracts | **1–2 wks** | Includes the CREATE2 flag mine. Zero storage in the hook. |
+| V5 | **`StockDropEpochController`** | contracts | ~150 lines | Clock, menu, checkpointed tally, `settledWinner()`. |
+| V6 | **Trade-tax hook + `StockDropVault`** | contracts | **1–2 wks** | Includes the CREATE2 flag mine. Zero storage in the hook. |
 | V7 | **`MamoRewardRouter`** | contracts | ~100 lines | Stateless, permissionless, registry-authenticated. |
 | V8 | **Automation A11 — tax-conversion keeper** | backend | small | Spec it into `ROBINHOOD_TENDERLY_AUTOMATIONS.md` §4: cron 1h, gated by A1 market-hours, reads `settledWinner()`, clips at ≤50% of the winner's measured 100 bps cap ≥15 min apart via A3's executor, calls `swapAndNotify`, alerts if unconverted at epoch close +5d. |
 | V9 | **POL seeding runbook** | ops | days | Pool init, mined hook address, range placement, public no-withdraw statement. |
 | V10 | **Audit — v2 scope** | external | shared gate | Hook immutability and return-delta accounting; vault mandate; checkpoint correctness under stake/withdraw; router authentication; in-kind deposit cap accounting. |
-| V11 | **Mamo concierge (MCP)** — *consideration, not launch-blocking* | backend | ~2–4 wks | Read API + calldata builder + MCP server (§12). Ships within the Initiation window if greenlit; no contract changes. |
+| V11 | **Mamo concierge (MCP)** — *consideration, not launch-blocking* | backend | ~2–4 wks | Read API + calldata builder + MCP server (§12). Ships within the launch window if greenlit; no contract changes. |
 
 **Explicitly NOT in scope for v2:**
 
@@ -351,7 +353,7 @@ Added to v1 §7's ordered path. **Nothing here reorders it**; the audit gate is 
 - **No open-universe ballot.** The cleared menu is the ballot, permanently.
 - **No vote-incentive ("bribe") markets.** Named here as a *future option* — third parties paying stakers to vote for a name is a coherent v2.1 extension and an obvious one. It is not designed, not built, and not committed; it also has its own legal surface and should not be casually inherited.
 - **No MAMO emissions.** Every reward in v2 is bought with realized revenue.
-- **No treasury cut of the tax** during the Initiation.
+- **No treasury cut of the tax** during the program.
 
 ---
 
@@ -362,8 +364,8 @@ Recommendations given; each is a real decision, not a formality.
 | # | Decision | Recommendation | Why / what moves it |
 |---|---|---|---|
 | 1 | **Tax rate** | **200 bps** | 300 bps is the proven-credible precedent, but with a 30 bps LP fee the round trip is ~4.6% at 200 and ~6.6% at 300. We are taxing the volume the mechanism monetizes. Go 300 only if the pool is explicitly a distribution event and low volume is acceptable. **Immutable — decide before the mine.** |
-| 2 | **Epoch length** | **14 days** | Long enough that proceeds are a legible number and a vote is worth casting; short enough for 13 cycles inside the sunset. 7d halves per-epoch size and doubles keeper load; 30d makes turnout decay. |
-| 3 | **Sunset length** | **182 days** (13 × 14d) | Aligns the last epoch to the sunset exactly. 90d is too short to build a habit; 365d starts to look like a permanent revenue claim, which is the thing we are avoiding. **Immutable.** |
+| 2 | **Epoch length** | **14 days** | Long enough that proceeds are a legible number and a vote is worth casting; 7d halves per-epoch size and doubles keeper load; 30d makes turnout decay. |
+| 3 | **Program end** | **Indefinite + one-way `disable()` (default); hardcoded sunset as a consideration** | The default keeps a working program alive and avoids countdown theater; the retire switch is the deliberate end path. If a sunset is chosen instead, 182d (13 × 14d) aligns epochs exactly, and longer starts to look like a permanent revenue claim. Either choice is immutable — decide before the mine. |
 | 4 | **Reward set** | **Single name, voted** | Concentration is the narrative and costs nothing in execution at realistic size. The alternative — pro-rata across the menu — is exactly The Index's $1.64 dust failure. |
 | 5 | **POL size** | **$300k** (50% full-range / 50% ±40%) | ~100 bps at a ~$4k ticket. $400k buys a ~$5.5k ticket and is defensible; below $200k the pool is too thin to attract the volume the tax needs. |
 | 6 | **Staker reservation** | **50% of remaining capacity**, `minStake` TBD | v1 already proposed ~50%. `minStake` should be set from the actual staker distribution after the bridge, not guessed now. |
@@ -386,7 +388,7 @@ Sourced verbatim from Mamo's published docs (`docs.mamo.bot`, via the public `mo
 - **Never say "tax."** The brand's published don'ts exclude tax/reflection-token mechanics. User-facing copy says **"pool fee" or "trading fees"**; the immutable hook is the proof behind "trust comes from proof, not promises" (their line). Engineering docs keep the precise word.
 - **Extend named things, never invent parallel ones.** The epoch purchase is an extension of **The Mamo Drop**; claim-to-basket is **Reinvest**, the option name Mamo already ships for Bitcoin. Naming continuity is free brand equity.
 - **Honesty is house style.** Mamo volunteers downside unprompted ("Honest about risk" is a standing docs section). The four hard truths — markets close ~50h on weekends, baskets are capped on purpose, no single blended number will ever be quoted, tokenized stocks are not available everywhere — are written in-voice, on the first screen, not the last.
-- **No urgency theater.** The caps and the sunset are genuinely scarce and genuinely ending; state both calmly and let the facts do the work. Countdown-style FOMO inverts the brand.
+- **No urgency theater.** The caps are genuinely scarce — state it calmly and let the fact do the work; the same rule argues against a hardcoded sunset (decision 3). Countdown-style FOMO inverts the brand.
 
 ---
 
@@ -399,4 +401,4 @@ Today Mamo's interface is a chat with basic tools. This launch is an opening to 
 
 **The safety story is the architecture we already shipped, extended for free.** Every hard bound in the system — the basket mandate, the oracle-floored swaps, the owner-only fund paths, the cleared ballot menu — binds *any* caller, including an agent we did not write. A misbehaving third-party harness can only ever produce transactions the contracts permit. "An agent you do not have to trust" was built for our backend; it turns out to be exactly the property that makes opening the surface to other agents safe. No other product on this chain can make that claim.
 
-**Build shape** (backend-owned, no contract changes): a read API over state we already index for the Tenderly automations, a calldata/tx-builder service, and the MCP server wrapping both. Geo-gating enforced at the API layer, same policy as the front end. **Not launch-blocking** — the chat UI remains the default door — but shipping it inside the Initiation window turns the launch's attention into distribution in the interfaces users already live in, and is an honest answer to the fact that our current agent UI is the weakest part of the product. Costed in §9 as V11; greenlight is a product decision, not an engineering one.
+**Build shape** (backend-owned, no contract changes): a read API over state we already index for the Tenderly automations, a calldata/tx-builder service, and the MCP server wrapping both. Geo-gating enforced at the API layer, same policy as the front end. **Not launch-blocking** — the chat UI remains the default door — but shipping it inside the launch window turns the launch's attention into distribution in the interfaces users already live in, and is an honest answer to the fact that our current agent UI is the weakest part of the product. Costed in §9 as V11; greenlight is a product decision, not an engineering one.
