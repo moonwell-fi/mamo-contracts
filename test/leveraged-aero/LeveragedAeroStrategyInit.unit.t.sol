@@ -89,6 +89,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _registerSwapPools(address(legB), address(legA));
 
         gauge = new MockCLGauge(address(aero));
+        gauge.setPool(address(pool));
         comptroller = new MockComptroller();
         mUsdc = new MockMoonwellMarket(address(usdc));
         mLegA = new MockMoonwellMarket(address(legA));
@@ -274,6 +275,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     function testInitRevertsOnNonEighteenDecimalRewardToken() public {
         MockToken sixDpReward = new MockToken("Reward", "RWD", 6);
         MockCLGauge oddGauge = new MockCLGauge(address(sixDpReward));
+        oddGauge.setPool(address(pool)); // bound correctly so the reward-decimals check is what fires
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.gauge = address(oddGauge);
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);

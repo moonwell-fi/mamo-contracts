@@ -282,11 +282,18 @@ contract MockNpm {
 
     mapping(uint256 => Pos) internal _pos;
     uint256 public nextId = 1;
-    MockCLPool public immutable pool;
+    /// @dev Settable (not immutable): the real NPM is pool-agnostic, so a venue-migration test
+    ///      re-points the mock at the destination pool before driving `redeploy`.
+    MockCLPool public pool;
 
     error MockNpmSlippage();
 
     constructor(MockCLPool pool_) {
+        pool = pool_;
+    }
+
+    /// @notice Re-point the geometry source at a different pool (venue-migration tests).
+    function setPool(MockCLPool pool_) external {
         pool = pool_;
     }
 

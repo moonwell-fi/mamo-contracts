@@ -99,6 +99,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         legAPrice8 = _legAPriceFromSqrtP(sqrtP);
 
         gauge = new MockCLGauge(address(aero));
+        gauge.setPool(address(pool));
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegA = new MockLendingMarket(address(legA));

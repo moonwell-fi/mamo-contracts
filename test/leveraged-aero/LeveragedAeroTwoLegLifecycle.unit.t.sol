@@ -103,6 +103,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
 
         gauge = new MockCLGauge(address(aero));
+        gauge.setPool(address(pool));
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegB = new MockLendingMarket(address(legB));
