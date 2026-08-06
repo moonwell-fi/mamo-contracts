@@ -198,6 +198,14 @@ Concentration is a product decision with an execution justification.
 
 User-facing framing (in voice): **"This epoch, you pick the stock. Every two weeks, MAMO stakers choose one company. The pool's trading fees are already real — you decide what they turn into."** Nothing about yield, nothing about APY, and the vote is written as an extension of The Mamo Drop, an existing named ritual, not a new concept.
 
+### 4f. Consideration — who picks the stock: stakers, or Mamo?
+
+Worth stating the tension plainly, because it touches the brand's core promise. **Mamo is a "no thinking required" product** — it handles the heavy lifting; the user is never handed homework. A biweekly vote is the engagement and governance-utility mechanic, but it is also, unavoidably, a decision we ask users to make. The alternative is on-brand and simple: **the Mamo agent picks the epoch's stock** — from the same cleared menu, under the same execution bounds — based on published criteria (price movements, news flow, liquidity re-measures; LLM-assisted analysis is an implementation detail of the backend, not a contract surface).
+
+**Recommended hybrid: staker vote with an agent-pick fallback.** Keep the vote, but replace the below-quorum fallback (currently "prior winner") with **Mamo's published pick**: stakers who want a say have one; everyone else gets Mamo's judgment. Each epoch the agent publishes its pick *with a plain-language why* — the brand's no-black-box rule applied to the choice itself. Contract impact is minimal and should be decided before audit: `settledWinner()` gains a `BACKEND_ROLE`-set fallback bounded to the menu (~5 lines); everything downstream — the vault mandate, the clips, the oracle bounds — is unchanged, because **whoever chooses, the cleared menu and the execution bounds still bind the choice.** KPI tie-in: §7's turnout KPI already says a theatre vote should be simplified or retired; the agent pick is the documented successor, so building it as the fallback now removes a future migration.
+
+**Legal flag, added by name:** *Mamo selecting specific named securities on analysis-based criteria* sits closer to discretionary advice than mandate execution, and is a different activity again from stakers voting. It joins the §8 legal list as item (c).
+
 ---
 
 ## 5. The reinvest — `claimAndDeposit`
@@ -306,7 +314,7 @@ v1 §5 stands in full (issuer blocklist, regulatory, stale feeds, decoy feeds, i
 
 | Risk | L / I | Mitigation |
 |---|---|---|
-| **Legal scope growth** — (a) paying **securities tokens** as staking rewards to token holders, (b) stakers **collectively directing purchases of named securities**. Both are new activities, not extensions of "managed basket". | **High / Severe** | The dominant new risk. Both go on the Jersey/regulatory review list **by name**, not as a footnote to the basket review. Door 2 does not ship without a specific sign-off on both; Door 1 ships regardless. Sunset bounds the exposure window to 182 days. |
+| **Legal scope growth** — (a) paying **securities tokens** as staking rewards to token holders, (b) stakers **collectively directing purchases of named securities**, (c) if the §4f agent-pick fallback ships, **Mamo selecting named securities on analysis-based criteria**. All three are new activities, not extensions of "managed basket". | **High / Severe** | The dominant new risk. Both go on the Jersey/regulatory review list **by name**, not as a footnote to the basket review. Door 2 does not ship without a specific sign-off on both; Door 1 ships regardless. Sunset bounds the exposure window to 182 days. |
 | **Pooled stock custody in `MultiRewards`** — the reward buffer holds stock tokens for all stakers, which is precisely the pooling baskets avoid. The issuer can blocklist that one address. | Medium / High | Bounded by size: only *undistributed* rewards sit there — one epoch's proceeds, $5–25k central case. `claimAndDeposit` shortens residence time structurally. Buffer balance is a monitored quantity (extend A9's blocklist watch to the `MultiRewards` address). Disclose it: this is the one place Mamo pools stock tokens. |
 | **Reflexivity** — trade-tax revenue is measurably self-consuming (−97% peak-to-now on the precedent) | **High / Medium** | The sunset **is** the mitigation: a decaying mechanism with a hardcoded end cannot become a promise we have to keep. Never quoted as APY; never in a yield table; the front end shows realized purchases, not projected rates. |
 | **MAMO becomes a speculation object** — a tax hook and a stock-buying flywheel invite trading behaviour Mamo has not previously courted | Medium / Medium | **A token-governance decision, not an engineering one — flag it for the owners of the token.** Containment: baskets stay the headline, the tax sunsets, and no MAMO emissions are introduced anywhere in v2. |
@@ -333,6 +341,7 @@ Added to v1 §7's ordered path. **Nothing here reorders it**; the audit gate is 
 | V8 | **Automation A11 — tax-conversion keeper** | backend | small | Spec it into `ROBINHOOD_TENDERLY_AUTOMATIONS.md` §4: cron 1h, gated by A1 market-hours, reads `settledWinner()`, clips at ≤50% of the winner's measured 100 bps cap ≥15 min apart via A3's executor, calls `swapAndNotify`, alerts if unconverted at epoch close +5d. |
 | V9 | **POL seeding runbook** | ops | days | Pool init, mined hook address, range placement, public no-withdraw statement. |
 | V10 | **Audit — v2 scope** | external | shared gate | Hook immutability and return-delta accounting; vault mandate; checkpoint correctness under stake/withdraw; router authentication; in-kind deposit cap accounting. |
+| V11 | **Mamo concierge (MCP)** — *consideration, not launch-blocking* | backend | ~2–4 wks | Read API + calldata builder + MCP server (§12). Ships within the Initiation window if greenlit; no contract changes. |
 
 **Explicitly NOT in scope for v2:**
 
@@ -362,6 +371,7 @@ Recommendations given; each is a real decision, not a formality.
 | 8 | **Drop switch** | quarterly → weekly at **$2,500/week** | Publish the trigger in advance. |
 | 9 | **`MultiRewards` byte-identity** | accept the **+25-line checkpoint delta** | The alternative is off-chain vote-weight computation, which reintroduces exactly the trusted-attester problem native staking was supposed to remove. |
 | 10 | **Comms order** | **baskets first, always** | Sequencing is the main containment for the "Mamo becomes a memecoin" risk (§8). |
+| 11 | **Who picks the epoch stock** | **Staker vote with agent-pick fallback** (§4f) | Pure vote maximizes the utility story but hands users homework; pure agent-pick is on-brand ("no thinking") but weakens governance utility. The hybrid keeps both: vote if you care, Mamo decides when you do not — with its reasoning published. ~5-line controller change; decide before audit; carries legal flag (c). |
 
 Launch line (in voice): **"Mamo is not bringing another savings account to Robinhood Chain. It is bringing the part that was missing: a portfolio that manages itself, in plain language, under your control."** Door 1 is the product; Door 2 is how MAMO gets there. Nothing in the copy implies the fee stream is a yield, and nothing promises it lasts.
 
@@ -377,3 +387,16 @@ Sourced verbatim from Mamo's published docs (`docs.mamo.bot`, via the public `mo
 - **Extend named things, never invent parallel ones.** The epoch purchase is an extension of **The Mamo Drop**; claim-to-basket is **Reinvest**, the option name Mamo already ships for Bitcoin. Naming continuity is free brand equity.
 - **Honesty is house style.** Mamo volunteers downside unprompted ("Honest about risk" is a standing docs section). The four hard truths — markets close ~50h on weekends, baskets are capped on purpose, no single blended number will ever be quoted, tokenized stocks are not available everywhere — are written in-voice, on the first screen, not the last.
 - **No urgency theater.** The caps and the sunset are genuinely scarce and genuinely ending; state both calmly and let the facts do the work. Countdown-style FOMO inverts the brand.
+
+---
+
+## 12. Consideration — the Mamo concierge (MCP)
+
+Today Mamo's interface is a chat with basic tools. This launch is an opening to ship something better *alongside* it without rebuilding it: **an MCP server that turns the user's agent harness of choice into a Mamo concierge.** Any agent that speaks MCP — Claude, or whatever the user already runs — gets:
+
+- **Read tools**: basket state and NAV, sleeve rate, epoch status and current ballot, accrued rewards, capacity remaining (open vs staker-reserved), the published agent-pick reasoning (§4f).
+- **Action tools**: calldata generation for every user action — deposit, withdraw, Reinvest, stake, vote — returned for the **user's own wallet to sign**. The concierge composes transactions; it never holds keys and never signs.
+
+**The safety story is the architecture we already shipped, extended for free.** Every hard bound in the system — the basket mandate, the oracle-floored swaps, the owner-only fund paths, the cleared ballot menu — binds *any* caller, including an agent we did not write. A misbehaving third-party harness can only ever produce transactions the contracts permit. "An agent you do not have to trust" was built for our backend; it turns out to be exactly the property that makes opening the surface to other agents safe. No other product on this chain can make that claim.
+
+**Build shape** (backend-owned, no contract changes): a read API over state we already index for the Tenderly automations, a calldata/tx-builder service, and the MCP server wrapping both. Geo-gating enforced at the API layer, same policy as the front end. **Not launch-blocking** — the chat UI remains the default door — but shipping it inside the Initiation window turns the launch's attention into distribution in the interfaces users already live in, and is an honest answer to the fact that our current agent UI is the weakest part of the product. Costed in §9 as V11; greenlight is a product decision, not an engineering one.
