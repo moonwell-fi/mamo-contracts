@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
@@ -304,6 +305,65 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.adjustLeverage(3000, 0, 0); // lever DOWN
         assertLt(mLegB.borrowBalance(address(strategy)), debtBUp, "lever DOWN repaid leg B");
+    }
+
+    // ==================== FULL LEVER-DOWN (the orphaned-NFT guard) ====================
+
+    /**
+     * @dev REGRESSION — a lever-down to zero debt must be REJECTED, not executed.
+     *
+     *      `_unwindLiquidity` unstakes unconditionally but re-stakes only while liquidity remains, and
+     *      `_leverDown` is the one 100%-unwind caller that neither clears `$.tokenId` nor mints a
+     *      replacement. Executing it therefore left a live `tokenId` pointing at an NFT the gauge no
+     *      longer held, and every later `gauge.withdraw` — settle, flatten, rerange, deployIdle,
+     *      compound, migrateVenue, redeploy, fulfillRedeem, emergencyRedeem — reverted forever.
+     *
+     *      Reverting is the fix rather than retiring the position: with the collateral still supplied,
+     *      clearing `tokenId` would send `nav()` down its flat-book branch, which counts ONLY idle USDC
+     *      and would erase the mUSDC collateral from NAV. A true full unwind has to redeem the
+     *      collateral too — that is what `flatten()` is for.
+     */
+    function testAdjustLeverageToZeroIsRejected() public {
+        _execute(SEED);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroManager.FullUnwindNotSupported.selector);
+        strategy.adjustLeverage(0, 0, 0);
+
+        // Nothing moved, and the position is still staked — the whole point of the guard.
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "position untouched");
+        assertTrue(gauge.stakedContains(address(strategy), tokenIdBefore), "NFT still staked");
+        assertGt(mLegB.borrowBalance(address(strategy)), 0, "leg B debt untouched");
+        assertGt(mLegA.borrowBalance(address(strategy)), 0, "leg A debt untouched");
+    }
+
+    /// @dev The guard is on the DEBT delta, not on the literal argument: a tiny non-zero target whose
+    ///      `targetDebt` floors to 0 against the live collateral reaches the same branch and must be
+    ///      rejected identically.
+    function testAdjustLeverageToADustTargetThatFloorsToZeroDebtIsRejected() public {
+        _execute(SEED);
+        // targetDebt = targetLtvBps * collateral / 10000; with collateral < 10000 (USDC 6dp) any
+        // targetLtvBps of 1 floors to 0. Shrink the collateral basis to reach that band.
+        mUsdc.setExchangeRateStored(1);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroManager.FullUnwindNotSupported.selector);
+        strategy.adjustLeverage(1, 0, 0);
+    }
+
+    /// @dev The guard must NOT catch an ordinary lever-down: a partial repay leaves liquidity, so the
+    ///      re-stake fires and the invariant holds.
+    function testPartialLeverDownKeepsThePositionStaked() public {
+        _execute(SEED);
+        uint256 tokenId = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(3000, 0, 0);
+
+        assertEq(strategy.layout().tokenId, tokenId, "same position");
+        assertTrue(gauge.stakedContains(address(strategy), tokenId), "re-staked after a partial unwind");
+        assertGt(mLegB.borrowBalance(address(strategy)), 0, "debt reduced, not cleared");
     }
 
     // ==================== TARGET-LTV PERSISTENCE (two-borrowed-legs) ====================

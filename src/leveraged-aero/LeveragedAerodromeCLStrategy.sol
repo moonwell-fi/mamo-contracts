@@ -93,6 +93,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error WidthOutOfBounds(); // rerange width off the tickSpacing grid or outside [minWidth, maxWidth]
     error ZeroShares(); // deposit would mint 0 shares (dust assets against a large book) — pay-for-nothing
     error NotVaultOwner(); // stageVenue caller is not the vault's owner (the venue-selection authority)
+    // A lever-down that would repay the ENTIRE debt is rejected — it would orphan the staked position
+    // NFT. Declared once in the manager (same selector); re-declared here so it is on the strategy's
+    // public ABI for the rebalancer, exactly as `InsufficientIdleForLeverUp` is. Use `flatten()`.
+    error FullUnwindNotSupported();
 
     // ── Constants ──
     /// @dev Position `kind` tag for the PriceRouter adapter registry.
