@@ -2,12 +2,15 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
+import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
+import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
 import {TickMath} from "./sherwood/libraries/TickMath.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title LeveragedAeroVenue
 /// @notice Venue-migration companion to `LeveragedAerodromeCLStrategy` (delegatecalled, like
@@ -47,6 +50,9 @@ library LeveragedAeroVenue {
     error VenueNotStaged(); // migrate without a staged hash, or params that do not match it
     error BookNotFlat(); // migrate while a CL position, hedged basis, or leg debt is still live
     error PositionAlreadyOpen(); // redeploy on a book that already has a CL position (use deployIdle)
+    error ZeroMinOut(); // flatten with a reward balance to sell but no caller floor
+    error BelowOracleFloor(); // flatten's reward-swap fill < the AERO/USD oracle floor (L9)
+    error InsufficientIdleAfterFlatten(uint256 idle, uint256 minIdle); // caller's aggregate unwind floor
 
     // ── Events (emitted from the strategy's address via delegatecall) ──
     /// @notice A destination venue hash was staged (or cleared, when `venueHash == 0`) by the vault owner.
@@ -60,8 +66,14 @@ library LeveragedAeroVenue {
     ///         Field semantics are LEG SLOTS exactly as in `InitParams` (names historical): `weth*`
     ///         is leg A (the natively-wrappable, always-borrowed slot), `cbBTC*` is leg B (the slot
     ///         that may be the unit of account — that IS asset-mode). The non-migratable core (usdc,
-    ///         mUsdc, comptroller, npm, swapRouter, usdcFeed, sequencerFeed, aeroUsdFeed, oracle/calm
-    ///         params, maxSlippageBps, fee params) is read from live storage, never from here.
+    ///         mUsdc, comptroller, npm, swapRouter, usdcFeed, sequencerFeed, oracle/calm params,
+    ///         maxSlippageBps, fee params) is read from live storage, never from here.
+    ///
+    ///         `aeroUsdFeed` IS part of the venue, deliberately. The gauge is migratable, so
+    ///         `gauge.rewardToken()` can change; a feed pinned to its init value would let a migration
+    ///         silently price reward token X with AERO's price — mis-scaling the L9 harvest floor (too
+    ///         low disables the sandwich guard, too high bricks every `compound`). Carrying it in the
+    ///         SAME owner-committed hash as the gauge is what keeps the pair attested together.
     struct VenueParams {
         address mCbBTC; // Moonwell market for leg B (must be mUsdc in asset-mode)
         address mWeth; // Moonwell market for leg A
@@ -71,6 +83,7 @@ library LeveragedAeroVenue {
         address gauge; // Gauge for the pool (AERO rewards); must report `pool()` == pool
         address cbBTCFeed; // leg B/USD aggregator (must be the USDC/USD feed in asset-mode)
         address wethFeed; // leg A/USD aggregator
+        address aeroUsdFeed; // gauge-reward/USD aggregator (8dp) — floors the reward swap (L9)
         int24 tickSpacing; // LP pool tickSpacing (asserted against `pool.tickSpacing()`)
         int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (0 in asset-mode)
         int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing
@@ -193,15 +206,55 @@ library LeveragedAeroVenue {
     /// @dev Slippage on the unwind swaps is Chainlink-floored inside `settleImpl` via
     ///      `maxSlippageBps` (same guard as a real settle); a down oracle fail-closes the flatten.
     ///      Idempotent on an already-flat book (the unwind and repays are no-ops).
-    function flattenImpl() public {
-        LeveragedAeroManager.settleImpl();
+    function flattenImpl(uint256 minRewardUsdcOut, uint256 minIdleUsdcOut) public {
         Layout storage $ = _layout();
+        // CALM GATE FIRST — never unwind at a manipulated tick. `settleImpl` has none of its own: it
+        // was written for the TERMINAL, owner-driven `settle()`, and `_unwindLiquidity`'s
+        // `amount0Min`/`amount1Min` are derived from the same `slot0()` it burns at, so they bind
+        // nothing against a shoved pool. `flatten` is proposer-callable and REPEATABLE (redeploy →
+        // flatten → …), which is exactly the shape `rerangeImpl` gates against; match it.
+        LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
+        LeveragedAeroManager.settleImpl();
+        // Sell the reward tranche the unwind's `gauge.withdraw` just auto-claimed. WITHOUT this the
+        // book keeps a balance that is invisible to `nav()` (the `tokenId == 0` branch prices idle
+        // USDC only), unsellable (`compound` early-returns on a flat book) and un-rescuable
+        // (`rescueToVault` denies the reward token while Executed) — so every deposit and redeem in
+        // the flat window would price against an understated NAV.
+        _sellRewardBalance(minRewardUsdcOut);
         // Same pathological-case belt as `_settle`: repays drive the bases to 0 through `_repay`'s
         // clamp except when residual debt could not be covered at all — zero them explicitly so a
         // flat book never carries a stale hedge basis into the next venue.
         $.hedgedDebtA = 0;
         $.hedgedDebtB = 0;
-        emit Flattened(IERC20($.usdc).balanceOf(address(this)));
+        // Caller's aggregate floor on the WHOLE unwind (LP exit + leg sweeps + reward sale). The
+        // per-swap oracle floors bound each leg at `maxSlippageBps`, which init permits as wide as
+        // 10%; this is the proposer's own bound on the realised total, and the reason `flatten` is no
+        // longer the one value-moving entry point on this contract with no caller-supplied guard.
+        uint256 idle = IERC20($.usdc).balanceOf(address(this));
+        if (idle < minIdleUsdcOut) revert InsufficientIdleAfterFlatten(idle, minIdleUsdcOut);
+        emit Flattened(idle);
+    }
+
+    /// @dev Sell the gauge-reward balance to USDC, floored exactly as `compoundImpl`'s harvest is:
+    ///      `max(caller minOut, oracle floor)`, where the floor comes from a hardened 8dp read of the
+    ///      venue's `aeroUsdFeed` haircut by `maxSlippageBps`, post-checked against the MEASURED fill
+    ///      so a dishonest router cannot widen the bound. A stale feed fail-closes the flatten, which
+    ///      is the same posture `compound` takes (defer rather than sell blind).
+    ///
+    ///      No-op when the book holds no reward token — that keeps `flatten` idempotent on an
+    ///      already-flat book, and is why `minRewardUsdcOut` is only required to be nonzero when there
+    ///      is actually something to sell.
+    function _sellRewardBalance(uint256 minRewardUsdcOut) private {
+        Layout storage $ = _layout();
+        address rewardTok = ICLGauge($.gauge).rewardToken();
+        uint256 bal = IERC20(rewardTok).balanceOf(address(this));
+        if (bal == 0) return;
+        if (minRewardUsdcOut == 0) revert ZeroMinOut();
+        uint256 floor = Math.mulDiv(
+                bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
+            ) * (10000 - uint256($.maxSlippageBps)) / 10000;
+        uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(rewardTok, $.usdc, bal, minRewardUsdcOut);
+        if (usdcOut < floor) revert BelowOracleFloor();
     }
 
     /// @notice Execute the staged venue rewrite: verify `p` byte-matches the owner-staged hash,
@@ -266,6 +319,11 @@ library LeveragedAeroVenue {
         if (p.gauge == address(0)) revert ZeroAddress();
         if (p.cbBTCFeed == address(0)) revert ZeroAddress();
         if (p.wethFeed == address(0)) revert ZeroAddress();
+        if (p.aeroUsdFeed == address(0)) revert ZeroAddress();
+        // L9: the reward-token floor scales an 8dp price (`mulDiv(bal, price8, 1e20)`); a non-8dp
+        // aggregator would silently mis-scale it by orders of magnitude. Checked here (not at read
+        // time like the leg feeds) because the floor consumes the raw answer.
+        if (IAggregatorV3(p.aeroUsdFeed).decimals() != 8) revert UnexpectedFeedDecimals();
 
         // ── SHAPE DERIVATION — the ONE line that selects the pool shape (see `_initialize`) ──
         bool legBIsAsset_ = p.cbBTC == usdc;
@@ -346,6 +404,7 @@ library LeveragedAeroVenue {
         $.gauge = p.gauge;
         $.cbBTCFeed = p.cbBTCFeed;
         $.wethFeed = p.wethFeed;
+        $.aeroUsdFeed = p.aeroUsdFeed;
         $.tickSpacing = p.tickSpacing;
         $.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
         $.wethSwapTickSpacing = p.wethSwapTickSpacing;

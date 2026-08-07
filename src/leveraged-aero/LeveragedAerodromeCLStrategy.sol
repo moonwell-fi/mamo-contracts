@@ -15,7 +15,6 @@ import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAeroVenue} from "./LeveragedAeroVenue.sol";
 import {BaseStrategy} from "./sherwood/BaseStrategy.sol";
 import {FeeConstants} from "./sherwood/FeeConstants.sol";
-import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
 import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
 import {IProtocolConfig} from "./sherwood/interfaces/IProtocolConfig.sol";
 import {ICLGauge, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
@@ -460,11 +459,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (p.wethFeed == address(0)) revert ZeroAddress();
         if (p.usdcFeed == address(0)) revert ZeroAddress();
         if (p.sequencerFeed == address(0)) revert ZeroAddress();
-        if (p.aeroUsdFeed == address(0)) revert ZeroAddress();
-        // L9: the AERO/USD floor scales an 8dp price (mulDiv by 1e20); a non-8dp aggregator would
-        // silently mis-scale the floor. Assert it here (the other feeds check dec at read time via
-        // _readUsd8; this one is checked once at init since the manager reads it raw for the floor).
-        if (IAggregatorV3(p.aeroUsdFeed).decimals() != 8) revert UnexpectedFeedDecimals();
+        // `aeroUsdFeed` (zero-check + the 8dp L9 assertion) is validated inside
+        // `LeveragedAeroVenue.applyVenue` — it moved into the migratable venue subset so a gauge
+        // change and its reward-price feed are always attested together.
 
         // L7: the strategy's unit of account MUST be the vault's ERC-4626 asset, and the
         // SHARES_VIRTUAL_OFFSET (1e6) hardcodes a 6-decimal asset — reject any other wiring.
@@ -509,7 +506,6 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.npm = p.npm;
         $.swapRouter = p.swapRouter;
         $.sequencerFeed = p.sequencerFeed;
-        $.aeroUsdFeed = p.aeroUsdFeed;
         $.maxDelay = p.maxDelay;
         $.gracePeriod = p.gracePeriod;
         $.calmDeviationTicks = p.calmDeviationTicks;
@@ -543,6 +539,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         v.gauge = p.gauge;
         v.cbBTCFeed = p.cbBTCFeed;
         v.wethFeed = p.wethFeed;
+        v.aeroUsdFeed = p.aeroUsdFeed;
         v.tickSpacing = p.tickSpacing;
         v.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
         v.wethSwapTickSpacing = p.wethSwapTickSpacing;
@@ -1339,11 +1336,24 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         residual legs to USDC, Chainlink-floored slippage via `maxSlippageBps`) but does NOT
     ///         settle: no state transition, no push-to-vault, no protocol-fee discharge. Deposits
     ///         and redeems keep working against the flat book (NAV == idle USDC, oracle-free); the
-    ///         proposer re-enters via `deployIdle` — into the current venue, or into a new one after
+    ///         proposer re-enters via `redeploy` — into the current venue, or into a new one after
     ///         `migrateVenue`. Idempotent on an already-flat book.
-    function flatten() external onlyProposer nonReentrant {
+    ///
+    ///         GUARDS (both added because `flatten` is repeatable, unlike the terminal `settle` whose
+    ///         unwind body it reuses): the pool is CALM-GATED before the burn — `settleImpl` has no
+    ///         gate of its own and `_unwindLiquidity`'s mins are derived from the same `slot0()` it
+    ///         burns at, so they bind nothing against a shoved tick — and the reward tranche the
+    ///         unwind auto-claims is SOLD here, so the flat-book `nav()` (idle USDC only) is again the
+    ///         whole book rather than understating it for the length of the flat window.
+    /// @param minRewardUsdcOut Minimum USDC out of the gauge-reward sale. Required nonzero only when
+    ///                         a reward balance is actually present; the L9 oracle floor applies on
+    ///                         top, so the effective bound is `max(this, floor)`.
+    /// @param minIdleUsdcOut   Aggregate floor on the strategy's idle USDC once the unwind completes
+    ///                         — the proposer's own bound on the realised total, over and above the
+    ///                         per-swap `maxSlippageBps` floors.
+    function flatten(uint256 minRewardUsdcOut, uint256 minIdleUsdcOut) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        LeveragedAeroVenue.flattenImpl();
+        LeveragedAeroVenue.flattenImpl(minRewardUsdcOut, minIdleUsdcOut);
     }
 
     /// @notice Execute the owner-staged venue rewrite. PROPOSER ONLY, and only when `p` byte-matches
