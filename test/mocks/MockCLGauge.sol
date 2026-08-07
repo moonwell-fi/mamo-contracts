@@ -40,13 +40,27 @@ contract MockCLGauge {
         aeroToPayOnWithdraw = amount;
     }
 
+    /// @dev Per-depositor stake set, mirroring the real Slipstream `CLGauge._stakes`. Modelled on
+    ///      purpose: the previous stub let `withdraw` succeed on an NFT the gauge never held, which
+    ///      made an unstaked-but-still-referenced position indistinguishable from a staked one and
+    ///      hid a permanent-DoS class of bug from the whole suite.
+    mapping(address => mapping(uint256 => bool)) internal _staked;
+
+    error MockCLGaugeNotStaked();
+
     function deposit(uint256 tokenId) external {
         lastDepositedTokenId = tokenId;
         lastDepositor = msg.sender;
         depositCallCount++;
+        _staked[msg.sender][tokenId] = true;
     }
 
     function withdraw(uint256 tokenId) external {
+        // The real CLGauge reverts when the caller is not the staked depositor (it transfers the NFT
+        // out of the gauge's own custody). Enforced here so a test can observe the orphaned-NFT state.
+        if (!_staked[msg.sender][tokenId]) revert MockCLGaugeNotStaked();
+        _staked[msg.sender][tokenId] = false;
+
         lastWithdrawnTokenId = tokenId;
         lastWithdrawCaller = msg.sender;
         withdrawCallCount++;
@@ -95,7 +109,7 @@ contract MockCLGauge {
         return aeroToken;
     }
 
-    function stakedContains(address, uint256) external pure returns (bool) {
-        return false;
+    function stakedContains(address depositor, uint256 tokenId) external view returns (bool) {
+        return _staked[depositor][tokenId];
     }
 }

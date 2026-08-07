@@ -84,6 +84,9 @@ library LeveragedAeroManager {
     error BelowOracleFloor(); // compound swap fill < AERO/USD oracle floor (L9)
     error FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps); // fast-path redeem would breach maxLtvBps
     error UnsupportedLeg(); // a swap was routed for a token that is neither configured leg
+    // A lever-down would repay the ENTIRE debt, which removes 100% of the liquidity and orphans the
+    // staked position NFT (see the guard in `_leverDown`). Route full unwinds through `flatten()`.
+    error FullUnwindNotSupported();
     // NOTE: `InsufficientIdleForLeverUp` (asset-mode lever-up, see `_leverUp`) is NOT declared here — it
     // is raised by `LeveragedAeroValuation.assetModeLeverUpPair`, alongside the arithmetic that sizes the
     // draw, exactly as `DegenerateRange` is. Same convention: valuation-raised errors are not mirrored.
@@ -746,6 +749,22 @@ library LeveragedAeroManager {
     ///      Balanced legs (the common case) leave no residual → no swap → `minOut` unused.
     function _leverDown(uint256 repayUsd, uint256 debtUsd, uint256 minOut) private {
         Layout storage $ = _layout();
+        // FULL-UNWIND GUARD (load-bearing, do not relax to a clamp).
+        //
+        // `repayUsd == debtUsd` drives `_unwindLiquidity` down its `num == den` branch, which removes
+        // 100% of the liquidity and — because nothing remains to earn — SKIPS the re-stake. The two
+        // callers that legitimately take that branch dispose of the position first (`settleImpl` zeroes
+        // `tokenId`, `rerangeImpl` replaces it with a fresh mint); `_leverDown` does neither, so it
+        // would leave a live `$.tokenId` pointing at an NFT the gauge no longer holds. Every later
+        // venue op opens with `ICLGauge.withdraw($.tokenId)` — settle, flatten, rerange, deployIdle,
+        // compound, migrateVenue, redeploy and BOTH async-redeem exits — so the book would be
+        // permanently bricked, including the trustless `emergencyRedeem` deadman.
+        //
+        // Rejecting is the fix rather than retiring the position (`$.tokenId = 0`): the collateral is
+        // still supplied at this point, and `nav()`'s `tokenId == 0` branch prices ONLY idle USDC, so
+        // clearing the id would erase the mUSDC collateral from NAV. A genuine full unwind must redeem
+        // the collateral too — that is `flatten()`, which reaches a flat book the NAV branch can price.
+        if (repayUsd >= debtUsd) revert FullUnwindNotSupported();
         _unwindLiquidity(repayUsd, debtUsd);
         (uint256 cbShort, uint256 wethShort) = _redeemRepayFromCollected(repayUsd, debtUsd, 0, 0);
         // Two independent `if`s (NOT else-if): a dual-leg IL shortfall covers BOTH legs (L6), mirroring
