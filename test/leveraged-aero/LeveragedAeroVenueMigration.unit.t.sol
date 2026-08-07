@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAeroVenue} from "@contracts/leveraged-aero/LeveragedAeroVenue.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
@@ -11,7 +12,13 @@ import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
-import {MockChainlinkFeed, MockClSwapRouter, MockLendingMarket, MockNpm} from "./LeveragedAeroVenuesHarness.sol";
+import {
+    MockAeroV2Router,
+    MockChainlinkFeed,
+    MockClSwapRouter,
+    MockLendingMarket,
+    MockNpm
+} from "./LeveragedAeroVenuesHarness.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -90,6 +97,11 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     uint256 internal constant P_LEG_A = 3000e8; // $3k @ 18dp (legA AND legA2)
     int24 internal constant TICK = 311_100;
 
+    /// @dev The Aerodrome v2 router address `LeveragedAeroValuation.swapAeroToUsdc` hardcodes for the
+    ///      reward sale. `MockAeroV2Router` is etched there so `flatten`'s reward leg is exercised
+    ///      for real (immutables live in runtime bytecode, so the etched copy keeps its config).
+    address internal constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+
     /// @dev Split into per-venue frames: one flat setUp of this size overflows the Yul stack
     ///      under via_ir (each helper keeps its locals in its own frame).
     function setUp() public {
@@ -162,6 +174,11 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     }
 
     function fundVenues() external {
+        // Reward-sale venue: 1 AERO -> 1 USDC, matching the 1e8 aeroFeed mark.
+        MockAeroV2Router aeroRouterImpl = new MockAeroV2Router(address(aero), address(usdc), 1e6);
+        vm.etch(AERO_V2_ROUTER, address(aeroRouterImpl).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+
         usdc.mint(address(mUsdc), 100_000_000e6);
         legB.mint(address(mLegB), 1_000_000e8);
         legA.mint(address(mLegA), 1_000_000e18);
@@ -242,6 +259,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         v.gauge = address(gaugeB);
         v.cbBTCFeed = address(legB2Feed);
         v.wethFeed = address(legA2Feed);
+        v.aeroUsdFeed = address(aeroFeed);
         v.tickSpacing = SPACING_B;
         v.cbBTCSwapTickSpacing = LEG_B2_SWAP_SPACING;
         v.wethSwapTickSpacing = LEG_A2_SWAP_SPACING;
@@ -274,9 +292,12 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.execute();
     }
 
+    /// @dev `minRewardUsdcOut` is nonzero because several tests arm a gauge reward tranche; the L9
+    ///      oracle floor is the binding guard on top of it. `minIdleUsdcOut` is 0 here so the helper
+    ///      stays usable on an already-flat book; the dedicated tests below bound it explicitly.
     function _flatten() internal {
         vm.prank(proposer);
-        strategy.flatten();
+        strategy.flatten(1, 0);
     }
 
     function _stage(LeveragedAeroVenue.VenueParams memory v) internal {
@@ -323,7 +344,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         vm.expectRevert(BaseStrategy.NotProposer.selector);
         vm.prank(lp);
-        strategy.flatten();
+        strategy.flatten(1, 0);
     }
 
     function testFlattenIsIdempotentOnAFlatBook() public {
@@ -361,6 +382,101 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         vm.stopPrank();
         assertGt(out, 0, "flat-book redeem pays");
         assertEq(usdc.balanceOf(lp) - lpUsdcBefore, out, "payout delivered");
+    }
+
+    // ==================== flatten guards (audit findings 4 + 7) ====================
+
+    /**
+     * @dev REGRESSION (finding 4) — the unwind's `gauge.withdraw` auto-claims the pending reward
+     *      tranche, and `settleImpl` sweeps only the two LEG tokens. Left unsold, that balance is
+     *      invisible to `nav()` (the `tokenId == 0` branch prices idle USDC only), unsellable
+     *      (`compound` early-returns on a flat book) and un-rescuable (`rescueToVault` denies the
+     *      reward token while Executed) — so every deposit in the flat window buys a free claim on it.
+     *      `flatten` must convert it, leaving the flat NAV equal to the whole book.
+     */
+    function testFlattenSellsTheAutoClaimedRewardTranche() public {
+        _execute(SEED);
+        // Arm a reward tranche paid out by the gauge on unstake, and a router rate to sell it at.
+        uint256 tranche = 1000e18;
+        aero.mint(address(gauge), tranche);
+        gauge.setAeroToPayOnWithdraw(tranche);
+
+        _flatten();
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "reward tranche sold, not stranded");
+        // The proceeds are in the flat-book NAV, which is exactly the idle USDC balance.
+        assertEq(strategy.nav(), usdc.balanceOf(address(strategy)), "flat NAV == idle USDC");
+        assertGt(strategy.nav(), (SEED * 98) / 100 + 900e6, "reward proceeds landed in NAV");
+    }
+
+    /// @dev The reward sale is floored by the L9 oracle read on top of the caller's bound: a router
+    ///      paying far under the AERO/USD mark must revert the whole flatten, not sell blind.
+    function testFlattenRevertsWhenTheRewardSaleIsBelowTheOracleFloor() public {
+        _execute(SEED);
+        aero.mint(address(gauge), 1000e18);
+        gauge.setAeroToPayOnWithdraw(1000e18);
+        // Re-etch a router paying 50% under the 1e8 feed mark (immutables => new instance + etch).
+        MockAeroV2Router cheap = new MockAeroV2Router(address(aero), address(usdc), 5e5);
+        vm.etch(AERO_V2_ROUTER, address(cheap).code);
+
+        vm.expectRevert(LeveragedAeroVenue.BelowOracleFloor.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+    }
+
+    /// @dev A reward balance with no caller floor is rejected (mirrors `compound`'s `ZeroMinOut`
+    ///      belt); with NO reward balance the same call is a clean no-op, which is what keeps
+    ///      `flatten` idempotent.
+    function testFlattenRewardFloorIsRequiredOnlyWhenThereIsAReward() public {
+        _execute(SEED);
+        aero.mint(address(gauge), 1000e18);
+        gauge.setAeroToPayOnWithdraw(1000e18);
+
+        vm.expectRevert(LeveragedAeroVenue.ZeroMinOut.selector);
+        vm.prank(proposer);
+        strategy.flatten(0, 0);
+
+        // No reward armed -> minRewardUsdcOut == 0 is fine.
+        gauge.setAeroToPayOnWithdraw(0);
+        vm.prank(proposer);
+        strategy.flatten(0, 0);
+        _assertFlat();
+    }
+
+    /**
+     * @dev REGRESSION (finding 7) — `settleImpl` carries no calm gate of its own, and
+     *      `_unwindLiquidity` derives its `amount0Min`/`amount1Min` from the same `slot0()` it burns
+     *      at, so those mins bind nothing against a shoved tick. `flatten` is proposer-callable and
+     *      repeatable (unlike the terminal `settle` whose body it reuses), so it must gate like
+     *      `rerange` does.
+     */
+    function testFlattenCalmGateBlocksAShovedTick() public {
+        _execute(SEED);
+        pool.setTick(TICK + 5000); // well past calmDeviationTicks = 100
+        pool.setTwapTick(TICK);
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK + 5000));
+
+        vm.expectRevert(LeveragedAeroValuation.CalmGateBreached.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        // The gate fired before the burn — the position is untouched and still staked.
+        assertGt(strategy.layout().tokenId, 0, "position untouched");
+        assertTrue(gauge.stakedContains(address(strategy), strategy.layout().tokenId), "still staked");
+    }
+
+    /// @dev REGRESSION (finding 7) — the caller's aggregate floor on the realised unwind. The
+    ///      per-swap oracle floors only bound each leg at `maxSlippageBps` (init permits up to 10%);
+    ///      this is the proposer's own bound on the total.
+    function testFlattenHonoursTheCallerIdleFloor() public {
+        _execute(SEED);
+        uint256 unreachable = SEED * 2;
+
+        // Selector-only: the realised idle depends on the unwind's slippage, and asserting the exact
+        // figure here would pin an unrelated number rather than the guard.
+        vm.expectPartialRevert(LeveragedAeroVenue.InsufficientIdleAfterFlatten.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, unreachable);
     }
 
     // ==================== staging ====================
@@ -479,6 +595,41 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         LeveragedAeroVenue.VenueParams memory v = _venueBParams();
         v.cbBTCSwapTickSpacing = 300; // no legB2/USDC pool registered at this spacing
         _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /**
+     * @dev REGRESSION (finding 8) — the gauge is migratable, so `gauge.rewardToken()` can change. If
+     *      the feed that prices that token stayed pinned to its init value, a migration would price
+     *      reward token X with AERO's price and mis-scale the L9 harvest floor. The feed therefore
+     *      lives in `VenueParams` and is validated + rewritten with the gauge.
+     */
+    function testMigrateRewritesTheRewardFeedWithTheGauge() public {
+        _execute(SEED);
+        _flatten();
+        MockChainlinkFeed newRewardFeed = new MockChainlinkFeed(2e8, 8, 1, block.timestamp);
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.aeroUsdFeed = address(newRewardFeed);
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().aeroUsdFeed, address(newRewardFeed), "reward feed migrated with the gauge");
+    }
+
+    /// @dev The L9 scaling assumption (`mulDiv(bal, price8, 1e20)`) is asserted on the staged feed,
+    ///      exactly as it was at init.
+    function testMigrateRejectsANonEightDecimalRewardFeed() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.aeroUsdFeed = address(new MockChainlinkFeed(1e18, 18, 1, block.timestamp));
+        _expectMigrateRevert(v, LeveragedAeroVenue.UnexpectedFeedDecimals.selector);
+    }
+
+    function testMigrateRejectsAZeroRewardFeed() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.aeroUsdFeed = address(0);
+        _expectMigrateRevert(v, LeveragedAeroVenue.ZeroAddress.selector);
     }
 
     function testMigrateRejectsAnOffGridWidth() public {

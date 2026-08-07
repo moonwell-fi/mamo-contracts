@@ -587,18 +587,23 @@ same vault, same share token, same user accounts, no user action. Three new stra
 | Call | Who | What |
 |---|---|---|
 | `stageVenue(bytes32)` | **vault owner (multisig)** | Commit `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))` for the destination venue; `0` clears. Inert until executed. |
-| `flatten()` | proposer | `settleImpl`'s exact unwind (exit gauge+CL, repay both legs, redeem all collateral, sweep legs → USDC) but **no settle**: state stays `Executed`, USDC stays in the strategy, deposits/redeems keep working (flat NAV = idle USDC, oracle-free). Idempotent. |
+| `flatten(minRewardUsdcOut, minIdleUsdcOut)` | proposer | `settleImpl`'s exact unwind (exit gauge+CL, repay both legs, redeem all collateral, sweep legs → USDC) but **no settle**: state stays `Executed`, USDC stays in the strategy, deposits/redeems keep working (flat NAV = idle USDC, oracle-free). **Calm-gated** before the burn, and it **sells the reward tranche** the unwind auto-claims (L9 oracle floor + your `minRewardUsdcOut`) so the flat NAV is the whole book. `minIdleUsdcOut` is your aggregate floor on the realised unwind. Idempotent. |
 | `migrateVenue(VenueParams)` | proposer | Executes the staged rewrite. Requires byte-exact hash match AND a flat book (`tokenId == 0`, hedged bases 0, zero debt on both current leg markets). Re-runs full init-grade validation (incl. a `gauge.pool() == pool` binding check) and rewrites the venue subset of storage. Moves **no funds**. |
 | `redeploy()` | proposer | Re-opens a **fresh** position from the flat book — `executeImpl`'s genesis sequence, entire idle balance, stored width/target-LTV. `deployIdle` can NOT do this (it `increaseLiquidity`s the stored tokenId, 0 when flat); conversely `redeploy` reverts `PositionAlreadyOpen` on a live book. |
 
 **Runbook (per migration):**
 
 1. Owner multisig: `stageVenue(keccak256(abi.encode(params)))` — encode the exact `VenueParams`
-   struct (legs, markets, feeds, pool, gauge, spacings, width band, LTV params; the non-migratable
-   core — usdc/mUsdc/comptroller/npm/router/usdcFeed/sequencerFeed/aeroUsdFeed/oracle-calm
-   params/fees — is read from live storage and is NOT in the struct).
-2. Rebalancer: `flatten()` (oracle must be live — the leg sweeps are Chainlink-floored via
-   `maxSlippageBps`).
+   struct (legs, markets, leg feeds, **the reward feed `aeroUsdFeed`**, pool, gauge, spacings, width
+   band, LTV params; the non-migratable core — usdc/mUsdc/comptroller/npm/router/usdcFeed/
+   sequencerFeed/oracle-calm params/fees — is read from live storage and is NOT in the struct).
+   The reward feed travels WITH the gauge on purpose: the gauge determines `rewardToken()`, so
+   pinning its feed separately would let a migration price a new reward token at AERO's price and
+   mis-scale the L9 harvest floor.
+2. Rebalancer: `flatten(minRewardUsdcOut, minIdleUsdcOut)` (oracle must be live — the leg sweeps and
+   the reward sale are Chainlink-floored via `maxSlippageBps`, and the pool is calm-gated, so a
+   shoved tick reverts rather than unwinding at a manipulated price). Size `minIdleUsdcOut` off the
+   expected realised unwind; pass a nonzero `minRewardUsdcOut` whenever a tranche is pending.
 3. Rebalancer: `migrateVenue(params)` — pure config rewrite; NAV is provably unchanged (flat NAV is
    the idle-USDC balance, which no venue field touches).
 4. Rebalancer: `redeploy()`; afterwards sweep old-leg unwind dust with `rescueToVault(oldLeg)`
