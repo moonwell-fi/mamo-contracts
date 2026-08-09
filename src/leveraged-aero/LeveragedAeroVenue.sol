@@ -251,8 +251,8 @@ library LeveragedAeroVenue {
         if (bal == 0) return;
         if (minRewardUsdcOut == 0) revert ZeroMinOut();
         uint256 floor = Math.mulDiv(
-                bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
-            ) * (10000 - uint256($.maxSlippageBps)) / 10000;
+            bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
+        ) * (10000 - uint256($.maxSlippageBps)) / 10000;
         uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(rewardTok, $.usdc, bal, minRewardUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor();
     }
