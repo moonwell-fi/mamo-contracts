@@ -837,6 +837,34 @@ What is still **not** wrapped, and is deliberate:
 
 ---
 
+## Per-account share cap (multisig procedure)
+
+`LeveragedAeroVault.maxSharesPerAccount` caps the shares ONE per-user account may hold. `0` ==
+unlimited. Owner-only; one transaction covers every account.
+
+**Always derive the number from the contract — never hand-compute it.** Shares are 12dp against a 6dp
+asset, so an off-by-1e6 sets a ceiling a million times too large or small:
+
+```
+shares = vault.previewSharesForAssets(<target USDC, 6dp>)   // read
+vault.setMaxSharesPerAccount(shares)                         // owner tx
+```
+
+`previewSharesForAssets` reverts if the strategy cannot price itself, the same fail-closed posture a
+real deposit has — if it reverts, do not guess a number, fix the oracle first.
+
+Three things to keep straight:
+
+- **It is an allocation guardrail, not a TVL limit.** N accounts × cap each is unbounded; this does
+  not bound total fund size.
+- **It is not a security boundary.** The pooled `LeveragedAerodromeCLStrategy.deposit` is
+  permissionless, so anyone depositing there directly is uncapped. All product flows go through
+  accounts.
+- **Its dollar meaning drifts upward** as the fund earns (a richer book mints fewer shares per
+  dollar). Re-read and re-set periodically if you need a tight dollar bound.
+
+Rollback is one transaction: `setMaxSharesPerAccount(0)` restores unlimited.
+
 ## Staging
 
 > **The live staging instance runs the current in-repo stack** (vault generation 2): a

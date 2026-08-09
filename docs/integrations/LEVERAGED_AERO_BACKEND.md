@@ -62,12 +62,46 @@ against the code rather than assumed:
 | Backend call | Shape-dependent? | Why |
 |---|---|---|
 | `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
-| `depositIdle(minShares)` | No | USDC in, shares out. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. |
+| `depositIdle(assets, minShares)` | No | USDC in, shares out. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or if the resulting share balance would breach the per-account cap (see below). |
 | `fulfillRedeem(id)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
 | `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
 
 So: **do not add a `legBIsAsset` branch to the account keeper.** Read it only if you are surfacing the
 fund's composition in ops tooling.
+
+## Per-account share cap
+
+`LeveragedAeroVault.maxSharesPerAccount` is a **global** ceiling on the vault shares any single
+account may hold. `0` means unlimited (the deploy default). Only the vault owner (MAMO_MULTISIG) can
+change it, and the change applies to every account immediately, including existing ones.
+
+Both account deposit paths enforce it and **revert** rather than trimming:
+
+```
+deposit(assets, minShares)        → reverts "Share cap exceeded"
+depositIdle(assets, minShares)    → reverts "Share cap exceeded"
+```
+
+That is precisely why `depositIdle` takes an amount. An account holding more idle USDC than its
+remaining cap room cannot deposit the whole balance, so the keeper must size the call to the room:
+
+```
+held      = vaultShares.balanceOf(account)
+cap       = vault.maxSharesPerAccount()          // 0 => unlimited, skip the rest
+roomShares = cap > held ? cap - held : 0         // 0 => do not call, it would revert
+```
+
+Convert that share room to a USDC amount with `vault.previewSharesForAssets(assets)` (search for the
+largest `assets` whose preview fits `roomShares`, or simply scale — the function is linear in
+`assets`). Leftover idle USDC stays on the account and the owner can claim it via
+`claimWithdrawnUsdc` at any time.
+
+Two properties worth building around:
+
+- **The cap is in shares (12dp), not USDC.** Its dollar meaning drifts *upward* as the fund earns, so
+  do not cache a dollar equivalent — re-read it.
+- **Withdrawals free room automatically.** The check is against the balance held, so there is no
+  separate release step after an exit.
 
 Two fund-ops reads exist for that tooling and are worth knowing about even though this doc's loop does not
 call them — both are plain views on the strategy clone:
@@ -124,7 +158,7 @@ members; index ≠ 0 members do **not** pass the `depositIdle` gate). This is **
 | Action | Key that must sign | Address (Base) | Whose key |
 |---|---|---|---|
 | `createStrategyForUser(user)` on the factory | factory BACKEND_ROLE = `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` | backend |
-| `depositIdle(minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` | backend |
+| `depositIdle(assets, minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` | backend |
 | `fulfillRedeem(id)` on the strategy | strategy **proposer** = `MAMO_REBALANCER` | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | **rebalancer — NOT the backend** |
 
 Signing `depositIdle` with a non-index-0 backend key reverts `"Not owner or backend"`. Wire the keys

@@ -9,6 +9,14 @@ import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/U
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/// @dev Just the vault's per-account share ceiling. Declared locally so the account needs no new
+///      storage pointer — `vaultShares` already IS the vault address (derived at init from
+///      `sherwoodStrategy.vault()`), which is why the cap lives on the vault rather than the
+///      factory or the registry.
+interface ILeveragedAeroVaultCap {
+    function maxSharesPerAccount() external view returns (uint256);
+}
+
 /**
  * @title MamoLeveragedAeroStrategy
  * @notice A per-user Mamo account contract that wraps the vendored Sherwood leveraged Aerodrome CL
@@ -127,14 +135,21 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         usdc.safeTransferFrom(msg.sender, address(this), assets);
         usdc.forceApprove(address(sherwoodStrategy), assets);
         shares = sherwoodStrategy.deposit(assets, minShares);
+        _assertWithinShareCap();
 
         emit Deposit(msg.sender, assets, shares);
     }
 
     /**
-     * @notice Deposit this account's entire idle USDC balance into the Sherwood strategy (owner or backend).
+     * @notice Deposit `assets` of this account's idle USDC into the Sherwood strategy (owner or backend).
      * @dev Users can plain-transfer USDC to their account; the backend then nudges it in via this call
      *      (mirrors `depositIdleTokens` in MamoMultiMarketStrategy). Reverts if there is no idle USDC.
+     *
+     *      THE CALLER PICKS THE AMOUNT rather than this depositing the whole balance, and that is what
+     *      makes {LeveragedAeroVault.maxSharesPerAccount} usable: an account holding more idle USDC
+     *      than its remaining cap room would otherwise be unable to deposit ANYTHING, because the cap
+     *      rejects rather than trims. The caller sizes the deposit to the room; the remainder stays
+     *      idle and the owner can withdraw it at any time.
      *
      *      Gated to the owner or the registry backend — the repo's trusted-actor pattern. This closes the
      *      anonymous-griefer vector: because idle USDC is ambiguous (it may be pending re-deposit OR a
@@ -144,19 +159,44 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      *      trusted actors: the owner claims withdrawals explicitly via {claimWithdrawnUsdc}, so the backend
      *      must only call this when a re-deposit is intended, and the owner and backend coordinate which
      *      idle USDC is which.
+     * @param assets    Idle USDC to deposit (6dp); must be non-zero and at most the balance held.
      * @param minShares Minimum vault shares to accept (slippage guard).
      * @return shares Vault shares minted to this account (12dp).
      */
-    function depositIdle(uint256 minShares) external returns (uint256 shares) {
+    function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares) {
         require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
 
-        uint256 assets = usdc.balanceOf(address(this));
-        require(assets > 0, "No idle USDC to deposit");
+        require(assets > 0, "Amount must be greater than 0");
+        require(assets <= usdc.balanceOf(address(this)), "Insufficient idle USDC");
 
         usdc.forceApprove(address(sherwoodStrategy), assets);
         shares = sherwoodStrategy.deposit(assets, minShares);
+        _assertWithinShareCap();
 
         emit Deposit(msg.sender, assets, shares);
+    }
+
+    /**
+     * @dev Reject the deposit just made if it left this account above the vault's global
+     *      {LeveragedAeroVault.maxSharesPerAccount}. `0` there means unlimited.
+     *
+     *      CHECKED AFTER THE DEPOSIT, DELIBERATELY. The share count is only known once
+     *      `sherwoodStrategy.deposit` returns — the strategy has no `previewDeposit`, and its
+     *      pricing runs a fee crystallisation first, so any pre-check here would have to duplicate
+     *      `mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navNet + 1)` AND stay in lock-step with it
+     *      forever. A silent drift between two copies of that formula is a worse failure than the gas
+     *      burnt on a reverting path: the revert unwinds the whole transaction, so no shares are
+     *      minted and no USDC moves.
+     *
+     *      Measured against the BALANCE HELD, not a running total, so withdrawing frees room with no
+     *      bookkeeping. Lowering the cap below an existing position traps nobody — every withdrawal
+     *      path ignores the cap entirely.
+     */
+    function _assertWithinShareCap() internal view {
+        uint256 cap = ILeveragedAeroVaultCap(address(vaultShares)).maxSharesPerAccount();
+        if (cap == 0) return; // unlimited
+        uint256 held = vaultShares.balanceOf(address(this));
+        require(held <= cap, "Share cap exceeded");
     }
 
     /**

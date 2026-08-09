@@ -917,6 +917,71 @@ contract LeveragedAeroVaultUnitTest is Test {
         vm.expectRevert("LAV: renounce disabled");
         vault.renounceOwnership();
     }
+
+    // ==================== PER-ACCOUNT SHARE CAP ====================
+
+    /// @dev The cap defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the
+    ///      owner acts. The freeze case is `setOpenDeposits(false)`, which is a separate switch.
+    function testMaxSharesPerAccountDefaultsToUnlimited() public view {
+        assertEq(vault.maxSharesPerAccount(), 0, "0 == unlimited on a fresh deploy");
+    }
+
+    function testSetMaxSharesPerAccountByOwner() public {
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LeveragedAeroVault.MaxSharesPerAccountSet(30_000e12);
+        vm.prank(owner);
+        vault.setMaxSharesPerAccount(30_000e12);
+        assertEq(vault.maxSharesPerAccount(), 30_000e12, "cap stored");
+
+        // Re-settable, including back to unlimited (the one-transaction rollback).
+        vm.prank(owner);
+        vault.setMaxSharesPerAccount(0);
+        assertEq(vault.maxSharesPerAccount(), 0, "cap cleared");
+    }
+
+    function testSetMaxSharesPerAccountRevertsForNonOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
+        vm.prank(thirdParty);
+        vault.setMaxSharesPerAccount(1);
+        assertEq(vault.maxSharesPerAccount(), 0, "unchanged");
+    }
+
+    /// @dev The ops conversion: shares a given USDC amount would mint at current pricing. This is the
+    ///      ONLY sanctioned way to derive the `setMaxSharesPerAccount` argument — shares are 12dp
+    ///      against a 6dp asset, so hand-computing it invites an off-by-1e6.
+    function testPreviewSharesForAssetsAtPar() public {
+        _bind();
+        // Empty book: supply 0, nav 0 -> shares = assets * 1e6, the 6-decimal step `decimals()` documents.
+        assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "par pricing on an empty book");
+    }
+
+    /// @dev The drift the design accepts: as the book earns, each dollar buys FEWER shares, so a fixed
+    ///      share cap admits MORE dollars over time. Pinned here so the behaviour is a decision on
+    ///      record rather than a surprise.
+    function testPreviewSharesForAssetsFallsAsNavGrows() public {
+        _bindAndMint(alice, 1_000e12);
+        strategy.setNav(1_000e6);
+        uint256 atPar = vault.previewSharesForAssets(1_000e6);
+
+        strategy.setNav(1_200e6); // +20% NAV, supply unchanged
+        uint256 afterGain = vault.previewSharesForAssets(1_000e6);
+
+        assertLt(afterGain, atPar, "a richer book mints fewer shares per dollar");
+    }
+
+    /// @dev Fail-closed, exactly like a real deposit: the preview is a preview OF a deposit, so a
+    ///      strategy that cannot price itself must not hand back a number an operator would act on.
+    function testPreviewSharesForAssetsRevertsWhenNavUnpriceable() public {
+        _bind();
+        strategy.setNavReverts(true);
+        vm.expectRevert("MockStrategy: nav unpriceable");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    function testPreviewSharesForAssetsRevertsBeforeStrategyIsBound() public {
+        vm.expectRevert("LAV: strategy unset");
+        vault.previewSharesForAssets(1_000e6);
+    }
 }
 
 /**

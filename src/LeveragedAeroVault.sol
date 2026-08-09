@@ -10,6 +10,14 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
+/// @dev Just the strategy's NAV read, for {LeveragedAeroVault.previewSharesForAssets}. Declared
+///      locally rather than added to the vendored `IStrategy`, because every stand-in that
+///      implements that interface would then have to grow the selector too.
+interface IStrategyNav {
+    function nav() external view returns (uint256);
+}
 
 /**
  * @title LeveragedAeroVault
@@ -54,10 +62,40 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     ///         `address(0)` (the deploy default) == fees OFF.
     address public feeConfig;
 
+    /// @notice Ceiling on the shares ONE per-user account may hold — a global allocation guardrail,
+    ///         identical for every account. `0` (the deploy default) == UNLIMITED.
+    ///
+    /// @dev THIS VALUE IS STORED HERE BUT ENFORCED IN THE ACCOUNT
+    ///      ({MamoLeveragedAeroStrategy}), for two reasons:
+    ///
+    ///        1. Only an account knows a single user's share balance; this vault sees just the
+    ///           aggregate ledger.
+    ///        2. Enforcing it in {strategyMint} would also catch FEE-SHARE crystallisations, which
+    ///           the strategy performs best-effort inside a try/catch — a cap-blocked fee mint would
+    ///           silently defer fees forever instead of reverting. That is the same hazard
+    ///           {depositsOpen} already carries, and it is not one to duplicate.
+    ///
+    ///      It lives on the VAULT (rather than the factory or the registry) because every account
+    ///      already holds this address — it derives `vaultShares` from `strategy.vault()` — so no
+    ///      account needs a new pointer, and one owner transaction covers the whole user base.
+    ///
+    ///      DENOMINATION IS SHARES (12dp), NOT USDC. An account's share balance cannot drift on its
+    ///      own (fee-shares mint to the fee recipient, never to accounts), so the cap needs no
+    ///      oracle and withdrawals free room automatically. The trade-off is that the cap's DOLLAR
+    ///      meaning drifts UPWARD as the fund earns: `shares = assets × (supply + 1e6) / (nav + 1)`,
+    ///      so a richer book mints fewer shares per dollar and a fixed share cap admits more dollars.
+    ///      Use {previewSharesForAssets} to derive the number to set; never hand-compute the 12dp
+    ///      figure.
+    ///
+    ///      `0` means unlimited rather than frozen so a fresh deployment is not bricked before the
+    ///      owner acts; the freeze case is already served by {depositsOpen}.
+    uint256 public maxSharesPerAccount;
+
     // ==================== EVENTS ====================
 
     event StrategySet(address indexed strategy);
     event OpenDepositsUpdated(bool open);
+    event MaxSharesPerAccountSet(uint256 maxShares);
     event FeeConfigUpdated(address indexed feeConfig);
     event StrategyActivated(address indexed strategy, uint256 seedAmount);
     event StrategySettled(address indexed strategy);
@@ -200,6 +238,36 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     function setOpenDeposits(bool open) external onlyOwner {
         depositsOpen = open;
         emit OpenDepositsUpdated(open);
+    }
+
+    /// @notice Set the per-account share ceiling every {MamoLeveragedAeroStrategy} account enforces.
+    ///         `0` == unlimited. Takes effect immediately for every account, including existing ones.
+    /// @dev Derive `maxShares` from {previewSharesForAssets} rather than hand-computing it — shares
+    ///      are 12dp against a 6dp asset, so an off-by-1e6 sets a ceiling a million times wrong.
+    ///      Lowering the cap below a holder's existing balance does NOT unwind or trap them: the cap
+    ///      gates new deposits only, and every withdrawal path is independent of it.
+    /// @param maxShares New ceiling in vault shares (12dp); `0` disables the cap.
+    function setMaxSharesPerAccount(uint256 maxShares) external onlyOwner {
+        maxSharesPerAccount = maxShares;
+        emit MaxSharesPerAccountSet(maxShares);
+    }
+
+    /// @notice ADVISORY: the shares a deposit of `assets` USDC would mint at CURRENT pricing — the
+    ///         one canonical conversion for choosing the {setMaxSharesPerAccount} argument.
+    /// @dev Mirrors the strategy's own deposit formula
+    ///      (`mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navNet + 1)`) against the live book.
+    ///      POINT-IN-TIME, NOT A PEG: the answer moves with NAV and supply, so a cap set from it
+    ///      represents that dollar figure only at the instant it was read (see the drift note on
+    ///      {maxSharesPerAccount}). Reverts if the strategy's NAV is unpriceable, exactly as a real
+    ///      deposit would — it is a preview of a deposit, and inherits its fail-closed posture.
+    /// @param assets USDC (6dp) to convert.
+    /// @return shares Vault shares (12dp) that amount would mint right now.
+    function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
+        require(strategy != address(0), "LAV: strategy unset");
+        // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy; it is the same 6-decimal step `decimals()`
+        // documents, so it is derived here rather than duplicated as a second magic constant.
+        uint256 offset = 10 ** (decimals() - IERC20Metadata(asset).decimals());
+        shares = Math.mulDiv(assets, totalSupply() + offset, IStrategyNav(strategy).nav() + 1);
     }
 
     /// @notice Point the strategy's protocol-fee lookup at a config contract, or clear it

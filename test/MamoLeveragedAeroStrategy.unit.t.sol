@@ -270,6 +270,165 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.deposit(DEPOSIT, 0);
     }
 
+    // ==================== PARTIAL IDLE DEPOSIT ====================
+
+    /// @dev The caller picks the amount rather than the account sweeping everything. This is what
+    ///      makes the share cap usable: an account holding more idle USDC than its remaining cap room
+    ///      must still be able to deploy the part that fits, because the cap rejects rather than trims.
+    function testDepositIdleDepositsOnlyTheRequestedAmount() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        usdc.mint(address(strategy), DEPOSIT * 3);
+
+        vm.prank(user);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
+
+        assertEq(shares, EXPECTED_SHARES, "only the requested amount was deposited");
+        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT * 2, "the remainder stays idle");
+    }
+
+    /// @dev The idle remainder is not stranded — the owner's existing claim path still reaches it.
+    function testIdleRemainderStaysOwnerWithdrawable() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        usdc.mint(address(strategy), DEPOSIT * 3);
+
+        vm.prank(user);
+        strategy.depositIdle(DEPOSIT, 0);
+
+        uint256 before = usdc.balanceOf(user);
+        vm.prank(user);
+        uint256 claimed = strategy.claimWithdrawnUsdc();
+        assertEq(claimed, DEPOSIT * 2, "remainder claimable");
+        assertEq(usdc.balanceOf(user) - before, DEPOSIT * 2, "paid to the owner");
+    }
+
+    function testDepositIdleAboveTheIdleBalanceReverts() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        usdc.mint(address(strategy), DEPOSIT);
+
+        vm.prank(user);
+        vm.expectRevert("Insufficient idle USDC");
+        strategy.depositIdle(DEPOSIT + 1, 0);
+    }
+
+    // ==================== PER-ACCOUNT SHARE CAP ====================
+
+    /// @dev `0` on the vault means unlimited, so the cap never blocks before the multisig acts.
+    function testDepositUncappedWhenCapIsZero() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        assertEq(vault.maxSharesPerAccount(), 0, "unlimited by default");
+        _deposit(strategy, user, DEPOSIT * 100);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES * 100, "no ceiling applied");
+    }
+
+    function testDepositExceedingTheCapReverts() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES); // room for exactly DEPOSIT
+
+        usdc.mint(user, DEPOSIT * 2);
+        vm.startPrank(user);
+        usdc.approve(address(strategy), DEPOSIT * 2);
+        vm.expectRevert("Share cap exceeded");
+        strategy.deposit(DEPOSIT * 2, 0);
+        vm.stopPrank();
+
+        // The revert unwound everything: no shares minted, no USDC taken.
+        assertEq(strategy.sharesBalance(), 0, "no shares minted");
+        assertEq(usdc.balanceOf(user), DEPOSIT * 2, "no USDC moved");
+    }
+
+    /// @dev Landing EXACTLY on the cap is allowed — the bound is inclusive.
+    function testDepositExactlyAtTheCapSucceeds() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
+        _deposit(strategy, user, DEPOSIT);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "exactly at the cap");
+    }
+
+    function testDepositIdleExceedingTheCapRevertsAndLeavesIdleUntouched() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
+        usdc.mint(address(strategy), DEPOSIT * 2);
+
+        vm.prank(user);
+        vm.expectRevert("Share cap exceeded");
+        strategy.depositIdle(DEPOSIT * 2, 0);
+
+        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT * 2, "idle untouched");
+        assertEq(strategy.sharesBalance(), 0, "no shares minted");
+    }
+
+    /// @dev The pairing that makes the whole feature work: idle far above the cap room, but the
+    ///      backend can still deploy the slice that fits.
+    function testBackendCanDeployTheSliceThatFitsUnderTheCap() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
+        usdc.mint(address(strategy), DEPOSIT * 10);
+
+        vm.prank(backend);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
+
+        assertEq(shares, EXPECTED_SHARES, "the fitting slice went in");
+        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT * 9, "the rest stayed idle");
+    }
+
+    /// @dev The cap is measured against the balance HELD, so an exit frees room with no bookkeeping.
+    function testWithdrawingFreesCapRoom() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
+        _deposit(strategy, user, DEPOSIT);
+
+        // At the cap — a further deposit is refused.
+        usdc.mint(user, DEPOSIT);
+        vm.startPrank(user);
+        usdc.approve(address(strategy), DEPOSIT);
+        vm.expectRevert("Share cap exceeded");
+        strategy.deposit(DEPOSIT, 0);
+
+        // Exit half, then the same deposit fits.
+        strategy.withdraw(EXPECTED_SHARES / 2, 0);
+        strategy.deposit(DEPOSIT / 2, 0);
+        vm.stopPrank();
+        assertLe(strategy.sharesBalance(), EXPECTED_SHARES, "still within the cap");
+    }
+
+    /// @dev Lowering the cap under an existing position must not trap the holder: the cap gates new
+    ///      deposits only and every withdrawal path ignores it.
+    function testLoweringTheCapDoesNotTrapAnExistingPosition() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT * 4);
+
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES); // now far below the holding
+
+        uint256 before = usdc.balanceOf(user);
+        vm.prank(user);
+        strategy.withdrawAll(0);
+        assertGt(usdc.balanceOf(user) - before, 0, "exit unaffected by the cap");
+        assertEq(strategy.sharesBalance(), 0, "fully exited");
+    }
+
+    /**
+     * @dev Pins the assumption the share-denominated cap rests on (design D1): shares minted to
+     *      ANYONE ELSE — notably the fee recipient on a performance/management crystallise — do not
+     *      touch this account's balance, and therefore cannot consume its cap room. If fee-shares
+     *      ever started landing on accounts, a share cap would silently tighten on its own and this
+     *      test is what would catch it.
+     */
+    function testFeeShareMintsDoNotConsumeAnAccountsCapRoom() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
+        _deposit(strategy, user, DEPOSIT / 2);
+        uint256 heldBefore = strategy.sharesBalance();
+
+        // The strategy mints fee-shares to a third-party recipient (what a crystallise does).
+        vm.prank(address(sherwood));
+        vault.strategyMint(thirdParty, EXPECTED_SHARES * 10);
+
+        assertEq(strategy.sharesBalance(), heldBefore, "account balance untouched by a foreign mint");
+        // ...and the account's remaining room is unchanged: the rest of its allowance still fits.
+        _deposit(strategy, user, DEPOSIT / 2);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "cap room was never consumed");
+    }
+
     // ==================== DEPOSIT IDLE ====================
 
     function testDepositIdleSweepsInDirectTransfer() public {
@@ -278,7 +437,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         usdc.mint(address(strategy), DEPOSIT);
 
         vm.prank(user);
-        uint256 shares = strategy.depositIdle(0);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
 
         assertEq(shares, EXPECTED_SHARES);
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES);
@@ -288,8 +447,8 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     function testDepositIdleEmptyReverts() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         vm.prank(user);
-        vm.expectRevert("No idle USDC to deposit");
-        strategy.depositIdle(0);
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.depositIdle(0, 0);
     }
 
     function testDepositIdleAsBackendSucceeds() public {
@@ -299,7 +458,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         // The registry backend (getBackendAddress) is a trusted actor and may nudge idle USDC in.
         assertEq(registry.getBackendAddress(), backend, "backend is registry backend");
         vm.prank(backend);
-        uint256 shares = strategy.depositIdle(0);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
 
         assertEq(shares, EXPECTED_SHARES);
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES);
@@ -312,7 +471,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
         vm.prank(thirdParty);
         vm.expectRevert("Not owner or backend");
-        strategy.depositIdle(0);
+        strategy.depositIdle(DEPOSIT, 0);
     }
 
     /// @notice Regression: an anonymous third party must NOT be able to force a fulfilled async
@@ -332,7 +491,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         // Attacker front-runs the owner's claim to re-lock the funds — must revert.
         vm.prank(thirdParty);
         vm.expectRevert("Not owner or backend");
-        strategy.depositIdle(0);
+        strategy.depositIdle(DEPOSIT, 0);
 
         // Owner still claims the fulfilled withdrawal.
         vm.prank(user);
