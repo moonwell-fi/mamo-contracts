@@ -19,7 +19,7 @@ import {console} from "forge-std/console.sol";
 ///              address(0); both are granted later, the rebalancer in this very proposal). Skipped
 ///              if MAMO_LP_AUTO_BALANCER_V2 is already registered.
 ///           2. build() — Safe actions, in order:
-///                a. balancer.setSequencerUptimeFeed(CHAINLINK_SEQUENCER_UPTIME, grace) — arm the L2
+///                a. balancer.setSequencerUptimeFeed(CHAINLINK_L2_SEQUENCER_UPTIME_FEED, grace) — arm the L2
 ///                   sequencer guard BEFORE anything reads a Chainlink feed. It defaults to
 ///                   address(0) on a fresh deployment, and `LPValuationLib.checkSequencer`
 ///                   early-returns while unset, so a deployment that never runs this action ships
@@ -249,7 +249,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     ///      probes the feed in this same tx, so a wrong address or a sequencer inside its grace window
     ///      fails the Safe simulation instead of the next rebalance.
     function _wireSequencer(LPAutoBalancerV2 lab) internal {
-        lab.setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_SEQUENCER_UPTIME"), sequencerGracePeriod);
+        lab.setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), sequencerGracePeriod);
     }
 
     /// @dev Wire the balancer to the compound module and set the F-MAMO-doable compound config.
@@ -287,7 +287,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         // address and a non-zero grace period so a regression to the default fails validation.
         assertEq(
             lab.sequencerUptimeFeed(),
-            addresses.getAddress("CHAINLINK_SEQUENCER_UPTIME"),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
             "sequencer uptime feed armed"
         );
         assertEq(lab.sequencerGracePeriod(), sequencerGracePeriod, "sequencer grace period set");

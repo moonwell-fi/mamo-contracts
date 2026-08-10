@@ -234,7 +234,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         proposal.simulate();
         proposal.validate();
 
-        address feed = addresses.getAddress("CHAINLINK_SEQUENCER_UPTIME");
+        address feed = addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED");
         assertEq(lab.sequencerUptimeFeed(), feed, "sequencer uptime feed armed by the proposal");
         assertEq(lab.sequencerGracePeriod(), proposal.sequencerGracePeriod(), "grace period armed");
         assertTrue(lab.sequencerGracePeriod() != 0, "grace period is non-zero (guard not neutered)");

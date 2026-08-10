@@ -156,7 +156,7 @@
   },
   {
     "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
-    "name": "CHAINLINK_SEQUENCER_UPTIME",
+    "name": "CHAINLINK_L2_SEQUENCER_UPTIME_FEED",
     "isContract": true
   },
   {
