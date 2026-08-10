@@ -74,6 +74,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     int24 internal constant LEG_B_SWAP_SPACING = 100;
     int24 internal constant LEG_A_SWAP_SPACING = 200;
     uint24 internal constant WIDTH = 4000;
+    /// @dev The centred skew — `width/2` each side, i.e. the pre-skew behaviour.
+    uint16 internal constant SKEW_CENTERED = 5000;
     uint16 internal constant TARGET_LTV_BPS = 5000;
     uint256 internal constant P_USDC = 1e8;
     uint256 internal constant SEED = 1_000_000e6;
@@ -166,6 +168,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         p.width = WIDTH;
         p.minWidth = 200;
         p.maxWidth = 20_000;
+        p.skewBps = SKEW_CENTERED;
         p.targetLtvBps = TARGET_LTV_BPS;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
@@ -214,7 +217,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 debtUsdc = _valueUsdc(debtB, P_LEG_B, 8) + _valueUsdc(debtA, P_LEG_A, 18);
         assertApproxEqAbs((debtUsdc * 10_000) / collateral, uint256(TARGET_LTV_BPS), 1, "LTV == target");
 
-        (int24 tickLower, int24 tickUpper) = LeveragedAeroValuation.centeredTickRange(address(pool), SPACING, WIDTH);
+        (int24 tickLower, int24 tickUpper) =
+            LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, SKEW_CENTERED);
         assertEq(strategy.layout().posTickLower, tickLower, "range persisted");
         assertEq(strategy.layout().posTickUpper, tickUpper, "range persisted");
         assertGt(strategy.layout().tokenId, 0, "position minted");
@@ -391,6 +395,155 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqRel(
             addedDebt, (topUp * uint256(TARGET_LTV_BPS)) / 10_000, 1e12, "redeploy sized at the untouched init target"
         );
+    }
+
+    // ==================== RERANGE SKEW (two borrowed legs) ====================
+    //
+    // The two-leg shape had NO rerange coverage before the skew work. It is the shape where the skew's
+    // one real cost shows up (see `testRerangeSkewedLeavesALargerIdleRemainderThanCentered`), so the
+    // whole entrypoint is driven here end to end against the venue mocks.
+
+    /// @dev The re-range mints at the SKEWED range, not the centred one, and persists BOTH knobs. The
+    ///      centred range is computed alongside and asserted to differ, so a implementation that ignored
+    ///      `skewBps` entirely could not pass.
+    function testRerangeSkewedMintsTheSkewedRange() public {
+        _execute(SEED);
+        uint256 oldTokenId = strategy.layout().tokenId;
+
+        (int24 expLower, int24 expUpper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, 3500);
+        (int24 cenLower, int24 cenUpper) =
+            LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, SKEW_CENTERED);
+        assertTrue(expLower != cenLower && expUpper != cenUpper, "3500 must actually move the range off centre");
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 3500, 0, 0);
+
+        assertEq(strategy.layout().posTickLower, expLower, "minted at the SKEWED lower bound");
+        assertEq(strategy.layout().posTickUpper, expUpper, "minted at the SKEWED upper bound");
+        assertEq(strategy.layout().skewBps, 3500, "the skew is persisted");
+        assertEq(strategy.layout().width, WIDTH, "...alongside the width");
+        assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId (Slipstream ticks are immutable)");
+        assertEq(gauge.depositCallCount(), 2, "the new NFT was restaked");
+        // The range still brackets spot, so the position is genuinely two-sided.
+        assertLe(expLower, pool.tick(), "skewed range still brackets spot");
+        assertGt(expUpper, pool.tick(), "skewed range still brackets spot");
+    }
+
+    /**
+     * @dev THE KNOWN UTILISATION COST OF SKEWING — pinned so it is a documented consequence rather than a
+     *      surprise. A re-range does NOT swap: it re-adds exactly the two collected leg balances, and
+     *      those came from a book whose borrow is range-BLIND (the two-leg shape borrows 50/50 BY USD via
+     *      `_borrowHalfEach`, never against the range). Move the range and the mix it WANTS moves with it,
+     *      while the mix it is HANDED does not — so more of one leg is left over as an idle remainder.
+     *
+     *      THE DRAG IS DIRECTIONAL, and this test states both halves rather than the flattering one.
+     *      Extending the range further ABOVE spot makes it want more token0 (`amount0 ∝ 1/sqrtP −
+     *      1/sqrtUpper`), so an UP-skew here happens to consume MORE of the stranded leg than the centred
+     *      range does; the DOWN-skew is the direction that strands more. Which way is which is a property
+     *      of the book's current leg mix, not of skewing per se — the operator-facing claim is only that
+     *      a re-range cannot re-balance the mix, so any move off the mix the book happens to hold costs
+     *      utilisation in one direction.
+     *
+     *      The remainder is NOT a loss in either direction — `nav()` prices it and it stays redeployable
+     *      until the next `deployIdle` / `compound` — which is asserted alongside, so the cost is pinned
+     *      as a UTILISATION one and not a value one. All three branches run from the SAME post-genesis
+     *      snapshot, so the comparison is apples to apples.
+     */
+    function testRerangeSkewedLeavesALargerIdleRemainderThanCentered() public {
+        _execute(SEED);
+        uint256 navBefore = strategy.nav();
+
+        (uint256 centeredRemainder, uint256 centeredNav) = _remainderAfterRerange(SKEW_CENTERED);
+        (uint256 downSkewRemainder, uint256 downSkewNav) = _remainderAfterRerange(8000); // 3200 below, 800 above
+        (uint256 upSkewRemainder, uint256 upSkewNav) = _remainderAfterRerange(2000); // 800 below, 3200 above
+
+        assertGt(
+            downSkewRemainder,
+            centeredRemainder,
+            "skewing AWAY from the book's leg mix strands MORE of a borrowed leg (range-blind 50/50 borrow)"
+        );
+        assertLt(
+            upSkewRemainder,
+            centeredRemainder,
+            "...and the opposite skew strands LESS: the drag is directional, not a penalty for skewing"
+        );
+        // The remainder is unproductive, never lost: NAV prices it wherever it sits.
+        assertApproxEqRel(centeredNav, navBefore, 1e16, "NAV indifferent (centred)");
+        assertApproxEqRel(downSkewNav, navBefore, 1e16, "NAV indifferent (down-skew)");
+        assertApproxEqRel(upSkewNav, navBefore, 1e16, "NAV indifferent (up-skew)");
+    }
+
+    /// @dev Re-range at `skewBps_`, measure the idle borrowed-leg remainder and NAV, then roll the whole
+    ///      book back — so several skews can be compared against ONE post-genesis state.
+    function _remainderAfterRerange(uint16 skewBps_) internal returns (uint256 remainder, uint256 nav_) {
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, skewBps_, 0, 0);
+        remainder = _idleLegValueUsdc();
+        nav_ = strategy.nav();
+        vm.revertToState(snap);
+    }
+
+    /// @dev A re-range on a FLAT book is a venue no-op — but the proposer's `width` AND `skewBps` must
+    ///      still land, because the next `deployIdle` / `compound` mint reads them from storage. The
+    ///      persists sit in the strategy frame AHEAD of `rerangeImpl`'s `tokenId == 0` bail-out precisely
+    ///      so this holds after the write moved out of the library.
+    function testRerangeOnFlatBookPersistsSkew() public {
+        _execute(SEED);
+
+        // Redeem the whole book: `tokenId` goes to 0 while the strategy stays Executed.
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        vm.prank(lp);
+        vault.approve(address(strategy), supply);
+        vm.prank(lp);
+        uint256 id = strategy.requestRedeem(supply, 0);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        assertEq(strategy.layout().tokenId, 0, "flat book");
+
+        uint256 stakedBefore = gauge.depositCallCount();
+        vm.prank(proposer);
+        strategy.rerange(2000, 2500, 0, 0);
+
+        assertEq(strategy.layout().width, 2000, "flat-book rerange still stored the width");
+        assertEq(strategy.layout().skewBps, 2500, "...and the skew, for the next redeploy to mint at");
+        assertEq(strategy.layout().tokenId, 0, "still flat: no position was opened");
+        assertEq(gauge.depositCallCount(), stakedBefore, "nothing was staked");
+    }
+
+    /// @dev The calm-gate still fires FIRST on the skewed path: a shoved spot reverts before any venue
+    ///      call, and — because the two persists now sit in the strategy frame — the atomic rollback
+    ///      leaves the STORED width/skew untouched too. A re-range can never land at a manipulated tick,
+    ///      nor half-land its params.
+    function testRerangeSkewCalmGateStillGatesFirst() public {
+        _execute(SEED);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        uint128 liqBefore = npm.liquidityOf(tokenIdBefore);
+        uint256 stakedBefore = gauge.depositCallCount();
+
+        // Shove SPOT well past `calmDeviationTicks = 100` while leaving the TWAP put.
+        pool.setTick(TICK + 5000);
+        pool.setTwapTick(TICK);
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK + 5000));
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.CalmGateBreached.selector);
+        strategy.rerange(2000, 3500, 0, 0);
+
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "the position was never touched");
+        assertEq(npm.liquidityOf(tokenIdBefore), liqBefore, "no liquidity was removed");
+        assertEq(gauge.depositCallCount(), stakedBefore, "nothing was unstaked/restaked");
+        assertEq(strategy.layout().width, WIDTH, "the width write rolled back with the op");
+        assertEq(strategy.layout().skewBps, SKEW_CENTERED, "...and so did the skew write");
+    }
+
+    /// @dev USDC face value of whatever borrowed-leg balance a re-range left sitting idle on the
+    ///      strategy — the utilisation drag the skew test compares.
+    function _idleLegValueUsdc() internal view returns (uint256) {
+        return _valueUsdc(legB.balanceOf(address(strategy)), P_LEG_B, 8)
+            + _valueUsdc(legA.balanceOf(address(strategy)), P_LEG_A, 18);
     }
 
     // ==================== REDEEM ====================

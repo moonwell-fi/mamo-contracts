@@ -163,11 +163,15 @@ library LeveragedAeroManager {
         int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (NOT the LP pool's)
         int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing (NOT the LP pool's)
         // ── appended for the per-cycle rerange width band (keep byte-identical) ──
-        uint24 width; // current full range width in ticks (rerange spans width/2 each side)
+        uint24 width; // current full range width in ticks (split across the tick by `skewBps`)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
+        // ── appended for the rerange SKEW (keep byte-identical). Placed HERE, not after the hedged
+        //    principals, so it free-packs into the existing tail slot (20 bytes used → 22) and
+        //    `hedgedDebtA`/`hedgedDebtB` keep a byte-identical slot AND offset. ──
+        uint16 skewBps; // fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == centred)
         // ── LAST fields: appended for the borrow-interest hedge (keep byte-identical) ──
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with the widths above)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
@@ -216,7 +220,8 @@ library LeveragedAeroManager {
         markets[0] = $.mUsdc;
         IComptroller($.comptroller).enterMarkets(markets);
         LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
-        (int24 tickLower, int24 tickUpper) = LeveragedAeroValuation.centeredTickRange($.pool, $.tickSpacing, $.width);
+        (int24 tickLower, int24 tickUpper) =
+            LeveragedAeroValuation.skewedTickRange($.pool, $.tickSpacing, $.width, $.skewBps);
         (uint256 cbBTCAmt, uint256 wethAmt) = _supplyAndBorrow(usdcAmt, tickLower, tickUpper);
         _wrapNativeEth();
         _mintAndStake(cbBTCAmt, wethAmt, tickLower, tickUpper);
@@ -526,7 +531,7 @@ library LeveragedAeroManager {
         return LeveragedAeroValuation.hedgeBorrowInterest(b);
     }
 
-    /// @notice Recenter the CL position on the current tick WITHOUT swapping (body of the strategy's
+    /// @notice Re-range the CL position around the current tick WITHOUT swapping (body of the strategy's
     ///         `rerange`): calm-gate → remove 100% liquidity + collect → new tickSpacing-aligned range
     ///         → re-add the collected legs → restake → assert health. Debt + collateral untouched.
     ///
@@ -534,18 +539,17 @@ library LeveragedAeroManager {
     ///         remainder of ONE borrowed leg is left idle (NAV-counted, stays redeployable). A new
     ///         tokenId is minted (Slipstream ticks are immutable); the old empty NFT is harmless dust.
     ///         No-op on a flat book.
-    /// @param width_  Full range width in ticks for this cycle (validated against the stored band by
-    ///                the strategy entrypoint, then persisted here as the new `width`).
+    /// @dev TAKES NO RANGE PARAMS. The proposer's `width` / `skewBps` for this cycle were validated AND
+    ///      PERSISTED by the strategy entrypoint before this delegatecall (see the ordering note on
+    ///      `LeveragedAerodromeCLStrategy.rerange`), so this reads both straight out of storage. The
+    ///      persists deliberately sit ahead of the flat-book bail-out below, so a re-range on a flat book
+    ///      still takes effect for the next `deployIdle` / `compound` mint — the property is unchanged,
+    ///      only the frame the two `sstore`s live in moved, for EIP-170 headroom.
     /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
     /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
-    function rerangeImpl(uint24 width_, uint256 minLiq0, uint256 minLiq1) public {
+    function rerangeImpl(uint256 minLiq0, uint256 minLiq1) public {
         Layout storage $ = _layout();
-        // Persist the (already band-validated) width BEFORE the flat-book bail-out. `deployIdle` /
-        // `compound` mint at the STORED width, so a rerange on a flat book must still take effect —
-        // otherwise the proposer's width choice is silently dropped and the next redeploy reopens at
-        // the stale one.
-        $.width = width_;
-        if ($.tokenId == 0) return; // flat book — nothing to recenter (width above already stored)
+        if ($.tokenId == 0) return; // flat book — nothing to re-range (width/skew already stored)
 
         // 1. Calm-gate BEFORE touching the pool — never recenter at a manipulated tick.
         LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
@@ -554,9 +558,10 @@ library LeveragedAeroManager {
         //    left empty + unstaked; a recenter needs a fresh range == fresh tokenId.
         _unwindLiquidity(1, 1);
 
-        // 3. Derive the tickSpacing-aligned range centered on the current (calm) tick from the width
-        //    stored above. Every later mint (deployIdle / compound) reuses that stored width.
-        (int24 tickLower, int24 tickUpper) = LeveragedAeroValuation.centeredTickRange($.pool, $.tickSpacing, $.width);
+        // 3. Derive the tickSpacing-aligned range around the current (calm) tick from the width/skew
+        //    the entrypoint stored. Every later mint (deployIdle / compound) reuses that same pair.
+        (int24 tickLower, int24 tickUpper) =
+            LeveragedAeroValuation.skewedTickRange($.pool, $.tickSpacing, $.width, $.skewBps);
 
         // 4. Re-add the collected legs (full balances as desired) into the new range. No swap →
         //    principal conserved. `_mintPosition` enforces the two-sided `maxSlippageBps` mins
@@ -600,8 +605,8 @@ library LeveragedAeroManager {
     /// @param minLiq        Minimum CL liquidity on a lever-UP add (slippage guard).
     /// @param minOut        Minimum USDC out of a lever-DOWN residual swap (slippage guard).
     function adjustLeverageImpl(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut) public {
-        // Persist the (already max-validated) target BEFORE the venue ops, exactly as `rerangeImpl`
-        // persists `width`. Three reasons this ordering is the right one:
+        // Persist the (already max-validated) target BEFORE the venue ops, exactly as `rerange`
+        // persists `width` / `skewBps`. Three reasons this ordering is the right one:
         //
         //   1. SAFETY IS UNAFFECTED. The strategy entrypoint already rejected `targetLtvBps_ >
         //      maxLtvBps`, and this is the ONLY caller — so no out-of-band value can reach this write.
@@ -623,9 +628,11 @@ library LeveragedAeroManager {
         //      headroom: that frame already loads `_layout()` for the `maxLtvBps` check, so the write
         //      costs ~20 bytes there versus ~71 in this library, and this library is at the cap.
         //      Semantics are identical — same transaction, same all-or-nothing revert, and still ahead
-        //      of the no-op branch below. (`rerangeImpl` persists `width` in-library because the
-        //      manager had room when it was written; if this file is ever refactored for space, that
-        //      write is the same candidate for relocation.)
+        //      of the no-op branch below. (`rerangeImpl` used to persist `width` in-library, back when
+        //      the manager had room; the rerange-skew work made it the earmarked relocation candidate
+        //      and took it — `rerange` now writes BOTH `width` and `skewBps` in the strategy frame,
+        //      still ahead of the impl's own flat-book bail-out, and `rerangeImpl` takes no range
+        //      params at all.)
         (uint256 collateralUsdc, uint256 debtUsdc) = _readCollateralDebt();
         uint256 targetDebt = (uint256(targetLtvBps_) * collateralUsdc) / 10000;
         if (targetDebt > debtUsdc) {
@@ -1074,23 +1081,25 @@ library LeveragedAeroManager {
             (uint256 exp0, uint256 exp1) =
                 LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liqToRemove);
             uint256 slip = uint256($.maxSlippageBps);
-            INonfungiblePositionManager(npm_).decreaseLiquidity(
-                INonfungiblePositionManager.DecreaseLiquidityParams({
+            INonfungiblePositionManager(npm_)
+                .decreaseLiquidity(
+                    INonfungiblePositionManager.DecreaseLiquidityParams({
                     tokenId: tokenId_,
                     liquidity: liqToRemove,
                     amount0Min: exp0 * (10000 - slip) / 10000,
                     amount1Min: exp1 * (10000 - slip) / 10000,
                     deadline: block.timestamp + 600
                 })
-            );
-            INonfungiblePositionManager(npm_).collect(
-                INonfungiblePositionManager.CollectParams({
+                );
+            INonfungiblePositionManager(npm_)
+                .collect(
+                    INonfungiblePositionManager.CollectParams({
                     tokenId: tokenId_,
                     recipient: address(this),
                     amount0Max: type(uint128).max,
                     amount1Max: type(uint128).max
                 })
-            );
+                );
         }
 
         // Re-stake only when remaining liquidity is non-zero.
@@ -1275,8 +1284,9 @@ library LeveragedAeroManager {
         (address tok0, address tok1) = _tokens01();
         IERC20(tok0).forceApprove(npm_, amt0);
         IERC20(tok1).forceApprove(npm_, amt1);
-        (uint128 liq,,) = INonfungiblePositionManager(npm_).increaseLiquidity(
-            INonfungiblePositionManager.IncreaseLiquidityParams({
+        (uint128 liq,,) = INonfungiblePositionManager(npm_)
+            .increaseLiquidity(
+                INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId_,
                 amount0Desired: amt0,
                 amount1Desired: amt1,
@@ -1284,7 +1294,7 @@ library LeveragedAeroManager {
                 amount1Min: amt1Min,
                 deadline: block.timestamp + 600
             })
-        );
+            );
         if (uint256(liq) < minLiquidity) revert InsufficientLiquidity();
     }
 

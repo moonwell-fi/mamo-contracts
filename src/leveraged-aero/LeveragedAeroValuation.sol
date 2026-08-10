@@ -242,37 +242,48 @@ library LeveragedAeroValuation {
     // Range geometry + ASSET-MODE deploy sizing
     // ---------------------------------------------------------------------------
 
-    /// @notice The tickSpacing-aligned range centred on `pool`'s current tick, spanning `width/2` ticks
-    ///         each side. Lives here (rather than in `LeveragedAeroManager`, which is at the EIP-170
-    ///         margin) alongside `assetModeSplit`, the sizing math that consumes it.
+    /// @notice The tickSpacing-aligned range around `pool`'s current tick, SKEWED by `skewBps`: that
+    ///         fraction of `width` (1e4 scale) is placed BELOW the current tick and the exact complement
+    ///         above. `skewBps == 5000` is the centred range (and reproduces the old `centeredTickRange`
+    ///         bit-for-bit whenever `width` is even); `3500` puts 35% of the width below spot and 65%
+    ///         above. Lives here (rather than in `LeveragedAeroManager`, which is at the EIP-170 margin)
+    ///         alongside `assetModeSplit`, the sizing math that consumes it.
     ///
-    /// @dev "Centred" is grid-approximate, not exact. Both bounds round DOWN onto the grid, so the
-    ///      realised centre can sit up to one `tickSpacing` below the current tick and the realised
-    ///      width can differ from `width` by up to one spacing; when `width / tickSpacing` is ODD the
-    ///      half-span is itself off-grid, which is where the skew is largest. Accepted: the band is
-    ///      orders of magnitude wider than one spacing, and re-centring exactly would need an align-up
-    ///      on one side, silently widening the range past the band validated at init.
+    /// @dev The two spans are EXACT COMPLEMENTS — `upperSpan = width − lowerSpan` — so the nominal range
+    ///      is always exactly `width` ticks wide before alignment, with no double rounding.
+    ///
+    ///      Placement is grid-approximate, not exact. Both bounds round DOWN onto the grid, so the
+    ///      realised split can sit up to one `tickSpacing` below the requested one and the realised
+    ///      width can differ from `width` by up to one spacing; when a span is not itself a multiple of
+    ///      the spacing that is where the drift is largest. Accepted: the band is orders of magnitude
+    ///      wider than one spacing, and placing exactly would need an align-up on one side, silently
+    ///      widening the range past the band validated at init.
     ///
     ///      Both bounds are clamped into the aligned tick domain: `width` is capped at `2 × MAX_TICK` at
-    ///      init so the arithmetic cannot wrap int24, but a wide band near either end of the domain
-    ///      still pushes a bound past ±MAX_TICK, where `getSqrtRatioAtTick` would revert unhelpfully
-    ///      deep inside TickMath. `maxAligned` sits ON the spacing grid by construction, so clamping
-    ///      keeps the range mintable rather than merely non-panicking.
+    ///      init, so with the whole width now landing on ONE side in the limit the arithmetic is
+    ///      `currentTick ± width` (not `± width/2`) — worst case `|tc| + width <= MAX_TICK + 2 ×
+    ///      MAX_TICK ≈ 2.66e6`, still far inside int24's ±8.39e6, so it cannot wrap. A wide band near
+    ///      either end of the domain still pushes a bound past ±MAX_TICK, where `getSqrtRatioAtTick`
+    ///      would revert unhelpfully deep inside TickMath. `maxAligned` sits ON the spacing grid by
+    ///      construction, so clamping keeps the range mintable rather than merely non-panicking.
     ///
-    ///      The returned range always STRICTLY BRACKETS the current tick (`tickLower <= tick <
-    ///      tickUpper`) whenever `width >= 2 × tickSpacing`, which init enforces — this is what makes a
-    ///      freshly centred range two-sided, and therefore always sizeable by `assetModeSplit`.
+    ///      The returned range STRICTLY BRACKETS the current tick (`tickLower <= tick < tickUpper`)
+    ///      whenever BOTH spans are at least one `tickSpacing` — which is exactly what the caller's
+    ///      `_checkSkew` enforces (the old, skew-free guarantee was the `width >= 2 × tickSpacing`
+    ///      special case of it). That is what makes a freshly ranged position two-sided, and therefore
+    ///      always sizeable by `assetModeSplit`.
     ///
     ///      Callers must calm-gate BEFORE this: it reads the manipulable spot tick.
-    function centeredTickRange(address pool, int24 tickSpacing, uint24 width)
+    function skewedTickRange(address pool, int24 tickSpacing, uint24 width, uint16 skewBps)
         public
         view
         returns (int24 tickLower, int24 tickUpper)
     {
         (, int24 currentTick,,,,) = ICLPool(pool).slot0();
-        int24 span = int24(width / 2);
-        tickLower = _alignTick(currentTick - span, tickSpacing);
-        tickUpper = _alignTick(currentTick + span, tickSpacing);
+        uint256 lowerSpan = (uint256(width) * uint256(skewBps)) / 10000;
+        uint256 upperSpan = uint256(width) - lowerSpan; // exact complement — no double rounding
+        tickLower = _alignTick(currentTick - int24(uint24(lowerSpan)), tickSpacing);
+        tickUpper = _alignTick(currentTick + int24(uint24(upperSpan)), tickSpacing);
         int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing);
         if (tickLower < -maxAligned) tickLower = -maxAligned;
         if (tickUpper > maxAligned) tickUpper = maxAligned;
@@ -485,8 +496,9 @@ library LeveragedAeroValuation {
         uint256 minOut
     ) public {
         IERC20(tokenIn).forceApprove(router, amountIn);
-        ICLSwapRouter(router).exactInputSingle(
-            ICLSwapRouter.ExactInputSingleParams({
+        ICLSwapRouter(router)
+            .exactInputSingle(
+                ICLSwapRouter.ExactInputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: tokenOut,
                 tickSpacing: tickSpacing,
@@ -496,7 +508,7 @@ library LeveragedAeroValuation {
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
-        );
+            );
     }
 
     /// @notice Slipstream `exactOutputSingle` (approve, swap, then RESET the approval to 0).
@@ -521,8 +533,9 @@ library LeveragedAeroValuation {
         uint256 amountInMax
     ) public {
         IERC20(tokenIn).forceApprove(router, amountInMax);
-        ICLSwapRouter(router).exactOutputSingle(
-            ICLSwapRouter.ExactOutputSingleParams({
+        ICLSwapRouter(router)
+            .exactOutputSingle(
+                ICLSwapRouter.ExactOutputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: tokenOut,
                 tickSpacing: tickSpacing,
@@ -532,7 +545,7 @@ library LeveragedAeroValuation {
                 amountInMaximum: amountInMax,
                 sqrtPriceLimitX96: 0
             })
-        );
+            );
         IERC20(tokenIn).forceApprove(router, 0);
     }
 
@@ -567,9 +580,8 @@ library LeveragedAeroValuation {
         IERC20(aero).forceApprove(AERO_V2_ROUTER, amountIn);
         IAeroRouter.Route[] memory routes = new IAeroRouter.Route[](1);
         routes[0] = IAeroRouter.Route({from: aero, to: usdc, stable: false, factory: AERO_V2_FACTORY});
-        IAeroRouter(AERO_V2_ROUTER).swapExactTokensForTokens(
-            amountIn, minOut, routes, address(this), block.timestamp + 600
-        );
+        IAeroRouter(AERO_V2_ROUTER)
+            .swapExactTokensForTokens(amountIn, minOut, routes, address(this), block.timestamp + 600);
         usdcOut = IERC20(usdc).balanceOf(address(this)) - usdcBefore;
     }
 

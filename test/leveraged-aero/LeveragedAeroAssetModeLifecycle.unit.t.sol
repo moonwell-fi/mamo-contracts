@@ -70,6 +70,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     ///      worth ~$100k needs a NEGATIVE tick (`ln(1e-3)/ln(1.0001) ~ -69078`, aligned to the grid).
     int24 internal constant TICK = -69_100;
     uint24 internal constant WIDTH = 4000;
+    /// @dev The centred skew — `width/2` each side, i.e. the pre-skew behaviour.
+    uint16 internal constant SKEW_CENTERED = 5000;
     uint16 internal constant TARGET_LTV_BPS = 5000;
     uint8 internal constant LEG_A_DECIMALS = 8;
     uint256 internal constant P_USDC = 1e8;
@@ -173,6 +175,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         p.width = WIDTH;
         p.minWidth = 200;
         p.maxWidth = 20_000;
+        p.skewBps = SKEW_CENTERED;
         p.targetLtvBps = TARGET_LTV_BPS;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
@@ -213,7 +216,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     }
 
     function _centeredRange() internal view returns (int24, int24) {
-        return LeveragedAeroValuation.centeredTickRange(address(pool), SPACING, WIDTH);
+        return LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, SKEW_CENTERED);
     }
 
     /// @dev On-chain collateral (USDC face) and leg-A debt, on the strategy's own health basis.
@@ -362,6 +365,80 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(proposer);
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         strategy.deployIdle(100_000e6, 0);
+    }
+
+    // ==================== RERANGE SKEW (asset-mode) ====================
+
+    /// @dev The SKEWED range for this fixture, recomputed independently of the production path.
+    function _skewedRange(uint16 skewBps_) internal view returns (int24, int24) {
+        return LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, skewBps_);
+    }
+
+    /**
+     * @dev A skewed re-range in asset-mode must land on the SKEWED range and leave a book that is still
+     *      SIZEABLE against it. The second half is the one that matters here: asset-mode's whole deploy
+     *      path goes through `assetModeSplit`, which fails closed on a one-sided range, so a skew that
+     *      produced a range not bracketing spot would not merely be suboptimal — it would brick every
+     *      subsequent `deployIdle` / lever-up. The split is therefore run against the realised range and
+     *      asserted to solve.
+     */
+    function testRerangeSkewedAssetModeSizesAgainstTheSkewedRange() public {
+        _execute(SEED);
+        uint256 oldTokenId = strategy.layout().tokenId;
+        uint256 navBefore = strategy.nav();
+
+        (int24 expLower, int24 expUpper) = _skewedRange(3500);
+        (int24 cenLower, int24 cenUpper) = _skewedRange(SKEW_CENTERED);
+        assertTrue(expLower != cenLower && expUpper != cenUpper, "3500 must actually move the range off centre");
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 3500, 0, 0);
+
+        assertEq(strategy.layout().posTickLower, expLower, "minted at the SKEWED lower bound");
+        assertEq(strategy.layout().posTickUpper, expUpper, "minted at the SKEWED upper bound");
+        assertEq(strategy.layout().skewBps, 3500, "the skew is persisted");
+        assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId");
+        assertApproxEqRel(strategy.nav(), navBefore, 1e16, "a no-swap re-range is NAV-neutral");
+
+        // The realised range still brackets spot, so `assetModeSplit` can size against it — asserted by
+        // running the real thing rather than by re-deriving the geometry.
+        (uint256 c, uint256 u, uint256 a) = _expectedSplit(100_000e6, expLower, expUpper);
+        assertEq(c + u, 100_000e6, "the skewed range is still two-sided and sizeable");
+        assertGt(a, 0, "...with a real leg-A borrow behind it");
+    }
+
+    /**
+     * @dev THE PERSISTENCE THAT MATTERS ECONOMICALLY: the next `deployIdle` sizes its collateral / borrow
+     *      split against the STORED SKEWED range, not against a centred one. The two candidate sizings are
+     *      computed and asserted to DIFFER first, so the test discriminates — an implementation that
+     *      dropped `skewBps` on the way to storage (or re-derived a centred range at mint time) would size
+     *      at `expCCentered` and fail here, not pass on a loose tolerance.
+     */
+    function testDeployIdleAfterSkewedRerangeUsesStoredSkewedRange() public {
+        _execute(SEED);
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 3500, 0, 0);
+
+        int24 lower = strategy.layout().posTickLower;
+        int24 upper = strategy.layout().posTickUpper;
+        (int24 cenLower, int24 cenUpper) = _skewedRange(SKEW_CENTERED);
+
+        uint256 topUp = 250_000e6;
+        (uint256 expCSkewed,,) = _expectedSplit(topUp, lower, upper);
+        (uint256 expCCentered,,) = _expectedSplit(topUp, cenLower, cenUpper);
+        assertTrue(expCSkewed != expCCentered, "the skewed and centred sizings must differ, or this proves nothing");
+
+        (uint256 collateralBefore,) = _collateralAndDebt();
+        usdc.mint(address(strategy), topUp);
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+
+        (uint256 collateralAfter, uint256 debtAfter) = _collateralAndDebt();
+        assertEq(collateralAfter - collateralBefore, expCSkewed, "deployIdle sized C against the STORED SKEWED range");
+        assertApproxEqAbs(
+            (debtAfter * 10_000) / collateralAfter, uint256(TARGET_LTV_BPS), 2, "LTV still on target after the skew"
+        );
     }
 
     // ==================== ASSET-MODE LEVER UP (idle-funded) ====================
