@@ -150,6 +150,9 @@ contract LeveragedAeroStackHarness is Script {
         console.log("  feeRecip :", p.feeRecipient);
         console.log("  mgmt/perf fee bps:", uint256(p.managementFeeBps), uint256(p.performanceFeeBps));
         console.log("  width band min/width/max:", uint256(p.minWidth), uint256(p.width), uint256(p.maxWidth));
+        // Separate line: console.log tops out at 4 args, and the band already uses all of them.
+        // Keep the "width band" prefix — run-leveraged-aero-stack.sh Phase B.2 greps for it.
+        console.log("  width band skewBps (below-fraction, 5000 = centered):", uint256(p.skewBps));
     }
 
     /// @dev Build `InitParams` from env vars. Field-by-field (not a struct literal) to keep the Yul IR
@@ -195,6 +198,11 @@ contract LeveragedAeroStackHarness is Script {
         p.width = uint24(vm.envOr("WIDTH", uint256(4000))); // 40 × spacing — genesis mints at this
         p.minWidth = uint24(vm.envOr("MIN_WIDTH", uint256(200))); // 2 × spacing
         p.maxWidth = uint24(vm.envOr("MAX_WIDTH", uint256(20_000)));
+        // ── range skew: fraction of `width` placed BELOW the current tick, bps (10000 = 1.00).
+        // 5000 = centered, which is the ops default at genesis — skew is applied per-cycle via
+        // `rerange`, not baked into init. Must be in (0, 10000) exclusive AND leave BOTH spans
+        // >= one tickSpacing, else OutOfBounds().
+        p.skewBps = uint16(vm.envOr("SKEW_BPS", uint256(5000)));
         // ── risk params: targetLtv ≤ maxLtv < USDC CF, minHealth ≥ 10500, minHealth×maxLtv < 1e8 ──
         p.targetLtvBps = uint16(vm.envOr("TARGET_LTV_BPS", uint256(5000)));
         p.maxLtvBps = uint16(vm.envOr("MAX_LTV_BPS", uint256(6500)));

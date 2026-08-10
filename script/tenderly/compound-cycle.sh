@@ -75,10 +75,13 @@ AERO_V2_ROUTER=0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43
 AERO_V2_FACTORY=0x420DD381b31aEf6683db6B902084cB0FFECe40Da
 NPM=0x827922686190790b37229fd06084350E74485b72
 
-# NB: keep in lockstep with LeveragedAerodromeCLStrategy.LayoutView. b9ea6ac appended
-# `uint128 hedgedDebtA` + `uint128 hedgedDebtB` (fields 47/48) for the borrow-interest hedge; a
-# short signature here makes `cast call` fail to decode and every `lay N` read comes back empty.
-LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint128,uint128))'
+# NB: keep in lockstep with LeveragedAerodromeCLStrategy.LayoutView — BOTH arity and field ORDER.
+# b9ea6ac appended `uint128 hedgedDebtA` + `uint128 hedgedDebtB` for the borrow-interest hedge; the
+# rerange-skew change appended `uint16 skewBps` AFTER `legBIsAsset` — i.e. field 47, NOT next to the
+# width band (`width`/`minWidth`/`maxWidth`, 43/44/45) where you would expect it — pushing the two
+# hedgedDebt fields to 48/49. A short or mis-ordered signature here makes `cast call` fail to decode
+# and every `lay N` read comes back empty — if `lay` starts returning nothing, check this line FIRST.
+LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint128,uint128))'
 
 c() { cast call --rpc-url "$RPC" "$@" 2>/dev/null; }
 num() { echo "${1%% *}"; }
@@ -378,8 +381,8 @@ cmd_compound_expect_revert() {
 # INDEPENDENT price sources driving different things:
 #   • the FEED drives nav()/valuation, slippage floors and `BelowOracleFloor`, hedge sizing, the
 #     staleness gate, health/LTV;
-#   • the POOL TICK drives LP leg composition, in/out-of-range, where `rerange` re-centres, and the
-#     realized swap price;
+#   • the POOL TICK drives LP leg composition, in/out-of-range, where `rerange` anchors the new range
+#     (it brackets the pool tick, split by `skewBps` — 5000 = centered), and the realized swap price;
 #   • `calmGate` reads NO feed at all — it compares pool spot against the pool's OWN TWAP.
 # So moving exactly one of them fails closed, in two different ways: pool-only reverts
 # `CalmGateBreached` until the TWAP catches up and then `BelowOracleFloor` because the oracle is
@@ -409,7 +412,7 @@ cmd_calm() {
     echo ">> PASS — calmGate is satisfied ($((cd - diff)) ticks of headroom); a rebalance can run."
   fi
   if (( spot < lo || spot > hi )); then
-    echo "position range      $lo / $hi  ->  spot is OUT OF RANGE (single-sided; rerange to re-centre)"
+    echo "position range      $lo / $hi  ->  spot is OUT OF RANGE (single-sided; rerange to reposition (width + skew))"
   else
     echo "position range      $lo / $hi  ->  spot is in range"
   fi

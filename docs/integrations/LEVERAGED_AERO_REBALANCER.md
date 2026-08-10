@@ -129,7 +129,7 @@ function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer 
 | Position effect (two borrowed legs) | supply **all** of `amount` USDC → mUSDC → borrow both legs at **`targetLtvBps`** (50/50 by USD value) → wrap native ETH **iff** `wethDeliversNative` (§G) → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
 | Position effect (asset-mode) | `LeveragedAeroValuation.assetModeSplit` solves the split closed-form against the **STORED** range: only `C < amount` is supplied as collateral, a **single** leg-A borrow is taken against `C` at `targetLtvBps`, and `U = amount − C` is held back as the LP's USDC side so the add lands at exactly the ratio the stored range needs. Net leg-A exposure stays 0 (LP leg == debt leg). |
 | Guards | Two-borrowed-legs: borrow sized at `amount × targetLtvBps / 1e4`. Asset-mode: borrow sized at `C × targetLtvBps / 1e4` with `C` from the split — so the **effective** collateral is less than `amount` and a naive `amount × targetLtvBps` model will over-predict the borrow. Both: two-sided `maxSlippageBps` mins on the add plus the caller's `minLiquidity`; closes with `_assertHealthy()` (post-op LTV ≤ `maxLtvBps` **and** no Moonwell shortfall). |
-| Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`; **asset-mode also** `DegenerateRange()` — the split is sized against the STORED range (`posTickLower`/`posTickUpper`), so a range the price has already left is one-sided and fails closed. `rerange` recenters and unblocks it. |
+| Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`; **asset-mode also** `DegenerateRange()` — the split is sized against the STORED range (`posTickLower`/`posTickUpper`), so a range the price has already left is one-sided and fails closed. A `rerange` back onto spot unblocks it. |
 | When to call | Deposits land as idle USDC (see §D) and earn nothing until deployed. Run periodically to sweep accumulated idle into the position, within leverage caps. |
 
 ### `compound` — harvest AERO, reinvest, crystallize fees
@@ -151,26 +151,60 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 | Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`; **`MoonwellRepayFailed(errCode)` from the interest re-hedge**; `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `InsufficientLiquidity` and (asset-mode) `DegenerateRange()` from the redeploy. A stale/mismatched feed fail-closes the whole call — the AERO feed at the swap floor, and the leg + USDC feeds at the hedge (`compound` already fail-closes on those via the pre-compound `nav()`, so the hedge widens no oracle exposure). |
 | When to call | On a yield/gas cadence. A stale AERO feed intentionally blocks it — defer and retry. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
 
-### `rerange` — re-center and re-width the CL range (no swap)
+### `rerange` — reposition the CL range: re-width, re-skew, re-anchor (no swap)
 
 ```solidity
-function rerange(uint24 width, uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant;
+function rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)
+    external onlyProposer nonReentrant;
 ```
 
-The 3-arg form (per-cycle width) is the in-repo signature — `src/leveraged-aero/LeveragedAerodromeCLStrategy.sol`
-is the authority for it; there is no older 2-arg variant to reconcile against any more.
+The 4-arg form (per-cycle width **and** skew) is the in-repo signature — `src/leveraged-aero/LeveragedAerodromeCLStrategy.sol`
+is the authority for it. It replaces the previous 3-arg `rerange(uint24,uint256,uint256)`; **the selector
+changed**, so anything holding a hardcoded one must be re-derived (`cast sig 'rerange(uint24,uint16,uint256,uint256)'`).
 
 | | |
 |---|---|
-| `width` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `WidthOutOfBounds()` (selector `0x1f9f54af`, deliberately matching the Mamo backend's rebalance-param error). The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain — always read them off the clone you actually point at (the current staging clone was init'd width **4000**, band **[200, 20000]**). |
+| `width_` | New position width in **raw ticks** (must be a multiple of `tickSpacing`), validated strategy-side against the init-immutable `[minWidth, maxWidth]` band **before** the venue delegatecall → `OutOfBounds()`. The width is **persisted** — subsequent range math (and the genesis mint path) reads the stored value; only `rerange` moves it, the band never moves after init. `layout()` exposes `width` / `minWidth` / `maxWidth` for the rebalancer to read on-chain — always read them off the clone you actually point at (the current staging clone was init'd width **4000**, band **[200, 20000]**). |
+| `skewBps_` | The fraction of `width_` placed **BELOW** the current tick, in bps (`10000` = 1.00). `5000` = centered — the old, and still the genesis/ops default. `3500` puts 35 % of the range below spot and 65 % above, i.e. more room for the price to rise. Concretely `lowerSpan = width_ × skewBps_ / 10000`, `upperSpan = width_ − lowerSpan`; both bounds are still aligned **DOWN** to `tickSpacing`, so the realised on-grid width stays within one spacing of the request. Validated with the width, **before** the venue delegatecall → `OutOfBounds()`: `skewBps_` must be in `(0, 10000)` **exclusive**, and **both** spans must be ≥ one `tickSpacing` — the second check is what protects the strict-bracketing invariant at small widths, where a legal-looking skew would otherwise collapse a side to zero. Like `width`, `skewBps` is **persisted** and exposed on `layout()`; the next `execute`/genesis mint re-mints at the stored width **and** the stored skew. |
 | `minLiq0` / `minLiq1` | Minimum **token0** / **token1** the re-add must consume (two-sided slippage guard) → `InsufficientLiquidity()`. `token0`/`token1` are **pool ordering**, derived at init from `pool.token0()` and exposed as `layout().wethIsToken0` — do not assume which leg is which (see §G). |
-| Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a recenter can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** CL NFT spanning `width/2` raw ticks each side of the current tick → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
-| What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** leg is left idle in the strategy — `nav()` prices it, so the recenter is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
+| Position effect | **Calm-gate runs FIRST** (`LeveragedAeroValuation._calmGate`) so a reposition can never execute at a manipulated tick → remove 100% liquidity + collect → mint a **new** CL NFT bracketing the current tick, `width_ × skewBps_ / 10000` raw ticks below it and the remainder above (equal halves at the default `skewBps_ = 5000`) → restake. The **old NFT is left empty** (Slipstream ticks are immutable; the stale NFT is harmless dust). |
+| What happens to principal | **No swap → principal conserved** (IL is realized only on a true exit). The collected ratio can't match the new range, so a remainder of **one** leg is left idle in the strategy — `nav()` prices it, so the reposition is NAV-neutral and the remainder stays redeployable. Debt + collateral untouched (health preserved). |
 | Asset-mode difference | The re-add offers the mint the strategy's **whole balance of each leg slot as `amountDesired`** — and in asset-mode the leg-B slot **is USDC** (`layout().cbBTC == layout().usdc`). So the amount of USDC the mint consumes is whatever the new range needs to pair with the collected leg A, which can be **more than the unwind itself collected**, drawing the difference from idle USDC. That is value-conserving (idle → LP, `nav()` unchanged) but it shrinks the redeem cover budget, the same operator consequence as an asset-mode lever-up. Conversely the leftover remainder is plain USDC rather than a borrowed leg. Size reranges against available idle when the clone is asset-mode. |
 | Fee interaction | **No crystallization** — supply and NAV are unchanged; the streaming fee simply defers to the next crystallize point and the HWM is unaffected. |
 | Guards | Calm-gate; two-sided `maxSlippageBps` mins + caller `minLiq0/minLiq1`; closing `_assertHealthy()`. |
-| Errors | `WidthOutOfBounds` (out-of-band or misaligned `width`), calm-gate reverts (`TwapDeviation`/`StaleOracle` family), `InsufficientLiquidity`, `UnhealthyPosition`. |
-| When to call | When spot has drifted out of the active range, or when the rebalance model chooses a new width for the cycle. Width selection policy is the rebalancer's (`RebalanceParams.width` in the backend spec); the chain only enforces the band. |
+| Errors | `OutOfBounds` — **one error now covers both knobs**: an out-of-band or misaligned `width_`, *and* a `skewBps_` outside `(0, 10000)` or one whose spans do not both reach a `tickSpacing`. Plus calm-gate reverts (`TwapDeviation`/`StaleOracle` family), `InsufficientLiquidity`, `UnhealthyPosition`. **`OutOfBounds()` is the rename of the old `WidthOutOfBounds()` and therefore has a NEW selector** — see the note below. |
+| Errors — asset-mode reachability | An **extreme** skew makes the range very lopsided, and a very lopsided range is exactly the shape `LeveragedAeroValuation.assetModeSplit` fails closed on: the next `deployIdle` / lever-up can then revert `DegenerateRange()`. This is **not a new failure mode** — it is the existing one-sided-range guard — but skew is a new way to reach it. Prefer moderate skews, and if you do park the range far off spot, expect the deploy paths to want a `rerange` back before they will size. |
+| When to call | When spot has drifted out of the active range, or when the rebalance model chooses a new width **or a new skew** for the cycle. Width and skew selection policy is the rebalancer's (`RebalanceParams.width` in the backend spec); the chain only enforces the band, the `(0, 10000)` bound and the one-spacing-per-side floor. |
+
+> **Selector change — the backend error table must be updated.** `WidthOutOfBounds()` (`0x1f9f54af`)
+> is gone; it is renamed `OutOfBounds()`, selector **`0xb4120f14`** (`cast sig 'OutOfBounds()'`). The old
+> selector was deliberately paired with the Mamo backend's rebalance-param error code — that pairing now
+> points at a selector the strategy no longer emits, so the backend's decode table has to be re-pointed at
+> `0xb4120f14` or every out-of-band width/skew will surface as an unknown revert. The error's *meaning*
+> widened too: it is no longer width-only.
+>
+> **Do not "fix" `docs/superpowers/specs/2026-07-03-lp-auto-balancer-v2-backend-spec.md`.** That table
+> also lists `0x1f9f54af → WidthOutOfBounds()`, and it is still **correct** — it describes
+> `LPAutoBalancerV2`, a different contract that keeps its own `WidthOutOfBounds()`. The two contracts'
+> errors have now **diverged**: `0x1f9f54af` means an LPV2 width bug, `0xb4120f14` means a leveraged-Aero
+> width **or skew** bug. A backend decoding both products needs both entries, keyed by which contract
+> reverted.
+
+> **Two-borrowed-legs shape: a skewed range leaves a persistent idle remainder (deliberate).** The
+> genesis / `deployIdle` borrow is **range-blind** — `_borrowHalfEach` splits the borrow 50/50 by USD
+> value regardless of where the range sits. A skewed range does **not** want 50/50 by value, so the mint
+> consumes an unequal amount of the two legs and the book carries a standing idle balance of one borrowed
+> token. To be explicit about what this is and is not:
+> - **Not a hedge break.** The idle borrowed token hedges its own debt 1:1 exactly as it would inside the
+>   LP, and `nav()` prices it. Net exposure is unchanged.
+> - **Not an LTV or health change.** Collateral and debt are untouched; `_assertHealthy()` sees the same
+>   numbers.
+> - **It is capital-utilisation drag** — a slice of the book sits idle instead of earning LP fees.
+>
+> Recommended ops default: **initialize with `skewBps = 5000` (centered) and apply skew per-cycle via
+> `rerange`**, sizing it against how much drag you are willing to carry. Asset-mode is unaffected in kind
+> (its leg-B slot is USDC, so the remainder is plain idle USDC — see the asset-mode row above). Making the
+> borrow range-aware would remove the drag and is a possible follow-up; it is **out of scope** here.
 
 ### `adjustLeverage` — move LTV toward a target
 
@@ -187,7 +221,7 @@ function adjustLeverage(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut)
 | Position effect (both shapes) | Collateral untouched; LTV moves on the **debt** side. `targetDebt = targetLtvBps_ × collateralUsdc / 1e4`. Lever **down**: unwind the matching CL fraction and repay, per-leg residual rebalanced through USDC (`minOut`) — unchanged in asset-mode, where the leg-B residual **is** USDC and flows straight into the leg-A cover. Closes with `_assertHealthy()`. |
 | Lever **up** — two borrowed legs | Borrow the delta 50/50 by USD across both legs and LP them against each other. **Self-funding**: the pair *is* the two borrows, so no idle USDC is consumed. |
 | Lever **up** — asset-mode | Borrows **only leg A** and pairs it with USDC **drawn from the strategy's idle balance**, sized closed-form (`assetModeLeverUpPair`) so the LP's leg-A amount equals the added leg-A debt — that is what preserves the delta-hedge (swapping part of the borrow to USDC would leave the book net short). **Operator consequence: an asset-mode lever-up CONSUMES idle USDC.** Value-conserving (a NAV component moving idle → LP, not a loss) but it shrinks the redeem cover budget until the next deposit. **Size lever-ups against available idle**; an under-funded one reverts `InsufficientIdleForLeverUp(needed, available)` and changes nothing — deliberately not a partial fill and not a silent cap. |
-| `targetLtvBps_` is **persisted** | The value is stored as the fund's standing target, so `execute` / `deployIdle` / `compound` size their **next** borrow at it. This holds even when neither branch runs (`targetDebt == debtUsdc`) — the retarget still takes effect, exactly like `rerange`-on-a-flat-book persisting `width`. Read it back with `targetLtvBps()` or `layout().targetLtvBps` (§E). |
+| `targetLtvBps_` is **persisted** | The value is stored as the fund's standing target, so `execute` / `deployIdle` / `compound` size their **next** borrow at it. This holds even when neither branch runs (`targetDebt == debtUsdc`) — the retarget still takes effect, exactly like `rerange`-on-a-flat-book persisting `width` and `skewBps`. Read it back with `targetLtvBps()` or `layout().targetLtvBps` (§E). |
 | Fee interaction | **No crystallization** (like `rerange`): no supply change, no PnL realized; streaming fee defers, HWM unaffected. |
 | Errors | `TargetLtvExceedsMax`, `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`; **asset-mode lever-up also** `InsufficientIdleForLeverUp(uint256 needed, uint256 available)` and `DegenerateRange()` (the pairing is sized against the STORED range — a one-sided one fails closed; `rerange` unblocks it). `InsufficientIdleForLeverUp` is raised inside `LeveragedAeroValuation` but **re-declared on the strategy** (`LeveragedAerodromeCLStrategy.sol:93`, same selector) so it is on the clone's own ABI for the rebalancer / frontend — decode it off the strategy ABI, no library ABI needed. |
 | When to call | To hold the fund near `targetLtvBps`, and — critically — **before `fulfillRedeem`** to lever **down** so the oracle-free proportional unwind self-funds its IL/debt shortfall (see §C). In asset-mode note the two directions are asymmetric on idle: lever **down** frees USDC, lever **up** spends it. |
@@ -435,7 +469,7 @@ function hedgedDebt() external view returns (uint128 legA, uint128 legB);       
   gauge, swapRouter, comptroller, the Moonwell markets, the Chainlink feeds incl. `aeroUsdFeed`,
   `sequencerFeed`), **oracle config** (`maxDelay`, `gracePeriod`, `calmDeviationTicks`, `twapWindow`,
   `tickSpacing`), **position state** (`tokenId`, `posTickLower`, `posTickUpper`, `nextRedeemRequestId`),
-  the **width band** (`width`, `minWidth`, `maxWidth`), the **hedged-debt basis** (`hedgedDebtA`,
+  the **range knobs** (`width`, `minWidth`, `maxWidth`, `skewBps`), the **hedged-debt basis** (`hedgedDebtA`,
   `hedgedDebtB`), and the **venue-shape fields the keeper must not assume** (`legBIsAsset`,
   `cbBTCDecimals`, `wethDecimals`, `wethIsToken0`, `wethDeliversNative`, `cbBTCSwapTickSpacing`,
   `wethSwapTickSpacing` — see §G).
@@ -479,7 +513,7 @@ Strategy events that exist today:
   and a calm-gate. A stale feed or a down sequencer **fail-closes** — the op reverts. This is intended
   posture: defer the harvest / re-range / deleverage and rely on the oracle-free async queue for exits.
 - **Calm gate.** Every mint/add path runs the calm-gate (`|spotTick − twapTick| ≤ calmDeviationTicks` over
-  `twapWindow`) before the pool is touched, as does NAV pricing — so the agent can never recenter, add or
+  `twapWindow`) before the pool is touched, as does NAV pricing — so the agent can never reposition, add or
   price at a manipulated tick. A shoved pool blocks `rerange`, `deployIdle`, `compound`'s redeploy and a
   lever-**up**; retry once calm. **Where in the op the gate fires is not uniform**, and an operator reading
   a reverted trace should expect it: `rerange` gates first, before any venue call; `execute` gates after
@@ -543,8 +577,8 @@ the clone rather than assuming the launch pair:
   | Range-sensitivity | none on the deploy path | `deployIdle` / lever-up size against the **STORED** range → `DegenerateRange()` when it is one-sided; `rerange` first |
 
   The operator rule of thumb for asset-mode: **idle USDC is no longer just a redeem buffer, it is an input
-  to `deployIdle`, `adjustLeverage` (up) and `rerange`.** Track it as a budget, and prefer a `rerange` to
-  recenter before any op that sizes against the stored range.
+  to `deployIdle`, `adjustLeverage` (up) and `rerange`.** Track it as a budget, and prefer a `rerange`
+  back onto spot before any op that sizes against the stored range.
 - **`weth*` / `cbBTC*` are leg SLOTS, not tokens.** `weth`/`mWeth`/`wethFeed`/`wethDecimals` are **leg A**
   (the slot that may be delivered natively on borrow); `cbBTC`/`mCbBTC`/`cbBTCFeed`/`cbBTCDecimals` are
   **leg B**. The names are historical — read the actual token addresses from `layout()`. Every error
@@ -594,7 +628,7 @@ appears. But there is one misconception worth killing up front, because it waste
 | --- | --- |
 | `nav()` and all USD valuation (`readUsd8`) | LP leg composition (how much cbBTC vs USDC the position holds) |
 | Slippage floors / `minOut` sizing, `BelowOracleFloor` | Whether the position is in or out of range |
-| The interest hedge's oracle-priced buy sizing | Where `rerange` re-centres (it centres on the pool tick) |
+| The interest hedge's oracle-priced buy sizing | Where `rerange` anchors the new range (it brackets the pool tick, split by `skewBps`) |
 | The staleness gate (`maxDelay`, currently 172800 s) | `calmGate` — **both** sides of it |
 | Health / LTV ratios and the `deleverage` trigger | Realized swap price, and therefore actual slippage |
 
@@ -620,9 +654,10 @@ mechanism protecting the fund from being rebalanced at a manipulated price — a
 | `twapWindow` | 15 | **1800 s** | TWAP averaging window (30 min) |
 | `tickSpacing` | 20 | 100 | LP pool spacing |
 | `maxSlippageBps` | 24 | 100 | 1 % — also the oracle-floor tolerance on swaps |
-| `posTickLower` / `posTickUpper` | 27 / 28 | −66300 / −63300 | current range (width 3000 ≈ 35 % span) |
-| width band | 44 / 45 | [200, 20000] | `rerange` width bounds (`WidthOutOfBounds` outside) |
+| `posTickLower` / `posTickUpper` | 27 / 28 | −66300 / −63300 | current range (width 3000 ≈ 35 % span, centered — `skewBps` 5000) |
+| width band | 44 / 45 | [200, 20000] | `rerange` width bounds (`OutOfBounds` outside) |
 | `legBIsAsset` | 46 | `true` | asset mode: leg B **is** USDC |
+| `skewBps` | 47 | **5000** | fraction of `width` placed BELOW spot; 5000 = centered (`OutOfBounds` outside `(0, 10000)` or if either span < `tickSpacing`). **Appended after `legBIsAsset`, not next to the width band** — decode by name, not by eyeballing the group |
 
 At the time of writing spot tick is **−64796** and the TWAP tick is **−64796** (identical — no recent
 swaps), so the gate has full headroom. Note the range edges are ~1500 ticks away, i.e. it takes roughly a
@@ -715,12 +750,19 @@ cd script/tenderly
 # One command: swap the pool → warp 1860 s → re-price leg-A/USD → re-gate the feeds → calm.
 ./compound-cycle.sh move-price -66400
 #   ... expect: ">> target REACHED", then "PASS" with 0 ticks of deviation (the TWAP has
-#   ... converged), then "spot is OUT OF RANGE (single-sided; rerange to re-centre)"
+#   ... converged), then "spot is OUT OF RANGE (single-sided; rerange to reposition (width + skew))"
 
-# The rebalance under test. rerange re-centres on the NEW pool tick; width must be a multiple
-# of tickSpacing (100) and inside the clone's [minWidth, maxWidth] band — read them from layout().
-cast send "$STRAT" 'rerange(uint24,uint256,uint256)' 3000 0 0 \
+# The rebalance under test. rerange brackets the NEW pool tick, split by skewBps; width must be a
+# multiple of tickSpacing (100) and inside the clone's [minWidth, maxWidth] band — read them from
+# layout(). skewBps = 3500 => 35 % of the width below spot, 65 % above (the cbBTC/WETH backtest's
+# skew): a deliberate lean that leaves more room for the price to recover upward.
+cast send "$STRAT" 'rerange(uint24,uint16,uint256,uint256)' 3000 3500 0 0 \
   --from "$PROPOSER" --unlocked --gas-limit 14000000 --rpc-url "$LEVERAGED_AERO_ADMIN_RPC_URL"
+# lowerSpan = 3000 × 3500/10000 = 1050, upperSpan = 1950, both bounds aligned DOWN to spacing 100:
+#   tickLower = alignDown(-66400 - 1050) = -67500,  tickUpper = alignDown(-66400 + 1950) = -64500
+# => realised width 3000 (on the nose) and a realised ~1100/1900 split — the grid rounding is why
+# the realised skew is only "within one spacing" of the request, never exact.
+# Pass 5000 instead of 3500 for the old centered behaviour.
 
 ./compound-cycle.sh calm                       # expect "spot is in range" again — new range, same spot
 ./compound-cycle.sh snap after-rerange         # principal conserved; one leg left idle (see §B)
@@ -757,7 +799,8 @@ runs Aerodrome's weekly epoch flip. Re-arm it the production way:
 | `StaleOracle` | warped on a **non**-FreshFeed instance | wrong instance — check `check-feeds` |
 | `OLD` from `pool.observe` | state sync is ON — observation ring re-hydrated from mainnet while `observationIndex` froze | not repairable; recreate the vnet with sync OFF |
 | `ZeroMinOut` | `minUsdcOut == 0` | derive one from `quote` |
-| `WidthOutOfBounds` | width outside [200, 20000] or off the spacing grid | pick a valid width |
+| `OutOfBounds` | width outside [200, 20000] or off the spacing grid; **or** `skewBps` outside `(0, 10000)` or with a span shorter than one `tickSpacing` | pick a valid width / skew (selector `0xb4120f14` — this is the renamed `WidthOutOfBounds`) |
+| `DegenerateRange` | asset-mode deploy/lever-up sized against a range the price has left — reachable by an extreme skew as well as by drift | `rerange` back onto spot with a moderate skew |
 | `TargetLtvExceedsMax` | target above `maxLtvBps` | lower the target |
 | `InsufficientIdleForLeverUp` | lever-up needs idle USDC it doesn't have | deposit more, then retry — this is correct fail-closed behaviour |
 | `NotProposer` | signed with the wrong key | sign as the **rebalancer**, not `MAMO_BACKEND` |
@@ -838,12 +881,12 @@ Production addresses are published separately at deploy.
 - [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed. **Do not predict the redeploy as `usdcOut − fee`** — `compound` first repays accrued borrow interest out of the harvest (§B), so the CL add is smaller by that amount; `MoonwellRepayFailed` is on that path.
 - [ ] Track drift with `hedgedDebt()` vs. each market's `borrowBalanceStored` (§E) to size the harvest cadence, and confirm it returns to ~0 after a compound; remember the on-chain measure accrues first, so the off-chain `…Stored` read is a lower bound.
 - [ ] Read the standing target with `targetLtvBps()`, not from the position's current LTV — `adjustLeverage` **persists** it and the next `deployIdle`/`compound` borrows at it.
-- [ ] `rerange(width, minLiq0, minLiq1)` when spot drifts out of range or the model picks a new width — `width` in raw ticks, tickSpacing-aligned, inside `[minWidth, maxWidth]` (else `WidthOutOfBounds`); expect calm-gate reverts on a shoved pool (retry when calm).
+- [ ] `rerange(width, skewBps, minLiq0, minLiq1)` when spot drifts out of range or the model picks a new width **or skew** — `width` in raw ticks, tickSpacing-aligned, inside `[minWidth, maxWidth]`; `skewBps` in `(0, 10000)` (5000 = centered) with **both** spans ≥ one `tickSpacing` (else `OutOfBounds`, selector `0xb4120f14` — **re-point the backend error table off the retired `WidthOutOfBounds` `0x1f9f54af`**); expect calm-gate reverts on a shoved pool (retry when calm). In the two-borrowed-legs shape, budget for the standing idle remainder a skewed range leaves against the range-blind 50/50 borrow (§B) — utilisation drag, not a hedge or health change.
 - [ ] `adjustLeverage(target, minLiq, minOut)` to hold near `targetLtvBps` — and to lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds.
 - [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
 - [ ] Treat `FULFILL_WINDOW = 2 days` as the hard SLA; alert before it; every `RedeemEmergency` is a missed SLA.
 - [ ] Run `deleverage(minOut)` proactively as health nears `minHealthBps`; remember it is permissionless (others will trigger it too).
 - [ ] Monitor `nav()` reverts as a "priced paths degraded to async" signal — **not** a fulfill blocker (the queue is oracle-free); monitor `FeeCrystallizeDeferred`, whose realistic cause is a frozen vault (`depositsOpen == false`).
-- [ ] Read the venue shape off `layout()` before wiring anything numeric — leg tokens, `cbBTCDecimals`/`wethDecimals`, `wethIsToken0`, the two leg-swap spacings, the width band (§G). Never hardcode the launch pair.
+- [ ] Read the venue shape off `layout()` before wiring anything numeric — leg tokens, `cbBTCDecimals`/`wethDecimals`, `wethIsToken0`, the two leg-swap spacings, the width band and the stored `skewBps` (§G). Never hardcode the launch pair.
 - [ ] Know the open gaps: the any-pool rewrites have **no behavioral fork coverage** yet, and the Moonwell `underlying()` init guard is unverified on the live markets (§G).
 - [ ] Use `rescueToVault(token)` only for genuine stray tokens; it reverts on any position/accounting token and always pays the vault.

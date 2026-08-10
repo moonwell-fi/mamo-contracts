@@ -64,7 +64,9 @@
 #   LEG_A/LEG_B, M_LEG_A/M_LEG_B, M_USDC, COMPTROLLER, NPM, GAUGE, SWAP_ROUTER
 #   LEG_A_FEED/LEG_B_FEED/USDC_FEED/AERO_FEED/SEQ_FEED
 #   TICK_SPACING, LEG_A_SWAP_TICK_SPACING, LEG_B_SWAP_TICK_SPACING, WETH_DELIVERS_NATIVE
-#   WIDTH/MIN_WIDTH/MAX_WIDTH, TARGET_LTV_BPS/MAX_LTV_BPS/MIN_HEALTH_BPS/MAX_SLIPPAGE_BPS
+#   WIDTH/MIN_WIDTH/MAX_WIDTH, SKEW_BPS (5000 = centered — the ops default; skew is meant to be
+#     applied per-cycle via `rerange`, not baked into genesis), TARGET_LTV_BPS/MAX_LTV_BPS/
+#     MIN_HEALTH_BPS/MAX_SLIPPAGE_BPS
 #   MAX_DELAY/GRACE_PERIOD/TWAP_WINDOW/CALM_DEVIATION_TICKS
 #   MGMT_FEE_BPS (100) / PERF_FEE_BPS (1000) / FEE_RECIPIENT (= MAMO_REBALANCER)
 #   VAULT_NAME / VAULT_SYMBOL
@@ -112,7 +114,8 @@ _CLI_VNET_RPC="${TENDERLY_VNET_RPC_URL:-}"
 # These are the subset THIS script also needs (the 5 feeds for B.0, the pool for the
 # log, USDC for the seed). LeveragedAeroStackHarness.s.sol carries identical defaults for
 # them plus the fields only it reads (legs, Moonwell markets, NPM, gauge, router, risk /
-# oracle / width / fee params) — keep the two default sets in lockstep.
+# oracle / width+skew / fee params) — keep the two default sets in lockstep. SKEW_BPS defaults
+# to 5000 (centered) on both sides.
 #
 # ── SHAPE: which pool family this fund LPs ────────────────────────────────────
 # `asset` (DEFAULT — the launch product): leg B IS the unit of account, i.e. a cbBTC/USDC
@@ -388,6 +391,8 @@ forge script "$FQ" --sig 'buildInitData()' -vvv > "$INITDATA_LOG" 2>&1 \
   || { grep -iE "error|revert|fail" "$INITDATA_LOG" | tail -20 | tee -a "$RESULTS"; die "buildInitData() failed"; }
 INITDATA="$(grep -oE 'HARNESS_INITDATA=0x[0-9a-fA-F]+' "$INITDATA_LOG" | head -1 | cut -d= -f2)"
 [ -n "$INITDATA" ] || die "could not parse HARNESS_INITDATA from $INITDATA_LOG"
+# "width band" matches BOTH harness lines: the min/width/max triple and the skewBps line, which
+# keeps that prefix deliberately so this one pattern covers the whole range config.
 grep -E "(pool +:|legA/legB:|feeRecip +:|mgmt/perf fee bps|width band)" "$INITDATA_LOG" | tee -a "$RESULTS"
 ok "initData = ${#INITDATA} hex chars"
 
@@ -400,7 +405,8 @@ section "Phase B.3 — vault.cloneAndBind(template, MAMO_REBALANCER, initData) [
 # A wrong venue value fails HERE, loudly: VenueMismatch (pool spacing / token set / Moonwell
 # underlying / a swap pool that does not exist at the configured spacing), UnsupportedLeg
 # (USDC or AERO as a leg), LegDecimalsOutOfRange, AssetMismatch, UnexpectedFeedDecimals,
-# WidthOutOfBounds, or one of the risk/oracle/fee bound errors.
+# OutOfBounds (width band OR skewBps — one error covers both), or one of the risk/oracle/fee
+# bound errors.
 csend_gas "$GAS_CLONE_AND_BIND" "cloneAndBind" "$MULTISIG" "$VAULT" \
   'cloneAndBind(address,address,bytes)' "$TEMPLATE" "$MAMO_REBALANCER" "$INITDATA"
 CLONE="$(ccall "$VAULT" 'strategy()(address)' | field)"

@@ -93,5 +93,9 @@ The two-call protocol-fee lookup the strategy inherits (`vault.factory()` → `.
 _Avoid_: factory (nothing is deployed by it), ProtocolConfig as a contract we ship
 
 **Width band**:
-The init-time `[minWidth, maxWidth]` bounds, on the `tickSpacing` grid, that every rerange width must satisfy — the genesis width included. Enforced by `_checkWidth`, rejected with `WidthOutOfBounds()`.
-_Avoid_: range (that is the resulting tickLower/tickUpper), tick spacing (the grid the band sits on)
+The init-time `[minWidth, maxWidth]` bounds, on the `tickSpacing` grid, that every rerange width must satisfy — the genesis width included. Enforced by `_checkWidth`, rejected with `OutOfBounds()`.
+_Avoid_: range (that is the resulting tickLower/tickUpper), tick spacing (the grid the band sits on), `WidthOutOfBounds()` (renamed — that name still belongs to `LPAutoBalancerV2`, a different contract)
+
+**Skew**:
+`skewBps` — the fraction of `width` placed BELOW the current tick, on the bps scale (`10000` = 1.00). `5000` = centered; `3500` = 35 % of the range below spot, 65 % above. `lowerSpan = width × skewBps / 10000`, `upperSpan = width − lowerSpan`, both bounds aligned DOWN to `tickSpacing`. Stored in `Layout` and exposed on `layout()` exactly like `width` — a flat-book `rerange` persists both, and the next genesis mint uses the stored pair. Validated with the width and rejected by the same `OutOfBounds()`: strictly inside `(0, 10000)`, and both spans at least one `tickSpacing`.
+_Avoid_: skew as a percentage or a ratio (it is bps), "offset"/"shift" (the range still brackets spot), centered range (only true at 5000)

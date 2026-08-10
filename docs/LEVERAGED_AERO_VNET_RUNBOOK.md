@@ -29,7 +29,9 @@ Audience: Mamo engineers with a checkout of **this repo only**.
 > - Paths and type names under `src/leveraged-aero/sherwood/` are preserved **only** so the vendored
 >   strategy's imports still compile. They are shims. Nothing calls Sherwood.
 > - The post-settlement exit is the vault's **permissionless** `redeemSettled(shares)`.
-> - The strategy now initializes against **any** Aerodrome Slipstream pool, and `rerange` is in-repo.
+> - The strategy now initializes against **any** Aerodrome Slipstream pool, and `rerange` is in-repo —
+>   in its 4-arg `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` form, which
+>   carries a per-cycle **skew** alongside the width (see B.3).
 
 ---
 
@@ -318,7 +320,8 @@ phase).
 `VenueMismatch` (pool spacing or token set, a Moonwell `underlying()` that does not match its leg, or a
 leg↔USDC swap pool that does not exist at the configured spacing — both swap spacings are
 existence-probed through the CL factory), `UnsupportedLeg`, `LegDecimalsOutOfRange`, `AssetMismatch`,
-`UnexpectedFeedDecimals`, `WidthOutOfBounds`, or one of the risk / oracle / fee bound errors.
+`UnexpectedFeedDecimals`, `OutOfBounds` (the width band **or** `skewBps` — one error covers both), or one
+of the risk / oracle / fee bound errors.
 
 `InitParams` is **leg slots, not token identities** (`weth*` = leg A, the natively-wrappable slot;
 `cbBTC*` = leg B — the names are historical). Any Slipstream pool whose two tokens have Moonwell borrow
@@ -331,6 +334,7 @@ constants:
 | `cbBTCSwapTickSpacing`, `wethSwapTickSpacing` | spacings of the leg↔USDC **swap** pools — separate venues from the LP pool, nonzero required. These replaced three hardcoded `int24(100)` literals |
 | `wethDeliversNative` | leg A's Moonwell market pays native ETH on borrow → the strategy wraps it. `false` on an ERC-20-delivering market (and then stray ETH is stranded — there is no ETH rescue path) |
 | `width`, `minWidth`, `maxWidth` | rerange width band, validated once at init: both bounds on the spacing grid, `minWidth ≥ 2 × spacing`, `minWidth ≤ maxWidth`, and `width` inside the band. Genesis mints at `width` |
+| `skewBps` | fraction of `width` placed **below** the current tick, bps (`10000` = 1.00). `5000` = centered — the genesis/ops default, and what `SKEW_BPS` defaults to in the runner. Must be in `(0, 10000)` exclusive **and** leave both spans ≥ one `tickSpacing` → `OutOfBounds()`. Persisted like `width`: genesis mints at it, `rerange` moves it |
 
 Derived at init, never passed: **leg token ordering** (`wethIsToken0` from `pool.token0()`) and **leg
 decimals** (`IERC20Metadata.decimals()`, bounded `[2, 18]` → `LegDecimalsOutOfRange`).
@@ -348,10 +352,17 @@ Init guards that will bite during a first deploy against a new pool:
   `twapWindow ∈ (0, 1 day]`, `calmDeviationTicks ∈ (0, 5000]`, `maxSlippageBps ∈ (0, 1000]`.
 - Fee ceilings, and a nonzero `feeRecipient` whenever either fee bps is nonzero.
 
-`rerange(uint24 width, uint256 minLiq0, uint256 minLiq1)` is **in-repo** (`onlyProposer`, persisted
-per-cycle width, re-checked against the init band → `WidthOutOfBounds()`, selector `0x1f9f54af`). The
-old "the vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — delete it on
-sight.
+`rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` is **in-repo**
+(`onlyProposer`, persisted per-cycle width **and** skew, re-checked against the init band and the skew
+bounds → `OutOfBounds()`, selector `0xb4120f14`). The old "the vendored copy is behind upstream,
+re-vendor pending" caveat is **obsolete** — delete it on sight.
+
+> **Two signature/selector changes landed together here.** `rerange` grew a `uint16 skewBps_` second
+> argument (was `rerange(uint24,uint256,uint256)`), and `WidthOutOfBounds()` (`0x1f9f54af`) was renamed
+> `OutOfBounds()` (`0xb4120f14`) and now covers skew failures as well as width ones. Anything holding
+> either value hardcoded — the Mamo backend's rebalance-param error table above all — must be
+> re-pointed. Re-derive rather than copy: `cast sig 'OutOfBounds()'`,
+> `cast sig 'rerange(uint24,uint16,uint256,uint256)'`.
 
 ### B.4 — the bind (already done by B.3)
 

@@ -27,7 +27,24 @@ Delta against the baseline:
 | Host swap (de-Sherwood) | New `src/LeveragedAeroVault.sol` replaces Sherwood's `SyndicateVault`; `sherwood/` shims shrunk to the surface the strategy actually consumes (`ISyndicateGovernor` + `BatchExecutorLib` deleted; `ISyndicateVault` → 3 functions; `BaseStrategy` rewritten for the vanilla vault-driven lifecycle) | `ea822be` |
 | Any-pool init + validation | Leg decimals read from the tokens at init and bounded `[2, 18]` (were `CBBTC_DECIMALS` / `WETH_DECIMALS` constants); pool token ordering derived from `pool.token0()` (`wethIsToken0`, mapped through `_tokens01` / `_amounts01`) instead of the manager's hardwired `token0 == WETH`; per-leg swap-pool `tickSpacing` inputs replace three hardcoded `int24(100)` literals; native-ETH borrow wrap made conditional (`wethDeliversNative`); init venue guards (pool `tickSpacing` + token-set match, Moonwell `underlying()` binding, reject USDC-as-leg and reward-token-as-leg) | `978e5af` |
 | Per-cycle rerange width | `rerange(uint24 width, uint256 minLiq0, uint256 minLiq1)` validated against an init-time `[minWidth, maxWidth]` band on the `tickSpacing` grid and persisted; `RANGE_TICK_SPACINGS` deleted; genesis mints at the init width; `WidthOutOfBounds()` = `0x1f9f54af` | `978e5af` |
+| Per-cycle rerange **skew** | `rerange` grew a second argument — `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)`. `skewBps` is the fraction of `width` placed **below** the current tick (bps, `10000` = 1.00; `5000` = centered, the previous fixed behaviour and the genesis/ops default). `lowerSpan = width × skewBps / 10000`, `upperSpan = width − lowerSpan`, both bounds still aligned DOWN to `tickSpacing`. Stored in `Layout` and surfaced on `layout()` exactly like `width`, so a flat-book `rerange` persists both and the next genesis mint re-mints at the stored pair. `centeredTickRange` → `skewedTickRange(pool, tickSpacing, width, skewBps)`; `rerangeImpl` narrowed to `(minLiq0, minLiq1)` and reads both knobs from storage (the persists moved to the strategy). **`WidthOutOfBounds()` renamed `OutOfBounds()` = `0xb4120f14`** and reused for both knobs | *this change* |
 | Comment hygiene | Three comment-only hunks in the strategy retiring stale Sherwood rationale (`selfManagesFees`, `_protocolConfig`, `rescueToVault`); new docstring on the manager's trimmed `_config()` | `ea822be`, `978e5af` |
+
+> **Selector break in the skew row, called out deliberately.** The width row above records
+> `WidthOutOfBounds()`'s selector (`0x1f9f54af`), which was matched to the Mamo backend's rebalance-param
+> error code. The rename to `OutOfBounds()` **changes that selector to `0xb4120f14`** — the pairing is
+> broken until the backend's error table is re-pointed, and the error's meaning is now wider (width *or*
+> skew). `rerange`'s own selector changed with the added argument. Both are intentional, both are
+> pre-launch, and neither is upgrade-safe to do later; re-derive rather than copy
+> (`cast sig 'OutOfBounds()'`, `cast sig 'rerange(uint24,uint16,uint256,uint256)'`).
+
+> **Known, accepted consequence of skew — two-borrowed-legs shape only.** The genesis / `deployIdle`
+> borrow is range-blind (`_borrowHalfEach` splits 50/50 by USD value), so a **skewed** range is not 50/50
+> by value and the book carries a persistent idle remainder of one borrowed token. This is **not** a hedge
+> break (the idle borrowed token 1:1 hedges its own debt, and `nav()` prices it) and **not** an LTV/health
+> change — it is capital-utilisation drag: less of the book earns LP fees. Mitigated operationally
+> (init `skewBps = 5000`, apply skew via `rerange`, size the skew against the drag). Making the borrow
+> range-aware is a possible follow-up and is **out of scope** here.
 
 Field names in `Layout` still read `cbBTC` / `weth` / `mCbBTC` / `mWeth`. These are **leg slots**, not
 token commitments — leg B and leg A respectively. Nothing in the code assumes those particular tokens
@@ -193,13 +210,19 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
     guards actually bind the venue (`pool.tickSpacing()`, `token0`/`token1` set match, Moonwell
     `underlying()`, USDC-as-leg and reward-token-as-leg rejection, decimals in `[2, 18]`); (d)
     `wethDeliversNative == false` leaves `receive()` accepting ETH with no wrap (gap 3).
-12. **Rerange width band + the vault's own surface** — `rerange(width, …)` accepts a per-cycle width and
-    `_checkWidth` enforces the grid + `[minWidth, maxWidth]` band on both the genesis width and every
-    subsequent one; the band itself is validated once at init (`% spacing == 0`,
-    `minWidth >= 2 × spacing`, `min <= max`). Confirm a proposer cannot degenerate the range to an empty
-    or single-tick band, and that the persisted `$.width` cannot desync from the minted position. On the
-    vault: `setStrategy` set-once, `redeemSettled` rounding and the pre-burn/pre-transfer ordering, the
-    `decimals() = asset.decimals() + 6` coupling to the strategy's `SHARES_VIRTUAL_OFFSET = 1e6` genesis
+12. **Rerange width band + skew + the vault's own surface** — `rerange(width, skewBps, …)` accepts a
+    per-cycle width **and skew** and `_checkWidth` enforces the grid + `[minWidth, maxWidth]` band on
+    both the genesis width and every subsequent one; the band itself is validated once at init
+    (`% spacing == 0`, `minWidth >= 2 × spacing`, `min <= max`). `skewBps` is checked alongside it —
+    strictly inside `(0, 10000)`, and **both** derived spans (`width × skewBps / 10000` and the
+    remainder) at least one `tickSpacing`, which is what keeps the range strictly bracketing spot at
+    small widths. Confirm a proposer cannot degenerate the range to an empty or single-tick band **by
+    either knob**, that the down-alignment of both bounds cannot invert them or push spot outside the
+    minted range, and that the persisted `$.width` / `$.skewBps` cannot desync from the minted position.
+    Note also that an extreme (still-valid) skew can leave the range far enough off spot to trip the
+    pre-existing `DegenerateRange()` in `assetModeSplit` — a new path to an old guard, not a new failure
+    mode. On the vault: `setStrategy` set-once, `redeemSettled` rounding and the pre-burn/pre-transfer
+    ordering, the `decimals() = asset.decimals() + 6` coupling to the strategy's `SHARES_VIRTUAL_OFFSET = 1e6` genesis
     pricing, `activateStrategy`'s owner-funded seed path, and the `rescueERC20` asset carve-out.
 
 ## Accepted patterns / known non-issues
@@ -268,7 +291,7 @@ Stated plainly; none are closed.
   commit**, and its `§`-references are the ones cited in the source NatSpec. It is stale w.r.t. this
   fork in exactly the places the fork changed: the host/vault/governor sections describe Sherwood's
   proposal lifecycle rather than the vanilla activate/settle one, and it predates the any-pool init and
-  the rerange width band. The spec was re-verified claim-by-claim against source on 2026-07-13; two
+  the rerange width band and skew. The spec was re-verified claim-by-claim against source on 2026-07-13; two
   minor errata at the pinned commit relate to Sherwood governance constants and no longer apply here.
 - Product-level overview of the fund (roles, trust boundary, operating model) is summarized in the PR
   description introducing this package.
@@ -290,7 +313,7 @@ Last verified locally 2026-07-27: **459 passed / 0 failed / 0 skipped**. Relevan
 | Suite | Tests | Covers |
 |---|---|---|
 | `test/LeveragedAeroVault.unit.t.sol` | 45 | The vault end-to-end against a mock strategy: `strategyMint`/`strategyBurn` gating, set-once `setStrategy`, `depositsOpen`, decimals coupling, `activateStrategy`/`settleStrategy`, `redeemSettled` pro-rata + rounding, `rescueERC20` asset carve-out, fee-config hops |
-| `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 31 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band) and `rerange` width/auth — **including both pool orderings at init** |
+| `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 31 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band, `skewBps` bounds) and `rerange` width/skew/auth — **including both pool orderings at init** |
 | `test/MamoLeveragedAeroStrategy.unit.t.sol` | 51 | The per-user account wrapper (adjacent, not in this package's scope) |
 | `test/leveraged-aero/LayoutParity.t.sol` | 4 | The `Layout` / `RedeemRequest` / `STORAGE_SLOT` tripwire. **Not part of the 459** — it is not a `*.unit.t.sol` file; it runs under `make test` and under the `test/leveraged-aero/*` match-path above. 4/4 green. |
 
@@ -313,6 +336,6 @@ health/LTV bounds after every op, `totalSupply` conservation across the mint/bur
 
 **Read that evidence narrowly.** It exercises the strategy internals **at the baseline commit**, on the
 Sherwood host, with the legacy cbBTC/WETH config. It does NOT cover: the `LeveragedAeroVault` host swap,
-the any-pool ordering/decimals/swap-spacing rewrites, or the rerange width band. **There is no
+the any-pool ordering/decimals/swap-spacing rewrites, or the rerange width band and skew. **There is no
 behavioral (fork) suite in this repo for the forked code** — the in-repo gate is unit-level and
 mock-based. Closing that is follow-up 1 and it is the single largest evidence gap in this package.
