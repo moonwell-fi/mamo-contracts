@@ -90,6 +90,17 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     mapping(address chainlinkFeed => FeedBounds bounds) public feedBounds;
 
     /**
+     * @notice Whether a specific pair is already represented in configuredPairCount
+     * @dev configuredPairCount is bookkeeping added after the first deployment, so pairs configured
+     *      BEFORE the upgrade are live in tokenPairOracleData while contributing nothing to the
+     *      count. Deriving "is this pair counted?" from `tokenPairOracleData[...].length` therefore
+     *      let removeTokenConfiguration decrement a count the pair never incremented, which could
+     *      drive the count of a token with live pairs back to zero. This flag makes increment and
+     *      decrement exactly symmetric; backfillPairCount() registers pre-upgrade pairs.
+     */
+    mapping(address fromToken => mapping(address toToken => bool counted)) public pairCounted;
+
+    /**
      * @notice Emitted when a token pair's price feed configuration is updated
      * @param fromToken The address of the token to swap from
      * @param toToken The address of the token to swap to
@@ -135,6 +146,14 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     event FeedBoundsSet(address indexed chainlinkFeed, uint256 minAnswer, uint256 maxAnswer);
 
     /**
+     * @notice Emitted when a pre-upgrade pair is registered into configuredPairCount
+     * @param fromToken The sell token the pair belongs to
+     * @param toToken The buy token of the registered pair
+     * @param configuredPairs The token's pair count after the backfill
+     */
+    event PairCountBackfilled(address indexed fromToken, address indexed toToken, uint256 configuredPairs);
+
+    /**
      * @notice Locks the implementation contract so it cannot be initialized directly
      * @dev Without this, anyone can call initialize() on the implementation and become its owner,
      *      which is enough to authorize an upgrade of the implementation itself.
@@ -170,8 +189,12 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         require(configurations.length > 0, "Empty configurations array");
 
         // Track the pair the first time it is configured so isRewardToken() can answer from real
-        // pair configuration rather than from the legacy maxTimePriceValid mapping.
-        if (tokenPairOracleData[fromToken][toToken].length == 0) {
+        // pair configuration rather than from the legacy maxTimePriceValid mapping. The flag — not
+        // the presence of oracle data — is what removeTokenConfiguration decrements against, so a
+        // pair configured before this bookkeeping existed can never take the count below its true
+        // value.
+        if (!pairCounted[fromToken][toToken]) {
+            pairCounted[fromToken][toToken] = true;
             configuredPairCount[fromToken] += 1;
         }
 
@@ -206,23 +229,70 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         require(toToken != address(0), "Invalid to token address");
         require(tokenPairOracleData[fromToken][toToken].length > 0, "Token pair not configured");
 
-        // Pairs configured before this bookkeeping existed have a zero count; do not underflow.
-        if (configuredPairCount[fromToken] > 0) {
+        // Only give back what this pair actually took. A pair configured before configuredPairCount
+        // existed never incremented it, so decrementing here would under-count the token and could
+        // report a token with LIVE pairs as no longer a reward token.
+        if (pairCounted[fromToken][toToken]) {
+            pairCounted[fromToken][toToken] = false;
             configuredPairCount[fromToken] -= 1;
         }
 
         // Clear configurations
         delete tokenPairOracleData[fromToken][toToken];
 
+        // MOO-726: maxTimePriceValid is the legacy reward-token flag and used to be a one-way latch,
+        // so a token whose last pair had been removed still passed the isRewardToken() gate and
+        // consumers (MamoMultiMarketStrategy._approveCowSwap, LPCompoundModule.approveCowSwap) kept
+        // handing the CoW relayer an allowance for it. Once nothing is configured for the token, the
+        // flag goes with it. Pre-upgrade pairs must be registered with backfillPairCount() first,
+        // otherwise the count reads zero while other pairs are still live.
+        if (configuredPairCount[fromToken] == 0 && maxTimePriceValid[fromToken] != 0) {
+            maxTimePriceValid[fromToken] = 0;
+            emit MaxTimePriceValidSet(fromToken, 0);
+        }
+
         emit TokenPairConfigurationRemoved(fromToken, toToken);
     }
 
+    /**
+     * @notice Sets (or clears) the legacy max-time-price-valid flag for a token
+     * @dev Zero is accepted and CLEARS the flag. Rejecting zero made the flag a one-way latch: a
+     *      token configured before configuredPairCount existed could never stop being reported as a
+     *      reward token, even after every pair for it had been removed.
+     * @param fromToken The token the flag applies to
+     * @param _maxTimePriceValid Seconds a price stays valid, or zero to clear the flag
+     */
     function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external onlyOwner {
         require(fromToken != address(0), "Invalid from token address");
-        require(_maxTimePriceValid > 0, "Max time price valid can't be zero");
         maxTimePriceValid[fromToken] = _maxTimePriceValid;
 
         emit MaxTimePriceValidSet(fromToken, _maxTimePriceValid);
+    }
+
+    /**
+     * @notice Registers pairs configured before configuredPairCount existed into the counter
+     * @dev Only callable by the owner, and idempotent: a pair already counted, or with no oracle
+     *      data, is skipped. The nested tokenPairOracleData mapping cannot be enumerated on chain,
+     *      so the release that ships this contract must call this with the live pair list — see
+     *      multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol. Without it,
+     *      isRewardToken() answers for pre-upgrade pairs only through the legacy flag, and
+     *      removeTokenConfiguration cannot tell "last pair removed" from "never counted".
+     * @param fromToken The sell token whose pairs are being registered
+     * @param toTokens The buy tokens already configured for fromToken
+     */
+    function backfillPairCount(address fromToken, address[] calldata toTokens) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+
+        for (uint256 i = 0; i < toTokens.length; i++) {
+            address toToken = toTokens[i];
+            if (tokenPairOracleData[fromToken][toToken].length == 0) continue;
+            if (pairCounted[fromToken][toToken]) continue;
+
+            pairCounted[fromToken][toToken] = true;
+            configuredPairCount[fromToken] += 1;
+
+            emit PairCountBackfilled(fromToken, toToken, configuredPairCount[fromToken]);
+        }
     }
 
     /**

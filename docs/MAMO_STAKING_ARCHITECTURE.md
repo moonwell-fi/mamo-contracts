@@ -558,6 +558,70 @@ graph LR
     I --> J
 ```
 
+## Rollout — breaking changes and shipping order
+
+The Sherlock audit fixes change two external signatures and add a cross-contract dependency that
+does not exist on chain today. Nothing here is optional or independently deployable: shipping any
+piece on its own breaks the caller of the piece that did not ship.
+
+### 1. `compound()` → `compound(uint256 deadline)` — BREAKING ABI change
+
+`MamoStakingStrategy.compound()` now takes the swap deadline from the caller (MOO-744). A deadline
+computed inside the transaction as `block.timestamp + N` is tautological: the router's
+`require(block.timestamp <= deadline)` can never fail, so a `compound()` sitting in the mempool
+stays valid indefinitely and eventually executes against whatever market exists when it lands.
+
+- Selector changes: any backend, keeper, multicall batch or off-chain ABI that calls `compound()`
+  must be updated and released **together with** the implementation. A stale caller does not fail
+  gracefully — it hits the fallback and reverts.
+- The strategy rejects a deadline already in the past (`"Deadline in the past"`), and the value is
+  forwarded verbatim into `ISwapRouter.ExactInputSingleParams.deadline`. The backend must pick a
+  real, near-term deadline; re-deriving `block.timestamp + N` off-chain at signing time and letting
+  the transaction sit reintroduces the exact bug.
+
+### 2. `MamoStakingStrategyFactory` constructor arity — BREAKING deployment change
+
+The trailing `_defaultSlippageInBps` constructor argument is gone. Slippage has a single source of
+truth, `MamoStakingRegistry.defaultSlippageInBps`, which `MamoStakingStrategy.getAccountSlippage()`
+falls back to; the factory stored a value it never passed on. Any deployment script, proposal or
+verification job that constructs the factory must drop the argument (already done in
+`script/DeployMamoStaking.s.sol` and proposals 005 / 008). `defaultSlippageInBps()` no longer
+exists on the factory, so off-chain readers of it must move to the registry.
+
+### 3. The registry and the strategy must ship together
+
+`compound()` prices its minimum-out through `MamoStakingRegistry.slippagePriceChecker()`. **That
+function does not exist on the registry deployed at `0xFf3bB81651592bc9c64220093A98ffb10d2b2706` —
+the call reverts on chain.** The `MamoStakingStrategy` integration suite only reaches `compound()`
+because `setUp()` installs a `vm.mockCall` for it; that mock stands in for the redeployment, it is
+not evidence that the live registry supports the call.
+
+Consequence: a strategy implementation carrying the new `compound()` **must not** be whitelisted
+against the currently deployed registry. The registry redeployment (proposal
+`008_MamoStakingV2Deployment`) and the strategy implementation go out in the same release, and the
+new strategy must be pointed at the new registry.
+
+### 4. The SlippagePriceChecker upgrade must enable its own guards
+
+`SlippagePriceChecker`'s sequencer-uptime check is a no-op while `sequencerUptimeFeed` is
+`address(0)`, which is deliberately the state an in-place upgrade lands in — so the implementation
+on its own leaves MOO-741 exactly as unmitigated as before. Proposal
+`013_SlippagePriceCheckerOracleHardening` batches the three steps that make the fix real, and its
+`validate()` asserts the guard ends up enabled:
+
+1. `upgradeToAndCall` the proxy to the new implementation.
+2. `setSequencerUptimeFeed(CHAINLINK_L2_SEQUENCER_UPTIME_FEED, 3600)` — Base's Chainlink
+   "L2 Sequencer Uptime Status Feed", `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433`.
+3. `backfillPairCount(...)` for every token configured before `configuredPairCount` existed.
+   Without it, `isRewardToken()` answers for those tokens only through the legacy
+   `maxTimePriceValid` flag, and `removeTokenConfiguration` cannot tell "the last pair was just
+   removed" from "this pair was never counted".
+
+`setFeedBounds` stays unset on purpose: today's aggregators report representational limits rather
+than market bounds, so no answer can saturate, and configuring bounds against a live feed is an
+ongoing operational commitment. It is available the day an aggregator with active finite bounds
+appears behind one of these feeds.
+
 ## Key Architecture Changes
 
 ### 1. Centralized Configuration Registry

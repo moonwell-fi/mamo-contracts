@@ -21,6 +21,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {MockConfigurableSwapRouter} from "./mocks/MockConfigurableSwapRouter.sol";
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 
 contract MamoStakingStrategyIntegrationTest is BaseTest {
@@ -1369,8 +1370,44 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Reward token should have been fully swapped");
     }
 
+    /// @dev Replaces MamoStakingRegistry.dexRouter() with a router whose behaviour can be dialled in,
+    ///      funded with enough MAMO to settle any swap the strategy asks for. The price-checker mock
+    ///      installed in setUp() is on a different selector and survives.
+    function _installMockRouter() internal returns (MockConfigurableSwapRouter router) {
+        router = new MockConfigurableSwapRouter();
+        deal(address(mamoToken), address(router), 1e30);
+
+        vm.mockCall(address(stakingRegistry), abi.encodeWithSignature("dexRouter()"), abi.encode(address(router)));
+    }
+
+    /// @notice MOO-744: the caller's deadline must reach the router, not just the require at the top.
+    /// @dev testCompoundRevertsWhenDeadlineHasPassed only pins the `require(deadline >= block.timestamp)`;
+    ///      its happy-path call runs on a strategy with no accrued rewards, so the swap loop is skipped
+    ///      and the deadline never reaches a router. Restoring the pre-fix `deadline: block.timestamp
+    ///      + 300` in the swap params therefore left that test — and the whole suite — green. This
+    ///      test hands compound() a deadline that nothing inside the transaction can reconstruct and
+    ///      reads back the value the router was actually called with.
+    function testCompoundForwardsCallerDeadlineToRouter() public {
+        _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+
+        // A distinctive offset: any deadline the strategy synthesises from block.timestamp misses it.
+        uint256 deadline = vm.getBlockTimestamp() + 4242;
+
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        assertEq(router.callCount(), 1, "The accrued reward token must actually have been swapped");
+        assertGt(router.lastAmountIn(), 0, "The swap must have carried a real amountIn");
+        assertEq(router.lastDeadline(), deadline, "Router must be handed the CALLER's deadline");
+    }
+
     /// @notice MOO-733: the reward-token allowance granted to the router must not survive the swap.
-    function testCompoundClearsRewardTokenAllowanceAfterSwap() public {
+    /// @dev Non-regression guard only. The real Aerodrome router pulls exactly `amountIn`, so the
+    ///      allowance is already zero without the trailing `forceApprove(dexRouter, 0)` — this test
+    ///      passes against the pre-fix implementation and is evidence for nothing on its own. The
+    ///      discriminating version is testCompoundClearsRewardTokenAllowanceWhenRouterPullsLess.
+    function testCompoundLeavesNoRouterAllowanceWithTheRealRouter() public {
         address cbBTC = _stakeAndAccrueCbBtcRewards();
         address dexRouter = address(stakingRegistry.dexRouter());
 
@@ -1381,8 +1418,79 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         assertEq(IERC20(cbBTC).allowance(userStrategy, dexRouter), 0, "Router allowance should be cleared after swap");
     }
 
+    /// @notice MOO-733: a router that pulls LESS than it was approved for must not keep the remainder.
+    /// @dev This is what the trailing `forceApprove(dexRouter, 0)` is for. Nothing in the real router's
+    ///      behaviour can produce a residual allowance, so only a router that under-pulls can tell the
+    ///      fixed implementation from the pre-fix one.
+    function testCompoundClearsRewardTokenAllowanceWhenRouterPullsLess() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+        router.setPullBps(5000); // pulls half of what it is approved for
+
+        uint256 deadline = _deadline();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        assertEq(router.callCount(), 1, "The reward token must have been routed through the swap");
+        assertLt(router.lastPulled(), router.lastAmountIn(), "Fixture must leave an unspent approval behind");
+        assertEq(
+            IERC20(cbBTC).allowance(userStrategy, address(router)),
+            0,
+            "The unpulled remainder of the approval must not survive the swap"
+        );
+    }
+
+    /// @notice MOO-733: the emitted amountOut must be the measured delta, not the router's claim.
+    /// @dev The real router's return value equals the balance delta it produced, so with it the
+    ///      emitted `actualAmountOut` and the measured `received` are indistinguishable. Here the
+    ///      router over-reports while still delivering more than the minimum, so the two diverge.
+    function testCompoundEmitsMeasuredAmountOutNotRouterReport() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+        router.setDeliverExtra(1e18); // delivers strictly more than amountOutMinimum
+        router.setOverReportBy(777e18); // but claims even more than it delivered
+
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+        uint256 earnedMamo = multiRewards.earned(userStrategy, address(mamoToken));
+
+        uint256 deadline = _deadline();
+        vm.recordLogs();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        (bool found, uint256 reportedOut) = _findCompoundAmountOut(cbBTC);
+        assertTrue(found, "CompoundRewardTokenProcessed should be emitted for cbBTC");
+
+        assertTrue(router.lastReported() != router.lastDelivered(), "Fixture must make claim and delivery diverge");
+        assertEq(reportedOut, router.lastDelivered(), "Emitted amountOut must be the MAMO actually received");
+        assertLt(reportedOut, router.lastReported(), "Emitted amountOut must not be the router's own claim");
+        assertEq(
+            multiRewards.balanceOf(userStrategy) - stakedBefore,
+            earnedMamo + router.lastDelivered(),
+            "Only the MAMO actually delivered can have been staked"
+        );
+    }
+
+    /// @dev Pulls `actualAmountOut` out of the CompoundRewardTokenProcessed log for `rewardToken`.
+    function _findCompoundAmountOut(address rewardToken) internal returns (bool found, uint256 amountOut) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == userStrategy
+                    && logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")
+                    && address(uint160(uint256(logs[i].topics[1]))) == rewardToken
+            ) {
+                (, amountOut) = abi.decode(logs[i].data, (uint256, uint256));
+                return (true, amountOut);
+            }
+        }
+    }
+
     /// @notice MOO-733: the emitted amountOut must be the measured balance delta.
-    function testCompoundEmitsMeasuredAmountOut() public {
+    /// @dev Non-regression guard only. The real router's return value already equals the measured
+    ///      delta, so this cannot separate `actualAmountOut` from `received`; see
+    ///      testCompoundEmitsMeasuredAmountOutNotRouterReport for the discriminating version.
+    function testCompoundEmitsAmountOutConsistentWithTheRealRouter() public {
         address cbBTC = _stakeAndAccrueCbBtcRewards();
 
         assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy holds no idle MAMO before compounding");

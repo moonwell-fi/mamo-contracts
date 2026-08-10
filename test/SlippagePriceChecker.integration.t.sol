@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 
+import {SlippagePriceCheckerOracleHardening} from
+    "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
 import {BaseTest} from "./BaseTest.t.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
@@ -362,18 +364,26 @@ contract SlippagePriceCheckerTest is BaseTest {
         slippagePriceChecker.checkPrice(amountIn, address(well), address(underlying), minOut, excessiveSlippage);
     }
 
-    function testRevertIfZeroMaxTimePriceValid() public {
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd,
-            reverse: false,
-            heartbeat: 1800
-        });
+    /// @notice MOO-726: zero is a legitimate value — it CLEARS the legacy reward-token flag.
+    /// @dev This used to revert with "Max time price valid can't be zero", which together with
+    ///      removeTokenConfiguration never touching the mapping made the flag a one-way latch: once
+    ///      set, a token passed isRewardToken() forever, so consumers kept approving the CoW relayer
+    ///      for a token whose oracle configuration had been removed.
+    function testMaxTimePriceValidCanBeClearedToZero() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        assertGt(checker.maxTimePriceValid(address(well)), 0, "WELL should start with the legacy flag set");
 
         vm.prank(owner);
-        vm.expectRevert("Max time price valid can't be zero");
-        slippagePriceChecker.setMaxTimePriceValid(address(well), 0);
+        checker.setMaxTimePriceValid(address(well), 0);
+
+        assertEq(checker.maxTimePriceValid(address(well)), 0, "Zero must clear the legacy flag");
+
+        // Only the owner may do it.
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        checker.setMaxTimePriceValid(address(well), 0);
     }
 
     function testRevertIfTokenNotConfiguredInRemoveTokenConfiguration() public {
@@ -793,6 +803,196 @@ contract SlippagePriceCheckerTest is BaseTest {
         uint256 legacy =
             toDecimals >= 2 ? truncatingHops * (10 ** (toDecimals - 2)) : truncatingHops / (10 ** (2 - toDecimals));
         assertGt(expected, legacy, "Fixture must actually exercise the truncation the fix removes");
+    }
+
+    /// @dev The buy tokens any live pair may be configured against. Mirrors the candidate list the
+    ///      release proposal backfills with; the nested pair mapping cannot be enumerated on chain.
+    function _candidateBuyTokens() internal view returns (address[] memory buyTokens) {
+        buyTokens = new address[](4);
+        buyTokens[0] = addresses.getAddress("USDC");
+        buyTokens[1] = addresses.getAddress("cbBTC");
+        buyTokens[2] = addresses.getAddress("WETH");
+        buyTokens[3] = addresses.getAddress("MAMO");
+    }
+
+    /// @dev Removes every configured pair for `fromToken` among the candidate buy tokens.
+    function _removeAllPairs(SlippagePriceChecker checker, address fromToken) internal returns (uint256 removed) {
+        address[] memory buyTokens = _candidateBuyTokens();
+        for (uint256 i = 0; i < buyTokens.length; i++) {
+            if (checker.tokenPairOracleInformation(fromToken, buyTokens[i]).length == 0) continue;
+            vm.prank(owner);
+            checker.removeTokenConfiguration(fromToken, buyTokens[i]);
+            removed++;
+        }
+    }
+
+    /// @notice MOO-726: removing the last configured pair must stop the token being a reward token.
+    /// @dev `removeTokenConfiguration` never cleared `maxTimePriceValid`, and `setMaxTimePriceValid`
+    ///      rejected zero, so the legacy flag was a permanent latch. On chain
+    ///      `maxTimePriceValid(MORPHO) == 3600`, so after the owner removed MORPHO's pairs
+    ///      `MamoMultiMarketStrategy._approveCowSwap` and `LPCompoundModule.approveCowSwap` still
+    ///      passed their "Token not allowed" gate and handed the CoW relayer an allowance for a
+    ///      de-configured token.
+    function testRemoveLastPairClearsRewardTokenFlag() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        // Register the pre-upgrade pairs exactly as the release proposal does, so the counter knows
+        // how many pairs are really live. Hoisted: a call in argument position is evaluated first and
+        // would consume the prank.
+        address[] memory candidates = _candidateBuyTokens();
+        vm.prank(owner);
+        checker.backfillPairCount(address(morpho), candidates);
+
+        uint256 pairs = checker.configuredPairCount(address(morpho));
+        assertGt(pairs, 1, "MORPHO should have more than one live pair for this test to be meaningful");
+        assertGt(checker.maxTimePriceValid(address(morpho)), 0, "MORPHO carries the legacy flag on chain");
+        assertTrue(checker.isRewardToken(address(morpho)), "MORPHO starts as a reward token");
+
+        // Removing ONE of several pairs must not disarm the token.
+        address[] memory buyTokens = _candidateBuyTokens();
+        for (uint256 i = 0; i < buyTokens.length; i++) {
+            if (checker.tokenPairOracleInformation(address(morpho), buyTokens[i]).length == 0) continue;
+            vm.prank(owner);
+            checker.removeTokenConfiguration(address(morpho), buyTokens[i]);
+            break;
+        }
+        assertEq(checker.configuredPairCount(address(morpho)), pairs - 1, "One pair should have been removed");
+        assertTrue(checker.isRewardToken(address(morpho)), "Still a reward token while other pairs are live");
+        assertGt(checker.maxTimePriceValid(address(morpho)), 0, "Legacy flag survives a partial removal");
+
+        // Removing the REST disarms it, legacy flag included.
+        _removeAllPairs(checker, address(morpho));
+
+        assertEq(checker.configuredPairCount(address(morpho)), 0, "No pairs should remain");
+        assertEq(checker.maxTimePriceValid(address(morpho)), 0, "Legacy flag must be cleared with the last pair");
+        assertFalse(checker.isRewardToken(address(morpho)), "A fully de-configured token is not a reward token");
+    }
+
+    /// @notice Pre-upgrade pairs must not be able to drive configuredPairCount below the truth.
+    /// @dev The counter only ever incremented for pairs added AFTER the upgrade, but the removal path
+    ///      decremented for any pair with a non-empty config. Sequence: token X has a pre-upgrade
+    ///      pair X->A (count 0); add X->B (count 1); remove X->A (count 0) while X->B is still live.
+    ///      With no legacy flag, isRewardToken(X) then reads false for a token that IS configured.
+    function testRemovingPreUpgradePairKeepsCountForLivePairs() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        // WELL -> underlying is configured on chain, i.e. before this bookkeeping existed.
+        assertGt(
+            checker.tokenPairOracleInformation(address(well), address(underlying)).length,
+            0,
+            "WELL -> underlying should be a live pre-upgrade pair"
+        );
+        assertEq(checker.configuredPairCount(address(well)), 0, "Pre-upgrade pairs contribute nothing to the count");
+        assertFalse(checker.pairCounted(address(well), address(underlying)), "Pre-upgrade pair is not counted");
+
+        // Drop the legacy flag so isRewardToken() depends purely on the counter.
+        vm.prank(owner);
+        checker.setMaxTimePriceValid(address(well), 0);
+
+        // Add a NEW pair the modern way: this one is counted.
+        address newBuyToken = makeAddr("newBuyToken");
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1 days
+        });
+        vm.prank(owner);
+        checker.addTokenConfiguration(address(well), newBuyToken, configs);
+        assertEq(checker.configuredPairCount(address(well)), 1, "The new pair should be counted");
+        assertTrue(checker.isRewardToken(address(well)), "WELL is a reward token through the new pair");
+
+        // Remove the PRE-UPGRADE pair. It never incremented the counter, so it must not decrement it.
+        vm.prank(owner);
+        checker.removeTokenConfiguration(address(well), address(underlying));
+
+        assertEq(checker.configuredPairCount(address(well)), 1, "Removing an uncounted pair must not decrement");
+        assertTrue(checker.isRewardToken(address(well)), "WELL must still be a reward token: WELL -> new is live");
+        assertGt(
+            checker.tokenPairOracleInformation(address(well), newBuyToken).length, 0, "The new pair is still configured"
+        );
+    }
+
+    /// @notice Pairs configured before the upgrade need an explicit backfill to enter the counter.
+    /// @dev There is no reinitializer and the nested pair mapping cannot be enumerated on chain, so
+    ///      without backfillPairCount a pre-upgrade pair reports isRewardToken() == false the moment
+    ///      the legacy maxTimePriceValid flag is not set (or is cleared).
+    function testBackfillPairCountRegistersPreUpgradePairs() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        vm.prank(owner);
+        checker.setMaxTimePriceValid(address(well), 0);
+
+        // Live pairs, invisible to the counter, and no legacy flag: reported as not a reward token.
+        assertGt(
+            checker.tokenPairOracleInformation(address(well), address(underlying)).length, 0, "Pair is live on chain"
+        );
+        assertEq(checker.configuredPairCount(address(well)), 0, "Counter starts empty for pre-upgrade pairs");
+        assertFalse(checker.isRewardToken(address(well)), "Un-backfilled pre-upgrade token reads as not a reward token");
+
+        // Hoisted: a call in argument position is evaluated first and would consume the prank.
+        address[] memory candidates = _candidateBuyTokens();
+
+        vm.prank(owner);
+        checker.backfillPairCount(address(well), candidates);
+
+        uint256 counted = checker.configuredPairCount(address(well));
+        assertGt(counted, 0, "Backfill must register the live pairs");
+        assertTrue(checker.pairCounted(address(well), address(underlying)), "The live pair must be marked counted");
+        assertTrue(checker.isRewardToken(address(well)), "A backfilled token is a reward token again");
+
+        // Idempotent: running it twice must not double count.
+        vm.prank(owner);
+        checker.backfillPairCount(address(well), candidates);
+        assertEq(checker.configuredPairCount(address(well)), counted, "Backfill must be idempotent");
+
+        // Unconfigured pairs are skipped, and only the owner may backfill.
+        address[] memory unconfigured = new address[](1);
+        unconfigured[0] = makeAddr("neverConfigured");
+        vm.prank(owner);
+        checker.backfillPairCount(address(well), unconfigured);
+        assertEq(checker.configuredPairCount(address(well)), counted, "Unconfigured pairs must be skipped");
+
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        checker.backfillPairCount(address(well), candidates);
+    }
+
+    /// @notice MOO-741: the release must leave the sequencer guard ENABLED, not merely deployed.
+    /// @dev `_requireSequencerUp()` returns early while `sequencerUptimeFeed == address(0)`, so
+    ///      shipping the implementation on its own leaves MOO-741 exactly as unmitigated as before.
+    ///      This runs the real proposal end to end and then proves the guard actually bites.
+    function testOracleHardeningProposalEnablesSequencerGuard() public {
+        SlippagePriceCheckerOracleHardening proposal = new SlippagePriceCheckerOracleHardening();
+        proposal.setAddresses(addresses);
+        proposal.setPrimaryForkId(vm.activeFork());
+
+        // No pre-check on sequencerUptimeFeed(): the implementation live on Base predates the getter,
+        // so calling it before the upgrade reverts. Its storage slot is untouched, i.e. zero, which is
+        // exactly the "guard disabled" state the upgrade would land in on its own.
+        SlippagePriceChecker checker = SlippagePriceChecker(address(slippagePriceChecker));
+
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        address uptimeFeed = addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED");
+        assertEq(checker.sequencerUptimeFeed(), uptimeFeed, "Release must wire the sequencer uptime feed");
+        assertEq(checker.sequencerGracePeriod(), 3600, "Release must set the grace period");
+
+        // The guard is live: quotes work now, and stop the moment the sequencer reports down.
+        assertGt(checker.getExpectedOut(1e18, address(well), address(underlying)), 0, "Quotes work with the guard on");
+
+        vm.mockCall(
+            uptimeFeed,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(uint80(1), int256(1), block.timestamp - 10, block.timestamp - 10, uint80(1))
+        );
+        vm.expectRevert("Sequencer is down");
+        checker.getExpectedOut(1e18, address(well), address(underlying));
     }
 
     /// @notice MOO-748: the upgrade must not loosen any existing quote.
