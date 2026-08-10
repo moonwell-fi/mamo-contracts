@@ -267,8 +267,9 @@ contract MamoStakingStrategyFactory is AccessControlEnumerable {
     /// @notice The strategy type ID
     uint256 public immutable strategyTypeId;
     
-    /// @notice Default slippage in basis points
-    uint256 public immutable defaultSlippageInBps;
+    // NOTE: the factory intentionally carries no defaultSlippageInBps. Slippage has a single source
+    // of truth, MamoStakingRegistry.defaultSlippageInBps, which MamoStakingStrategy falls back to via
+    // getAccountSlippage(); per-strategy overrides go through setAccountSlippage().
     
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
     
@@ -481,7 +482,11 @@ sequenceDiagram
    - ✅ Backend-controlled addition/removal of reward tokens globally
    - ✅ Prevents unauthorized token processing across all strategies
    - ✅ Supports ecosystem evolution without individual strategy updates
-   - ✅ Emergency pause functionality affects all operations
+   - ✅ Emergency pause functionality affects all backend-driven operations: while the registry is
+     paused, `compound()` and `reinvest()` revert with "Registry paused" (the `onlyBackend` modifier
+     checks `stakingRegistry.paused()` as well as the caller's role)
+   - ✅ The pause is deliberately asymmetric: owner exits (`withdraw`, `withdrawAll`,
+     `withdrawRewards`) keep working while paused, so an incident can never trap user funds
 
 4. **Configurable DEX Router**:
    - ✅ Global backend-controlled router updates

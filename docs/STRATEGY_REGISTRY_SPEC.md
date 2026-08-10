@@ -9,8 +9,8 @@ The contract is initialized with three distinct roles that are passed as constru
 
 ### Roles
 
-- `DEFAULT_ADMIN_ROLE`: The default admin role that can grant and revoke other roles, and is responsible for contract upgrades
-- `BACKEND_ROLE`: The role that can manage strategies, deploy strategies, update user strategies, and claim rewards for users
+- `DEFAULT_ADMIN_ROLE`: The default admin role (multisig + timelock). Grants and revokes other roles, whitelists strategy implementations, and recovers stray ERC20s
+- `BACKEND_ROLE`: The role that registers deployed strategies for users (`addStrategy`). It cannot whitelist implementations and cannot upgrade a user's strategy
 - `GUARDIAN_ROLE`: The role that can pause and unpause the contract in case of emergencies
 
 ### Storage
@@ -33,7 +33,16 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation) external returns (uint256 strategyTypeId)`: Adds an implementation to the whitelist with a new strategy type ID and sets it as the latest implementation for that type. Returns the assigned strategy type ID. Only callable by accounts with the BACKEND_ROLE.
+- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID; passing a non-zero value adds another implementation version to an existing type. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.**
+
+  Whitelisting is the trust root of the entire upgrade path: `upgradeStrategy` will only move a user's proxy to `latestImplementationById[strategyTypeId]`, so whoever can whitelist can decide what code every strategy of that type eventually runs. It therefore sits behind the admin multisig with a timelock, and the operational flow is:
+
+  1. The new implementation is deployed and reviewed.
+  2. The admin multisig queues a `whitelistImplementation(implementation, strategyTypeId)` call in the timelock. The delay is the window in which users and the guardian can react — including pausing the registry, which blocks `upgradeStrategy` and `addStrategy`.
+  3. After the delay the call is executed, making the implementation the latest for its type.
+  4. Each user then opts in individually by calling `upgradeStrategy` on their own strategy. Nothing upgrades a user's strategy on their behalf.
+
+  The backend (BACKEND_ROLE) can register strategies for users via `addStrategy`, but it can neither whitelist an implementation nor upgrade a user's strategy.
 
 - `function getImplementationId(address implementation) external view returns (uint256)`: Gets the strategy ID for an implementation.
 
@@ -121,8 +130,8 @@ The contract is initialized with three distinct roles that are passed as constru
 
 ### Roles
 
-- `DEFAULT_ADMIN_ROLE`: The default admin role that can grant and revoke other roles, and is responsible for contract upgrades
-- `BACKEND_ROLE`: The role that can manage strategies, deploy strategies, update user strategies, and claim rewards for users
+- `DEFAULT_ADMIN_ROLE`: The default admin role (multisig + timelock). Grants and revokes other roles, whitelists strategy implementations, and recovers stray ERC20s
+- `BACKEND_ROLE`: The role that registers deployed strategies for users (`addStrategy`). It cannot whitelist implementations and cannot upgrade a user's strategy
 - `GUARDIAN_ROLE`: The role that can pause and unpause the contract in case of emergencies
 
 ### Storage
@@ -145,7 +154,16 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation) external returns (uint256 strategyTypeId)`: Adds an implementation to the whitelist with a new strategy type ID and sets it as the latest implementation for that type. Returns the assigned strategy type ID. Only callable by accounts with the BACKEND_ROLE.
+- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID; passing a non-zero value adds another implementation version to an existing type. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.**
+
+  Whitelisting is the trust root of the entire upgrade path: `upgradeStrategy` will only move a user's proxy to `latestImplementationById[strategyTypeId]`, so whoever can whitelist can decide what code every strategy of that type eventually runs. It therefore sits behind the admin multisig with a timelock, and the operational flow is:
+
+  1. The new implementation is deployed and reviewed.
+  2. The admin multisig queues a `whitelistImplementation(implementation, strategyTypeId)` call in the timelock. The delay is the window in which users and the guardian can react — including pausing the registry, which blocks `upgradeStrategy` and `addStrategy`.
+  3. After the delay the call is executed, making the implementation the latest for its type.
+  4. Each user then opts in individually by calling `upgradeStrategy` on their own strategy. Nothing upgrades a user's strategy on their behalf.
+
+  The backend (BACKEND_ROLE) can register strategies for users via `addStrategy`, but it can neither whitelist an implementation nor upgrade a user's strategy.
 
 - `function getImplementationId(address implementation) external view returns (uint256)`: Gets the strategy ID for an implementation.
 

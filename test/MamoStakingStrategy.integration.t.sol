@@ -12,9 +12,13 @@ import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
@@ -25,6 +29,8 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
     MamoStrategyRegistry public mamoStrategyRegistry;
     IMultiRewards public multiRewards;
     MultiMarketStrategyFactory public cbBTCStrategyFactory;
+
+    ISlippagePriceChecker public slippagePriceChecker;
 
     IERC20 public mamoToken;
     address public user;
@@ -47,8 +53,83 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Get the cbBTC strategy factory for testing reward distribution
         cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
 
+        // The implementation the live factory points at is the bytecode deployed on Base before this
+        // branch. Every proxy the factory creates delegatecalls into it, so without this the whole
+        // suite would exercise the pre-audit logic and none of the fixes below would be covered.
+        // The implementation holds no state of its own (proxies keep theirs), so replacing only its
+        // runtime code is sufficient and leaves every live address, role and balance untouched.
+        vm.etch(stakingStrategyImplementation, address(new MamoStakingStrategy()).code);
+
+        // The staking stack in this branch is AHEAD of what is deployed on Base: compound() prices
+        // its minimum-out through MamoStakingRegistry.slippagePriceChecker(), and the live registry
+        // predates that field (the call reverts on chain). The two fixtures below stand in for the
+        // redeployment this branch ships with -- see the deployment note in the PR description.
+        slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        _mockRegistryPriceChecker();
+        _configureCbBtcToMamoOracle();
+
         // Create test user
         user = makeAddr("testUser");
+    }
+
+    function _mockRegistryPriceChecker() internal {
+        vm.mockCall(
+            address(stakingRegistry),
+            abi.encodeWithSignature("slippagePriceChecker()"),
+            abi.encode(address(slippagePriceChecker))
+        );
+    }
+
+    /// @dev Mirrors multisig/mamo-multisig/008_MamoStakingV2Deployment._configureCbBtcToMamoOracle:
+    ///      cbBTC * (BTC/USD) / (MAMO/USD) = MAMO equivalent. Not yet applied on chain.
+    function _configureCbBtcToMamoOracle() internal {
+        address checkerOwner = OwnableUpgradeable(address(slippagePriceChecker)).owner();
+        address cbBTC = addresses.getAddress("cbBTC");
+
+        if (slippagePriceChecker.tokenPairOracleInformation(cbBTC, address(mamoToken)).length > 0) return;
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+        // Production heartbeats are 3600 / 86400. The fork is pinned, so its rounds never refresh
+        // while tests vm.warp days forward; a heartbeat that spans the suite keeps the REAL answers
+        // usable. Heartbeat enforcement itself is covered in SlippagePriceChecker.integration.t.sol.
+        feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_BTC_USD"),
+            reverse: false,
+            heartbeat: 3650 days
+        });
+        feeds[1] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"),
+            reverse: true,
+            heartbeat: 3650 days
+        });
+
+        vm.prank(checkerOwner);
+        slippagePriceChecker.addTokenConfiguration(cbBTC, address(mamoToken), feeds);
+        vm.prank(checkerOwner);
+        slippagePriceChecker.setMaxTimePriceValid(cbBTC, 3600);
+    }
+
+    /// @notice Deadline handed to compound() in tests that are not about the deadline itself
+    /// @dev Deliberately makes no external calls: it is used in argument position, where Solidity
+    ///      evaluates it BEFORE the call, so any call it made would consume a pending vm.prank or an
+    ///      armed vm.expectRevert.
+    function _deadline() internal view returns (uint256) {
+        return vm.getBlockTimestamp() + 300;
+    }
+
+    /// @dev Widens this strategy's slippage to the protocol maximum.
+    ///      On the pinned fork the Aerodrome cbBTC/MAMO pool price sits further than the 1% default
+    ///      from the BTC/USD ÷ MAMO/USD Chainlink pair, so a real swap cannot clear a 1% floor. That
+    ///      is a property of the fork's market data, not of the code under test; every test that
+    ///      actually swaps therefore opts into the widest slippage the registry permits.
+    function _allowWideSlippage(address payable strategy) internal {
+        // Hoisted: a call in argument position is evaluated first and would consume the prank.
+        address strategyOwner = MamoStakingStrategy(strategy).owner();
+        uint256 maxSlippage = stakingRegistry.MAX_SLIPPAGE_IN_BPS();
+
+        vm.prank(strategyOwner);
+        MamoStakingStrategy(strategy).setAccountSlippage(maxSlippage);
     }
 
     // Test basic deployment and functionality
@@ -709,7 +790,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.startPrank(backend);
 
         // Should not revert even with no rewards
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Verify the original deposit is still there
@@ -727,7 +808,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.startPrank(backend);
 
         // Process rewards with COMPOUND mode explicitly
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Verify deposit is maintained
@@ -843,24 +924,25 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Attempt to process rewards as non-backend
         vm.startPrank(attacker);
         vm.expectRevert("Not backend");
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Attempt to process rewards as owner (should also fail)
         vm.startPrank(user);
         vm.expectRevert("Not backend");
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Should work as backend
         address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
     }
 
     function testCompoundModeProcessing() public {
         userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit
@@ -869,6 +951,11 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Verify initial staked balance
         uint256 initialBalance = multiRewards.balanceOf(userStrategy);
         assertEq(initialBalance, depositAmount, "Initial balance should match deposit");
+
+        // Seed a real reward stream. Without it this strategy accrues a few WEI of cbBTC from the
+        // live programme, and swapping dust through the pool cannot clear the oracle-derived
+        // minimum-out at any slippage -- the router itself reverts with "Too little received".
+        _setupRewardsInMultiRewards(addresses.getAddress("cbBTC"), 1 * 10 ** 8, 7 days);
 
         // Simulate time passing to accrue rewards
         vm.warp(block.timestamp + 7 days);
@@ -880,7 +967,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.startPrank(backend);
 
         // Process rewards in compound mode - this will claim any accrued rewards
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Check the balance after processing rewards
@@ -902,6 +989,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
 
     function testCompoundModeEmitsCorrectEvents() public {
         userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
 
@@ -925,7 +1013,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
             vm.expectEmit(true, false, false, false);
             emit CompoundRewardTokenProcessed(cbBTC, 0, 0); // amounts will be checked separately
 
-            MamoStakingStrategy(userStrategy).compound();
+            MamoStakingStrategy(userStrategy).compound(_deadline());
             vm.stopPrank();
         }
     }
@@ -977,6 +1065,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
 
     function testEventParametersAreAccurate() public {
         userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 cbBTCRewardAmount = 5 * 10 ** 8; // Larger amount for better testing
 
@@ -1000,7 +1089,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
             // Record events manually to verify parameters
             vm.recordLogs();
 
-            MamoStakingStrategy(userStrategy).compound();
+            MamoStakingStrategy(userStrategy).compound(_deadline());
 
             Vm.Log[] memory logs = vm.getRecordedLogs();
 
@@ -1207,6 +1296,189 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.expectRevert("Strategy not registered");
         MamoStakingStrategy(userStrategy).reinvest(strategies);
         vm.stopPrank();
+    }
+
+    // ========== SHERLOCK AUDIT REGRESSION TESTS ==========
+
+    /// @dev Puts a real, non-zero cbBTC reward balance on the user's staking strategy.
+    function _stakeAndAccrueCbBtcRewards() internal returns (address cbBTC) {
+        userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, 10 * 10 ** 8, 7 days);
+
+        vm.warp(vm.getBlockTimestamp() + 1 days);
+        assertGt(multiRewards.earned(userStrategy, cbBTC), 0, "Setup should have accrued cbBTC rewards");
+    }
+
+    /// @notice MOO-744: the swap deadline must come from the caller, not from block.timestamp.
+    /// @dev `block.timestamp + 300` is computed inside the very transaction that executes the swap,
+    ///      so the router's `require(block.timestamp <= deadline)` can never fail. A compound() left
+    ///      in the mempool stayed valid indefinitely and would execute against whatever market
+    ///      existed when it finally landed.
+    function testCompoundRevertsWhenDeadlineHasPassed() public {
+        userStrategy = _deployUserStrategy(user);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+
+        uint256 stale = vm.getBlockTimestamp() - 1;
+        uint256 now_ = vm.getBlockTimestamp();
+
+        vm.prank(backend);
+        vm.expectRevert("Deadline in the past");
+        MamoStakingStrategy(userStrategy).compound(stale);
+
+        // The current instant is still a valid deadline.
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(now_);
+    }
+
+    /// @notice MOO-733: compound() must verify the MAMO it actually received, not the router's word.
+    /// @dev The router here reports a huge amountOut while transferring nothing. Before the fix the
+    ///      strategy accepted that return value as the swap result, so amountOutMinimum was enforced
+    ///      only by the router's own implementation and an honest-but-buggy router (or a router
+    ///      upgrade with different return semantics) silently defeated the slippage guard.
+    function testCompoundRevertsWhenRouterUnderDeliversDespiteReturnValue() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        address dexRouter = address(stakingRegistry.dexRouter());
+
+        // Router returns a large amountOut but moves no MAMO.
+        vm.mockCall(
+            dexRouter, abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector), abi.encode(type(uint128).max)
+        );
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        uint256 deadline = _deadline();
+        vm.prank(backend);
+        vm.expectRevert("Insufficient MAMO received");
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        vm.clearMockedCalls();
+        _mockRegistryPriceChecker();
+
+        // Sanity: with the real router the same compound succeeds, so the revert above is the
+        // balance check firing and not a broken fixture.
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+        deadline = _deadline();
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(deadline);
+        assertGt(multiRewards.balanceOf(userStrategy), stakedBefore, "Real compound should restake swapped MAMO");
+        assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Reward token should have been fully swapped");
+    }
+
+    /// @notice MOO-733: the reward-token allowance granted to the router must not survive the swap.
+    function testCompoundClearsRewardTokenAllowanceAfterSwap() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        address dexRouter = address(stakingRegistry.dexRouter());
+
+        uint256 deadline = _deadline();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        assertEq(IERC20(cbBTC).allowance(userStrategy, dexRouter), 0, "Router allowance should be cleared after swap");
+    }
+
+    /// @notice MOO-733: the emitted amountOut must be the measured balance delta.
+    function testCompoundEmitsMeasuredAmountOut() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+
+        assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy holds no idle MAMO before compounding");
+
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+        // Any MAMO claimed as a reward is staked alongside the swap proceeds; read it at the same
+        // timestamp compound() will claim it at so the two are exactly comparable.
+        uint256 earnedMamo = multiRewards.earned(userStrategy, address(mamoToken));
+
+        uint256 deadline = _deadline();
+        vm.recordLogs();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 reportedOut;
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == userStrategy
+                    && logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")
+                    && address(uint160(uint256(logs[i].topics[1]))) == cbBTC
+            ) {
+                (, reportedOut) = abi.decode(logs[i].data, (uint256, uint256));
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "CompoundRewardTokenProcessed should be emitted for cbBTC");
+
+        assertGt(reportedOut, 0, "Reported amountOut should be non-zero");
+
+        // Everything the strategy holds in MAMO gets staked, so the staked delta is exactly the MAMO
+        // claimed as a reward plus the MAMO the swap actually delivered.
+        assertEq(
+            multiRewards.balanceOf(userStrategy) - stakedBefore,
+            earnedMamo + reportedOut,
+            "Reported amountOut should equal the MAMO actually received and staked"
+        );
+    }
+
+    /// @notice MOO-735: backend operations must stop while the staking registry is paused.
+    /// @dev The pause exists for exactly these scenarios (faulty router, bad price-checker config,
+    ///      compromised reinvest destination), yet compound() and reinvest() kept running through it.
+    function testCompoundAndReinvestRevertWhileRegistryPaused() public {
+        userStrategy = _deployUserStrategy(user);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address guardian = stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0);
+
+        vm.prank(guardian);
+        stakingRegistry.pause();
+        assertTrue(stakingRegistry.paused(), "Registry should be paused");
+
+        uint256 deadline = _deadline();
+        vm.prank(backend);
+        vm.expectRevert("Registry paused");
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        address[] memory strategies = new address[](stakingRegistry.getRewardTokenCount());
+        vm.prank(backend);
+        vm.expectRevert("Registry paused");
+        MamoStakingStrategy(userStrategy).reinvest(strategies);
+
+        // Unpausing restores backend operation.
+        vm.prank(guardian);
+        stakingRegistry.unpause();
+
+        deadline = _deadline();
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(deadline);
+    }
+
+    /// @notice MOO-735: the pause must never trap user funds.
+    function testOwnerCanStillExitWhileRegistryPaused() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        address guardian = stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0);
+        vm.prank(guardian);
+        stakingRegistry.pause();
+
+        // Partial withdraw, reward claim and full exit all remain available to the owner.
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount / 2);
+
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).withdrawRewards();
+
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).withdrawAll();
+
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Owner should have fully exited while paused");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "Owner should hold all their MAMO back");
     }
 
     // Event declarations

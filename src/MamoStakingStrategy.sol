@@ -66,11 +66,17 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Restricts function access to the backend address only
-     * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
+     * @notice Restricts function access to the backend address, and only while the registry is live
+     * @dev Uses the MamoStakingRegistry to verify the caller is the backend. The registry pause is
+     *      the guardian's emergency stop for exactly the scenarios these functions are exposed to
+     *      (faulty router, bad price-checker configuration, compromised reinvest destination), so
+     *      backend-driven operations must stop with it. Owner-facing exits (withdraw, withdrawAll,
+     *      withdrawRewards) deliberately do NOT use this modifier: users must always be able to
+     *      leave during an incident.
      */
     modifier onlyBackend() {
         require(stakingRegistry.hasRole(stakingRegistry.BACKEND_ROLE(), msg.sender), "Not backend");
+        require(!stakingRegistry.paused(), "Registry paused");
         _;
     }
 
@@ -196,8 +202,14 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     /**
      * @notice Compound all available rewards by converting them to MAMO and restaking
      * @dev Claims rewards and then compounds them. Can be called independently.
+     * @param deadline Unix timestamp after which the swaps must no longer execute. Taken from the
+     *        caller because `block.timestamp + N` computed inside the transaction is tautological:
+     *        a pending compound() would stay valid forever and eventually execute against whatever
+     *        market exists when it is finally mined.
      */
-    function compound() external onlyBackend {
+    function compound(uint256 deadline) external onlyBackend {
+        require(deadline >= block.timestamp, "Deadline in the past");
+
         multiRewards.getReward();
 
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
@@ -234,16 +246,27 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
                 tokenOut: address(mamoToken),
                 tickSpacing: tickSpacing,
                 recipient: address(this),
-                deadline: block.timestamp + 300,
+                deadline: deadline,
                 amountIn: rewardBalance,
                 amountOutMinimum: amountOutMinimum,
                 sqrtPriceLimitX96: 0 // No price limit
             });
 
-            // Execute swap and capture actual amount out
-            uint256 actualAmountOut = dexRouter.exactInputSingle(swapParams);
+            // Measure what this contract actually received rather than trusting the router's return
+            // value: amountOutMinimum would otherwise be enforced only by the router's own code, so
+            // a buggy router, a router upgrade, or non-standard return semantics would silently
+            // defeat the slippage protection this strategy believes it is applying.
+            uint256 mamoBalanceBefore = IERC20(mamoTokenAddr).balanceOf(address(this));
 
-            emit CompoundRewardTokenProcessed(address(rewardToken), rewardBalance, actualAmountOut);
+            dexRouter.exactInputSingle(swapParams);
+
+            uint256 received = IERC20(mamoTokenAddr).balanceOf(address(this)) - mamoBalanceBefore;
+            require(received >= amountOutMinimum, "Insufficient MAMO received");
+
+            // Leave no standing allowance behind if the router pulled less than it was approved for.
+            rewardToken.forceApprove(address(dexRouter), 0);
+
+            emit CompoundRewardTokenProcessed(address(rewardToken), rewardBalance, received);
         }
 
         // Stake all MAMO

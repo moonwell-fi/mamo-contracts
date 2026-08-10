@@ -66,7 +66,6 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
     function testFactoryValidatesConfiguration() public view {
         // Verify factory was deployed with correct parameters
         assertEq(stakingStrategyFactory.strategyTypeId(), 3, "Factory should have correct strategy type ID");
-        assertEq(stakingStrategyFactory.defaultSlippageInBps(), 100, "Factory should have correct default slippage");
     }
 
     // ========== STRATEGY CREATION TESTS ==========
@@ -263,13 +262,33 @@ contract MamoStakingStrategyFactoryIntegrationTest is BaseTest {
 
     // ========== EDGE CASES AND ERROR HANDLING ==========
 
-    function testCreateStrategyWithMaxSlippage() public view {
-        // This test verifies that the factory properly handles maximum slippage values
-        // The factory is initialized with defaultSlippageInBps which should be within limits
-        uint256 maxSlippage = stakingStrategyFactory.MAX_SLIPPAGE_IN_BPS();
-        uint256 factorySlippage = stakingStrategyFactory.defaultSlippageInBps();
+    /// @notice MOO-745: the factory no longer carries a defaultSlippageInBps of its own.
+    /// @dev Slippage has a single source of truth, the staking registry, which the strategy falls
+    ///      back to. The factory's copy was validated and stored but never passed to the strategy,
+    ///      so the two could silently diverge; the deploy scripts setting them equal masked it.
+    function testFactoryHasNoOwnDefaultSlippage() public {
+        // The registry default is what getAccountSlippage() actually falls back to.
+        assertTrue(
+            stakingRegistry.defaultSlippageInBps() <= stakingStrategyFactory.MAX_SLIPPAGE_IN_BPS(),
+            "Registry slippage should be within max limits"
+        );
 
-        assertTrue(factorySlippage <= maxSlippage, "Factory slippage should be within max limits");
+        // A factory built from the current source takes no slippage argument at all, and exposes no
+        // getter for one. (The factory read from addresses/ is the pre-fix deployment on chain.)
+        MamoStakingStrategyFactory freshFactory = new MamoStakingStrategyFactory(
+            addresses.getAddress("MAMO_MULTISIG"),
+            address(mamoStrategyRegistry),
+            addresses.getAddress("MAMO_STAKING_BACKEND"),
+            address(stakingRegistry),
+            address(multiRewards),
+            address(mamoToken),
+            stakingStrategyImplementation,
+            3
+        );
+
+        (bool ok,) = address(freshFactory).staticcall(abi.encodeWithSignature("defaultSlippageInBps()"));
+        assertFalse(ok, "Factory should not expose defaultSlippageInBps");
+        assertEq(freshFactory.strategyTypeId(), 3, "Fresh factory should keep the rest of its configuration");
     }
 
     function testFactoryImmutableParameters() public view {
