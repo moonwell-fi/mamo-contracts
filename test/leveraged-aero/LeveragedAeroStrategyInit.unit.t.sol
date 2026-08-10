@@ -156,7 +156,10 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         return LeveragedAerodromeCLStrategy(payable(Clones.clone(address(template))));
     }
 
-    function _init(LeveragedAerodromeCLStrategy.InitParams memory p) internal returns (LeveragedAerodromeCLStrategy s) {
+    function _init(LeveragedAerodromeCLStrategy.InitParams memory p)
+        internal
+        returns (LeveragedAerodromeCLStrategy s)
+    {
         s = _clone();
         s.initialize(address(vault), proposer, abi.encode(p));
     }

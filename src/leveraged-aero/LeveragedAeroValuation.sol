@@ -496,9 +496,8 @@ library LeveragedAeroValuation {
         uint256 minOut
     ) public {
         IERC20(tokenIn).forceApprove(router, amountIn);
-        ICLSwapRouter(router)
-            .exactInputSingle(
-                ICLSwapRouter.ExactInputSingleParams({
+        ICLSwapRouter(router).exactInputSingle(
+            ICLSwapRouter.ExactInputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: tokenOut,
                 tickSpacing: tickSpacing,
@@ -508,7 +507,7 @@ library LeveragedAeroValuation {
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
-            );
+        );
     }
 
     /// @notice Slipstream `exactOutputSingle` (approve, swap, then RESET the approval to 0).
@@ -533,9 +532,8 @@ library LeveragedAeroValuation {
         uint256 amountInMax
     ) public {
         IERC20(tokenIn).forceApprove(router, amountInMax);
-        ICLSwapRouter(router)
-            .exactOutputSingle(
-                ICLSwapRouter.ExactOutputSingleParams({
+        ICLSwapRouter(router).exactOutputSingle(
+            ICLSwapRouter.ExactOutputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: tokenOut,
                 tickSpacing: tickSpacing,
@@ -545,7 +543,7 @@ library LeveragedAeroValuation {
                 amountInMaximum: amountInMax,
                 sqrtPriceLimitX96: 0
             })
-            );
+        );
         IERC20(tokenIn).forceApprove(router, 0);
     }
 
@@ -580,8 +578,9 @@ library LeveragedAeroValuation {
         IERC20(aero).forceApprove(AERO_V2_ROUTER, amountIn);
         IAeroRouter.Route[] memory routes = new IAeroRouter.Route[](1);
         routes[0] = IAeroRouter.Route({from: aero, to: usdc, stable: false, factory: AERO_V2_FACTORY});
-        IAeroRouter(AERO_V2_ROUTER)
-            .swapExactTokensForTokens(amountIn, minOut, routes, address(this), block.timestamp + 600);
+        IAeroRouter(AERO_V2_ROUTER).swapExactTokensForTokens(
+            amountIn, minOut, routes, address(this), block.timestamp + 600
+        );
         usdcOut = IERC20(usdc).balanceOf(address(this)) - usdcBefore;
     }
 
