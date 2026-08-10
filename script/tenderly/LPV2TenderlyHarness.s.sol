@@ -104,7 +104,7 @@ contract LPV2TenderlyHarness is Script {
     }
 
     function _lab() internal view returns (LPAutoBalancerV2) {
-        return LPAutoBalancerV2(vm.envAddress("HARNESS_LAB"));
+        return LPAutoBalancerV2(payable(vm.envAddress("HARNESS_LAB")));
     }
 
     /// @dev Broadcaster private key, read from the ENVIRONMENT (vm.envUint) rather than passed to

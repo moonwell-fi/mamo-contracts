@@ -164,7 +164,7 @@ contract LPAutoBalancerV2SetupTest is Test {
 
         address labAddr = addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2");
         assertTrue(labAddr != address(0), "balancer deployed");
-        LPAutoBalancerV2 lab = LPAutoBalancerV2(labAddr);
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(labAddr));
 
         // 2-3. Build the Safe actions, simulate (Safe executes them atomically), validate.
         proposal.build();

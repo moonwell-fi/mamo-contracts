@@ -169,7 +169,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     }
 
     function build() public override buildModifier(addresses.getAddress("F-MAMO")) {
-        LPAutoBalancerV2 lab = LPAutoBalancerV2(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2"));
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
 
         // Steps 1-3 in a block so the config struct + locals free before _wireModule inlines
         // (keeps build() under the via_ir stack limit — position config has 21 fields).
@@ -241,7 +241,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         address labAddr = addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2");
         assertTrue(labAddr != address(0), "balancer address set");
         assertTrue(labAddr.code.length > 0, "balancer has code");
-        LPAutoBalancerV2 lab = LPAutoBalancerV2(labAddr);
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(labAddr));
 
         // Roles: admin = F-MAMO, rebalancer granted.
         address safe = addresses.getAddress("F-MAMO");
@@ -307,7 +307,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     function validateModule(address labAddr, address safe) public view {
         address moduleAddr = addresses.getAddress("MAMO_LP_COMPOUND_MODULE");
         assertTrue(moduleAddr != address(0) && moduleAddr.code.length > 0, "module deployed");
-        assertEq(LPAutoBalancerV2(labAddr).compoundModule(), moduleAddr, "balancer wired to module");
+        assertEq(LPAutoBalancerV2(payable(labAddr)).compoundModule(), moduleAddr, "balancer wired to module");
         LPCompoundModule module = LPCompoundModule(moduleAddr);
         assertEq(module.balancer(), labAddr, "module bound to balancer");
         assertEq(module.AERO(), addresses.getAddress("AERO"), "module AERO");
@@ -318,7 +318,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(
             address(module.slippagePriceChecker()), addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"), "checker set"
         );
-        assertEq(LPAutoBalancerV2(labAddr).swapLossAllowanceBps(), SWAP_LOSS_ALLOWANCE_BPS, "swap loss allowance set");
+        assertEq(LPAutoBalancerV2(payable(labAddr)).swapLossAllowanceBps(), SWAP_LOSS_ALLOWANCE_BPS, "swap loss allowance set");
     }
 
     /// @dev Resolve the rebalancer EOA: explicit setter wins; else fall back to the
