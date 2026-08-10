@@ -526,6 +526,26 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      then skim ONLY the AERO gained by this withdraw to the feeCollector. Measuring the gain
     ///      rather than the balance means a stray AERO balance already sitting on this contract is
     ///      never swept. CEI: the flag is cleared before the AERO transfer.
+    /// @dev NO LP-FEE MIRROR OF MOO-736 HERE. `CLGauge.withdraw()` opens with the same
+    ///      `nft.collect({recipient: msg.sender})` that motivated the skim-before-stake fix in
+    ///      `stake()`, so the symmetric worry is that fees land loose on the way OUT and get counted
+    ///      as principal. They cannot, and the reason is in Slipstream, not here:
+    ///        - `CLPool.calculateFees` routes the STAKED share of every swap fee to `gaugeFee` and
+    ///          grows `feeGrowthGlobalX128` only over `liquidity - stakedLiquidity`, and
+    ///          `Position.update(..., staked = true)` skips the tokensOwed accrual outright;
+    ///        - Slipstream's `NonfungiblePositionManager.collect` takes a separate branch for a
+    ///          gauge-owned position that updates the feeGrowthInside snapshot but adds NOTHING to
+    ///          tokensOwed;
+    ///        - `CLGauge.deposit()` already collected every pre-stake fee (and `stake()` skims before
+    ///          that), so tokensOwed is zero when staking begins and stays zero throughout.
+    ///      The withdraw-time collect therefore transfers 0/0. Verified against
+    ///      github.com/aerodrome-finance/slipstream (`CLGauge.deposit/withdraw`, `CLPool.stake` /
+    ///      `calculateFees`, `Position.update`, `NonfungiblePositionManager.collect`) rather than
+    ///      assumed. The balancer never calls increase/decreaseLiquidity or collect on a staked
+    ///      tokenId (it is not the owner while staked, and `collectFees()` reverts AlreadyStaked), so
+    ///      there is no path that makes tokensOwed non-zero mid-stake. `_exitAll`'s existing
+    ///      unstake-then-`_skimFees` order is correct as written: the post-unstake skim is what picks
+    ///      up any fee accrued after the gauge released the NFT.
     /// @param main true → the main leg, false → the alt leg.
     function _unstakeLeg(ManagedPositionV2 storage p, bool main) private {
         uint256 tokenId = main ? p.mainTokenId : p.altTokenId;
@@ -761,6 +781,19 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         that — a single-sided mint consumes the entire funded balance at both the honest and
     ///         the manipulated price, so amount0MinMain passes either way. Committing to the exact
     ///         ticks is what makes the placement verifiable rather than merely bounded.
+    ///
+    ///         The commitment names only the MAIN bounds, but it pins the ALT too — because the
+    ///         width is required to be an even multiple of tickSpacing (per-call check below and
+    ///         `LPPositionLib.validateRebalanceConfig` on the bounds). `_mintAlt` anchors on
+    ///         `floorAlign(spotTick)`, and each `_mainRange` branch inverts to that anchor uniquely
+    ///         under that constraint: balanced → `floorAlign(spot) = tickLower + width/2` (valid only
+    ///         because `width/2` is a whole number of spacings); token0-single-sided →
+    ///         `tickLower - tickSpacing`; token1-single-sided → `tickUpper`. The branch itself is
+    ///         chosen from oracle-priced leg VALUES, which spot does not move. So a spot that
+    ///         satisfies the main commitment leaves exactly one legal alt placement. Drop the
+    ///         even-multiple rule and that stops being true: at spacing 100 / width 300, spot 150 and
+    ///         spot 249 both yield main [0, 300] while the token0 alt slides from [200, 300] to
+    ///         [300, 400] with TickMismatch silent.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
     ///         out of the floor per H-1), BOTH floor snapshots here (the position and loose amounts)
     ///         are taken back in unwindForSwap — a prior transaction. A token
@@ -802,9 +835,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         LPValuationLib.OracleConfig memory cfg = _oracleCfg(p);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
-        // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
-        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
-        if (params.width % uint24(p.tickSpacing) != 0) revert InvalidWidth();
+        // Config bounds are 2*spacing-aligned but the per-call width is caller-supplied: an unaligned
+        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint, and
+        // an ODD multiple of the spacing would un-pin the alt from the tick commitment (see above).
+        if (params.width % (2 * uint24(p.tickSpacing)) != 0) revert InvalidWidth();
 
         (int24 tl, int24 tu) = _mainRange(p, cfg, spotTick, params.width, dec0, dec1);
         // TICK COMMITMENT (see the natspec above): the caller pinned the range it decided on; a spot
@@ -936,9 +970,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         );
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
-        // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
+        // Config bounds are 2*spacing-aligned but the per-call width is caller-supplied: an unaligned
         // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
-        if (params.width % uint24(p.tickSpacing) != 0) revert InvalidWidth();
+        // Same even-multiple rule as rebuildAfterSwap — this path is atomic and carries no tick
+        // commitment, so the rule buys it nothing directly; it is applied here so "legal width" has
+        // ONE definition across both rebalance paths and across the config bounds. A width accepted
+        // by rebalanceUsingAlt but rejected by rebuildAfterSwap would be a live footgun.
+        if (params.width % (2 * uint24(p.tickSpacing)) != 0) revert InvalidWidth();
 
         // Choose the new main range. The common case is a spot-centered straddle. But rebalancing a
         // FULLY out-of-range position withdraws 100%-single-sided principal (a CL position outside

@@ -19,10 +19,16 @@ import {console} from "forge-std/console.sol";
 ///              address(0); both are granted later, the rebalancer in this very proposal). Skipped
 ///              if MAMO_LP_AUTO_BALANCER_V2 is already registered.
 ///           2. build() — Safe actions, in order:
-///                a. NFPM.safeTransferFrom(F-MAMO, balancer, tokenId)  — deposit the pre-minted
+///                a. balancer.setSequencerUptimeFeed(CHAINLINK_SEQUENCER_UPTIME, grace) — arm the L2
+///                   sequencer guard BEFORE anything reads a Chainlink feed. It defaults to
+///                   address(0) on a fresh deployment, and `LPValuationLib.checkSequencer`
+///                   early-returns while unset, so a deployment that never runs this action ships
+///                   with the guard OFF — on Base, an L2, that is the whole exposure MOO-741 exists
+///                   to close. Ordered first so the registration probes in (c) also run under it.
+///                b. NFPM.safeTransferFrom(F-MAMO, balancer, tokenId)  — deposit the pre-minted
 ///                   WETH/cbBTC Slipstream NFT into the balancer.
-///                b. balancer.registerPosition(config)                 — register the phase-1 position.
-///                c. balancer.grantRole(REBALANCER_ROLE, rebalancerEOA) — authorize the backend signer.
+///                c. balancer.registerPosition(config)                 — register the phase-1 position.
+///                d. balancer.grantRole(REBALANCER_ROLE, rebalancerEOA) — authorize the backend signer.
 ///              The AERO->drop wiring is intentionally NOT an action here — see the NOTE below.
 ///
 ///         PRECONDITION (off-chain Phase B): the WETH/cbBTC Slipstream position NFT must already be
@@ -97,12 +103,26 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     ///         MAMO_LP_REBALANCER address entry when present; otherwise MUST be set via setRebalancerEOA.
     address public rebalancerEOA;
 
+    /// @notice Default seconds the Base sequencer must have been continuously up before the balancer
+    ///         accepts a Chainlink read. 3600s is the conventional L2 grace period: long enough for
+    ///         ETH/USD and BTC/USD to publish a post-outage round, short enough that a recovery does
+    ///         not idle the rebalancer for a whole cadence. Overridable per run via
+    ///         `setSequencerGracePeriod` (and on-chain afterwards by the Safe via
+    ///         `setSequencerUptimeFeed`), which is why it is a variable and not a constant.
+    uint256 public sequencerGracePeriod = 3600;
+
     function setTokenId(uint256 tokenId_) external {
         tokenId = tokenId_;
     }
 
     function setRebalancerEOA(address rebalancerEOA_) external {
         rebalancerEOA = rebalancerEOA_;
+    }
+
+    /// @notice Override the sequencer grace period this proposal arms the guard with. Must be
+    ///         non-zero and <= 7 days — the balancer rejects anything else with InvalidConfig.
+    function setSequencerGracePeriod(uint256 gracePeriod_) external {
+        sequencerGracePeriod = gracePeriod_;
     }
 
     function _initializeAddresses() internal {
@@ -171,6 +191,9 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     function build() public override buildModifier(addresses.getAddress("F-MAMO")) {
         LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
 
+        // 0. Arm the L2 sequencer guard first (own frame: keeps build() under the via_ir stack limit).
+        _wireSequencer(lab);
+
         // Steps 1-3 in a block so the config struct + locals free before _wireModule inlines
         // (keeps build() under the via_ir stack limit — position config has 21 fields).
         {
@@ -219,6 +242,16 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         _wireModule(lab);
     }
 
+    /// @dev Arm the balancer's L2 sequencer-uptime guard. Not optional decoration: the guard ships
+    ///      DISABLED (`sequencerUptimeFeed == address(0)` makes `checkSequencer` a no-op), so without
+    ///      this action the balancer prices every rebalance off Chainlink rounds that may pre-date a
+    ///      Base sequencer outage — exactly the state MOO-741 was raised about. `setSequencerUptimeFeed`
+    ///      probes the feed in this same tx, so a wrong address or a sequencer inside its grace window
+    ///      fails the Safe simulation instead of the next rebalance.
+    function _wireSequencer(LPAutoBalancerV2 lab) internal {
+        lab.setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_SEQUENCER_UPTIME"), sequencerGracePeriod);
+    }
+
     /// @dev Wire the balancer to the compound module and set the F-MAMO-doable compound config.
     ///      approveCowSwap() + the SlippagePriceChecker AERO->WETH/cbBTC config are DEFERRED (see the
     ///      COMPOUND NOTE at the top): the checker owner is NOT F-MAMO, so AERO cannot be whitelisted
@@ -248,6 +281,17 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertTrue(lab.hasRole(lab.DEFAULT_ADMIN_ROLE(), safe), "admin is F-MAMO");
         assertTrue(lab.hasRole(lab.GUARDIAN_ROLE(), safe), "guardian is F-MAMO");
         assertTrue(lab.hasRole(lab.REBALANCER_ROLE(), _resolveRebalancer()), "rebalancer granted");
+
+        // MOO-741: the L2 sequencer guard must be ENABLED when this proposal lands. A zero feed is a
+        // silently-disabled guard, which is indistinguishable from "never wired" — assert both the
+        // address and a non-zero grace period so a regression to the default fails validation.
+        assertEq(
+            lab.sequencerUptimeFeed(),
+            addresses.getAddress("CHAINLINK_SEQUENCER_UPTIME"),
+            "sequencer uptime feed armed"
+        );
+        assertEq(lab.sequencerGracePeriod(), sequencerGracePeriod, "sequencer grace period set");
+        assertTrue(lab.sequencerGracePeriod() != 0, "sequencer guard not silently disabled");
 
         // Position config + NFT custody, and the compound module wiring — split into `this.` external
         // views so via_ir compiles each in its own frame (position() returns a 21-field tuple; inlining

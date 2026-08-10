@@ -2490,6 +2490,79 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.rebuildAfterSwap(params);
     }
 
+    // ---------- MOO-727 follow-up: width must be an EVEN multiple of tickSpacing ----------
+    // A width that is a spacing multiple but an ODD one (600 = 3 * 200 here) leaves the balanced
+    // main's spot preimage TWO spacings wide: `alignedRange` floors `spot - width/2` and width/2 is
+    // then half a spacing off the grid, so two different spots produce the SAME main range while
+    // `floorAlign(spot)` — the anchor `_mintAlt` places the alt from — differs by a full spacing.
+    // The tick commitment names only the main bounds, so TickMismatch stays silent and the alt
+    // slides. Requiring an even multiple makes `floorAlign(spot) = tickLower + width/2` a function
+    // of the committed bounds, which pins the alt transitively. See the TICK COMMITMENT natspec on
+    // rebuildAfterSwap and `LPPositionLib.validateRebalanceConfig`.
+    //
+    // 600 is inside the fixture's [400, 2000] band and IS a multiple of tickSpacing (200), so the
+    // pre-fix code accepted it — these four tests fail against the previous revision.
+
+    function test_rebalanceUsingAlt_revertsOddMultipleWidth() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18);
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.width = 600; // 3 * tickSpacing: aligned, but an ODD multiple
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.InvalidWidth.selector);
+        lab.rebalanceUsingAlt(params);
+    }
+
+    function test_rebuildAfterSwap_revertsOddMultipleWidth() public {
+        _register(false);
+        _setRealModule();
+        _unwind();
+        LPAutoBalancerV2.RebuildParams memory params = _defaultRebuildParams();
+        params.width = 600; // 3 * tickSpacing: aligned, but an ODD multiple
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.InvalidWidth.selector);
+        lab.rebuildAfterSwap(params);
+    }
+
+    /// @dev The config bounds carry the same rule, so an operator learns at registration time rather
+    ///      than discovering a whole band of widths is unusable on the next rebalance.
+    function test_registerPosition_revertsOddMultipleMinWidth() public {
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        cfg.minWidth = 600; // >= 2*tickSpacing and spacing-aligned, but an ODD multiple
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidWidth.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_setPositionConfig_revertsOddMultipleMaxWidth() public {
+        _register(false);
+
+        vm.prank(manager);
+        vm.expectRevert(LPAutoBalancerV2.InvalidWidth.selector);
+        // maxWidth 2200 = 11 * tickSpacing — spacing-aligned, odd multiple.
+        lab.setPositionConfig(400, 2200, 400, 1800, 200, 100, 0);
+    }
+
+    /// @dev The tightest legal width (minWidth == 2 * tickSpacing) is by construction an EVEN
+    ///      multiple, so the new rule can never make a config uninhabitable. Pins that the fix did
+    ///      not narrow the usable band from below.
+    function test_rebalanceUsingAlt_acceptsMinWidthUnderEvenMultipleRule() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18);
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.width = 400; // == minWidth == 2 * tickSpacing
+
+        vm.prank(rebalancer);
+        lab.rebalanceUsingAlt(params); // must NOT revert
+    }
+
+    // The geometric property the rule buys — the committed main bounds determine floorAlign(spot),
+    // i.e. the alt anchor — is pinned in LPGeometryLib.unit.t.sol
+    // (testFuzz_alignedRange_evenMultipleWidthPinsFloorAlign and its odd-multiple counterexample).
+
     // ---------- unwindForSwap with a live alt leg ----------
     // Realistic cycle-N+1 state: a prior rebalanceUsingAlt left an alt NFT and the backend now
     // chooses the swap path. Phase 1 must tear down BOTH legs and count the alt in the snapshot.

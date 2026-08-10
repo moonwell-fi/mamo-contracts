@@ -100,6 +100,48 @@ contract LPGeometryLibUnitTest is Test {
         assertEq(int256(tu) - int256(tl), int256(uint256(width)), "span == width");
     }
 
+    /// @dev MOO-727 follow-up. `LPAutoBalancerV2.rebuildAfterSwap`'s tick commitment names only the
+    ///      MAIN bounds, yet `_mintAlt` anchors the alt on `floorAlign(spot)`. What makes the
+    ///      commitment cover the alt too is that every legal width is an EVEN multiple of the
+    ///      spacing: then `width/2` is a whole number of spacings, `floorAlign(spot - width/2) ==
+    ///      floorAlign(spot) - width/2`, and the anchor is recoverable from the committed tickLower.
+    ///      Fuzzed here so the invariant the contract now depends on is asserted, not assumed.
+    function testFuzz_alignedRange_evenMultipleWidthPinsFloorAlign(
+        int24 currentTick,
+        uint24 spacingSeed,
+        uint24 halfMult
+    ) public pure {
+        int24 spacing = int24(uint24(bound(spacingSeed, 1, 2000)));
+        // width = 2k * spacing, k in [1, 20] — the even-multiple band validateRebalanceConfig admits.
+        uint24 halfWidth = uint24(bound(halfMult, 1, 20)) * uint24(spacing);
+        uint24 width = 2 * halfWidth;
+        currentTick = int24(bound(currentTick, MIN_TICK + int24(width), MAX_TICK - int24(width)));
+
+        (int24 tl,) = LPGeometryLib.alignedRange(currentTick, width, spacing, currentTick);
+
+        assertEq(
+            int256(tl) + int256(uint256(halfWidth)),
+            int256(LPGeometryLib.floorAlign(currentTick, spacing)),
+            "even-multiple width: alt anchor recoverable from the committed main lower bound"
+        );
+    }
+
+    /// @dev The counterexample the even-multiple rule exists to exclude, at the DEPLOYED phase-1
+    ///      shape (tickSpacing 100, width 300 = 3 * spacing — spacing-aligned but an ODD multiple).
+    ///      Spot 150 and spot 249 produce the SAME main range, so the tick commitment cannot tell
+    ///      them apart, while their alt anchors sit a full spacing apart.
+    function test_alignedRange_oddMultipleWidthLeavesAltAnchorAmbiguous() public pure {
+        int24 spacing = 100;
+
+        (int24 tlA, int24 tuA) = LPGeometryLib.alignedRange(150, 300, spacing, 150);
+        (int24 tlB, int24 tuB) = LPGeometryLib.alignedRange(249, 300, spacing, 249);
+
+        assertEq(int256(tlA), int256(tlB), "odd multiple: same main lower for two distinct spots");
+        assertEq(int256(tuA), int256(tuB), "odd multiple: same main upper for two distinct spots");
+        assertEq(int256(LPGeometryLib.floorAlign(150, spacing)), 100, "anchor at spot 150");
+        assertEq(int256(LPGeometryLib.floorAlign(249, spacing)), 200, "anchor at spot 249");
+    }
+
     /// @dev A reference tick far from spot yields a range that cannot straddle — must revert with
     ///      the library's own require string.
     function test_alignedRange_revertsWhenNoStraddle() public {

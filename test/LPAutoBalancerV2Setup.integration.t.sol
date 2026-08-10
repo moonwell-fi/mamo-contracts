@@ -9,6 +9,7 @@ import {Test} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -210,5 +211,67 @@ contract LPAutoBalancerV2SetupTest is Test {
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
         assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
+    }
+
+    // ─── MOO-741: the setup proposal must leave the L2 sequencer guard ENABLED ──────────────────
+    //
+    // `sequencerUptimeFeed` defaults to address(0) and `LPValuationLib.checkSequencer` early-returns
+    // while it is unset, so a deployment that never runs the setter ships with the guard OFF and the
+    // balancer is exactly as exposed as before MOO-741. This test pins the wiring (feed + non-zero
+    // grace period) AND proves the guard is LIVE — not merely stored — by driving the real
+    // `_readFeed` path with the uptime aggregator mocked into each failure state.
+
+    function test_proposal_armsSequencerUptimeGuard() public {
+        proposal.deploy();
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+
+        // Pre-condition: a freshly deployed balancer has the guard DISABLED. If this ever starts
+        // failing, the default changed and the rest of this test is measuring the wrong thing.
+        assertEq(lab.sequencerUptimeFeed(), address(0), "guard disabled before the proposal runs");
+        assertEq(lab.sequencerGracePeriod(), 0, "grace period unset before the proposal runs");
+
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        address feed = addresses.getAddress("CHAINLINK_SEQUENCER_UPTIME");
+        assertEq(lab.sequencerUptimeFeed(), feed, "sequencer uptime feed armed by the proposal");
+        assertEq(lab.sequencerGracePeriod(), proposal.sequencerGracePeriod(), "grace period armed");
+        assertTrue(lab.sequencerGracePeriod() != 0, "grace period is non-zero (guard not neutered)");
+
+        address eth = addresses.getAddress("CHAINLINK_ETH_USD");
+        address btc = addresses.getAddress("CHAINLINK_BTC_USD");
+
+        // Control: with the real (up, long past its grace window) feed, the oracle path still works.
+        vm.prank(safe);
+        lab.setOracles(eth, btc);
+
+        // 1. Sequencer reported DOWN (answer == 1) → every feed read fails closed.
+        _mockSequencer(feed, 1, block.timestamp - 10 days);
+        vm.prank(safe);
+        vm.expectRevert(LPAutoBalancerV2.SequencerDown.selector);
+        lab.setOracles(eth, btc);
+
+        // 2. Sequencer back UP but still inside the grace window → reads stay rejected. This is the
+        //    case a plain "answer == 0" check would wave through while the price feeds still carry
+        //    their pre-outage round.
+        _mockSequencer(feed, 0, block.timestamp - 60);
+        vm.prank(safe);
+        vm.expectRevert(LPAutoBalancerV2.SequencerGracePeriod.selector);
+        lab.setOracles(eth, btc);
+
+        // 3. Up and past the grace window → accepted again.
+        _mockSequencer(feed, 0, block.timestamp - 2 hours);
+        vm.prank(safe);
+        lab.setOracles(eth, btc);
+    }
+
+    /// @dev Force the uptime aggregator's answer/startedAt. `answer` 0 == up, 1 == down.
+    function _mockSequencer(address feed, int256 answer, uint256 startedAt) internal {
+        vm.mockCall(
+            feed,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(uint80(1), answer, startedAt, block.timestamp, uint80(1))
+        );
     }
 }

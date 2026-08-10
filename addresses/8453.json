@@ -155,6 +155,11 @@
     "isContract": true
   },
   {
+    "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
+    "name": "CHAINLINK_SEQUENCER_UPTIME",
+    "isContract": true
+  },
+  {
     "addr": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
     "name": "SAFE_PROXY",
     "isContract": true
