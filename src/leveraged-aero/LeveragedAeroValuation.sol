@@ -32,6 +32,14 @@ interface IAeroRouter {
     ) external returns (uint256[] memory amounts);
 }
 
+/// @dev Aerodrome v2 (AMM) PoolFactory — the registry the Route above names, used to PROVE a
+///      reward→USDC route exists before a venue is adopted. Note the arity difference from
+///      Slipstream's `ICLFactory.getPool(address,address,int24)`: v2 pools are keyed by a
+///      stable/volatile flag, not a tick spacing.
+interface IAeroV2Factory {
+    function getPool(address tokenA, address tokenB, bool stable) external view returns (address pool);
+}
+
 /// @title  LeveragedAeroValuation
 /// @notice Net-equity **oracle** NAV for the leveraged Aerodrome CL strategy. This is
 ///         the single safety-critical computation — it prices DEPOSITS, so a wrong
@@ -545,6 +553,18 @@ library LeveragedAeroValuation {
     address private constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     /// @dev Aerodrome v2 PoolFactory on Base (`router.defaultFactory()`), required by the Route.
     address private constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @notice The Aerodrome v2 VOLATILE pool `swapAeroToUsdc` would route `reward → usdc` through,
+    ///         or `address(0)` when no such pool is registered.
+    /// @dev Exists so venue validation can probe the reward leg the same way it probes the two
+    ///      leg↔USDC CL swap pools. The route below is byte-for-byte the one `swapAeroToUsdc`
+    ///      constructs (same factory, `stable == false`), so a nonzero answer here is exactly the
+    ///      condition under which that swap can resolve a pool at all. Reads the factory rather than
+    ///      the router's `poolFor` helper: the helper is a deterministic CREATE2 predictor and
+    ///      returns a nonzero address for pairs that were never deployed.
+    function aeroV2VolatilePool(address tokenA, address tokenB) public view returns (address) {
+        return IAeroV2Factory(AERO_V2_FACTORY).getPool(tokenA, tokenB, false);
+    }
 
     /// @notice Swap `amountIn` AERO to USDC through the Aerodrome v2 volatile pool and report the
     ///         MEASURED fill (balance delta, not the router's own return value).

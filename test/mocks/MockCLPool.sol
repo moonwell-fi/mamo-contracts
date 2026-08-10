@@ -19,6 +19,13 @@ contract MockCLPool {
     ///         swap-pool existence probe (`pool.factory().getPool(usdc, leg, spacing)`).
     address public factory;
 
+    /// @notice The gauge this pool reports as its own. On a real Slipstream pool the Voter writes
+    ///         this at gauge creation, which is why venue validation requires it to AGREE with
+    ///         `gauge.pool()` — the self-attested direction alone is forgeable by a hostile gauge.
+    ///         Defaults to `address(0)` (ungauged), so a test must wire it explicitly, exactly as it
+    ///         must wire `gauge.setPool`.
+    address public gauge;
+
     uint160 public sqrtPriceX96 = 79228162514264337593543950336; // 1:1
     int24 public tick;
 
@@ -35,6 +42,10 @@ contract MockCLPool {
 
     function setFactory(address factory_) external {
         factory = factory_;
+    }
+
+    function setGauge(address gauge_) external {
+        gauge = gauge_;
     }
 
     function setTokens(address token0_, address token1_) external {
@@ -82,10 +93,6 @@ contract MockCLPool {
 
     function fee() external pure returns (uint24) {
         return 500;
-    }
-
-    function gauge() external pure returns (address) {
-        return address(0);
     }
 }
 

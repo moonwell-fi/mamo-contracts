@@ -13,6 +13,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
 import {
+    MockAeroV2Factory,
     MockAeroV2Router,
     MockChainlinkFeed,
     MockClSwapRouter,
@@ -105,6 +106,10 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     /// @dev Leg-A price (8dp) implied by the pool's `sqrtP` for this fixture's ordering (legA = token1).
     uint256 internal legAPrice8;
 
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
     function setUp() public {
         vm.warp(1_800_000_000);
 
@@ -123,10 +128,17 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
 
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegA = new MockLendingMarket(address(legA));
         npm = new MockNpm(pool);
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
+        // that forgets to unstake first reverts here exactly as it would on chain.
+        gauge.setNpm(address(npm));
         router = new MockClSwapRouter();
 
         sequencerFeed = new MockChainlinkFeed(0, 8, 1, block.timestamp - 2 hours);

@@ -10,6 +10,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller, MockMoonwellMarket} from "../mocks/MockMoonwellMarket.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockToken} from "../mocks/MockToken.sol";
+import {MockAeroV2Factory} from "./LeveragedAeroVenuesHarness.sol";
 
 import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -72,6 +73,10 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev `2 * TickMath.MAX_TICK` — the ceiling `_initialize` enforces on `maxWidth`.
     uint24 internal constant MAX_BAND_WIDTH = 1_774_544;
 
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
     function setUp() public {
         usdc = new MockToken("USD Coin", "USDC", 6);
         legA = new MockToken("Leg A", "LEGA", 18);
@@ -90,6 +95,10 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockMoonwellMarket(address(usdc));
         mLegA = new MockMoonwellMarket(address(legA));
@@ -275,7 +284,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     function testInitRevertsOnNonEighteenDecimalRewardToken() public {
         MockToken sixDpReward = new MockToken("Reward", "RWD", 6);
         MockCLGauge oddGauge = new MockCLGauge(address(sixDpReward));
-        oddGauge.setPool(address(pool)); // bound correctly so the reward-decimals check is what fires
+        // Bind BOTH directions so the reward-decimals check is what fires: the gauge↔pool binding is
+        // reciprocal, and leaving `pool.gauge()` pointing at the default gauge would mask this guard
+        // behind a `VenueMismatch`.
+        oddGauge.setPool(address(pool));
+        pool.setGauge(address(oddGauge));
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.gauge = address(oddGauge);
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);

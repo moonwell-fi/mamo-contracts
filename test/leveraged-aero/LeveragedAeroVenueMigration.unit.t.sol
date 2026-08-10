@@ -13,6 +13,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
 import {
+    MockAeroV2Factory,
     MockAeroV2Router,
     MockChainlinkFeed,
     MockClSwapRouter,
@@ -104,6 +105,10 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
     /// @dev Split into per-venue frames: one flat setUp of this size overflows the Yul stack
     ///      under via_ir (each helper keeps its locals in its own frame).
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
     function setUp() public {
         vm.warp(1_800_000_000);
         // EXTERNAL self-calls, not internal helpers: via_ir re-inlines single-call-site internal
@@ -140,11 +145,18 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         mLegB = new MockLendingMarket(address(legB));
         mLegA = new MockLendingMarket(address(legA));
         legBFeed = new MockChainlinkFeed(int256(P_LEG_B), 8, 1, block.timestamp);
         legAFeed = new MockChainlinkFeed(int256(P_LEG_A), 8, 1, block.timestamp);
         npm = new MockNpm(pool);
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
+        // that forgets to unstake first reverts here exactly as it would on chain.
+        gauge.setNpm(address(npm));
     }
 
     /// @dev Cross-pair destination: same prices/tick as venue A, different spacing.
@@ -159,6 +171,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         clFactory.setPool(address(usdc), address(legA2), LEG_A2_SWAP_SPACING, makeAddr("legA2SwapPool"));
         gaugeB = new MockCLGauge(address(aero));
         gaugeB.setPool(address(poolB));
+        poolB.setGauge(address(gaugeB));
+        gaugeB.setNpm(address(npm));
         mLegB2 = new MockLendingMarket(address(legB2));
         mLegA2 = new MockLendingMarket(address(legA2));
         legB2Feed = new MockChainlinkFeed(int256(P_LEG_B), 8, 1, block.timestamp);
@@ -171,6 +185,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         poolC.setFactory(address(clFactory));
         gaugeC = new MockCLGauge(address(aero));
         gaugeC.setPool(address(poolC));
+        poolC.setGauge(address(gaugeC));
+        gaugeC.setNpm(address(npm));
     }
 
     function fundVenues() external {
@@ -333,7 +349,10 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
         _assertFlat();
         uint256 idle = usdc.balanceOf(address(strategy));
-        assertGt(idle, (SEED * 98) / 100, "essentially the whole book realized as idle USDC");
+        // TIGHT on purpose: this fixture's swap mocks fill at exact oracle parity, so a lossless
+        // unwind is the CORRECT expectation and the only permitted gap is integer rounding. A 2%
+        // band here would let a real conservation bug through unnoticed.
+        assertApproxEqRel(idle, SEED, 0.0001e18, "whole book realized as idle USDC (lossless fixture)");
         assertEq(strategy.nav(), idle, "flat NAV == idle USDC (oracle-free)");
         // Still Executed: the proposer-gated venue ops remain reachable (settle would brick them).
         vm.prank(proposer);
@@ -441,6 +460,51 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         vm.prank(proposer);
         strategy.flatten(0, 0);
         _assertFlat();
+    }
+
+    /**
+     * @dev REGRESSION (dust-donation deadlock) — a reward balance worth under one micro-USD prices to
+     *      a ZERO oracle floor and the router fills it at 0 USDC, so BOTH arguments used to be
+     *      unsatisfiable: `0` hit `ZeroMinOut` and anything nonzero hit the router's own min-out
+     *      check. Since nothing else can clear a reward balance on a live `Executed` book — `compound`
+     *      early-returns once flat and reverts identically while live, and `rescueToVault` denies the
+     *      reward token until `Settled` — a 1e6-wei donation permanently blocked `flatten`, and with it
+     *      `migrateVenue`'s flat-book precondition. The sale is now skipped exactly where the floor
+     *      rounds to 0, which is exactly where an unsold balance cannot move a 6dp NAV.
+     */
+    function testFlattenSurvivesARewardDustDonation() public {
+        _execute(SEED);
+        aero.mint(address(strategy), 1e6); // sub-micro-USD at the 1e8 (== $1) feed mark
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        _assertFlat();
+        assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place, not force-sold");
+        assertEq(strategy.nav(), usdc.balanceOf(address(strategy)), "flat NAV still == idle USDC");
+        // And the migration it used to block now completes.
+        _stage(_venueBParams());
+        _migrate(_venueBParams());
+        assertEq(strategy.layout().pool, address(poolB), "migration no longer blocked by dust");
+    }
+
+    /// @dev The dust skip must NOT widen the guard for a real tranche: a balance whose oracle floor is
+    ///      nonzero still has to clear both the caller's floor and the L9 post-check.
+    function testFlattenStillSellsABalanceJustAboveTheDustThreshold() public {
+        _execute(SEED);
+        // 1e15 wei AERO × 1e8 / 1e20 == 1000 (6dp), and the `maxSlippageBps` haircut still leaves a
+        // NONZERO floor — which is what separates "dust" from "small". (The threshold is the haircut
+        // one, not the raw one: at 1e12 the raw floor is 1 unit and the haircut rounds it to 0.)
+        aero.mint(address(gauge), 1e15);
+        gauge.setAeroToPayOnWithdraw(1e15);
+
+        vm.expectRevert(LeveragedAeroVenue.ZeroMinOut.selector);
+        vm.prank(proposer);
+        strategy.flatten(0, 0);
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+        assertEq(aero.balanceOf(address(strategy)), 0, "above-dust balance is still sold");
     }
 
     /**
@@ -589,6 +653,47 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
     }
 
+    /// @dev The gauge↔pool binding is checked in BOTH directions. `gauge.pool()` is self-attested by
+    ///      the staged contract, so a hostile gauge returns the real pool for free; only the pool's own
+    ///      `gauge()` (Voter-written on a real Slipstream pool) makes the pair non-forgeable.
+    function testMigrateRejectsAGaugeThePoolDoesNotClaim() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        MockCLGauge impostor = new MockCLGauge(address(aero));
+        impostor.setPool(address(poolB)); // passes the self-attested direction...
+        // ...but poolB.gauge() still points at the real gaugeB.
+        v.gauge = address(impostor);
+        _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /// @dev The reward leg is a THIRD swap venue (Aerodrome v2, volatile, hardcoded route). Without a
+    ///      probe, a gauge whose reward token has no v2/USDC pool passes every other check and then
+    ///      reverts inside BOTH `compound` and `flatten` once a tranche accrues — permanently, since
+    ///      `flatten` is also the precondition for migrating away.
+    function testMigrateRejectsARewardTokenWithNoUsdcRoute() public {
+        _execute(SEED);
+        _flatten();
+        MockToken orphanReward = new MockToken("Orphan", "ORPH", 18); // no pool in the v2 factory mock
+        MockCLGauge orphanGauge = new MockCLGauge(address(orphanReward));
+        orphanGauge.setPool(address(poolB));
+        poolB.setGauge(address(orphanGauge));
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.gauge = address(orphanGauge);
+        _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /// @dev Leg feeds are validated at STAGE time, not only at read time. `readUsd8` does fail closed
+    ///      on a non-8dp answer, but it fails after the venue is already adopted — bricking `redeploy`
+    ///      on a fund that has no way back except re-staging.
+    function testMigrateRejectsANonEightDecimalLegFeed() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.wethFeed = address(new MockChainlinkFeed(int256(1e18), 18, 1, block.timestamp));
+        _expectMigrateRevert(v, LeveragedAeroVenue.UnexpectedFeedDecimals.selector);
+    }
+
     function testMigrateRejectsAMissingLegSwapPool() public {
         _execute(SEED);
         _flatten();
@@ -719,6 +824,57 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(l.cbBTCFeed, address(usdcFeed), "leg B feed pinned to USDC/USD");
         assertEq(l.cbBTCSwapTickSpacing, 0, "leg B swap spacing declared unused");
         assertFalse(l.wethIsToken0, "usdc is token0 in poolC");
+        // CROSS-DECIMAL: venue A's leg B is 8dp, venue C's is USDC at 6dp. The stored decimals drive
+        // every token↔USDC conversion, so a migration that failed to rewrite them would mis-scale the
+        // whole book by 100x while every other assertion above still passed.
+        assertEq(l.cbBTCDecimals, 6, "leg B decimals re-read at migrate (8dp -> 6dp)");
+        assertEq(l.wethDecimals, 18, "leg A decimals re-read at migrate");
+    }
+
+    /**
+     * @dev The scenario the reward feed lives in `VenueParams` FOR: a destination gauge that rewards a
+     *      DIFFERENT token. Pinning the feed at init would price that token with AERO's mark and
+     *      mis-scale the L9 harvest floor. Nothing exercised it end-to-end — both fixture gauges reward
+     *      AERO — so this drives the full sequence and then sells a real tranche of the new token
+     *      against the new feed.
+     */
+    function testMigrationToAGaugeWithADifferentRewardTokenHarvestsAgainstTheNewFeed() public {
+        _execute(SEED);
+        _flatten();
+
+        MockToken newReward = new MockToken("Reward2", "RWD2", 18);
+        MockChainlinkFeed newRewardFeed = new MockChainlinkFeed(2e8, 8, 1, block.timestamp); // $2
+        MockCLGauge gaugeB2 = new MockCLGauge(address(newReward));
+        gaugeB2.setPool(address(poolB));
+        poolB.setGauge(address(gaugeB2));
+        // The route probe and the sale both key off the destination's reward token now.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(newReward), address(usdc), address(0xA2F))).code);
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.gauge = address(gaugeB2);
+        v.aeroUsdFeed = address(newRewardFeed);
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().aeroUsdFeed, address(newRewardFeed), "feed migrated with the gauge");
+
+        npm.setPool(poolB);
+        vm.prank(proposer);
+        strategy.redeploy(0);
+
+        // Arm a tranche of the NEW reward token and a router that fills it at the new feed's $2 mark.
+        uint256 tranche = 1000e18;
+        newReward.mint(address(gaugeB2), tranche);
+        gaugeB2.setAeroToPayOnWithdraw(tranche);
+        MockAeroV2Router r = new MockAeroV2Router(address(newReward), address(usdc), 2e6);
+        vm.etch(AERO_V2_ROUTER, address(r).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        assertEq(newReward.balanceOf(address(strategy)), 0, "new reward token sold, not stranded");
+        assertEq(aero.balanceOf(address(strategy)), 0, "old reward token not involved");
+        assertEq(strategy.nav(), usdc.balanceOf(address(strategy)), "flat NAV == idle USDC");
     }
 
     // ==================== redeploy ====================
@@ -733,7 +889,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         uint256 idle = usdc.balanceOf(address(strategy));
 
         vm.prank(proposer);
-        strategy.redeploy();
+        strategy.redeploy(0);
 
         assertGt(strategy.layout().tokenId, 0, "fresh position minted");
         assertEq(gaugeB.depositCallCount(), 1, "staked in the NEW gauge");
@@ -751,7 +907,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         vm.expectRevert(LeveragedAeroVenue.PositionAlreadyOpen.selector);
         vm.prank(proposer);
-        strategy.redeploy();
+        strategy.redeploy(0);
     }
 
     function testRedeployRevertsForNonProposer() public {
@@ -759,7 +915,153 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _flatten();
         vm.expectRevert(BaseStrategy.NotProposer.selector);
         vm.prank(lp);
-        strategy.redeploy();
+        strategy.redeploy(0);
+    }
+
+    /// @dev `redeploy` is the ONE repeatable value-moving proposer op, and the mint's own §8 mins come
+    ///      off the same `slot0()` the mint executes at — self-referential. The caller's floor is the
+    ///      only bound that is not derived from the price being bounded.
+    function testRedeployHonoursTheCallerLiquidityFloor() public {
+        _execute(SEED);
+        _flatten();
+
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientLiquidity.selector);
+        vm.prank(proposer);
+        strategy.redeploy(type(uint128).max);
+
+        assertEq(strategy.layout().tokenId, 0, "nothing opened when the floor is unmet");
+
+        // A reachable floor still opens the position.
+        vm.prank(proposer);
+        strategy.redeploy(1);
+        assertGt(strategy.layout().tokenId, 0, "position opened under a satisfiable floor");
+    }
+
+    /// @dev ROLLBACK (B → A): `flatten → redeploy` re-enters the ORIGINAL venue with nothing changed,
+    ///      and the staged destination hash must NOT survive it. Leaving it armed would let the
+    ///      proposer fire an owner authorization months later into conditions nobody re-evaluated —
+    ///      the replay the migrate path already closes by consuming on use.
+    function testRedeployRollsBackToTheOldVenueAndClearsTheStagedHash() public {
+        _execute(SEED);
+        _flatten();
+        _stage(_venueBParams());
+        assertTrue(strategy.layout().stagedVenueHash != bytes32(0), "hash armed");
+
+        vm.prank(proposer);
+        strategy.redeploy(0);
+
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "staged hash cleared by the rollback");
+        assertEq(strategy.layout().pool, address(pool), "still on the ORIGINAL venue");
+        assertEq(strategy.layout().gauge, address(gauge), "still on the original gauge");
+        assertGt(strategy.layout().tokenId, 0, "position reopened on venue A");
+        assertEq(gauge.depositCallCount(), 2, "restaked in the OLD gauge (genesis + rollback)");
+        assertEq(gaugeB.depositCallCount(), 0, "venue B never touched");
+
+        // And the abandoned authorization can no longer be executed without a fresh stage.
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        vm.expectRevert(LeveragedAeroVenue.VenueNotStaged.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+    }
+
+    /// @dev Same-venue round trip with no migration in between — the plain "unwind, wait, re-enter"
+    ///      operation, distinct from the rollback above in that nothing was ever staged.
+    function testFlattenThenRedeployRoundTripsOnTheSameVenue() public {
+        _execute(SEED);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        uint256 navBefore = strategy.nav();
+
+        _flatten();
+        _assertFlat();
+        vm.prank(proposer);
+        strategy.redeploy(0);
+
+        assertGt(strategy.layout().tokenId, 0, "reopened");
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "a FRESH position, not the old id");
+        assertEq(strategy.layout().pool, address(pool), "same venue throughout");
+        assertApproxEqRel(strategy.nav(), navBefore, 0.0001e18, "round trip is value-neutral (lossless fixture)");
+    }
+
+    // ==================== post-settle gating (mutation survivors) ====================
+
+    /// @dev ERC-7201 base slot, byte-identical to the three `STORAGE_SLOT` copies in `src`.
+    bytes32 internal constant LAYOUT_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
+
+    /// @dev Poke `Layout.tokenId` directly. Needed because the flat-book gate is a conjunction whose
+    ///      clauses cannot all be driven through the public surface — a real book with a live `tokenId`
+    ///      also carries debt, so the leg-debt clause would mask this one (exactly what let the mutant
+    ///      survive). The read-back assert doubles as a check that the slot offset is still correct.
+    function _writeTokenId(uint256 id) internal {
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 18), bytes32(id));
+        assertEq(strategy.layout().tokenId, id, "tokenId slot offset drifted");
+    }
+
+    /// @dev Same, for the packed `hedgedDebtA | hedgedDebtB` slot.
+    function _writeHedgedDebt(uint128 a, uint128 b) internal {
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 27), bytes32((uint256(b) << 128) | uint256(a)));
+        (uint128 ra, uint128 rb) = strategy.hedgedDebt();
+        assertEq(ra, a, "hedgedDebtA slot offset drifted");
+        assertEq(rb, b, "hedgedDebtB slot offset drifted");
+    }
+
+    /// @dev All three new entry points gate on `Executed`. Nothing covered them post-`settle`, where
+    ///      `redeploy` in particular would re-open a levered position on a wound-down fund whose assets
+    ///      have already been pushed to the vault.
+    function testMigrationEntryPointsAreRejectedAfterSettle() public {
+        _execute(SEED);
+        vm.prank(address(vault));
+        strategy.settle();
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        vm.prank(proposer);
+        strategy.redeploy(0);
+    }
+
+    /// @dev The flat-book gate is a CONJUNCTION, and the mutation sweep found the first two clauses
+    ///      masked by the leg-debt clause firing with the same selector. Drive each in isolation.
+    function testMigrateFlatBookGateIsCheckedClauseByClause() public {
+        _execute(SEED);
+        _flatten();
+        _stage(_venueBParams());
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+
+        // (1) tokenId alone: no debt, no hedged basis, but a live position id.
+        _writeTokenId(1234);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+        _writeTokenId(0);
+
+        // (2) hedged basis A alone.
+        _writeHedgedDebt(1, 0);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        // (3) hedged basis B alone.
+        _writeHedgedDebt(0, 1);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+        _writeHedgedDebt(0, 0);
+
+        // (4) leg-B debt alone (the leg-A case is `testMigrateRevertsWhileLegDebtRemains`).
+        vm.prank(address(strategy));
+        mLegB.borrow(1e8);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
     }
 
     // ==================== continuity across the full sequence ====================
@@ -779,7 +1081,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _migrate(_venueBParams());
         npm.setPool(poolB);
         vm.prank(proposer);
-        strategy.redeploy();
+        strategy.redeploy(0);
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
