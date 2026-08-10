@@ -32,15 +32,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Counter for strategy type IDs
     uint256 public nextStrategyTypeId;
 
-    /// @notice The single address strategies recognise as "the backend operator".
-    /// @dev Deliberately NOT derived from the BACKEND_ROLE member set. BACKEND_ROLE is shared by
-    ///      the operator and every factory that calls {addStrategy}; OpenZeppelin's EnumerableSet
-    ///      removal is swap-and-pop, so reading member index 0 hands the operator identity to
-    ///      whichever member happens to sit in slot zero after a revocation — i.e. it changes
-    ///      during key rotation, the moment it must not. Stored explicitly and moved only by
-    ///      {setStrategyOperator}.
-    address public strategyOperator;
-
     // State variables
     /// @notice Set of all strategy addresses for each user
     mapping(address => EnumerableSet.AddressSet) private _userStrategies;
@@ -53,6 +44,20 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
     /// @notice Maps implementations to their strategy ID
     mapping(address => uint256) public implementationToId;
+
+    /// @notice The single address strategies recognise as "the backend operator".
+    /// @dev Deliberately NOT derived from the BACKEND_ROLE member set. BACKEND_ROLE is shared by
+    ///      the operator and every factory that calls {addStrategy}; OpenZeppelin's EnumerableSet
+    ///      removal is swap-and-pop, so reading member index 0 hands the operator identity to
+    ///      whichever member happens to sit in slot zero after a revocation — i.e. it changes
+    ///      during key rotation, the moment it must not. Stored explicitly and moved only by
+    ///      {setStrategyOperator}.
+    /// @dev Declared LAST on purpose. MamoStrategyRegistry is not upgradeable, so slot assignment
+    ///      is not consensus-critical today — but a variable inserted between `nextStrategyTypeId`
+    ///      and `implementationToId` would shift every mapping slot after it, and describing that
+    ///      as an "append" would mislead anyone who later plans a storage-preserving migration or
+    ///      a proxied successor. Appended here, the description is literally true.
+    address public strategyOperator;
 
     // Events
     /// @notice Emitted when a strategy is added for a user
@@ -289,6 +294,35 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
 
         emit StrategyOperatorUpdated(strategyOperator, newOperator);
         strategyOperator = newOperator;
+    }
+
+    // ==================== GUARDIAN FUNCTIONS ====================
+
+    /**
+     * @notice Emergency containment: strips the current strategy operator of its authority
+     * @dev Making the operator explicit fixed the identity bug, but it also SLOWED containment: a
+     *      compromised operator key used to lose its powers the moment BACKEND_ROLE was revoked,
+     *      whereas `onlyBackend` now reads this variable, {setStrategyOperator} is DEFAULT_ADMIN
+     *      (a timelocked multisig), and the strategies' backend entry points carry no
+     *      `whenNotPaused` — so {pause} here does not reach them either. This is the fast path
+     *      that closes that window, and it belongs to the same role that already holds the other
+     *      break-glass lever.
+     *
+     *      It can only ever point the operator at THIS CONTRACT, never at a guardian-chosen
+     *      address: the guardian must be able to switch the backend OFF without being able to
+     *      become it. `address(this)` is a safe sentinel because the registry never calls a
+     *      strategy's onlyBackend surface (its only outbound strategy call is the
+     *      registry-authorised `upgradeToAndCall`), and no key controls it — so every
+     *      `onlyBackend` function on every strategy becomes uncallable until DEFAULT_ADMIN
+     *      installs a fresh operator with {setStrategyOperator}. Zero is not usable as the
+     *      sentinel: `msg.sender` can never be zero, but treating it as "unset" invites callers
+     *      to special-case it.
+     */
+    function freezeStrategyOperator() external onlyRole(GUARDIAN_ROLE) {
+        require(strategyOperator != address(this), "Strategy operator already frozen");
+
+        emit StrategyOperatorUpdated(strategyOperator, address(this));
+        strategyOperator = address(this);
     }
 
     /**

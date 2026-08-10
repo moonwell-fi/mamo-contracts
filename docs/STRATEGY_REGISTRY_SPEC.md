@@ -47,7 +47,9 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function isUserStrategy(address user, address strategy) external view returns (bool)`: Checks if a strategy belongs to a user.
 
-- `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
+- `function getBackendAddress() external view returns (address)`: Gets the strategy operator address — the explicitly stored `strategyOperator`, NOT a member of the BACKEND_ROLE set. BACKEND_ROLE is shared by the operator and every factory, and OpenZeppelin's EnumerableSet removes by swap-and-pop, so member index 0 would change identity during a key rotation.
+
+- `function setStrategyOperator(address newOperator) external`: Sets the address strategies recognise as the backend operator. Only callable by accounts with the DEFAULT_ADMIN_ROLE; the new operator cannot be the zero address.
 
 ## SlippagePriceChecker
 
@@ -159,4 +161,41 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function isUserStrategy(address user, address strategy) external view returns (bool)`: Checks if a strategy belongs to a user.
 
-- `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
+- `function getBackendAddress() external view returns (address)`: Gets the strategy operator address — the explicitly stored `strategyOperator`, NOT a member of the BACKEND_ROLE set. BACKEND_ROLE is shared by the operator and every factory, and OpenZeppelin's EnumerableSet removes by swap-and-pop, so member index 0 would change identity during a key rotation.
+
+- `function setStrategyOperator(address newOperator) external`: Sets the address strategies recognise as the backend operator. Only callable by accounts with the DEFAULT_ADMIN_ROLE; the new operator cannot be the zero address.
+
+## Operator Containment (security note)
+
+`getBackendAddress()` returns the explicitly stored `strategyOperator`, not a member of the
+BACKEND_ROLE set. That removed a real bug — swap-and-pop removal from an `EnumerableSet` could hand
+operator identity to a factory during a key rotation — but it has an accepted cost, recorded here
+because it changes the incident-response picture:
+
+- Revoking BACKEND_ROLE from a compromised operator key **no longer removes its strategy-level
+  authority**. `onlyBackend` on the strategies reads `strategyOperator`, which role changes do not
+  move.
+- `setStrategyOperator` is DEFAULT_ADMIN_ROLE, i.e. the timelocked multisig, and it cannot be set
+  to the zero address.
+- The strategies' `onlyBackend` entry points are not `whenNotPaused`, so pausing the registry does
+  not reach them.
+
+Left alone, containment would therefore be strictly slower than before the change. It is not:
+`freezeStrategyOperator()` (GUARDIAN_ROLE, the same role that holds `pause`) is the fast path. It
+can only ever set the operator to the registry's own address — a sentinel no key controls and which
+never calls a strategy's `onlyBackend` surface — so the guardian can switch the backend off without
+being able to become it. Recovery stays with DEFAULT_ADMIN.
+
+### Runbook: suspected operator key compromise
+
+1. **GUARDIAN** — `MamoStrategyRegistry.freezeStrategyOperator()`. Every strategy's
+   `updatePosition` / `claimRewards` / `setFeeRecipient` becomes uncallable immediately. User
+   deposits and withdrawals are unaffected; this is not a fund freeze.
+2. **GUARDIAN** — `pause()` if strategy *creation* should also stop (this blocks `addStrategy` and
+   `upgradeStrategy`; step 1 does not).
+3. **ADMIN** — `revokeRole(BACKEND_ROLE, compromisedKey)` so the key can no longer register
+   strategies, and `grantRole(BACKEND_ROLE, newKey)`.
+4. **ADMIN** — `setStrategyOperator(newKey)` to restore operations. Only after step 3: the two are
+   deliberately separate, and only this step re-enables the strategy-level surface.
+5. Verify `getBackendAddress() == newKey` and that the old key holds neither the role nor the
+   operator slot.

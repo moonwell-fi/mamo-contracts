@@ -99,6 +99,69 @@ contract MamoStrategyRegistryUnitTest is Test {
         assertFalse(registry.hasRole(backendRole, backend));
     }
 
+    // ============ MOO-731 FOLLOW-UP: FAST-PATH CONTAINMENT OF A COMPROMISED OPERATOR ============
+
+    /// @notice Making the operator explicit slowed containment down: revoking BACKEND_ROLE no
+    ///         longer strips a compromised key of its strategy-level authority, and the only
+    ///         replacement path is DEFAULT_ADMIN (a timelocked multisig). Pausing the registry does
+    ///         not help either — the strategies' onlyBackend entry points are not pausable. The
+    ///         guardian therefore gets a one-way OFF switch.
+    function testGuardianCanFreezeStrategyOperator() public {
+        vm.expectEmit(true, true, false, false);
+        emit MamoStrategyRegistry.StrategyOperatorUpdated(backend, address(registry));
+        vm.prank(guardian);
+        registry.freezeStrategyOperator();
+
+        // The compromised key is no longer "the backend" as far as any strategy is concerned.
+        assertEq(registry.getBackendAddress(), address(registry), "operator points at the sentinel");
+        assertTrue(registry.getBackendAddress() != backend, "compromised key lost strategy authority");
+
+        // Revoking the role alone would NOT have achieved this — the pre-freeze state is the
+        // proof: role membership and operator identity are independent by design.
+        assertTrue(registry.hasRole(backendRole, backend), "role membership is untouched by the freeze");
+    }
+
+    /// @notice The freeze must never be a way for the guardian to BECOME the operator; the only
+    ///         reachable value is the registry itself, which no key controls and which never calls
+    ///         a strategy's onlyBackend surface.
+    function testFreezeCannotHandTheGuardianOperatorRights() public {
+        vm.prank(guardian);
+        registry.freezeStrategyOperator();
+
+        assertTrue(registry.getBackendAddress() != guardian, "guardian cannot install itself");
+
+        // Recovery is deliberately the slow path: only DEFAULT_ADMIN can install a live operator.
+        address freshOperator = makeAddr("freshOperator");
+        vm.prank(guardian);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, guardian, adminRole)
+        );
+        registry.setStrategyOperator(freshOperator);
+
+        vm.prank(admin);
+        registry.setStrategyOperator(freshOperator);
+        assertEq(registry.getBackendAddress(), freshOperator);
+    }
+
+    function testRevertFreezeStrategyOperatorNotGuardian() public {
+        bytes32 guardianRole = registry.GUARDIAN_ROLE();
+
+        vm.prank(backend);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, backend, guardianRole)
+        );
+        registry.freezeStrategyOperator();
+    }
+
+    function testRevertFreezeStrategyOperatorTwice() public {
+        vm.prank(guardian);
+        registry.freezeStrategyOperator();
+
+        vm.prank(guardian);
+        vm.expectRevert("Strategy operator already frozen");
+        registry.freezeStrategyOperator();
+    }
+
     // ==================== MOO-737: EXPLICIT TYPE IDS ADVANCE THE COUNTER ====================
 
     function testExplicitStrategyTypeIdAdvancesCounter() public {

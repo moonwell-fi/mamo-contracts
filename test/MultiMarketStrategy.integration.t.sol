@@ -156,7 +156,6 @@ contract MultiMarketStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -187,7 +186,6 @@ contract MultiMarketStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -217,7 +215,6 @@ contract MultiMarketStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,

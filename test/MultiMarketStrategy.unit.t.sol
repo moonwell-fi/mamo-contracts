@@ -7,6 +7,7 @@ import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {MarketType} from "@interfaces/IMarketRegistry.sol";
+import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
@@ -201,7 +202,6 @@ contract MultiMarketStrategyUnitTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(priceChecker),
                 feeRecipient: feeRecipient,
@@ -264,7 +264,11 @@ contract MultiMarketStrategyUnitTest is Test {
 
         // The owner cannot sweep the fee: it is no longer held by the strategy.
         vm.prank(owner);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "ERC20InsufficientBalance(address,uint256,uint256)", address(strategy), claimed - expectedFee, claimed
+            )
+        );
         strategy.recoverERC20(address(rewardToken), owner, claimed);
 
         vm.prank(owner);
@@ -273,6 +277,146 @@ contract MultiMarketStrategyUnitTest is Test {
         assertEq(rewardToken.balanceOf(owner), claimed - expectedFee, "owner only ever gets the net amount");
         assertEq(rewardToken.balanceOf(feeRecipient), expectedFee, "fee is untouched");
         assertEq(rewardToken.balanceOf(address(strategy)), 0);
+    }
+
+    /// @notice The whole point of MOO-724 / Sherlock #49: Merkl's `claim` is PERMISSIONLESS, so
+    ///         anyone (the owner first among them) can pull this strategy's rewards straight from
+    ///         the distributor and the tokens land here without claimRewards ever running. A fee
+    ///         charged on the claimRewards delta is therefore charged on nothing.
+    function test_rewardsArrivingOutsideClaimRewards_stillPayTheFee() public {
+        uint256 arrived = 1000e18;
+        uint256 expectedFee = (arrived * COMPOUND_FEE) / 10000;
+
+        // Not a claimRewards call — the tokens simply show up, exactly as they would after a
+        // third party called distributor.claim(strategy, ...).
+        rewardToken.mint(address(strategy), arrived);
+        assertEq(rewardToken.balanceOf(feeRecipient), 0, "nothing charged yet");
+        assertEq(strategy.pendingRewardFee(address(rewardToken)), expectedFee, "the fee is owed");
+
+        strategy.sweepRewardFees(address(rewardToken));
+
+        assertEq(rewardToken.balanceOf(feeRecipient), expectedFee, "fee collected on the balance");
+        assertEq(rewardToken.balanceOf(address(strategy)), arrived - expectedFee);
+        assertEq(strategy.pendingRewardFee(address(rewardToken)), 0, "nothing left owing");
+    }
+
+    /// @notice A second sweep must not charge the same balance twice.
+    function test_sweepRewardFees_isIdempotent() public {
+        rewardToken.mint(address(strategy), 1000e18);
+
+        strategy.sweepRewardFees(address(rewardToken));
+        uint256 afterFirst = rewardToken.balanceOf(feeRecipient);
+
+        assertEq(strategy.sweepRewardFees(address(rewardToken)), 0, "second sweep charges nothing");
+        assertEq(rewardToken.balanceOf(feeRecipient), afterFirst, "fee recipient unchanged");
+    }
+
+    /// @notice The subtle half. Once a CoW order has drained the settled balance, the recorded
+    ///         "already charged" anchor is stale-high, and the next batch of rewards would hide
+    ///         behind it — permanently, since the owner controls when the permissionless claim
+    ///         happens. The relayer allowance is what makes the outflow visible: it falls by
+    ///         exactly what was pulled, and the sweep credits that against the anchor.
+    function test_rewardsArrivingAfterASwap_stillPayTheFee() public {
+        uint256 firstBatch = 1000e18;
+        rewardToken.mint(address(strategy), firstBatch);
+        strategy.sweepRewardFees(address(rewardToken));
+
+        uint256 feeAfterFirst = rewardToken.balanceOf(feeRecipient);
+        uint256 sellable = rewardToken.balanceOf(address(strategy));
+        assertEq(
+            rewardToken.allowance(address(strategy), strategy.VAULT_RELAYER()),
+            sellable,
+            "relayer armed at exactly the settled balance"
+        );
+
+        // CoW settles the order: the vault relayer pulls the whole sellable balance.
+        vm.prank(strategy.VAULT_RELAYER());
+        rewardToken.transferFrom(address(strategy), makeAddr("cowSettlement"), sellable);
+        assertEq(rewardToken.balanceOf(address(strategy)), 0);
+
+        // Next epoch's rewards land by the permissionless route, smaller than what just left.
+        uint256 secondBatch = 400e18;
+        uint256 expectedSecondFee = (secondBatch * COMPOUND_FEE) / 10000;
+        rewardToken.mint(address(strategy), secondBatch);
+
+        assertEq(strategy.pendingRewardFee(address(rewardToken)), expectedSecondFee, "second batch owes its fee");
+        strategy.sweepRewardFees(address(rewardToken));
+
+        assertEq(
+            rewardToken.balanceOf(feeRecipient) - feeAfterFirst, expectedSecondFee, "second batch was charged in full"
+        );
+    }
+
+    /// @notice The gate: no reward token can be swapped out while it still owes a fee.
+    function test_isValidSignature_refusesUntilTheRewardFeeIsSettled() public {
+        rewardToken.mint(address(strategy), 1000e18);
+
+        bytes memory encodedOrder = abi.encode(
+            GPv2Order.Data({
+                sellToken: IERC20(address(rewardToken)),
+                buyToken: IERC20(address(underlying)),
+                receiver: address(strategy),
+                sellAmount: 1000e18,
+                buyAmount: 1,
+                validTo: uint32(block.timestamp + 1 hours),
+                appData: keccak256(bytes('{"appCode":"Mamo","metadata":{},"version":"1.3.0"}')),
+                feeAmount: 0,
+                kind: GPv2Order.KIND_SELL,
+                partiallyFillable: false,
+                sellTokenBalance: GPv2Order.BALANCE_ERC20,
+                buyTokenBalance: GPv2Order.BALANCE_ERC20
+            })
+        );
+
+        vm.expectRevert("Reward fee not settled");
+        strategy.isValidSignature(bytes32(0), encodedOrder);
+
+        strategy.sweepRewardFees(address(rewardToken));
+
+        // Same order, same (deliberately wrong) digest: the fee gate no longer stops it, so the
+        // revert moves on to the ordinary order-binding check.
+        vm.expectRevert("bad digest");
+        strategy.isValidSignature(bytes32(0), encodedOrder);
+    }
+
+    /// @notice Sherlock #49, the recovery route. recoverERC20 is an unconditional owner exit, so
+    ///         it has to settle the fee before it hands anything over — and settle again after,
+    ///         or the recovered amount would become free headroom for the next batch.
+    function test_recoverERC20_cannotEscapeTheRewardFee() public {
+        uint256 arrived = 1000e18;
+        uint256 expectedFee = (arrived * COMPOUND_FEE) / 10000;
+        rewardToken.mint(address(strategy), arrived);
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "ERC20InsufficientBalance(address,uint256,uint256)", address(strategy), arrived - expectedFee, arrived
+            )
+        );
+        strategy.recoverERC20(address(rewardToken), owner, arrived);
+
+        vm.prank(owner);
+        strategy.recoverERC20(address(rewardToken), owner, arrived - expectedFee);
+
+        assertEq(rewardToken.balanceOf(feeRecipient), expectedFee, "fee was taken before the owner was paid");
+        assertEq(rewardToken.balanceOf(owner), arrived - expectedFee, "owner only gets the remainder");
+        assertEq(rewardToken.balanceOf(address(strategy)), 0);
+
+        // The recovery must not leave headroom the next batch can hide behind.
+        uint256 secondBatch = 300e18;
+        rewardToken.mint(address(strategy), secondBatch);
+        assertEq(
+            strategy.pendingRewardFee(address(rewardToken)),
+            (secondBatch * COMPOUND_FEE) / 10000,
+            "the batch after a recovery still owes its fee"
+        );
+    }
+
+    function test_sweepRewardFees_rejectsTheStrategyToken() public {
+        // Approving the CoW relayer on the underlying would put every user deposit in reach of an
+        // order, so the strategy's own asset can never be settled as a reward.
+        vm.expectRevert("Not a reward token");
+        strategy.sweepRewardFees(address(underlying));
     }
 
     function test_claimRewards_repeatedClaimsChargeOnlyTheNewDelta() public {
@@ -303,6 +447,32 @@ contract MultiMarketStrategyUnitTest is Test {
 
         // The mToken keeps exactly its configured half — nothing was over-allocated to it.
         assertEq(mToken.balanceOfUnderlying(address(strategy)), 500e18);
+    }
+
+    /// @notice The zero-balance branch. A strategy that happens to hold nothing when a market is
+    ///         deactivated is stuck: deposit() refuses to run while the active splits are
+    ///         incomplete, and updatePosition() is the only way to complete them — so if it also
+    ///         refuses at zero balance the strategy can never be funded again. Note this is not
+    ///         reachable by funding first: the sibling test below is the funded path, which is
+    ///         exactly the branch that hid this.
+    function test_updatePosition_repairsSplitsOnAnUnfundedStrategy() public {
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(address(underlying), address(vault));
+
+        // Nothing was ever deposited.
+        assertEq(underlying.balanceOf(address(strategy)), 0);
+
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
+        updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 10000});
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+
+        assertEq(strategy.marketSplitBps(address(mToken)), 10000, "splits repaired");
+        assertEq(strategy.marketSplitBps(address(vault)), 0, "deactivated market zeroed");
+
+        // And the strategy is usable again.
+        _deposit(1000e18);
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 1000e18);
     }
 
     function test_deposit_worksAgainOnceAllocationIsRestored() public {

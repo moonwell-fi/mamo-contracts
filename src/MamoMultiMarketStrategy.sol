@@ -68,10 +68,10 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     address public constant WETH = 0x4200000000000000000000000000000000000006;
 
     /// @notice The exact CoW Protocol appData document every reward order must carry.
-    /// @dev No hooks: the compound fee is taken at claim time by {claimRewards}, so the balance an
-    ///      order can sell is already net of fees and the order needs no pre-hook. The previous
-    ///      design pinned a `transferFrom(this, feeRecipient, fee)` pre-hook, which could never
-    ///      succeed — for transferFrom the spender is the CALLER (HooksTrampoline), and this
+    /// @dev No hooks: the compound fee is settled on-chain by {sweepRewardFees}, so the balance an
+    ///      order is allowed to sell is already net of fees and the order needs no pre-hook. The
+    ///      previous design pinned a `transferFrom(this, feeRecipient, fee)` pre-hook, which could
+    ///      never succeed — for transferFrom the spender is the CALLER (HooksTrampoline), and this
     ///      strategy only ever approves VAULT_RELAYER. The trampoline swallows hook reverts, so
     ///      settlement proceeded and the fee was silently never collected. Approving the
     ///      trampoline is NOT the fix: CoW documents that allowances granted to it are usable by
@@ -119,6 +119,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     // Slot 61: per-market splits keyed by market address
     mapping(address => uint256) public marketSplitBps;
 
+    // Slot 62: how much of the CURRENT balance of a reward token has already had the compound fee
+    // charged on it. Together with the VAULT_RELAYER allowance (which this contract is the only
+    // writer of) it is enough to reconstruct, at any later time, how much of the balance is
+    // freshly arrived and still owes the fee — see {_unchargedRewards}.
+    mapping(address => uint256) public rewardFeeCharged;
+
     // Events
     event Deposit(address indexed asset, uint256 amount);
     event DepositIdle(address indexed asset, uint256 amount);
@@ -128,12 +134,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
     event RewardsClaimed(address[] rewardTokens, uint256[] rewardAmounts);
     event CompoundFeeCollected(address indexed feeRecipient, address[] rewardTokens, uint256[] feeAmounts);
+    event RewardFeeSettled(address indexed rewardToken, address indexed feeRecipient, uint256 feeAmount);
     event MarketRegistryMigrated(address indexed marketRegistry);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
-        address mamoBackend;
         address token;
         address slippagePriceChecker;
         address feeRecipient;
@@ -182,7 +188,6 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      */
     function initialize(InitParams calldata params) external initializer {
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
-        require(params.mamoBackend != address(0), "Invalid mamoBackend address");
         require(params.token != address(0), "Invalid token address");
         require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
@@ -222,9 +227,13 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         }
         _validateTotalSplit();
 
-        // Approve CowSwap for each reward token
+        // Reward tokens are validated here but deliberately NOT given a standing allowance. The
+        // CoW vault relayer is approved for exactly the fee-settled balance by {sweepRewardFees},
+        // which is what lets a later settlement see how much the relayer pulled (see
+        // {_unchargedRewards}); an unlimited, never-decreasing allowance would erase that signal
+        // and with it the only defence against rewards that arrive outside {claimRewards}.
         for (uint256 i = 0; i < params.rewardTokens.length; i++) {
-            _approveCowSwap(params.rewardTokens[i], type(uint256).max);
+            _requireRewardToken(params.rewardTokens[i]);
         }
     }
 
@@ -260,8 +269,27 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
     // ==================== OWNER FUNCTIONS ====================
 
-    function approveCowSwap(address tokenAddress, uint256 amount) public onlyOwner {
-        _approveCowSwap(tokenAddress, amount);
+    /**
+     * @notice Recovers ERC20 tokens from this contract, settling any compound fee owed first
+     * @dev Sherlock #49. Reward tokens sit here as plain balances, so the inherited unconditional
+     *      owner recovery is otherwise a complete escape hatch from the compound fee: claim (or
+     *      let anyone claim) the rewards, sweep them out before any order exists, done. Settling
+     *      first means the owner can only ever take the post-fee remainder. The trailing settle is
+     *      what makes it stick — it drops the anchor and the relayer allowance back down to what
+     *      is left, so the next batch of rewards cannot hide behind the recovered amount.
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) public override onlyOwner {
+        bool isReward = tokenAddress != address(token) && slippagePriceChecker.isRewardToken(tokenAddress);
+
+        if (isReward) {
+            sweepRewardFees(tokenAddress);
+        }
+
+        super.recoverERC20(tokenAddress, to, amount);
+
+        if (isReward) {
+            sweepRewardFees(tokenAddress);
+        }
     }
 
     function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
@@ -313,13 +341,17 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /**
      * @notice Updates the position across markets with new splits (address-keyed)
      * @param updates Array of market address + new splitBps pairs
+     * @dev Runs on an EMPTY strategy too. This is the only way to repair the split configuration
+     *      after a market is deactivated (deposit() refuses to run while the active splits are
+     *      incomplete), so refusing to run at zero balance would permanently brick every strategy
+     *      that happened to hold nothing at that moment — with no way back, because it cannot be
+     *      funded either. There is simply nothing to re-deposit in that case.
      */
     function updatePosition(MarketSplitUpdate[] calldata updates) external onlyBackend {
         // Withdraw everything from all markets
         _withdrawAllFromMarkets();
 
         uint256 totalTokenBalance = token.balanceOf(address(this));
-        require(totalTokenBalance > 0, "Nothing to rebalance");
 
         // Zero out all splits first
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
@@ -338,19 +370,21 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         _validateTotalSplit();
 
         // Re-deposit via depositInternal
-        depositInternal(totalTokenBalance);
+        if (totalTokenBalance > 0) {
+            depositInternal(totalTokenBalance);
+        }
 
         emit PositionUpdated(updates);
     }
 
     /**
      * @notice Claims Merkl rewards for this strategy and settles the compound fee on what arrived
-     * @dev The fee is charged HERE, on the claimed delta, and not inside the CoW order. Two
-     *      reasons: a pre-hook fee transfer can never work (see EXPECTED_APP_DATA), and reward
-     *      tokens sitting as plain balances are reachable by the owner through the inherited
-     *      recoverERC20 — so any fee that is only owed at swap time can be walked away from
-     *      before an order exists. Collecting at claim time means the balance a later order can
-     *      sell is already net of fees and there is nothing left to sidestep.
+     * @dev Convenience only. The fee is NOT charged on the claimed delta: Merkl's distributor
+     *      exposes a permissionless `claim`, so anyone — the strategy owner included — can pull
+     *      this strategy's rewards straight from the distributor and the tokens land here without
+     *      this function ever running. The fee therefore has to be a property of the BALANCE, not
+     *      of the call that fetched it; {sweepRewardFees} is where it is actually charged, and no
+     *      CoW order for a reward token can settle until it has been (see {isValidSignature}).
      */
     function claimRewards(
         address[] calldata rewardTokens,
@@ -362,38 +396,62 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
         uint256 length = rewardTokens.length;
         address[] memory accounts = new address[](length);
-        uint256[] memory balancesBefore = new uint256[](length);
         for (uint256 i = 0; i < length; i++) {
             accounts[i] = address(this);
-            balancesBefore[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
 
         IMerkleDistributor(MERKLE_PROTOCOL_DISTRIBUTOR).claim(accounts, rewardTokens, rewardAmounts, proofs);
 
         emit RewardsClaimed(rewardTokens, rewardAmounts);
 
-        if (compoundFee == 0 || length == 0) {
-            return;
-        }
-
         uint256[] memory feeAmounts = new uint256[](length);
-
-        // Two phases on purpose: every delta is measured against the pre-claim snapshot BEFORE any
-        // fee leaves, so a token that appears twice in the array cannot have the second entry's
-        // delta shrunk by the first entry's transfer.
         for (uint256 i = 0; i < length; i++) {
-            uint256 claimed = IERC20(rewardTokens[i]).balanceOf(address(this)) - balancesBefore[i];
-            feeAmounts[i] = (claimed * compoundFee) / SPLIT_TOTAL;
+            // A duplicated token settles to zero on its second visit — the first visit already
+            // moved the whole uncharged balance behind the anchor.
+            feeAmounts[i] = sweepRewardFees(rewardTokens[i]);
         }
+
+        emit CompoundFeeCollected(feeRecipient, rewardTokens, feeAmounts);
+    }
+
+    /**
+     * @notice Charges the compound fee on any balance of `rewardToken` that has not been charged
+     *         yet, and re-arms the CoW vault relayer allowance at the fee-settled balance
+     * @dev PERMISSIONLESS on purpose. It is the single settlement point for the fee regardless of
+     *      how the tokens got here — a backend {claimRewards}, a permissionless distributor claim
+     *      by the owner, or a plain transfer. Anyone may force it, and {isValidSignature} refuses
+     *      to sign an order for a reward token that still owes a fee, so the only way to turn
+     *      rewards into strategy tokens runs through here.
+     * @param rewardToken The reward token to settle
+     * @return fee The amount transferred to the fee recipient by this call
+     */
+    function sweepRewardFees(address rewardToken) public returns (uint256 fee) {
+        _requireRewardToken(rewardToken);
+
+        uint256 balance = IERC20(rewardToken).balanceOf(address(this));
+        fee = (_unchargedRewards(rewardToken, balance) * compoundFee) / SPLIT_TOTAL;
 
         address recipient = feeRecipient;
-        for (uint256 i = 0; i < length; i++) {
-            if (feeAmounts[i] > 0) {
-                IERC20(rewardTokens[i]).safeTransfer(recipient, feeAmounts[i]);
-            }
+        if (fee > 0) {
+            IERC20(rewardToken).safeTransfer(recipient, fee);
+            balance -= fee;
         }
 
-        emit CompoundFeeCollected(recipient, rewardTokens, feeAmounts);
+        // Re-anchor BOTH observables to the post-fee balance. The next settlement compares them:
+        // the relayer allowance falls by exactly what CoW pulled, and crediting that outflow is
+        // what stops a stale anchor from masking an equal amount of freshly arrived rewards.
+        rewardFeeCharged[rewardToken] = balance;
+        IERC20(rewardToken).forceApprove(VAULT_RELAYER, balance);
+
+        emit RewardFeeSettled(rewardToken, recipient, fee);
+    }
+
+    /**
+     * @notice The compound fee `rewardToken` currently owes, i.e. what {sweepRewardFees} would pay
+     */
+    function pendingRewardFee(address rewardToken) public view returns (uint256) {
+        uint256 balance = IERC20(rewardToken).balanceOf(address(this));
+        return (_unchargedRewards(rewardToken, balance) * compoundFee) / SPLIT_TOTAL;
     }
 
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
@@ -460,13 +518,19 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     ///      sell-order mechanics + price check live in GPv2OrderChecks.validate — one
     ///      implementation for this path and both of LPCompoundModule's. Revert strings are the
     ///      repo-canonical short set (see the library).
-    ///      The order carries no fee hook: the compound fee was already taken in claimRewards, so
-    ///      whatever balance is sellable here is the strategy's own share.
+    ///      The order carries no fee hook. Instead this signature is refused outright while the
+    ///      sell token still owes a compound fee, so rewards cannot be swapped out from under the
+    ///      fee no matter how they arrived; {sweepRewardFees} is permissionless, so clearing the
+    ///      gate never depends on a privileged party. Dust is deliberately allowed through: the
+    ///      test is on the fee OWED, so an attacker cannot block every order by donating a few wei
+    ///      of a reward token. CoW cannot reach the untaxed remainder anyway — the relayer's
+    ///      allowance is re-armed at the settled balance and never above it.
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory _order = abi.decode(encodedOrder, (GPv2Order.Data));
 
         require(_order.sellToken != token, "Sell token can't be strategy token");
         require(_order.buyToken == token, "Buy token must match the strategy token");
+        require(pendingRewardFee(address(_order.sellToken)) == 0, "Reward fee not settled");
 
         GPv2OrderChecks.validate(
             _order,
@@ -686,9 +750,35 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(total == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
     }
 
-    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
-        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
-        IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
+    /**
+     * @notice How much of `balance` has never had the compound fee charged on it
+     * @dev Two observables, both of which only this contract writes:
+     *      - `rewardFeeCharged[t]`, set to the whole balance at the end of every settlement;
+     *      - the VAULT_RELAYER allowance, set to the same value at the same moment.
+     *      Between settlements the relayer is the only party that can move tokens out without
+     *      going through this contract, and every unit it moves decrements the allowance by one.
+     *      So `charged - allowance` is exactly the CoW outflow since the last settlement, and
+     *      subtracting it prevents the (now too high) anchor from swallowing an equal amount of
+     *      rewards that arrived afterwards — the concrete bypass being: let a swap drain the
+     *      balance, then permissionlessly claim the next epoch's rewards from the distributor.
+     *      The final clamp covers any other outflow the contract itself performed.
+     */
+    function _unchargedRewards(address rewardToken, uint256 balance) internal view returns (uint256) {
+        uint256 charged = rewardFeeCharged[rewardToken];
+
+        uint256 allowanceLeft = IERC20(rewardToken).allowance(address(this), VAULT_RELAYER);
+        if (allowanceLeft < charged) charged = allowanceLeft;
+        if (charged > balance) charged = balance;
+
+        return balance - charged;
+    }
+
+    /// @dev A reward token is anything the price checker will price that is NOT the strategy's own
+    ///      asset. The second half matters: {sweepRewardFees} approves the relayer, and approving
+    ///      it on the underlying would put every user deposit within reach of a CoW order.
+    function _requireRewardToken(address rewardToken) internal view {
+        require(rewardToken != address(token), "Not a reward token");
+        require(slippagePriceChecker.isRewardToken(rewardToken), "Token not allowed");
     }
 
     /**

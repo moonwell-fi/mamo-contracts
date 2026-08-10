@@ -43,7 +43,11 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
      * @param to The address to send the tokens to
      * @param amount The amount of tokens to recover
      */
-    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyOwner {
+    /// @dev `public virtual` rather than `external` so a strategy that holds tokens with an
+    ///      obligation attached (e.g. reward tokens owing a protocol fee) can settle it before the
+    ///      owner is allowed to take the balance out. `super.recoverERC20` is only reachable from
+    ///      an override if this is `public`.
+    function recoverERC20(address tokenAddress, address to, uint256 amount) public virtual onlyOwner {
         require(to != address(0), "Cannot send to zero address");
         require(amount > 0, "Amount must be greater than 0");
 

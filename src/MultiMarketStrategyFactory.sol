@@ -128,7 +128,6 @@ contract MultiMarketStrategyFactory {
         MamoMultiMarketStrategy(payable(strategy)).initialize(
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
-                mamoBackend: mamoStrategyRegistryInterface.getBackendAddress(),
                 token: token,
                 slippagePriceChecker: slippagePriceChecker,
                 feeRecipient: feeRecipient,

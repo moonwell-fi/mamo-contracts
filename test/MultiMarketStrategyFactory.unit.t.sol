@@ -573,7 +573,6 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
     function testImplementationCannotBeInitialized() public {
         MamoMultiMarketStrategy.InitParams memory params = MamoMultiMarketStrategy.InitParams({
             mamoStrategyRegistry: registryAddr,
-            mamoBackend: backend,
             token: token,
             slippagePriceChecker: slippagePriceChecker,
             feeRecipient: feeRecipient,
