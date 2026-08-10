@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+
+import {Test} from "@forge-std/Test.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+
+/// @notice Unit coverage for the registry's privileged-identity and strategy-type bookkeeping.
+/// @dev Deliberately NOT a fork test: the integration suite binds to the already-deployed
+///      MAMO_STRATEGY_REGISTRY on Base, so it can never exercise changes to this source file.
+contract MamoStrategyRegistryUnitTest is Test {
+    MamoStrategyRegistry public registry;
+
+    address public admin = makeAddr("admin");
+    address public backend = makeAddr("backend");
+    address public guardian = makeAddr("guardian");
+
+    /// @dev Hoisted: a call in ARGUMENT position (registry.BACKEND_ROLE()) is evaluated first and
+    ///      consumes a pending one-shot vm.prank, so the guarded call would run unpranked.
+    bytes32 public backendRole;
+    bytes32 public adminRole;
+
+    function setUp() public {
+        registry = new MamoStrategyRegistry(admin, backend, guardian);
+        backendRole = registry.BACKEND_ROLE();
+        adminRole = registry.DEFAULT_ADMIN_ROLE();
+    }
+
+    // ==================== MOO-731: OPERATOR IDENTITY IS NOT SET ORDERING ====================
+
+    function testStrategyOperatorDefaultsToConstructorBackend() public view {
+        assertEq(registry.strategyOperator(), backend);
+        assertEq(registry.getBackendAddress(), backend);
+    }
+
+    /// @notice The finding: BACKEND_ROLE is shared with the factories, and EnumerableSet removal
+    ///         is swap-and-pop. Revoking the member at index 0 used to move the LAST member —
+    ///         plausibly a factory — into the operator slot, silently handing it updatePosition /
+    ///         claimRewards / setFeeRecipient rights (and halting the real operator).
+    function testRevokingRoleMemberZeroDoesNotMoveOperator() public {
+        address factory = makeAddr("factory");
+
+        vm.startPrank(admin);
+        registry.grantRole(backendRole, factory);
+        vm.stopPrank();
+
+        // Sanity: the pre-fix implementation read exactly this member.
+        assertEq(registry.getRoleMember(backendRole, 0), backend);
+
+        vm.prank(admin);
+        registry.revokeRole(backendRole, backend);
+
+        // Swap-and-pop really did move the factory into slot zero...
+        assertEq(registry.getRoleMember(backendRole, 0), factory, "swap-and-pop moved the factory");
+        // ...but the operator identity is unaffected by set ordering.
+        assertEq(registry.getBackendAddress(), backend, "operator must not follow set ordering");
+        assertTrue(registry.getBackendAddress() != factory, "factory must not inherit operator rights");
+    }
+
+    function testSetStrategyOperator() public {
+        address newOperator = makeAddr("newOperator");
+
+        vm.expectEmit(true, true, false, false);
+        emit MamoStrategyRegistry.StrategyOperatorUpdated(backend, newOperator);
+        vm.prank(admin);
+        registry.setStrategyOperator(newOperator);
+
+        assertEq(registry.strategyOperator(), newOperator);
+        assertEq(registry.getBackendAddress(), newOperator);
+    }
+
+    function testRevertSetStrategyOperatorNotAdmin() public {
+        vm.prank(backend);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, backend, adminRole)
+        );
+        registry.setStrategyOperator(makeAddr("newOperator"));
+    }
+
+    function testRevertSetStrategyOperatorZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert("Invalid strategy operator address");
+        registry.setStrategyOperator(address(0));
+    }
+
+    /// @notice The rotation the finding describes: revoke the compromised key, grant the new one,
+    ///         move the operator. Nothing is derived from the member set at any point.
+    function testKeyRotationKeepsOperatorExplicit() public {
+        address newBackend = makeAddr("newBackend");
+
+        vm.startPrank(admin);
+        registry.grantRole(backendRole, newBackend);
+        registry.revokeRole(backendRole, backend);
+        registry.setStrategyOperator(newBackend);
+        vm.stopPrank();
+
+        assertEq(registry.getBackendAddress(), newBackend);
+        assertFalse(registry.hasRole(backendRole, backend));
+    }
+
+    // ==================== MOO-737: EXPLICIT TYPE IDS ADVANCE THE COUNTER ====================
+
+    function testExplicitStrategyTypeIdAdvancesCounter() public {
+        assertEq(registry.nextStrategyTypeId(), 1);
+
+        vm.prank(admin);
+        registry.whitelistImplementation(makeAddr("implA"), 7);
+
+        assertEq(registry.nextStrategyTypeId(), 8, "counter must move past an explicit id");
+    }
+
+    /// @notice The finding: an explicit id occupying the slot the counter is about to hand out
+    ///         made the next automatic registration overwrite latestImplementationById, which
+    ///         permanently blocks addStrategy for the earlier implementation.
+    function testAutomaticIdDoesNotCollideWithExplicitId() public {
+        address implA = makeAddr("implA");
+        address implB = makeAddr("implB");
+
+        vm.startPrank(admin);
+        registry.whitelistImplementation(implA, 1);
+        uint256 assignedB = registry.whitelistImplementation(implB, 0);
+        vm.stopPrank();
+
+        assertEq(assignedB, 2, "automatic id must not reuse an occupied slot");
+        assertEq(registry.latestImplementationById(1), implA, "earlier implementation still current for its type");
+        assertEq(registry.latestImplementationById(2), implB);
+        assertEq(registry.implementationToId(implA), 1);
+        assertEq(registry.implementationToId(implB), 2);
+    }
+
+    function testExplicitIdBelowCounterDoesNotRewindIt() public {
+        vm.startPrank(admin);
+        registry.whitelistImplementation(makeAddr("implA"), 0); // id 1, counter -> 2
+        registry.whitelistImplementation(makeAddr("implB"), 0); // id 2, counter -> 3
+        uint256 assigned = registry.whitelistImplementation(makeAddr("implC"), 1); // rollout for type 1
+        vm.stopPrank();
+
+        assertEq(assigned, 1);
+        assertEq(registry.nextStrategyTypeId(), 3, "counter must not rewind");
+    }
+
+    /// @notice Re-registering an occupied id is the implementation ROLLOUT path and must keep
+    ///         working — rejecting occupied slots would break upgrades, not collisions.
+    function testImplementationRolloutReusesTypeId() public {
+        address v1 = makeAddr("v1");
+        address v2 = makeAddr("v2");
+
+        vm.startPrank(admin);
+        uint256 typeId = registry.whitelistImplementation(v1, 0);
+        registry.whitelistImplementation(v2, typeId);
+        vm.stopPrank();
+
+        assertEq(registry.latestImplementationById(typeId), v2);
+        assertTrue(registry.whitelistedImplementations(v1), "old implementation stays whitelisted for upgrades");
+    }
+}

@@ -17,7 +17,6 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 interface IMerkleDistributor {
     function claim(
@@ -68,6 +67,17 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /// @notice The address of the WETH token
     address public constant WETH = 0x4200000000000000000000000000000000000006;
 
+    /// @notice The exact CoW Protocol appData document every reward order must carry.
+    /// @dev No hooks: the compound fee is taken at claim time by {claimRewards}, so the balance an
+    ///      order can sell is already net of fees and the order needs no pre-hook. The previous
+    ///      design pinned a `transferFrom(this, feeRecipient, fee)` pre-hook, which could never
+    ///      succeed — for transferFrom the spender is the CALLER (HooksTrampoline), and this
+    ///      strategy only ever approves VAULT_RELAYER. The trampoline swallows hook reverts, so
+    ///      settlement proceeded and the fee was silently never collected. Approving the
+    ///      trampoline is NOT the fix: CoW documents that allowances granted to it are usable by
+    ///      anyone.
+    string internal constant EXPECTED_APP_DATA = '{"appCode":"Mamo","metadata":{},"version":"1.3.0"}';
+
     // ==================== STORAGE LAYOUT ====================
     // Slots 0-49: BaseStrategy (mamoStrategyRegistry, strategyTypeId, __gap[48])
 
@@ -117,6 +127,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
     event RewardsClaimed(address[] rewardTokens, uint256[] rewardAmounts);
+    event CompoundFeeCollected(address indexed feeRecipient, address[] rewardTokens, uint256[] feeAmounts);
     event MarketRegistryMigrated(address indexed marketRegistry);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
@@ -157,6 +168,14 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
     // ==================== INITIALIZER ====================
 
+    /// @notice Locks the implementation so it can never be initialized directly.
+    /// @dev Without this the first caller of {initialize} on the implementation becomes its owner
+    ///      (initialize takes the owner from caller-supplied params) and gains the inherited
+    ///      recoverERC20/recoverETH. Proxies are unaffected — they initialize their own storage.
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice Initializer for new deployments using MarketRegistry
      * @param params The initialization parameters struct
@@ -188,8 +207,17 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(regMarkets.length > 0, "No markets in registry");
         require(params.defaultSplitBps.length == regMarkets.length, "Split count must match market count");
 
+        // Inactive registry entries are skipped, not rejected. MarketRegistry never removes a
+        // market — retiring one is a deactivation — so requiring every historical entry to be
+        // active would make every creation after the first retirement revert. An inactive entry
+        // may only carry a zero allocation; the ACTIVE splits still have to total SPLIT_TOTAL,
+        // which _validateTotalSplit enforces (it, depositInternal and _withdrawProRata all agree
+        // on skipping inactive markets).
         for (uint256 i = 0; i < regMarkets.length; i++) {
-            require(regMarkets[i].active, "Market not active");
+            if (!regMarkets[i].active) {
+                require(params.defaultSplitBps[i] == 0, "Inactive market must have zero split");
+                continue;
+            }
             marketSplitBps[regMarkets[i].target] = params.defaultSplitBps[i];
         }
         _validateTotalSplit();
@@ -315,6 +343,15 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         emit PositionUpdated(updates);
     }
 
+    /**
+     * @notice Claims Merkl rewards for this strategy and settles the compound fee on what arrived
+     * @dev The fee is charged HERE, on the claimed delta, and not inside the CoW order. Two
+     *      reasons: a pre-hook fee transfer can never work (see EXPECTED_APP_DATA), and reward
+     *      tokens sitting as plain balances are reachable by the owner through the inherited
+     *      recoverERC20 — so any fee that is only owed at swap time can be walked away from
+     *      before an order exists. Collecting at claim time means the balance a later order can
+     *      sell is already net of fees and there is nothing left to sidestep.
+     */
     function claimRewards(
         address[] calldata rewardTokens,
         uint256[] calldata rewardAmounts,
@@ -323,14 +360,40 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(rewardTokens.length == rewardAmounts.length, "Reward tokens and amounts length mismatch");
         require(rewardTokens.length == proofs.length, "Reward tokens and proofs length mismatch");
 
-        address[] memory accounts = new address[](rewardTokens.length);
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        uint256 length = rewardTokens.length;
+        address[] memory accounts = new address[](length);
+        uint256[] memory balancesBefore = new uint256[](length);
+        for (uint256 i = 0; i < length; i++) {
             accounts[i] = address(this);
+            balancesBefore[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
 
         IMerkleDistributor(MERKLE_PROTOCOL_DISTRIBUTOR).claim(accounts, rewardTokens, rewardAmounts, proofs);
 
         emit RewardsClaimed(rewardTokens, rewardAmounts);
+
+        if (compoundFee == 0 || length == 0) {
+            return;
+        }
+
+        uint256[] memory feeAmounts = new uint256[](length);
+
+        // Two phases on purpose: every delta is measured against the pre-claim snapshot BEFORE any
+        // fee leaves, so a token that appears twice in the array cannot have the second entry's
+        // delta shrunk by the first entry's transfer.
+        for (uint256 i = 0; i < length; i++) {
+            uint256 claimed = IERC20(rewardTokens[i]).balanceOf(address(this)) - balancesBefore[i];
+            feeAmounts[i] = (claimed * compoundFee) / SPLIT_TOTAL;
+        }
+
+        address recipient = feeRecipient;
+        for (uint256 i = 0; i < length; i++) {
+            if (feeAmounts[i] > 0) {
+                IERC20(rewardTokens[i]).safeTransfer(recipient, feeAmounts[i]);
+            }
+        }
+
+        emit CompoundFeeCollected(recipient, rewardTokens, feeAmounts);
     }
 
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
@@ -397,39 +460,20 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     ///      sell-order mechanics + price check live in GPv2OrderChecks.validate — one
     ///      implementation for this path and both of LPCompoundModule's. Revert strings are the
     ///      repo-canonical short set (see the library).
+    ///      The order carries no fee hook: the compound fee was already taken in claimRewards, so
+    ///      whatever balance is sellable here is the strategy's own share.
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory _order = abi.decode(encodedOrder, (GPv2Order.Data));
 
         require(_order.sellToken != token, "Sell token can't be strategy token");
         require(_order.buyToken == token, "Buy token must match the strategy token");
 
-        uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
-
-        bytes memory preHookCalldata =
-            abi.encodeWithSelector(IERC20.transferFrom.selector, address(this), feeRecipient, feeAmount);
-
-        string memory preHookCalldataStr = string.concat("0x", _bytesToHexString(preHookCalldata));
-
-        string memory targetAddress = Strings.toHexString(uint160(address(_order.sellToken)), 20);
-
-        string memory expectedAppData = string(
-            abi.encodePacked(
-                '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
-                preHookCalldataStr,
-                '","gasLimit":"',
-                Strings.toString(hookGasLimit),
-                '","target":"',
-                targetAddress,
-                '"}],"version":"0.1.0"}},"version":"1.3.0"}'
-            )
-        );
-
         GPv2OrderChecks.validate(
             _order,
             GPv2OrderChecks.Binding({
                 orderDigest: orderDigest,
                 domainSeparator: DOMAIN_SEPARATOR,
-                expectedAppData: keccak256(bytes(expectedAppData))
+                expectedAppData: keccak256(bytes(EXPECTED_APP_DATA))
             }),
             address(this),
             slippagePriceChecker,
@@ -437,6 +481,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         );
 
         return MAGIC_VALUE;
+    }
+
+    /// @notice The appData document (and its hash) every reward order must carry
+    function expectedAppData() external pure returns (string memory doc, bytes32 hash) {
+        doc = EXPECTED_APP_DATA;
+        hash = keccak256(bytes(EXPECTED_APP_DATA));
     }
 
     // ==================== INTERNAL FUNCTIONS ====================
@@ -449,14 +499,24 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         uint256 deposited = 0;
 
-        // Find the last active market with nonzero split for remainder handling
+        // Find the last active market with nonzero split for remainder handling, and check the
+        // active allocation is complete. The remainder branch below is a DUST sink (integer
+        // division leftovers); without this guard it silently absorbs the entire allocation of a
+        // market that was just deactivated — 40/30/30 with B deactivated would send 60% of the
+        // deposit to C, which is configured for 30%. Depositing is blocked during that window
+        // until updatePosition (or the factory's split config) restores a complete allocation.
         uint256 lastActiveIdx = type(uint256).max;
+        uint256 totalActiveSplit = 0;
         for (uint256 i = regMarkets.length; i > 0; i--) {
-            if (regMarkets[i - 1].active && marketSplitBps[regMarkets[i - 1].target] > 0) {
+            if (!regMarkets[i - 1].active) continue;
+
+            uint256 activeSplit = marketSplitBps[regMarkets[i - 1].target];
+            totalActiveSplit += activeSplit;
+            if (activeSplit > 0 && lastActiveIdx == type(uint256).max) {
                 lastActiveIdx = i - 1;
-                break;
             }
         }
+        require(totalActiveSplit == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (!regMarkets[i].active) continue;
@@ -493,29 +553,68 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     }
 
     /**
-     * @notice Withdraws pro-rata from active markets based on their split
+     * @notice Withdraws `amountNeeded` underlying tokens, pro-rata by split where possible
      * @param amountNeeded The total amount of underlying tokens needed
-     * @dev Integer division may leave up to (N-1) wei undrawn where N = active markets.
-     *      Users can call withdrawAll() to fully drain all markets if withdraw() reverts on dust.
+     * @dev Splits are a target allocation, not a statement about what each market currently holds.
+     *      Balances drift with interest, an ERC4626 vault can cap what it will pay out, exit fees
+     *      make a share worth less than its configured share of principal, and during the
+     *      deactivate-then-updatePosition window the active splits do not describe the whole
+     *      position at all. So each market is asked for at most its CURRENT capacity, the
+     *      shortfall is carried forward, and a second pass sweeps every market — including
+     *      inactive ones, which still hold funds — until the amount is covered. Anything less
+     *      makes withdraw() revert on ordinary drift while withdrawAll() would have succeeded.
      */
     function _withdrawProRata(uint256 amountNeeded) internal {
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
+        uint256 remaining = amountNeeded;
 
-        for (uint256 i = 0; i < regMarkets.length; i++) {
+        // Pass 1: pro-rata against the configured allocation, capped at each market's capacity.
+        for (uint256 i = 0; i < regMarkets.length && remaining > 0; i++) {
             if (!regMarkets[i].active) continue;
 
             uint256 split = marketSplitBps[regMarkets[i].target];
             if (split == 0) continue;
 
-            uint256 withdrawAmount = (amountNeeded * split) / SPLIT_TOTAL;
-            if (withdrawAmount == 0) continue;
+            uint256 target = (amountNeeded * split) / SPLIT_TOTAL;
+            if (target > remaining) target = remaining;
 
-            if (regMarkets[i].marketType == MarketType.MTOKEN) {
-                require(IMToken(regMarkets[i].target).redeemUnderlying(withdrawAmount) == 0, "Failed to redeem mToken");
-            } else {
-                IERC4626(regMarkets[i].target).withdraw(withdrawAmount, address(this), address(this));
-            }
+            remaining -= _withdrawUpTo(regMarkets[i], target);
         }
+
+        // Pass 2: cover the shortfall from wherever the funds actually are.
+        for (uint256 i = 0; i < regMarkets.length && remaining > 0; i++) {
+            remaining -= _withdrawUpTo(regMarkets[i], remaining);
+        }
+
+        require(remaining == 0, "Withdrawal failed: insufficient market liquidity");
+    }
+
+    /**
+     * @notice Withdraws at most `amount` underlying from a single market
+     * @return withdrawn The amount of underlying tokens this strategy actually received
+     * @dev Measured as a balance delta rather than trusting the requested amount, so a market
+     *      that pays out less (or, for a WETH mToken, pays in native ETH that `receive` wraps)
+     *      is accounted correctly.
+     */
+    function _withdrawUpTo(RegistryMarket memory market, uint256 amount) internal returns (uint256 withdrawn) {
+        if (amount == 0) return 0;
+
+        uint256 balanceBefore = token.balanceOf(address(this));
+
+        if (market.marketType == MarketType.MTOKEN) {
+            uint256 capacity = IMToken(market.target).balanceOfUnderlying(address(this));
+            uint256 toWithdraw = amount > capacity ? capacity : amount;
+            if (toWithdraw == 0) return 0;
+            require(IMToken(market.target).redeemUnderlying(toWithdraw) == 0, "Failed to redeem mToken");
+        } else {
+            // maxWithdraw already accounts for the vault's withdrawal fee and liquidity limits.
+            uint256 capacity = IERC4626(market.target).maxWithdraw(address(this));
+            uint256 toWithdraw = amount > capacity ? capacity : amount;
+            if (toWithdraw == 0) return 0;
+            IERC4626(market.target).withdraw(toWithdraw, address(this), address(this));
+        }
+
+        return token.balanceOf(address(this)) - balanceBefore;
     }
 
     /**
@@ -561,7 +660,10 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
             } else {
                 uint256 shares = IERC4626(regMarkets[i].target).balanceOf(address(this));
                 if (shares > 0) {
-                    total += IERC4626(regMarkets[i].target).convertToAssets(shares);
+                    // previewRedeem, not convertToAssets: per EIP-4626 convertToAssets excludes
+                    // withdrawal fees, so it reports a gross value the shares cannot actually
+                    // deliver — withdraw() would accept an amount the vault then refuses to pay.
+                    total += IERC4626(regMarkets[i].target).previewRedeem(shares);
                 }
             }
         }
@@ -587,19 +689,6 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     function _approveCowSwap(address tokenAddress, uint256 amount) internal {
         require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
         IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
-    }
-
-    function _bytesToHexString(bytes memory _bytes) internal pure returns (string memory) {
-        bytes memory hexString = new bytes(_bytes.length * 2);
-        bytes memory hexChars = "0123456789abcdef";
-
-        for (uint256 i = 0; i < _bytes.length; i++) {
-            uint8 value = uint8(_bytes[i]);
-            hexString[i * 2] = hexChars[value >> 4];
-            hexString[i * 2 + 1] = hexChars[value & 0xf];
-        }
-
-        return string(hexString);
     }
 
     /**

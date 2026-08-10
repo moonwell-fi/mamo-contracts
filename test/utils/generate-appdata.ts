@@ -8,11 +8,19 @@ export const metadataApi = new MetadataApi();
 
 /**
  * Generates appData for Mamo strategy orders
- * @param sellToken The address of the token being sold
- * @param feeRecipient The address that will receive the fee
- * @param feeAmount The amount of fee to be taken (as a string)
- * @param hookGasLimit The gas limit for the pre-hook
- * @param from The address from which the transfer is made
+ *
+ * NOTE: Mamo orders carry NO hooks. The compound fee is settled on-chain by
+ * MamoMultiMarketStrategy.claimRewards, so the balance an order can sell is already net of
+ * fees. The previous version pinned a `transferFrom(strategy, feeRecipient, fee)` pre-hook,
+ * which could never execute — for transferFrom the spender is the caller (HooksTrampoline), and
+ * the strategy only approves the CoW vault relayer. The remaining parameters are kept for
+ * call-site compatibility and are no longer part of the document.
+ *
+ * @param sellToken Unused; kept for call-site compatibility
+ * @param feeRecipient Unused; kept for call-site compatibility
+ * @param feeAmount Unused; kept for call-site compatibility
+ * @param hookGasLimit Unused; kept for call-site compatibility
+ * @param from Unused; kept for call-site compatibility
  * @returns The generated appData document
  */
 export async function generateMamoAppData(
@@ -22,30 +30,10 @@ export async function generateMamoAppData(
   hookGasLimit: number,
   from: string
 ): Promise<AppDataDocument> {
-  // Create the transferFrom calldata for the pre-hook
-  // IERC20.transferFrom selector is 0x23b872dd
-  // We need to encode: transferFrom(from, feeRecipient, feeAmount)
-
-  const hooks = {
-    pre: [
-      {
-        // Create a placeholder for the callData that matches the format expected by the contract
-        // Use FEE_RECIPIENT constant instead of the feeRecipient parameter
-        callData: createTransferFromCalldata(from, feeRecipient, feeAmount),
-        gasLimit: hookGasLimit.toString(),
-        target: sellToken.toLowerCase(),
-      },
-    ],
-    version: "0.1.0",
-  };
-
   // Use the MetadataApi to generate the appData document in the format CoW Swap expects
-  // Register the appData with CoW Swap's API
   const appDataDoc = await metadataApi.generateAppDataDoc({
     appCode: "Mamo",
-    metadata: {
-      hooks,
-    },
+    metadata: {},
   });
 
   // generate app data

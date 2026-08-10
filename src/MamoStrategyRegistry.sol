@@ -32,6 +32,15 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Counter for strategy type IDs
     uint256 public nextStrategyTypeId;
 
+    /// @notice The single address strategies recognise as "the backend operator".
+    /// @dev Deliberately NOT derived from the BACKEND_ROLE member set. BACKEND_ROLE is shared by
+    ///      the operator and every factory that calls {addStrategy}; OpenZeppelin's EnumerableSet
+    ///      removal is swap-and-pop, so reading member index 0 hands the operator identity to
+    ///      whichever member happens to sit in slot zero after a revocation — i.e. it changes
+    ///      during key rotation, the moment it must not. Stored explicitly and moved only by
+    ///      {setStrategyOperator}.
+    address public strategyOperator;
+
     // State variables
     /// @notice Set of all strategy addresses for each user
     mapping(address => EnumerableSet.AddressSet) private _userStrategies;
@@ -63,6 +72,9 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice Emitted when the strategy operator address is changed
+    event StrategyOperatorUpdated(address indexed oldOperator, address indexed newOperator);
+
     /**
      * @notice Constructor that sets up initial roles
      * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the specified addresses
@@ -79,6 +91,11 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
         _grantRole(GUARDIAN_ROLE, guardian);
+
+        // The deployment-time backend is also the initial strategy operator. From here the two
+        // identities move independently: role membership via grant/revoke, the operator via
+        // setStrategyOperator.
+        strategyOperator = backend;
 
         nextStrategyTypeId = 1;
     }
@@ -172,11 +189,13 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Gets the backend address (first member of the BACKEND_ROLE)
-     * @return The address of the backend
+     * @notice Gets the strategy operator address that strategies accept as "the backend"
+     * @dev Returns the explicitly stored {strategyOperator}, never a member of the BACKEND_ROLE
+     *      set — see the note on that variable for why set ordering must not confer privilege.
+     * @return The address of the strategy operator
      */
     function getBackendAddress() external view returns (address) {
-        return getRoleMember(BACKEND_ROLE, 0);
+        return strategyOperator;
     }
 
     // ==================== BACKEND FUNCTIONS ====================
@@ -200,8 +219,15 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         if (strategyTypeId == 0) {
             assignedStrategyTypeId = nextStrategyTypeId++;
         } else {
-            // Otherwise, use the provided strategyTypeId
+            // Otherwise, use the provided strategyTypeId. An explicit ID at or above the counter
+            // must push the counter past it, otherwise the next automatic registration hands out
+            // an ID that is already occupied and silently overwrites latestImplementationById —
+            // which would strand the earlier implementation (addStrategy requires an exact match
+            // against the latest) and make an unrelated implementation its only upgrade target.
             assignedStrategyTypeId = strategyTypeId;
+            if (strategyTypeId >= nextStrategyTypeId) {
+                nextStrategyTypeId = strategyTypeId + 1;
+            }
         }
 
         whitelistedImplementations[implementation] = true;
@@ -249,6 +275,21 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         emit StrategyAdded(user, strategy, implementation);
     }
     // ==================== ADMIN FUNCTIONS ====================
+
+    /**
+     * @notice Sets the address strategies recognise as the backend operator
+     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE. Granting or revoking
+     *      BACKEND_ROLE (which gates {addStrategy} for factories) does NOT move this address;
+     *      rotating the operator key is a deliberate two-step: grant/revoke the role for
+     *      registration rights, then call this for operator rights.
+     * @param newOperator The address of the new strategy operator
+     */
+    function setStrategyOperator(address newOperator) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newOperator != address(0), "Invalid strategy operator address");
+
+        emit StrategyOperatorUpdated(strategyOperator, newOperator);
+        strategyOperator = newOperator;
+    }
 
     /**
      * @notice Recovers ERC20 tokens accidentally sent to this contract

@@ -138,8 +138,8 @@ contract DeployMultiMarketSystem is MultisigProposal {
             addresses.addAddress(keys.implKey, newImpl, true);
         }
 
-        // Deploy MultiMarketStrategyFactory
-        address impl = addresses.getAddress(keys.implKey);
+        // Deploy MultiMarketStrategyFactory. The factory resolves the implementation and the
+        // backend from MamoStrategyRegistry at call time, so neither is passed in here.
         address[] memory rewardTokens = new address[](cfg.rewardTokens.length);
         for (uint256 j = 0; j < cfg.rewardTokens.length; j++) {
             rewardTokens[j] = addresses.getAddress(cfg.rewardTokens[j].token);
@@ -152,10 +152,8 @@ contract DeployMultiMarketSystem is MultisigProposal {
 
         MultiMarketStrategyFactory factory = new MultiMarketStrategyFactory(
             addresses.getAddress("MAMO_STRATEGY_REGISTRY"),
-            addresses.getAddress("MAMO_BACKEND"),
             addresses.getAddress(cfg.token),
             addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
-            impl,
             addresses.getAddress("MAMO_MULTISIG"),
             addresses.getAddress("MARKET_REGISTRY"),
             keys.strategyTypeId,
