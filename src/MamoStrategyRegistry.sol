@@ -209,7 +209,10 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @notice Adds an implementation to the whitelist with a strategy type ID
      * @dev Only callable by accounts with the ADMIN_ROLE
      * @param implementation The address of the implementation to whitelist
-     * @param strategyTypeId The strategy type ID to assign. If 0, a new ID will be assigned
+     * @param strategyTypeId Pass 0 to CREATE a new strategy type (the next counter value is
+     *        assigned). Pass an EXISTING type id to roll out a new implementation for that type;
+     *        the id must already be in use or the call reverts with "Unknown strategy type".
+     *        A new type can never be created at a caller-chosen id — see the body for why.
      * @return assignedStrategyTypeId The assigned strategy type ID
      */
     function whitelistImplementation(address implementation, uint256 strategyTypeId)
@@ -220,19 +223,25 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(implementation != address(0), "Invalid implementation address");
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
-        // If strategyTypeId is 0, assign a new strategy type ID
+        // A strategy TYPE is created exactly one way: automatic assignment (strategyTypeId == 0).
+        // An explicit id is the implementation ROLLOUT path and may only name a type that already
+        // exists.
+        //
+        // Keeping type creation on the counter is what makes nextStrategyTypeId authoritative.
+        // Previously an explicit id could squat the slot the counter was about to hand out, so the
+        // next automatic registration silently overwrote latestImplementationById — stranding the
+        // earlier implementation (addStrategy requires an exact match against the latest) and
+        // making an unrelated implementation the only upgrade target its proxies would accept.
+        // Neither is recoverable: latestImplementationById is written nowhere else, and the
+        // "already whitelisted" guard above blocks re-registering the stranded implementation.
+        //
+        // Rejecting unknown ids also turns a mistyped id into a revert instead of a phantom
+        // strategy type that nothing can ever deploy against.
         if (strategyTypeId == 0) {
             assignedStrategyTypeId = nextStrategyTypeId++;
         } else {
-            // Otherwise, use the provided strategyTypeId. An explicit ID at or above the counter
-            // must push the counter past it, otherwise the next automatic registration hands out
-            // an ID that is already occupied and silently overwrites latestImplementationById —
-            // which would strand the earlier implementation (addStrategy requires an exact match
-            // against the latest) and make an unrelated implementation its only upgrade target.
+            require(latestImplementationById[strategyTypeId] != address(0), "Unknown strategy type");
             assignedStrategyTypeId = strategyTypeId;
-            if (strategyTypeId >= nextStrategyTypeId) {
-                nextStrategyTypeId = strategyTypeId + 1;
-            }
         }
 
         whitelistedImplementations[implementation] = true;

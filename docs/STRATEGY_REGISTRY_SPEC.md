@@ -141,6 +141,48 @@ The strategy type ID is a simple incremental uint256 value that uniquely identif
 
 This approach simplifies the ID system while still allowing for type-safe upgrades. Implementations of the same strategy type (e.g., different versions of a USDC strategy) will share the same ID, ensuring that users can only upgrade to the latest implementation of the same strategy type.
 
+#### Creating a type vs rolling out an implementation
+
+`whitelistImplementation(implementation, strategyTypeId)` has exactly two sanctioned uses, and the
+contract enforces the split:
+
+- `strategyTypeId == 0` - **create a new strategy type.** The next counter value is assigned and the
+  counter advances. This is the only way a type comes into existence.
+- `strategyTypeId == <existing id>` - **roll out a new implementation** for a type that already
+  exists. The counter is untouched. Passing an id that is not in use reverts with
+  `Unknown strategy type`.
+
+A new type can never be created at a caller-chosen id. That restriction is what keeps
+`nextStrategyTypeId` authoritative: when an explicit id could claim a free slot, it was able to
+squat the value the counter was about to hand out, and the next automatic registration then
+overwrote `latestImplementationById` for that slot. The consequences were unrecoverable -
+`addStrategy` requires an exact match against the latest implementation, so every factory pinned to
+the displaced implementation stopped working, and its existing proxies would accept only an
+unrelated implementation as their upgrade target. Neither can be undone: `latestImplementationById`
+is written in exactly one place, and the "Implementation already whitelisted" guard blocks
+re-registering the displaced implementation.
+
+#### Operational constraint on the deployed registry
+
+`MamoStrategyRegistry` is **not upgradeable**, so the enforcement above applies only to a freshly
+deployed registry. The registry live on Base (`0x46a5624C2ba92c08aBA4B206297052EDf14baa92`) predates
+it and its counter is already desynchronised:
+
+```
+nextStrategyTypeId          = 4
+latestImplementationById(4) = 0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7   (occupied)
+```
+
+`nextStrategyTypeId` is therefore a **stale lower bound, not the next free slot**. On this registry:
+
+- **Never call `whitelistImplementation(impl, 0)`.** Auto-assignment would take id 4 and
+  permanently strand strategy type 4. Proposals `005_MamoStakingDeployment` and
+  `008_MamoStakingV2Deployment` use this form and must not be re-executed against production.
+- **Create new types with an explicit id `>= 5`**, after asserting the id is free
+  (`latestImplementationById(id) == address(0)`) and that the counter has not reached it
+  (`nextStrategyTypeId() < id`). `012_DeployLeveragedAeroAccountSystem` follows this pattern.
+- Implementation rollouts to existing types (`009`, `010`, `011`) are unaffected.
+
 ### Functions
 
 - `function pause() external`: Pauses the contract. Only callable by accounts with the GUARDIAN_ROLE.

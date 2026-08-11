@@ -162,37 +162,54 @@ contract MamoStrategyRegistryUnitTest is Test {
         registry.freezeStrategyOperator();
     }
 
-    // ==================== MOO-737: EXPLICIT TYPE IDS ADVANCE THE COUNTER ====================
+    // ============ MOO-737: ONLY AUTO-ASSIGNMENT MAY CREATE A STRATEGY TYPE ============
 
-    function testExplicitStrategyTypeIdAdvancesCounter() public {
+    /// @notice An explicit id may only ROLL OUT an implementation for a type that already exists.
+    ///         Creating a type at a caller-chosen id is what let an explicit registration squat the
+    ///         slot the counter was about to hand out.
+    function testExplicitUnknownStrategyTypeIdReverts() public {
         assertEq(registry.nextStrategyTypeId(), 1);
 
         vm.prank(admin);
+        vm.expectRevert("Unknown strategy type");
         registry.whitelistImplementation(makeAddr("implA"), 7);
 
-        assertEq(registry.nextStrategyTypeId(), 8, "counter must move past an explicit id");
+        assertEq(registry.nextStrategyTypeId(), 1, "a rejected call must not move the counter");
+        assertEq(registry.latestImplementationById(7), address(0), "no phantom type may be created");
     }
 
-    /// @notice The finding: an explicit id occupying the slot the counter is about to hand out
-    ///         made the next automatic registration overwrite latestImplementationById, which
-    ///         permanently blocks addStrategy for the earlier implementation.
-    function testAutomaticIdDoesNotCollideWithExplicitId() public {
+    /// @notice A mistyped id is now a revert rather than a strategy type nothing can deploy against.
+    function testExplicitIdOneAboveTheCounterReverts() public {
+        vm.startPrank(admin);
+        registry.whitelistImplementation(makeAddr("implA"), 0); // id 1, counter -> 2
+        vm.expectRevert("Unknown strategy type");
+        registry.whitelistImplementation(makeAddr("implB"), 2); // the very next slot: still unknown
+        vm.stopPrank();
+
+        assertEq(registry.nextStrategyTypeId(), 2, "counter untouched by the rejected call");
+    }
+
+    /// @notice The original finding, now impossible by construction: an explicit id can no longer
+    ///         occupy a free slot, so the next automatic registration cannot collide with one and
+    ///         overwrite latestImplementationById.
+    function testAutomaticIdCannotCollideWithAnExplicitId() public {
         address implA = makeAddr("implA");
         address implB = makeAddr("implB");
 
         vm.startPrank(admin);
-        registry.whitelistImplementation(implA, 1);
+        uint256 assignedA = registry.whitelistImplementation(implA, 0);
         uint256 assignedB = registry.whitelistImplementation(implB, 0);
         vm.stopPrank();
 
-        assertEq(assignedB, 2, "automatic id must not reuse an occupied slot");
+        assertEq(assignedA, 1);
+        assertEq(assignedB, 2, "automatic ids never repeat");
         assertEq(registry.latestImplementationById(1), implA, "earlier implementation still current for its type");
         assertEq(registry.latestImplementationById(2), implB);
         assertEq(registry.implementationToId(implA), 1);
         assertEq(registry.implementationToId(implB), 2);
     }
 
-    function testExplicitIdBelowCounterDoesNotRewindIt() public {
+    function testRolloutForAnExistingTypeDoesNotMoveTheCounter() public {
         vm.startPrank(admin);
         registry.whitelistImplementation(makeAddr("implA"), 0); // id 1, counter -> 2
         registry.whitelistImplementation(makeAddr("implB"), 0); // id 2, counter -> 3
@@ -200,7 +217,7 @@ contract MamoStrategyRegistryUnitTest is Test {
         vm.stopPrank();
 
         assertEq(assigned, 1);
-        assertEq(registry.nextStrategyTypeId(), 3, "counter must not rewind");
+        assertEq(registry.nextStrategyTypeId(), 3, "a rollout must not move the counter");
     }
 
     /// @notice Re-registering an occupied id is the implementation ROLLOUT path and must keep
