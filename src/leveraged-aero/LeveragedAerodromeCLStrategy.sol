@@ -13,7 +13,6 @@ import {LeveragedAeroFees} from "./LeveragedAeroFees.sol";
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {BaseStrategy} from "./sherwood/BaseStrategy.sol";
-import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
@@ -22,7 +21,6 @@ import {ICLFactory, ICLGauge, ICLPool, INonfungiblePositionManager} from "./sher
 import {IStrategy} from "./sherwood/interfaces/IStrategy.sol";
 import {ISyndicateFactory} from "./sherwood/interfaces/ISyndicateFactory.sol";
 import {ISyndicateVault} from "./sherwood/interfaces/ISyndicateVault.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title LeveragedAerodromeCLStrategy
@@ -48,6 +46,14 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     using SafeERC20 for IERC20;
 
     // ── Errors ──
+    //
+    // THE INIT-VALIDATION ERRORS ARE RAISED FROM THE LIBRARY, NOT FROM THIS FRAME. `TargetLtvExceedsMax`,
+    // `MinHealthTooLow`, `MaxLtvExceedsCF`, `MinHealthMaxLtvConflict`, `FeeRecipientRequired`,
+    // `PerformanceFeeTooHigh`, `ManagementFeeTooHigh`, `OracleParamOutOfRange`, `ComptrollerCallFailed`
+    // and `OutOfBounds` are all declared IDENTICALLY in `LeveragedAeroValuation` (which runs those
+    // ladders — the relocation bought EIP-170 headroom here). Same signature == same selector, so they
+    // stay on this contract's ABI and a caller/test may expect them off either. Do not delete them as
+    // "unused": the ABI is the interface a frontend and the init suite bind to.
     error NotImplemented();
     error TargetLtvExceedsMax();
     error MinHealthTooLow(); // minHealthBps < 10500 (1.05x floor)
@@ -104,9 +110,6 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @dev ERC-4626 virtual share offset matching the vault's `_decimalsOffset()` (USDC 6dp → 1e6).
     uint256 private constant SHARES_VIRTUAL_OFFSET = 1e6;
-
-    /// @dev Annual management-fee ceiling (bps); mirrors `SyndicateFactory.MAX_MANAGEMENT_FEE_BPS` (5%/yr).
-    uint16 private constant MAX_MANAGEMENT_FEE_BPS = 500;
 
     /// @dev Deadman window: after this elapses on an unfulfilled `requestRedeem`, its owner can
     ///      `emergencyRedeem` trustlessly (oracle-free). The backend fulfills in minutes; 2 days
@@ -174,6 +177,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         uint16 skewBps; // initial fraction of `width` placed BELOW the tick (1e4 scale; 5000 == centred)
+        uint16 minSkewBps; // lower bound for a proposer-supplied rerange skew (governance band)
+        uint16 maxSkewBps; // upper bound for a proposer-supplied rerange skew (governance band)
         // ── Risk params ──
         uint16 targetLtvBps; // Target LTV in bps (e.g. 5000 = 50%)
         uint16 maxLtvBps; // Maximum LTV cap in bps (e.g. 6500 = 65%)
@@ -268,10 +273,13 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
-        // ── appended for the rerange SKEW (keep byte-identical). Placed HERE, not after the hedged
-        //    principals, so it free-packs into the existing tail slot (20 bytes used → 22) and
-        //    `hedgedDebtA`/`hedgedDebtB` keep a byte-identical slot AND offset. ──
+        // ── appended for the rerange SKEW and its governance band (keep byte-identical). Placed HERE,
+        //    not after the hedged principals, so all three free-pack into the existing tail slot
+        //    (20 bytes used → 26) and `hedgedDebtA`/`hedgedDebtB` keep a byte-identical slot AND offset:
+        //    26 + 16 > 32, so `hedgedDebtA` still starts the NEXT slot at offset 0. ──
         uint16 skewBps; // fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == centred)
+        uint16 minSkewBps; // lower bound for a proposer-supplied rerange skew
+        uint16 maxSkewBps; // upper bound for a proposer-supplied rerange skew
         // ── LAST fields: appended for the borrow-interest hedge (keep byte-identical) ──
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with the widths above)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
@@ -339,6 +347,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 maxWidth;
         bool legBIsAsset;
         uint16 skewBps;
+        uint16 minSkewBps;
+        uint16 maxSkewBps;
         uint128 hedgedDebtA;
         uint128 hedgedDebtB;
     }
@@ -396,6 +406,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         v.maxWidth = $.maxWidth;
         v.legBIsAsset = $.legBIsAsset;
         v.skewBps = $.skewBps;
+        v.minSkewBps = $.minSkewBps;
+        v.maxSkewBps = $.maxSkewBps;
         v.hedgedDebtA = $.hedgedDebtA;
         v.hedgedDebtB = $.hedgedDebtB;
     }
@@ -555,46 +567,33 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint8 wethDec = IERC20Metadata(p.weth).decimals();
         if (cbDec < 2 || cbDec > 18 || wethDec < 2 || wethDec > 18) revert LegDecimalsOutOfRange();
 
-        // Rerange width band: every width (init + per-cycle) must sit on the tickSpacing grid, and
-        // the floor must span at least two spacings so an aligned range is never empty.
-        if (p.tickSpacing <= 0) revert OutOfBounds();
-        uint24 spacing = uint24(p.tickSpacing);
-        if (p.minWidth % spacing != 0 || p.maxWidth % spacing != 0) revert OutOfBounds();
-        if (uint256(p.minWidth) < 2 * uint256(spacing)) revert OutOfBounds();
-        if (p.minWidth > p.maxWidth) revert OutOfBounds();
-        // Ceiling on the band: `skewedTickRange` spans up to `width` ticks on ONE side of the pool tick
-        // (the skew limit), so a width beyond the full tick domain can only ever produce out-of-domain
-        // bounds (and, at the uint24 extreme, an int24 wrap in the `currentTick ± span` arithmetic).
-        if (uint256(p.maxWidth) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert OutOfBounds();
-        _checkWidth(p.width, p.tickSpacing, p.minWidth, p.maxWidth);
-        _checkSkew(p.width, p.skewBps, p.tickSpacing);
+        // Range governance: the two BANDS' own shape (width grid/floor/ceiling, `0 < minSkew <= maxSkew
+        // < 1e4`), then the genesis `(width, skewBps)` pair against them — the SAME predicate `rerange`
+        // runs per cycle, so the two entrypoints cannot drift. Both ladders live in
+        // `LeveragedAeroValuation` (which re-declares `OutOfBounds` at the same selector) purely for
+        // EIP-170 headroom: this contract is at the cap and that library is not.
+        LeveragedAeroValuation.checkInitRange(
+            p.width, p.skewBps, p.tickSpacing, p.minWidth, p.maxWidth, p.minSkewBps, p.maxSkewBps
+        );
 
-        uint16 cfBps = _readCollateralFactor(p.comptroller, p.mUsdc);
-        if (p.targetLtvBps > p.maxLtvBps) revert TargetLtvExceedsMax();
-        if (p.minHealthBps < 10500) revert MinHealthTooLow();
-        if (p.maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
-        // L4: permissionless deleverage triggers at LTV = 1e8 / minHealthBps; that trigger LTV MUST
-        // sit strictly above maxLtvBps, else there is an in-band range anyone can grief-deleverage.
-        // Cross-multiplied (overflow-free): require minHealthBps * maxLtvBps < 1e8.
-        if (uint256(p.minHealthBps) * uint256(p.maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
-        // L3 (+L5): bound the oracle / calm-gate params so a misconfig can't silently disable a guard.
-        // Bounds admit the confirmed config yet block degenerate values:
-        //   maxDelay           ∈ (0, 7 days] — a huge value disables staleness detection
-        //   gracePeriod        ∈ [0, 1 days] — sequencer-restart grace
-        //   twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate
-        //   calmDeviationTicks ∈ (0, 5000]   — a huge value disables the calm-gate
-        //   maxSlippageBps     ∈ (0, 1000]   — 0 or huge disables swap-slippage protection (10% cap)
-        if (p.maxDelay == 0 || p.maxDelay > 7 days) revert OracleParamOutOfRange();
-        if (p.gracePeriod > 1 days) revert OracleParamOutOfRange();
-        if (p.twapWindow == 0 || p.twapWindow > 1 days) revert OracleParamOutOfRange();
-        if (p.calmDeviationTicks == 0 || p.calmDeviationTicks > 5000) revert OracleParamOutOfRange();
-        if (p.maxSlippageBps == 0 || p.maxSlippageBps > 1000) revert OracleParamOutOfRange();
-        if ((p.managementFeeBps != 0 || p.performanceFeeBps != 0) && p.feeRecipient == address(0)) {
-            revert FeeRecipientRequired();
-        }
-        // M3: hard ceilings on both fee rates (perf mirrors the protocol-wide cap; mgmt the factory's).
-        if (p.performanceFeeBps > FeeConstants.MAX_PERFORMANCE_FEE_BPS) revert PerformanceFeeTooHigh();
-        if (p.managementFeeBps > MAX_MANAGEMENT_FEE_BPS) revert ManagementFeeTooHigh();
+        // Risk / oracle / fee ladder — relocated whole (rung for rung, same order, same selectors) into
+        // `LeveragedAeroValuation`, for the same headroom reason. The collateral-factor read moved with
+        // it: it is a context-free `staticcall`, so running it in this frame under delegatecall is
+        // identical. The fee rungs are a separate call only because a 12-argument `checkRiskParams` put
+        // this frame one slot too deep for the Yul stack allocator; the ORDER is the original one.
+        uint16 cfBps = LeveragedAeroValuation.readCollateralFactor(p.comptroller, p.mUsdc);
+        LeveragedAeroValuation.checkRiskParams(
+            p.targetLtvBps,
+            p.maxLtvBps,
+            p.minHealthBps,
+            cfBps,
+            p.maxDelay,
+            p.gracePeriod,
+            p.twapWindow,
+            p.calmDeviationTicks,
+            p.maxSlippageBps
+        );
+        LeveragedAeroValuation.checkFeeParams(p.managementFeeBps, p.performanceFeeBps, p.feeRecipient);
 
         Layout storage $ = _layout();
         $.usdc = p.usdc;
@@ -635,52 +634,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.wethSwapTickSpacing = p.wethSwapTickSpacing;
         $.width = p.width;
         $.skewBps = p.skewBps;
+        $.minSkewBps = p.minSkewBps;
+        $.maxSkewBps = p.maxSkewBps;
         $.minWidth = p.minWidth;
         $.maxWidth = p.maxWidth;
         $.legBIsAsset = legBIsAsset_;
         // tokenId / posTickLower / posTickUpper / hwmPerShare default to 0 (set in _execute / on first deposit).
-    }
-
-    /// @dev Width band check shared by `_initialize` (the genesis width) and `rerange` (each
-    ///      per-cycle width): on the tickSpacing grid and inside `[minWidth_, maxWidth_]`. The band
-    ///      itself is validated once at init (multiples, `minWidth_ >= 2 × spacing`, min ≤ max).
-    function _checkWidth(uint24 width_, int24 tickSpacing_, uint24 minWidth_, uint24 maxWidth_) private pure {
-        if (tickSpacing_ <= 0) revert OutOfBounds();
-        if (width_ % uint24(tickSpacing_) != 0) revert OutOfBounds();
-        if (width_ < minWidth_ || width_ > maxWidth_) revert OutOfBounds();
-    }
-
-    /// @dev Skew band check shared by `_initialize` (the genesis skew) and `rerange` (each per-cycle
-    ///      skew). `skewBps_` is the fraction of `width_` placed BELOW the pool tick on a 1e4 scale, so
-    ///      5000 is centred; the complement goes above. Always called AFTER `_checkWidth`, which is what
-    ///      establishes `tickSpacing_ > 0` for the cast below.
-    ///
-    ///      THE GUARD IS SPAN-BASED, NOT A FLAT bps BAND, ON PURPOSE: a flat band cannot protect small
-    ///      widths (at `width == 2 × tickSpacing` even a mild 2500 skew starves the lower side to half a
-    ///      spacing, while at `width == 200 × tickSpacing` a 100-bps skew is perfectly safe). BOTH sides
-    ///      must span at least one `tickSpacing`, or the DOWN-aligned range stops STRICTLY BRACKETING the
-    ///      pool tick (`tickLower <= tick < tickUpper`) — the invariant `assetModeSplit` relies on to size
-    ///      a fresh range two-sided, and the reason a one-sided range is a fail-closed `DegenerateRange`.
-    function _checkSkew(uint24 width_, uint16 skewBps_, int24 tickSpacing_) private pure {
-        if (skewBps_ == 0 || skewBps_ >= 10000) revert OutOfBounds();
-        uint256 lowerSpan = (uint256(width_) * uint256(skewBps_)) / 10000;
-        uint256 upperSpan = uint256(width_) - lowerSpan; // exact complement, matching `skewedTickRange`
-        uint256 spacing = uint256(uint24(tickSpacing_));
-        if (lowerSpan < spacing || upperSpan < spacing) revert OutOfBounds();
-    }
-
-    /// @dev USDC collateral factor (bps) from `Comptroller.markets(mUsdc)`. ABI is
-    ///      `(bool isListed, uint256 collateralFactorMantissa, ...)`; read the 2nd word (1e18-scaled).
-    function _readCollateralFactor(address comptroller_, address mUsdc_) private view returns (uint16 cfBps) {
-        (bool ok, bytes memory ret) = comptroller_.staticcall(abi.encodeWithSignature("markets(address)", mUsdc_));
-        if (!ok || ret.length < 64) revert ComptrollerCallFailed();
-        uint256 cfMantissa;
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            cfMantissa := mload(add(ret, 0x40))
-        }
-        cfBps = uint16(cfMantissa / 1e14); // 0.88e18 / 1e14 = 8800
-        if (cfBps == 0) revert ComptrollerCallFailed();
     }
 
     // ── NAV ──
@@ -1088,24 +1047,34 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @param skewBps_ WHERE that width sits relative to the calm tick: the fraction of `width_` placed
     ///                 BELOW it, on a 1e4 scale. `5000` is centred (`width_/2` each side, the historical
     ///                 behaviour); `3500` puts 35% of the width below spot and 65% above, which is how a
-    ///                 rebalancer expresses a directional view without swapping. Must be in `(0, 10000)`
-    ///                 AND leave both sides spanning at least one `tickSpacing` — see `_checkSkew`.
+    ///                 rebalancer expresses a directional view without swapping. Must be in `(0, 10000)`,
+    ///                 inside the governance band `[minSkewBps, maxSkewBps]`, AND leave both sides
+    ///                 spanning at least one `tickSpacing` — see `LeveragedAeroValuation.checkRange`.
     ///
     ///                 Placement is grid-approximate: both bounds round DOWN onto the spacing grid, so
     ///                 the realised range sits off the requested split by up to one spacing.
     /// @param minLiq0  Minimum token0 the re-add must consume (two-sided slippage guard).
     /// @param minLiq1  Minimum token1 the re-add must consume (two-sided slippage guard).
     ///
-    /// @dev BOTH `width_` and `skewBps_` are PERSISTED here, in this frame, BEFORE the delegatecall —
-    ///      two things ride on that. (1) `nav()` and every subsequent mint (`deployIdle` / `compound`)
-    ///      read the STORED pair, so the proposer's choice must outlive the call. (2) The write must
-    ///      land even on a FLAT book, where `rerangeImpl` returns early and the re-range itself is a
-    ///      no-op but the new range still has to take effect for the next redeploy — which is why the
-    ///      persists are AHEAD of the impl rather than inside it (the impl used to store `width` itself,
-    ///      ahead of its own bail-out; the ordering property is unchanged, only the frame moved). The
-    ///      relocation is for EIP-170 headroom: this frame already holds `_layout()` for the two checks,
-    ///      so the writes cost ~20 bytes here versus ~70 in the manager library, which is at the cap.
-    ///      Exactly the same move `adjustLeverage`'s target-LTV write already makes.
+    /// @dev BOTH `width_` and `skewBps_` are PERSISTED here, in this frame, BEFORE the delegatecall,
+    ///      because `rerangeImpl` TAKES NO RANGE PARAMS: it reads the pair straight out of storage, so
+    ///      the persist must precede the delegatecall or the impl would re-range at the OLD pair. (The
+    ///      stored pair's only readers are `executeImpl` and `rerangeImpl` — `nav()` does not read it,
+    ///      and `deployIdle` / `compound` do not re-derive a range at all: they `increaseLiquidity` into
+    ///      the STORED `posTickLower`/`posTickUpper`. So the stored pair takes economic effect at the
+    ///      NEXT `rerange`, or at `execute` on a pre-genesis book.) Placing the two `sstore`s in THIS
+    ///      frame rather than in the impl is a bytecode relocation for EIP-170 headroom: this frame
+    ///      already holds `_layout()` for the validation, so the writes cost ~20 bytes here versus ~70 in
+    ///      the manager library, which is at the cap. Exactly the same move `adjustLeverage`'s target-LTV
+    ///      write already makes.
+    ///
+    ///      FLAT BOOK (`tokenId == 0` while still `Executed`): `rerangeImpl` returns early and the
+    ///      persist is all that happens. That is deliberate — and deliberately NOT a revert — but the
+    ///      honest reading is that such a book is TERMINAL UNTIL SETTLE: nothing can mint again
+    ///      (`execute` is one-shot, `deployIdle` fails closed with no NFT to add into, `compound` no-ops), so
+    ///      no later op consumes the stored pair. The write is kept for `layout()` / monitoring
+    ///      consistency — so the fund's advertised range matches what a proposer last asked for — not
+    ///      because anything re-reads it.
     function rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)
         external
         onlyProposer
@@ -1113,8 +1082,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     {
         if (_state != State.Executed) revert NotExecuted();
         Layout storage $ = _layout();
-        _checkWidth(width_, $.tickSpacing, $.minWidth, $.maxWidth);
-        _checkSkew(width_, skewBps_, $.tickSpacing);
+        LeveragedAeroValuation.checkRange(
+            width_, skewBps_, $.tickSpacing, $.minWidth, $.maxWidth, $.minSkewBps, $.maxSkewBps
+        );
         $.width = width_;
         $.skewBps = skewBps_;
         LeveragedAeroManager.rerangeImpl(minLiq0, minLiq1);

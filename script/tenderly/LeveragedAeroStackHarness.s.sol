@@ -152,7 +152,12 @@ contract LeveragedAeroStackHarness is Script {
         console.log("  width band min/width/max:", uint256(p.minWidth), uint256(p.width), uint256(p.maxWidth));
         // Separate line: console.log tops out at 4 args, and the band already uses all of them.
         // Keep the "width band" prefix — run-leveraged-aero-stack.sh Phase B.2 greps for it.
-        console.log("  width band skewBps (below-fraction, 5000 = centered):", uint256(p.skewBps));
+        console.log(
+            "  width band skewBps (below-fraction, 5000 = centered) min/skew/max:",
+            uint256(p.minSkewBps),
+            uint256(p.skewBps),
+            uint256(p.maxSkewBps)
+        );
     }
 
     /// @dev Build `InitParams` from env vars. Field-by-field (not a struct literal) to keep the Yul IR
@@ -200,9 +205,13 @@ contract LeveragedAeroStackHarness is Script {
         p.maxWidth = uint24(vm.envOr("MAX_WIDTH", uint256(20_000)));
         // ── range skew: fraction of `width` placed BELOW the current tick, bps (10000 = 1.00).
         // 5000 = centered, which is the ops default at genesis — skew is applied per-cycle via
-        // `rerange`, not baked into init. Must be in (0, 10000) exclusive AND leave BOTH spans
-        // >= one tickSpacing, else OutOfBounds().
+        // `rerange`, not baked into init. Must be in (0, 10000) exclusive, inside the governance band
+        // [MIN_SKEW_BPS, MAX_SKEW_BPS], AND leave BOTH spans >= one tickSpacing, else OutOfBounds().
         p.skewBps = uint16(vm.envOr("SKEW_BPS", uint256(5000)));
+        // ── skew governance band: fixed for the clone's life, `0 < min <= max < 10000`. It caps how far
+        // off centre a proposer may rerange; ±40 points around centre is the ops default.
+        p.minSkewBps = uint16(vm.envOr("MIN_SKEW_BPS", uint256(1000)));
+        p.maxSkewBps = uint16(vm.envOr("MAX_SKEW_BPS", uint256(9000)));
         // ── risk params: targetLtv ≤ maxLtv < USDC CF, minHealth ≥ 10500, minHealth×maxLtv < 1e8 ──
         p.targetLtvBps = uint16(vm.envOr("TARGET_LTV_BPS", uint256(5000)));
         p.maxLtvBps = uint16(vm.envOr("MAX_LTV_BPS", uint256(6500)));

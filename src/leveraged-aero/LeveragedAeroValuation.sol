@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {ICToken} from "./sherwood/interfaces/ICToken.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
@@ -104,9 +105,43 @@ library LeveragedAeroValuation {
     ///         same-signature declarations in `LeveragedAeroManager` / `LeveragedAerodromeCLStrategy`,
     ///         so a test may expect it off any of the three.
     error MoonwellRepayFailed(uint256 errCode);
+    /// @notice A range pair failed `checkRange`: a width off the tickSpacing grid / outside
+    ///         `[minWidth, maxWidth]`, OR a skew outside `(0, 1e4)` / outside the governance band
+    ///         `[minSkewBps, maxSkewBps]` / one that starves either side of the range below a single
+    ///         tickSpacing. ONE error for both knobs: they are validated together, by the same two
+    ///         callers (`_initialize` and `rerange`), and a caller that has to fix its range params does
+    ///         not branch on which half was wrong. The selector matches the same-signature declaration
+    ///         in `LeveragedAerodromeCLStrategy`, so a test may expect it off either.
+    error OutOfBounds();
+    /// @notice An oracle / calm-gate config value is outside the band a guard needs to stay meaningful.
+    ///         Declared here because `checkRiskParams` runs the ladder; the selector matches the
+    ///         same-signature declaration in `LeveragedAerodromeCLStrategy`.
+    error OracleParamOutOfRange();
+    /// @notice `targetLtvBps > maxLtvBps` at init. Selector shared with the strategy.
+    error TargetLtvExceedsMax();
+    /// @notice `minHealthBps` below the 10500 floor. Selector shared with the strategy.
+    error MinHealthTooLow();
+    /// @notice `maxLtvBps` at or above the Moonwell USDC collateral factor. Selector shared.
+    error MaxLtvExceedsCF();
+    /// @notice `minHealthBps × maxLtvBps >= 1e8` — the permissionless-deleverage trigger LTV would sit
+    ///         at or below `maxLtvBps`, opening an in-band grief window (L4). Selector shared.
+    error MinHealthMaxLtvConflict();
+    /// @notice A non-zero fee rate with a zero recipient. Selector shared with the strategy.
+    error FeeRecipientRequired();
+    /// @notice Performance fee above the protocol-wide cap. Selector shared with the strategy.
+    error PerformanceFeeTooHigh();
+    /// @notice Management fee above the factory's cap. Selector shared with the strategy.
+    error ManagementFeeTooHigh();
+    /// @notice `Comptroller.markets()` failed, returned short, or reported a zero collateral factor.
+    ///         Selector shared with the strategy.
+    error ComptrollerCallFailed();
 
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
+
+    /// @dev Annual management-fee ceiling (bps) enforced by `checkFeeParams`; mirrors
+    ///      `SyndicateFactory.MAX_MANAGEMENT_FEE_BPS` (5%/yr). Lives here with the ladder that reads it.
+    uint16 private constant MAX_MANAGEMENT_FEE_BPS = 500;
 
     /// @dev Reference liquidity for the `assetModeSplit` ratio probe. Only the RATIO of the two
     ///      required amounts matters (both are linear in L for a fixed range + sqrtP, so L cancels),
@@ -242,6 +277,174 @@ library LeveragedAeroValuation {
     // Range geometry + ASSET-MODE deploy sizing
     // ---------------------------------------------------------------------------
 
+    /// @notice The Moonwell USDC collateral factor in bps, read from `Comptroller.markets(mUsdc_)` at
+    ///         init. Fail-closed: a failed/short call or a zero factor reverts `ComptrollerCallFailed`.
+    /// @dev The ABI is `(bool isListed, uint256 collateralFactorMantissa, ...)` — read the 2nd word
+    ///      (1e18-scaled). Relocated out of `LeveragedAerodromeCLStrategy` for EIP-170 headroom; the
+    ///      `staticcall` is context-free (no storage, no msg.sender dependence), so running it in the
+    ///      caller's frame under delegatecall is identical. Selector shared with the strategy.
+    function readCollateralFactor(address comptroller_, address mUsdc_) public view returns (uint16 cfBps) {
+        (bool ok, bytes memory ret) = comptroller_.staticcall(abi.encodeWithSignature("markets(address)", mUsdc_));
+        if (!ok || ret.length < 64) revert ComptrollerCallFailed();
+        uint256 cfMantissa;
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            cfMantissa := mload(add(ret, 0x40))
+        }
+        cfBps = uint16(cfMantissa / 1e14); // 0.88e18 / 1e14 = 8800
+        if (cfBps == 0) revert ComptrollerCallFailed();
+    }
+
+    /// @notice The INIT-ONLY range ladder: the two governance BANDS' own shape, then the genesis
+    ///         `(width_, skewBps_)` pair against them via the very same `checkRange` every later
+    ///         `rerange` runs — so genesis and per-cycle validation cannot drift.
+    /// @dev One entrypoint rather than two calls from `_initialize`: the strategy is at the EIP-170 cap
+    ///      and a second library call site there costs ~100 bytes of it.
+    function checkInitRange(
+        uint24 width_,
+        uint16 skewBps_,
+        int24 tickSpacing_,
+        uint24 minWidth_,
+        uint24 maxWidth_,
+        uint16 minSkewBps_,
+        uint16 maxSkewBps_
+    ) public pure {
+        checkBands(tickSpacing_, minWidth_, maxWidth_, minSkewBps_, maxSkewBps_);
+        checkRange(width_, skewBps_, tickSpacing_, minWidth_, maxWidth_, minSkewBps_, maxSkewBps_);
+    }
+
+    /// @notice The INIT-ONLY shape check on the two governance bands themselves — the bounds every later
+    ///         `checkRange` is measured against, fixed for the clone's life.
+    /// @dev WIDTH BAND: both bounds on the `tickSpacing_` grid, `minWidth_ >= 2 × spacing` (so an aligned
+    ///      range is never empty), `minWidth_ <= maxWidth_`, and `maxWidth_` inside the tick domain —
+    ///      `skewedTickRange` spans up to `width` ticks on ONE side of the pool tick (the skew limit), so
+    ///      a wider band could only ever produce out-of-domain bounds (and, at the uint24 extreme, an
+    ///      int24 wrap in the `currentTick ± span` arithmetic).
+    ///
+    ///      SKEW BAND: `0 < minSkewBps_ <= maxSkewBps_ < 10000` — the band can only ever TIGHTEN the open
+    ///      `(0, 1e4)` interval `checkRange` enforces, never widen it.
+    ///
+    ///      Lives here, beside `checkRange`, for the same EIP-170 reason: the strategy is at the cap.
+    function checkBands(int24 tickSpacing_, uint24 minWidth_, uint24 maxWidth_, uint16 minSkewBps_, uint16 maxSkewBps_)
+        public
+        pure
+    {
+        if (tickSpacing_ <= 0) revert OutOfBounds();
+        uint24 spacing = uint24(tickSpacing_);
+        if (minWidth_ % spacing != 0 || maxWidth_ % spacing != 0) revert OutOfBounds();
+        if (uint256(minWidth_) < 2 * uint256(spacing)) revert OutOfBounds();
+        if (minWidth_ > maxWidth_) revert OutOfBounds();
+        if (uint256(maxWidth_) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert OutOfBounds();
+        if (minSkewBps_ == 0 || minSkewBps_ > maxSkewBps_ || maxSkewBps_ >= 10000) revert OutOfBounds();
+    }
+
+    /// @notice The INIT-ONLY numeric ladder over the risk, oracle and fee params, in the order the
+    ///         strategy used to run it inline (the order is observable — each rung has its own typed
+    ///         error, and the init suite pins which one fires).
+    /// @dev Relocated out of `LeveragedAerodromeCLStrategy._initialize` for EIP-170 headroom, unchanged
+    ///      rung for rung. Every error is re-declared in this library with the SAME signature, so the
+    ///      selectors a caller sees are identical to the strategy's own declarations.
+    ///
+    ///      L4 (the `minHealthBps × maxLtvBps` rung): the permissionless deleverage triggers at
+    ///      `LTV = 1e8 / minHealthBps`; that trigger LTV MUST sit strictly above `maxLtvBps`, else there
+    ///      is an in-band range anyone can grief-deleverage. Cross-multiplied to stay overflow-free.
+    ///
+    ///      L3 (+L5), the oracle rungs — bound each knob so a misconfig cannot silently disable a guard.
+    ///      The bounds admit the confirmed config yet block degenerate values:
+    ///        maxDelay           ∈ (0, 7 days] — a huge value disables staleness detection
+    ///        gracePeriod        ∈ [0, 1 days] — sequencer-restart grace
+    ///        twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate
+    ///        calmDeviationTicks ∈ (0, 5000]   — a huge value disables the calm-gate
+    ///        maxSlippageBps     ∈ (0, 1000]   — 0 or huge disables swap-slippage protection (10% cap)
+    ///
+    ///      The FEE rungs are a separate call (`checkFeeParams`) rather than three more parameters here:
+    ///      a 12-argument version of this function put the caller's frame one slot too deep for the Yul
+    ///      stack allocator. Order across the two calls is the original order.
+    /// @param cfBps The Moonwell USDC collateral factor (bps) the caller read at init.
+    function checkRiskParams(
+        uint16 targetLtvBps,
+        uint16 maxLtvBps,
+        uint16 minHealthBps,
+        uint16 cfBps,
+        uint256 maxDelay,
+        uint256 gracePeriod,
+        uint32 twapWindow,
+        uint16 calmDeviationTicks,
+        uint16 maxSlippageBps
+    ) public pure {
+        if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
+        if (minHealthBps < 10500) revert MinHealthTooLow();
+        if (maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
+        if (uint256(minHealthBps) * uint256(maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
+        if (maxDelay == 0 || maxDelay > 7 days) revert OracleParamOutOfRange();
+        if (gracePeriod > 1 days) revert OracleParamOutOfRange();
+        if (twapWindow == 0 || twapWindow > 1 days) revert OracleParamOutOfRange();
+        if (calmDeviationTicks == 0 || calmDeviationTicks > 5000) revert OracleParamOutOfRange();
+        if (maxSlippageBps == 0 || maxSlippageBps > 1000) revert OracleParamOutOfRange();
+    }
+
+    /// @notice The INIT-ONLY fee rungs: a non-zero rate needs a recipient, and M3 puts a hard ceiling on
+    ///         both rates (performance mirrors the protocol-wide cap, management the factory's 5%/yr —
+    ///         `SyndicateFactory.MAX_MANAGEMENT_FEE_BPS`).
+    /// @dev The tail of `checkRiskParams`' ladder, split off only to keep the caller's stack inside the
+    ///      Yul allocator's reach. Selectors match the strategy's own declarations.
+    function checkFeeParams(uint16 managementFeeBps, uint16 performanceFeeBps, address feeRecipient) public pure {
+        if ((managementFeeBps != 0 || performanceFeeBps != 0) && feeRecipient == address(0)) {
+            revert FeeRecipientRequired();
+        }
+        if (performanceFeeBps > FeeConstants.MAX_PERFORMANCE_FEE_BPS) revert PerformanceFeeTooHigh();
+        if (managementFeeBps > 500) revert ManagementFeeTooHigh();
+    }
+
+    /// @notice THE ONE PREDICATE that validates a `(width, skewBps)` pair before `skewedTickRange`
+    ///         consumes it — shared by `LeveragedAerodromeCLStrategy._initialize` (the genesis pair) and
+    ///         `LeveragedAerodromeCLStrategy.rerange` (each per-cycle pair), so the two entrypoints
+    ///         cannot drift. Lives HERE rather than in the strategy purely for EIP-170 headroom: the
+    ///         strategy is at the cap and this library has room.
+    ///
+    /// @dev WIDTH: on the `tickSpacing_` grid and inside `[minWidth_, maxWidth_]`. The band itself is
+    ///      validated once at init (multiples, `minWidth_ >= 2 × spacing`, min ≤ max, `maxWidth_` inside
+    ///      the tick domain).
+    ///
+    ///      SKEW: `skewBps_` is the fraction of `width_` placed BELOW the pool tick on a 1e4 scale, so
+    ///      5000 is centred; the complement goes above. It must be inside the OPEN `(0, 10000)` interval,
+    ///      inside the governance band `[minSkewBps_, maxSkewBps_]` (validated at init as
+    ///      `0 < minSkewBps_ <= maxSkewBps_ < 10000`, so the band can only ever tighten the open
+    ///      interval, never widen it), and leave both spans at least one spacing.
+    ///
+    ///      THE SPAN GUARD IS SPAN-BASED, NOT A FLAT bps BAND, ON PURPOSE: a flat band cannot protect
+    ///      small widths (at `width == 2 × tickSpacing` even a mild 2500 skew starves the lower side to
+    ///      half a spacing, while at `width == 200 × tickSpacing` a 100-bps skew is perfectly safe). BOTH
+    ///      sides must span at least one `tickSpacing`, or the DOWN-aligned range stops STRICTLY
+    ///      BRACKETING the pool tick (`tickLower <= tick < tickUpper`) — the invariant `assetModeSplit`
+    ///      relies on to size a fresh range two-sided, and the reason a one-sided range is a fail-closed
+    ///      `DegenerateRange`.
+    ///
+    ///      QUANTIZATION CLIFF, the operator-facing consequence: the USABLE skew set widens with
+    ///      `width_ / tickSpacing_`. At the floor (`width_ == 2 × tickSpacing_`) the only geometry
+    ///      satisfying both spans is the centred one, so skew is effectively pinned to ~5000 there;
+    ///      meaningful skew needs `width_ >= 3 × tickSpacing_`, and a governance band whose whole
+    ///      interior is unreachable at the configured width will simply refuse every rerange.
+    function checkRange(
+        uint24 width_,
+        uint16 skewBps_,
+        int24 tickSpacing_,
+        uint24 minWidth_,
+        uint24 maxWidth_,
+        uint16 minSkewBps_,
+        uint16 maxSkewBps_
+    ) public pure {
+        if (tickSpacing_ <= 0) revert OutOfBounds();
+        if (width_ % uint24(tickSpacing_) != 0) revert OutOfBounds();
+        if (width_ < minWidth_ || width_ > maxWidth_) revert OutOfBounds();
+        if (skewBps_ == 0 || skewBps_ >= 10000) revert OutOfBounds();
+        if (skewBps_ < minSkewBps_ || skewBps_ > maxSkewBps_) revert OutOfBounds();
+        uint256 lowerSpan = (uint256(width_) * uint256(skewBps_)) / 10000;
+        uint256 upperSpan = uint256(width_) - lowerSpan; // exact complement, matching `skewedTickRange`
+        uint256 spacing = uint256(uint24(tickSpacing_));
+        if (lowerSpan < spacing || upperSpan < spacing) revert OutOfBounds();
+    }
+
     /// @notice The tickSpacing-aligned range around `pool`'s current tick, SKEWED by `skewBps`: that
     ///         fraction of `width` (1e4 scale) is placed BELOW the current tick and the exact complement
     ///         above. `skewBps == 5000` is the centred range (and reproduces the old `centeredTickRange`
@@ -269,7 +472,7 @@ library LeveragedAeroValuation {
     ///
     ///      The returned range STRICTLY BRACKETS the current tick (`tickLower <= tick < tickUpper`)
     ///      whenever BOTH spans are at least one `tickSpacing` — which is exactly what the caller's
-    ///      `_checkSkew` enforces (the old, skew-free guarantee was the `width >= 2 × tickSpacing`
+    ///      `checkRange` enforces (the old, skew-free guarantee was the `width >= 2 × tickSpacing`
     ///      special case of it). That is what makes a freshly ranged position two-sided, and therefore
     ///      always sizeable by `assetModeSplit`.
     ///
@@ -913,6 +1116,44 @@ library LeveragedAeroValuation {
         uint256 usdValue = Math.mulDiv(amount, pToken, 10 ** uint256(tokenDecimals));
         // → USDC face (6dp): divide by the USDC price (8dp) and rescale 1e8 → 1e6.
         return Math.mulDiv(usdValue, 1e6, pUsdc);
+    }
+
+    /// @notice The three oracle bounds an IL-residual cover needs (`LeveragedAeroManager._rebalanceCover`):
+    ///         how much USDC the deficit buy may spend, how much of the surplus leg to sell for it, and
+    ///         the floor that sell must clear. Pure — the caller supplies the hardened prices.
+    ///
+    /// @dev Lives here rather than inline in the manager, which is at the EIP-170 cap.
+    ///
+    ///      `buyMax` is the oracle CEILING on the exact-output cover: a sandwiched/manipulated
+    ///      permissionless `deleverage` cannot overpay past oracle + `slipBps` (H1).
+    ///
+    ///      `sellAmt` is NEED-SIZED, never the whole balance: `buyMax` converted into surplus-leg units
+    ///      and grossed up by `slipBps` a SECOND time, so a sell that fills exactly on `sellFloor` still
+    ///      raises the ceiling-priced buy. Capped at `surplusBal`. Selling more than this would liquidate
+    ///      a delta-neutral idle remainder into an unrecorded short — see the manager's call site.
+    ///
+    ///      `sellFloor` is derived from `sellAmt`, NOT from `surplusBal`: a floor priced off a balance
+    ///      larger than what is sold is unreachable and would revert every need-sized sell.
+    ///
+    ///      `surplusBal == 0` (nothing to sell, or the surplus leg IS the unit of account) returns
+    ///      `(buyMax, 0, 0)` without touching `pSurplus` — which the caller may then pass as 0.
+    /// @param slipBps `maxSlippageBps`, bounded to (0, 1000] at init so neither gross-up can underflow.
+    function coverBounds(
+        uint256 shortAmt,
+        uint8 deficitDec,
+        uint256 pDeficit,
+        uint256 surplusBal,
+        uint8 surplusDec,
+        uint256 pSurplus,
+        uint256 pUsdc,
+        uint256 slipBps
+    ) public pure returns (uint256 buyMax, uint256 sellAmt, uint256 sellFloor) {
+        buyMax = _usdcValue(shortAmt, deficitDec, pDeficit, pUsdc) * (10000 + slipBps) / 10000;
+        if (surplusBal == 0) return (buyMax, 0, 0);
+        uint256 needed =
+            Math.mulDiv(buyMax * 10000 / (10000 - slipBps), (10 ** uint256(surplusDec)) * pUsdc, pSurplus * 1e6);
+        sellAmt = surplusBal > needed ? needed : surplusBal;
+        sellFloor = _usdcValue(sellAmt, surplusDec, pSurplus, pUsdc) * (10000 - slipBps) / 10000;
     }
 
     /// @dev Spot-vs-TWAP calm-gate (fail-closed). Reverts `CalmGateBreached` when the pool

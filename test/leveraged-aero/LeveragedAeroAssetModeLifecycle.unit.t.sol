@@ -176,6 +176,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         p.minWidth = 200;
         p.maxWidth = 20_000;
         p.skewBps = SKEW_CENTERED;
+        p.minSkewBps = 1000; // governance band: wide enough for every skew this suite drives
+        p.maxSkewBps = 9000;
         p.targetLtvBps = TARGET_LTV_BPS;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
@@ -439,6 +441,93 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertApproxEqAbs(
             (debtAfter * 10_000) / collateralAfter, uint256(TARGET_LTV_BPS), 2, "LTV still on target after the skew"
         );
+    }
+
+    // ==================== RERANGE MUST NOT DRAW IDLE USDC (asset-mode) ====================
+    //
+    // THE ASSET-MODE HAZARD: `rerangeImpl` re-adds "the collected legs" by reading its two leg BALANCES
+    // after the unwind. In this shape leg B IS the unit of account, so that balance is not just what the
+    // unwind collected — it is also every undeployed deposit and the whole redeem cover budget. Offering
+    // it to the mint would let a re-range silently pull UNLEVERED idle USDC into the LP: value-conserving
+    // but a capability no entrypoint declares (`deployIdle` is THE path that adds idle, and it levers it
+    // first), and it shrinks the cover budget a redeem depends on. The fix snapshots leg B BEFORE the
+    // unwind and offers only the delta — exactly the distinction `redeemUnwindImpl`'s `idleUsdcBefore`
+    // snapshot draws.
+    //
+    // Both tests measure against a BASELINE re-range run from the same post-genesis snapshot with no
+    // extra idle, so the assertion is an exact identity (`idle_after == baseline + seed`) rather than an
+    // inequality: the seeded USDC must be neither consumed nor otherwise moved, to the wei.
+
+    /// @dev Re-range at an EXTREME (but legal) skew with a large idle USDC balance present. THE
+    ///      DIRECTION MATTERS: leg A is token1 here, so pushing the range ABOVE spot (skew 2000: 800
+    ///      ticks below, 3200 above) is what makes the new range hungriest for token0 — the unit of
+    ///      account — while the unwind hands it a mix sized for the OLD range. That is precisely the
+    ///      shape where an implementation reading the raw leg-B balance tops the mint up out of idle.
+    ///      (The mirror skew is not a regression test at all: its range wants MORE leg A and less USDC,
+    ///      so the collected USDC already covers it and no idle is drawn either way.)
+    function testSkewedRerangeDoesNotDrawIdleUsdcIntoTheLp() public {
+        _execute(SEED);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 2000, 0, 0);
+        uint256 baselineIdle = usdc.balanceOf(address(strategy));
+        vm.revertToState(snap);
+
+        uint256 idleSeed = 400_000e6;
+        usdc.mint(address(strategy), idleSeed);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 2000, 0, 0);
+
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            baselineIdle + idleSeed,
+            "the idle USDC was neither drawn into the LP nor otherwise moved"
+        );
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "the re-range still minted a fresh position");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "...with real liquidity in it");
+        assertEq(strategy.layout().skewBps, 2000, "...at the requested skew");
+    }
+
+    /// @dev The CENTRED case, after a price drift — the pre-existing leak this fix also closes. Skew is
+    ///      not the cause: any re-range that leaves the collected pair short of the new range's desired
+    ///      ratio would have topped it up out of idle. The drift is what makes the collected ratio wrong
+    ///      at an unchanged `skewBps`.
+    function testCenteredRerangeAfterAPriceDriftDoesNotDrawIdleUsdc() public {
+        _execute(SEED);
+
+        // Drift the pool (spot AND TWAP together, so the calm-gate stays open) and keep the leg-A oracle
+        // on the same mark, or the fixture would be testing an oracle/pool divergence instead.
+        int24 newTick = TICK + 300;
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
+        pool.setTick(newTick);
+        legAFeed.setAnswer(int256(_legAPriceFromSqrtP(pool.sqrtPriceX96())));
+        // FIXTURE ONLY: `MockNpm` custodies exactly what it was minted, so after a price move its
+        // `collect` owes a leg-A amount re-priced at the NEW sqrtP that it never received. Float it, the
+        // way a real pool's other LPs do. Nothing here touches the strategy's USDC, which is what the
+        // assertion below is about.
+        legA.mint(address(npm), 1_000e8);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+        uint256 baselineIdle = usdc.balanceOf(address(strategy));
+        vm.revertToState(snap);
+
+        uint256 idleSeed = 250_000e6;
+        usdc.mint(address(strategy), idleSeed);
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            baselineIdle + idleSeed,
+            "a centred recenter leaves idle USDC untouched too"
+        );
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the recenter still minted real liquidity");
     }
 
     // ==================== ASSET-MODE LEVER UP (idle-funded) ====================

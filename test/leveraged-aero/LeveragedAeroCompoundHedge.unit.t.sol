@@ -206,6 +206,8 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         p.minWidth = 200;
         p.maxWidth = 20_000;
         p.skewBps = 5000;
+        p.minSkewBps = 1000; // governance band (unused here — this suite never reranges)
+        p.maxSkewBps = 9000;
         p.targetLtvBps = TARGET_LTV_BPS;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
