@@ -124,13 +124,13 @@ function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer 
 
 | | |
 |---|---|
-| `amount` | USDC (6dp) to deploy; must be ≤ the strategy's idle USDC balance, else `InsufficientIdle()`. |
+| `amount` | USDC (6dp) to deploy. Bounded by the strategy's idle USDC balance and **nothing else** (`InsufficientIdle()` above it) — there is no leverage-derived size ceiling to compute, and structurally cannot be one: the op supplies fresh collateral and borrows against it at exactly the stored `targetLtvBps`, so the incremental tranche's LTV **is** the target. A bigger deploy therefore pulls blended LTV *toward* target and cannot itself breach `maxLtvBps`. Partial deploys are expected and legal; bigger is directionally the safer one. |
 | `minLiquidity` | Minimum CL liquidity the add must produce (slippage floor). |
 | Position effect (two borrowed legs) | supply **all** of `amount` USDC → mUSDC → borrow both legs at **`targetLtvBps`** (50/50 by USD value) → wrap native ETH **iff** `wethDeliversNative` (§G) → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
 | Position effect (asset-mode) | `LeveragedAeroValuation.assetModeSplit` solves the split closed-form against the **STORED** range: only `C < amount` is supplied as collateral, a **single** leg-A borrow is taken against `C` at `targetLtvBps`, and `U = amount − C` is held back as the LP's USDC side so the add lands at exactly the ratio the stored range needs. Net leg-A exposure stays 0 (LP leg == debt leg). |
-| Guards | Two-borrowed-legs: borrow sized at `amount × targetLtvBps / 1e4`. Asset-mode: borrow sized at `C × targetLtvBps / 1e4` with `C` from the split — so the **effective** collateral is less than `amount` and a naive `amount × targetLtvBps` model will over-predict the borrow. Both: two-sided `maxSlippageBps` mins on the add plus the caller's `minLiquidity`; closes with `_assertHealthy()` (post-op LTV ≤ `maxLtvBps` **and** no Moonwell shortfall). |
-| Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`; **asset-mode also** `DegenerateRange()` — the split is sized against the STORED range (`posTickLower`/`posTickUpper`), so a range the price has already left is one-sided and fails closed. A `rerange` back onto spot unblocks it. |
-| When to call | Deposits land as idle USDC (see §D) and earn nothing until deployed. Run periodically to sweep accumulated idle into the position, within leverage caps. |
+| Guards | Two-borrowed-legs: borrow sized at `amount × targetLtvBps / 1e4`. Asset-mode: borrow sized at `C × targetLtvBps / 1e4` with `C` from the split — so the **effective** collateral is less than `amount` and a naive `amount × targetLtvBps` model will over-predict the borrow. Both: two-sided `maxSlippageBps` mins on the add plus the caller's `minLiquidity`; closes with `_assertHealthy()` (post-op LTV ≤ `maxLtvBps` **and** no Moonwell shortfall) — that assert runs **after** the deploy, so the caps constrain the *result*, not the input. |
+| Errors | `InsufficientIdle`, `InsufficientLiquidity`, `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `UnhealthyPosition(ltvBps, limitBps)`; **asset-mode also** `DegenerateRange()` — the split is sized against the STORED range (`posTickLower`/`posTickUpper`), so a range the price has already left is one-sided and fails closed. A `rerange` back onto spot unblocks it. The one genuine **external** ceiling on `amount` is Moonwell's borrow cap on the leg market(s), which surfaces as `MoonwellBorrowFailed(errCode)` — size down and retry. Naming trap: `InsufficientIdleForLeverUp` is **not** a `deployIdle` error despite reading like one; it belongs to asset-mode `adjustLeverage` (below). |
+| When to call | Deposits land as idle USDC (see §D) and earn nothing until deployed. Run periodically to sweep accumulated idle into the position. Since `amount` is free up to idle, the decision is not "how much fits under the caps" but **how much idle to hold back**: the reserve is the instant-redeem cover (§D) and, in asset-mode, the funding for a lever-**up** (§G). Choose it deliberately rather than deploying to zero. |
 
 ### `compound` — harvest AERO, reinvest, crystallize fees
 
@@ -340,6 +340,14 @@ can trustlessly self-service via `emergencyRedeem(id, minAssetsOut)` (owner-gate
 `WithdrawEmergency`/`RedeemEmergency`. **Every emergency exit is a missed SLA** and strips the agent
 from the loop. Treat 2 days as the hard fulfillment SLA; alert well before it.
 
+**Reachable is not the same as successful.** `emergencyRedeem` runs the *same* proportional unwind as
+`fulfillRedeem`, so it inherits its failure modes: on a **partial** redeem the IL cover is capped at the
+redeemer's own budget (`balance − stayersIdle`) and fails closed rather than dipping into stayers' funds,
+so a deeply out-of-range book can bounce the deadman itself. It is an unconditional right to *try*, not a
+guaranteed payout — one more reason not to let a request reach the window. The user is never trapped by
+that: `cancelRedeem` has **no state gate and no NAV gate** (owner-only, un-settled-only), so the escrowed
+shares can always be retrieved and exited later.
+
 **Drain the queue before settlement.** `fulfillRedeem` and `emergencyRedeem` both require `Executed`, so any
 request still outstanding when the vault owner calls `settleStrategy()` becomes unfulfillable — its owner
 must `cancelRedeem(id)` (callable in **any** state) to get the shares back and then exit via the vault's
@@ -411,8 +419,18 @@ and earn nothing until deployed. Key facts for the agent:
   `IERC20(usdc).balanceOf(address(this))` — the strategy's own balance — and the docstring states vault
   float is excluded to preserve deposit/redeem symmetry). So idle-but-undeployed deposits are in NAV and
   correctly priced.
-- The agent's job is to **periodically `deployIdle`** accumulated idle USDC within the leverage caps
-  (`targetLtvBps`, bounded by `maxLtvBps` via the closing health assert).
+- The agent's job is to **periodically `deployIdle`** accumulated idle USDC. `amount` is bounded only by
+  the idle balance — the leverage caps bind the *result* (the closing `_assertHealthy()`), not the input,
+  because the tranche is borrowed at exactly `targetLtvBps` (§B). The real decision is the size of the
+  reserve you leave behind.
+- **Why the reserve matters: the fast `redeem` path draws idle FIRST, then Moonwell collateral** — via
+  `_redeemUnderlying($.mUsdc, …)` — and **never** touches the LP position or the debt (the fast path has
+  zero LP call sites; unwinding the LP happens only on the async `fulfillRedeem` path). The LTV gate
+  applies to the collateral-funded remainder only, since pulling collateral against unchanged debt raises
+  LTV: a breach of `maxLtvBps` reverts `FastRedeemExceedsLtv` and forces the redeemer onto the request
+  queue. **When idle fully covers the redeem the gate is skipped entirely** (`if (fromCollateral == 0)
+  return;`), so a healthy idle balance is what keeps ordinary exits off your SLA loop. Note a redeemer can
+  only draw their own pro-rata `f × idle` (`f = shares/supply`); the stayers' `(1−f)` share is reserved.
 - **Do not confuse this with the account-level `depositIdle` nudge.** That is a *separate* surface on the
   per-user `MamoLeveragedAeroStrategy` account (sibling backend doc), gated to the owner or registry
   backend member-0, and it moves a user's plain-transferred USDC into the fund. This section is about
@@ -540,7 +558,9 @@ Strategy events that exist today:
   carries them, rather than leaning on those sweeps under stressed leg-pool conditions. (The
   *deleverage/adjustLeverage* residual swap is separately oracle-floored — `_rebalanceCover` raises any
   caller `minOut` to `oracleValue × (1 − maxSlippageBps)` — so the permissionless `deleverage(0)` is not
-  sandwichable.)
+  sandwichable. That raised floor is handed to the router, so a breach surfaces as the **router's own
+  `amountOutMinimum` revert**, not as `BelowOracleFloor`, which has exactly one raise site: `compound`'s
+  AERO→USDC sell. Alert on both.)
 - **Fee-path asymmetry (audit item 7).** Crystallize is **best-effort** on user-exit paths (defers +
   emits `FeeCrystallizeDeferred`) but **hard-reverts** on `compound`/`settle`/the redeem skim. A persistent
   `FeeCrystallizeDeferred` on deposits/redeems while `compound` reverts points at a **frozen vault**
@@ -627,7 +647,7 @@ appears. But there is one misconception worth killing up front, because it waste
 | Driven by the **Chainlink feed** (the FreshFeed mock) | Driven by the **pool tick** (a real swap) |
 | --- | --- |
 | `nav()` and all USD valuation (`readUsd8`) | LP leg composition (how much cbBTC vs USDC the position holds) |
-| Slippage floors / `minOut` sizing, `BelowOracleFloor` | Whether the position is in or out of range |
+| Slippage floors / `minOut` sizing, `compound`'s `BelowOracleFloor` | Whether the position is in or out of range |
 | The interest hedge's oracle-priced buy sizing | Where `rerange` anchors the new range (it brackets the pool tick, split by `skewBps`) |
 | The staleness gate (`maxDelay`, currently 172800 s) | `calmGate` — **both** sides of it |
 | Health / LTV ratios and the `deleverage` trigger | Realized swap price, and therefore actual slippage |
@@ -677,7 +697,11 @@ The public RPC cannot do any of this.
 3. **Move the feed to match** — deploy a new `FreshFeed` carrying the new answer and `tenderly_setCode` it
    over the **same** feed address. The answer is an `immutable`, so **there is no setter**; "moving" the
    price means replacing the code. If you skip this, the oracle still reports the old price, the router
-   quote diverges from oracle fair by more than `maxSlippageBps`, and swaps revert `BelowOracleFloor`.
+   quote diverges from oracle fair by more than `maxSlippageBps`, and the oracle-floored swaps fail closed
+   — but **with two different selectors**: `compound`'s AERO→USDC sell reverts `BelowOracleFloor` (its one
+   and only raise site), while the `deleverage` / `adjustLeverage` lever-down residual swap has its min-out
+   *raised* to the oracle floor and handed to the router, so it reverts inside **Slipstream's own
+   `amountOutMinimum`** check. Same economic protection, different revert to alert on.
 4. **Re-assert freshness** — `./script/tenderly/compound-cycle.sh check-feeds` after *every* warp. This is
    the gate that catches a non-FreshFeed instance before you waste a run.
 5. **Now rebalance** — `rerange`, `adjustLeverage`, or `compound` as the scenario requires.
@@ -795,7 +819,8 @@ runs Aerodrome's weekly epoch flip. Re-arm it the production way:
 | Revert | Cause | Fix |
 | --- | --- | --- |
 | `CalmGateBreached` | pool moved > `calmDeviationTicks` from its TWAP | warp ≥ `twapWindow`, then retry |
-| `BelowOracleFloor` | pool and feed disagree by > `maxSlippageBps` | move the feed to match the pool (step 3) |
+| `BelowOracleFloor` | **`compound` only** — its AERO→USDC sell is the single raise site; the realized fill came in under the AERO/USD oracle floor because pool and feed disagree by > `maxSlippageBps` | move the feed to match the pool (step 3) |
+| Slipstream `amountOutMinimum` revert (no named selector) | the same pool/feed disagreement hitting a **lever-down residual swap** (`deleverage` / `adjustLeverage`): its min-out is raised to the oracle floor and enforced by the router, **not** by `BelowOracleFloor` | same fix — re-align the feed with the pool |
 | `StaleOracle` | warped on a **non**-FreshFeed instance | wrong instance — check `check-feeds` |
 | `OLD` from `pool.observe` | state sync is ON — observation ring re-hydrated from mainnet while `observationIndex` froze | not repairable; recreate the vnet with sync OFF |
 | `ZeroMinOut` | `minUsdcOut == 0` | derive one from `quote` |
@@ -876,7 +901,7 @@ Production addresses are published separately at deploy.
 
 - [ ] Sign every operator op with the strategy **proposer** key (`MAMO_REBALANCER`, `0x73f6…8FAf` on staging) — **never** the backend key (`MAMO_BACKEND`); confirm `strategy.proposer()` matches before wiring.
 - [ ] Gate the whole operator loop on `state() == Executed`; `execute`/`settle` are `onlyVault` and belong to the vault owner's `activateStrategy` / `settleStrategy`, not to you.
-- [ ] Periodically `deployIdle(amount, minLiquidity)` accumulated strategy-idle USDC within leverage caps; pass a real `minLiquidity`.
+- [ ] Periodically `deployIdle(amount, minLiquidity)` accumulated strategy-idle USDC; pass a real `minLiquidity`. `amount` is capped by idle alone — no leverage-derived ceiling to compute (§B) — so decide the **reserve you hold back**: it is the instant-redeem cover that keeps exits off the queue (§D), and in asset-mode the lever-up funding (§G).
 - [ ] **Read `layout().legBIsAsset` first and branch on it** — asset-mode changes `deployIdle` sizing, makes lever-**up** consume idle USDC, lets `rerange` draw on idle, and adds `InsufficientIdleForLeverUp` / `DegenerateRange` to the error set (§G).
 - [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed. **Do not predict the redeploy as `usdcOut − fee`** — `compound` first repays accrued borrow interest out of the harvest (§B), so the CL add is smaller by that amount; `MoonwellRepayFailed` is on that path.
 - [ ] Track drift with `hedgedDebt()` vs. each market's `borrowBalanceStored` (§E) to size the harvest cadence, and confirm it returns to ~0 after a compound; remember the on-chain measure accrues first, so the off-chain `…Stored` read is a lower bound.

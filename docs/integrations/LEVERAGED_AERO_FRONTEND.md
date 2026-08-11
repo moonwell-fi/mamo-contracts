@@ -326,6 +326,16 @@ sequenceDiagram
 > tx, so the owner receives USDC directly. `withdrawAll` redeems the account's entire share balance and
 > reverts `"No shares to withdraw"` if there is none.
 
+**What funds a fast withdraw — and therefore which route the user gets.** The fast path draws the fund's
+**idle USDC first** (the user's pro-rata `f × idle` share only, `f = shares/supply`), then frees whatever
+remains from the Moonwell **collateral**. It never touches the LP position or the debt — unwinding the LP
+happens only on the async path. That is why the LTV gate is scoped to the collateral-funded remainder:
+pulling collateral against unchanged debt raises LTV, and a would-be breach of the cap reverts
+`FastRedeemExceedsLtv` and sends the user to Flow 3. The corollary worth building around: **when idle
+alone covers the withdrawal the LTV gate is skipped entirely**, so small withdrawals against a
+well-funded book stay on the fast path even when the position itself is levered near its cap. Do not
+predict the route from position health alone — trust `previewWithdraw`'s `fastOk`.
+
 ---
 
 ## Flow 3 — async withdraw (request → pending → claim)
@@ -349,6 +359,11 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 > the escrowed shares keep bearing the position's PnL until the rebalancer fulfils. The USDC the user
 > ultimately receives is priced at fulfill time, not request time. Surface this clearly (e.g. "amount
 > finalizes when processed") and do not display the request-time preview as a locked payout.
+
+> **The rebalancer cannot redirect a fulfillment.** `fulfillRedeem(id)` takes no recipient argument — the
+> payee is `redeemRequests[id].owner`, fixed to the user's account at `requestRedeem` and immutable
+> thereafter. The floor is the user's own stored `minAssetsOut`. The rebalancer chooses *when* a request
+> settles, never *to whom* or *for how much*.
 
 ```mermaid
 sequenceDiagram
@@ -392,6 +407,14 @@ function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external returns (u
 Only enable this in the UI once `block.timestamp > requestedAt + 2 days` for the request; before then it
 reverts `FulfillWindowOpen()`. `minAssetsOut` is a **fresh** floor (the request's original floor may be
 stale after two days).
+
+> **It is unconditionally *reachable*, not unconditionally *successful*.** `emergencyWithdraw` runs the
+> same proportional unwind the rebalancer would have run, so it can still revert: on a partial redeem the
+> IL cover is capped at the redeemer's own budget and fails closed rather than touching other holders'
+> funds, so a deeply out-of-range position can bounce it. Do not present it as a guaranteed payout — treat
+> a revert as retryable, and always keep **Cancel** offered alongside it: `cancelWithdraw(id)` has no state
+> gate and no NAV gate, so the user can always retrieve the escrowed shares and exit afterwards. It is also
+> the *only* route once the strategy settles — `emergencyWithdraw` requires `Executed` (see *Settled exit*).
 
 ---
 
