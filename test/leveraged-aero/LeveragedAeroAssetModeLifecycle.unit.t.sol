@@ -665,6 +665,39 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGe(healthAfter, 12_000, "health restored above the minimum");
     }
 
+    /// @dev THE CLAMP, in the collateral≈0 tail it exists for. `deleverageImpl` targets
+    ///      `targetDebt = collateral × 1e4 / targetHealth`; once collateral is dust that floors to 0, so
+    ///      the requested `repayUsd == debtBefore` and `_leverDown`'s orphaned-NFT guard
+    ///      (`repayUsd >= debtUsd → FullUnwindNotSupported`) would fire — turning the PERMISSIONLESS
+    ///      health valve OFF in exactly the distressed state it exists for. The clamp
+    ///      (`repayUsd = debtBefore - 1`) keeps `num < den` so ≥1 liquidity and the re-stake survive.
+    ///
+    ///      Construction: after execute, set the mUSDC exchange rate to `1e18 / mBal + 1`, which drives
+    ///      the collateral read to EXACTLY 1 unit — `collateral = mBal × rate / 1e18 ∈ [1e18, 1e18+mBal)`
+    ///      / 1e18 = 1. That is the only collateral value (with 0) for which `targetDebt` floors to 0
+    ///      while health can still strictly improve. Against the clamp deletion this reverts
+    ///      `FullUnwindNotSupported`.
+    function testDeleverageClampKeepsTheValveAliveWhenCollateralIsDust() public {
+        _execute(SEED);
+        uint256 mBal = mUsdc.balanceOf(address(strategy));
+        mUsdc.setExchangeRateStored(1e18 / mBal + 1); // collateral read → exactly 1 unit
+
+        (uint256 collateralBefore, uint256 debtBefore) = _collateralAndDebt();
+        assertEq(collateralBefore, 1, "collateral driven to the 1-unit dust tail (targetDebt floors to 0)");
+        assertGt(debtBefore, 0, "debt still live");
+        assertEq((collateralBefore * 10_000) / debtBefore, 0, "health is zero, the valve must engage");
+
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        vm.prank(makeAddr("keeper"));
+        strategy.deleverage(0); // clamp path; without it, FullUnwindNotSupported
+
+        assertLt(mLegA.borrowBalance(address(strategy)), debtBefore, "debt was repaid down");
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "position survived, not fully unwound/orphaned");
+        assertTrue(
+            gauge.stakedContains(address(strategy), strategy.layout().tokenId), "the >=1-liquidity re-stake fired"
+        );
+    }
+
     // ==================== THE CRUX INVARIANT ====================
 
     /**

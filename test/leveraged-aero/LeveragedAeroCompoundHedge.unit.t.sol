@@ -680,6 +680,41 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertGt(_collateralUsdc(), collateralBefore, "the stray balance was harvested and redeployed");
     }
 
+    /// @dev DUST NO-OP, the compound-side twin of `flatten`'s `_sellRewardBalance` skip. A reward
+    ///      balance worth under one micro-USD prices to a ZERO oracle floor, and the router fills it
+    ///      at 0 USDC — so the nonzero `minUsdcOut` compound is FORCED to demand (the `ZeroMinOut`
+    ///      belt rejects 0) makes the AERO→USDC swap revert on the router's own min-out check. Without
+    ///      the `floor == 0` early return, a single dust donation to the gauge bricks every subsequent
+    ///      `compound`. `1e6` wei AERO × `$1` (1e8) / 1e20 == 0 (6dp), so it lands in the dust band.
+    function testCompoundNoOpsOnADustRewardInsteadOfBricking() public {
+        _armBook();
+        _clearRewards();
+        aero.mint(address(strategy), 1e6); // sub-micro-USD: floor rounds to 0
+
+        uint256 collateralBefore = _collateralUsdc();
+        // A nonzero minUsdcOut is mandatory (ZeroMinOut belt); the dust skip must fire BEFORE the swap.
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place, not force-sold at a loss");
+        assertEq(_collateralUsdc(), collateralBefore, "no redeploy: the harvest cleanly no-oped");
+    }
+
+    /// @dev The skip must NOT widen the guard for a real tranche: the smallest balance whose HAIRCUT
+    ///      floor is nonzero still swaps and redeploys. The threshold is the post-`maxSlippageBps`
+    ///      floor, not the raw one — at `1e12` the raw floor is 1 unit and the 100bps haircut rounds
+    ///      it back to 0 (still skipped); `2e12` gives raw 2, haircut floor 1, the first that sells.
+    function testCompoundStillHarvestsTheSmallestNonDustBalance() public {
+        _armBook();
+        _clearRewards();
+        aero.mint(address(strategy), 2e12);
+
+        uint256 collateralBefore = _collateralUsdc();
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "above-dust balance is sold, not skipped");
+        assertGt(_collateralUsdc(), collateralBefore, "the tranche was harvested and redeployed");
+    }
+
     // ==================== 3. FEE TIMING (findings 3 + 4) ====================
 
     /**
