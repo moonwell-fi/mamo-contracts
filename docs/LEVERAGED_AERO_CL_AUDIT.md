@@ -28,6 +28,9 @@ Delta against the baseline:
 | Any-pool init + validation | Leg decimals read from the tokens at init and bounded `[2, 18]` (were `CBBTC_DECIMALS` / `WETH_DECIMALS` constants); pool token ordering derived from `pool.token0()` (`wethIsToken0`, mapped through `_tokens01` / `_amounts01`) instead of the manager's hardwired `token0 == WETH`; per-leg swap-pool `tickSpacing` inputs replace three hardcoded `int24(100)` literals; native-ETH borrow wrap made conditional (`wethDeliversNative`); init venue guards (pool `tickSpacing` + token-set match, Moonwell `underlying()` binding, reject USDC-as-leg and reward-token-as-leg) | `978e5af` |
 | Per-cycle rerange width | `rerange(uint24 width, uint256 minLiq0, uint256 minLiq1)` validated against an init-time `[minWidth, maxWidth]` band on the `tickSpacing` grid and persisted; `RANGE_TICK_SPACINGS` deleted; genesis mints at the init width; `WidthOutOfBounds()` = `0x1f9f54af` | `978e5af` |
 | Per-cycle rerange **skew** | `rerange` grew a second argument — `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)`. `skewBps` is the fraction of `width` placed **below** the current tick (bps, `10000` = 1.00; `5000` = centered, the previous fixed behaviour and the genesis/ops default). `lowerSpan = width × skewBps / 10000`, `upperSpan = width − lowerSpan`, both bounds still aligned DOWN to `tickSpacing`. Stored in `Layout` and surfaced on `layout()` exactly like `width`, so a flat-book `rerange` persists both and the next genesis mint re-mints at the stored pair. `centeredTickRange` → `skewedTickRange(pool, tickSpacing, width, skewBps)`; `rerangeImpl` narrowed to `(minLiq0, minLiq1)` and reads both knobs from storage (the persists moved to the strategy). **`WidthOutOfBounds()` renamed `OutOfBounds()` = `0xb4120f14`** and reused for both knobs | *this change* |
+| Skew governance band + validation relocation | Two new fields, `minSkewBps` / `maxSkewBps`, **inserted** into `InitParams` and `Layout` immediately after `skewBps` (so `hedgedDebtA`/`hedgedDebtB` shift from `layout()` tuple positions 48/49 to 50/51). Validated once at init and re-checked on **every** `rerange`, raising the existing `OutOfBounds()` — no new selector. Width **and** skew validation moved out of the strategy's private `_checkWidth`/`_checkSkew` into `LeveragedAeroValuation.checkRange(width, skewBps, tickSpacing, minWidth, maxWidth, minSkewBps, maxSkewBps)`; behaviour is identical to the previous checks plus the band. Harness defaults `MIN_SKEW_BPS=1000` / `MAX_SKEW_BPS=9000` | *this change* |
+| Review remediation — asset-mode `rerangeImpl` idle draw | `rerangeImpl` **snapshots the leg-B balance before the unwind** and offers the mint only what the unwind itself collected. Previously it passed the whole leg-B slot balance as `amountDesired`, and in asset-mode that slot **is** USDC — so a rerange could pull stayers' idle USDC, including the redeemers' cover reserve, into the LP. Value-conserving but not the operator's intent, and it silently shrank the fast-redeem buffer. Now structurally impossible | *this change* |
+| Review remediation — need-sized `_rebalanceCover` | The lever-down / `deleverage` cover swap now sells **only the surplus required to cover the shortfall** and keeps the remainder, instead of selling the whole surplus leg balance. Shrinks the swapped notional (less realized slippage and venue fee on every lever-down) and leaves the unsold surplus as an idle leg balance that `nav()` prices and that still hedges its own debt | *this change* |
 | Comment hygiene | Three comment-only hunks in the strategy retiring stale Sherwood rationale (`selfManagesFees`, `_protocolConfig`, `rescueToVault`); new docstring on the manager's trimmed `_config()` | `ea822be`, `978e5af` |
 
 > **Selector break in the skew row, called out deliberately.** The width row above records
@@ -38,13 +41,30 @@ Delta against the baseline:
 > pre-launch, and neither is upgrade-safe to do later; re-derive rather than copy
 > (`cast sig 'OutOfBounds()'`, `cast sig 'rerange(uint24,uint16,uint256,uint256)'`).
 
-> **Known, accepted consequence of skew — two-borrowed-legs shape only.** The genesis / `deployIdle`
-> borrow is range-blind (`_borrowHalfEach` splits 50/50 by USD value), so a **skewed** range is not 50/50
-> by value and the book carries a persistent idle remainder of one borrowed token. This is **not** a hedge
-> break (the idle borrowed token 1:1 hedges its own debt, and `nav()` prices it) and **not** an LTV/health
-> change — it is capital-utilisation drag: less of the book earns LP fees. Mitigated operationally
-> (init `skewBps = 5000`, apply skew via `rerange`, size the skew against the drag). Making the borrow
-> range-aware is a possible follow-up and is **out of scope** here.
+> **Known, accepted consequence of skew — two-borrowed-legs shape only. Restated after review: it is a
+> per-borrow RATCHET, not a standing balance.** Every borrow site (genesis, `deployIdle`, `compound`) is
+> range-blind — `_borrowHalfEach` splits 50/50 by USD value — and each mint is offered only the amounts
+> borrowed **in that cycle**; pre-existing idle leg balances are never swept back in. So a skewed range
+> strands a slice of *each* borrow and the idle fraction **grows with every compound**, until an op that
+> resizes the book folds it back. Three properties the earlier wording understated: the drag is
+> **direction-independent** at the borrow sites (skew `2000` and `8000` both strand ≈ 33.5 % of each
+> borrow; ≈ 19 % at the documented `3500`), the stranded slice is **debt-funded** (it pays Moonwell borrow
+> interest while earning no LP fees), and it is still **delta-neutral** (the idle borrowed token hedges its
+> own debt 1:1, `nav()` prices it, net per-leg delta stays zero) and **not** an LTV/health change. The
+> operational mitigation (init `skewBps = 5000`, apply skew per-cycle via `rerange`) only **defers** the
+> drag: the next `deployIdle` borrows 50/50 into the stored skewed range. Making the borrow **range-aware**
+> is the planned follow-up that removes it at source and is **out of scope** here — see *Known gaps*, item 5.
+
+> **External security review of PR #71 (the skew change) — triage.** The PR was reviewed externally and
+> every finding was verified adversarially against source before disposition. **10 findings**, resolved as:
+> **2 code fixes landed in this PR** — the asset-mode `rerangeImpl` idle-draw snapshot and the need-sized
+> `_rebalanceCover` (both rows above); **1 hardening landed** — the `[minSkewBps, maxSkewBps]` governance
+> band, which is the reviewable answer to "what stops an operator key parking the fund at a
+> near-degenerate skew"; and **the remainder dispositioned** to named follow-ups or to other branches
+> rather than being fixed here. Two of those dispositions are corrections to *this document* and are
+> recorded below rather than silently amended: the calm-gate coverage map (see *Accepted patterns*) and
+> the persist-relocation rationale (same section). The restated skew-drag note above is a third. Nothing
+> in the review changed the delegatecall-layout, oracle or fee surfaces.
 
 Field names in `Layout` still read `cbBTC` / `weth` / `mCbBTC` / `mWeth`. These are **leg slots**, not
 token commitments — leg B and leg A respectively. Nothing in the code assumes those particular tokens
@@ -74,14 +94,18 @@ vanilla lifecycle — it is fork-local code, not vendored context.
 the wrapper's only diff is a NatSpec hunk repointing its terminal-state escape hatch at the vault's
 `redeemSettled`. They are exercised by the same unit gate (see Test evidence).
 
-**Deploy flow** (replaces Sherwood's `StrategyFactory.cloneAndInit`): deploy the vault → `Clones.clone`
-the strategy template → `strategy.initialize(vault, proposer = MAMO_BACKEND, initData)` →
-`vault.setStrategy(strategy)` (set-once) → `vault.setOpenDeposits(true)` →
-`vault.activateStrategy(seedAmount)`, which pulls the seed from the owner straight to the strategy and
-calls `execute()`. There is no template allowlist and no atomic clone+init: **the clone is initializable
-by anyone between `clone` and `initialize`**, so the two must be broadcast together or the deployment
-front-run check must be done by hand. The vault's `setStrategy` is the binding that matters — a clone
-someone else initialized against a different vault cannot mint here.
+**Deploy flow** (replaces Sherwood's `StrategyFactory.cloneAndInit`): deploy the vault → the owner calls
+`vault.cloneAndBind(template, proposer = MAMO_REBALANCER, initData)`, which does `Clones.clone` →
+`clone.initialize(address(this), proposer_, initData)` → `_bind(clone)` in **one `onlyOwner`
+transaction** → `vault.setOpenDeposits(true)` → `vault.activateStrategy(seedAmount)`, which pulls the seed
+from the owner straight to the strategy and calls `execute()`. Two corrections to earlier revisions of
+this paragraph: the proposer is the dedicated **`MAMO_REBALANCER`** operator key, deliberately **not**
+`MAMO_BACKEND` (which drives the account layer); and the clone+init **is** atomic now, closing the window
+where a fresh clone was initializable by anyone between `clone` and `initialize` and a front-runner could
+seize the `proposer` role. `setStrategy(address)` survives as the manual path for an already-initialized
+clone; both route through the same **set-once** `_bind`, which re-checks `clone.vault() == address(this)`,
+so a clone someone else initialized against a different vault can never be bound — and a wrong clone means
+a new vault, since there is no rotation. There is still no template allowlist.
 
 ## The corruption-critical invariant
 
@@ -98,7 +122,12 @@ textually compares the triplet between the two files. (The comparison strips lin
 blocks carry one intentionally asymmetric self-referential comment — "keep byte-identical in the
 manager" vs "…in the strategy" — while every storage-relevant token, the `RedeemRequest` struct, and the
 `STORAGE_SLOT` literal are compared verbatim.) `978e5af` appended 9 fields into one packed slot and the
-tripwire is green on both files.
+tripwire is green on both files. **This change touches `Layout` again**, and this time by **insertion**
+rather than append: `minSkewBps` / `maxSkewBps` go in immediately after `skewBps`, so every field after
+them shifts. The parity tripwire is exactly the control for that — the insert must be byte-identical in
+both files or the two halves of the delegatecall read different slots. Note the tripwire proves the two
+files **agree**, not that the new ordering is compatible with anything already deployed: it is not, and
+these are pre-launch clones, so a redeploy (not an upgrade) is the only path.
 
 **Bytecode margin note:** under this repo's optimizer profile (via_ir, `optimizer_runs = 200`, cancun):
 
@@ -121,8 +150,9 @@ ERC-20 shares — "strategy-serviced custody". Deposits are priced at oracle net
 fail-closed: a stale feed or shoved pool denies the deposit, never mints cheap shares). Exits have three
 entrypoints while the strategy is `Executed`: fast oracle-priced `redeem` (LTV-gated,
 collateral-funded), async oracle-free `requestRedeem → fulfillRedeem` (proposer, exact proportional
-unwind), and a trustless `emergencyRedeem` deadman after 2 days. The operator (Mamo backend, the
-"proposer") manages the position through a bounded interface (`deployIdle` / `compound` / `rerange` /
+unwind), and a trustless `emergencyRedeem` deadman after 2 days. The operator (the rebalancer service,
+`MAMO_REBALANCER` — the strategy's "proposer", **not** the Mamo backend, which drives the per-user account
+layer) manages the position through a bounded interface (`deployIdle` / `compound` / `rerange` /
 `adjustLeverage`) with hard LTV/health caps asserted after every action, plus a **permissionless**
 `deleverage` anyone can trigger when health slips. The agent can never withdraw user funds to itself.
 
@@ -211,14 +241,27 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
     `underlying()`, USDC-as-leg and reward-token-as-leg rejection, decimals in `[2, 18]`); (d)
     `wethDeliversNative == false` leaves `receive()` accepting ETH with no wrap (gap 3).
 12. **Rerange width band + skew + the vault's own surface** — `rerange(width, skewBps, …)` accepts a
-    per-cycle width **and skew** and `_checkWidth` enforces the grid + `[minWidth, maxWidth]` band on
-    both the genesis width and every subsequent one; the band itself is validated once at init
-    (`% spacing == 0`, `minWidth >= 2 × spacing`, `min <= max`). `skewBps` is checked alongside it —
-    strictly inside `(0, 10000)`, and **both** derived spans (`width × skewBps / 10000` and the
+    per-cycle width **and skew** and `LeveragedAeroValuation.checkRange` enforces the grid +
+    `[minWidth, maxWidth]` band on both the genesis width and every subsequent one; the band itself is
+    validated once at init (`% spacing == 0`, `minWidth >= 2 × spacing`, `min <= max`, and a
+    `maxWidth <= 2 × MAX_TICK` ceiling so an extreme skew cannot push a bound out of the tick domain or
+    wrap the `int24` arithmetic). The **skew band** is new and is validated the same way, and can only
+    ever **tighten** the open `(0, 10000)` interval (`0 < minSkewBps <= maxSkewBps < 10000`), never widen
+    it. `skewBps` itself is checked alongside the width — strictly inside `(0, 10000)`, inside
+    `[minSkewBps, maxSkewBps]`, and **both** derived spans (`width × skewBps / 10000` and the
     remainder) at least one `tickSpacing`, which is what keeps the range strictly bracketing spot at
-    small widths. Confirm a proposer cannot degenerate the range to an empty or single-tick band **by
+    small widths. All of it is one function now (the two former private helpers `_checkWidth` /
+    `_checkSkew` are gone), called from the strategy entrypoint before the venue delegatecall — review it
+    as such. Confirm a proposer cannot degenerate the range to an empty or single-tick band **by
     either knob**, that the down-alignment of both bounds cannot invert them or push spot outside the
     minted range, and that the persisted `$.width` / `$.skewBps` cannot desync from the minted position.
+    Two known, accepted geometric consequences to check rather than re-report: the down-alignment is
+    **asymmetric** — it preserves the realised width exactly but always transfers the residue (up to
+    `tickSpacing − 1` ticks) from the upper span into the lower one, so the realised upper side can be a
+    single tick at the guard's floor; and at `width == 2 × tickSpacing` every admissible skew aliases onto
+    the same centred range, making skew inert at minimum width. Both are bounded and fail-safe (spot stays
+    bracketed); they are documented as an ops sizing rule (`upperSpan >= 2 × tickSpacing`) rather than
+    tightened on-chain.
     Note also that an extreme (still-valid) skew can leave the range far enough off spot to trip the
     pre-existing `DegenerateRange()` in `assetModeSplit` — a new path to an old guard, not a new failure
     mode. On the vault: `setStrategy` set-once, `redeemSettled` rounding and the pre-burn/pre-transfer
@@ -247,6 +290,25 @@ Pre-declared so auditors don't re-report them; each is a deliberate, reviewed ch
 - **`Layout` leg field names.** `cbBTC` / `weth` / `mCbBTC` / `mWeth` / `wethIsToken0` are leg-slot
   names, kept because renaming them would break the byte-identical `Layout` parity across two files for
   no behavioral gain. Documented as leg B / leg A in the source.
+- **Calm-gate coverage is ADD-paths-only — corrected.** Earlier wording here read as though every venue
+  path were calm-gated. It is not, and the asymmetry is deliberate: the gate runs on `rerange`, `execute`,
+  `deployIdle` and lever-**up** (and on NAV pricing), while `deleverage`, `settle` and the redeem unwinds
+  (`fulfillRedeem` / `emergencyRedeem`) are **un-gated**. The rationale is directional — those paths
+  **burn** liquidity rather than mint it, so a shoved tick cannot be used to mint the fund a bad position
+  through them, and gating them would hand any pool-shover a way to block a user's exit or the
+  permissionless safety valve. Reviewers should confirm the direction argument, not the absence of a gate.
+- **The `width`/`skewBps`/`targetLtvBps` persists live in the STRATEGY frame — corrected rationale.** This
+  is a **bytecode relocation for EIP-170 headroom**, not a semantic choice: the strategy frame already
+  loads `_layout()` for the validation, so each `sstore` costs ~20 bytes there versus ~70 in
+  `LeveragedAeroManager`, which is at the size cap (551 bytes of margin — see above). Semantics are
+  identical either way: same transaction, same all-or-nothing revert, so a stored value that disagrees
+  with the minted position is unreachable. Earlier text implied a correctness motive; there is none.
+  The one genuinely deliberate behaviour it enables is the **flat-book persist**: with `tokenId == 0`
+  (still `Executed`) `rerangeImpl` returns early and the persist is all that happens, kept for
+  `layout()` / monitoring consistency rather than because anything re-reads it — such a book is
+  **terminal until settle** (`execute` is one-shot, `deployIdle` fails closed with no NFT to add into,
+  `compound` no-ops), which is itself worth a reviewer's attention as a liveness property rather than a
+  safety one.
 
 ### Trusted-vault note
 
@@ -281,6 +343,12 @@ Stated plainly; none are closed.
    warning and all three call sites pass it straight to `_calmGate`, but the type does not enforce it.
    The flagged structural fix is a distinct `CalmConfig` type — deferred because the manager has only
    551 bytes of EIP-170 headroom.
+5. **Range-aware borrowing is not implemented.** `_borrowHalfEach` splits every borrow 50/50 by USD value
+   regardless of where the range sits, which is what produces the per-borrow skew ratchet described in the
+   skew note above. The fix — sizing each cycle's borrow against the *stored* range so the mint consumes
+   what it borrows — is the named follow-up out of the PR #71 review and is out of scope here. Until it
+   lands, the operational mitigation (centered genesis, skew via `rerange`, fewer and larger deploys) only
+   defers the drag. Bounded and delta-neutral, so it is a capital-efficiency gap rather than a safety one.
 
 ## Specification & documentation
 
@@ -309,6 +377,10 @@ forge build --sizes                  # EIP-170 margins (table above)
 ```
 
 Last verified locally 2026-07-27: **459 passed / 0 failed / 0 skipped**. Relevant breakdown:
+
+> **These counts predate this change.** The skew-band validation and the two review remediations landed
+> with their own tests after that run, so the totals below are a floor, not the current figure. Re-run
+> `make test-unit` and the `test/leveraged-aero/*` match-path before quoting a number.
 
 | Suite | Tests | Covers |
 |---|---|---|
