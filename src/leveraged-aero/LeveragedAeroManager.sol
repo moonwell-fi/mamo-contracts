@@ -1212,7 +1212,14 @@ library LeveragedAeroManager {
             uint256 cbBal2 = IERC20($.cbBTC).balanceOf(address(this));
             if (cbBal2 > 0) {
                 IERC20($.cbBTC).forceApprove($.mCbBTC, cbBal2);
-                _repay($.mCbBTC, type(uint256).max);
+                // SAME SHAPE `_settleRepayDebts` closes above: `max` pulls the FULL accrued debt
+                // while the approve is sized off the BALANCE, and the funding swap only guarantees
+                // `debtRem * (1 - maxSlippageBps)` — so a min-fill leaves balance < debt and reverts
+                // the whole unwind (and therefore `flatten`, and therefore `migrateVenue`). Repay the
+                // balance in that case. No fresh market read is needed: `_settleRepayDebts` ran
+                // `borrowBalanceCurrent` on this market in this tx and no time has passed since, so
+                // `cbDebtRem` IS the accrued debt.
+                _repay($.mCbBTC, cbBal2 >= cbDebtRem ? type(uint256).max : cbBal2);
             }
         }
         // Cover WETH shortfall (bounded by its own oracle budget, not the full idle balance — M1;
@@ -1222,7 +1229,7 @@ library LeveragedAeroManager {
             uint256 wBal2 = IERC20($.weth).balanceOf(address(this));
             if (wBal2 > 0) {
                 IERC20($.weth).forceApprove($.mWeth, wBal2);
-                _repay($.mWeth, type(uint256).max);
+                _repay($.mWeth, wBal2 >= wethDebtRem ? type(uint256).max : wBal2); // see the cbBTC leg
             }
         }
     }

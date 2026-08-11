@@ -6,6 +6,7 @@ import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroVal
 import {LeveragedAeroVenue} from "@contracts/leveraged-aero/LeveragedAeroVenue.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
+import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
@@ -109,6 +110,13 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE, and every
+    ///      destination pool must be REGISTERED at its declared pair + spacing to be adoptable.
+    ///      Etch is safe despite `MockCLFactory` being storage-based: only the code is copied, and
+    ///      every `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         vm.warp(1_800_000_000);
         // EXTERNAL self-calls, not internal helpers: via_ir re-inlines single-call-site internal
@@ -125,7 +133,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     function setUpCore() external {
         usdc = new MockToken("USD Coin", "USDC", 6);
         aero = new MockToken("Aerodrome", "AERO", 18);
-        clFactory = new MockCLFactory();
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         router = new MockClSwapRouter();
@@ -140,7 +149,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         pool = new MockCLPool(address(legB), address(legA), SPACING);
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         pool.setTick(TICK);
-        pool.setFactory(address(clFactory));
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legB), address(legA), SPACING, address(pool));
         clFactory.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("legBSwapPool"));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
         gauge = new MockCLGauge(address(aero));
@@ -166,7 +176,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         poolB = new MockCLPool(address(legB2), address(legA2), SPACING_B);
         poolB.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         poolB.setTick(TICK);
-        poolB.setFactory(address(clFactory));
+        poolB.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legB2), address(legA2), SPACING_B, address(poolB));
         clFactory.setPool(address(usdc), address(legB2), LEG_B2_SWAP_SPACING, makeAddr("legB2SwapPool"));
         clFactory.setPool(address(usdc), address(legA2), LEG_A2_SWAP_SPACING, makeAddr("legA2SwapPool"));
         gaugeB = new MockCLGauge(address(aero));
@@ -182,7 +193,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     /// @dev Asset-mode destination {usdc, legA2}: migrate-only, so no price/tick setup needed.
     function setUpVenueC() external {
         poolC = new MockCLPool(address(usdc), address(legA2), SPACING);
-        poolC.setFactory(address(clFactory));
+        poolC.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(usdc), address(legA2), SPACING, address(poolC));
         gaugeC = new MockCLGauge(address(aero));
         gaugeC.setPool(address(poolC));
         poolC.setGauge(address(gaugeC));
@@ -263,6 +275,31 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         p.managementFeeBps = 0;
         p.performanceFeeBps = 0;
         p.feeRecipient = address(0);
+    }
+
+    /// @dev Venue A as a MIGRATION DESTINATION — the same venue `_baseParams()` initialises with,
+    ///      marshalled as `VenueParams` so a test can migrate BACK to it. Every field must match
+    ///      `_baseParams()`'s venue subset or the round trip is not a round trip.
+    function _venueAParams() internal view returns (LeveragedAeroVenue.VenueParams memory v) {
+        v.mCbBTC = address(mLegB);
+        v.mWeth = address(mLegA);
+        v.cbBTC = address(legB);
+        v.weth = address(legA);
+        v.pool = address(pool);
+        v.gauge = address(gauge);
+        v.cbBTCFeed = address(legBFeed);
+        v.wethFeed = address(legAFeed);
+        v.aeroUsdFeed = address(aeroFeed);
+        v.tickSpacing = SPACING;
+        v.cbBTCSwapTickSpacing = LEG_B_SWAP_SPACING;
+        v.wethSwapTickSpacing = LEG_A_SWAP_SPACING;
+        v.wethDeliversNative = false;
+        v.width = WIDTH;
+        v.minWidth = 200;
+        v.maxWidth = 20_000;
+        v.targetLtvBps = TARGET_LTV_BPS;
+        v.maxLtvBps = 6500;
+        v.minHealthBps = 12_000;
     }
 
     /// @dev Venue B (cross-pair): fresh legs/markets/feeds/pool/gauge, spacing 200, width band on grid.
@@ -488,6 +525,40 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(strategy.layout().pool, address(poolB), "migration no longer blocked by dust");
     }
 
+    /// @dev The dust skip used to sit AFTER `readUsd8`, so dust still gated `flatten` on the reward
+    ///      feed being healthy — and `flatten` is `migrateVenue`'s own precondition, which made a
+    ///      feed outage plus one wei of donated dust enough to stall a migration for the duration of
+    ///      the outage, for zero economic benefit. The oracle-free band now short-circuits first.
+    function testFlattenIgnoresDustWithoutConsultingAStaleRewardFeed() public {
+        _execute(SEED);
+        aero.mint(address(strategy), 1e6);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours); // past the 1 hour maxDelay
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        _assertFlat();
+        assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place");
+        // The migration the outage would otherwise have stalled still completes.
+        _stage(_venueBParams());
+        _migrate(_venueBParams());
+        assertEq(strategy.layout().pool, address(poolB), "migration not stalled by a stale feed");
+    }
+
+    /// @dev The narrow half of the same branch, and the reason it is safe: the oracle-free band is
+    ///      derived from a price CEILING, so anything above it still consults the feed and still
+    ///      fails closed when that feed is stale. The band can only ever be narrower than the priced
+    ///      `floor == 0` skip, never wider.
+    function testFlattenStillFailsClosedOnAStaleFeedAboveTheOracleFreeBand() public {
+        _execute(SEED);
+        aero.mint(address(strategy), 1e9); // > 1e20 / REWARD_PRICE_CEILING_USD8 (== 1e8)
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+    }
+
     /// @dev The dust skip must NOT widen the guard for a real tranche: a balance whose oracle floor is
     ///      nonzero still has to clear both the caller's floor and the L9 post-check.
     function testFlattenStillSellsABalanceJustAboveTheDustThreshold() public {
@@ -665,6 +736,100 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         // ...but poolB.gauge() still points at the real gaugeB.
         v.gauge = address(impostor);
         _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    // ==================== CANONICAL FACTORY BINDING (migrate side) ====================
+
+    /// @dev The migrate-side half of the init binding: a destination pool is adoptable only if the
+    ///      CANONICAL Slipstream factory registers it. A pool that nominates its own registry — the
+    ///      self-attestation the binding removes — is rejected even when that registry vouches for
+    ///      it completely. This is the seam that mattered most at runtime: init is deployer-driven,
+    ///      whereas `migrateVenue` re-points a LIVE fund at a pool chosen months later.
+    function testMigrateRejectsADestinationPoolThatNominatesAForeignFactory() public {
+        _execute(SEED);
+        _flatten();
+        MockCLFactory rogue = new MockCLFactory();
+        rogue.setPool(address(usdc), address(legB2), LEG_B2_SWAP_SPACING, makeAddr("rogueB2Swap"));
+        rogue.setPool(address(usdc), address(legA2), LEG_A2_SWAP_SPACING, makeAddr("rogueA2Swap"));
+        rogue.setPool(address(legB2), address(legA2), SPACING_B, address(poolB));
+        poolB.setFactory(address(rogue));
+        _expectMigrateRevert(_venueBParams(), LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /// @dev And the registration itself is load-bearing, not just the factory address.
+    function testMigrateRejectsADestinationTheCanonicalFactoryDoesNotRegister() public {
+        _execute(SEED);
+        _flatten();
+        clFactory.setPool(address(legB2), address(legA2), SPACING_B, address(0));
+        _expectMigrateRevert(_venueBParams(), LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    // ==================== ROUND TRIP ====================
+
+    /// @dev A→B→A. Every prior migration test moves the fund ONE way, so nothing ever migrated OUT of
+    ///      a venue with a different token ordering or shape — which is exactly why migrate-staleness
+    ///      mutants on the DERIVED fields survived: a stale `wethIsToken0` / `legBIsAsset` / leg
+    ///      decimals looks identical to a correct one until a second migration has to overwrite it.
+    ///      Venue B is deliberately a different pair AND a different spacing, so the return leg has to
+    ///      rewrite the derived set rather than leave it alone.
+    function testMigrateRoundTripRestoresEveryDerivedField() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAerodromeCLStrategy.LayoutView memory before = strategy.layout();
+        assertFalse(before.wethIsToken0, "venue A sorts leg B first");
+
+        // FLIP THE ORDERING on the destination. Without this the round trip is blind to the mutant
+        // it exists to catch: venues A and B both sort leg B into token0, so a DELETED
+        // `$.wethIsToken0` write is indistinguishable from a correct one and the mutant survives.
+        // Verified: with the flip, deleting that write fails this test.
+        poolB.setTokens(address(legA2), address(legB2));
+        clFactory.setPool(address(legA2), address(legB2), SPACING_B, address(poolB));
+
+        _stage(_venueBParams());
+        _migrate(_venueBParams());
+        assertEq(strategy.layout().pool, address(poolB), "outbound leg landed");
+        assertTrue(strategy.layout().wethIsToken0, "ordering flipped on the way out");
+
+        _stage(_venueAParams());
+        _migrate(_venueAParams());
+
+        LeveragedAerodromeCLStrategy.LayoutView memory afterTrip = strategy.layout();
+        assertEq(afterTrip.pool, before.pool, "pool restored");
+        assertEq(afterTrip.gauge, before.gauge, "gauge restored");
+        assertEq(afterTrip.cbBTC, before.cbBTC, "leg B restored");
+        assertEq(afterTrip.weth, before.weth, "leg A restored");
+        assertEq(afterTrip.mCbBTC, before.mCbBTC, "leg B market restored");
+        assertEq(afterTrip.mWeth, before.mWeth, "leg A market restored");
+        assertEq(afterTrip.tickSpacing, before.tickSpacing, "spacing restored");
+        // The DERIVED set — the fields a stale-write mutant leaves behind.
+        assertEq(afterTrip.wethIsToken0, before.wethIsToken0, "ordering re-derived");
+        assertEq(afterTrip.legBIsAsset, before.legBIsAsset, "shape re-derived");
+        assertEq(afterTrip.cbBTCDecimals, before.cbBTCDecimals, "leg B decimals re-derived");
+        assertEq(afterTrip.wethDecimals, before.wethDecimals, "leg A decimals re-derived");
+    }
+
+    /// @dev The shape half of the same gap: venue C is ASSET-MODE (`cbBTC == usdc`), so
+    ///      `legBIsAsset` must flip false→true on the way out and true→false on the way back. Only a
+    ///      migration OUT of asset mode can catch a stale write to it, and until now nothing migrated
+    ///      out of anything.
+    function testMigrateRoundTripThroughAssetModeRestoresTheShape() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAerodromeCLStrategy.LayoutView memory before = strategy.layout();
+        assertFalse(before.legBIsAsset, "venue A is the two-borrowed-legs shape");
+
+        _stage(_venueCParams());
+        _migrate(_venueCParams());
+        assertTrue(strategy.layout().legBIsAsset, "asset mode adopted");
+
+        _stage(_venueAParams());
+        _migrate(_venueAParams());
+        assertFalse(strategy.layout().legBIsAsset, "shape re-derived on the way back");
+        assertEq(strategy.layout().cbBTC, before.cbBTC, "leg B is a real borrowed leg again");
+        assertEq(strategy.layout().mCbBTC, before.mCbBTC, "leg B market restored");
+        assertEq(strategy.layout().cbBTCSwapTickSpacing, before.cbBTCSwapTickSpacing, "leg B spacing restored");
     }
 
     /// @dev The reward leg is a THIRD swap venue (Aerodrome v2, volatile, hardcoded route). Without a

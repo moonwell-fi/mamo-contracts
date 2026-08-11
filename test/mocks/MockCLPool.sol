@@ -70,6 +70,23 @@ contract MockCLPool {
         sqrtPriceX96 = sqrtPriceX96_;
     }
 
+    /// @notice Cap the oracle history `observe` can answer for, in seconds. `0` (the default) means
+    ///         unlimited — the pre-existing behaviour, so every existing fixture is unaffected.
+    /// @dev Models the ONE failure mode venue validation's TWAP-availability probe exists to catch:
+    ///      a real Slipstream pool whose observation cardinality does not yet span the requested
+    ///      window REVERTS `observe`, and without a knob here that probe cannot be exercised at all
+    ///      (it always succeeded, which is also why the vacuous `observe([0, 0])` at init went
+    ///      unnoticed). Set it to `window - 1` to model "pool younger than twapWindow".
+    function setMaxObservationAge(uint32 maxObservationAge_) external {
+        maxObservationAge = maxObservationAge_;
+    }
+
+    /// @notice Oldest observation `observe` will serve, in seconds ago. `0` == unlimited.
+    uint32 public maxObservationAge;
+
+    /// @notice Thrown when `observe` is asked for a window the mock's history does not span.
+    error MockCLPoolOldestObservation();
+
     // ── ICLPool ──
 
     function slot0() external view returns (uint160, int24, uint16, uint16, uint16, bool) {
@@ -86,6 +103,9 @@ contract MockCLPool {
         tickCumulatives = new int56[](secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);
         for (uint256 i; i < secondsAgos.length; ++i) {
+            if (maxObservationAge != 0 && secondsAgos[i] > maxObservationAge) {
+                revert MockCLPoolOldestObservation();
+            }
             // Cumulative measured backwards from now: -(secondsAgo) * twapTick.
             tickCumulatives[i] = -int56(int32(int256(uint256(secondsAgos[i])))) * int56(twapTick);
         }
