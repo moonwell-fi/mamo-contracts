@@ -45,20 +45,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Maps implementations to their strategy ID
     mapping(address => uint256) public implementationToId;
 
-    /// @notice The single address strategies recognise as "the backend operator".
-    /// @dev Deliberately NOT derived from the BACKEND_ROLE member set. BACKEND_ROLE is shared by
-    ///      the operator and every factory that calls {addStrategy}; OpenZeppelin's EnumerableSet
-    ///      removal is swap-and-pop, so reading member index 0 hands the operator identity to
-    ///      whichever member happens to sit in slot zero after a revocation — i.e. it changes
-    ///      during key rotation, the moment it must not. Stored explicitly and moved only by
-    ///      {setStrategyOperator}.
-    /// @dev Declared LAST on purpose. MamoStrategyRegistry is not upgradeable, so slot assignment
-    ///      is not consensus-critical today — but a variable inserted between `nextStrategyTypeId`
-    ///      and `implementationToId` would shift every mapping slot after it, and describing that
-    ///      as an "append" would mislead anyone who later plans a storage-preserving migration or
-    ///      a proxied successor. Appended here, the description is literally true.
-    address public strategyOperator;
-
     // Events
     /// @notice Emitted when a strategy is added for a user
     event StrategyAdded(address indexed user, address strategy, address implementation);
@@ -77,9 +63,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
-    /// @notice Emitted when the strategy operator address is changed
-    event StrategyOperatorUpdated(address indexed oldOperator, address indexed newOperator);
-
     /**
      * @notice Constructor that sets up initial roles
      * @dev Grants DEFAULT_ADMIN_ROLE, BACKEND_ROLE, and GUARDIAN_ROLE to the specified addresses
@@ -96,11 +79,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
         _grantRole(GUARDIAN_ROLE, guardian);
-
-        // The deployment-time backend is also the initial strategy operator. From here the two
-        // identities move independently: role membership via grant/revoke, the operator via
-        // setStrategyOperator.
-        strategyOperator = backend;
 
         nextStrategyTypeId = 1;
     }
@@ -194,13 +172,11 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
     }
 
     /**
-     * @notice Gets the strategy operator address that strategies accept as "the backend"
-     * @dev Returns the explicitly stored {strategyOperator}, never a member of the BACKEND_ROLE
-     *      set — see the note on that variable for why set ordering must not confer privilege.
-     * @return The address of the strategy operator
+     * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @return The address of the backend
      */
     function getBackendAddress() external view returns (address) {
-        return strategyOperator;
+        return getRoleMember(BACKEND_ROLE, 0);
     }
 
     // ==================== BACKEND FUNCTIONS ====================
@@ -209,10 +185,7 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
      * @notice Adds an implementation to the whitelist with a strategy type ID
      * @dev Only callable by accounts with the ADMIN_ROLE
      * @param implementation The address of the implementation to whitelist
-     * @param strategyTypeId Pass 0 to CREATE a new strategy type (the next counter value is
-     *        assigned). Pass an EXISTING type id to roll out a new implementation for that type;
-     *        the id must already be in use or the call reverts with "Unknown strategy type".
-     *        A new type can never be created at a caller-chosen id — see the body for why.
+     * @param strategyTypeId The strategy type ID to assign. If 0, a new ID will be assigned
      * @return assignedStrategyTypeId The assigned strategy type ID
      */
     function whitelistImplementation(address implementation, uint256 strategyTypeId)
@@ -223,24 +196,11 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         require(implementation != address(0), "Invalid implementation address");
         require(!whitelistedImplementations[implementation], "Implementation already whitelisted");
 
-        // A strategy TYPE is created exactly one way: automatic assignment (strategyTypeId == 0).
-        // An explicit id is the implementation ROLLOUT path and may only name a type that already
-        // exists.
-        //
-        // Keeping type creation on the counter is what makes nextStrategyTypeId authoritative.
-        // Previously an explicit id could squat the slot the counter was about to hand out, so the
-        // next automatic registration silently overwrote latestImplementationById — stranding the
-        // earlier implementation (addStrategy requires an exact match against the latest) and
-        // making an unrelated implementation the only upgrade target its proxies would accept.
-        // Neither is recoverable: latestImplementationById is written nowhere else, and the
-        // "already whitelisted" guard above blocks re-registering the stranded implementation.
-        //
-        // Rejecting unknown ids also turns a mistyped id into a revert instead of a phantom
-        // strategy type that nothing can ever deploy against.
+        // If strategyTypeId is 0, assign a new strategy type ID
         if (strategyTypeId == 0) {
             assignedStrategyTypeId = nextStrategyTypeId++;
         } else {
-            require(latestImplementationById[strategyTypeId] != address(0), "Unknown strategy type");
+            // Otherwise, use the provided strategyTypeId
             assignedStrategyTypeId = strategyTypeId;
         }
 
@@ -289,50 +249,6 @@ contract MamoStrategyRegistry is AccessControlEnumerable, Pausable {
         emit StrategyAdded(user, strategy, implementation);
     }
     // ==================== ADMIN FUNCTIONS ====================
-
-    /**
-     * @notice Sets the address strategies recognise as the backend operator
-     * @dev Only callable by accounts with the DEFAULT_ADMIN_ROLE. Granting or revoking
-     *      BACKEND_ROLE (which gates {addStrategy} for factories) does NOT move this address;
-     *      rotating the operator key is a deliberate two-step: grant/revoke the role for
-     *      registration rights, then call this for operator rights.
-     * @param newOperator The address of the new strategy operator
-     */
-    function setStrategyOperator(address newOperator) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newOperator != address(0), "Invalid strategy operator address");
-
-        emit StrategyOperatorUpdated(strategyOperator, newOperator);
-        strategyOperator = newOperator;
-    }
-
-    // ==================== GUARDIAN FUNCTIONS ====================
-
-    /**
-     * @notice Emergency containment: strips the current strategy operator of its authority
-     * @dev Making the operator explicit fixed the identity bug, but it also SLOWED containment: a
-     *      compromised operator key used to lose its powers the moment BACKEND_ROLE was revoked,
-     *      whereas `onlyBackend` now reads this variable, {setStrategyOperator} is DEFAULT_ADMIN
-     *      (a timelocked multisig), and the strategies' backend entry points carry no
-     *      `whenNotPaused` — so {pause} here does not reach them either. This is the fast path
-     *      that closes that window, and it belongs to the same role that already holds the other
-     *      break-glass lever.
-     *
-     *      It can only ever point the operator at THIS CONTRACT, never at a guardian-chosen
-     *      address: the guardian must be able to switch the backend OFF without being able to
-     *      become it. `address(this)` is a safe sentinel because the registry never calls a
-     *      strategy's onlyBackend surface (its only outbound strategy call is the
-     *      registry-authorised `upgradeToAndCall`), and no key controls it — so every
-     *      `onlyBackend` function on every strategy becomes uncallable until DEFAULT_ADMIN
-     *      installs a fresh operator with {setStrategyOperator}. Zero is not usable as the
-     *      sentinel: `msg.sender` can never be zero, but treating it as "unset" invites callers
-     *      to special-case it.
-     */
-    function freezeStrategyOperator() external onlyRole(GUARDIAN_ROLE) {
-        require(strategyOperator != address(this), "Strategy operator already frozen");
-
-        emit StrategyOperatorUpdated(strategyOperator, address(this));
-        strategyOperator = address(this);
-    }
 
     /**
      * @notice Recovers ERC20 tokens accidentally sent to this contract

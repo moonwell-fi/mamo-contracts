@@ -97,10 +97,8 @@ interface IMamoStrategyRegistry {
     function getStrategyImplementation(address strategy) external view returns (address);
 
     /**
-     * @notice Gets the strategy operator address that strategies accept as "the backend"
-     * @dev Explicitly stored and admin-settable. NOT derived from the BACKEND_ROLE member set —
-     *      that set is shared with the factories and its ordering changes on revocation.
-     * @return The address of the strategy operator
+     * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @return The address of the backend
      */
     function getBackendAddress() external view returns (address);
 

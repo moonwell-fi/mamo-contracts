@@ -518,7 +518,6 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
         vm.startPrank(admin);
         registry.grantRole(backendRole, newBackend);
         registry.revokeRole(backendRole, backend);
-        registry.setStrategyOperator(newBackend);
         vm.stopPrank();
 
         vm.prank(backend);
