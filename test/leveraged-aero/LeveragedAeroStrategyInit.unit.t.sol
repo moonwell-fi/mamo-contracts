@@ -301,6 +301,18 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
     }
 
+    /// @dev The LEG feeds are pinned to 8dp at validation time too, not only at read time — a non-8dp
+    ///      aggregator mis-scales every token↔USDC conversion by orders of magnitude. `wethFeed` had a
+    ///      test; `cbBTCFeed` (the very next clause, same selector) did not, so a mutant deleting the
+    ///      `cbBTCFeed.decimals() != 8` line alone survived. Only `cbBTCFeed` is odd here (others 8dp),
+    ///      so this clause is what fires. Leg A stays 8dp so the earlier `wethFeed` clause passes.
+    function testInitRevertsOnNonEightDecimalCbBtcFeed() public {
+        MockPriceFeed odd = new MockPriceFeed(1e18, 18, block.timestamp);
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.cbBTCFeed = address(odd);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
+    }
+
     /// @dev The same floor hardcodes an 18dp reward token (`mulDiv(aeroBal, price8, 1e20)`).
     function testInitRevertsOnNonEighteenDecimalRewardToken() public {
         MockToken sixDpReward = new MockToken("Reward", "RWD", 6);

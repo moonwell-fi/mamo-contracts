@@ -614,6 +614,44 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.flatten(1, unreachable);
     }
 
+    /// @dev REGRESSION for the `_settleRepayDebts` stale-index bug. That function decides full-repay
+    ///      (`type(uint256).max`) vs partial off a leg's debt read; the fix reads `borrowBalanceCurrent`
+    ///      (which ACCRUES) instead of the stale `borrowBalanceStored`. The bug window: a leg whose
+    ///      HELD balance covers the STORED debt but not the ACCRUED debt takes the `>= stored` full-repay
+    ///      branch, approves only the held balance, and Moonwell's `repayBorrow` then capitalises and
+    ///      pulls the larger ACCRUED debt — reverting the whole flatten, and with it `migrateVenue`'s
+    ///      flat-book precondition. Construction: arm PENDING interest (invisible to `borrowBalanceStored`)
+    ///      so accrued > stored, and mint a small cushion so each leg's held balance lands in
+    ///      `[stored, accrued)`. With the fix, flatten reads the accrued debt, repays what it holds, and
+    ///      `_settleShortfall` covers the remainder from collateral. Fails against the stored read.
+    function testFlattenSurvivesPendingInterestBetweenStoredAndAccruedDebt() public {
+        _execute(SEED);
+        uint256 storedA = mLegA.borrowBalance(address(strategy));
+        uint256 storedB = mLegB.borrowBalance(address(strategy));
+        assertGt(storedA, 0, "leg A borrowed");
+        assertGt(storedB, 0, "leg B borrowed");
+
+        // Arm 20% of PENDING (un-capitalised) interest on each borrow: stored stays put, accrued jumps.
+        mLegA.accruePendingBorrowInterest(address(strategy), storedA * 20 / 100);
+        mLegB.accruePendingBorrowInterest(address(strategy), storedB * 20 / 100);
+        assertEq(mLegA.borrowBalance(address(strategy)), storedA, "stored read is still the pre-accrual debt");
+        assertGt(mLegA.borrowBalanceAccrued(address(strategy)), storedA, "accrued read reveals the gap");
+
+        // Cushion each leg so the post-unwind held balance robustly clears STORED (genesis rounds the
+        // LP down by dust) while staying well under ACCRUED — i.e. squarely inside the bug window.
+        legA.mint(address(strategy), storedA * 3 / 100);
+        legB.mint(address(strategy), storedB * 3 / 100);
+
+        // With the fix this succeeds; against `borrowBalanceStored` the full-repay branch over-pulls
+        // the accrued debt past the held-balance approval and the unwind reverts.
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        _assertFlat();
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg A debt fully cleared");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg B debt fully cleared");
+    }
+
     // ==================== staging ====================
 
     function testStageVenueIsVaultOwnerOnly() public {
@@ -830,6 +868,50 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(strategy.layout().cbBTC, before.cbBTC, "leg B is a real borrowed leg again");
         assertEq(strategy.layout().mCbBTC, before.mCbBTC, "leg B market restored");
         assertEq(strategy.layout().cbBTCSwapTickSpacing, before.cbBTCSwapTickSpacing, "leg B spacing restored");
+    }
+
+    /// @dev The leg-A DECIMALS half of the same gap. Venues A/B/C all carry an 18dp leg A, so the
+    ///      `wethDecimals` value never changes across any migration among them and a stale
+    ///      `$.wethDecimals = wethDec` write is invisible — the A↔B↔C round trips above pass even with
+    ///      that write deleted. Venue D is a two-leg destination whose leg A is 8dp, so the migration
+    ///      forces `wethDecimals` 18→8 and back, catching the stale write. Migrate-only (no redeploy),
+    ///      so venue D needs no tick/price — `applyVenue` reads no pool price.
+    function testMigrateRoundTripThroughAnEightDecimalLegARestoresTheDecimals() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAerodromeCLStrategy.LayoutView memory before = strategy.layout();
+        assertEq(before.wethDecimals, 18, "venue A leg A is 18dp");
+
+        // ── Venue D: fresh 8dp leg A, reusing venue B's 8dp leg B + collateral market. ──
+        MockToken legAD = new MockToken("Leg A 8dp", "LEGAD", 8);
+        MockLendingMarket mLegAD = new MockLendingMarket(address(legAD));
+        MockChainlinkFeed legADFeed = new MockChainlinkFeed(int256(P_LEG_A), 8, 1, block.timestamp);
+        MockCLPool poolD = new MockCLPool(address(legB2), address(legAD), SPACING);
+        poolD.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legB2), address(legAD), SPACING, address(poolD));
+        clFactory.setPool(address(usdc), address(legAD), LEG_A_SWAP_SPACING, makeAddr("legADSwapPool"));
+        MockCLGauge gaugeD = new MockCLGauge(address(aero));
+        gaugeD.setPool(address(poolD));
+        poolD.setGauge(address(gaugeD));
+        gaugeD.setNpm(address(npm));
+
+        LeveragedAeroVenue.VenueParams memory d = _venueBParams();
+        d.mWeth = address(mLegAD);
+        d.weth = address(legAD);
+        d.wethFeed = address(legADFeed);
+        d.pool = address(poolD);
+        d.gauge = address(gaugeD);
+        d.tickSpacing = SPACING;
+        d.wethSwapTickSpacing = LEG_A_SWAP_SPACING;
+
+        _stage(d);
+        _migrate(d);
+        assertEq(strategy.layout().wethDecimals, 8, "leg A decimals re-derived to 8 on the way out");
+
+        _stage(_venueAParams());
+        _migrate(_venueAParams());
+        assertEq(strategy.layout().wethDecimals, before.wethDecimals, "leg A decimals restored to 18");
     }
 
     /// @dev The reward leg is a THIRD swap venue (Aerodrome v2, volatile, hardcoded route). Without a
