@@ -110,6 +110,12 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
+    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
+    ///      `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         vm.warp(1_800_000_000);
 
@@ -120,8 +126,10 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         pool = new MockCLPool(address(usdc), address(legA), SPACING);
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         pool.setTick(TICK);
-        clFactory = new MockCLFactory();
-        pool.setFactory(address(clFactory));
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legA), address(usdc), SPACING, address(pool));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
 
         legAPrice8 = _legAPriceFromSqrtP(pool.sqrtPriceX96());

@@ -497,18 +497,25 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.mUsdc = p.mUsdc;
         $.usdcFeed = p.usdcFeed;
         $.comptroller = p.comptroller;
+        // FIFTH live-storage read, and it must be written HERE, not with the other oracle params
+        // below: `applyVenue`'s TWAP-availability probe calls `pool.observe([$.twapWindow, 0])`, so
+        // with the write left downstream the init-time probe ran as `observe([0, 0])` — which every
+        // pool answers, making the probe vacuous at init and live only at migrate. Its own bound
+        // check therefore has to move up with it, ahead of the sibling bounds below.
+        if (p.twapWindow == 0 || p.twapWindow > 1 days) revert OracleParamOutOfRange();
+        $.twapWindow = p.twapWindow;
         LeveragedAeroVenue.applyVenue(_venueParamsOf(p));
 
         // L3 (+L5): bound the oracle / calm-gate params so a misconfig can't silently disable a guard.
         // Bounds admit the confirmed config yet block degenerate values:
         //   maxDelay           ∈ (0, 7 days] — a huge value disables staleness detection
         //   gracePeriod        ∈ [0, 1 days] — sequencer-restart grace
-        //   twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate
+        //   twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate (checked ABOVE, with
+        //                                      its store, so `applyVenue`'s observe probe is live)
         //   calmDeviationTicks ∈ (0, 5000]   — a huge value disables the calm-gate
         //   maxSlippageBps     ∈ (0, 1000]   — 0 or huge disables swap-slippage protection (10% cap)
         if (p.maxDelay == 0 || p.maxDelay > 7 days) revert OracleParamOutOfRange();
         if (p.gracePeriod > 1 days) revert OracleParamOutOfRange();
-        if (p.twapWindow == 0 || p.twapWindow > 1 days) revert OracleParamOutOfRange();
         if (p.calmDeviationTicks == 0 || p.calmDeviationTicks > 5000) revert OracleParamOutOfRange();
         if (p.maxSlippageBps == 0 || p.maxSlippageBps > 1000) revert OracleParamOutOfRange();
         if ((p.managementFeeBps != 0 || p.performanceFeeBps != 0) && p.feeRecipient == address(0)) {
@@ -527,7 +534,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.maxDelay = p.maxDelay;
         $.gracePeriod = p.gracePeriod;
         $.calmDeviationTicks = p.calmDeviationTicks;
-        $.twapWindow = p.twapWindow;
+        // `$.twapWindow` was stored ahead of `applyVenue` — see the note there.
         $.maxSlippageBps = p.maxSlippageBps;
         $.managementFeeBps = p.managementFeeBps;
         $.performanceFeeBps = p.performanceFeeBps;

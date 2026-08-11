@@ -178,6 +178,17 @@ library LeveragedAeroVenue {
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant STORAGE_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
 
+    /// @dev The canonical Aerodrome Slipstream CLFactory on Base — the ONE registry allowed to vouch
+    ///      for a destination pool. Hardcoded rather than read from `pool.factory()` for the same
+    ///      reason `swapAeroToUsdc` hardcodes `AERO_V2_FACTORY`: a self-nominated registry vouches for
+    ///      nothing. Canonical immutable Base infra (`AERODROME_CL_FACTORY` in `addresses/8453.json`).
+    address private constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
+    /// @dev An 8dp reward-token price nothing could plausibly exceed ($10,000 against a ~$1 token),
+    ///      used ONLY to derive an oracle-free dust bound in `_sellRewardBalance`. Raising it makes
+    ///      that bound narrower (more conservative), never wider — the safe direction.
+    uint256 private constant REWARD_PRICE_CEILING_USD8 = 1e12;
+
     /// @dev ERC-7201 diamond-storage accessor (byte-identical across strategy + manager).
     function _layout() private pure returns (Layout storage $) {
         // solhint-disable-next-line no-inline-assembly
@@ -260,6 +271,21 @@ library LeveragedAeroVenue {
         address rewardTok = ICLGauge($.gauge).rewardToken();
         uint256 bal = IERC20(rewardTok).balanceOf(address(this));
         if (bal == 0) return;
+        // ORACLE-FREE DUST BAND, checked BEFORE the priced one below. The `floor == 0` skip is
+        // correct but sits AFTER `readUsd8`, so a dust donation still gates `flatten` on reward-feed
+        // staleness / sequencer grace for zero economic benefit — and `flatten` is `migrateVenue`'s
+        // own precondition, so a feed outage plus one wei of donated dust stalls a migration.
+        // `bal * price8 < 1e20` is what makes the floor round to 0; `REWARD_PRICE_CEILING_USD8`
+        // substitutes a price so absurd (`$10,000` against a ~$1 token) that no live read could
+        // exceed it, which makes this branch strictly narrower than the priced one — it can only
+        // skip balances the priced check would also have skipped.
+        //
+        // PARTIAL BY CONSTRUCTION, deliberately: this covers only the band that is dust at the
+        // CEILING price, so the priced `floor == 0` skip below still carries the rest of the band and
+        // still runs after the oracle. Closing the remainder needs the actual price, i.e. a
+        // non-reverting `tryReadUsd8` variant — a rewrite of a safety-critical oracle path, which is
+        // not worth it for a sub-micro-USD balance.
+        if (bal < 1e20 / REWARD_PRICE_CEILING_USD8) return;
         uint256 floor = Math.mulDiv(
             bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
         ) * (10000 - uint256($.maxSlippageBps)) / 10000;
@@ -374,9 +400,20 @@ library LeveragedAeroVenue {
         if (IMoonwellMarket(p.mWeth).underlying() != p.weth) revert VenueMismatch();
         // Symmetric with the two borrow legs: the collateral market must wrap the unit of account.
         if (IMoonwellMarket(mUsdc).underlying() != usdc) revert VenueMismatch();
-        // The leg↔USDC swap pools are separate venues from the LP pool — probe them so a typo'd
-        // spacing can't route every swap at a nonexistent pool on a live levered book.
-        address clFactory = ICLPool(p.pool).factory();
+        // CANONICAL FACTORY BINDING. The pool no longer gets to nominate the registry that vouches
+        // for it. `pool.factory()` is SELF-ATTESTED — exactly the seam the `gauge.pool()` reciprocal
+        // below closes for the gauge — so a hostile pool paired with a hostile "factory" satisfies
+        // every probe below for free: the factory answers with whatever the attacker wants for the
+        // two leg↔USDC lookups, and nothing else here re-derives the LP pool's provenance. Pinning
+        // the real Slipstream CLFactory and requiring it to REGISTER `p.pool` at the declared pair +
+        // spacing means the attacker must control the canonical factory, not merely deploy a pool.
+        // Mirrors the treatment `swapAeroToUsdc`'s reward route already gets (hardcoded
+        // `AERO_V2_FACTORY`), removing the asymmetry between the two.
+        if (ICLPool(p.pool).factory() != AERODROME_CL_FACTORY) revert VenueMismatch();
+        if (ICLFactory(AERODROME_CL_FACTORY).getPool(p.weth, p.cbBTC, p.tickSpacing) != p.pool) {
+            revert VenueMismatch();
+        }
+        address clFactory = AERODROME_CL_FACTORY;
         if (legBIsAsset_) {
             // ── ASSET-MODE: the three leg-B slots that only make sense for a BORROWED leg ──
             // (see the numbered rationale in `_initialize`'s original block)
@@ -412,8 +449,13 @@ library LeveragedAeroVenue {
         // whose oracle cardinality does not yet span `twapWindow` REVERTS that read. Every gated path
         // on the destination — `redeploy`, `rerange`, and `flatten` itself — would then revert, i.e. a
         // pool younger than the window is adoptable but neither usable nor exitable. Probe it here so
-        // that becomes a rejected stage instead of a stuck fund. `twapWindow` is non-migratable core,
-        // so the value probed is the one the gate will use.
+        // that becomes a rejected MIGRATE instead of a stuck fund. `twapWindow` is non-migratable
+        // core, so the value probed is the one the gate will use.
+        //
+        // WHEN, precisely: `stageVenue` stores a hash and validates NOTHING — every check in this
+        // function runs at `migrateVenue`, on a book the proposer has already flattened. So a bad
+        // parameter set is caught after the flatten, not before it. Say so plainly: an operator who
+        // reads "rejected at stage time" will flatten first and then eat the revert.
         uint32[] memory secondsAgos = new uint32[](2);
         secondsAgos[0] = $.twapWindow;
         try ICLPool(p.pool).observe(secondsAgos) returns (int56[] memory, uint160[] memory) {}
@@ -433,7 +475,8 @@ library LeveragedAeroVenue {
         // Probe it for the same reason: a gauge whose reward token has no v2/USDC pool passes every
         // other check here and then reverts inside BOTH `compound` and `flatten` the moment a tranche
         // accrues — and `flatten` is the migration's own precondition, so the fund would be stuck on a
-        // venue it cannot unwind. Rejecting at stage time turns that into a rejected parameter set.
+        // venue it cannot unwind. Rejecting at MIGRATE time turns that into a rejected parameter set
+        // (see the timing note on the observe probe above — nothing is validated at stage time).
         if (LeveragedAeroValuation.aeroV2VolatilePool(rewardTok, usdc) == address(0)) revert VenueMismatch();
 
         // Leg decimals drive every token↔USDC conversion — read them, never assume.
