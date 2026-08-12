@@ -982,6 +982,35 @@ contract LeveragedAeroVaultUnitTest is Test {
         vm.expectRevert("LAV: strategy unset");
         vault.previewSharesForAssets(1_000e6);
     }
+
+    /**
+     * @dev REGRESSION — the preview silently disabled the cap in a REACHABLE state. The real `deposit`
+     *      reverts `NavUnpriceable` on `navNet == 0 && supply > 0`, but `nav()` FLOORS to 0 rather than
+     *      reverting, and the preview had no matching guard: it divided by `nav() + 1 == 1` and returned
+     *      a figure ~1e9-1e12x too large. Since this function is the documented way to choose the
+     *      `setMaxSharesPerAccount` argument, an operator following the contract's own instruction
+     *      would have set an effectively UNLIMITED cap — the exact "cap a million times wrong" failure
+     *      the cap exists to prevent. The state is real: after `settleStrategy` the book is flat so
+     *      `nav()` is the strategy's USDC balance (0) while supply is still outstanding, and likewise
+     *      whenever `protocolFeeOwed >= gross`.
+     */
+    function testPreviewSharesForAssetsRevertsWhenNavIsZeroWithSupplyOutstanding() public {
+        _bindAndMint(alice, 1_000e12);
+        strategy.setNav(0); // flat/worthless book, holders still present
+
+        // Pre-fix this returned 1.0e24 against a 1e15 par figure.
+        vm.expectRevert("LAV: nav unpriceable");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    /// @dev The boundary that must stay OPEN: a genuinely empty book (supply 0) legitimately prices at
+    ///      nav 0 — that is the genesis deposit, which the real `deposit` also allows. The guard keys on
+    ///      supply, so it must not fire here.
+    function testPreviewSharesForAssetsStillPricesAnEmptyBookAtNavZero() public {
+        _bind();
+        strategy.setNav(0);
+        assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "genesis pricing unaffected");
+    }
 }
 
 /**

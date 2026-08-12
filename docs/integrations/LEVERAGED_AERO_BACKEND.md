@@ -86,15 +86,25 @@ That is precisely why `depositIdle` takes an amount. An account holding more idl
 remaining cap room cannot deposit the whole balance, so the keeper must size the call to the room:
 
 ```
-held      = vaultShares.balanceOf(account)
-cap       = vault.maxSharesPerAccount()          // 0 => unlimited, skip the rest
-roomShares = cap > held ? cap - held : 0         // 0 => do not call, it would revert
+held       = account.sharesBalance() + account.escrowedShares()   // escrow counts, see below
+cap        = vault.maxSharesPerAccount()          // 0 => unlimited, skip the rest
+roomShares = cap > held ? cap - held : 0          // 0 => do not call, it would revert
 ```
 
-Convert that share room to a USDC amount with `vault.previewSharesForAssets(assets)` (search for the
-largest `assets` whose preview fits `roomShares`, or simply scale — the function is linear in
-`assets`). Leftover idle USDC stays on the account and the owner can claim it via
-`claimWithdrawnUsdc` at any time.
+Convert that share room to a USDC amount with `vault.previewSharesForAssets(assets)` (the function is
+linear in `assets`, so scaling works). **Leave headroom — do not size to the exact edge.** The preview
+prices against raw `nav()` while the real deposit prices against `navNet` (NAV after the fee
+crystallisation the deposit runs first), so with fees pending the real mint is **≥** the preview and an
+exact-edge deposit reverts `"Share cap exceeded"`. Target ~95% of the room and treat that revert as
+**retryable** (re-read and re-size, do not escalate). Leftover idle USDC stays on the account and the
+owner can claim it via `claimWithdrawnUsdc` at any time.
+
+**Escrowed shares count against the cap.** `requestWithdraw` moves shares into the strategy's escrow,
+so `sharesBalance()` alone understates the position while a request is in flight — use
+`escrowedShares()` as well (as above), or the keeper will compute room that the deposit then rejects.
+`previewSharesForAssets` also **reverts** `"LAV: nav unpriceable"` when the book cannot be priced
+(`nav() == 0` with shares outstanding, e.g. post-settle); treat that as "retry later", never as
+unlimited room.
 
 Two properties worth building around:
 
@@ -267,7 +277,7 @@ the operator from the loop.
 ## `depositIdle` — coordination footgun (documented in the contract)
 
 ```solidity
-function depositIdle(uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
+function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
 ```
 
 Idle USDC on an account is **ambiguous**: it may be funds a user plain-transferred for re-deposit, **or**
@@ -288,7 +298,7 @@ would silently re-lock users' fulfilled withdrawals.
 | Call | Contract | Gate | Notes |
 |---|---|---|---|
 | `createStrategyForUser(user)` | Factory | factory BACKEND_ROLE or `user` | provisioning; deterministic address |
-| `depositIdle(minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent |
+| `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent; **you pick `assets`** |
 
 That is the whole backend write surface. `fulfillRedeem(id)` on the strategy clone is **not** on it —
 `onlyProposer`, i.e. the **rebalancer** (`MAMO_REBALANCER`), never `MAMO_BACKEND`.
@@ -324,8 +334,8 @@ above) — use these when indexing the strategy clone directly rather than per-a
 
 ## Revert-string reference
 
-Account (`require` strings): `"Amount must be greater than 0"`, `"No idle USDC to deposit"`,
-`"Not owner or backend"`, `"No shares to withdraw"`, `"No USDC to claim"`; OZ
+Account (`require` strings): `"Amount must be greater than 0"`, `"Insufficient idle USDC"`,
+`"Share cap exceeded"`, `"Too many open requests"`, `"Not owner or backend"`, `"No shares to withdraw"`, `"No USDC to claim"`; OZ
 `OwnableUnauthorizedAccount(address)` for `onlyOwner` misuse; initializer strings
 `"Invalid mamoStrategyRegistry address"`, `"Strategy type id not set"`, `"Invalid owner address"`,
 `"Invalid sherwoodStrategy address"`, `"Invalid usdc address"`, `"Invalid vault address"`.

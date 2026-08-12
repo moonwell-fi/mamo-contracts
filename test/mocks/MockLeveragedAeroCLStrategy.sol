@@ -45,14 +45,9 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     ///         simulating an oracle-down / LTV-gate condition.
     bool public fastPathBlocked;
 
-    struct RedeemRequest {
-        address owner;
-        uint256 shares;
-        uint256 minAssetsOut;
-        uint256 requestedAt;
-        bool settled;
-    }
-
+    /// @dev `RedeemRequest` is INHERITED from {ILeveragedAeroCLStrategy}, which now declares it so the
+    ///      account can read escrowed shares off the real strategy's getter. Redeclaring it here would
+    ///      shadow that type and let the mock's field order drift from the contract it stands in for.
     mapping(uint256 => RedeemRequest) public requests;
     uint256 public nextRequestId;
 
@@ -121,7 +116,7 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
             owner: msg.sender,
             shares: shares,
             minAssetsOut: minAssetsOut,
-            requestedAt: block.timestamp,
+            requestedAt: uint40(block.timestamp), // uint40 to match the real strategy's struct
             settled: false
         });
     }
@@ -153,6 +148,13 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
     function previewRedeem(uint256 shares) external view override returns (uint256 assetsOut, bool fastOk) {
         return (_assetsForShares(shares), !fastPathBlocked);
+    }
+
+    /// @dev The escrow read the account's share cap uses. Mirrors the real strategy's `redeemRequest`
+    ///      getter; an unknown id returns the zero struct (`settled == false`, `shares == 0`), which is
+    ///      exactly how the real mapping behaves and contributes nothing to the escrow total.
+    function redeemRequest(uint256 id) external view override returns (RedeemRequest memory) {
+        return requests[id];
     }
 
     function vault() external view override returns (address) {

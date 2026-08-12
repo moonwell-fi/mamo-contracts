@@ -8,7 +8,7 @@ See `proposal.md` — Why. Facts that shape the approach:
 - **The account already references the vault.** `vaultShares` is initialized as `IERC20(sherwoodStrategy.vault())`, so `address(vaultShares)` *is* the vault — no new pointer is needed to read a value stored there. This matters because accounts are initialized without a factory reference, and already-deployed accounts cannot gain one without a re-initializer.
 - **The vault owner is the MAMO multisig** (`Ownable2Step`), the same authority behind `stageVenue`, `activateStrategy` and `setOpenDeposits`. The registry's `DEFAULT_ADMIN_ROLE` is a *different*, timelocked authority.
 - **Nothing leveraged-aero is deployed on Base** (no entries in `addresses/8453.json`), so the vault can take a new storage field with no migration concern.
-- **Fee-shares mint to `feeRecipient`, not to accounts**, so an account's share balance moves only on its own deposits and withdrawals. This is what makes a share-denominated cap stable without an oracle.
+- **Fee-shares mint to `feeRecipient`, not to accounts**, so an account's share balance is not moved by protocol accounting. This is what makes a share-denominated cap stable without an oracle. It is NOT true that the balance moves only on the account's own deposits and withdrawals — `requestWithdraw` moves shares into the strategy's escrow, and shares are a plain unrestricted ERC20 that anyone may transfer in. See D1.
 - The pooled strategy has no `previewDeposit`; only `previewRedeem` exists.
 
 ## Goals / Non-Goals
@@ -34,6 +34,7 @@ Shares are exact, need no oracle, and an account's balance cannot drift on its o
 
 - *Accepted cost*: the cap's **dollar meaning drifts upward** with fund performance. `shares = assets × (supply + offset) / navNet`, so as NAV grows each dollar buys fewer shares and a fixed share cap admits more dollars. A cap set as "≈$30k" becomes ≈$36k of room after a +20% run. This loosens rather than tightens, so the drift is in the safe direction for a user-facing allocation limit.
 - *Alternatives rejected*: tracked USDC principal (needs pro-rata decrement across four exit paths, and diverges from real value anyway); current position value (accurate, and adds no new failure mode since deposits are already NAV-priced and fail-closed — but it makes gains consume cap room, which reads as punishing good performance).
+- *Correction (review)*: the original premise that "an account's balance moves only on its own deposits/withdrawals" was **wrong in one direction that matters**. `requestWithdraw` escrows shares in the strategy, dropping `balanceOf(account)` to 0 while the position is still fully owned, and `cancelWithdraw` is owner-callable in any state with no timing lock. Measuring the balance alone therefore made the cap bypassable from inside the account: `deposit(cap) → requestWithdraw(all) → deposit(cap) → cancelWithdraw` holds 2 × cap, repeatable for gas. The cap now measures **held + escrowed**, reading each request's `settled` flag LIVE from the strategy (a backend `fulfillRedeem` settles with no callback, so a locally-mirrored flag would stay inflated forever and permanently shrink the account's room). Open requests are bounded (`MAX_OPEN_REQUESTS`) to keep that sum gas-bounded.
 
 ### D2: Cap value on the vault, enforcement in the account
 
@@ -61,6 +62,8 @@ A freshly deployed vault has `maxSharesPerAccount == 0`; treating that as "no de
 ### D6: `deposit` stays permissionless
 
 Unchanged from today. *Known consequence*: with a cap in place, a third party can consume a user's allocation room by depositing their own USDC into that user's account, blocking the user from depositing their own. The attacker pays real money and the shares land under the victim's ownership, so it is self-harming — accepted deliberately rather than overlooked. Revisit if it is ever observed.
+
+*Second consequence (review), a different and worse state than the above*: shares are a plain unrestricted ERC20, so a third party can **transfer** shares to an account and push it strictly **over** the cap, not merely up to it — blocking that account's deposits until the owner withdraws or the multisig raises the cap. Also accepted, for the same reason plus two more: the donated shares are the victim's to withdraw (the griefer pays value to the target), and **no withdrawal path consults the cap**, so the account's exits are entirely unaffected. Fixing it would need a share allowlist or netting donations out of the cap, both far more costly than the nuisance. Pinned by `testDonatedSharesCanPushAnAccountOverTheCapAndBlockDeposits`.
 
 ## Risks / Trade-offs
 

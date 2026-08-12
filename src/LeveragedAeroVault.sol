@@ -258,16 +258,36 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     ///      (`mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navNet + 1)`) against the live book.
     ///      POINT-IN-TIME, NOT A PEG: the answer moves with NAV and supply, so a cap set from it
     ///      represents that dollar figure only at the instant it was read (see the drift note on
-    ///      {maxSharesPerAccount}). Reverts if the strategy's NAV is unpriceable, exactly as a real
-    ///      deposit would — it is a preview of a deposit, and inherits its fail-closed posture.
+    ///      {maxSharesPerAccount}). Reverts when the strategy's NAV is unpriceable (`nav() == 0` with
+    ///      shares outstanding), mirroring the deposit's own `NavUnpriceable` guard — it is a preview
+    ///      of a deposit, and inherits its fail-closed posture.
+    ///
+    ///      NOT AN UPPER BOUND ON THE REAL MINT. This prices against raw `nav()`, whereas `deposit`
+    ///      prices against `navNet` (post-crystallise, i.e. NAV minus the fee that crystallise mints
+    ///      away). With fees pending `navNet <= nav()`, so the real mint is `>=` this figure. Size a
+    ///      deposit to the exact edge of this number and it can revert `"Share cap exceeded"` — leave
+    ///      headroom and treat that revert as retryable.
     /// @param assets USDC (6dp) to convert.
     /// @return shares Vault shares (12dp) that amount would mint right now.
     function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
         require(strategy != address(0), "LAV: strategy unset");
+        uint256 supply = totalSupply();
+        uint256 navNow = IStrategyNav(strategy).nav();
+        // MIRROR THE DEPOSIT'S `NavUnpriceable` GUARD. The real `deposit` reverts on
+        // `navNet == 0 && supply > 0`; `nav()` FLOORS to 0 rather than reverting, so without this the
+        // denominator collapses to 1 and the preview returns a figure ~1e9-1e12x too large. That state
+        // is reachable, not theoretical: after `settleStrategy` the book is flat so `nav()` is the
+        // strategy's USDC balance (0) while supply is still outstanding, and likewise whenever
+        // `protocolFeeOwed >= gross`. Since this function is the documented way to choose the
+        // `setMaxSharesPerAccount` argument, returning a number there would set an effectively
+        // UNLIMITED cap — the exact "cap a million times wrong" failure the cap exists to prevent.
+        // Fail closed instead, so the caller re-reads once the book is priceable again. `supply == 0`
+        // (genesis, empty book) legitimately prices at nav 0 and must stay allowed, matching deposit.
+        require(navNow > 0 || supply == 0, "LAV: nav unpriceable");
         // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy; it is the same 6-decimal step `decimals()`
         // documents, so it is derived here rather than duplicated as a second magic constant.
         uint256 offset = 10 ** (decimals() - IERC20Metadata(asset).decimals());
-        shares = Math.mulDiv(assets, totalSupply() + offset, IStrategyNav(strategy).nav() + 1);
+        shares = Math.mulDiv(assets, supply + offset, navNow + 1);
     }
 
     /// @notice Point the strategy's protocol-fee lookup at a config contract, or clear it

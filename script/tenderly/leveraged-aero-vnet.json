@@ -25,6 +25,8 @@
   "note": "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
   "vaultGeneration": 2,
   "vaultGenerationName": "leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)",
+  "vaultGenerationRequired": 3,
+  "STALE": "THIS RECORDED POOLED LAYER IS OUT OF DATE — REDEPLOY BEFORE USE. The recorded vault predates maxSharesPerAccount(), and the account's share-cap check makes a TYPED call to it on every deposit. The vault is NOT upgradeable, so a current account impl bound to this vault reverts on every deposit with empty returndata. Run `make tenderly-leveraged-aero-stack` (which now records generation 3) BEFORE `make tenderly-leveraged-aero-account`; the account harness also probes maxSharesPerAccount() and refuses to run against generation < 3.",
   "feeds": {
     "pattern": "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
     "legAUsd": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",

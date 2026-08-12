@@ -62,6 +62,25 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     /// @notice The USDC token (6dp): the deposit asset and the withdrawal payout token.
     IERC20 public usdc;
 
+    /// @notice Ids of async redeem requests this account has opened and not yet observed as settled.
+    /// @dev APPENDED STORAGE (the contract's storage note above sanctions appending; nothing is
+    ///      reordered, so existing slots are untouched). Needed because the share cap measures
+    ///      `vaultShares.balanceOf(this)`, and {requestWithdraw} moves shares into the strategy's
+    ///      escrow — so without this an in-flight request reads as "holds nothing".
+    ///
+    ///      NOT A MIRROR OF STRATEGY STATE: `settled` is read LIVE from the strategy, because a
+    ///      backend `fulfillRedeem` settles a request with no callback to this account. Keeping a
+    ///      local settled-flag would therefore drift permanently high after the first fulfill and
+    ///      silently shrink the account's cap room forever. This list is only the id SET; truth about
+    ///      each id comes from {ILeveragedAeroCLStrategy.redeemRequest}. Settled ids are pruned
+    ///      opportunistically, so the list is self-healing.
+    uint256[] private _openRequestIds;
+
+    /// @notice Hard ceiling on simultaneously-open async requests, bounding the cap check's gas.
+    /// @dev Only reached by the owner opening many requests against their own position; at the limit
+    ///      the fix is to cancel or let one settle. Chosen well above any realistic exit pattern.
+    uint256 public constant MAX_OPEN_REQUESTS = 16;
+
     /// @notice Emitted when USDC is deposited and vault shares are minted to this account.
     event Deposit(address indexed depositor, uint256 assets, uint256 shares);
 
@@ -188,15 +207,62 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      *      burnt on a reverting path: the revert unwinds the whole transaction, so no shares are
      *      minted and no USDC moves.
      *
-     *      Measured against the BALANCE HELD, not a running total, so withdrawing frees room with no
-     *      bookkeeping. Lowering the cap below an existing position traps nobody — every withdrawal
-     *      path ignores the cap entirely.
+     *      Measured against the BALANCE HELD **PLUS SHARES IN ESCROW**, not a running total, so
+     *      withdrawing frees room with no bookkeeping. Lowering the cap below an existing position
+     *      traps nobody — every withdrawal path ignores the cap entirely.
+     *
+     *      ESCROW COUNTS, and it has to. {requestWithdraw} moves shares account → strategy, so the
+     *      balance alone reads 0 while the position is still fully owned — an in-flight request is a
+     *      pending withdrawal, not a completed one, and {cancelWithdraw} is owner-callable in ANY
+     *      state with no timing lock. Counting only the balance made the cap trivially bypassable:
+     *      `deposit(cap)` → `requestWithdraw(all)` → `deposit(cap)` → `cancelWithdraw` leaves the
+     *      account holding 2 × cap, repeatable for gas. Summing live escrow closes that loop while
+     *      keeping deposits available during a pending request (up to the real remaining room).
      */
     function _assertWithinShareCap() internal view {
         uint256 cap = ILeveragedAeroVaultCap(address(vaultShares)).maxSharesPerAccount();
         if (cap == 0) return; // unlimited
-        uint256 held = vaultShares.balanceOf(address(this));
+        uint256 held = vaultShares.balanceOf(address(this)) + _escrowedShares();
         require(held <= cap, "Share cap exceeded");
+    }
+
+    /// @dev Shares this account currently has escrowed in the strategy across all UNSETTLED requests.
+    ///      Reads `settled` live rather than trusting a local flag — a backend `fulfillRedeem` settles
+    ///      without notifying this account.
+    function _escrowedShares() internal view returns (uint256 escrowed) {
+        uint256[] storage ids = _openRequestIds;
+        uint256 n = ids.length;
+        for (uint256 i; i < n; ++i) {
+            ILeveragedAeroCLStrategy.RedeemRequest memory r = sherwoodStrategy.redeemRequest(ids[i]);
+            if (!r.settled) escrowed += r.shares;
+        }
+    }
+
+    /// @dev Drop ids the strategy now reports as settled (fulfilled, cancelled, or emergency-redeemed).
+    ///      Swap-and-pop; order is irrelevant. Keeps {_escrowedShares} bounded and self-healing without
+    ///      needing a settle callback.
+    function _pruneSettledRequests() private {
+        uint256[] storage ids = _openRequestIds;
+        for (uint256 i = ids.length; i > 0; --i) {
+            uint256 idx = i - 1;
+            if (sherwoodStrategy.redeemRequest(ids[idx]).settled) {
+                ids[idx] = ids[ids.length - 1];
+                ids.pop();
+            }
+        }
+    }
+
+    /// @notice Ids of this account's async redeem requests not yet observed as settled.
+    /// @dev Introspection for the backend / UI; entries may already be settled on-chain until the next
+    ///      state-changing call prunes them.
+    function openRequestIds() external view returns (uint256[] memory) {
+        return _openRequestIds;
+    }
+
+    /// @notice Vault shares this account has escrowed in the strategy across all unsettled requests.
+    /// @dev Counts toward {LeveragedAeroVault.maxSharesPerAccount} alongside {sharesBalance}.
+    function escrowedShares() external view returns (uint256) {
+        return _escrowedShares();
     }
 
     /**
@@ -244,8 +310,15 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     function requestWithdraw(uint256 shares, uint256 minAssetsOut) external onlyOwner returns (uint256 id) {
         require(shares > 0, "Amount must be greater than 0");
 
+        // Prune first so settled ids never consume a slot, then bound the open set (the cap check
+        // iterates it). Pruning here also keeps the common single-request flow at length <= 1.
+        _pruneSettledRequests();
+        require(_openRequestIds.length < MAX_OPEN_REQUESTS, "Too many open requests");
+
         vaultShares.forceApprove(address(sherwoodStrategy), shares);
         id = sherwoodStrategy.requestRedeem(shares, minAssetsOut);
+        // Tracked so the escrowed shares keep counting against the vault's per-account share cap.
+        _openRequestIds.push(id);
 
         emit WithdrawRequested(id, shares, minAssetsOut);
     }
@@ -256,6 +329,9 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      */
     function cancelWithdraw(uint256 id) external onlyOwner {
         sherwoodStrategy.cancelRedeem(id);
+        // The shares are back on this account's balance, so the id must stop counting as escrow —
+        // otherwise they would be double-counted against the cap.
+        _pruneSettledRequests();
 
         emit WithdrawCancelled(id);
     }
@@ -271,6 +347,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      */
     function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external onlyOwner returns (uint256 assetsOut) {
         assetsOut = sherwoodStrategy.emergencyRedeem(id, minAssetsOut);
+        // Request is settled and its shares burnt — drop the id so it stops counting as escrow.
+        _pruneSettledRequests();
 
         _forwardToOwner(assetsOut);
 

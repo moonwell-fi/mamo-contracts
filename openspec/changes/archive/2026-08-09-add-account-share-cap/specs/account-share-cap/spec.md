@@ -49,6 +49,22 @@ A per-user account SHALL reject any deposit that would leave it holding more vau
 - **WHEN** an account at the cap withdraws part of its position and then receives a new deposit within the freed room
 - **THEN** the deposit succeeds, because the cap is measured against the share balance actually held
 
+#### Scenario: Shares escrowed in an async redeem request still count against the cap
+
+- **WHEN** an account at the cap opens an async redeem request (moving its shares into the strategy's escrow) and then receives a new deposit
+- **THEN** the call reverts, because an in-flight request is a PENDING withdrawal, not a completed one — the position is still owned and the escrowed shares count toward the cap
+
+#### Scenario: A settled request stops consuming cap room
+
+- **WHEN** an account's async redeem request is settled — fulfilled by the backend, cancelled, or emergency-redeemed
+- **THEN** its shares stop counting as escrow, and the room is usable again. Settlement by the backend does not call back into the account, so the account SHALL read settlement state live from the strategy rather than mirroring it locally
+
+### Requirement: The cap measures the account's whole position
+
+The cap SHALL be measured against every share the account still controls: the balance it holds PLUS the shares it has escrowed in unsettled async redeem requests. Measuring the balance alone is insufficient — `requestWithdraw` moves shares to the strategy and `cancelWithdraw` is owner-callable in any state with no timing lock, so a `deposit → requestWithdraw → deposit → cancelWithdraw` loop would otherwise leave the account holding an unbounded multiple of the cap for the cost of gas.
+
+The account SHALL bound the number of simultaneously-open requests so that this measurement stays gas-bounded.
+
 ### Requirement: The backend chooses how much idle USDC to deploy
 
 `depositIdle` SHALL accept the amount of idle USDC to deploy rather than always deploying the account's entire idle balance, and SHALL reject an amount greater than the balance held. This is what makes the cap usable: an account holding more idle USDC than its remaining cap room must still be able to deploy the part that fits.
