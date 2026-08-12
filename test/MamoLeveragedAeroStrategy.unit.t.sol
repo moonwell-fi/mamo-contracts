@@ -342,6 +342,31 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(usdc.balanceOf(thirdParty), DEPOSIT, "no USDC moved");
     }
 
+    /// @dev The OTHER account deposit path. Both `deposit` and `depositIdle` funnel into
+    ///      `sherwoodStrategy.deposit`, so the capacity ceiling reaches both — and because the revert
+    ///      unwinds the whole transaction, the account's idle USDC is left exactly where it was and
+    ///      stays withdrawable by the owner. Nothing is stranded by a full fund.
+    function testDepositIdleIsRefusedOnceTheFundIsFullAndLeavesIdleUntouched() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxTotalAssets(DEPOSIT);
+        _deposit(strategy, user, DEPOSIT); // fund now full
+        sherwood.setNav(DEPOSIT);
+
+        // The user plain-transfers more USDC to their account (nothing on-chain can prevent that).
+        usdc.mint(address(strategy), DEPOSIT);
+
+        vm.prank(user);
+        vm.expectRevert();
+        strategy.depositIdle(DEPOSIT, 0);
+
+        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "idle untouched, not stranded");
+
+        // ...and the owner can always take it back out.
+        vm.prank(user);
+        strategy.claimWithdrawnUsdc();
+        assertEq(usdc.balanceOf(address(strategy)), 0, "owner recovered the idle USDC");
+    }
+
     /// @dev Landing EXACTLY on the ceiling is allowed — the bound is inclusive.
     function testDepositExactlyAtCapacitySucceeds() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
