@@ -45,6 +45,15 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     ///         simulating an oracle-down / LTV-gate condition.
     bool public fastPathBlocked;
 
+    /// @notice The fund's NAV in USDC (6dp), used ONLY by the capacity check. Set explicitly by tests
+    ///         rather than derived, so a suite can put the book at any level independently of the
+    ///         share pricing above.
+    uint256 public nav;
+
+    function setNav(uint256 nav_) external {
+        nav = nav_;
+    }
+
     /// @dev `RedeemRequest` is INHERITED from {ILeveragedAeroCLStrategy}, which now declares it so the
     ///      account can read escrowed shares off the real strategy's getter. Redeclaring it here would
     ///      shadow that type and let the mock's field order drift from the contract it stands in for.
@@ -84,6 +93,13 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
     function deposit(uint256 assets, uint256 minShares) external override returns (uint256 shares) {
         require(state == State.Executed, "MockSherwood: not executed");
+
+        // FUND CAPACITY, mirroring the real strategy's check against `vault.maxTotalAssets()`:
+        // measured pre-transfer on the POST-deposit book, `0` == unlimited, and a deposit that would
+        // CROSS the ceiling is rejected outright rather than trimmed. Modelled here so the account
+        // suite covers the wiring — the account itself no longer enforces anything.
+        uint256 cap = vaultToken.maxTotalAssets();
+        require(cap == 0 || nav + assets <= cap, "MockSherwood: fund at capacity");
 
         usdc.safeTransferFrom(msg.sender, address(this), assets);
         shares = _sharesForAssets(assets);

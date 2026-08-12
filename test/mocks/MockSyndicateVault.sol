@@ -19,16 +19,16 @@ contract MockSyndicateVault is ERC20 {
     /// @notice When true, {strategyMint} reverts (deposits blocked); burns are unaffected.
     bool public paused;
 
-    /// @notice Per-account share ceiling read by `MamoLeveragedAeroStrategy._assertWithinShareCap`.
-    ///         `0` == unlimited, matching the real {LeveragedAeroVault}. The selector must exist here
-    ///         even when unused: the account makes a TYPED call, which reverts with no returndata
+    /// @notice FUND CAPACITY ceiling (USDC 6dp) read by `LeveragedAerodromeCLStrategy.deposit`.
+    ///         `0` == unlimited, matching the real {LeveragedAeroVault}. The selector MUST exist here
+    ///         even when unused: the strategy makes a TYPED call, which reverts with no returndata
     ///         against a stand-in that lacks it.
-    uint256 public maxSharesPerAccount;
+    uint256 public maxTotalAssets;
 
     constructor() ERC20("Mock Syndicate Vault", "svUSDC") {}
 
-    function setMaxSharesPerAccount(uint256 maxShares) external {
-        maxSharesPerAccount = maxShares;
+    function setMaxTotalAssets(uint256 maxAssets) external {
+        maxTotalAssets = maxAssets;
     }
 
     function decimals() public pure override returns (uint8) {

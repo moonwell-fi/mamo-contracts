@@ -289,29 +289,28 @@ backend"` otherwise. Prefer the explicit `approve`+`deposit` flow in the UI.
 > no pause — that one flag is the entire gate — so surface the revert as "deposits are temporarily closed",
 > not as a user error. Read it with `vault.depositsOpen()` to pre-disable the deposit CTA.
 
-> **Deposits are capped per account.** `vault.maxSharesPerAccount()` is a global ceiling on the shares
-> any one account may hold (`0` == unlimited, the default). It is enforced on the **user-facing**
-> `deposit`, so the UI must be able to explain it — a deposit that would push the account over reverts
-> `"Share cap exceeded"` and the whole transaction unwinds (no shares minted, no USDC taken).
+> **The fund has a capacity ceiling.** `vault.maxTotalAssets()` caps the whole fund's NAV in USDC
+> (`0` == unlimited, the default). This is a limit on the FUND, not on the user: once it is reached,
+> **nobody** can deposit, however small their own position. It fires on the user-facing `deposit`, so
+> the UI must be able to explain it — the deposit reverts `FundAtCapacity(navAfter, cap)` and the whole
+> transaction unwinds (no shares minted, no USDC taken).
 >
-> Compute the remaining room before enabling the CTA:
+> Read the room before enabling the CTA:
 >
 > ```
-> cap        = vault.maxSharesPerAccount()                          // 0 => unlimited, no limit UI
-> held       = account.sharesBalance() + account.escrowedShares()   // escrow counts — see below
-> roomShares = cap > held ? cap - held : 0
-> maxAssets  = <scale roomShares via vault.previewSharesForAssets(assets), which is linear>
+> room = vault.remainingCapacity()   // USDC (6dp)
+>                                    // type(uint256).max => no cap, show no limit UI
+>                                    // 0                 => fund is full, disable the CTA
 > ```
 >
 > Three things to get right:
-> - **Escrowed shares still count.** An open async-withdraw request moves shares into the strategy, so
->   `sharesBalance()` alone reads low while the position is unchanged. Use `escrowedShares()` too, or
->   the UI will offer room the contract then rejects.
-> - **Leave headroom.** `previewSharesForAssets` prices against raw NAV while the real deposit prices
->   after a fee crystallisation, so the actual mint can be slightly larger. Cap the input at ~95% of
->   `maxAssets` and treat `"Share cap exceeded"` as retryable, not as a user error.
-> - **`previewSharesForAssets` can revert** `"LAV: nav unpriceable"` when the book cannot be priced
->   (e.g. after settlement). Show "unavailable, try again", never an unlimited cap.
+> - **Leave headroom.** `remainingCapacity()` is a point-in-time read and NAV moves between it and the
+>   user's transaction landing. Cap the input at ~95% of `room` and treat `FundAtCapacity` as
+>   retryable — it is a "fund is full right now" message, **not** a user error.
+> - **"Full" is not permanent.** NAV moves on its own, so the fund can close on gains alone and reopen
+>   on a drawdown or when someone withdraws. Don't cache the value or present the state as final.
+> - **Withdrawals are never gated on it.** A user can always exit, including while the fund is over its
+>   ceiling — never disable a withdraw CTA because of capacity.
 
 ---
 
@@ -457,8 +456,7 @@ Account (`require` strings):
 | `"Amount must be greater than 0"` | `deposit`/`withdraw`/`requestWithdraw` with 0 | Validate amount > 0 client-side |
 | `"Insufficient idle USDC"` | `depositIdle` for more than the account holds | Cap the input at the idle balance |
 | `"Not owner or backend"` | `depositIdle` from a non-owner | Hide/disable for non-owner |
-| `"Share cap exceeded"` | `deposit`/`depositIdle` that would push the account over the vault's per-account cap | Show remaining room and cap the input (see below); retryable |
-| `"Too many open requests"` | `requestWithdraw` with 16 requests already open | Ask the user to cancel or wait for one to settle |
+| `FundAtCapacity(navAfter, cap)` (custom error) | `deposit`/`depositIdle` that would push the FUND past its capacity ceiling | Show remaining capacity and cap the input (see below); retryable, and not the user's fault |
 | `"No shares to withdraw"` | `withdrawAll` with 0 shares | Empty position |
 | `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle | Nothing claimable yet |
 | `OwnableUnauthorizedAccount(address)` (OZ custom error) | any `onlyOwner` call from non-owner | Wrong wallet connected |

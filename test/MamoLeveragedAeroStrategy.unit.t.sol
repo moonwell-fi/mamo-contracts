@@ -310,249 +310,100 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(DEPOSIT + 1, 0);
     }
 
-    // ==================== PER-ACCOUNT SHARE CAP ====================
+    // ==================== FUND CAPACITY CAP ====================
 
-    /// @dev `0` on the vault means unlimited, so the cap never blocks before the multisig acts.
-    function testDepositUncappedWhenCapIsZero() public {
+    /// @dev `0` on the vault means unlimited, so capacity never blocks before the multisig acts.
+    function testDepositUncappedWhenCapacityIsZero() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        assertEq(vault.maxSharesPerAccount(), 0, "unlimited by default");
+        assertEq(vault.maxTotalAssets(), 0, "unlimited by default");
         _deposit(strategy, user, DEPOSIT * 100);
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES * 100, "no ceiling applied");
     }
 
-    function testDepositExceedingTheCapReverts() public {
+    /// @dev THE POINT OF THE FEATURE: the ceiling is on the FUND, not the account. Once the book is
+    ///      full, a deposit is refused no matter whose account it comes through and no matter how
+    ///      little that account itself holds.
+    function testDepositIsRefusedOnceTheFundIsFullEvenFromAnEmptyAccount() public {
+        MamoLeveragedAeroStrategy first = _createStrategy(user);
+        vault.setMaxTotalAssets(DEPOSIT); // capacity == exactly one DEPOSIT
+        _deposit(first, user, DEPOSIT); // fund now full
+        sherwood.setNav(DEPOSIT);
+
+        // A DIFFERENT user, whose account holds nothing at all, is still refused.
+        MamoLeveragedAeroStrategy second = _createStrategy(thirdParty);
+        usdc.mint(thirdParty, DEPOSIT);
+        vm.startPrank(thirdParty);
+        usdc.approve(address(second), DEPOSIT);
+        vm.expectRevert();
+        second.deposit(DEPOSIT, 0);
+        vm.stopPrank();
+
+        assertEq(second.sharesBalance(), 0, "no shares minted");
+        assertEq(usdc.balanceOf(thirdParty), DEPOSIT, "no USDC moved");
+    }
+
+    /// @dev Landing EXACTLY on the ceiling is allowed — the bound is inclusive.
+    function testDepositExactlyAtCapacitySucceeds() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES); // room for exactly DEPOSIT
+        vault.setMaxTotalAssets(DEPOSIT);
+        _deposit(strategy, user, DEPOSIT);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "exactly at capacity");
+    }
+
+    /// @dev Revert-don't-trim: a deposit that would CROSS the ceiling is rejected outright, even
+    ///      though part of it would have fitted. The depositor retries with the room that is left.
+    function testDepositCrossingCapacityIsRejectedOutrightNotTrimmed() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        vault.setMaxTotalAssets(DEPOSIT);
 
         usdc.mint(user, DEPOSIT * 2);
         vm.startPrank(user);
         usdc.approve(address(strategy), DEPOSIT * 2);
-        vm.expectRevert("Share cap exceeded");
+        vm.expectRevert();
         strategy.deposit(DEPOSIT * 2, 0);
         vm.stopPrank();
 
-        // The revert unwound everything: no shares minted, no USDC taken.
+        // Nothing moved, and the room that DOES fit is still usable.
         assertEq(strategy.sharesBalance(), 0, "no shares minted");
         assertEq(usdc.balanceOf(user), DEPOSIT * 2, "no USDC moved");
-    }
-
-    /// @dev Landing EXACTLY on the cap is allowed — the bound is inclusive.
-    function testDepositExactlyAtTheCapSucceeds() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
         _deposit(strategy, user, DEPOSIT);
-        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "exactly at the cap");
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "the fitting amount goes in");
     }
 
-    function testDepositIdleExceedingTheCapRevertsAndLeavesIdleUntouched() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        usdc.mint(address(strategy), DEPOSIT * 2);
-
-        vm.prank(user);
-        vm.expectRevert("Share cap exceeded");
-        strategy.depositIdle(DEPOSIT * 2, 0);
-
-        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT * 2, "idle untouched");
-        assertEq(strategy.sharesBalance(), 0, "no shares minted");
-    }
-
-    /// @dev The pairing that makes the whole feature work: idle far above the cap room, but the
-    ///      backend can still deploy the slice that fits.
-    function testBackendCanDeployTheSliceThatFitsUnderTheCap() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        usdc.mint(address(strategy), DEPOSIT * 10);
-
-        vm.prank(backend);
-        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
-
-        assertEq(shares, EXPECTED_SHARES, "the fitting slice went in");
-        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT * 9, "the rest stayed idle");
-    }
-
-    /// @dev The cap is measured against the balance HELD, so an exit frees room with no bookkeeping.
-    function testWithdrawingFreesCapRoom() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        _deposit(strategy, user, DEPOSIT);
-
-        // At the cap — a further deposit is refused.
-        usdc.mint(user, DEPOSIT);
-        vm.startPrank(user);
-        usdc.approve(address(strategy), DEPOSIT);
-        vm.expectRevert("Share cap exceeded");
-        strategy.deposit(DEPOSIT, 0);
-
-        // Exit half, then the same deposit fits.
-        strategy.withdraw(EXPECTED_SHARES / 2, 0);
-        strategy.deposit(DEPOSIT / 2, 0);
-        vm.stopPrank();
-        // Exact, not `assertLe`: a bound would also hold if the re-deposit minted NOTHING, which is
-        // the failure this test exists to exclude. Half out, half back in == the original holding.
-        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "the freed room was actually re-used");
-    }
-
-    /**
-     * @dev REGRESSION — the cap was bypassable from inside the account via the async-withdraw escrow.
-     *      `requestWithdraw` moves shares account → strategy, so `balanceOf(account)` (all the cap used
-     *      to measure) reads 0 while the position is still fully owned, and `cancelWithdraw` is
-     *      owner-callable in ANY state with no timing lock. The loop
-     *      `deposit(cap) → requestWithdraw(all) → deposit(cap) → cancelWithdraw` left the account
-     *      holding 2 × cap for gas only, repeatable. The cap now counts escrowed shares, so the second
-     *      deposit is refused while the request is in flight.
-     */
-    function testCapCannotBeBypassedByEscrowingSharesInARedeemRequest() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        _deposit(strategy, user, DEPOSIT); // exactly at the cap
-
-        vm.startPrank(user);
-        strategy.requestWithdraw(EXPECTED_SHARES, 0);
-        // The escrow emptied the balance...
-        assertEq(strategy.sharesBalance(), 0, "shares are in escrow, not on the balance");
-        // ...but they still count, so the cap holds.
-        assertEq(strategy.escrowedShares(), EXPECTED_SHARES, "escrow is counted");
-
-        usdc.mint(user, DEPOSIT);
-        usdc.approve(address(strategy), DEPOSIT);
-        vm.expectRevert("Share cap exceeded");
-        strategy.deposit(DEPOSIT, 0);
-        vm.stopPrank();
-    }
-
-    /// @dev The other half: cancelling returns the shares to the balance and they must not be
-    ///      double-counted (balance + a stale escrow entry would wrongly read 2 × cap and lock the
-    ///      account out of its own remaining room).
-    function testCancellingARequestReturnsTheRoomWithoutDoubleCounting() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        _deposit(strategy, user, DEPOSIT / 2);
-
-        vm.startPrank(user);
-        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES / 2, 0);
-        strategy.cancelWithdraw(id);
-        vm.stopPrank();
-
-        assertEq(strategy.escrowedShares(), 0, "settled request no longer counts");
-        assertEq(strategy.openRequestIds().length, 0, "settled id pruned");
-        assertEq(strategy.sharesBalance(), EXPECTED_SHARES / 2, "shares back on the balance");
-
-        // The remaining room is still usable — exactly once.
-        usdc.mint(user, DEPOSIT);
-        vm.startPrank(user);
-        usdc.approve(address(strategy), DEPOSIT);
-        strategy.deposit(DEPOSIT / 2, 0);
-        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "back at the cap");
-        vm.expectRevert("Share cap exceeded");
-        strategy.deposit(DEPOSIT / 2, 0);
-        vm.stopPrank();
-    }
-
-    /// @dev A request settled by the BACKEND (`fulfillRedeem`) never calls back into this account, so
-    ///      the escrow accounting must read `settled` live rather than trust a local flag — otherwise
-    ///      it would stay inflated forever and permanently shrink the account's room.
-    function testFulfilledRequestStopsConsumingCapRoomWithoutACallback() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        _deposit(strategy, user, DEPOSIT);
-
-        vm.prank(user);
-        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, 0);
-        assertEq(strategy.escrowedShares(), EXPECTED_SHARES, "counted while in flight");
-
-        // Backend fulfills directly on the strategy — no notification to the account.
-        sherwood.fulfillRedeem(id);
-
-        assertEq(strategy.escrowedShares(), 0, "settled escrow stops counting, with no callback");
-        // The room is genuinely free again.
-        usdc.mint(user, DEPOSIT);
-        vm.startPrank(user);
-        usdc.approve(address(strategy), DEPOSIT);
-        strategy.deposit(DEPOSIT, 0);
-        vm.stopPrank();
-        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "full room reusable after fulfill");
-    }
-
-    /// @dev Lowering the cap under an existing position must not trap the holder: the cap gates new
-    ///      deposits only and every withdrawal path ignores it.
-    function testLoweringTheCapDoesNotTrapAnExistingPosition() public {
+    /// @dev Capacity gates DEPOSITS only. Lowering it under a live book must not unwind or trap
+    ///      anyone — every withdrawal path is independent of it.
+    function testLoweringCapacityDoesNotTrapExistingHolders() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT * 4);
+        sherwood.setNav(DEPOSIT * 4);
 
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES); // now far below the holding
+        vault.setMaxTotalAssets(DEPOSIT); // now far below the live book
 
         uint256 before = usdc.balanceOf(user);
         vm.prank(user);
         strategy.withdrawAll(0);
-        assertGt(usdc.balanceOf(user) - before, 0, "exit unaffected by the cap");
+        assertGt(usdc.balanceOf(user) - before, 0, "exit unaffected by capacity");
         assertEq(strategy.sharesBalance(), 0, "fully exited");
     }
 
-    /**
-     * @dev Pins the assumption the share-denominated cap rests on (design D1): shares minted to
-     *      ANYONE ELSE — notably the fee recipient on a performance/management crystallise — do not
-     *      touch this account's balance, and therefore cannot consume its cap room. If fee-shares
-     *      ever started landing on accounts, a share cap would silently tighten on its own and this
-     *      test is what would catch it.
-     */
-    function testFeeShareMintsDoNotConsumeAnAccountsCapRoom() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        _deposit(strategy, user, DEPOSIT / 2);
-        uint256 heldBefore = strategy.sharesBalance();
+    /// @dev Withdrawing frees capacity for everyone, because the ceiling is measured against the
+    ///      fund's live NAV rather than a high-water mark.
+    function testWithdrawingFreesCapacityForOtherDepositors() public {
+        MamoLeveragedAeroStrategy first = _createStrategy(user);
+        vault.setMaxTotalAssets(DEPOSIT);
+        _deposit(first, user, DEPOSIT);
+        sherwood.setNav(DEPOSIT); // full
 
-        // The strategy mints fee-shares to a third-party recipient (what a crystallise does).
-        vm.prank(address(sherwood));
-        vault.strategyMint(thirdParty, EXPECTED_SHARES * 10);
-
-        assertEq(strategy.sharesBalance(), heldBefore, "account balance untouched by a foreign mint");
-        // ...and the account's remaining room is unchanged: the rest of its allowance still fits.
-        _deposit(strategy, user, DEPOSIT / 2);
-        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "cap room was never consumed");
-    }
-
-    /**
-     * @dev ACCEPTED BEHAVIOUR, pinned so it is a decision on record rather than a surprise. Shares are
-     *      a plain unrestricted ERC20, so a third party can TRANSFER shares to an account and push it
-     *      strictly OVER the cap — which then blocks that account's future deposits until the owner
-     *      withdraws or the multisig raises the cap. Design D6 reasoned only about a donor consuming
-     *      room UP TO the cap; being pushed past it is a different (and worse) state.
-     *
-     *      Not fixed, deliberately: the griefer pays real value to the victim (the donated shares are
-     *      the victim's to withdraw), the account's own exits are entirely unaffected, and the only
-     *      alternatives — a share allowlist or netting donations out of the cap — cost far more than
-     *      the nuisance. Deposits are the only thing affected.
-     */
-    function testDonatedSharesCanPushAnAccountOverTheCapAndBlockDeposits() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        vault.setMaxSharesPerAccount(EXPECTED_SHARES);
-        _deposit(strategy, user, DEPOSIT / 2); // half the cap used
-
-        // A third party donates enough to exceed the cap outright.
-        vm.prank(address(sherwood));
-        vault.strategyMint(thirdParty, EXPECTED_SHARES);
-        vm.prank(thirdParty);
-        vault.transfer(address(strategy), EXPECTED_SHARES);
-
-        assertGt(strategy.sharesBalance(), EXPECTED_SHARES, "donation pushed the account over the cap");
-
-        // Deposits are blocked while over the cap...
-        usdc.mint(user, DEPOSIT);
-        vm.startPrank(user);
-        usdc.approve(address(strategy), DEPOSIT);
-        vm.expectRevert("Share cap exceeded");
-        strategy.deposit(DEPOSIT / 2, 0);
-
-        vm.stopPrank();
-        // ...but the exit is NOT: the owner can always withdraw, donation included. (The donated
-        // shares were minted without a matching deposit, so back them in the mock's till first —
-        // on the real strategy that USDC exists by construction.)
-        usdc.mint(address(sherwood), DEPOSIT * 2);
         vm.prank(user);
-        strategy.withdrawAll(0);
-        assertEq(strategy.sharesBalance(), 0, "owner exits freely, cap never gates a withdrawal");
+        first.withdrawAll(0);
+        sherwood.setNav(0); // the book emptied out
+
+        // A different user can now take the freed capacity.
+        MamoLeveragedAeroStrategy second = _createStrategy(thirdParty);
+        _deposit(second, thirdParty, DEPOSIT);
+        assertEq(second.sharesBalance(), EXPECTED_SHARES, "freed capacity is reusable");
     }
+
 
     // ==================== DEPOSIT IDLE ====================
 

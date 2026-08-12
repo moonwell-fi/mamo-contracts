@@ -356,6 +356,72 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _assertFlat();
     }
 
+    // ==================== FUND CAPACITY CAP (real vault + real strategy) ====================
+
+    /// @dev THE AUTHORITATIVE TEST for the capacity ceiling: real `LeveragedAeroVault` + real
+    ///      `LeveragedAerodromeCLStrategy.deposit`, which is where the check actually lives. Once the
+    ///      fund's NAV is at the ceiling, deposits are refused for EVERYONE — it is a ceiling on the
+    ///      book, not a per-account allocation limit, so a brand-new depositor is refused just the
+    ///      same. `0` == unlimited by default, so it never bites before the owner acts.
+    function testDepositIsRefusedOnceTheFundReachesCapacity() public {
+        _execute(SEED);
+        assertEq(vault.maxTotalAssets(), 0, "unlimited by default");
+
+        // Ceiling just above the live book, leaving a known amount of room.
+        uint256 navNow = strategy.nav();
+        vm.prank(owner);
+        vault.setMaxTotalAssets(navNow + 100_000e6);
+        assertEq(vault.remainingCapacity(), 100_000e6, "room == cap - nav");
+
+        // A deposit that CROSSES the ceiling is rejected outright, not trimmed.
+        usdc.mint(lp, 300_000e6);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), 300_000e6);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.FundAtCapacity.selector);
+        strategy.deposit(150_000e6, 0);
+
+        // The room that DOES fit still goes in, landing exactly at the ceiling.
+        uint256 shares = strategy.deposit(100_000e6, 0);
+        vm.stopPrank();
+        assertGt(shares, 0, "the fitting deposit minted");
+        assertEq(vault.remainingCapacity(), 0, "fund is now exactly full");
+
+        // Full means full — even a dust deposit, from a different address, is refused.
+        usdc.mint(owner, 1e6);
+        vm.startPrank(owner);
+        usdc.approve(address(strategy), 1e6);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.FundAtCapacity.selector);
+        strategy.deposit(1e6, 0);
+        vm.stopPrank();
+    }
+
+    /// @dev Capacity gates DEPOSITS only. A fund pushed over its ceiling must still let everyone out,
+    ///      and redeeming frees room for others — the ceiling is measured against live NAV, never a
+    ///      high-water mark.
+    function testCapacityGatesDepositsOnlyAndRedeemingFreesRoom() public {
+        _execute(SEED);
+        usdc.mint(lp, 100_000e6);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), 100_000e6);
+        uint256 shares = strategy.deposit(100_000e6, 0);
+        vm.stopPrank();
+
+        // Lower the ceiling far BELOW the live book: deposits shut, exits unaffected.
+        vm.prank(owner);
+        vault.setMaxTotalAssets(1e6);
+        assertEq(vault.remainingCapacity(), 0, "fund is over its ceiling");
+
+        // A modest slice, so the fast path's own LTV gate (unrelated to capacity) stays clear — the
+        // point here is that the CEILING does not participate in the exit at all.
+        uint256 slice = shares / 50;
+        uint256 lpUsdcBefore = usdc.balanceOf(lp);
+        vm.startPrank(lp);
+        vault.approve(address(strategy), slice);
+        strategy.redeem(slice, 0);
+        vm.stopPrank();
+        assertGt(usdc.balanceOf(lp), lpUsdcBefore, "exit unaffected by the ceiling");
+    }
+
     function testDepositAndRedeemWorkOnAFlatBook() public {
         _execute(SEED);
         // Seed a depositor while the book is live so supply > 0.

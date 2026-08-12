@@ -91,11 +91,10 @@ interface ILeveragedAeroCLStrategy {
 
     /**
      * @notice A single escrowed async-redeem request by id.
-     * @dev Field order MUST match Sherwood's `LeveragedAerodromeCLStrategy.RedeemRequest`. Read by the
-     *      account's share-cap check so shares parked in the strategy's escrow still count against
-     *      {LeveragedAeroVault.maxSharesPerAccount}: an in-flight request moves shares
-     *      account → strategy, dropping `balanceOf(account)` to 0 without the position having been
-     *      exited, which would otherwise let a `request → deposit → cancel` loop hold N × cap.
+     * @dev Field order MUST match Sherwood's `LeveragedAerodromeCLStrategy.RedeemRequest`. Queue
+     *      introspection: an in-flight request moves shares account → strategy, so `balanceOf` alone
+     *      understates a holder's position — a UI or keeper reporting on a pending withdrawal reads
+     *      the escrowed amount and its `settled` flag from here.
      * @param id Request id.
      */
     function redeemRequest(uint256 id) external view returns (RedeemRequest memory);

@@ -837,33 +837,31 @@ What is still **not** wrapped, and is deliberate:
 
 ---
 
-## Per-account share cap (multisig procedure)
+## Fund capacity cap (multisig procedure)
 
-`LeveragedAeroVault.maxSharesPerAccount` caps the shares ONE per-user account may hold. `0` ==
-unlimited. Owner-only; one transaction covers every account.
-
-**Always derive the number from the contract — never hand-compute it.** Shares are 12dp against a 6dp
-asset, so an off-by-1e6 sets a ceiling a million times too large or small:
+`LeveragedAeroVault.maxTotalAssets` caps the whole fund's NAV, in USDC (6dp). `0` == unlimited.
+Owner-only, one transaction:
 
 ```
-shares = vault.previewSharesForAssets(<target USDC, 6dp>)   // read
-vault.setMaxSharesPerAccount(shares)                         // owner tx
+vault.setMaxTotalAssets(5_000_000e6)   // $5M capacity
+vault.setMaxTotalAssets(0)             // rollback: unlimited
 ```
 
-`previewSharesForAssets` reverts if the strategy cannot price itself, the same fail-closed posture a
-real deposit has — if it reverts, do not guess a number, fix the oracle first.
+Denominated in the unit of account, so **set the dollar figure you mean** — no share conversion, and
+none of the 12dp/6dp hazard the old per-account share cap carried. Read the live headroom with
+`vault.remainingCapacity()` (USDC; `type(uint256).max` when the cap is disabled).
 
 Three things to keep straight:
 
-- **It is an allocation guardrail, not a TVL limit.** N accounts × cap each is unbounded; this does
-  not bound total fund size.
-- **It is not a security boundary.** The pooled `LeveragedAerodromeCLStrategy.deposit` is
-  permissionless, so anyone depositing there directly is uncapped. All product flows go through
-  accounts.
-- **Its dollar meaning drifts upward** as the fund earns (a richer book mints fewer shares per
-  dollar). Re-read and re-set periodically if you need a tight dollar bound.
-
-Rollback is one transaction: `setMaxSharesPerAccount(0)` restores unlimited.
+- **It is a real TVL ceiling.** Once the fund's NAV reaches it, EVERY deposit is refused — every
+  account, and direct depositors too, because the check lives in the strategy's `deposit`, which is
+  the one path all of them take. That is the difference from the per-account cap it replaced.
+- **NAV moves on its own, so the ceiling is not a static gate.** The fund can drift *above* it on
+  gains alone (closing deposits with nobody having deposited) and back below on a drawdown. Expect
+  deposits to reopen and close without any owner action; that is inherent to a value-denominated
+  capacity limit.
+- **It gates deposits only.** Lowering it below the live book traps nobody — no withdrawal path
+  consults it, so holders can always exit, and each exit frees that much capacity for others.
 
 ## Staging
 

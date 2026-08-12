@@ -497,7 +497,7 @@ jq -n \
       sequencerUptime: $seqFeed
     },
     vaultGeneration: 3,
-    vaultGenerationName: "leveraged-aero-vault (in-repo: + maxSharesPerAccount(), previewSharesForAssets())",
+    vaultGenerationName: "leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())",
     note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66); mamo = the account layer, filled by run-leveraged-aero-account.sh (null right after a pooled redeploy — the factory binds the clone at construction, so the account layer must be redeployed too). sherwood is a deprecated alias of pooled, kept for existing consumers. The 5 feeds are FreshFeed-mocked (never stale). proposer is the rebalancer operator key, deliberately distinct from MAMO_BACKEND."
   }' > "$CONFIG_JSON"
 ok "config emitted: $CONFIG_JSON"

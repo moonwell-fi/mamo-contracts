@@ -69,49 +69,48 @@ against the code rather than assumed:
 So: **do not add a `legBIsAsset` branch to the account keeper.** Read it only if you are surfacing the
 fund's composition in ops tooling.
 
-## Per-account share cap
+## Fund capacity cap
 
-`LeveragedAeroVault.maxSharesPerAccount` is a **global** ceiling on the vault shares any single
-account may hold. `0` means unlimited (the deploy default). Only the vault owner (MAMO_MULTISIG) can
-change it, and the change applies to every account immediately, including existing ones.
+`LeveragedAeroVault.maxTotalAssets` is a ceiling on the **whole fund's NAV**, denominated in USDC
+(6dp). `0` means unlimited (the deploy default). Only the vault owner (MAMO_MULTISIG) can change it.
 
-Both account deposit paths enforce it and **revert** rather than trimming:
-
-```
-deposit(assets, minShares)        → reverts "Share cap exceeded"
-depositIdle(assets, minShares)    → reverts "Share cap exceeded"
-```
-
-That is precisely why `depositIdle` takes an amount. An account holding more idle USDC than its
-remaining cap room cannot deposit the whole balance, so the keeper must size the call to the room:
+It is a limit on the FUND, not on any one user: once the book reaches the ceiling, **nobody** can
+deposit, regardless of how little their own account holds. It is enforced in the strategy's `deposit`
+— the single path every share-minting deposit takes, accounts and direct depositors alike — and it
+**reverts** rather than trimming:
 
 ```
-held       = account.sharesBalance() + account.escrowedShares()   // escrow counts, see below
-cap        = vault.maxSharesPerAccount()          // 0 => unlimited, skip the rest
-roomShares = cap > held ? cap - held : 0          // 0 => do not call, it would revert
+deposit(assets, minShares)        → reverts FundAtCapacity(navAfter, cap)
+depositIdle(assets, minShares)    → reverts FundAtCapacity(navAfter, cap)
 ```
 
-Convert that share room to a USDC amount with `vault.previewSharesForAssets(assets)` (the function is
-linear in `assets`, so scaling works). **Leave headroom — do not size to the exact edge.** The preview
-prices against raw `nav()` while the real deposit prices against `navNet` (NAV after the fee
-crystallisation the deposit runs first), so with fees pending the real mint is **≥** the preview and an
-exact-edge deposit reverts `"Share cap exceeded"`. Target ~95% of the room and treat that revert as
-**retryable** (re-read and re-size, do not escalate). Leftover idle USDC stays on the account and the
-owner can claim it via `claimWithdrawnUsdc` at any time.
+That is why `depositIdle` takes an amount. When the fund is near its ceiling, an account holding more
+idle USDC than the remaining capacity cannot deposit the whole balance, so the keeper sizes the call
+to the room:
 
-**Escrowed shares count against the cap.** `requestWithdraw` moves shares into the strategy's escrow,
-so `sharesBalance()` alone understates the position while a request is in flight — use
-`escrowedShares()` as well (as above), or the keeper will compute room that the deposit then rejects.
-`previewSharesForAssets` also **reverts** `"LAV: nav unpriceable"` when the book cannot be priced
-(`nav() == 0` with shares outstanding, e.g. post-settle); treat that as "retry later", never as
-unlimited room.
+```
+room = vault.remainingCapacity()   // USDC (6dp). type(uint256).max => cap disabled
+                                   // 0 => fund is full, do not call
+```
 
-Two properties worth building around:
+**Leave headroom — do not size to the exact edge.** `remainingCapacity()` reads raw `nav()`, while the
+deposit measures against `navNet` (NAV after the fee crystallisation the deposit runs first), and NAV
+moves between your read and your transaction landing. Target ~95% of `room` and treat `FundAtCapacity`
+as **retryable** (re-read and re-size, do not escalate). Leftover idle USDC stays on the account and
+the owner can claim it via `claimWithdrawnUsdc` at any time.
 
-- **The cap is in shares (12dp), not USDC.** Its dollar meaning drifts *upward* as the fund earns, so
-  do not cache a dollar equivalent — re-read it.
-- **Withdrawals free room automatically.** The check is against the balance held, so there is no
-  separate release step after an exit.
+Three properties worth building around:
+
+- **The ceiling is in USDC, so it means what it says** — no share conversion, no 12dp/6dp trap.
+- **NAV moves on its own.** The fund can drift *above* the ceiling on gains alone, closing deposits
+  with nobody having deposited, and back below it on a drawdown, reopening them. Do not treat "closed"
+  as permanent, and do not cache `remainingCapacity()`.
+- **Withdrawals free room, for everyone.** The check is against live NAV, not a high-water mark, so an
+  exit immediately reopens that much capacity to any depositor. There is no release step.
+
+`vault.previewSharesForAssets(assets)` remains the assets→shares conversion for sizing `minShares`; it
+**reverts** `"LAV: nav unpriceable"` when the book cannot be priced (`nav() == 0` with shares
+outstanding, e.g. post-settle). Treat that as "retry later", never as a usable number.
 
 Two fund-ops reads exist for that tooling and are worth knowing about even though this doc's loop does not
 call them — both are plain views on the strategy clone:
@@ -335,7 +334,7 @@ above) — use these when indexing the strategy clone directly rather than per-a
 ## Revert-string reference
 
 Account (`require` strings): `"Amount must be greater than 0"`, `"Insufficient idle USDC"`,
-`"Share cap exceeded"`, `"Too many open requests"`, `"Not owner or backend"`, `"No shares to withdraw"`, `"No USDC to claim"`; OZ
+`"Not owner or backend"`, `"No shares to withdraw"`, `"No USDC to claim"`; OZ
 `OwnableUnauthorizedAccount(address)` for `onlyOwner` misuse; initializer strings
 `"Invalid mamoStrategyRegistry address"`, `"Strategy type id not set"`, `"Invalid owner address"`,
 `"Invalid sherwoodStrategy address"`, `"Invalid usdc address"`, `"Invalid vault address"`.

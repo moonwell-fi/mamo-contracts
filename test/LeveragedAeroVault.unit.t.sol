@@ -918,32 +918,66 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.renounceOwnership();
     }
 
-    // ==================== PER-ACCOUNT SHARE CAP ====================
+    // ==================== FUND CAPACITY CAP ====================
 
-    /// @dev The cap defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the
+    /// @dev The ceiling defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the
     ///      owner acts. The freeze case is `setOpenDeposits(false)`, which is a separate switch.
-    function testMaxSharesPerAccountDefaultsToUnlimited() public view {
-        assertEq(vault.maxSharesPerAccount(), 0, "0 == unlimited on a fresh deploy");
+    function testMaxTotalAssetsDefaultsToUnlimited() public view {
+        assertEq(vault.maxTotalAssets(), 0, "0 == unlimited on a fresh deploy");
     }
 
-    function testSetMaxSharesPerAccountByOwner() public {
+    function testSetMaxTotalAssetsByOwner() public {
         vm.expectEmit(false, false, false, true, address(vault));
-        emit LeveragedAeroVault.MaxSharesPerAccountSet(30_000e12);
+        emit LeveragedAeroVault.MaxTotalAssetsSet(5_000_000e6);
         vm.prank(owner);
-        vault.setMaxSharesPerAccount(30_000e12);
-        assertEq(vault.maxSharesPerAccount(), 30_000e12, "cap stored");
+        vault.setMaxTotalAssets(5_000_000e6);
+        assertEq(vault.maxTotalAssets(), 5_000_000e6, "capacity stored");
 
         // Re-settable, including back to unlimited (the one-transaction rollback).
         vm.prank(owner);
-        vault.setMaxSharesPerAccount(0);
-        assertEq(vault.maxSharesPerAccount(), 0, "cap cleared");
+        vault.setMaxTotalAssets(0);
+        assertEq(vault.maxTotalAssets(), 0, "capacity cleared");
     }
 
-    function testSetMaxSharesPerAccountRevertsForNonOwner() public {
+    function testSetMaxTotalAssetsRevertsForNonOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
         vm.prank(thirdParty);
-        vault.setMaxSharesPerAccount(1);
-        assertEq(vault.maxSharesPerAccount(), 0, "unchanged");
+        vault.setMaxTotalAssets(1);
+        assertEq(vault.maxTotalAssets(), 0, "unchanged");
+    }
+
+    /// @dev `remainingCapacity` is the number a depositor sizes against. `0` is ambiguous on its own
+    ///      (full vs unlimited), so an unlimited fund reports `type(uint256).max` rather than 0.
+    function testRemainingCapacityReportsMaxWhenUnlimited() public {
+        _bind();
+        assertEq(vault.remainingCapacity(), type(uint256).max, "unlimited reads as max, not 0");
+    }
+
+    function testRemainingCapacityShrinksAsTheFundFills() public {
+        _bindAndMint(alice, 1_000e12);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000e6);
+
+        strategy.setNav(1_000e6);
+        assertEq(vault.remainingCapacity(), 4_000e6, "room == cap - nav");
+
+        strategy.setNav(4_500e6);
+        assertEq(vault.remainingCapacity(), 500e6, "room shrinks as the book grows");
+    }
+
+    /// @dev At or ABOVE the ceiling the fund is full. Above matters: NAV moves on its own, so a fund
+    ///      can drift past the ceiling on gains alone with nobody having deposited — the subtraction
+    ///      must floor at 0 rather than underflow.
+    function testRemainingCapacityIsZeroAtAndAboveTheCeiling() public {
+        _bindAndMint(alice, 1_000e12);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000e6);
+
+        strategy.setNav(5_000e6);
+        assertEq(vault.remainingCapacity(), 0, "exactly full");
+
+        strategy.setNav(6_000e6); // drifted over on gains
+        assertEq(vault.remainingCapacity(), 0, "over the ceiling floors to 0, no underflow");
     }
 
     /// @dev The ops conversion: shares a given USDC amount would mint at current pricing. This is the

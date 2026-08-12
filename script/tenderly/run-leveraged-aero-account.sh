@@ -143,15 +143,15 @@ ok "pooled layer wired: strategy=$STRAT vault=$VAULT state=$(ccall "$STRAT" 'sta
 # ABI is identical either way, so the smoke below is valid on both — but the getter name and the
 # emitted config must follow the live contract.
 #
-# GEN 3 MUST BE PROBED FIRST AND SEPARATELY. The account now makes a TYPED
-# `maxSharesPerAccount()` call on the vault inside its share-cap check, and the vault is NOT
-# upgradeable — so a new account impl bound to a gen-2 vault reverts on EVERY deposit with empty
-# returndata (Solidity's codesize+returndata guard, no decodable reason). `depositsOpen()` cannot
-# distinguish the two generations because gen 2 answers it too, which is exactly how that hazard
-# would reach a live vnet undetected. Probing the cap selector is the only reliable discriminator.
-if [ -n "$(ccall "$VAULT" 'maxSharesPerAccount()(uint256)')" ]; then
+# GEN 3 MUST BE PROBED FIRST AND SEPARATELY. The STRATEGY now makes a TYPED `maxTotalAssets()` call
+# on the vault inside its fund-capacity check, and the vault is NOT upgradeable — so a current
+# strategy bound to a gen-2 vault reverts on EVERY deposit with empty returndata (Solidity's
+# codesize+returndata guard, no decodable reason). `depositsOpen()` cannot distinguish the two
+# generations because gen 2 answers it too, which is exactly how that hazard would reach a live vnet
+# undetected. Probing the capacity selector is the only reliable discriminator.
+if [ -n "$(ccall "$VAULT" 'maxTotalAssets()(uint256)')" ]; then
   VAULT_GEN=3
-  VAULT_GEN_NAME="leveraged-aero-vault (in-repo: + maxSharesPerAccount(), previewSharesForAssets())"
+  VAULT_GEN_NAME="leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())"
   DEPOSITS_OPEN_SIG='depositsOpen()(bool)'
 elif [ -n "$(ccall "$VAULT" 'depositsOpen()(bool)')" ]; then
   VAULT_GEN=2
@@ -165,7 +165,7 @@ fi
 info "vault generation: $VAULT_GEN — $VAULT_GEN_NAME"
 # Fail EARLY and loudly rather than at the first deposit with empty returndata.
 if [ "$VAULT_GEN" -lt 3 ]; then
-  die "vault at $VAULT predates maxSharesPerAccount() (generation $VAULT_GEN). The account's share-cap
+  die "vault at $VAULT predates maxTotalAssets() (generation $VAULT_GEN). The strategy's fund-capacity
   check calls it on every deposit and the vault is not upgradeable, so every deposit here would revert
   with empty returndata. Redeploy the pooled layer first: make tenderly-leveraged-aero-stack"
 fi

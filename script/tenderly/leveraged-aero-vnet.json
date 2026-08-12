@@ -26,7 +26,7 @@
   "vaultGeneration": 2,
   "vaultGenerationName": "leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)",
   "vaultGenerationRequired": 3,
-  "STALE": "THIS RECORDED POOLED LAYER IS OUT OF DATE — REDEPLOY BEFORE USE. The recorded vault predates maxSharesPerAccount(), and the account's share-cap check makes a TYPED call to it on every deposit. The vault is NOT upgradeable, so a current account impl bound to this vault reverts on every deposit with empty returndata. Run `make tenderly-leveraged-aero-stack` (which now records generation 3) BEFORE `make tenderly-leveraged-aero-account`; the account harness also probes maxSharesPerAccount() and refuses to run against generation < 3.",
+  "STALE": "THIS RECORDED POOLED LAYER IS OUT OF DATE — REDEPLOY BEFORE USE. The recorded vault predates maxTotalAssets(), and the STRATEGY's fund-capacity check makes a TYPED call to it on every deposit. The vault is NOT upgradeable, so a current strategy bound to this vault reverts on every deposit with empty returndata. Run `make tenderly-leveraged-aero-stack` (which now records generation 3) BEFORE `make tenderly-leveraged-aero-account`; the account harness also probes maxTotalAssets() and refuses to run against generation < 3.",
   "feeds": {
     "pattern": "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
     "legAUsd": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
