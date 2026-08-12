@@ -31,6 +31,26 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice Role identifier the registry uses for backend authorization
+    /// @dev Constant (not storage) so this is layout-neutral for every deployed proxy.
+    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
+
+    /// @notice Whether `account` is authorized to act as the Mamo backend for this strategy
+    /// @dev Sherlock #41. The predecessor of this check was
+    ///      `account == mamoStrategyRegistry.getBackendAddress()`, i.e. `getRoleMember(BACKEND_ROLE, 0)`.
+    ///      OpenZeppelin's EnumerableSet has no ordering guarantee and its removal swaps the LAST
+    ///      member into the vacated slot, so index 0 silently changes identity whenever ANY member
+    ///      is revoked — revoking a retired factory can re-point every strategy's backend gate at a
+    ///      different principal. Membership, not position, is the property the gate actually wants.
+    ///
+    ///      Consequence to be aware of: this authorizes the whole BACKEND_ROLE set, which today
+    ///      includes the per-asset factories as well as the operator. That is the same principal
+    ///      set {MultiMarketStrategyFactory} already gates on, so the two halves of an operation
+    ///      that spans factory and strategy now agree on who may perform it.
+    function _isBackend(address account) internal view returns (bool) {
+        return mamoStrategyRegistry.hasRole(BACKEND_ROLE, account);
+    }
+
     /**
      * @notice Allows the contract to receive ETH
      */

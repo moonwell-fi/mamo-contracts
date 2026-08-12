@@ -37,8 +37,21 @@ contract MockMToken {
         return balanceOf[owner];
     }
 
+    /// @dev Underlying the market can actually hand back right now. Everything else is with
+    ///      borrowers. Mirrors Compound: a redemption for more than this does NOT revert, it
+    ///      returns the nonzero TOKEN_INSUFFICIENT_CASH error code.
+    function getCash() external view returns (uint256) {
+        return token.balanceOf(address(this));
+    }
+
+    /// @dev Test hook: move `amount` of underlying out to a borrower, so getCash() < deposits.
+    function lendOut(address borrower, uint256 amount) external {
+        token.transfer(borrower, amount);
+    }
+
     function redeemUnderlying(uint256 amount) external returns (uint256) {
         require(balanceOf[msg.sender] >= amount, "mToken: insufficient balance");
+        if (token.balanceOf(address(this)) < amount) return 9; // TOKEN_INSUFFICIENT_CASH
         balanceOf[msg.sender] -= amount;
         token.transfer(msg.sender, amount);
         return 0;
@@ -46,6 +59,7 @@ contract MockMToken {
 
     function redeem(uint256 amount) external returns (uint256) {
         require(balanceOf[msg.sender] >= amount, "mToken: insufficient balance");
+        if (token.balanceOf(address(this)) < amount) return 9; // TOKEN_INSUFFICIENT_CASH
         balanceOf[msg.sender] -= amount;
         token.transfer(msg.sender, amount);
         return 0;
@@ -92,6 +106,10 @@ contract MockERC4626Vault {
         return previewRedeem(balanceOf[owner]);
     }
 
+    function maxRedeem(address owner) external view returns (uint256) {
+        return balanceOf[owner];
+    }
+
     function deposit(uint256 assets, address receiver) external returns (uint256) {
         token.transferFrom(msg.sender, address(this), assets);
         balanceOf[receiver] += assets;
@@ -116,21 +134,61 @@ contract MockERC4626Vault {
     }
 }
 
+/// @dev Registry stand-in with a real BACKEND_ROLE member SET, not a single pinned address, so the
+///      index-0 semantics that Sherlock #41 is about can be exercised: `getBackendAddress` still
+///      reports member 0 and moves when a member is revoked, while `hasRole` — what the strategy
+///      now gates on — does not.
 contract MockStrategyRegistry {
-    address public strategyOperator;
+    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
+
+    address[] internal _backends;
+    mapping(address => bool) internal _isBackend;
 
     constructor(address _operator) {
-        strategyOperator = _operator;
+        _grant(_operator);
+    }
+
+    function grantBackend(address account) external {
+        _grant(account);
+    }
+
+    /// @dev Mirrors EnumerableSet.remove: the LAST member is swapped into the vacated slot.
+    function revokeBackend(address account) external {
+        require(_isBackend[account], "not a backend");
+        for (uint256 i = 0; i < _backends.length; i++) {
+            if (_backends[i] == account) {
+                _backends[i] = _backends[_backends.length - 1];
+                _backends.pop();
+                break;
+            }
+        }
+        _isBackend[account] = false;
+    }
+
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        return role == BACKEND_ROLE && _isBackend[account];
     }
 
     function getBackendAddress() external view returns (address) {
-        return strategyOperator;
+        return _backends[0];
+    }
+
+    function _grant(address account) internal {
+        if (_isBackend[account]) return;
+        _isBackend[account] = true;
+        _backends.push(account);
     }
 }
 
 contract MockSlippagePriceChecker {
-    function isRewardToken(address) external pure returns (bool) {
-        return true;
+    mapping(address => bool) internal _notReward;
+
+    function setNotRewardToken(address token, bool notReward) external {
+        _notReward[token] = notReward;
+    }
+
+    function isRewardToken(address token) external view returns (bool) {
+        return !_notReward[token];
     }
 }
 
@@ -348,10 +406,8 @@ contract MultiMarketStrategyUnitTest is Test {
     }
 
     /// @notice The gate: no reward token can be swapped out while it still owes a fee.
-    function test_isValidSignature_refusesUntilTheRewardFeeIsSettled() public {
-        rewardToken.mint(address(strategy), 1000e18);
-
-        bytes memory encodedOrder = abi.encode(
+    function _rewardOrder() internal view returns (bytes memory) {
+        return abi.encode(
             GPv2Order.Data({
                 sellToken: IERC20(address(rewardToken)),
                 buyToken: IERC20(address(underlying)),
@@ -367,16 +423,60 @@ contract MultiMarketStrategyUnitTest is Test {
                 buyTokenBalance: GPv2Order.BALANCE_ERC20
             })
         );
+    }
+
+    /// @notice The fee gate applies exactly where the finite-allowance lock does not: a proxy
+    ///         carrying a legacy unlimited approval to the CoW relayer. There, and only there, an
+    ///         unsettled balance is genuinely reachable by a settlement.
+    function test_isValidSignature_refusesUntilTheRewardFeeIsSettled_underLegacyAllowance() public {
+        rewardToken.mint(address(strategy), 1000e18);
+
+        // Recreate the pre-upgrade state: anchor at zero, relayer approved without limit.
+        // Relayer address hoisted: an external call in argument position is evaluated FIRST and
+        // would consume the one-shot prank, leaving the approval attributed to the test contract.
+        address relayer = strategy.VAULT_RELAYER();
+        vm.prank(address(strategy));
+        rewardToken.approve(relayer, type(uint256).max);
+        assertEq(strategy.rewardFeeCharged(address(rewardToken)), 0, "anchor should start at zero");
 
         vm.expectRevert("Reward fee not settled");
-        strategy.isValidSignature(bytes32(0), encodedOrder);
+        strategy.isValidSignature(bytes32(0), _rewardOrder());
 
         strategy.sweepRewardFees(address(rewardToken));
 
-        // Same order, same (deliberately wrong) digest: the fee gate no longer stops it, so the
-        // revert moves on to the ordinary order-binding check.
+        // The sweep re-arms the allowance AT the settled balance, so the gate stops applying and
+        // the revert moves on to the ordinary order-binding check (the digest is deliberately wrong).
         vm.expectRevert("bad digest");
-        strategy.isValidSignature(bytes32(0), encodedOrder);
+        strategy.isValidSignature(bytes32(0), _rewardOrder());
+    }
+
+    /// @notice Regression for the dust-donation grief. `pendingRewardFee` is a bps multiplication
+    ///         that rounds down, so at compoundFee = 500 the tolerance is 19 wei and a 20-wei
+    ///         donation used to round up to a nonzero owed fee and revert the solver's ENTIRE
+    ///         batch — repeatable after every sweep for ~20 wei plus gas. What actually secures the
+    ///         fee is the finite allowance, not the gate: whatever is donated after a sweep sits
+    ///         outside the allowance and no settlement can reach it.
+    function test_isValidSignature_dustDonationCannotBlockOrders() public {
+        rewardToken.mint(address(strategy), 1000e18);
+        strategy.sweepRewardFees(address(rewardToken));
+
+        uint256 settled = rewardToken.balanceOf(address(strategy));
+        assertEq(strategy.rewardFeeCharged(address(rewardToken)), settled, "anchor tracks settled balance");
+        assertEq(rewardToken.allowance(address(strategy), strategy.VAULT_RELAYER()), settled, "allowance re-armed");
+
+        // 20 wei is the first donation that rounds up to a nonzero owed fee at compoundFee = 500.
+        rewardToken.mint(address(strategy), 20);
+        assertGt(strategy.pendingRewardFee(address(rewardToken)), 0, "donation does owe a fee");
+
+        // ...and the order is signable anyway: "bad digest" is the ordinary binding check, i.e. the
+        // fee gate did not fire. The relayer's reach is unchanged at `settled`.
+        vm.expectRevert("bad digest");
+        strategy.isValidSignature(bytes32(0), _rewardOrder());
+        assertEq(
+            rewardToken.allowance(address(strategy), strategy.VAULT_RELAYER()),
+            settled,
+            "donation is outside the relayer's reach"
+        );
     }
 
     /// @notice Sherlock #49, the recovery route. recoverERC20 is an unconditional owner exit, so
@@ -573,5 +673,216 @@ contract MultiMarketStrategyUnitTest is Test {
         (string memory doc, bytes32 hash) = strategy.expectedAppData();
         assertEq(doc, '{"appCode":"Mamo","metadata":{},"version":"1.3.0"}');
         assertEq(hash, keccak256(bytes(doc)));
+    }
+
+    // ============ #37 (mToken leg): A FULLY LENT-OUT MARKET IS NOT A FAILED WITHDRAWAL ============
+
+    address internal constant BORROWER = address(0xB0110E4);
+
+    /// @dev Lend out the mToken's entire cash, so it owns the position but can pay nothing.
+    function _drainMTokenCash() internal {
+        mToken.lendOut(BORROWER, underlying.balanceOf(address(mToken)));
+        assertEq(mToken.getCash(), 0, "market has no cash");
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 500e18, "strategy still owns its position");
+    }
+
+    /// @notice The headline case. 500/500 across the two markets, the Moonwell market fully lent
+    ///         out, owner asks for 400 — an amount the VAULT leg alone covers comfortably. Capping
+    ///         the mToken leg only by what the strategy owns made pass 1 ask for 200 the market
+    ///         could not pay, and the unguarded `require(redeemUnderlying(...) == 0)` reverted the
+    ///         whole call before pass 2 ever reached the vault that had the funds.
+    function test_withdraw_succeedsWhenAnMTokenMarketIsOutOfCash() public {
+        _deposit(1000e18);
+        _drainMTokenCash();
+
+        vm.prank(owner);
+        strategy.withdraw(400e18);
+
+        assertEq(underlying.balanceOf(owner), 400e18, "covered entirely from the liquid market");
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 500e18, "illiquid leg untouched");
+    }
+
+    /// @notice And when there genuinely is not enough liquidity anywhere, the failure is the
+    ///         specific, actionable one rather than the venue's opaque error code.
+    function test_withdraw_revertsWithLiquidityMessageWhenNoMarketCanPay() public {
+        _deposit(1000e18);
+        _drainMTokenCash();
+
+        vm.prank(owner);
+        vm.expectRevert("Withdrawal failed: insufficient market liquidity");
+        strategy.withdraw(900e18);
+    }
+
+    /// @notice The finding's stated consolation — "withdrawAll can still recover the funds" — did
+    ///         not hold: the redeem-everything path carried the same unguarded require. It is now
+    ///         best-effort, draining what cash exists instead of reverting.
+    function test_withdrawAll_drainsAvailableCashWhenAnMTokenIsIlliquid() public {
+        _deposit(1000e18);
+        // Half the mToken's cash is lent out: 250 recoverable, 250 stuck.
+        mToken.lendOut(BORROWER, 250e18);
+
+        vm.prank(owner);
+        strategy.withdrawAll();
+
+        assertEq(underlying.balanceOf(owner), 750e18, "vault leg plus the mToken's remaining cash");
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 250e18, "the rest stays lent, still earning");
+    }
+
+    /// @notice updatePosition opens with the same sweep, so the revert also blocked every
+    ///         rebalance — including the one that repairs splits after a deactivation.
+    function test_updatePosition_survivesAnIlliquidMToken() public {
+        _deposit(1000e18);
+        _drainMTokenCash();
+
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+        updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 2000});
+        updates[1] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(vault), splitBps: 8000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+
+        assertEq(strategy.marketSplitBps(address(vault)), 8000, "splits applied");
+        // The 500 that could be swept was re-split; the stuck 500 stayed in the mToken.
+        assertEq(vault.balanceOf(address(strategy)), 400e18, "80% of the recovered balance");
+    }
+
+    // ==================== #41: THE BACKEND GATE IS MEMBERSHIP, NOT INDEX 0 ====================
+
+    /// @notice `getBackendAddress()` is `getRoleMember(BACKEND_ROLE, 0)`, and EnumerableSet's
+    ///         removal swaps the LAST member into the vacated slot. Revoking an unrelated member
+    ///         therefore silently re-points index 0 — which, under the old gate, revoked the real
+    ///         operator's access as a side effect of retiring something else.
+    function test_backendGate_survivesAnUnrelatedRoleRevocation() public {
+        address otherMember = makeAddr("retiredFactory");
+        registry.grantBackend(otherMember);
+        assertEq(registry.getBackendAddress(), backend, "operator starts at index 0");
+
+        // This is the live topology in miniature: index 0 is held by one principal (today the
+        // multicall), with factories behind it. Retiring the index-0 occupant swaps the LAST member
+        // into slot 0, so `getBackendAddress()` now names a factory.
+        registry.grantBackend(makeAddr("thirdMember"));
+        registry.revokeBackend(backend);
+        assertTrue(registry.getBackendAddress() != backend, "index 0 moved to a different principal");
+
+        // Re-granting the operator puts it back in the SET but at the end, never at index 0 —
+        // under the old gate it would have been permanently locked out with no way to get back in
+        // short of revoking every other member. Membership is what the gate reads now.
+        registry.grantBackend(backend);
+        assertTrue(registry.getBackendAddress() != backend, "still not index 0");
+
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+        updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 5000});
+        updates[1] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(vault), splitBps: 5000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates); // would revert "Not backend" under the index-0 gate
+    }
+
+    function test_backendGate_rejectsANonMember() public {
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+        updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 5000});
+        updates[1] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(vault), splitBps: 5000});
+
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert("Not backend");
+        strategy.updatePosition(updates);
+    }
+
+    /// @notice A second role member is a first-class backend, not a second-class one. This is the
+    ///         semantic the factory already had; the strategy now agrees with it.
+    function test_backendGate_acceptsAnyRoleMember() public {
+        address secondOperator = makeAddr("secondOperator");
+        registry.grantBackend(secondOperator);
+
+        vm.prank(secondOperator);
+        strategy.setFeeRecipient(makeAddr("newRecipient"));
+        assertEq(strategy.feeRecipient(), makeAddr("newRecipient"));
+    }
+
+    // ==================== migrateV1ToMarketRegistry IS ONE-WAY ====================
+
+    /// @notice A factory-created strategy sits at `_initialized == 1` with both legacy splits at
+    ///         zero, so every branch of the migration was skipped and _validateTotalSplit passed
+    ///         against the splits it was already initialized with. The owner could therefore
+    ///         re-point `marketRegistry` at an arbitrary contract and spoof the market set, the
+    ///         active flags and _getTotalBalance for that strategy.
+    function test_migrateV1_cannotRepointAnAlreadyConfiguredStrategy() public {
+        MarketRegistry hostile = new MarketRegistry(admin, backend, guardian);
+
+        vm.prank(owner);
+        vm.expectRevert("Market registry already set");
+        strategy.migrateV1ToMarketRegistry(address(hostile));
+
+        assertEq(address(strategy.marketRegistry()), address(marketRegistry), "registry unchanged");
+    }
+
+    // ==================== claimRewards SKIPS WHAT IT CANNOT SETTLE ====================
+
+    /// @notice Merkl routinely pays a market's own asset, and a campaign can start paying a token
+    ///         before the price checker is configured for it. Either one used to revert the entire
+    ///         batch inside _requireRewardToken and strand every other reward in the call.
+    function test_claimRewards_skipsUnsettleableTokensInsteadOfRevertingTheBatch() public {
+        MockERC20 unconfigured = new MockERC20("Unconfigured", "UNC");
+        priceChecker.setNotRewardToken(address(unconfigured), true);
+
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(underlying); // the strategy's own asset
+        tokens[1] = address(unconfigured); // priced by nothing yet
+        tokens[2] = address(rewardToken); // the real reward
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = 1e18;
+        amounts[1] = 2e18;
+        amounts[2] = 1000e18;
+        bytes32[][] memory proofs = new bytes32[][](3);
+
+        vm.prank(backend);
+        strategy.claimRewards(tokens, amounts, proofs);
+
+        // The settleable token was settled...
+        uint256 expectedFee = (1000e18 * COMPOUND_FEE) / 10000;
+        assertEq(rewardToken.balanceOf(feeRecipient), expectedFee, "fee charged on the real reward");
+        // ...and the other two simply landed, untaxed and with no relayer allowance armed.
+        assertEq(underlying.balanceOf(address(strategy)), 1e18, "underlying kept as principal");
+        assertEq(unconfigured.balanceOf(address(strategy)), 2e18, "unconfigured token untouched");
+        assertEq(unconfigured.allowance(address(strategy), strategy.VAULT_RELAYER()), 0, "relayer not armed");
+    }
+
+    /// @notice A market position is not yield. If an mToken or 4626 share ever picked up a price
+    ///         checker entry, the permissionless sweep would tax 5% of the strategy's PRINCIPAL
+    ///         shares and approve the relayer for the rest.
+    function test_sweepRewardFees_rejectsAMarketShare() public {
+        _deposit(1000e18);
+
+        // The price checker says yes to everything unless told otherwise — the mistaken-entry state.
+        vm.expectRevert("Market share is not a reward token");
+        strategy.sweepRewardFees(address(mToken));
+
+        vm.expectRevert("Market share is not a reward token");
+        strategy.sweepRewardFees(address(vault));
+    }
+
+    // ==================== depositIdleTokens INSIDE THE DEACTIVATION WINDOW ====================
+
+    /// @notice depositIdleTokens shares depositInternal with deposit(), so the #36 guard governs it
+    ///         too: it must refuse while the active allocation is incomplete, and the idle balance
+    ///         must survive the refusal rather than being partially placed.
+    function test_depositIdleTokens_revertsWhileActiveSplitsAreIncomplete() public {
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(address(underlying), address(vault));
+
+        underlying.mint(address(strategy), 1000e18);
+
+        vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
+        strategy.depositIdleTokens();
+
+        assertEq(underlying.balanceOf(address(strategy)), 1000e18, "idle balance intact");
+
+        // Repairing the allocation unblocks it.
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](1);
+        updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 10000});
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+
+        assertEq(mToken.balanceOfUnderlying(address(strategy)), 1000e18, "re-deposited by updatePosition");
     }
 }

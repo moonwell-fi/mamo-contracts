@@ -5,7 +5,7 @@ import {ERC1967Proxy} from "./ERC1967Proxy.sol";
 import {MamoMultiMarketStrategy} from "./MamoMultiMarketStrategy.sol";
 
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
-import {IMarketRegistry} from "./interfaces/IMarketRegistry.sol";
+import {IMarketRegistry, RegistryMarket} from "./interfaces/IMarketRegistry.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 /**
@@ -89,6 +89,13 @@ contract MultiMarketStrategyFactory {
         allowedSlippageInBps = _allowedSlippageInBps;
         compoundFee = _compoundFee;
 
+        // The role id below is re-derived locally rather than read at every call site, so pin it to
+        // the registry's own value once. A registry using a different id would otherwise degrade
+        // this factory to self-serve-only — every backend gate silently false, no revert anywhere.
+        require(
+            IMamoStrategyRegistry(_mamoStrategyRegistry).BACKEND_ROLE() == BACKEND_ROLE, "Registry role id mismatch"
+        );
+
         _setDefaultSplitBps(_defaultSplitBps);
 
         for (uint256 i = 0; i < _rewardTokens.length; i++) {
@@ -142,6 +149,16 @@ contract MultiMarketStrategyFactory {
             })
         );
 
+        // The implementation is whatever the registry publishes for this type id, and type ids are
+        // assigned by hand (see docs/STRATEGY_REGISTRY_SPEC.md on the collision risk). Assert the
+        // initialized proxy is actually the thing this factory configures, so a wrong id fails
+        // here — before the proxy is registered to the user — rather than relying on initialize()
+        // happening to revert against an unrelated implementation's parameter shape.
+        MamoMultiMarketStrategy created = MamoMultiMarketStrategy(payable(strategy));
+        require(address(created.token()) == token, "Implementation token mismatch");
+        require(address(created.marketRegistry()) == marketRegistry, "Implementation registry mismatch");
+        require(created.strategyTypeId() == strategyTypeId, "Implementation type id mismatch");
+
         mamoStrategyRegistryInterface.addStrategy(user, strategy);
 
         emit StrategyCreated(user, strategy);
@@ -180,10 +197,6 @@ contract MultiMarketStrategyFactory {
     }
 
     function _setDefaultSplitBps(uint256[] memory newSplitBps) internal {
-        // NOTE: deliberately not validated against the registry's market count here — the
-        // deployment order registers markets AFTER the factory exists, so a constructor-time
-        // check would be unsatisfiable. The relation is enforced where it matters, at creation
-        // time in _splitsForCurrentMarkets.
         require(newSplitBps.length > 0, "At least one split required");
 
         uint256 totalSplit = 0;
@@ -191,6 +204,33 @@ contract MultiMarketStrategyFactory {
             totalSplit += newSplitBps[i];
         }
         require(totalSplit == SPLIT_TOTAL, "Splits must add up to 10000");
+
+        // Validate positionally against the registry, but only once the registry actually has
+        // markets for this token. The deployment order registers markets AFTER the factory exists,
+        // so a constructor-time check would be unsatisfiable — hence the guard rather than an
+        // unconditional require.
+        //
+        // Both checks below were previously deferred to strategy creation, where they surface as a
+        // revert deep inside initialize() long after the misconfiguration was accepted and its
+        // event emitted:
+        //   - length: a SHORT array is silently zero-padded by _splitsForCurrentMarkets, so
+        //     `[10000]` against three markets is accepted here and then routes 100% of every new
+        //     strategy into market 0.
+        //   - active flags: a nonzero allocation on a deactivated market passes the sum check and
+        //     bricks creation, because the strategy's initialize refuses it.
+        // Markets registered after this call are still fine: they are appended, and
+        // _splitsForCurrentMarkets pads them to a zero allocation until the splits are set again.
+        uint256 marketCount = IMarketRegistry(marketRegistry).getMarketCount(token);
+        if (marketCount > 0) {
+            require(newSplitBps.length == marketCount, "Split count must match market count");
+
+            RegistryMarket[] memory markets = IMarketRegistry(marketRegistry).getMarkets(token);
+            for (uint256 i = 0; i < markets.length; i++) {
+                if (!markets[i].active) {
+                    require(newSplitBps[i] == 0, "Inactive market must have zero split");
+                }
+            }
+        }
 
         delete defaultSplitBps;
         for (uint256 i = 0; i < newSplitBps.length; i++) {

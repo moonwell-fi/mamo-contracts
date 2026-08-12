@@ -331,13 +331,17 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
         );
     }
 
+    /// @notice The split-count check moved forward to where the splits are SET. Previously a
+    ///         mismatched array was accepted (and its event emitted) and only surfaced later, as a
+    ///         revert inside createStrategyForUser that named neither the caller nor the mistake.
     function testRevertMoreSplitsThanMarkets() public {
         uint256[] memory tooManySplits = new uint256[](3);
         tooManySplits[0] = 5000;
         tooManySplits[1] = 4000;
         tooManySplits[2] = 1000;
 
-        MultiMarketStrategyFactory factory = _createFactory(
+        vm.expectRevert("Split count must match market count");
+        _createFactory(
             registryAddr,
             token,
             slippagePriceChecker,
@@ -350,10 +354,29 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
             new address[](0),
             tooManySplits
         );
+    }
 
-        vm.expectRevert("Split count exceeds market count");
-        vm.prank(backend);
-        factory.createStrategyForUser(makeAddr("user"));
+    /// @notice The mirror case, and the one that was silently WRONG rather than merely deferred: a
+    ///         short array used to be zero-padded at creation time, so `[10000]` against two
+    ///         markets was accepted here and then routed 100% of every new strategy into market 0.
+    function testRevertFewerSplitsThanMarkets() public {
+        uint256[] memory tooFewSplits = new uint256[](1);
+        tooFewSplits[0] = 10000;
+
+        vm.expectRevert("Split count must match market count");
+        _createFactory(
+            registryAddr,
+            token,
+            slippagePriceChecker,
+            feeRecipient,
+            address(marketRegistry),
+            strategyTypeId,
+            100000,
+            100,
+            500,
+            new address[](0),
+            tooFewSplits
+        );
     }
 
     function testSlippageAtMaxBoundary() public {

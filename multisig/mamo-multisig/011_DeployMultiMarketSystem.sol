@@ -179,6 +179,16 @@ contract DeployMultiMarketSystem is MultisigProposal {
                 "Type should already exist"
             );
         }
+
+        // Pin who index 0 is BEFORE the proposal runs, so the paired assertion in validate() can
+        // prove the role churn below did not move it. Any proposal that grants or revokes
+        // BACKEND_ROLE should carry this pair — the whole point of Sherlock #41 is that the
+        // identity at index 0 changes as an invisible side effect of unrelated membership edits.
+        assertEq(
+            registry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 should be the strategy multicall before this proposal"
+        );
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -214,16 +224,32 @@ contract DeployMultiMarketSystem is MultisigProposal {
                 }
             }
 
-            // 3. Revoke BACKEND_ROLE from old factory
+            // 3. Grant BACKEND_ROLE to the new factory BEFORE revoking the old one.
+            //    Order is load-bearing, not cosmetic: BACKEND_ROLE is an EnumerableSet, and a
+            //    revocation swaps the LAST member into the vacated slot. Revoking first therefore
+            //    re-points `getRoleMember(BACKEND_ROLE, 0)` — the value `getBackendAddress()`
+            //    returns — at whatever happened to be last, in the middle of the proposal. Granting
+            //    first also means there is no instant in which this asset has no factory able to
+            //    onboard users.
+            registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress(keys.factoryKey));
+
+            // 4. Revoke BACKEND_ROLE from the old factory
             if (addresses.isAddressSet(keys.oldFactoryKey)) {
                 address oldFactory = addresses.getAddress(keys.oldFactoryKey);
                 if (registry.hasRole(registry.BACKEND_ROLE(), oldFactory)) {
                     registry.revokeRole(registry.BACKEND_ROLE(), oldFactory);
                 }
             }
+        }
 
-            // 4. Grant BACKEND_ROLE to new factory
-            registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress(keys.factoryKey));
+        // The operator EOA must hold BACKEND_ROLE in its own right. Before this PR the old
+        // factories PINNED the MAMO_BACKEND address at construction, so it could call
+        // createStrategyForUser without ever being a role member; the new factories authorize
+        // against `hasRole(BACKEND_ROLE, ...)`, and on the deployed registry MAMO_BACKEND is NOT a
+        // member (the current set is the multicall plus the five factories). Without this grant the
+        // upgrade silently takes user onboarding offline for the operator.
+        if (!registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress("MAMO_BACKEND"))) {
+            registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress("MAMO_BACKEND"));
         }
 
         // Revoke temporary BACKEND_ROLE from multisig on MarketRegistry
@@ -294,6 +320,23 @@ contract DeployMultiMarketSystem is MultisigProposal {
         assertFalse(
             marketReg.hasRole(marketReg.BACKEND_ROLE(), addresses.getAddress("MAMO_MULTISIG")),
             "Multisig should not have BACKEND_ROLE on MarketRegistry"
+        );
+
+        // The operator EOA can onboard users. The new factories gate on hasRole rather than a
+        // pinned address, so this is now a membership fact and not an implicit one.
+        assertTrue(
+            registry.hasRole(registry.BACKEND_ROLE(), addresses.getAddress("MAMO_BACKEND")),
+            "MAMO_BACKEND should hold BACKEND_ROLE"
+        );
+
+        // Paired with the preBuildMock assertion: this proposal grants four members and revokes
+        // three, and none of that may move index 0. `getBackendAddress()` is no longer an
+        // authorization primitive anywhere in src/ (see Sherlock #41), but it remains a live
+        // off-chain read, and a silent change of identity here is exactly the failure mode.
+        assertEq(
+            registry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 must not move"
         );
     }
 
