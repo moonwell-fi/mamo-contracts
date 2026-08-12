@@ -9,10 +9,6 @@ import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/U
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @dev Just the vault's per-account share ceiling. Declared locally so the account needs no new
-///      storage pointer — `vaultShares` already IS the vault address (derived at init from
-///      `sherwoodStrategy.vault()`), which is why the cap lives on the vault rather than the
-///      factory or the registry.
 /**
  * @title MamoLeveragedAeroStrategy
  * @notice A per-user Mamo account contract that wraps the vendored Sherwood leveraged Aerodrome CL
@@ -57,7 +53,6 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
 
     /// @notice The USDC token (6dp): the deposit asset and the withdrawal payout token.
     IERC20 public usdc;
-
 
     /// @notice Emitted when USDC is deposited and vault shares are minted to this account.
     event Deposit(address indexed depositor, uint256 assets, uint256 shares);
@@ -171,7 +166,6 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
 
         emit Deposit(msg.sender, assets, shares);
     }
-
 
     /**
      * @notice Fast-path withdrawal of `shares`, paying USDC to the owner.

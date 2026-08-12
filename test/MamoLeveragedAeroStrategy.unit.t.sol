@@ -429,7 +429,6 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(second.sharesBalance(), EXPECTED_SHARES, "freed capacity is reusable");
     }
 
-
     // ==================== DEPOSIT IDLE ====================
 
     function testDepositIdleSweepsInDirectTransfer() public {
