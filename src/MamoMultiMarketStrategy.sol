@@ -912,7 +912,20 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /// @dev Scans the registry's market list rather than calling isMarketActive, which REVERTS for
     ///      an unregistered target — the common case here — and would turn a check into a failure.
     ///      Deactivated markets count too: the strategy can still be holding their shares.
+    ///
+    ///      The unset-registry branch is NOT defensive padding. A live v1 proxy sits at
+    ///      `marketRegistry == address(0)` for the whole window between being upgraded to this
+    ///      implementation and its `migrateV1ToMarketRegistry` call, and its positions are still in
+    ///      the legacy `mToken` / `metaMorphoVault` slots. Calling `getMarkets` on the zero address
+    ///      there reverts, which would take down `claimRewards`, the permissionless
+    ///      `sweepRewardFees`, and reward-token `recoverERC20` for every un-migrated strategy —
+    ///      paths that worked before this check existed. Reading the legacy slots keeps the
+    ///      protection itself intact across the window rather than merely skipping it.
     function _isMarketTarget(address candidate) internal view returns (bool) {
+        if (address(marketRegistry) == address(0)) {
+            return candidate == address(mToken) || candidate == address(metaMorphoVault);
+        }
+
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (regMarkets[i].target == candidate) return true;

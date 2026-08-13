@@ -861,6 +861,35 @@ contract MultiMarketStrategyUnitTest is Test {
         strategy.sweepRewardFees(address(vault));
     }
 
+    /// @notice REGRESSION — the market-share check must survive the un-migrated v1 window. A live v1
+    ///         proxy sits at `marketRegistry == address(0)` from the moment it is upgraded to this
+    ///         implementation until `migrateV1ToMarketRegistry` runs, with its positions still in the
+    ///         legacy `mToken` / `metaMorphoVault` slots. Reading the market list off the zero address
+    ///         reverts, which took down `claimRewards`, the permissionless `sweepRewardFees`, and
+    ///         reward-token `recoverERC20` for every un-migrated strategy — all of which worked before
+    ///         the check was added. Caught by `test/ERC20StrategyV2.t.sol` (a real mainnet proxy
+    ///         upgraded without migrating); pinned here so it fails in the unit suite first.
+    function test_sweepRewardFees_worksBeforeTheV1MigrationHasRun() public {
+        // Reproduce the window: registry unset (slot 60), legacy market slots populated (50, 51).
+        vm.store(address(strategy), bytes32(uint256(60)), bytes32(0));
+        vm.store(address(strategy), bytes32(uint256(50)), bytes32(uint256(uint160(address(mToken)))));
+        vm.store(address(strategy), bytes32(uint256(51)), bytes32(uint256(uint160(address(vault)))));
+        assertEq(address(strategy.marketRegistry()), address(0), "un-migrated v1 state");
+
+        // The fee still settles — this is the call that reverted.
+        rewardToken.mint(address(strategy), 1000e18);
+        uint256 fee = strategy.sweepRewardFees(address(rewardToken));
+        assertEq(fee, (1000e18 * COMPOUND_FEE) / 10000, "fee charged without a registry");
+
+        // ...and the protection is not merely skipped in that window: the legacy slots still stand in
+        // for the market set, so principal-bearing positions remain out of reach of the sweep.
+        vm.expectRevert("Market share is not a reward token");
+        strategy.sweepRewardFees(address(mToken));
+
+        vm.expectRevert("Market share is not a reward token");
+        strategy.sweepRewardFees(address(vault));
+    }
+
     // ==================== depositIdleTokens INSIDE THE DEACTIVATION WINDOW ====================
 
     /// @notice depositIdleTokens shares depositInternal with deposit(), so the #36 guard governs it
