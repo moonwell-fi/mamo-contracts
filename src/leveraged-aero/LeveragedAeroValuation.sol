@@ -1153,21 +1153,13 @@ library LeveragedAeroValuation {
     ///      in full and running on every deposit, every block, with nothing in any transaction to show
     ///      for it. The trade is deliberate and it is NOT revisited here: `nav()` must stay revert-free on
     ///      this read (see the deadman rationale on `sweepFloors` — a hard revert on a reward probe would
-    ///      brick pricing over a term that is a small fraction of a levered book). What the trade OWES,
-    ///      and what is paid here, is that the state be NAMED rather than papered over: a non-`"NA"`
-    ///      revert degrades NAV to the pre-fix mis-pricing, NOT to a semantically-zero accrual.
-    ///
-    ///      THE `code.length` PRECHECK, and what it is actually for. A `try` DOES NOT COVER an empty-code
-    ///      target: Solidity guards a high-level call to a typed contract with an `extcodesize` check
-    ///      emitted OUTSIDE the try's protected region, so a gauge with no code reverts UNCATCHABLY
-    ///      ("call to non-contract address") straight through `catch {}`. Prechecking therefore does two
-    ///      things — it separates "the gauge contract is gone/empty" from "the tokenId is unstaked" (two
-    ///      states the catch could not distinguish, because only ONE of them ever reached the catch), and
-    ///      it removes a revert the catch was never absorbing in the first place. `nav()` is unaffected
-    ///      either way, but NOT because the catch stood in: it cannot reach this probe against a
-    ///      code-less gauge at all, because the `rewardToken()` read on the first line of the body
-    ///      already fail-closes the whole call (empty revert data). The value of removing that revert is
-    ///      for a reader that must answer WITHOUT reverting — which is the next item.
+    ///      brick pricing over a term that is a small fraction of a levered book). What is added is
+    ///      OBSERVABILITY, not a revert: `_earnedRead` reports whether the read answered, and
+    ///      `rewardReadOk` publishes exactly that for a keeper to poll. Silent stays silent onchain;
+    ///      it does not stay invisible. The read itself — including the `code.length` precheck, which a
+    ///      `try` cannot substitute for because solc's `extcodesize` guard on the call target reverts
+    ///      UNCATCHABLY — now lives in `_earnedRead`, as ONE definition shared by the priced term and the
+    ///      marker; its three states are documented there.
     ///
     ///      GATED ON THE SUM, NOT ON THE BALANCE: `earned()` can be non-zero while the balance is zero
     ///      (the steady state, in fact — emissions accrue every second between harvests), so the feed read
@@ -1212,13 +1204,103 @@ library LeveragedAeroValuation {
     ///      realisation basis cannot drift and a venue migration can never orphan a second pinned copy.
     function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
         uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
-        if (c.tokenId != 0 && c.gauge.code.length != 0) {
-            try ICLGauge(c.gauge).earned(strategy, c.tokenId) returns (uint256 e) {
-                amt += e;
-            } catch {}
-        }
+        (uint256 e,) = _earnedRead(c.gauge, strategy, c.tokenId);
+        amt += e;
         if (amt == 0) return 0;
         return _usdcValue(amt, 18, _readUsd8(c, c.rewardFeed), pUsdc);
+    }
+
+    /// @dev THE gauge-side `earned()` read — the amount AND whether the read actually answered. ONE
+    ///      definition, deliberately: `_rewardUsdc` takes the amount and ignores the flag, `rewardReadOk`
+    ///      takes the flag and ignores the amount, so the monitoring signal and the priced term CANNOT
+    ///      drift apart the way two hand-kept copies of the same predicate would.
+    ///
+    ///      THE THREE STATES, and why each maps where it does:
+    ///
+    ///        - `tokenId == 0` → `(0, true)`. A flat / pre-genesis book has NOTHING to read, and the call
+    ///          is never made (that is what keeps `nav()`'s flat-book branch call-free). "OK" is the
+    ///          honest answer: there is no failing read to report, and reporting `false` here would make
+    ///          the marker scream through every `settle`→`execute` gap.
+    ///
+    ///        - `gauge.code.length == 0` → `(0, false)`, WITHOUT making the call. THIS BRANCH IS
+    ///          LOAD-BEARING, NOT COSMETIC — a `try` DOES NOT CATCH THIS. Solidity guards a high-level
+    ///          call to a typed contract with an `extcodesize` check emitted OUTSIDE the try's protected
+    ///          region, so against an empty-code gauge the `try` reverts uncatchably ("call to
+    ///          non-contract address") and the revert propagates straight through `catch {}` to the
+    ///          caller. Verified by deleting this line: `testRewardReadOkIsFalseWhenTheGaugeHasNoCode`
+    ///          fails with exactly that revert. So the precheck is the ONLY thing standing between
+    ///          `rewardReadOk` and a revert path, and a marker that reverts precisely when the venue is
+    ///          gone is worse than no marker. It also, secondarily, keeps "the venue is gone" from being
+    ///          reported as OK — it is not an "accrual is zero" state.
+    ///
+    ///          FOR `nav()` this changes nothing OBSERVABLE, but not for the tempting reason: the bare
+    ///          `try` would have REVERTED here, not caught to 0. `nav()` is unaffected because it cannot
+    ///          reach this probe in that state at all — `_rewardUsdc`'s `rewardToken()` read, two lines
+    ///          before the call to this function, already fail-closes the whole of `nav()` against an
+    ///          empty-code gauge (empty revert data; asserted in the same test). Both paths deny an
+    ///          answer; only this one has a caller that must not revert.
+    ///
+    ///        - otherwise → the `try`. Success is `(e, true)`; any revert is `(0, false)` — `"NA"`
+    ///          (benign, the hand-off documented on `_rewardUsdc`) and every non-`"NA"` failure alike.
+    ///          The flag does not distinguish them: a caller CANNOT reliably tell them apart onchain
+    ///          (`"NA"` is a plain string revert any upgrade could also emit), and conflating them errs
+    ///          the safe way — a keeper investigates a benign unstake instead of missing a real outage.
+    ///          A benign `"NA"` is transient by construction (it lasts from the unstake to the next
+    ///          `_execute`), so a marker that STAYS false is the actionable signal.
+    function _earnedRead(address gauge, address strategy, uint256 tokenId) private view returns (uint256 e, bool ok) {
+        if (tokenId == 0) return (0, true);
+        if (gauge.code.length == 0) return (0, false);
+        try ICLGauge(gauge).earned(strategy, tokenId) returns (uint256 e_) {
+            return (e_, true);
+        } catch {
+            return (0, false);
+        }
+    }
+
+    /// @notice MONITORING MARKER for the single fail-open on the NAV path: `false` while the gauge-side
+    ///         `earned()` read that `nav()` prices is FAILING, `true` when it answers or when there is
+    ///         nothing to read. Poll it; `false` means `nav()` is understating the book by the unclaimed
+    ///         reward accrual.
+    ///
+    /// @dev WHY STATE AND NOT AN EVENT. Every other fail-open in this system is transaction-scoped and
+    ///      instruments itself with an event from the transaction that took it (`FeeCrystallizeDeferred`,
+    ///      the redeem-floor and reward-sale degradation events). This one is not: `nav()` is `view`, it
+    ///      cannot emit, and its fail-open is not an incident but a CONDITION — once `earned()` starts
+    ///      reverting for a non-`"NA"` reason it reverts on every deposit and every block until someone
+    ///      intervenes, understating NAV identically each time and leaving no trace anywhere. Readable
+    ///      state is the only instrumentation a `view` admits, so this is it.
+    ///
+    ///      STRICTLY BEHAVIOUR-NEUTRAL. Nothing in the pricing path reads this: it does not change
+    ///      `nav()`'s result, does not add a revert path to it, and is not itself allowed to revert (a
+    ///      marker a monitor cannot read is not a marker). It is a marker, not a gate — the deliberate
+    ///      choice is that a failing reward read degrades NAV and is REPORTED, rather than blocking
+    ///      deposits and the priced redeem.
+    ///
+    ///      LEAN SIGNATURE, on purpose — the same reason `calmGate` exists alongside `_calmGate` and
+    ///      `readUsd8` alongside `_readUsd8`. Two scalars, not a `Config`: the caller
+    ///      (`LeveragedAerodromeCLStrategy.rewardReadOk`) has ~230 BYTES of EIP-170 headroom in total, and
+    ///      building + ABI-encoding a 21-field `Config` to deliver two fields this predicate actually
+    ///      touches would not fit. Both inputs come from the SAME `Layout` slots `_config()` reads
+    ///      (`$.gauge`, `$.tokenId`), so the marker and the priced term cannot be pointed at different
+    ///      venues.
+    ///
+    ///      DELEGATECALL CONTEXT REQUIRED — the ONE way this differs from the pricing functions, which
+    ///      all take `strategy` explicitly. The subject is `address(this)`, which under the strategy's
+    ///      (or the delegatecalled manager's) call into this linked library IS the strategy clone — the
+    ///      same identity `netEquityUsdc` is passed. That drops the third calldata word, and at this
+    ///      caller's headroom those bytes are the difference between fitting and not. Consequence, stated
+    ///      so nobody is surprised: called on the DEPLOYED LIBRARY ADDRESS directly, the subject is the
+    ///      LIBRARY, which stakes nothing — so the answer is about the wrong account. It is `false` for
+    ///      any non-zero `tokenId` (the library has none staked) and a meaningless `true` for
+    ///      `tokenId == 0`, which is the arm that never reads anything. Neither is an answer about the
+    ///      fund. Reach it through `strategy.rewardReadOk()` — the only call site, and the only entry a
+    ///      keeper should use.
+    /// @param gauge    Slipstream CL gauge (`Layout.gauge` — the venue-migrated one).
+    /// @param tokenId  `Layout.tokenId`; 0 ⇒ flat book, nothing to read ⇒ `true`.
+    /// @return ok      `false` iff there IS a staked tokenId and the `earned()` read cannot be made or
+    ///                 reverts (gauge without code, `"NA"`, or any other failure).
+    function rewardReadOk(address gauge, uint256 tokenId) public view returns (bool ok) {
+        (, ok) = _earnedRead(gauge, address(this), tokenId);
     }
 
     /// @dev cbBTC + WETH debt at the same Chainlink basis, converted to USDC face.

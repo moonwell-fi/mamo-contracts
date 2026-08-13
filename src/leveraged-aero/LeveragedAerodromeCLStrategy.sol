@@ -777,6 +777,28 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         }
     }
 
+    /// @notice HEALTH MARKER FOR `nav()`'s ONE FAIL-OPEN: `false` while the gauge-side `earned()` read
+    ///         that `nav()` prices is failing, `true` when it answers or when there is nothing to read
+    ///         (`tokenId == 0`). A sustained `false` means `nav()` is UNDERSTATING the book by the
+    ///         unclaimed reward accrual on every deposit and every block — poll it.
+    ///
+    /// @dev A `view` cannot emit, and unlike every other fail-open in this system (which are
+    ///      transaction-scoped and carry an event — `FeeCrystallizeDeferred`, the redeem-floor and
+    ///      reward-sale degradation events) this one is a standing CONDITION, so readable state is the
+    ///      only instrumentation available. Behaviour-neutral: `nav()` does not read this, it gains no
+    ///      revert path from it, and this function cannot itself revert. See
+    ///      `LeveragedAeroValuation.rewardReadOk` / `_earnedRead` for the exact predicate and why a
+    ///      code-less gauge reports `false` rather than being lumped in with a benign `"NA"`.
+    ///
+    ///      Ungated for the same reason `redeemSweepFloors` is: a `view` over public storage and a public
+    ///      venue read, whose whole purpose is off-chain polling. Reads `Layout` directly instead of
+    ///      building a `_config()` — this contract has well under 1 KB of EIP-170 headroom and the
+    ///      predicate needs exactly two of that struct's fields, from the SAME slots `_config()` reads.
+    function rewardReadOk() external view returns (bool) {
+        Layout storage $ = _layout();
+        return LeveragedAeroValuation.rewardReadOk($.gauge, $.tokenId);
+    }
+
     // ── Positions (Lane A reporting for the PriceRouter) ──
 
     /// @inheritdoc IStrategy

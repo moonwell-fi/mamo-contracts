@@ -1318,4 +1318,136 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertEq(usdc.balanceOf(AERO_V2_ROUTER), routerBefore, "no reward swap was routed");
         assertLe(usdc.balanceOf(address(strategy)), stayersIdleBefore, "no extra USDC was reserved for stayers");
     }
+
+    // ====== 6. `rewardReadOk()`: THE MARKER ON nav()'s ONE FAIL-OPEN (review round 3, items 1-2) ======
+    //
+    // `_rewardUsdc`'s `catch {}` is the only fail-open in this system with no instrumentation, and the
+    // only one that is not transaction-scoped: an `earned()` that starts reverting for a NON-`"NA"`
+    // reason (gauge upgrade, selector change, OOG in the subcall) drops the earned term to zero on every
+    // deposit and every block, silently restoring exactly the mis-pricing section 4 closed. `nav()` is a
+    // `view` and cannot emit, so the instrumentation is readable state. These tests pin BOTH halves: the
+    // marker reports the condition, and reading it changes nothing about `nav()`.
+
+    /// @dev Etch a code-less account over the gauge address: the venue is "gone" as far as the EVM is
+    ///      concerned, which is the state the `code.length` precheck exists to make distinguishable.
+    ///      Etching (not re-pointing `Layout.gauge`) is the only way to reach it — `applyVenue` validates
+    ///      the gauge at init and at every migration, so no reachable configuration path produces it.
+    function _emptyTheGauge() internal {
+        vm.etch(address(gauge), "");
+    }
+
+    /**
+     * @dev THE HEALTHY STAKED BOOK: a live gauge answering `earned()` over a staked tokenId reports `true`
+     *      — with an accrual outstanding AND with the accrual at zero, because "OK" is about whether the
+     *      READ ANSWERED, not about whether the answer was non-zero. A marker that went false on an idle
+     *      gauge would be noise a keeper learns to ignore.
+     */
+    function testRewardReadOkIsTrueOnAHealthyStakedBook() public {
+        _armBook();
+        assertGt(strategy.layout().tokenId, 0, "staked book - there is something to read");
+        assertEq(gauge.earnedAmount(), 0, "nothing accrued yet");
+        assertTrue(strategy.rewardReadOk(), "a zero accrual is still a successful read");
+
+        _armRewards(TRANCHE);
+        assertTrue(strategy.rewardReadOk(), "...and so is a non-zero one");
+    }
+
+    /**
+     * @dev THE FLAT BOOK reports `true`. `tokenId == 0` means there is NOTHING to read — `_rewardUsdc`
+     *      makes no `earned()` call at all in that state (see `testFlatBookNeverCallsEarned`), so there is
+     *      no failing read to report. Reporting `false` here would make the marker scream through every
+     *      `settle`→`execute` gap and bury the one signal it exists to carry.
+     */
+    function testRewardReadOkIsTrueOnAFlatBook() public {
+        _armBook();
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(strategy.layout().tokenId, 0, "flat book");
+        // Even with EVERY `earned()` call reverting, the flat book is OK: the call is never made.
+        vm.mockCallRevert(address(gauge), abi.encodeWithSelector(gauge.earned.selector), bytes("NA"));
+        assertTrue(strategy.rewardReadOk(), "nothing staked, nothing to read, nothing to report");
+    }
+
+    /**
+     * @dev THE FINDING, pinned: a staked tokenId whose `earned()` REVERTS reports `false`. This is the
+     *      state `nav()` silently absorbs — the earned term drops to zero and the book is understated
+     *      with nothing in any transaction to show for it. The marker is the only trace, so it must be
+     *      exact. Note the marker deliberately does NOT distinguish a benign `"NA"` (a just-unstaked
+     *      tokenId, transient by construction) from a real outage: the two are not reliably separable
+     *      onchain, and a keeper investigating a transient beats one missing an outage.
+     */
+    function testRewardReadOkIsFalseWhenEarnedRevertsOnAStakedTokenId() public {
+        _armBook();
+        assertTrue(strategy.rewardReadOk(), "healthy to begin with");
+
+        vm.mockCallRevert(address(gauge), abi.encodeWithSelector(gauge.earned.selector), bytes("NA"));
+        assertFalse(strategy.rewardReadOk(), "a staked tokenId whose earned() reverts is NOT ok");
+
+        // Not specific to `"NA"`: ANY revert reason lands in the same catch, which is the whole problem.
+        vm.mockCallRevert(
+            address(gauge), abi.encodeWithSelector(gauge.earned.selector), abi.encodeWithSignature("Boom()")
+        );
+        assertFalse(strategy.rewardReadOk(), "a non-NA revert - the case the catch was never written for");
+    }
+
+    /**
+     * @dev A GAUGE WITHOUT CODE reports `false` — and this is the test that makes the `code.length`
+     *      precheck LOAD-BEARING rather than cosmetic. The `try/catch` does NOT cover this state: solc
+     *      guards a high-level call to a typed contract with an `extcodesize` check emitted OUTSIDE the
+     *      try's protected region, so an empty-code target reverts UNCATCHABLY and the revert propagates
+     *      through `catch {}`. Delete the precheck and this test fails with `[Revert] call to non-contract
+     *      address` — i.e. without it the marker REVERTS exactly when the venue is gone, which is worse
+     *      than no marker: a monitor learns nothing precisely when something is badly wrong.
+     */
+    function testRewardReadOkIsFalseWhenTheGaugeHasNoCode() public {
+        _armBook();
+        assertTrue(strategy.rewardReadOk(), "healthy to begin with");
+
+        _emptyTheGauge();
+        assertEq(address(gauge).code.length, 0, "the venue is gone");
+        assertFalse(strategy.rewardReadOk(), "no code, no read, not ok");
+
+        // And the ORDER of the two reward reads, pinned so the precheck's scope is not overstated the
+        // other way: `nav()` is unaffected here, but NOT because anything absorbed the failure — it never
+        // reaches the `earned()` probe at all. `_rewardUsdc`'s `rewardToken()` read, two lines earlier,
+        // already fail-closes the whole call against an empty-code gauge (empty revert data). Both paths
+        // deny an answer; only the marker has a caller that must not revert, which is what the precheck
+        // is for.
+        vm.expectRevert(bytes(""));
+        strategy.nav();
+    }
+
+    /**
+     * @dev THE BEHAVIOUR-NEUTRALITY CONTRACT, both directions in one test. The marker is a marker: adding
+     *      it (and the `code.length` precheck feeding it) must not move `nav()` by a wei, must not add a
+     *      revert path to it, and must not gate anything.
+     *
+     *        - a REVERTING `earned()` still catches to 0: `nav()` prices the held balance alone and does
+     *          NOT revert (the deadman property — `nav()` is the pricing path a stuck fund exits on);
+     *        - a HEALTHY `earned()` is still priced in full.
+     *
+     *      The reverting leg is run with a tranche HELD as well, so the assertion is on a real number and
+     *      not on a `nav()` that happens to be reward-free either way.
+     */
+    function testTheMarkerDoesNotMoveNav() public {
+        _armBook();
+        uint256 navBare = strategy.nav();
+
+        // Healthy: the accrual is priced, exactly as before the marker existed.
+        _armRewards(TRANCHE);
+        assertEq(strategy.nav(), navBare + _heldAeroValueUsdc(TRANCHE), "a healthy earned() is still priced");
+
+        // Degraded: a non-`"NA"` revert. `nav()` does not revert; the earned term silently drops to 0 and
+        // only the HELD tranche is priced — the pre-fix mis-pricing, now at least reported by the marker.
+        _clearRewards();
+        aero.mint(address(strategy), TRANCHE);
+        vm.mockCallRevert(
+            address(gauge), abi.encodeWithSelector(gauge.earned.selector), abi.encodeWithSignature("Boom()")
+        );
+        gauge.setEarnedAmount(TRANCHE); // would be priced if the read answered
+
+        assertEq(strategy.nav(), navBare + _heldAeroValueUsdc(TRANCHE), "catch-to-0: held only, and no revert");
+        assertFalse(strategy.rewardReadOk(), "...and THAT is the state the marker exists to expose");
+    }
 }

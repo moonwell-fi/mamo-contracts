@@ -128,7 +128,14 @@ contract MockCLGauge {
         earnedAmount = amount;
     }
 
-    function earned(address, uint256) external view returns (uint256) {
+    /// @dev `"NA"` FOR A PAIR THIS GAUGE DOES NOT HAVE STAKED — the real Slipstream behaviour, and the
+    ///      reason `LeveragedAeroValuation._earnedRead` wraps the call in a `try` at all. Modelled on
+    ///      purpose: the earlier stub ignored `account` entirely and handed `earnedAmount` to ANY caller,
+    ///      so nothing in the suite pinned WHO the accrual is read for. A read that asked about the wrong
+    ///      subject (the caller instead of the strategy, say) returned the right number for the wrong
+    ///      reason and passed — the same class of hole the `_staked` set already closed for `withdraw`.
+    function earned(address account, uint256 tokenId) external view returns (uint256) {
+        require(_staked[account][tokenId], "NA");
         return earnedAmount;
     }
 
