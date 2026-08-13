@@ -523,7 +523,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      still completes with the floors falling back to 0. See `LeveragedAeroValuation.sweepFloors`
     ///      for the full rationale; the math and the hardened reads live THERE, this is marshalling only.
     ///
-    ///      NOT `OnlySelf`-gated, unlike `crystallizeFeesSelf` / `sellSettleRewardSelf`: those MUTATE
+    ///      NOT `OnlySelf`-gated, unlike `crystallizeFeesSelf` / `sellRewardSelf`: those MUTATE
     ///      state, this is a `view` over public storage and public feeds. Ungated it doubles as a keeper
     ///      read — "what floor would a sweep of this size have to clear right now" — and a gate would
     ///      cost bytes on a contract with well under 1 KB of EIP-170 headroom for no security gain.
@@ -812,7 +812,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // floor post-checked against the measured fill), so a caught revert rolls the swap back
         // entirely and degrades to exactly the pre-fix behaviour: the tranche is left in place,
         // rescuable now that the state is `Settled`. It is never sold blind.
-        try this.sellSettleRewardSelf() {}
+        try this.sellRewardSelf() {}
         catch {
             emit SettleRewardSaleDeferred();
         }
@@ -842,15 +842,58 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         _pushAllToVault($.usdc);
     }
 
-    /// @dev Self-only external wrapper so `_settle` can sell the final reward tranche best-effort via
-    ///      `try/catch` (H3 pattern, as `crystallizeFeesSelf`). Isolating the sale in its own call
+    /// @dev Self-only external wrapper so a caller can sell an auto-claimed reward tranche best-effort
+    ///      via `try/catch` (H3 pattern, as `crystallizeFeesSelf`). Isolating the sale in its own call
     ///      frame is what lets a stale reward feed / reverting reward route roll back ONLY the sale
-    ///      (tranche untouched, still rescuable) while the TERMINAL settle completes — see the
-    ///      flatten-vs-settle note at the call site and on `LeveragedAeroVenue.sellSettleRewardImpl`.
-    ///      Gated to `address(this)`; runs inside settle's own frame, so it adds no reentrancy surface.
-    function sellSettleRewardSelf() external {
+    ///      (tranche untouched) while the caller completes — see the flatten-vs-settle-vs-redeem note on
+    ///      `LeveragedAeroVenue.sellRewardImpl`.
+    ///
+    ///      TWO CALLERS, hence the neutral name: the TERMINAL `_settle` below, and
+    ///      `LeveragedAeroManager.redeemUnwindImpl`, which reaches it through the local `IRewardSaleSelf`
+    ///      interface because it runs under DELEGATECALL and cannot `try` its own internal reverts.
+    ///      Gated to `address(this)`; runs inside the caller's own frame, so it adds no reentrancy
+    ///      surface (and is deliberately NOT `nonReentrant` — the entry points already hold that guard).
+    function sellRewardSelf() external {
         if (msg.sender != address(this)) revert OnlySelf();
-        LeveragedAeroVenue.sellSettleRewardImpl();
+        LeveragedAeroVenue.sellRewardImpl();
+    }
+
+    /// @dev THE ASYNC-REDEEM SIDE OF THE SAME SALE, plus the one piece of accounting it needs.
+    ///      `LeveragedAeroManager.redeemUnwindImpl` calls this (through its local `IRewardSaleSelf`)
+    ///      immediately after its `_unwindLiquidity`, whose `gauge.withdraw` auto-claims a reward tranche
+    ///      on EVERY async redeem. Without it the redeemer is paid `f × (assets − reward)` while 100% of
+    ///      the tranche stays with the stayers — and since `nav()` prices that reward, that was a
+    ///      nav-vs-payout inconsistency, not just an unfairness.
+    ///
+    ///      RETURNS THE STAYERS' RESERVATION, which is the whole reason this is not a bare sale. The
+    ///      manager's `idleUsdcBefore`/`stayersIdle` snapshots are taken BEFORE the unwind (deliberately
+    ///      — LP-shed USDC is 100% the redeemer's), so proceeds landing after them would otherwise flow
+    ///      ENTIRELY to the redeemer. But `gauge.withdraw` is all-or-nothing per NFT: it claims what the
+    ///      WHOLE book farmed, of which the redeemer owns `f`. So `(1−f)·proceeds` is returned for the
+    ///      manager to add to `stayersIdle` — the same `x − f·x` form `stayersIdle` itself uses, dust
+    ///      rounding to the stayers.
+    ///
+    ///      BEST-EFFORT, WITH THE `try` HELD HERE rather than in the manager: the manager is at the
+    ///      EIP-170 cap (the same relocation `_settle`'s hedged-basis zeroing makes), and the sale still
+    ///      fails CLOSED inside `sellRewardSelf`'s own frame, so a swallowed revert rolls the swap back
+    ///      whole — the tranche is left in place, never sold blind. Swallowing is REQUIRED here:
+    ///      `emergencyRedeem` routes through this path and exists for the oracle-down-AND-backend-dead
+    ///      state, so a stale reward feed must not be able to block the exit (same posture, same reason,
+    ///      as the redeem-sweep floors). Residual on failure = exactly the pre-fix behaviour.
+    ///
+    ///      Nested self-call (`this.sellRewardSelf()` from a frame whose `msg.sender` is already
+    ///      `address(this)`) — the `OnlySelf` gate passes, and neither hop is `nonReentrant` because the
+    ///      redeem entry points already hold that guard.
+    /// @param shares Redeeming shares (the manager's `f` numerator).
+    /// @param supply Total supply at redeem time (the `f` denominator).
+    /// @return stayersShare `(1−f)` of the realised USDC proceeds; 0 when nothing sold.
+    function sellRedeemRewardSelf(uint256 shares, uint256 supply) external returns (uint256 stayersShare) {
+        if (msg.sender != address(this)) revert OnlySelf();
+        IERC20 usdc_ = IERC20(_layout().usdc);
+        uint256 sold = usdc_.balanceOf(address(this));
+        try this.sellRewardSelf() {} catch {}
+        sold = usdc_.balanceOf(address(this)) - sold;
+        return sold - Math.mulDiv(sold, shares, supply);
     }
 
     /// @dev Crystallise management + HWM performance fees on the PRE-ACTION vault state. The caller

@@ -379,7 +379,7 @@ stored `minAssetsOut`, then burning the escrowed shares. See §C for the full lo
 | | |
 |---|---|
 | Preconditions | `state() == Executed`; request not `settled` (else `RequestSettled()`). |
-| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). |
+| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). The reward tranche the unwind auto-claims is sold on the same L9 oracle floor (best-effort — see §C) and split `f / (1−f)`. |
 | Oracle posture | Still **oracle-free in the sense that matters**: the floor is derived behind a catchable call and falls back to **0** when the feeds are unreadable, so a down oracle/sequencer never blocks a fulfill or the `emergencyRedeem` deadman — it only removes the floor. A sandwicher cannot *make* a feed stale, so the floor binds whenever it can bind. Consequence for the agent: a fulfill that reverts on the sweep's min-out is a **venue-liquidity/pricing** signal (thin leg↔USDC pool, or someone shoving it), not an oracle problem — retry, or lever down first to shrink the residual being sold. |
 | Fee interaction | Best-effort crystallize (never blocks the exit): on an oracle outage `navPre = 0`, so the price-free **management** fee still accrues while the **performance** fee defers; a fee-mint revert emits `FeeCrystallizeDeferred(2, navPre)` and proceeds. |
 | Events | `RedeemFulfilled(id, owner, assetsOut)`. |
@@ -532,6 +532,18 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
   snapshot), and it is now bounded. **The floor never blocks the deadman**: it is derived behind a
   catchable call, so an unreadable feed silently drops it to 0 and `emergencyRedeem` still completes —
   the whole point being that the deadman exists for the oracle-down-and-backend-dead state.
+- **The redeem sells the reward tranche its own unwind claims, and splits it `f / (1−f)`.** The unwind's
+  `gauge.withdraw` auto-claims the whole accrued AERO tranche — on *every* async redeem, because the
+  redeem's own unwind is what creates the balance. The leg sweeps above only touch the two leg tokens, so
+  before this the redeemer was paid `f × (assets − reward)` while 100% of the tranche stayed with the
+  stayers; with `nav()` pricing that reward, that was a payout that did not match the NAV the shares were
+  measured against. The redeem now runs the **same best-effort, oracle-floored sale** the terminal
+  `settle` uses, right after the unwind, and reserves `(1−f)` of the proceeds for the stayers — so the
+  redeemer receives their pro-rata slice and no more. **Best-effort, for the same deadman reason as the
+  sweep floors:** a stale AERO/USD feed or a broken AERO→USDC route makes the sale fail *closed inside its
+  own frame* (the swap rolls back whole — never sold blind), the redeem swallows it and completes, and the
+  tranche simply stays with the stayers. That residual is the only case in which the old behaviour still
+  applies. Stayers are never worse off than before; the redeemer is, at worst, no better off.
 
 Because a levered position tends to run a debt/IL shortfall against the collected legs, levering
 **down** first shrinks the debt the unwind must repay, so the proportional unwind self-funds cleanly

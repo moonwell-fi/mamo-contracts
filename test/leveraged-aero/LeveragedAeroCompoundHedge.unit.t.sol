@@ -1128,4 +1128,152 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
         strategy.nav(); // no revert: nothing held, so nothing reads the reward feed
     }
+
+    // ====== 5. THE ASYNC REDEEM SELLS THE TRANCHE ITS OWN UNWIND CLAIMS (review round 2, item 2) ======
+    //
+    // `redeemUnwindImpl` → `_unwindLiquidity` → `gauge.withdraw` auto-claims a tranche DURING the redeem,
+    // on EVERY async redeem, because the redeem's own unwind is what creates the balance. Step E sweeps
+    // only the two LEG tokens, so the redeemer used to be paid `f × (assets − reward)` while 100% of the
+    // tranche landed with the stayers — and with `nav()` pricing the reward that is a nav-vs-payout
+    // inconsistency, not merely an unfairness. The redeem now runs the same best-effort, oracle-floored
+    // sale `settle` uses and splits the proceeds `f / (1−f)`.
+
+    /// @dev Model a gauge that genuinely OWES `amount`: `earned()` reports it (so `nav()` prices it before
+    ///      anything is claimed) AND either claim path delivers it. The withdraw arm is what makes it the
+    ///      redeem's own auto-claim; `MockCLGauge` zeroes `earnedAmount` when it pays, as the real gauge
+    ///      zeroes `rewards[tokenId]`.
+    function _armGaugeAccrual(uint256 amount) internal {
+        aero.mint(address(gauge), amount);
+        gauge.setEarnedAmount(amount);
+        gauge.setAeroToPayOnWithdraw(amount);
+        gauge.setAeroToPayOnGetReward(amount);
+    }
+
+    /// @dev Escrow + fulfil a proportional redeem of `shares` for `lp`; returns the USDC they were paid.
+    function _asyncRedeem(uint256 shares) internal returns (uint256 paid) {
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        vm.prank(lp);
+        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 before = usdc.balanceOf(lp);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        return usdc.balanceOf(lp) - before;
+    }
+
+    /**
+     * @dev THE FINDING. Same redeem, run twice from the same state — once against a gauge owing nothing,
+     *      once against a gauge owing a tranche the unwind auto-claims. The DIFFERENCE in what the
+     *      redeemer is paid is the test: it must be their pro-rata `f` slice of the tranche, not zero
+     *      (pre-fix) and not the whole of it (which would over-correct and rob the stayers).
+     */
+    function testAsyncRedeemPaysTheRedeemerTheirProRataShareOfItsOwnAutoClaim() public {
+        _armBook();
+        uint256 shares = SHARES / 4; // f = 25%
+        uint256 supply = vault.totalSupply();
+
+        uint256 snap = vm.snapshotState();
+        uint256 paidNoReward = _asyncRedeem(shares);
+        vm.revertToState(snap);
+
+        _armGaugeAccrual(TRANCHE);
+        uint256 paidWithReward = _asyncRedeem(shares);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "the auto-claimed tranche was SOLD, not left behind");
+        uint256 expected = Math.mulDiv(_heldAeroValueUsdc(TRANCHE), shares, supply);
+        assertApproxEqRel(
+            paidWithReward - paidNoReward, expected, 1e15, "redeemer paid exactly f x the tranche, no more"
+        );
+    }
+
+    /**
+     * @dev THE OTHER HALF: the stayers are not double-credited, and not robbed either. Their claim on the
+     *      book is NAV/share, so the invariant is CONTINUITY across the redeem — the sale converts
+     *      `(1−f)` of the tranche from reward token to USDC inside the strategy, which is a change of
+     *      form, not of value. Asserted against a `nav()` that already prices the accrual through
+     *      `earned()`, so a redeem that paid out too much or too little would show up here immediately.
+     */
+    function testAsyncRedeemLeavesStayerNavPerShareContinuous() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+        uint256 shares = SHARES / 4;
+
+        uint256 navPerShareBefore = Math.mulDiv(strategy.nav(), 1e18, vault.totalSupply());
+        _asyncRedeem(shares);
+        uint256 navPerShareAfter = Math.mulDiv(strategy.nav(), 1e18, vault.totalSupply());
+
+        assertApproxEqRel(navPerShareAfter, navPerShareBefore, 1e15, "stayers' NAV/share unchanged by the redeem");
+        // ...and the stayers' `(1-f)` really is sitting in the strategy as USDC, not as an unsold tranche.
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing left unsold");
+        assertGt(usdc.balanceOf(address(strategy)), 0, "the stayers' reserved slice stayed behind, in USDC");
+    }
+
+    /**
+     * @dev THE DEADMAN + THE RESIDUAL, pinned together. The sale is best-effort by contract: a stale
+     *      reward feed makes it fail CLOSED inside its own frame, the redeem swallows that and completes,
+     *      and the tranche is left untouched — never sold blind. This is the same posture (and the same
+     *      reason) as the redeem-sweep oracle floors: `emergencyRedeem` routes through this path for the
+     *      oracle-down-AND-backend-dead state, so a reward feed must never be able to block an exit.
+     *
+     *      The residual is the pre-fix behaviour, and it is the ONLY case in which it still applies: the
+     *      tranche stays with the stayers. Stayers are never worse off than before the change; the
+     *      redeemer is, at worst, no better off.
+     */
+    function testAStaleRewardFeedDefersTheRedeemSaleWithoutBlockingTheRedeem() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+        uint256 shares = SHARES / 4;
+
+        // Every feed but the reward feed stays fresh, so ONLY the reward sale is unpriceable.
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+
+        uint256 paid = _asyncRedeem(shares);
+
+        assertGt(paid, 0, "the redeem completed and paid - the deadman is intact");
+        assertEq(aero.balanceOf(address(strategy)), TRANCHE, "THE RESIDUAL: the tranche stayed, unsold");
+    }
+
+    /**
+     * @dev A FULL redeem (f = 1) takes the WHOLE tranche, because there are no stayers left to reserve
+     *      anything for — the `(1−f)` reservation collapses to 0 by construction rather than by a branch.
+     */
+    function testAFullAsyncRedeemTakesTheWholeAutoClaimedTranche() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+        uint256 supply = vault.totalSupply();
+
+        uint256 snap = vm.snapshotState();
+        uint256 paidNoReward;
+        {
+            gauge.setEarnedAmount(0);
+            gauge.setAeroToPayOnWithdraw(0);
+            paidNoReward = _asyncRedeem(supply);
+        }
+        vm.revertToState(snap);
+
+        uint256 paidWithReward = _asyncRedeem(supply);
+
+        assertApproxEqRel(
+            paidWithReward - paidNoReward, _heldAeroValueUsdc(TRANCHE), 1e15, "the sole holder takes all of it"
+        );
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant still restored");
+    }
+
+    /**
+     * @dev A REWARD-FREE REDEEM IS BYTE-IDENTICAL. The sale is a no-op when the gauge owes nothing
+     *      (`_sellRewardBalance` early-returns on a zero balance), so the common redeem gains no
+     *      behaviour, no oracle dependency and no swap — only the two balance reads that establish it.
+     */
+    function testARewardFreeAsyncRedeemIsUnchanged() public {
+        _armBook();
+        uint256 shares = SHARES / 4;
+
+        uint256 routerBefore = usdc.balanceOf(AERO_V2_ROUTER);
+        uint256 stayersIdleBefore = usdc.balanceOf(address(strategy));
+        uint256 paid = _asyncRedeem(shares);
+
+        assertGt(paid, 0, "redeemer paid");
+        assertEq(usdc.balanceOf(AERO_V2_ROUTER), routerBefore, "no reward swap was routed");
+        assertLe(usdc.balanceOf(address(strategy)), stayersIdleBefore, "no extra USDC was reserved for stayers");
+    }
 }

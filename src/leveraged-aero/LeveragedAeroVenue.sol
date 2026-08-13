@@ -274,26 +274,34 @@ library LeveragedAeroVenue {
         emit Flattened(idle);
     }
 
-    /// @notice Sell the reward tranche the TERMINAL settle's unwind auto-claimed, floored by the L9
-    ///         oracle read ALONE — `BaseStrategy.settle()` takes no arguments, so there is no caller
-    ///         `minOut` to require and the oracle floor is the whole guard (post-checked against the
-    ///         measured fill, exactly as in `flattenImpl`).
-    /// @dev BEST-EFFORT BY CONTRACT — the strategy MUST reach this through its self-`try/catch`
-    ///      wrapper (`LeveragedAerodromeCLStrategy.sellSettleRewardSelf`), never directly. This
-    ///      function still FAILS CLOSED on its own (stale reward feed → `StaleOracle`; a fill under
-    ///      the floor → `BelowOracleFloor`), which is what makes the catch safe: the revert unwinds
-    ///      the whole sub-call including the swap, so the reward balance is left untouched and
-    ///      rescuable rather than sold blind.
+    /// @notice Sell a reward tranche an unwind auto-claimed, floored by the L9 oracle read ALONE — no
+    ///         caller `minOut` is required, so the oracle floor is the whole guard (post-checked against
+    ///         the measured fill, exactly as in `flattenImpl`).
+    /// @dev TWO CALLERS, ONE CONTRACT. Named neutrally (not `sellSettleReward…`) because both the
+    ///      TERMINAL settle and the ASYNC redeem reach it:
+    ///
+    ///        - `LeveragedAerodromeCLStrategy._settle` — the final tranche, which would otherwise strand
+    ///          on a `Settled` strategy instead of reaching the USDC pot `redeemSettled` pays from; and
+    ///        - `LeveragedAeroManager.redeemUnwindImpl` — the tranche the redeem's OWN `gauge.withdraw`
+    ///          auto-claims mid-flight, which would otherwise be excluded from the redeemer's payout
+    ///          while `nav()` prices it.
+    ///
+    ///      BEST-EFFORT BY CONTRACT — both callers MUST reach this through the self-`try/catch` wrapper
+    ///      (`LeveragedAerodromeCLStrategy.sellRewardSelf`), never directly. This function still FAILS
+    ///      CLOSED on its own (stale reward feed → `StaleOracle`; a fill under the floor →
+    ///      `BelowOracleFloor`), which is what makes the catch safe: the revert unwinds the whole
+    ///      sub-call including the swap, so the reward balance is left untouched rather than sold blind.
     ///
     ///      WHY THE ASYMMETRY WITH `flattenImpl`, which calls the same helper fail-closed: `flatten`
     ///      is RESUMABLE — a reverted flatten leaves an `Executed` book the proposer simply retries
     ///      once the feed recovers, so failing closed costs nothing and preserves the caller's floor.
-    ///      `settle` is TERMINAL and owner-driven (`Executed → Settled`, one-way, no retry, no
-    ///      argument to widen): a hard revert here would let a stale reward feed or a reverting router
-    ///      BLOCK the fund's only exit. Degrading to "leave the tranche rescuable via
-    ///      `rescueToVault` post-`Settled`" — the pre-fix behaviour for the whole tranche — is the
-    ///      strictly better failure mode.
-    function sellSettleRewardImpl() public {
+    ///      The two callers here have no such retry. `settle` is TERMINAL and owner-driven (`Executed →
+    ///      Settled`, one-way, no argument to widen): a hard revert would let a stale reward feed or a
+    ///      reverting router BLOCK the fund's only exit. The async redeem is the DEADMAN path
+    ///      (`emergencyRedeem` routes through it precisely for the oracle-down state): a hard revert
+    ///      there would convert a value guard into a fund freeze. Both degrade to "leave the tranche
+    ///      in place" — the pre-fix behaviour — which is the strictly better failure mode.
+    function sellRewardImpl() public {
         _sellRewardBalance(0, false);
     }
 
@@ -320,7 +328,7 @@ library LeveragedAeroVenue {
     /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
     /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error. TRUE for
     ///        `flatten`, whose proposer supplies one; FALSE for the terminal settle, which has no
-    ///        argument to supply and is bounded by the oracle floor alone (see `sellSettleRewardImpl`).
+    ///        argument to supply and is bounded by the oracle floor alone (see `sellRewardImpl`).
     function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired) private {
         Layout storage $ = _layout();
         address rewardTok = ICLGauge($.gauge).rewardToken();
