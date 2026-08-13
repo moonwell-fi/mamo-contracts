@@ -115,11 +115,36 @@ _CLI_VNET_RPC="${TENDERLY_VNET_RPC_URL:-}"
 [ -f "$ROOT/.env" ] && { set -a; . "$ROOT/.env"; set +a; }
 [ -n "$_CLI_VNET_RPC" ] && export TENDERLY_VNET_RPC_URL="$_CLI_VNET_RPC"
 
+# ── gas headroom for the vnet's UNDER-estimating eth_estimateGas ──────────────
+# Same class of bug that run_forge_phase's --gas-estimate-multiplier exists for, but on the plain
+# `cast send` path: Tenderly's estimator under-shoots deep nested calls. Observed exactly once here —
+# `fulfillRedeem(id)` (nav() → crystallise → redeemUnwindImpl → Slipstream burn/collect → skim
+# transfers) estimated 1,644,942, was sent with that as the limit, and consumed all of it: status 0x0,
+# EMPTY revert data, gasUsed == gasLimit, while a `cast call` of the same call at the same state
+# returned successfully. `cast send` ships the bare estimate with no multiplier, so every send below
+# now carries an explicit 2x limit instead. Floored at 1M (cheap calls) and capped at 16,000,000 —
+# just under Base's per-tx gas cap of 16,777,216 (2^24), which a blind multiply would otherwise blow
+# past into TxGasLimitGreaterThanCap. If the estimate itself fails (a genuinely reverting call, e.g.
+# the intentional depositIdle negative test) this emits nothing and the send falls back to cast's own
+# estimate, preserving the original failure diagnostics.
+GAS_CAP=16000000
+gas_flags() {   # usage: gas_flags <from> <to> <sig> [args...] → echoes "--gas-limit N", or nothing
+  local from="$1" to="$2"; shift 2
+  local est; est="$(cast estimate "$to" "$@" --from "$from" --rpc-url "$RPC" 2>/dev/null | field)"
+  case "$est" in '' | *[!0-9]*) return 0 ;; esac
+  local lim=$(( est * 2 ))
+  [ "$lim" -lt 1000000 ] && lim=1000000
+  [ "$lim" -gt "$GAS_CAP" ] && lim="$GAS_CAP"
+  echo "--gas-limit $lim"
+}
+
 # ── cast send via unlocked impersonation; asserts status 0x1; echoes tx hash ──
 # usage: csend <label> <from> <to> <sig> [args...]
 csend() {
   local label="$1" from="$2" to="$3" sig="$4"; shift 4
-  local out; out="$(cast send "$to" "$sig" "$@" --from "$from" --unlocked --rpc-url "$RPC" --json 2>/dev/null)"
+  # unquoted on purpose: word-splits into `--gas-limit N`, or vanishes when the estimate failed.
+  local gl; gl="$(gas_flags "$from" "$to" "$sig" "$@")"
+  local out; out="$(cast send "$to" "$sig" "$@" --from "$from" --unlocked $gl --rpc-url "$RPC" --json 2>/dev/null)"
   local st tx; st="$(echo "$out" | jq -r '.status')"; tx="$(echo "$out" | jq -r '.transactionHash')"
   [ "$st" = "0x1" ] || die "$label failed (status=$st tx=$tx)"
   ok "$label — tx $tx"
@@ -231,7 +256,10 @@ assert_eq "account USDC after fast withdraw" "$(ccall "$USDC" 'balanceOf(address
 # async request → fulfill (proposer) → claim
 REM="$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)"
 REQSIG="$(cast keccak 'WithdrawRequested(uint256,uint256,uint256)')"
-RC="$(cast send "$ACCT" 'requestWithdraw(uint256,uint256)' "$REM" 1 --from "$USER" --unlocked --rpc-url "$RPC" --json 2>/dev/null)"
+# Raw send rather than csend: the request id is only recoverable from the receipt logs. Same
+# explicit gas limit as csend (see gas_flags) — unquoted on purpose.
+RQGL="$(gas_flags "$USER" "$ACCT" 'requestWithdraw(uint256,uint256)' "$REM" 1)"
+RC="$(cast send "$ACCT" 'requestWithdraw(uint256,uint256)' "$REM" 1 --from "$USER" --unlocked $RQGL --rpc-url "$RPC" --json 2>/dev/null)"
 [ "$(echo "$RC" | jq -r '.status')" = "0x1" ] || die "requestWithdraw failed"
 ID="$(cast to-dec "$(echo "$RC" | jq -r --arg a "$(echo "$ACCT" | tr A-Z a-z)" --arg s "$REQSIG" '.logs[] | select((.address|ascii_downcase)==$a and .topics[0]==$s) | .topics[1]')")"
 ok "requestWithdraw — id=$ID tx=$(echo "$RC" | jq -r '.transactionHash')"
@@ -291,6 +319,7 @@ PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(cat "$CONFIG_JSON")"
 jq -n \
   --argjson prev "$PREV" \
   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg chainId "$(cast chain-id --rpc-url "$RPC" 2>/dev/null || echo 8453)" \
   --arg publicRpc "$TENDERLY_VNET_PUBLIC_RPC_URL" \
   --arg impl "$IMPL" --arg factory "$FACTORY" \
   --arg strategy "$STRAT" --arg vault "$VAULT" \
@@ -299,7 +328,9 @@ jq -n \
   --arg vaultGenName "$VAULT_GEN_NAME" \
   '$prev * {
     generatedAt: $ts,
-    chainId: 8453,
+    # chainId is READ FROM THE RPC, never hardcoded: a vnet may report a custom chain id
+    # (e.g. 73578453) and downstream consumers wire wallets/networks from this field.
+    chainId: ($chainId | tonumber),
     publicRpc: (if $publicRpc == "" then ($prev.publicRpc // null) else $publicRpc end),
     adminRpc: "1Password (write-capable — never committed)",
     strategyTypeId: 5,
