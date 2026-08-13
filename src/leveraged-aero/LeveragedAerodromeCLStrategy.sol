@@ -22,6 +22,13 @@ import {ISyndicateFactory} from "./sherwood/interfaces/ISyndicateFactory.sol";
 import {ISyndicateVault} from "./sherwood/interfaces/ISyndicateVault.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+/// @dev Just the vault's fund-capacity ceiling, read by `deposit`. Declared locally rather than added
+///      to the vendored `ISyndicateVault`, so every stand-in implementing that interface does not have
+///      to grow the selector. Mirrors the pattern `LeveragedAeroVault` uses for `IStrategyNav`.
+interface ILeveragedAeroVaultCapacity {
+    function maxTotalAssets() external view returns (uint256);
+}
+
 /// @title LeveragedAerodromeCLStrategy
 /// @notice Leveraged Aerodrome CL strategy on Moonwell collateral. ONE implementation serves TWO pool
 ///         shapes; which one a clone runs is EMERGENT FROM CONFIG at init (there is no mode flag in
@@ -70,6 +77,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error MoonwellRedeemFailed(uint256 errCode);
     error InsufficientShares();
     error NavUnpriceable(); // deposit while nav()==0 with supply>0 (worthless book, holders present)
+    error FundAtCapacity(uint256 navAfter, uint256 cap); // deposit would cross the vault's maxTotalAssets
     error InsufficientAssetsOut();
     error InsufficientLiquidity();
     error InsufficientIdle();
@@ -988,8 +996,23 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // (fail-closed pricing is load-bearing). Only the fee-MINT failure is swallowed (fee defers).
         uint256 navPre = nav();
         uint256 navNet = _crystallizeAndNet(navPre, OP_DEPOSIT);
-        IERC20(_layout().usdc).safeTransferFrom(msg.sender, address(this), assets);
         address vault_ = vault();
+        // FUND CAPACITY CEILING (`vault.maxTotalAssets`, USDC 6dp; `0` == unlimited). Enforced HERE
+        // because this is the one path every share-minting deposit takes — per-user accounts and
+        // direct depositors alike — so the ceiling binds the FUND, not a single wrapper layer. It is
+        // deliberately not in `strategyMint`, which also serves the best-effort fee-share
+        // crystallisation: a capacity-blocked fee mint would silently defer fees forever.
+        //
+        // Checked BEFORE the transfer so a rejected deposit moves no USDC at all, and measured on the
+        // POST-deposit book (`navNet + assets`): `navPre` is read above before the transfer, so it
+        // excludes the incoming assets. A deposit that would CROSS the ceiling is rejected outright
+        // rather than trimmed — revert-don't-trim, matching every other guard here; the depositor
+        // retries with the room `vault.remainingCapacity()` reports.
+        {
+            uint256 cap = ILeveragedAeroVaultCapacity(vault_).maxTotalAssets();
+            if (cap != 0 && navNet + assets > cap) revert FundAtCapacity(navNet + assets, cap);
+        }
+        IERC20(_layout().usdc).safeTransferFrom(msg.sender, address(this), assets);
         uint256 supply = IERC20(vault_).totalSupply(); // POST-crystallize (includes any perf-fee mint)
         // Guard the navNet==0 share-inflation case: with holders present and a worthless book the
         // mulDiv denominator collapses to 1, minting ~assets×(supply+offset) shares (dilutes stayers).

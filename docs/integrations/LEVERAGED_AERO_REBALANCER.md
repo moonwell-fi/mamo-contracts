@@ -1124,6 +1124,32 @@ What is still **not** wrapped, and is deliberate:
 
 ---
 
+## Fund capacity cap (multisig procedure)
+
+`LeveragedAeroVault.maxTotalAssets` caps the whole fund's NAV, in USDC (6dp). `0` == unlimited.
+Owner-only, one transaction:
+
+```
+vault.setMaxTotalAssets(5_000_000e6)   // $5M capacity
+vault.setMaxTotalAssets(0)             // rollback: unlimited
+```
+
+Denominated in the unit of account, so **set the dollar figure you mean** — no share conversion, and
+none of the 12dp/6dp hazard the old per-account share cap carried. Read the live headroom with
+`vault.remainingCapacity()` (USDC; `type(uint256).max` when the cap is disabled).
+
+Three things to keep straight:
+
+- **It is a real TVL ceiling.** Once the fund's NAV reaches it, EVERY deposit is refused — every
+  account, and direct depositors too, because the check lives in the strategy's `deposit`, which is
+  the one path all of them take. That is the difference from the per-account cap it replaced.
+- **NAV moves on its own, so the ceiling is not a static gate.** The fund can drift *above* it on
+  gains alone (closing deposits with nobody having deposited) and back below on a drawdown. Expect
+  deposits to reopen and close without any owner action; that is inherent to a value-denominated
+  capacity limit.
+- **It gates deposits only.** Lowering it below the live book traps nobody — no withdrawal path
+  consults it, so holders can always exit, and each exit frees that much capacity for others.
+
 ## Staging
 
 > **The live staging instance runs the current in-repo stack** (vault generation 2): a

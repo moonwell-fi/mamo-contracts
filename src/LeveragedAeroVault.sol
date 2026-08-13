@@ -10,6 +10,14 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
+/// @dev Just the strategy's NAV read, for {LeveragedAeroVault.previewSharesForAssets}. Declared
+///      locally rather than added to the vendored `IStrategy`, because every stand-in that
+///      implements that interface would then have to grow the selector too.
+interface IStrategyNav {
+    function nav() external view returns (uint256);
+}
 
 /**
  * @title LeveragedAeroVault
@@ -54,10 +62,40 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     ///         `address(0)` (the deploy default) == fees OFF.
     address public feeConfig;
 
+    /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp). `0` (the deploy
+    ///         default) == UNLIMITED. Once the fund is at or above this, NOBODY can deposit — it is a
+    ///         ceiling on the whole book, not a per-user allocation limit.
+    ///
+    /// @dev STORED HERE, ENFORCED IN THE STRATEGY'S `deposit`. That is the single path every new
+    ///      share-minting deposit takes — per-user accounts and direct depositors alike — so the
+    ///      ceiling genuinely binds the fund rather than one wrapper layer. Deliberately NOT enforced
+    ///      in {strategyMint}: that function also serves FEE-SHARE crystallisations, which the
+    ///      strategy performs best-effort inside a try/catch, so a capacity-blocked fee mint would
+    ///      silently defer fees forever instead of reverting. Same hazard {depositsOpen} already
+    ///      carries; not one to duplicate. Fees are an accounting event, not new capital, and must
+    ///      never be gated on capacity.
+    ///
+    ///      DENOMINATION IS USDC (6dp), the unit of account — operators set the figure they mean and
+    ///      no share conversion is involved. The trade-off, stated plainly: NAV moves on its own, so
+    ///      the fund can drift ABOVE the cap through gains alone (closing deposits with nobody having
+    ///      deposited) and back below it on a drawdown (reopening them). That is inherent to a
+    ///      value-denominated capacity limit and is the intended reading — capacity is about how much
+    ///      the venue can absorb, which is a value question, not a share-count one.
+    ///
+    ///      MEASURED PRE-DEPOSIT, AGAINST THE POST-CRYSTALLISE NET NAV, and a deposit that would CROSS
+    ///      the ceiling is rejected OUTRIGHT rather than trimmed — the same revert-don't-trim posture
+    ///      every other guard here takes. A depositor who wants the room that is left retries with a
+    ///      smaller amount; {remainingCapacity} reports it.
+    ///
+    ///      `0` means unlimited rather than frozen so a fresh deployment is not bricked before the
+    ///      owner acts; the freeze case is already served by {depositsOpen}.
+    uint256 public maxTotalAssets;
+
     // ==================== EVENTS ====================
 
     event StrategySet(address indexed strategy);
     event OpenDepositsUpdated(bool open);
+    event MaxTotalAssetsSet(uint256 maxAssets);
     event FeeConfigUpdated(address indexed feeConfig);
     event StrategyActivated(address indexed strategy, uint256 seedAmount);
     event StrategySettled(address indexed strategy);
@@ -200,6 +238,70 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     function setOpenDeposits(bool open) external onlyOwner {
         depositsOpen = open;
         emit OpenDepositsUpdated(open);
+    }
+
+    /// @notice Set the fund's capacity ceiling, in USDC (6dp). `0` == unlimited. Takes effect on the
+    ///         next deposit; it is a ceiling on the whole book, not a per-user allocation limit.
+    /// @dev Denominated in the unit of account, so set the dollar figure you mean — no share
+    ///      conversion. Lowering it below the fund's current NAV does NOT unwind or trap anyone: it
+    ///      closes new deposits until the fund is back under the ceiling, and every withdrawal path is
+    ///      independent of it.
+    /// @param maxAssets New capacity in USDC (6dp); `0` disables the cap.
+    function setMaxTotalAssets(uint256 maxAssets) external onlyOwner {
+        maxTotalAssets = maxAssets;
+        emit MaxTotalAssetsSet(maxAssets);
+    }
+
+    /// @notice ADVISORY: USDC that could still be deposited before the capacity ceiling is reached.
+    /// @dev `0` means the fund is full (or exactly at the ceiling) — but note `0` is ALSO what an
+    ///      unlimited fund would report if read naively, so the flag is disambiguated here: when
+    ///      {maxTotalAssets} is `0` (unlimited) this returns `type(uint256).max`. POINT-IN-TIME: NAV
+    ///      moves, so this is a reading and not a reservation. Reverts when NAV is unpriceable, for
+    ///      the same fail-closed reason {previewSharesForAssets} does.
+    /// @return assets USDC still depositable, or `type(uint256).max` when the cap is disabled.
+    function remainingCapacity() external view returns (uint256 assets) {
+        uint256 cap = maxTotalAssets;
+        if (cap == 0) return type(uint256).max; // unlimited
+        require(strategy != address(0), "LAV: strategy unset");
+        uint256 navNow = IStrategyNav(strategy).nav();
+        return navNow >= cap ? 0 : cap - navNow;
+    }
+
+    /// @notice ADVISORY: the shares a deposit of `assets` USDC would mint at CURRENT pricing — the
+    ///         the canonical assets->shares conversion for UI display and slippage (`minShares`) sizing.
+    /// @dev Mirrors the strategy's own deposit formula
+    ///      (`mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navNet + 1)`) against the live book.
+    ///      POINT-IN-TIME, NOT A PEG: the answer moves with NAV and supply, so a cap set from it
+    ///      represents that dollar figure only at the instant it was read (see the drift note on
+    ///      the fund). Reverts when the strategy's NAV is unpriceable (`nav() == 0` with
+    ///      shares outstanding), mirroring the deposit's own `NavUnpriceable` guard — it is a preview
+    ///      of a deposit, and inherits its fail-closed posture.
+    ///
+    ///      NOT AN UPPER BOUND ON THE REAL MINT. This prices against raw `nav()`, whereas `deposit`
+    ///      prices against `navNet` (post-crystallise, i.e. NAV minus the fee that crystallise mints
+    ///      away). With fees pending `navNet <= nav()`, so the real mint is `>=` this figure — size
+    ///      `minShares` with that asymmetry in mind rather than against the exact figure.
+    /// @param assets USDC (6dp) to convert.
+    /// @return shares Vault shares (12dp) that amount would mint right now.
+    function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
+        require(strategy != address(0), "LAV: strategy unset");
+        uint256 supply = totalSupply();
+        uint256 navNow = IStrategyNav(strategy).nav();
+        // MIRROR THE DEPOSIT'S `NavUnpriceable` GUARD. The real `deposit` reverts on
+        // `navNet == 0 && supply > 0`; `nav()` FLOORS to 0 rather than reverting, so without this the
+        // denominator collapses to 1 and the preview returns a figure ~1e9-1e12x too large. That state
+        // is reachable, not theoretical: after `settleStrategy` the book is flat so `nav()` is the
+        // strategy's USDC balance (0) while supply is still outstanding, and likewise whenever
+        // `protocolFeeOwed >= gross`. Since this function is the documented way to choose the
+        // conversion any caller sizes a deposit from, handing back a garbage figure here would have
+        // it size against a price that is ~1e9-1e12x wrong.
+        // Fail closed instead, so the caller re-reads once the book is priceable again. `supply == 0`
+        // (genesis, empty book) legitimately prices at nav 0 and must stay allowed, matching deposit.
+        require(navNow > 0 || supply == 0, "LAV: nav unpriceable");
+        // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy; it is the same 6-decimal step `decimals()`
+        // documents, so it is derived here rather than duplicated as a second magic constant.
+        uint256 offset = 10 ** (decimals() - IERC20Metadata(asset).decimals());
+        shares = Math.mulDiv(assets, supply + offset, navNow + 1);
     }
 
     /// @notice Point the strategy's protocol-fee lookup at a config contract, or clear it

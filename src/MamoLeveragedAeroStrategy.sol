@@ -132,9 +132,16 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     }
 
     /**
-     * @notice Deposit this account's entire idle USDC balance into the Sherwood strategy (owner or backend).
+     * @notice Deposit `assets` of this account's idle USDC into the Sherwood strategy (owner or backend).
      * @dev Users can plain-transfer USDC to their account; the backend then nudges it in via this call
      *      (mirrors `depositIdleTokens` in MamoMultiMarketStrategy). Reverts if there is no idle USDC.
+     *
+     *      THE CALLER PICKS THE AMOUNT rather than this depositing the whole balance, and that is what
+     *      keeps the account usable against {LeveragedAeroVault.maxTotalAssets}: when the fund is near
+     *      its capacity ceiling, an account holding more idle USDC than the remaining capacity would
+     *      otherwise be unable to deposit ANYTHING, because the ceiling rejects rather than trims. The
+     *      caller sizes the deposit to `vault.remainingCapacity()`; the remainder stays idle and the
+     *      owner can withdraw it at any time.
      *
      *      Gated to the owner or the registry backend — the repo's trusted-actor pattern. This closes the
      *      anonymous-griefer vector: because idle USDC is ambiguous (it may be pending re-deposit OR a
@@ -144,14 +151,15 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      *      trusted actors: the owner claims withdrawals explicitly via {claimWithdrawnUsdc}, so the backend
      *      must only call this when a re-deposit is intended, and the owner and backend coordinate which
      *      idle USDC is which.
+     * @param assets    Idle USDC to deposit (6dp); must be non-zero and at most the balance held.
      * @param minShares Minimum vault shares to accept (slippage guard).
      * @return shares Vault shares minted to this account (12dp).
      */
-    function depositIdle(uint256 minShares) external returns (uint256 shares) {
+    function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares) {
         require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
 
-        uint256 assets = usdc.balanceOf(address(this));
-        require(assets > 0, "No idle USDC to deposit");
+        require(assets > 0, "Amount must be greater than 0");
+        require(assets <= usdc.balanceOf(address(this)), "Insufficient idle USDC");
 
         usdc.forceApprove(address(sherwoodStrategy), assets);
         shares = sherwoodStrategy.deposit(assets, minShares);

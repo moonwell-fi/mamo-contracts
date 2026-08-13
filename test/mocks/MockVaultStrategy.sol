@@ -44,6 +44,28 @@ contract MockVaultStrategy is IStrategy {
     /// @notice Asset balance observed at {execute} — the seed `activateStrategy` transferred in.
     uint256 public seedReceived;
 
+    /// @dev Book NAV (asset units, 6dp) reported by {nav}, which
+    ///      `LeveragedAeroVault.previewSharesForAssets` reads. Settable so a test can move the share
+    ///      price and watch the preview follow it.
+    uint256 internal _nav;
+
+    /// @dev When true {nav} reverts — the real strategy is fail-closed on a stale oracle, and the
+    ///      preview inherits that posture.
+    bool internal _navReverts;
+
+    function setNav(uint256 nav_) external {
+        _nav = nav_;
+    }
+
+    function setNavReverts(bool reverts_) external {
+        _navReverts = reverts_;
+    }
+
+    function nav() external view returns (uint256) {
+        require(!_navReverts, "MockStrategy: nav unpriceable");
+        return _nav;
+    }
+
     constructor(address vault_, address asset_) {
         _vault = vault_;
         _proposer = msg.sender;

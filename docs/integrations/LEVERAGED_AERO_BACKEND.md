@@ -62,12 +62,55 @@ against the code rather than assumed:
 | Backend call | Shape-dependent? | Why |
 |---|---|---|
 | `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
-| `depositIdle(minShares)` | No | USDC in, shares out. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. |
+| `depositIdle(assets, minShares)` | No | USDC in, shares out. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
 | `fulfillRedeem(id)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
 | `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
 
 So: **do not add a `legBIsAsset` branch to the account keeper.** Read it only if you are surfacing the
 fund's composition in ops tooling.
+
+## Fund capacity cap
+
+`LeveragedAeroVault.maxTotalAssets` is a ceiling on the **whole fund's NAV**, denominated in USDC
+(6dp). `0` means unlimited (the deploy default). Only the vault owner (MAMO_MULTISIG) can change it.
+
+It is a limit on the FUND, not on any one user: once the book reaches the ceiling, **nobody** can
+deposit, regardless of how little their own account holds. It is enforced in the strategy's `deposit`
+— the single path every share-minting deposit takes, accounts and direct depositors alike — and it
+**reverts** rather than trimming:
+
+```
+deposit(assets, minShares)        → reverts FundAtCapacity(navAfter, cap)
+depositIdle(assets, minShares)    → reverts FundAtCapacity(navAfter, cap)
+```
+
+That is why `depositIdle` takes an amount. When the fund is near its ceiling, an account holding more
+idle USDC than the remaining capacity cannot deposit the whole balance, so the keeper sizes the call
+to the room:
+
+```
+room = vault.remainingCapacity()   // USDC (6dp). type(uint256).max => cap disabled
+                                   // 0 => fund is full, do not call
+```
+
+**Leave headroom — do not size to the exact edge.** `remainingCapacity()` reads raw `nav()`, while the
+deposit measures against `navNet` (NAV after the fee crystallisation the deposit runs first), and NAV
+moves between your read and your transaction landing. Target ~95% of `room` and treat `FundAtCapacity`
+as **retryable** (re-read and re-size, do not escalate). Leftover idle USDC stays on the account and
+the owner can claim it via `claimWithdrawnUsdc` at any time.
+
+Three properties worth building around:
+
+- **The ceiling is in USDC, so it means what it says** — no share conversion, no 12dp/6dp trap.
+- **NAV moves on its own.** The fund can drift *above* the ceiling on gains alone, closing deposits
+  with nobody having deposited, and back below it on a drawdown, reopening them. Do not treat "closed"
+  as permanent, and do not cache `remainingCapacity()`.
+- **Withdrawals free room, for everyone.** The check is against live NAV, not a high-water mark, so an
+  exit immediately reopens that much capacity to any depositor. There is no release step.
+
+`vault.previewSharesForAssets(assets)` remains the assets→shares conversion for sizing `minShares`; it
+**reverts** `"LAV: nav unpriceable"` when the book cannot be priced (`nav() == 0` with shares
+outstanding, e.g. post-settle). Treat that as "retry later", never as a usable number.
 
 Two fund-ops reads exist for that tooling and are worth knowing about even though this doc's loop does not
 call them — both are plain views on the strategy clone:
@@ -124,7 +167,7 @@ members; index ≠ 0 members do **not** pass the `depositIdle` gate). This is **
 | Action | Key that must sign | Address (Base) | Whose key |
 |---|---|---|---|
 | `createStrategyForUser(user)` on the factory | factory BACKEND_ROLE = `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` | backend |
-| `depositIdle(minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` | backend |
+| `depositIdle(assets, minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` | backend |
 | `fulfillRedeem(id)` on the strategy | strategy **proposer** = `MAMO_REBALANCER` | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | **rebalancer — NOT the backend** |
 
 Signing `depositIdle` with a non-index-0 backend key reverts `"Not owner or backend"`. Wire the keys
@@ -267,7 +310,7 @@ the operator from the loop.
 ## `depositIdle` — coordination footgun (documented in the contract)
 
 ```solidity
-function depositIdle(uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
+function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
 ```
 
 Idle USDC on an account is **ambiguous**: it may be funds a user plain-transferred for re-deposit, **or**
@@ -288,7 +331,7 @@ would silently re-lock users' fulfilled withdrawals.
 | Call | Contract | Gate | Notes |
 |---|---|---|---|
 | `createStrategyForUser(user)` | Factory | factory BACKEND_ROLE or `user` | provisioning; deterministic address |
-| `depositIdle(minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent |
+| `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent; **you pick `assets`** |
 
 That is the whole backend write surface. `fulfillRedeem(id)` on the strategy clone is **not** on it —
 `onlyProposer`, i.e. the **rebalancer** (`MAMO_REBALANCER`), never `MAMO_BACKEND`.
@@ -324,7 +367,7 @@ above) — use these when indexing the strategy clone directly rather than per-a
 
 ## Revert-string reference
 
-Account (`require` strings): `"Amount must be greater than 0"`, `"No idle USDC to deposit"`,
+Account (`require` strings): `"Amount must be greater than 0"`, `"Insufficient idle USDC"`,
 `"Not owner or backend"`, `"No shares to withdraw"`, `"No USDC to claim"`; OZ
 `OwnableUnauthorizedAccount(address)` for `onlyOwner` misuse; initializer strings
 `"Invalid mamoStrategyRegistry address"`, `"Strategy type id not set"`, `"Invalid owner address"`,
