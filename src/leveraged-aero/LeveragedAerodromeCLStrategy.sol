@@ -1728,10 +1728,13 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         c.cbBTCDecimals = $.cbBTCDecimals;
         c.wethDecimals = $.wethDecimals;
         c.pool = $.pool;
-        // Gauge + reward feed: the held-reward NAV term (`_heldRewardUsdc`). Threaded from the SAME
-        // storage `LeveragedAeroVenue.applyVenue` rewrites on a migration and `_sellRewardBalance`
-        // prices its sale floor against — never a second pinned copy a migration could orphan.
+        // Gauge + tokenId + reward feed: the gauge-reward NAV term (`LeveragedAeroValuation._rewardUsdc`),
+        // which prices BOTH the claimed-but-unsold balance and the still-unclaimed `gauge.earned()` on the
+        // staked NFT. Threaded from the SAME storage `LeveragedAeroVenue.applyVenue` rewrites on a
+        // migration and `_sellRewardBalance` prices its sale floor against — never a second pinned copy a
+        // migration could orphan. `tokenId` is the flat-book signal too: 0 ⇒ no `earned()` call at all.
         c.gauge = $.gauge;
+        c.tokenId = $.tokenId;
         c.cbBTCFeed = $.cbBTCFeed;
         c.wethFeed = $.wethFeed;
         c.usdcFeed = $.usdcFeed;

@@ -90,6 +90,10 @@ contract MockCLGauge {
         if (aeroToPayOnWithdraw > 0) {
             IERC20(aeroToken).safeTransfer(msg.sender, aeroToPayOnWithdraw);
         }
+        // The auto-claim CONSUMES the accrual: the real gauge zeroes `rewards[tokenId]` when it pays.
+        // Modelled because `nav()` now prices `earned()` AND the held balance — a mock whose `earned()`
+        // survived its own claim would let a double-count in that term pass the suite.
+        earnedAmount = 0;
     }
 
     // Amount of AERO to pay out when getReward() is called
@@ -112,6 +116,8 @@ contract MockCLGauge {
         if (aeroToPayOnGetReward > 0) {
             IERC20(aeroToken).safeTransfer(msg.sender, aeroToPayOnGetReward);
         }
+        // ...and the claim CONSUMES the accrual — see the note in `withdraw`.
+        earnedAmount = 0;
     }
 
     // Configurable earned value returned by earned()
