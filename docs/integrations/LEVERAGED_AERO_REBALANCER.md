@@ -190,7 +190,7 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 | Fee interaction | Crystallizes management + HWM **performance** fees on the **pre-compound** NAV first (fail-closed on the price — a stale oracle reverts, so the harvest defers rather than mis-prices), so realized yield can't escape the performance fee. Then discharges `protocolFeeOwed` out of the swapped USDC before the hedge and the redeploy. |
 | Guards | Effective swap floor = `max(minUsdcOut, oracleFloor)` where `oracleFloor = aeroBal × AERO/USD(8dp) / 1e20 × (1 − maxSlippageBps)`, post-checked on the measured fill → `BelowOracleFloor()`. The hedge's USDC→leg buy is separately floored at the oracle-implied leg amount haircut by `maxSlippageBps`. Redeploy runs `_assertHealthy()`. |
 | Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`; **`MoonwellRepayFailed(errCode)` from the interest re-hedge**; `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `InsufficientLiquidity` and (asset-mode) `DegenerateRange()` from the redeploy. A stale/mismatched feed fail-closes the whole call — the AERO feed at the swap floor, and the leg + USDC feeds at the hedge (`compound` already fail-closes on those via the pre-compound `nav()`, so the hedge widens no oracle exposure). |
-| When to call | On a yield/gas cadence. A stale AERO feed intentionally blocks it — defer and retry. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
+| When to call | On a yield/gas cadence, **and promptly after any unwind** (`rerange`, `adjustLeverage`, a proportional `fulfillRedeem`) — those auto-claim a tranche that `nav()` then prices but that the async redeem path never pays out (§E). A stale AERO feed intentionally blocks it — defer and retry; while a tranche is held that same stale feed also fail-closes `nav()`. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
 
 ### `rerange` — reposition the CL range: re-width, re-skew, re-anchor (no swap)
 
@@ -641,6 +641,28 @@ function hedgedDebt() external view returns (uint128 legA, uint128 legB);       
   a panic signal — it means the fast/priced paths (deposit, fast `redeem`, `previewRedeem`) degrade to the
   async queue. The agent can **still fulfill** requests: `fulfillRedeem`'s proportional unwind is
   oracle-free (best-effort crystallize with `navPre = 0`). Don't gate the fulfill loop on `nav()`.
+- **`nav()` prices the HELD reward balance.** Every unwind (`rerange`, `adjustLeverage`, a proportional
+  `fulfillRedeem`, `flatten`, `settle`) goes through `gauge.withdraw`, which **auto-claims** the accrued
+  AERO tranche into the strategy whether or not anyone asked for it. That claimed-but-unsold balance is in
+  `nav()`, marked on the same `aeroUsdFeed` (8dp) the sale floor uses. Three operator consequences:
+  - **UNCLAIMED rewards are still outside NAV.** Only the balance the strategy actually holds is priced —
+    `gauge.earned()` is deliberately *not* read (Slipstream reverts `"NA"` on an unstaked tokenId, which
+    would give `nav()` a revert path that bricks deposits and the fast redeem). So NAV still steps up
+    slightly at `compound` for the newly-claimed portion; it no longer steps for the portion an earlier
+    unwind already claimed.
+  - **The reward feed becomes a `nav()` dependency *only while a tranche is held*.** The read is guarded
+    on `balance > 0`, so in steady state (`compound` sells 100%) nothing changes. But between an unwind
+    and the next `compound`, a stale `aeroUsdFeed` **fail-closes `nav()`** — deposits and the priced fast
+    redeem are denied until the feed recovers or the tranche is sold. This is intentional (a NAV that
+    cannot be computed honestly must not price a deposit). The cure is one call: `compound`. The async
+    queue is unaffected — `fulfillRedeem` never reads `nav()`.
+  - **Fee crystallisation reads NAV**, so reward value now accrues to holders continuously from the moment
+    it is claimed instead of stepping at `compound`. Corollary the accounting team should know: the async
+    `fulfillRedeem` unwind pays out *unwound tokens* and never hands a redeemer AERO, so between an
+    auto-claim and the next `compound` there is a small nav-vs-payout inconsistency on that one path
+    (the redeemer's slice of the held tranche stays with the fund). Deliberately accepted — distributing
+    the reward token pro-rata on the async path is a materially bigger change. Keep the operational habit
+    of calling `compound` promptly after any unwind and it never arises.
 - **`previewRedeem(shares)`** returns `(assetsOut, fastOk)`; `assetsOut` is the advisory oracle-priced
   fast-path payout and `fastOk` whether the fast path would currently price **and** clear the LTV gate.
   Both are advisory — the manager's on-chain gate is authoritative. Returns `(0, false)` on an oracle

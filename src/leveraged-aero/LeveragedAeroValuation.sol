@@ -8,7 +8,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {ICToken} from "./sherwood/interfaces/ICToken.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
+import {ICLGauge, ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
 import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
 import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "./sherwood/libraries/TickMath.sol";
@@ -50,7 +50,7 @@ interface IAeroV2Factory {
 ///         manipulated price can only *deny* a deposit, never mint cheap shares.
 ///
 ///         ```
-///         NAV = idleStrategy + collateral + clLegs + idleLegs − debt  (USDC, 6dp)
+///         NAV = idleStrategy + collateral + clLegs + idleLegs + heldReward − debt  (USDC, 6dp)
 ///         ```
 ///
 ///         The strategy prices/redeems against strategy-controlled value only; any vault float
@@ -74,6 +74,10 @@ interface IAeroV2Factory {
 ///                             remainder a no-swap `rerange` recenter leaves), each priced via
 ///                             Chainlink on the SAME basis as `debt` — so a borrowed leg is
 ///                             never uncounted and a single-position recenter is NAV-neutral.
+///         - `heldReward`    = the gauge reward token ALREADY CLAIMED into the strategy wallet
+///                             (every `_unwindLiquidity` auto-claims one via `gauge.withdraw`),
+///                             priced via the venue's reward feed. HELD BALANCE ONLY — never
+///                             `gauge.earned()`; see `netEquityUsdc`.
 ///
 ///         The CL-leg split uses the oracle sqrtP (the Gamma/Arrakis technique) so the
 ///         mint mark cannot be tick-shoved; the same two feeds price the debt, so the
@@ -174,9 +178,11 @@ library LeveragedAeroValuation {
         uint8 cbBTCDecimals; // cbBTC decimals (8 on Base)
         uint8 wethDecimals; // WETH decimals (18)
         address pool; // Aerodrome Slipstream CL pool (cbBTC/WETH)
+        address gauge; // Slipstream CL gauge — read ONLY for `rewardToken()` (the held-reward term)
         address cbBTCFeed; // Chainlink BTC/USD feed (8dp)
         address wethFeed; // Chainlink ETH/USD feed (8dp)
         address usdcFeed; // Chainlink USDC/USD feed (8dp)
+        address rewardFeed; // Chainlink reward/USD feed (8dp) — `Layout.aeroUsdFeed`, the venue-migrated one
         address sequencerFeed; // Chainlink L2 sequencer-uptime feed
         uint256 maxDelay; // per-feed max staleness (seconds)
         uint256 gracePeriod; // sequencer grace period (seconds)
@@ -190,10 +196,12 @@ library LeveragedAeroValuation {
     /// @param tickLower  Lower tick of the CL position (from `NPM.positions`).
     /// @param tickUpper  Upper tick of the CL position.
     /// @param liquidity  CL liquidity (from `NPM.positions`); 0 ⇒ no CL legs.
-    /// @return navUsdc   USDC value of `idle + collateral + clLegs + idleLegs − debt` (vault float
-    ///                   excluded — M2 deposit/redeem symmetry; strategy-controlled terms only).
+    /// @return navUsdc   USDC value of `idle + collateral + clLegs + idleLegs + heldReward − debt`
+    ///                   (vault float excluded — M2 deposit/redeem symmetry; strategy-controlled
+    ///                   terms only).
     /// @dev Fail-closed: reverts on any oracle/calm failure (via `ChainlinkReader` and the
-    ///      calm-gate) and on non-positive equity. Used to price deposits only.
+    ///      calm-gate) and on non-positive equity. Used to price deposits only. The reward feed is
+    ///      read ONLY when a reward balance is actually held — see `_heldRewardUsdc`.
     function netEquityUsdc(Config memory c, address strategy, int24 tickLower, int24 tickUpper, uint128 liquidity)
         public
         view
@@ -233,6 +241,9 @@ library LeveragedAeroValuation {
             assets += _usdcValue(IERC20(c.cbBTC).balanceOf(strategy), c.cbBTCDecimals, pCbBTC, pUsdc);
         }
         assets += _usdcValue(IERC20(c.weth).balanceOf(strategy), c.wethDecimals, pWeth, pUsdc);
+
+        // --- HELD gauge reward (claimed, not yet sold) ---
+        assets += _heldRewardUsdc(c, strategy, pUsdc);
 
         // --- debt (same Chainlink basis) ---
         uint256 debt = _debtUsdc(c, strategy, pCbBTC, pWeth, pUsdc);
@@ -1027,6 +1038,48 @@ library LeveragedAeroValuation {
         if (cBal == 0) return 0;
         uint256 rate = ICToken(c.mUsdc).exchangeRateStored();
         return (cBal * rate) / 1e18;
+    }
+
+    /// @dev THE HELD GAUGE-REWARD TERM, in USDC face (6dp). Every `_unwindLiquidity` calls
+    ///      `gauge.withdraw`, which AUTO-CLAIMS the accrued reward tranche into the strategy wallet — so a
+    ///      non-zero reward balance is a normal, reachable state (post-`rerange`, post-partial-redeem,
+    ///      post-`adjustLeverage`), not an anomaly. Leaving it unpriced made every such window a free
+    ///      option: a deposit placed before the next `compound()` bought in at a NAV that excluded the
+    ///      tranche and then captured a pro-rata slice of it when `compound` stepped NAV up.
+    ///
+    ///      HELD BALANCE ONLY — DO NOT ADD `gauge.earned()`. Slipstream's gauge reverts `"NA"` on
+    ///      `earned()` for a tokenId it does not have staked (verified on-chain), which every flat book
+    ///      and every mid-unwind moment produces. Adding it would give `nav()` — a `view` that prices
+    ///      deposits and the fast redeem — a revert path that bricks both. Unclaimed rewards therefore
+    ///      stay outside NAV exactly as before; only the claimed-but-unsold tranche is priced.
+    ///
+    ///      GUARDED ON `balance > 0`, deliberately: in steady state `compound` sells 100% of the tranche,
+    ///      so the common case reads no feed at all — no added oracle-liveness dependency on the deposit /
+    ///      fast-redeem path, and no added gas beyond the two staticcalls that find the balance.
+    ///
+    ///      FAIL-CLOSED on a stale reward feed while a balance IS held: the read goes through the same
+    ///      hardened `_readUsd8` every other term uses, so an unreadable feed reverts `nav()` rather than
+    ///      valuing the tranche at 0. That is this file's whole posture — a NAV that cannot be computed
+    ///      honestly must deny deposits, not mint against an understated book (valuing at 0 would
+    ///      RE-CREATE the very mis-pricing this term closes, and hand it to whoever can stale the feed).
+    ///      The exposure is bounded and self-clearing: the window only exists between an unwind and the
+    ///      next `compound`, `compound` itself is the fix, and the async redeem queue stays open
+    ///      throughout (`fulfillRedeem`'s proportional unwind never reads `nav()`).
+    ///
+    ///      DECIMALS are pinned at 18, matching the reward-token scaling already hardcoded in
+    ///      `LeveragedAeroManager.compoundImpl` / `LeveragedAeroVenue._sellRewardBalance` (the `1e20`
+    ///      divisor). `LeveragedAeroVenue.applyVenue` enforces it (`IERC20Metadata(rewardTok).decimals()
+    ///      != 18 → UnexpectedFeedDecimals`) at init AND at every venue migration, and likewise rejects a
+    ///      reward token equal to either leg (`UnsupportedLeg`), so this term can never double-count an
+    ///      idle-leg balance.
+    ///
+    ///      `c.rewardFeed` is `Layout.aeroUsdFeed` — the SAME field `_sellRewardBalance` derives its sale
+    ///      floor from and the SAME field `applyVenue` rewrites on a migration, so the mark and the
+    ///      realisation basis cannot drift and a venue migration can never orphan a second pinned copy.
+    function _heldRewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
+        uint256 bal = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
+        if (bal == 0) return 0;
+        return _usdcValue(bal, 18, _readUsd8(c, c.rewardFeed), pUsdc);
     }
 
     /// @dev cbBTC + WETH debt at the same Chainlink basis, converted to USDC face.

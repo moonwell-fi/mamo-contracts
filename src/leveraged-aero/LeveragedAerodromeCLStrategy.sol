@@ -1696,9 +1696,14 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         c.cbBTCDecimals = $.cbBTCDecimals;
         c.wethDecimals = $.wethDecimals;
         c.pool = $.pool;
+        // Gauge + reward feed: the held-reward NAV term (`_heldRewardUsdc`). Threaded from the SAME
+        // storage `LeveragedAeroVenue.applyVenue` rewrites on a migration and `_sellRewardBalance`
+        // prices its sale floor against — never a second pinned copy a migration could orphan.
+        c.gauge = $.gauge;
         c.cbBTCFeed = $.cbBTCFeed;
         c.wethFeed = $.wethFeed;
         c.usdcFeed = $.usdcFeed;
+        c.rewardFeed = $.aeroUsdFeed;
         c.sequencerFeed = $.sequencerFeed;
         c.maxDelay = $.maxDelay;
         c.gracePeriod = $.gracePeriod;

@@ -8,6 +8,8 @@ import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedA
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
+import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
+
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
@@ -808,5 +810,155 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertEq(strategy.layout().hwmPerShare, hwm1, "HWM unmoved (fee deferred, not lost)");
         assertEq(strategy.layout().lastFeeAccrualTimestamp, lastAccrual1, "accrual clock unmoved");
         assertGt(_collateralUsdc(), collateralBefore, "...but the HARVEST itself went through");
+    }
+
+    // ============ 4. nav() PRICES THE HELD REWARD BALANCE (review finding 3) ============
+
+    /// @dev The reward tranche used by this block: $50k of AERO at the fixture's $1 mark.
+    uint256 internal constant TRANCHE = 50_000e18;
+
+    /// @dev Arm the gauge's `withdraw` auto-claim, which is what makes a held reward balance a NORMAL
+    ///      state: every `_unwindLiquidity` calls `gauge.withdraw`, and Aerodrome pays the accrued
+    ///      tranche out on that call whether or not anyone asked for it.
+    function _armWithdrawAutoClaim(uint256 amount) internal {
+        aero.mint(address(gauge), amount);
+        gauge.setAeroToPayOnWithdraw(amount);
+    }
+
+    /// @dev USDC face (6dp) `nav()` should credit for `aeroAmt` held AERO at the fixture's $1 mark:
+    ///      `_usdcValue(amt, 18, 1e8, 1e8)`.
+    function _heldAeroValueUsdc(uint256 aeroAmt) internal pure returns (uint256) {
+        return aeroAmt / 1e12;
+    }
+
+    /**
+     * @dev THE TERM ITSELF. A claimed-but-unsold reward balance is worth real USDC and `nav()` must say
+     *      so, to the unit. Priced on the same Chainlink basis (`aeroUsdFeed`, 8dp) the sale floor in
+     *      `compoundImpl` / `_sellRewardBalance` uses, so the mark and the realisation cannot drift.
+     */
+    function testNavPricesTheHeldRewardBalance() public {
+        _armBook();
+        uint256 navBefore = strategy.nav();
+
+        aero.mint(address(strategy), TRANCHE);
+
+        assertEq(strategy.nav(), navBefore + _heldAeroValueUsdc(TRANCHE), "nav credits the held tranche exactly");
+    }
+
+    /**
+     * @dev REACHABILITY, not a synthetic balance: `rerange` unwinds through `gauge.withdraw`, which
+     *      AUTO-CLAIMS the accrued tranche into the strategy wallet. The proposer asked for a reposition
+     *      and got a reward balance as a side effect — the window this finding is about.
+     */
+    function testNavPricesTheTrancheARerangeAutoClaims() public {
+        _armBook();
+        _armWithdrawAutoClaim(TRANCHE);
+        uint256 navBefore = strategy.nav();
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 5000, 0, 0);
+
+        assertEq(aero.balanceOf(address(strategy)), TRANCHE, "the unwind auto-claimed a tranche");
+        // The recenter itself is NAV-neutral at an unmoved tick (no swaps; any remainder stays idle and
+        // is NAV-counted), so the whole delta is the newly-held tranche.
+        assertApproxEqAbs(
+            strategy.nav(), navBefore + _heldAeroValueUsdc(TRANCHE), 2, "nav grew by the auto-claimed tranche"
+        );
+    }
+
+    /**
+     * @dev THE FINDING. A depositor who arrives in the window between an unwind's auto-claim and the next
+     *      `compound()` used to buy in at a NAV that EXCLUDED the held tranche, then collect a pro-rata
+     *      slice of it when `compound` stepped NAV up — a free option on someone else's harvest, taken
+     *      from the holders who actually farmed it.
+     *
+     *      With the tranche in NAV the step disappears: the depositor's shares are priced against the
+     *      inclusive book, `compound` merely converts AERO→USDC at the same mark, and they end up holding
+     *      exactly what they paid. The counterfactual is computed inline (not hardcoded) so the test also
+     *      documents the size of what was being captured.
+     */
+    function testADepositBeforeCompoundNoLongerCapturesTheHarvestStep() public {
+        _armBook();
+        _armWithdrawAutoClaim(TRANCHE);
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 5000, 0, 0); // auto-claims the tranche into the strategy
+        gauge.setAeroToPayOnWithdraw(0); // one tranche only — later unwinds claim nothing
+
+        uint256 navWithTranche = strategy.nav();
+        uint256 supplyBefore = vault.totalSupply();
+        uint256 trancheUsdc = _heldAeroValueUsdc(TRANCHE);
+
+        // What the PRE-FIX book would have done: price the deposit against `nav − tranche`, then hand the
+        // depositor their share of the step `compound` produces.
+        uint256 preFixShares = Math.mulDiv(100_000e6, supplyBefore, navWithTranche - trancheUsdc);
+        uint256 preFixCapture = Math.mulDiv(trancheUsdc, preFixShares, supplyBefore + preFixShares);
+        assertGt(preFixCapture, 100_000e6 / 100, "the captured slice was material (>1% of the deposit)");
+
+        address newLp = makeAddr("newLp");
+        usdc.mint(newLp, 100_000e6);
+        vm.prank(newLp);
+        usdc.approve(address(strategy), 100_000e6);
+        vm.prank(newLp);
+        uint256 minted = strategy.deposit(100_000e6, 0);
+
+        // The harvest that used to be a step for them. `earned() == 0`; the HELD balance is the proceeds.
+        _clearRewards();
+        _compound(1);
+        assertEq(aero.balanceOf(address(strategy)), 0, "the tranche was sold");
+
+        uint256 lpValue = Math.mulDiv(minted, strategy.nav(), vault.totalSupply());
+        assertApproxEqRel(lpValue, 100_000e6, 1e15, "the depositor holds what they paid - no harvest capture");
+        assertLt(lpValue, 100_000e6 + preFixCapture / 2, "...and nothing close to the pre-fix capture");
+    }
+
+    /**
+     * @dev NO REWARD HELD ⇒ NO ORACLE DEPENDENCY. The term is guarded on `balance > 0`, so the steady
+     *      state — `compound` sells 100% of every tranche — adds no reward-feed liveness requirement to
+     *      the deposit / fast-redeem path. Proven the only way that means anything: with the reward feed
+     *      STALE, which would fail-close every priced path if it were read.
+     */
+    function testNavDoesNotReadTheRewardFeedWhenNoRewardIsHeld() public {
+        _armBook();
+        assertEq(aero.balanceOf(address(strategy)), 0, "steady state: nothing held");
+        uint256 navFresh = strategy.nav();
+
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours); // well past maxDelay (1 hour)
+
+        assertEq(strategy.nav(), navFresh, "nav is byte-identical and never touched the reward feed");
+    }
+
+    /**
+     * @dev FAIL-CLOSED, pinned. With a tranche actually held and the reward feed unreadable, `nav()`
+     *      REVERTS rather than valuing the tranche at 0 — the same posture every other term in
+     *      `LeveragedAeroValuation` takes. Valuing at 0 would re-create exactly the mis-pricing this term
+     *      closes and hand it to whoever can stale the feed.
+     *
+     *      THE ACCEPTED CONSEQUENCE, asserted so it is never a surprise: deposits and the priced fast
+     *      redeem are denied for the duration. The window is bounded (it exists only between an unwind
+     *      and the next `compound`, and `compound` is itself the cure) and the async queue stays open —
+     *      `fulfillRedeem`'s proportional unwind never reads `nav()`.
+     */
+    function testNavFailsClosedOnAStaleRewardFeedWhileATrancheIsHeld() public {
+        _armBook();
+        aero.mint(address(strategy), TRANCHE);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav();
+
+        address newLp = makeAddr("newLp");
+        usdc.mint(newLp, 10_000e6);
+        vm.prank(newLp);
+        usdc.approve(address(strategy), 10_000e6);
+        vm.prank(newLp);
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.deposit(10_000e6, 0);
+
+        // ...and the cure is one proposer call: sell the tranche and the dependency is gone.
+        _refreshFeeds();
+        _clearRewards();
+        _compound(1);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+        strategy.nav(); // no revert: nothing held, so nothing reads the reward feed
     }
 }
