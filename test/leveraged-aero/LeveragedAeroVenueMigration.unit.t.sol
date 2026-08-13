@@ -466,6 +466,41 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev Isolates the COMPARISON: `navNet + assets > cap` is strictly greater, so landing exactly on
+    ///      the ceiling is allowed and one atomic unit past it is refused. Both legs sit in one test,
+    ///      back to back, on the same book.
+    ///
+    ///      This is not the only thing covering that operator — `testDepositIsRefusedOnceTheFundReachesCapacity`
+    ///      above also lands exactly on the ceiling, so a `>=` mutant breaks it too. The point here is
+    ///      that it does so incidentally, as step 2 of a five-step sequence about capacity being
+    ///      fund-global. That sequence is the more valuable test and also the more fragile one: any
+    ///      future edit to its amounts or ordering can move the deposit off the exact boundary and
+    ///      retire the `>=` coverage silently, with every assertion still green. Two lines here make the
+    ///      boundary an explicit, independently-failing claim instead of a side effect of someone else's
+    ///      arithmetic. Mutation-verified: `>=` fails the exact-fit leg, and removing the check
+    ///      altogether fails the one-over leg.
+    function testCapacityBoundaryIsStrictlyGreaterThan() public {
+        _execute(SEED);
+
+        uint256 navNow = strategy.nav();
+        vm.prank(owner);
+        vault.setMaxTotalAssets(navNow + 50_000e6);
+        assertEq(vault.remainingCapacity(), 50_000e6, "room == cap - nav");
+
+        // One atomic unit (1e-6 USDC) OVER the ceiling: refused.
+        usdc.mint(lp, 50_000e6 + 1);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), 50_000e6 + 1);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.FundAtCapacity.selector);
+        strategy.deposit(50_000e6 + 1, 0);
+
+        // Exactly ON the ceiling: allowed. `>` not `>=`.
+        uint256 shares = strategy.deposit(50_000e6, 0);
+        vm.stopPrank();
+        assertGt(shares, 0, "landing exactly on the ceiling is allowed");
+        assertEq(vault.remainingCapacity(), 0, "and it consumed the room exactly");
+    }
+
     /// @dev Capacity gates DEPOSITS only. A fund pushed over its ceiling must still let everyone out,
     ///      and redeeming frees room for others — the ceiling is measured against live NAV, never a
     ///      high-water mark.
