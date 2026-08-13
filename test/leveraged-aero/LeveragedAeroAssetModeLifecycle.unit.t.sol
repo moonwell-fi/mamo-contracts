@@ -280,6 +280,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
             strategy.layout().posTickUpper,
             targetDebt - debtUsdc,
             type(uint256).max,
+            usdc.balanceOf(address(strategy)), // the raw balance the manager credits
+            uint256(targetLtvBps_),
             LEG_A_DECIMALS,
             false, // leg A is token1 in this fixture
             legAPrice8
@@ -594,12 +596,18 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         );
 
         uint16 newTarget = 6000;
+        // FUND FIRST, THEN PROBE. The sizing credits the raw balance (`assetModeLeverUpPair`'s
+        // fixed point), so a probe taken before the mint would describe a different funding regime
+        // than the one the op runs in. With raw idle generously above the draw, the fixed point
+        // clamps to the naive delta — the RAW-FUNDED regime, i.e. this op's behaviour before idle
+        // USDC started being supplied on deposit. The zero-raw regime has its own test below.
+        usdc.mint(address(strategy), 500_000e6);
         (uint256 expBorrow, uint256 expLpUsdc) = _expectedLeverUpPair(newTarget);
         assertGt(expLpUsdc, 0, "the op must actually need pairing USDC, or the test proves nothing");
+        assertGt(usdc.balanceOf(address(strategy)), expLpUsdc, "raw idle must cover the whole draw here");
 
         uint256 debtLegABefore = mLegA.borrowBalance(address(strategy));
         (uint256 collateralBefore,) = _collateralAndDebt();
-        usdc.mint(address(strategy), expLpUsdc); // fund the draw
 
         _retarget(newTarget);
 
@@ -607,7 +615,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         //    delta is floor-divided into leg-A units at the 8dp feed price and the LTV is itself a floor
         //    division, so the realised LTV lands at or just under target (measured: 5999 for 6000).
         (uint256 collateralAfter, uint256 debtUsdcAfter) = _collateralAndDebt();
-        assertEq(collateralAfter, collateralBefore, "collateral is untouched by a leverage retarget");
+        assertEq(collateralAfter, collateralBefore, "raw-funded draw leaves the collateral untouched");
         assertApproxEqAbs((debtUsdcAfter * 10_000) / collateralAfter, uint256(newTarget), 2, "LTV == new target");
 
         // 2. Exactly the sized single leg-A borrow happened; leg B is still never borrowed.
@@ -631,8 +639,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     function testAssetModeLeverUpDrawsExactlyTheDerivedIdleAndConservesNav() public {
         _execute(SEED);
 
-        (, uint256 expLpUsdc) = _expectedLeverUpPair(6000);
-        usdc.mint(address(strategy), expLpUsdc + 500_000e6); // generous idle, so the draw is what bounds it
+        usdc.mint(address(strategy), 500_000e6); // generous idle, so the draw is what bounds it
+        (, uint256 expLpUsdc) = _expectedLeverUpPair(6000); // probed at the SAME raw balance the op sees
 
         uint256 idleBefore = usdc.balanceOf(address(strategy));
         uint256 npmUsdcBefore = usdc.balanceOf(address(npm));
@@ -647,44 +655,68 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved: value moved from idle into the LP");
     }
 
-    /// @dev Insufficient idle is a LOUD, DIAGNOSABLE refusal: the exact `(needed, available)` pair, the
-    ///      whole op rolled back — never a partial fill and never a silent cap. One wei more idle and the
-    ///      same call succeeds, which pins the boundary to the derived `U′` itself.
-    function testAssetModeLeverUpRevertsWhenIdleIsInsufficientAndLeavesStateUntouched() public {
+    /**
+     * @dev THE ZERO-RAW-IDLE REGIME — the one "no idle USDC sits dead" makes the normal case. With
+     *      every USDC supplied to Moonwell there is no raw balance for the pairing to draw on, and the
+     *      pre-change contract refused the whole op with `InsufficientIdleForLeverUp`. It must now
+     *      fund `U′` out of the collateral instead, and — this is the part that is not automatic —
+     *      still land ON target: the redeem shrinks the very collateral base the LTV is measured
+     *      against, so a naively-sized delta would overshoot (`ltv·C / (C − U′)`), which on an
+     *      aggressive target trips `_assertHealthy`'s `maxLtvBps` and reverts the op outright.
+     *
+     *      Asserted here: the op succeeds from a genuinely zero raw balance, the collateral REALLY
+     *      shrank (so the funding came from where we claim), the post-op LTV is the requested target
+     *      and not the overshoot, and NAV is conserved across the whole move.
+     */
+    function testAssetModeLeverUpFundsThePairFromCollateralWhenRawIdleIsZero() public {
         _execute(SEED);
 
-        (, uint256 needed) = _expectedLeverUpPair(6000);
-        // Top idle up to exactly `needed - 1`.
-        uint256 idle = usdc.balanceOf(address(strategy));
-        assertLt(idle, needed, "genesis dust must be short of the draw");
-        usdc.mint(address(strategy), needed - 1 - idle);
+        // Sweep the genesis dust so the raw balance is EXACTLY zero — the steady state under
+        // `supplyIdleImpl`, and the state the old bound could not lever out of at all.
+        uint256 dust = usdc.balanceOf(address(strategy));
+        if (dust > 0) {
+            vm.prank(address(strategy));
+            usdc.transfer(address(0xDEAD), dust);
+        }
+        assertEq(usdc.balanceOf(address(strategy)), 0, "the fixture must start with NO raw USDC");
 
-        uint256 debtBefore = mLegA.borrowBalance(address(strategy));
-        uint256 collateralCBefore = mUsdc.balanceOf(address(strategy));
-        uint256 tokenIdBefore = strategy.layout().tokenId;
-        uint128 liqBefore = npm.liquidityOf(tokenIdBefore);
+        uint16 newTarget = 6000;
+        (uint256 expBorrow, uint256 expLpUsdc) = _expectedLeverUpPair(newTarget);
+        assertGt(expLpUsdc, 0, "the op must actually need pairing USDC, or the test proves nothing");
 
-        vm.prank(owner);
-        strategy.setTargetLtv(6000);
+        uint256 debtLegABefore = mLegA.borrowBalance(address(strategy));
+        (uint256 collateralBefore,) = _collateralAndDebt();
+        uint256 navBefore = strategy.nav();
 
-        vm.prank(proposer);
-        vm.expectRevert(
-            abi.encodeWithSelector(LeveragedAerodromeCLStrategy.InsufficientIdleForLeverUp.selector, needed, needed - 1)
+        _retarget(newTarget); // would have reverted `InsufficientIdleForLeverUp` before this change
+
+        (uint256 collateralAfter, uint256 debtUsdcAfter) = _collateralAndDebt();
+
+        // 1. The funding really came out of the collateral, by exactly the derived `U′`.
+        assertLt(collateralAfter, collateralBefore, "the pairing USDC was redeemed from the collateral");
+        assertApproxEqRel(collateralBefore - collateralAfter, expLpUsdc, 1e15, "the collateral draw IS the derived U'");
+        // Essentially all of it went into the LP: what stays raw is the CL add's own geometry
+        // truncation (`getLiquidityForAmounts` takes the MIN over the two sides), ~1e-3 USDC here.
+        assertLt(usdc.balanceOf(address(strategy)), 1e4, "the redeemed USDC went into the LP, bar add-truncation dust");
+
+        // 2. ON TARGET, not past it. The naive (uncorrected) sizing would land at
+        //    `ltv·C / (C − U′)` — ~625 bps high here — so this is the assertion that discriminates.
+        assertApproxEqAbs(
+            (debtUsdcAfter * 10_000) / collateralAfter, uint256(newTarget), 2, "LTV == new target, not the overshoot"
         );
-        strategy.adjustLeverage(0, 0);
 
-        // State untouched — the check runs BEFORE the borrow, and the revert rolls back regardless.
-        assertEq(mLegA.borrowBalance(address(strategy)), debtBefore, "no borrow happened");
-        assertEq(mUsdc.balanceOf(address(strategy)), collateralCBefore, "collateral untouched");
-        assertEq(usdc.balanceOf(address(strategy)), needed - 1, "idle untouched");
-        assertEq(strategy.layout().tokenId, tokenIdBefore, "position untouched");
-        assertEq(npm.liquidityOf(tokenIdBefore), liqBefore, "LP liquidity untouched");
+        // 3. Exactly the sized borrow, leg B still never borrowed, and the hedge still holds.
+        assertEq(mLegA.borrowBalance(address(strategy)) - debtLegABefore, expBorrow, "leg-A debt grew by exactly A");
+        assertEq(mUsdc.borrowBalance(address(strategy)), 0, "leg B (the asset) is still never borrowed");
+        assertApproxEqRel(
+            _lpLegAAmount() + legA.balanceOf(address(strategy)),
+            mLegA.borrowBalance(address(strategy)),
+            1e15,
+            "post-lever-up: LP leg-A == leg-A debt (hedge preserved on the collateral-funded path too)"
+        );
 
-        // One more wei of idle clears the bound — the boundary is exactly the derived U'.
-        usdc.mint(address(strategy), 1);
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0);
-        assertGt(mLegA.borrowBalance(address(strategy)), debtBefore, "lever UP went through at exactly U' idle");
+        // 4. Value MOVED (collateral → LP), it was not created or destroyed.
+        assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved across the collateral-funded lever-up");
     }
 
     /// @dev A STORED range the price has since left is one-sided, so the lever-up pairing ratio cannot be

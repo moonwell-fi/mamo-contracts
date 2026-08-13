@@ -124,7 +124,7 @@ Four authorization tiers appear on the strategy:
 
 | Tier | Functions | Gate |
 |---|---|---|
-| Proposer-only (operations) | `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams`, **`lowerTargetLtv`** (policy, but **down only**) | `onlyProposer` (== `MAMO_REBALANCER`) |
+| Proposer-only (operations) | **`supplyIdle`**, `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams`, **`lowerTargetLtv`** (policy, but **down only**) | `onlyProposer` (== `MAMO_REBALANCER`) |
 | **Admin-only (policy / custody)** | **`setTargetLtv`** (the only way to **raise** the target), `rescueToVault` | `onlyAdmin` — `Ownable(vault()).owner()`, the MAMO multisig → `NotAdmin()` |
 | Permissionless | `deleverage` | anyone (by design — safety backstop) |
 | Vault-only (lifecycle) | `execute`, `settle` | `onlyVault` — the vault **owner** drives these, not the agent |
@@ -157,11 +157,60 @@ are `onlyProposer` except where noted. Risk caps live in the ERC-7201 `Layout` (
 compile-time constants bound the recovery valve: `DELEVERAGE_BUFFER_BPS = 500` (+5%) and, in the
 strategy, `FULFILL_WINDOW = 2 days`.
 
+### `supplyIdle` — park idle USDC in Moonwell so it earns (no borrow, no LP)
+
+```solidity
+function supplyIdle(uint256 amount) external onlyProposer nonReentrant;   // 0xe349a513
+```
+
+| | |
+|---|---|
+| `amount` | USDC (6dp) to supply as Moonwell collateral. Bounded by the strategy's **raw** USDC balance and nothing else — `InsufficientIdle()` above it. |
+| Position effect | `usdc.forceApprove(mUsdc, amount)` → `mUsdc.mint(amount)`. That is the whole op. **No borrow, no LP touch, no health assert** — it only moves USDC from a raw balance into interest-bearing collateral. Same in both pool shapes; no asset-mode branch. |
+| Effect on NAV | **Zero.** `nav()` counts raw USDC at face and collateral at `exchangeRateStored`, and the mint hands back `amount / exchangeRateStored` cTokens worth `amount` again. Expect movement of at most 1–2 units (6dp) from the mint's floor division. If you see more, something is wrong — stop. |
+| Effect on LTV | LTV **falls**: collateral grows, debt does not. The book is then under-levered relative to `targetLtvBps` until you retarget. |
+| Works on a flat book | Yes, and this is the main use. After `flatten` the entire fund sits as raw USDC earning nothing; `supplyIdle` puts it to work while the book is out of the pool. `nav()`'s flat branch prices the collateral, so deposits and redeems keep working normally throughout. |
+| Errors | `InsufficientIdle` (asked for more than the raw balance), `MoonwellMintFailed(errCode)` (market paused or at its **supply cap** — a retry, not a fault), `NotProposer`, `NotExecuted`. |
+| When to call | Whenever meaningful idle USDC has accumulated (deposits, a `flatten`, a rerange remainder) and you are not about to lever it immediately. |
+
+**How much float to leave un-supplied is your call, and it is a real trade-off.** `supplyIdle` takes an
+amount rather than sweeping, on purpose:
+
+- **Supplying earns.** Un-supplied USDC earns nothing at all.
+- **Raw USDC is the only ORACLE-FREE redeem cover.** When a full async redeem's proportional repay comes
+  up short on a leg (IL), the cover runs in two phases: **Phase 1** buys the deficit with the *raw* USDC
+  balance and reads **no** Chainlink feed; **Phase 2** falls back to redeeming collateral and pricing the
+  deficit off the oracle. So the raw float is exactly how much of a shortfall can be covered with the
+  feeds down — which matters most for the trustless 2-day `emergencyRedeem` deadman (§C), the one exit
+  that must keep working when nothing else does.
+
+This is why supplying is a keeper op and **not** something `deposit` does on arrival. Supplying every
+deposit as it landed would (a) put Moonwell's supply cap on the fund's money-in path — a capped market
+could refuse deposits outright — and (b) drive the Phase-1 budget structurally to zero, making every
+shortfall-carrying full redeem oracle-dependent. As an operator dial, both stay under your control.
+
+Rule of thumb: park the working capital, hold back a float sized against the redemptions you would want
+to be able to cover with the oracle down. `supplyIdle` then `adjustLeverage` is a two-step spelling of
+`deployIdle` — see the next entry for when to use which.
+
 ### `deployIdle` — put idle USDC to work
 
 ```solidity
 function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer nonReentrant;
 ```
+
+> **`deployIdle` vs `supplyIdle` + `adjustLeverage`.** `deployIdle` supplies *and* borrows *and* adds to
+> the LP in one call. `supplyIdle` only supplies; the collateral it creates is **leverageable like any
+> other** (there is no buffer/book distinction in `Layout`), so a following `adjustLeverage` levers the
+> whole book — the new collateral included — to the stored `targetLtvBps` and lands the same position.
+> Use `deployIdle` when you want one call with a `minLiquidity` floor; use `supplyIdle` when you want the
+> USDC earning *now* and will lever on a separate cadence, or when the book is flat and there is nothing
+> to add to.
+>
+> `amount` may now exceed the raw balance: the bound is raw **plus** redeemable mUSDC collateral, and the
+> op redeems the shortfall on demand (`MoonwellRedeemFailed(errCode)` if Moonwell will not release it —
+> supply-cap-style codes, or a high-utilisation market short of cash). So USDC you parked with
+> `supplyIdle` is still deployable without un-parking it first.
 
 | | |
 |---|---|
@@ -578,14 +627,24 @@ and earn nothing until deployed. Key facts for the agent:
 
 - `deposit(assets, minShares)` on the strategy mints shares priced against `nav()` but leaves the USDC
   idle — the comment is explicit: "Deposited USDC sits idle until a proposer calls `deployIdle()`."
-- **`nav()` counts strategy-held idle USDC but NOT vault float** (verified: the flat-book branch reads
-  `IERC20(usdc).balanceOf(address(this))` — the strategy's own balance — and the docstring states vault
-  float is excluded to preserve deposit/redeem symmetry). So idle-but-undeployed deposits are in NAV and
-  correctly priced.
-- The agent's job is to **periodically `deployIdle`** accumulated idle USDC. `amount` is bounded only by
-  the idle balance — the leverage caps bind the *result* (the closing `_assertHealthy()`), not the input,
-  because the tranche is borrowed at exactly `targetLtvBps` (§B). The real decision is the size of the
-  reserve you leave behind.
+  **Deposit touches no venue at all**, deliberately: a paused or supply-capped Moonwell market can never
+  refuse the fund's money-in path.
+- **Idle USDC does not have to be dead while it waits.** `supplyIdle(amount)` (§B) parks any part of the
+  raw balance in Moonwell to earn supply interest, without borrowing or touching the LP, and works on a
+  flat book too. It is NAV-neutral. How much you leave raw is a real dial — the raw float is the only
+  ORACLE-FREE cover for an IL shortfall on a full async redeem (§B, `supplyIdle`).
+- **`nav()` counts strategy-held raw USDC AND its Moonwell collateral, but NOT vault float.** Both
+  branches count both terms: the active branch through `netEquityUsdc`, and the flat branch through
+  `LeveragedAeroValuation.usdcAvailable(usdc, mUsdc, strategy)` — raw balance plus
+  `mUsdc.balanceOf × exchangeRateStored / 1e18`, no feed read, so a flat book stays priceable through an
+  oracle outage. Vault float is excluded to preserve deposit/redeem symmetry. So idle-but-undeployed
+  deposits are in NAV and correctly priced whether or not you have parked them.
+- The agent's job is to **periodically `deployIdle`** accumulated idle USDC (or `supplyIdle` it and lever
+  on a separate cadence). `amount` is bounded by raw USDC **plus** redeemable mUSDC collateral — the
+  leverage caps bind the *result* (the closing `_assertHealthy()`), not the input, because the tranche is
+  borrowed at exactly `targetLtvBps` (§B). The real decision is the size of the reserve you leave
+  behind — and note that parking a reserve with `supplyIdle` does **not** remove it from `deployIdle`'s
+  reach, but it does remove it from the oracle-free redeem cover.
 - **Why the reserve matters: the fast `redeem` path draws idle FIRST, then Moonwell collateral** — via
   `_redeemUnderlying($.mUsdc, …)` — and **never** touches the LP position or the debt (the fast path has
   zero LP call sites; unwinding the LP happens only on the async `fulfillRedeem` path). The LTV gate

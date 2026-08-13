@@ -5,6 +5,7 @@ import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
+import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
@@ -865,6 +866,274 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         return 5000 - (5000 * lo) / hi;
     }
 
+    // ==================== "NO IDLE USDC SITS DEAD" (the proposer's `supplyIdle`) ====================
+
+    /// @dev Fund a live book with `assets` from `lp` through the real `deposit` entrypoint.
+    function _deposit(uint256 assets) internal returns (uint256 shares) {
+        usdc.mint(lp, assets);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), assets);
+        shares = strategy.deposit(assets, 0);
+        vm.stopPrank();
+    }
+
+    /// @dev USDC collateral (6dp face) on the strategy's own basis.
+    function _collateralUsdc() internal view returns (uint256) {
+        return (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18;
+    }
+
+    /// @dev Chainlink-priced LTV of the live book, on the strategy's own health basis.
+    function _ltvBps() internal view returns (uint256) {
+        uint256 debtUsdc = _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
+            + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18);
+        return (debtUsdc * 10_000) / _collateralUsdc();
+    }
+
+    /// @dev The keeper supplies the whole raw balance to Moonwell.
+    function _supplyAllIdle() internal returns (uint256 supplied) {
+        supplied = usdc.balanceOf(address(strategy));
+        vm.prank(proposer);
+        strategy.supplyIdle(supplied);
+    }
+
+    /// @dev DEPOSIT IS UNTOUCHED. Money-in has no Moonwell dependency: the USDC lands raw and stays
+    ///     raw until a keeper decides to park it. This is the assertion that pins the design choice —
+    ///     a paused / supply-capped Moonwell USDC market must never be able to refuse a deposit.
+    function testDepositLeavesTheUsdcRawAndTouchesNoMoonwellMarket() public {
+        _execute(SEED);
+        uint256 collateralBefore = _collateralUsdc();
+        mUsdc.setSupplyErrors(4, 0); // a market that would refuse every mint
+
+        uint256 top = 250_000e6;
+        _deposit(top); // must not revert
+
+        assertEq(usdc.balanceOf(address(strategy)), top, "the deposit is held as RAW USDC");
+        assertEq(_collateralUsdc(), collateralBefore, "deposit supplied nothing to Moonwell");
+    }
+
+    /**
+     * @dev THE INVARIANT, under keeper control. `supplyIdle` moves raw USDC into mUSDC and the move is
+     *      value-neutral: NAV is unchanged. That second half is the load-bearing one — `nav()` counts
+     *      idle at FACE and collateral at `exchangeRateStored`, so "park it" is only free if those two
+     *      agree, which they do at any rate because the mint hands back `amount/rate` cTokens worth
+     *      `amount` again.
+     */
+    function testSupplyIdleMovesRawUsdcIntoMoonwellAndConservesNav() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+
+        uint256 collateralBefore = _collateralUsdc();
+        uint256 navBefore = strategy.nav();
+
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+
+        assertEq(usdc.balanceOf(address(strategy)), 0, "the raw balance was parked");
+        assertEq(_collateralUsdc() - collateralBefore, top, "and it became mUSDC collateral");
+        assertApproxEqAbs(strategy.nav(), navBefore, 1, "NAV unchanged by the move (rounding dust only)");
+    }
+
+    /// @dev The same, at a non-unit exchange rate — the case where "idle at face vs collateral at
+    ///      `exchangeRateStored`" could actually diverge if the accounting were wrong.
+    function testSupplyIdleConservesNavAtANonUnitExchangeRate() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        mUsdc.setExchangeRateStored(1.37e18); // the market has accrued supply interest
+
+        uint256 navBefore = strategy.nav();
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+
+        assertEq(usdc.balanceOf(address(strategy)), 0, "still nothing raw");
+        // `mint` floors `amount/rate` cTokens, so up to one cToken (~1.37 units of USDC) can round away.
+        assertApproxEqAbs(strategy.nav(), navBefore, 2, "NAV unchanged, bar mint rounding");
+    }
+
+    /// @dev PARTIAL BY DESIGN. The keeper decides how much float to leave un-supplied — that raw slice
+    ///      is what keeps the redeemer's ORACLE-FREE Phase-1 IL cover reachable. `supplyIdle` must
+    ///      therefore take an amount, not sweep, and must leave the remainder exactly alone.
+    function testSupplyIdleLeavesTheKeepersChosenFloatRaw() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        _deposit(250_000e6);
+
+        vm.prank(proposer);
+        strategy.supplyIdle(200_000e6); // park most, keep a 50k oracle-free cover float
+
+        assertEq(usdc.balanceOf(address(strategy)), 50_000e6, "the keeper's float is untouched");
+        assertEq(_collateralUsdc(), SEED + 200_000e6, "and only the parked slice became collateral");
+    }
+
+    /**
+     * @dev THE POLICY, ASSERTED. Supplied-but-unlevered USDC is LEVERAGEABLE: there is no buffer/book
+     *      distinction in `Layout`, `_readCollateralDebt` sees one collateral base, and so
+     *      `adjustLeverage` ALONE levers a freshly-parked balance to `targetLtvBps` — no `deployIdle`
+     *      needed. The book-level LTV dips after the supply (collateral grew, debt did not) and the
+     *      retarget brings the WHOLE book, the new collateral included, back to target.
+     */
+    function testSupplyIdleThenAdjustLeverageLeversTheNewCollateralToTarget() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+
+        // The supply diluted the leverage: same debt over a bigger base.
+        assertApproxEqAbs(_ltvBps(), (uint256(TARGET_LTV_BPS) * SEED) / (SEED + top), 2, "LTV dipped on the supply");
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(0, 0); // the STANDING target — no policy change, no deployIdle
+
+        assertEq(_collateralUsdc(), SEED + top, "collateral is the whole book, the parked slice included");
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "adjustLeverage alone levered the new collateral");
+    }
+
+    /// @dev Over-asking is a typed refusal against the RAW balance — `supplyIdle` supplies, it does not
+    ///      reach into the LP or re-supply collateral, so the raw balance is exactly its budget.
+    function testSupplyIdleRevertsInsufficientIdleAboveTheRawBalance() public {
+        _execute(SEED);
+        _deposit(100_000e6);
+        uint256 raw = usdc.balanceOf(address(strategy));
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);
+        strategy.supplyIdle(raw + 1);
+    }
+
+    /// @dev PROPOSER-ONLY, like every other venue op. The admin (vault owner) holds POLICY, not
+    ///      operations — it sets the target LTV and stages venues; it does not move funds on venues.
+    function testSupplyIdleRejectsTheAdminAndStrangers() public {
+        _execute(SEED);
+        _deposit(100_000e6);
+
+        vm.prank(owner);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        strategy.supplyIdle(1e6);
+
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        strategy.supplyIdle(1e6);
+    }
+
+    /// @dev Lifecycle-gated exactly like `deployIdle` / `compound` / `adjustLeverage`.
+    function testSupplyIdleRevertsBeforeExecute() public {
+        usdc.mint(address(strategy), 100_000e6);
+        vm.prank(proposer);
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        strategy.supplyIdle(100_000e6);
+    }
+
+    /// @dev FAIL-CLOSED on the supply, and harmless: a Moonwell USDC market that refuses to mint
+    ///      (paused, at its supply cap) reverts with the market's own code and moves nothing. On a
+    ///      keeper op that is a retry — which is precisely why this call is not on the deposit path.
+    function testSupplyIdleRevertsMoonwellMintFailedWhenTheMarketRefuses() public {
+        _execute(SEED);
+        _deposit(100_000e6);
+        mUsdc.setSupplyErrors(4, 0); // MARKET_NOT_FRESH-shaped code
+
+        vm.prank(proposer);
+        vm.expectRevert(abi.encodeWithSelector(LeveragedAerodromeCLStrategy.MoonwellMintFailed.selector, uint256(4)));
+        strategy.supplyIdle(100_000e6);
+    }
+
+    /// @dev `deployIdle` still works when the amount lives in mUSDC rather than as a raw balance: the
+    ///      `InsufficientIdle` bound now measures raw + collateral, and `_materialiseUsdc` redeems the
+    ///      shortfall before `_supplyAndBorrow` puts it back. End state is identical to the raw case.
+    function testDeployIdleWorksFromSuppliedCollateralWithNoRawUsdc() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+        assertEq(usdc.balanceOf(address(strategy)), 0, "precondition: nothing raw to deploy");
+
+        uint256 debtBBefore = mLegB.borrowBalance(address(strategy));
+        vm.prank(proposer);
+        strategy.deployIdle(top, 0);
+
+        assertEq(_collateralUsdc(), SEED + top, "collateral unchanged by the redeem->supply round trip");
+        assertGt(mLegB.borrowBalance(address(strategy)), debtBBefore, "the amount was levered");
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "deployIdle landed the book on target");
+    }
+
+    /// @dev The bound is still typed and still binding — it just measures the right basis now. Asking
+    ///      for one unit more than raw + collateral is `InsufficientIdle`, not a silent cap.
+    function testDeployIdleStillRevertsAboveRawPlusCollateral() public {
+        _execute(SEED);
+        uint256 available = usdc.balanceOf(address(strategy)) + _collateralUsdc();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);
+        strategy.deployIdle(available + 1, 0);
+    }
+
+    /// @dev `redeploy` re-enters a FLAT book whose whole pot the keeper parked in mUSDC —
+    ///      `executeImpl` reads `_usdcAvailable()` and materialises it, where the raw-balance read
+    ///      would have seen 0 and refused `ExecuteZeroBalance` on a fully-funded fund.
+    function testRedeployReEntersAFlatBookHeldEntirelyAsCollateral() public {
+        uint256 pot = _flatBookHeldEntirelyAsCollateral();
+
+        vm.prank(proposer);
+        strategy.redeploy(0);
+        assertGt(strategy.layout().tokenId, 0, "redeploy re-entered from collateral alone");
+        assertEq(_collateralUsdc(), pot, "the whole pot is back as collateral after the round trip");
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "and landed on target");
+    }
+
+    /// @dev Reach a FLAT book whose entire pot sits in mUSDC and NOTHING is raw — `flatten` realises
+    ///      the book to raw USDC and the keeper parks it, which is exactly the state `supplyIdle`
+    ///      exists for (a flat book is the one holding the most dead USDC).
+    /// @return pot The USDC now held entirely as collateral.
+    function _flatBookHeldEntirelyAsCollateral() internal returns (uint256 pot) {
+        _execute(SEED);
+        vm.prank(proposer);
+        strategy.flatten(0, 1);
+        assertEq(strategy.layout().tokenId, 0, "precondition: flat book");
+
+        pot = _supplyAllIdle();
+        assertGt(pot, 0, "flatten realised a pot");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "the whole pot is collateral, nothing raw");
+        assertEq(_collateralUsdc(), pot, "and it is priced as collateral");
+        assertEq(strategy.nav(), pot, "flat-book nav() prices the collateral it now holds");
+    }
+
+    /// @dev A failing `redeemUnderlying` surfaces as the typed `MoonwellRedeemFailed` on the paths that
+    ///      can NOW reach one — `deployIdle` materialises raw USDC on demand, which it never did while
+    ///      idle USDC could only sit raw.
+    function testMoonwellRedeemFailedSurfacesOnTheNewlyMaterialisingPaths() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+
+        mUsdc.setSupplyErrors(0, 9); // TOKEN_INSUFFICIENT_CASH-shaped code
+        vm.prank(proposer);
+        vm.expectRevert(abi.encodeWithSelector(LeveragedAerodromeCLStrategy.MoonwellRedeemFailed.selector, uint256(9)));
+        strategy.deployIdle(top, 0);
+    }
+
+    /// @dev The other newly-materialising path: `redeploy` on a flat book whose pot is all collateral.
+    function testMoonwellRedeemFailedSurfacesOnRedeploy() public {
+        _flatBookHeldEntirelyAsCollateral();
+        mUsdc.setSupplyErrors(0, 9);
+        vm.prank(proposer);
+        vm.expectRevert(abi.encodeWithSelector(LeveragedAerodromeCLStrategy.MoonwellRedeemFailed.selector, uint256(9)));
+        strategy.redeploy(0);
+    }
+
     // ==================== REDEEM ====================
 
     /// @dev The stayer reservation in the ORIGINAL shape: with no LP-shed USDC (both LP legs are
@@ -896,6 +1165,99 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             "stayers keep exactly (1-f) of the idle USDC"
         );
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "redeemer paid");
+    }
+
+    /**
+     * @dev THE FAST PATH WITH NOTHING RAW. `fastRedeemImpl` draws idle first, then collateral; on a
+     *      book the keeper has fully parked there is no idle, so it always draws collateral and the
+     *      LTV gate — which a fully idle-funded redeem used to skip entirely — is always live. That is
+     *      the same economics either way (the USDC being paid out IS collateral now, so paying it out
+     *      really does move the LTV), and it is not a tightening in practice: the supply LOWERS the
+     *      book's LTV before it can be redeemed, so a supply-then-exit always has headroom. Both
+     *      halves asserted here.
+     */
+    function testFastRedeemDrawsFromCollateralWhenNothingIsRawIdle() public {
+        _execute(SEED);
+        uint256 top = 250_000e6;
+        uint256 shares = _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top); // the keeper left NO float — the tightest case for the fast path
+        assertEq(usdc.balanceOf(address(strategy)), 0, "precondition: no raw idle to draw on");
+
+        uint256 collateralBefore = _collateralUsdc();
+        uint256 lpBefore = usdc.balanceOf(lp);
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares / 4);
+        uint256 out = strategy.redeem(shares / 4, 0);
+        vm.stopPrank();
+
+        assertGt(out, 0, "the fast path paid out");
+        assertEq(usdc.balanceOf(lp) - lpBefore, out, "payout delivered");
+        assertEq(collateralBefore - _collateralUsdc(), out, "funded entirely from collateral");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "and nothing was left raw behind it");
+    }
+
+    /**
+     * @dev THE ASYNC PATH WITH NOTHING RAW, AND THE IL COVER. A full redeem repays both debts from the
+     *      unwound legs; a price move leaves one leg short, and the shortfall has to be bought. The
+     *      redeemer's Phase-1 cover budget IS the raw balance and Phase 1 is ORACLE-FREE; a keeper
+     *      that parks everything drives that budget to 0 and the redeem falls through to Phase 2
+     *      (`_settleShortfall`), which redeems collateral, buys the deficit off Chainlink and repays.
+     *      This pins that the exit still completes and still pays — the failure mode that matters on a
+     *      redeem valve — in the WORST case the keeper can create.
+     *
+     *      AND THAT IS WHY THE FLOAT IS A KEEPER DIAL. Phase 2 reads feeds; Phase 1 does not. Supplying
+     *      on deposit would have made this state unavoidable and pushed every shortfall-carrying full
+     *      redeem — including the trustless `emergencyRedeem` deadman — onto the oracle. With
+     *      `supplyIdle` the operator chooses: leave float, keep Phase 1 reachable, pay the supply APY
+     *      on that slice. `testSupplyIdleLeavesTheKeepersChosenFloatRaw` is the other side of this.
+     */
+    function testAsyncFullRedeemCoversAnIlShortfallWithZeroRawIdle() public {
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK_ORACLE_CONSISTENT));
+        pool.setTick(TICK_ORACLE_CONSISTENT);
+        _execute(SEED);
+
+        uint256 shares = _deposit(250_000e6);
+        vm.prank(proposer);
+        strategy.supplyIdle(250_000e6); // keeper leaves NO float: Phase 1 has nothing to spend
+        assertEq(usdc.balanceOf(address(strategy)), 0, "precondition: the redeemer's Phase-1 budget is 0");
+
+        // Move the pool up (spot AND TWAP) with leg B's oracle + swap rate: leg B is token0, so the LP
+        // now holds LESS leg B than the leg-B debt and the proportional repay comes up short.
+        int24 newTick = TICK_ORACLE_CONSISTENT + 600;
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
+        pool.setTick(newTick);
+        pool.setTwapTick(newTick);
+        uint256 newPB = (P_LEG_B * 1_061_837) / 1_000_000; // 1.0001^600
+        legBFeed.setAnswer(int256(newPB));
+        router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
+        router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
+        // FIXTURE ONLY: `MockNpm` custodies exactly what it was minted, so a post-move `collect` owes
+        // amounts re-priced at the new sqrtP that it never received. Float it, as other LPs would.
+        legB.mint(address(npm), 100e8);
+        legA.mint(address(npm), 100e18);
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 legBBoughtBefore = router.boughtOf(address(legB));
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares);
+        uint256 id = strategy.requestRedeem(shares, 0);
+        vm.stopPrank();
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        // The cover really ran — without this the test would pass vacuously on a book that had no
+        // shortfall to cover in the first place.
+        assertGt(
+            router.boughtOf(address(legB)),
+            legBBoughtBefore,
+            "the IL cover actually bought leg B with USDC (the path under test was reached)"
+        );
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared through the IL cover");
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid despite the shortfall");
     }
 
     /// @dev Full redeem clears the book with BOTH debts repaid and the flat-book invariant restored.

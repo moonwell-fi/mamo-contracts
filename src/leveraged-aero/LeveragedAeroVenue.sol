@@ -4,11 +4,13 @@ pragma solidity 0.8.28;
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
-import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
+import {ICToken, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title LeveragedAeroVenue
@@ -34,6 +36,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///      CORRUPTION-CRITICAL note in `LeveragedAerodromeCLStrategy` and `layout_parity.sh`. Do not
 ///      touch any of the three copies without the others.
 library LeveragedAeroVenue {
+    using SafeERC20 for IERC20;
+
     // ── Errors (shared selectors with the strategy / BaseStrategy where names collide) ──
     error ZeroAddress();
     error VenueMismatch(); // pool/gauge/market wiring does not match the declared legs or tickSpacing
@@ -56,6 +60,7 @@ library LeveragedAeroVenue {
     error ZeroMinOut(); // flatten with a reward balance to sell but no caller floor
     error BelowOracleFloor(); // flatten's reward-swap fill < the AERO/USD oracle floor (L9)
     error InsufficientIdleAfterFlatten(uint256 idle, uint256 minIdle); // caller's aggregate unwind floor
+    error MoonwellMintFailed(uint256 errCode); // selector mirrors the strategy's / the manager's
 
     // ── Events (emitted from the strategy's address via delegatecall) ──
     /// @notice A destination venue hash was staged (or cleared, when `venueHash == 0`) by the vault owner.
@@ -223,6 +228,42 @@ library LeveragedAeroVenue {
         assembly {
             $.slot := STORAGE_SLOT
         }
+    }
+
+    // ── Idle supply ("no idle USDC sits dead") ──
+
+    /// @notice Supply `amount` of the strategy's raw USDC to Moonwell as collateral — the body of the
+    ///         proposer's `LeveragedAerodromeCLStrategy.supplyIdle`.
+    /// @dev THE "NO IDLE USDC SITS DEAD" ENTRYPOINT. Idle USDC used to sit as a raw ERC-20 balance
+    ///      earning nothing until a proposer levered it; the keeper can now park it in mUSDC, where it
+    ///      earns supply interest whether or not it is levered. The move is value-neutral to `nav()` —
+    ///      the amount leaves the raw-balance term and enters the collateral term at
+    ///      `exchangeRateStored`, and BOTH branches of `nav()` count both terms (the flat branch counts
+    ///      the collateral one precisely because this op can run on a flat book).
+    ///
+    ///      SUPPLIED-BUT-UNLEVERED COLLATERAL IS LEVERAGEABLE, BY POLICY. There is no buffer/book
+    ///      distinction in `Layout` and `LeveragedAeroManager._readCollateralDebt` is untouched, so
+    ///      `adjustLeverage` sees the grown collateral base and levers the WHOLE book to
+    ///      `targetLtvBps`. That is the intended behaviour, not a leak.
+    ///
+    ///      FAIL-CLOSED, and cheap to be: a Moonwell mint that errors (market paused, supply cap
+    ///      reached) reverts with the market's own code and moves nothing. On a KEEPER op that is a
+    ///      retry, not a user-facing failure — which is the whole reason this is not part of `deposit`.
+    ///      Putting it there would have let Moonwell's supply cap decide whether the fund can take
+    ///      money at all, and would have needed a `try/catch` to be safe; here it needs neither. See
+    ///      the entrypoint's docs for the second reason (the raw redeem-cover float).
+    ///
+    ///      No `enterMarkets` here: `LeveragedAeroManager.executeImpl` entered mUSDC at activation and
+    ///      market entry is permanent, and the entrypoint is gated on `State.Executed`, so it has
+    ///      provably run. This lives in THIS library, not the manager, purely for EIP-170 headroom —
+    ///      the manager is the one at the cap, and this is a two-call venue op with no manager-private
+    ///      dependency.
+    function supplyIdleImpl(uint256 amount) public {
+        if (amount == 0) return;
+        Layout storage $ = _layout();
+        IERC20($.usdc).forceApprove($.mUsdc, amount);
+        uint256 err = ICToken($.mUsdc).mint(amount);
+        if (err != 0) revert MoonwellMintFailed(err);
     }
 
     // ── Migration ops (auth + state gates live in the strategy's entry points) ──

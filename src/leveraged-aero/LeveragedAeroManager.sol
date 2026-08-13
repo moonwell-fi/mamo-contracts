@@ -245,8 +245,15 @@ library LeveragedAeroManager {
     ///                     `flattenImpl` levels at `settleImpl`'s unwind mins.
     function executeImpl(uint256 minLiquidity) public {
         Layout storage $ = _layout();
-        uint256 usdcAmt = IERC20($.usdc).balanceOf(address(this));
+        // THE WHOLE FLAT-BOOK POT, raw or supplied. Activation reaches here holding the seed as a raw
+        // balance; `redeploy` reaches here on a flat book the keeper may have swept into mUSDC with
+        // `supplyIdle` — reading the raw balance alone would see 0 there and revert `ExecuteZeroBalance`
+        // on a fund that is fully funded. Materialise the shortfall so `_supplyAndBorrow` gets the
+        // raw USDC it splits (activation redeems nothing; a redeploy pays one round trip, on an op
+        // that re-enters the entire book and runs at most once per flatten cycle).
+        uint256 usdcAmt = _usdcAvailable();
         if (usdcAmt == 0) revert ExecuteZeroBalance();
+        _materialiseUsdc(usdcAmt);
         address[] memory markets = new address[](1);
         markets[0] = $.mUsdc;
         IComptroller($.comptroller).enterMarkets(markets);
@@ -351,6 +358,17 @@ library LeveragedAeroManager {
             //
             // Phase 1 (oracle-free): cover IL shortfall from idle USDC via exact-output swap.
             //   When idle == 0 the calls are safe no-ops (amountInMaximum = 0 → early return).
+            //
+            //   THE RAW FLOAT IS AN OPERATOR DIAL, AND THIS IS WHAT IT BUYS. Phase 1 spends the RAW
+            //   USDC balance and reads no feed; Phase 2 below redeems collateral and prices the
+            //   deficit off Chainlink. So the size of the raw float decides how much of a full
+            //   redeem's IL shortfall can be covered WITHOUT an oracle — which matters most for the
+            //   trustless `emergencyRedeem` deadman, the one exit that must not depend on our feeds.
+            //   `supplyIdle` is deliberately a KEEPER op rather than something `deposit` does on
+            //   arrival for exactly this reason: supplying every deposit as it landed would have
+            //   driven this budget structurally to 0 and made every shortfall-carrying full redeem
+            //   oracle-dependent. Leaving float un-supplied costs the supply APY on that slice; the
+            //   keeper sizes the trade-off, the code does not make it for them.
             if (cbShort > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, type(uint256).max);
             if (wethShort > 0) _redeemCoverShortfall($.weth, $.mWeth, wethShort, type(uint256).max);
             // Phase 2 (self-fund fallback): if residual debt remains after Phase 1 (idle == 0 case),
@@ -447,9 +465,25 @@ library LeveragedAeroManager {
     ///      NO UP-FRONT CALM-GATE HERE — the gate lives inside `_addLiquidity`, so it runs AFTER the
     ///      supply/borrow below and before the pool is touched. See the ordering note on `executeImpl`
     ///      for why that asymmetry is deliberate and why it is not a weakening.
+    ///
+    ///      `InsufficientIdle` NOW BOUNDS AGAINST `_usdcAvailable()`, NOT THE RAW BALANCE. Idle USDC
+    ///      the keeper has parked with `supplyIdle` lives in mUSDC, so the raw balance can be 0 on a
+    ///      fully-funded book and the old bound would have refused the call. The meaning is unchanged
+    ///      — "you asked to deploy more USDC than this book holds outside the LP" — only the basis
+    ///      widened to include the collateral that USDC is now sitting in. `_materialiseUsdc` then
+    ///      redeems just the shortfall (a NO-OP for `compound`, which arrives holding raw swap
+    ///      proceeds) and `_supplyAndBorrow` supplies its collateral share straight back.
+    ///
+    ///      WORTH KNOWING, FOR THE ORDINARY PATH: this op is now largely REDUNDANT. A deposit already
+    ///      grows the collateral base directly, and `adjustLeverage` alone levers that base to
+    ///      `targetLtvBps` in both shapes — in asset-mode landing provably the same book this would
+    ///      (see `LeveragedAeroValuation.assetModeLeverUpPair`'s fixed point). What still REQUIRES
+    ///      `deployIdle` is `compound`'s harvest redeploy, which hands it genuinely raw swap proceeds
+    ///      that are not yet collateral and must not wait for a separate lever step.
     function deployIdleImpl(uint256 amount, uint256 minLiquidity) public {
         Layout storage $ = _layout();
-        if (amount > IERC20($.usdc).balanceOf(address(this))) revert InsufficientIdle();
+        if (amount > _usdcAvailable()) revert InsufficientIdle();
+        _materialiseUsdc(amount);
         (uint256 cbBTCAmt, uint256 wethAmt) = _supplyAndBorrow(amount, $.posTickLower, $.posTickUpper);
         _wrapAddRestake(cbBTCAmt, wethAmt, minLiquidity);
         _assertHealthy();
@@ -638,11 +672,12 @@ library LeveragedAeroManager {
     ///
     ///         ASSET-MODE: lever DOWN works unchanged (the leg-B residual IS USDC and flows straight
     ///         into the leg-A cover). Lever UP borrows ONLY leg A and pairs it with USDC DRAWN FROM THE
-    ///         BOOK'S IDLE BALANCE — see `_leverUp` for the derivation and for why idle-funding (not
-    ///         swap-funding) is the only delta-preserving choice. OPERATOR NOTE: an asset-mode lever-up
-    ///         therefore CONSUMES idle USDC. That is value-conserving (a NAV component moving from idle
-    ///         into the LP, not a loss) but it shrinks the redeem cover budget until the next deposit, so
-    ///         size lever-ups against available idle; an under-funded one reverts
+    ///         BOOK'S OWN USDC — raw balance first, then a `redeemUnderlying` off the mUSDC collateral,
+    ///         which is where that USDC lives once the keeper has run `supplyIdle`. See `_leverUp` for
+    ///         the derivation and for why own-funding (not swap-funding) is the only delta-preserving
+    ///         choice. OPERATOR NOTE: an asset-mode lever-up therefore CONSUMES collateral into the LP.
+    ///         That is value-conserving (a NAV component changing form, not a loss) and the sizing
+    ///         corrects for it, so the book still lands at target; an under-funded one reverts
     ///         `InsufficientIdleForLeverUp(needed, available)` and changes nothing.
     /// @param targetLtvBps_ Target LTV in bps. The caller passes the fund's STORED standing target
     ///                      (`$.targetLtvBps`), which the admin's `setTargetLtv` already validated as
@@ -756,14 +791,18 @@ library LeveragedAeroManager {
     ///      `LeveragedAeroValuation.assetModeLeverUpPair`, which shares its ratio probe and its
     ///      USD→leg-A conversion with the genesis `assetModeSplit` so the two cannot drift.
     ///
-    ///      IDLE IS A HARD REQUIREMENT, CHECKED BEFORE THE BORROW: short idle reverts
-    ///      `InsufficientIdleForLeverUp(needed, available)` with the whole op rolled back — deliberately
-    ///      NOT a partial fill and NOT a silent cap, so the rebalancer gets a loud, diagnosable failure
-    ///      instead of a quietly under-levered (and, worse, quietly un-hedged) position. The consumed
-    ///      idle is value-conserving — a NAV component moving from idle into the LP — but it does shrink
-    ///      the redeem cover budget until the next deposit, so lever-ups should be sized against
-    ///      available idle. A stored range the price has since left is one-sided and fails closed
-    ///      (`DegenerateRange`), same as `deployIdle`; `rerange` recentres and unblocks it.
+    ///      FUNDING IS A HARD REQUIREMENT, CHECKED BEFORE THE BORROW: a book that cannot fund `U′`
+    ///      reverts `InsufficientIdleForLeverUp(needed, available)` with the whole op rolled back —
+    ///      deliberately NOT a partial fill and NOT a silent cap, so the rebalancer gets a loud,
+    ///      diagnosable failure instead of a quietly under-levered (and, worse, quietly un-hedged)
+    ///      position. `available` is now `_usdcAvailable()` (raw balance + redeemable mUSDC collateral),
+    ///      not the raw balance: on a book the keeper has swept with `supplyIdle` the raw balance is 0
+    ///      and the old bound would have made asset-mode lever-up unreachable there. The consumed USDC
+    ///      is still
+    ///      value-conserving — a NAV component moving from collateral into the LP — and the sizing
+    ///      accounts for the collateral it consumes (see the fixed point above), so the op lands AT
+    ///      target rather than past it. A stored range the price has since left is one-sided and fails
+    ///      closed (`DegenerateRange`), same as `deployIdle`; `rerange` recentres and unblocks it.
     function _leverUp(uint256 borrowDeltaUsd, uint256 minLiq) private {
         Layout storage $ = _layout();
         uint256 cbBTCAmt;
@@ -775,17 +814,39 @@ library LeveragedAeroManager {
             // range `_addLiquidity` will actually add into). Leg B IS the unit of account here, so that
             // USDC enters as the leg-B amount and `_amounts01` routes it with no further special-casing —
             // identical to `deployIdleImpl`'s asset-mode add. `assetModeLeverUpPair` also enforces the
-            // idle bound (BEFORE the borrow below), reverting `InsufficientIdleForLeverUp`.
+            // funding bound (BEFORE the borrow below), reverting `InsufficientIdleForLeverUp`.
+            //
+            // TWO THINGS CHANGED WITH "NO IDLE USDC SITS DEAD", and they are one decision. The pairing
+            // USDC can no longer be assumed to come from a raw balance (once the keeper has run
+            // `supplyIdle` there may be none), so (1) the bound is taken against `_usdcAvailable()` —
+            // raw plus redeemable
+            // collateral — and (2) `raw` and `targetLtvBps` are passed so the sizing solves the FIXED
+            // POINT `Δ = (borrowDeltaUsd + ltv·raw) / (1 + ltv·m)` rather than the naive delta: the
+            // part of `U′` that has to be redeemed out of the collateral shrinks the very base the LTV
+            // is measured against, and ignoring that lands the book ABOVE target — far enough to trip
+            // `_assertHealthy`'s `maxLtvBps` on an aggressive one. A book still holding `raw ≥ U′`
+            // clamps back to the naive delta, i.e. to this call's pre-change behaviour exactly. The
+            // derivation, and the proof that it reproduces `assetModeSplit`'s genesis book, are on
+            // `assetModeLeverUpPair`.
+            //
+            // ORDER IS LOAD-BEARING: size (which enforces the bound) → materialise → borrow. The
+            // `_materialiseUsdc` sits between them so the redeem happens against the PRE-borrow book,
+            // where Moonwell's own collateral check is at its most permissive; doing it after the
+            // borrow would ask Moonwell to release collateral against a debt that just grew.
+            uint256 raw = IERC20($.usdc).balanceOf(address(this));
             (wethAmt, cbBTCAmt) = LeveragedAeroValuation.assetModeLeverUpPair(
                 $.pool,
                 $.posTickLower,
                 $.posTickUpper,
                 borrowDeltaUsd,
-                IERC20($.usdc).balanceOf(address(this)),
+                _usdcAvailable(),
+                raw,
+                uint256($.targetLtvBps),
                 $.wethDecimals,
                 $.wethIsToken0,
                 _readUsd8($.wethFeed)
             );
+            _materialiseUsdc(cbBTCAmt);
             _borrowLegA(wethAmt);
         }
         _wrapAddRestake(cbBTCAmt, wethAmt, minLiq);
@@ -967,6 +1028,36 @@ library LeveragedAeroManager {
     function _redeemUnderlying(address cToken, uint256 amt) private {
         uint256 err = ICToken(cToken).redeemUnderlying(amt);
         if (err != 0) revert MoonwellRedeemFailed(err);
+    }
+
+    /// @dev USDC the book can spend without touching the LP — raw balance + redeemable mUSDC
+    ///      collateral. THE FUNDING BASIS every "do I have enough idle?" bound now uses; see
+    ///      `LeveragedAeroValuation.usdcAvailable` for why the raw balance alone is no longer it.
+    function _usdcAvailable() private view returns (uint256) {
+        Layout storage $ = _layout();
+        return LeveragedAeroValuation.usdcAvailable($.usdc, $.mUsdc, address(this));
+    }
+
+    /// @dev MATERIALISE `amt` of RAW USDC on demand: redeem only the SHORTFALL from mUSDC.
+    ///
+    ///      THE SHORTFALL FORM IS THE WHOLE POINT, not an optimisation. A blanket
+    ///      `_redeemUnderlying($.mUsdc, amt)` would make every `deployIdle` a redeem→mint round trip,
+    ///      and Compound's two truncating divisions (`redeemTokens = amt/rate` on the way out,
+    ///      `mintTokens = amt/rate` on the way in) each round AGAINST the position — so a wholesale
+    ///      round trip burns up to ~1 unit of USDC per call for nothing. Redeeming only `amt − raw`
+    ///      makes `compound`'s harvest redeploy — which arrives holding genuinely RAW swap proceeds —
+    ///      a strict no-op: no redeem, no dust, no extra gas, byte-for-byte the old behaviour. The
+    ///      proposer's ordinary `deployIdle` on supplied funds pays the round trip once, on the
+    ///      portion `_supplyAndBorrow` puts straight back (all of it in the two-borrowed-legs shape,
+    ///      only the collateral share `C` in asset-mode).
+    ///
+    ///      Fails closed through `_redeemUnderlying`: a Moonwell redeem the collateral (or the
+    ///      market's cash) cannot cover surfaces as `MoonwellRedeemFailed(err)` with nothing moved.
+    ///      Callers that want a typed pre-check bound themselves by `_usdcAvailable()` first.
+    function _materialiseUsdc(uint256 amt) private {
+        Layout storage $ = _layout();
+        uint256 raw = IERC20($.usdc).balanceOf(address(this));
+        if (amt > raw) _redeemUnderlying($.mUsdc, amt - raw);
     }
 
     // ── Execute helpers ──

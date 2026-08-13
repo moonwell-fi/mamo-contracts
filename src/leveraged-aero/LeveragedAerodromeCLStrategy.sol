@@ -684,10 +684,22 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         Layout storage $ = _layout();
         uint256 gross;
         if ($.tokenId == 0) {
-            // Flat book: strategy-controlled idle USDC only (face, 6dp, no oracle). Vault float is
-            // excluded — `strategy.redeem` never pays it out, so counting it here would re-introduce
-            // the M2 deposit/redeem asymmetry the active-position branch already avoids.
-            gross = IERC20($.usdc).balanceOf(address(this));
+            // Flat book: strategy-controlled USDC only (face, 6dp, NO ORACLE — the property `flatten`
+            // relies on). Vault float is excluded — `strategy.redeem` never pays it out, so counting
+            // it here would re-introduce the M2 deposit/redeem asymmetry the active-position branch
+            // already avoids.
+            //
+            // THE COLLATERAL TERM IS MANDATORY, not a refinement. The proposer's `supplyIdle` can move
+            // the whole pot into mUSDC on a FLAT book — that is the state holding the most dead USDC
+            // (post-`flatten`, post-full-redeem), so it is the state the op is most wanted in — and a
+            // flat book is one the fund genuinely takes deposits in: `flatten` leaves the strategy
+            // `Executed` precisely so deposits/redeems keep working. Pricing such a book off the raw
+            // balance alone would read 0: the next depositor would mint against a zero NAV and every
+            // one after that would revert `NavUnpriceable`, while the supplied USDC sat invisible.
+            // `usdcAvailable` counts raw + `balanceOf × exchangeRateStored`, the same collateral term
+            // the active branch's `netEquityUsdc` and the health basis use, and it reads no feed — so
+            // the flat book stays priceable through an oracle outage exactly as before.
+            gross = LeveragedAeroValuation.usdcAvailable($.usdc, $.mUsdc, address(this));
         } else {
             // Active position: read ticks + liquidity from the NPM and delegate to the valuation lib.
             (int24 tickLower, int24 tickUpper, uint128 liquidity) = _npmPositionData();
@@ -1002,6 +1014,45 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (shares == 0) revert ZeroShares();
         if (shares < minShares) revert InsufficientShares();
         ISyndicateVault(vault_).strategyMint(msg.sender, shares);
+    }
+
+    /// @notice Supply `amount` of the strategy's RAW idle USDC to Moonwell as collateral, so it earns
+    ///         supply interest instead of sitting dead. Does NOT borrow and does NOT touch the LP —
+    ///         `deployIdle` is the op that levers, `adjustLeverage` is the op that retargets. Reverts
+    ///         `InsufficientIdle` if `amount` exceeds the raw balance.
+    ///
+    ///         WHY THIS IS A KEEPER OP AND NOT PART OF `deposit`. Supplying inside `deposit` was the
+    ///         obvious shape and it is the wrong one, for two independent reasons:
+    ///
+    ///           1. IT PUTS MOONWELL ON THE MONEY-IN PATH. A `mint` that errors — market paused, supply
+    ///              cap reached — would revert the deposit itself, i.e. an external venue's capacity
+    ///              would decide whether this fund can take money at all. Here the same failure is a
+    ///              keeper retry: fail-closed inside `supplyIdleImpl`, invisible to depositors.
+    ///           2. IT WOULD HAVE FORCED THE RAW FLOAT TO ZERO. The redeemer's IL-cover budget in
+    ///              `LeveragedAeroManager.redeemUnwindImpl` Phase 1 is the raw USDC balance, and Phase 1
+    ///              is ORACLE-FREE; Phase 2 (`_settleShortfall`) is not. Supplying every deposit on
+    ///              arrival would have driven Phase 1's budget structurally to 0 and pushed every full
+    ///              redeem carrying an IL shortfall onto the Chainlink-reading fallback — including the
+    ///              trustless `emergencyRedeem` deadman. As a keeper op, HOW MUCH FLOAT TO LEAVE
+    ///              UN-SUPPLIED IS THE OPERATOR'S CALL: supply the levered book's working capital,
+    ///              leave a deliberate raw float sized against the redemptions you expect to have to
+    ///              cover oracle-free. That is a policy dial, not a property of the code.
+    ///
+    ///         The supplied USDC is LEVERAGEABLE by policy: there is no buffer/book distinction in
+    ///         `Layout` and `_readCollateralDebt` is untouched, so the next `adjustLeverage` sees the
+    ///         grown collateral base and levers the WHOLE book to `targetLtvBps`. That is intended —
+    ///         `supplyIdle` then `adjustLeverage` is a two-step spelling of `deployIdle`.
+    ///
+    ///         `State.Executed` gate matches `deployIdle` / `compound` / `adjustLeverage` (every venue
+    ///         op is gated the same way): pre-`execute` the seed is the owner's to activate with, and
+    ///         post-`settle` the book is terminal. It works on a FLAT but `Executed` book (post-
+    ///         `flatten`), which is deliberate — that is the state holding the most dead USDC — and it
+    ///         is exactly why `nav()`'s flat branch must count the collateral term.
+    /// @param amount USDC (6dp) to supply; must be ≤ the strategy's raw USDC balance.
+    function supplyIdle(uint256 amount) external onlyProposer nonReentrant {
+        if (_state != State.Executed) revert NotExecuted();
+        if (amount > IERC20(_layout().usdc).balanceOf(address(this))) revert InsufficientIdle();
+        LeveragedAeroVenue.supplyIdleImpl(amount);
     }
 
     /// @notice Deploy `amount` of idle strategy USDC into the levered position (supply + borrow +

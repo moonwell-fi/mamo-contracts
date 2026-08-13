@@ -118,12 +118,28 @@ contract MockLendingMarket {
 
     error MockLendingMarketNoDebt();
 
+    /// @notice Compound error codes the supply side should return INSTEAD of acting (0 == act normally).
+    /// @dev Moonwell/Compound v2 signal failure by RETURN CODE, not by reverting — a market that is
+    ///      paused, at its supply cap, or short of cash answers `mint`/`redeemUnderlying` with a nonzero
+    ///      code and does nothing. The production code is written around exactly that (`MoonwellMintFailed`
+    ///      / `MoonwellRedeemFailed` wrap the code), and the mock could not express it at all: `mint`
+    ///      always returned 0 and a `redeemUnderlying` past the balance panicked on the `-=` underflow
+    ///      instead. Both matter now that `deposit` mints on every call and several ops redeem on demand.
+    uint256 public mintError;
+    uint256 public redeemError;
+
     constructor(address underlying_) {
         underlying = underlying_;
     }
 
     function setExchangeRateStored(uint256 rate) external {
         exchangeRateStored = rate;
+    }
+
+    /// @notice Arm the supply-side failure codes (test-only). `0` restores normal behaviour.
+    function setSupplyErrors(uint256 mintErr, uint256 redeemErr) external {
+        mintError = mintErr;
+        redeemError = redeemErr;
     }
 
     // ── Borrow-balance reads ──
@@ -206,18 +222,21 @@ contract MockLendingMarket {
     }
 
     function mint(uint256 amount) external returns (uint256) {
+        if (mintError != 0) return mintError; // paused / at supply cap: answer with the code, move nothing
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
         balanceOf[msg.sender] += (amount * 1e18) / exchangeRateStored;
         return 0;
     }
 
     function redeem(uint256 cAmount) external returns (uint256) {
+        if (redeemError != 0) return redeemError;
         balanceOf[msg.sender] -= cAmount; // under-collateralised redeem reverts, as Moonwell would
         IERC20(underlying).safeTransfer(msg.sender, (cAmount * exchangeRateStored) / 1e18);
         return 0;
     }
 
     function redeemUnderlying(uint256 amount) external returns (uint256) {
+        if (redeemError != 0) return redeemError; // insufficient cash / paused
         balanceOf[msg.sender] -= (amount * 1e18) / exchangeRateStored;
         IERC20(underlying).safeTransfer(msg.sender, amount);
         return 0;
@@ -519,6 +538,11 @@ contract MockClSwapRouter {
 
     mapping(address => mapping(address => uint256)) public rateE18;
 
+    /// @notice How much of `tokenOut` this router has been asked to BUY, per token, across both
+    ///         entrypoints. Lets a test prove a cover/shortfall swap actually happened rather than
+    ///         inferring it from net balances (which the sweeps move in the opposite direction).
+    mapping(address => uint256) public boughtOf;
+
     error MockRouterNoRate();
     error MockRouterMinOut();
     error MockRouterMaxIn();
@@ -556,6 +580,7 @@ contract MockClSwapRouter {
         if (amountOut < p.amountOutMinimum) revert MockRouterMinOut();
         IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), p.amountIn);
         IERC20(p.tokenOut).safeTransfer(p.recipient, amountOut);
+        boughtOf[p.tokenOut] += amountOut;
     }
 
     function exactOutputSingle(ExactOutputSingleParams calldata p) external payable returns (uint256 amountIn) {
@@ -565,5 +590,6 @@ contract MockClSwapRouter {
         if (amountIn > p.amountInMaximum) revert MockRouterMaxIn();
         IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(p.tokenOut).safeTransfer(p.recipient, p.amountOut);
+        boughtOf[p.tokenOut] += p.amountOut;
     }
 }
