@@ -282,7 +282,8 @@ REGBACKEND="$(ccall "$REG" 'getBackendAddress()(address)' | field)"
 info "registry.getBackendAddress() = $REGBACKEND"
 fund_eth "$REGBACKEND" "$ETH_FUND_HEX"
 # Must pass the ACTUAL transferred idle amount: the caller now picks the amount (that is what makes
-# the per-account share cap usable), and `require(assets > 0)` rejects the old `0` sentinel outright.
+# the fund capacity ceiling usable — it rejects rather than trims, so a partial deposit has to be
+# expressible), and `require(assets > 0)` rejects the old `0` sentinel outright.
 csend "depositIdle(IDLE_XFER, 0) [registry backend]" "$REGBACKEND" "$ACCT" 'depositIdle(uint256,uint256)' "$IDLE_XFER" 0
 IDLESH="$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)"
 [ "$IDLESH" -gt 0 ] 2>/dev/null && ok "depositIdle minted shares=$IDLESH" || die "depositIdle minted no shares"

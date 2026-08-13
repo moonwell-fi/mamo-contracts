@@ -62,7 +62,7 @@ against the code rather than assumed:
 | Backend call | Shape-dependent? | Why |
 |---|---|---|
 | `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
-| `depositIdle(assets, minShares)` | No | USDC in, shares out. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or if the resulting share balance would breach the per-account cap (see below). |
+| `depositIdle(assets, minShares)` | No | USDC in, shares out. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
 | `fulfillRedeem(id)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
 | `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
 

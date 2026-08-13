@@ -273,8 +273,9 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     // ==================== PARTIAL IDLE DEPOSIT ====================
 
     /// @dev The caller picks the amount rather than the account sweeping everything. This is what
-    ///      makes the share cap usable: an account holding more idle USDC than its remaining cap room
-    ///      must still be able to deploy the part that fits, because the cap rejects rather than trims.
+    ///      makes the fund capacity ceiling usable: an account holding more idle USDC than the fund's
+    ///      remaining capacity must still be able to deploy the part that fits, because the ceiling
+    ///      rejects rather than trims.
     function testDepositIdleDepositsOnlyTheRequestedAmount() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         usdc.mint(address(strategy), DEPOSIT * 3);

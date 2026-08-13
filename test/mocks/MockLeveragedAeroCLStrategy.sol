@@ -166,9 +166,9 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
         return (_assetsForShares(shares), !fastPathBlocked);
     }
 
-    /// @dev The escrow read the account's share cap uses. Mirrors the real strategy's `redeemRequest`
-    ///      getter; an unknown id returns the zero struct (`settled == false`, `shares == 0`), which is
-    ///      exactly how the real mapping behaves and contributes nothing to the escrow total.
+    /// @dev Mirrors the real strategy's `redeemRequest` getter, which the account reads to track a
+    ///      pending async withdrawal. An unknown id returns the zero struct (`settled == false`,
+    ///      `shares == 0`), exactly how the real mapping behaves.
     function redeemRequest(uint256 id) external view override returns (RedeemRequest memory) {
         return requests[id];
     }

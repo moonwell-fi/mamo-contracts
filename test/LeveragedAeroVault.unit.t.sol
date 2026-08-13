@@ -980,9 +980,10 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.remainingCapacity(), 0, "over the ceiling floors to 0, no underflow");
     }
 
-    /// @dev The ops conversion: shares a given USDC amount would mint at current pricing. This is the
-    ///      ONLY sanctioned way to derive the `setMaxSharesPerAccount` argument — shares are 12dp
-    ///      against a 6dp asset, so hand-computing it invites an off-by-1e6.
+    /// @dev The ops conversion: shares a given USDC amount would mint at current pricing. Advisory
+    ///      only since the cap became fund-NAV-denominated — nothing configures a limit from it any
+    ///      more — but still the sanctioned way to size a `minShares` floor, because shares are 12dp
+    ///      against a 6dp asset and hand-computing the conversion invites an off-by-1e6.
     function testPreviewSharesForAssetsAtPar() public {
         _bind();
         // Empty book: supply 0, nav 0 -> shares = assets * 1e6, the 6-decimal step `decimals()` documents.
@@ -1018,15 +1019,17 @@ contract LeveragedAeroVaultUnitTest is Test {
     }
 
     /**
-     * @dev REGRESSION — the preview silently disabled the cap in a REACHABLE state. The real `deposit`
-     *      reverts `NavUnpriceable` on `navNet == 0 && supply > 0`, but `nav()` FLOORS to 0 rather than
-     *      reverting, and the preview had no matching guard: it divided by `nav() + 1 == 1` and returned
-     *      a figure ~1e9-1e12x too large. Since this function is the documented way to choose the
-     *      `setMaxSharesPerAccount` argument, an operator following the contract's own instruction
-     *      would have set an effectively UNLIMITED cap — the exact "cap a million times wrong" failure
-     *      the cap exists to prevent. The state is real: after `settleStrategy` the book is flat so
-     *      `nav()` is the strategy's USDC balance (0) while supply is still outstanding, and likewise
-     *      whenever `protocolFeeOwed >= gross`.
+     * @dev REGRESSION — the preview over-reported by ~1e9-1e12x in a REACHABLE state. The real
+     *      `deposit` reverts `NavUnpriceable` on `navNet == 0 && supply > 0`, but `nav()` FLOORS to 0
+     *      rather than reverting, and the preview had no matching guard: it divided by
+     *      `nav() + 1 == 1`. Under the superseded per-account share cap this was the sharp edge —
+     *      the preview was the documented way to size the cap argument, so an operator following the
+     *      contract's own instruction would have set an effectively unlimited one. The cap is
+     *      fund-NAV-denominated now and no longer derived from this function, but the guard stays
+     *      load-bearing: the preview's surviving role is sizing a deposit's `minShares` floor, and a
+     *      figure a trillion times too large makes that floor unsatisfiable. The state is real:
+     *      after `settleStrategy` the book is flat so `nav()` is the strategy's USDC balance (0)
+     *      while supply is still outstanding, and likewise whenever `protocolFeeOwed >= gross`.
      */
     function testPreviewSharesForAssetsRevertsWhenNavIsZeroWithSupplyOutstanding() public {
         _bindAndMint(alice, 1_000e12);

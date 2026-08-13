@@ -40,6 +40,21 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
  *      config (`cbBTC` slot == usdc) used to pin the shape re-derivation; migrate-only (validation
  *      reads no pool price), so it needs no tick setup. Fees off.
  */
+/// @dev Minimal ProtocolConfig. `LeveragedAeroVault` doubles as its own factory (`factory()` returns
+///      `address(this)` once `feeConfig` is set, and `protocolConfig()` returns `feeConfig`), so this
+///      single contract is the whole chain the strategy's `_protocolFeeBps()` walks. Needed because the
+///      protocol slice is the ONLY fee leg that moves `navNet` away from `nav()` — the management and
+///      performance legs crystallise as share mints, which leave NAV untouched.
+contract MockProtocolConfig {
+    uint256 public protocolFeeBps;
+    address public protocolFeeRecipient;
+
+    constructor(uint256 bps, address recipient) {
+        protocolFeeBps = bps;
+        protocolFeeRecipient = recipient;
+    }
+}
+
 contract LeveragedAeroVenueMigrationUnitTest is Test {
     address internal owner = makeAddr("owner");
     address internal proposer = makeAddr("proposer");
@@ -476,6 +491,116 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.redeem(slice, 0);
         vm.stopPrank();
         assertGt(usdc.balanceOf(lp), lpUsdcBefore, "exit unaffected by the ceiling");
+    }
+
+    /// @dev The integrator recipe — "deposit exactly `remainingCapacity()`" — must hold WITH A FEE
+    ///      PENDING, not just on a fee-free book. The two sides are measured on different bases:
+    ///      `remainingCapacity()` prices on raw `nav()`, while the deposit guard enforces on `navNet`,
+    ///      which is `navPre` minus the protocol slice the crystallise accrues in that same call. The
+    ///      safety of the recipe rests entirely on that difference being signed the right way
+    ///      (`navNet <= nav()`, so room is at worst UNDER-reported). Proving it rather than resting on
+    ///      it needs a live protocol fee, since the management and performance legs crystallise as
+    ///      share mints and leave NAV alone — hence the config below.
+    function testDepositingExactlyRemainingCapacitySucceedsWithAFeePending() public {
+        _execute(SEED);
+
+        // Route a live protocol fee through the vault's own factory hop. The protocol slice is taken
+        // off the GAIN ABOVE THE HWM (`gain × protocolFeeBps`), not off elapsed time — warping alone
+        // accrues nothing here, so the book has to actually appreciate.
+        MockProtocolConfig cfg = new MockProtocolConfig(1000, makeAddr("protocolFeeRecipient"));
+        vm.prank(owner);
+        vault.setFeeConfig(address(cfg));
+
+        // Flatten so NAV is the strategy's idle USDC balance — face value, oracle-free, and directly
+        // controllable. On an ACTIVE book NAV is LP equity from the valuation library, which does not
+        // move when USDC is minted in, so appreciation would have to come from a price move and would
+        // fight the calm gate. Deposits work identically on a flat book (see
+        // `testDepositAndRedeemWorkOnAFlatBook`), so nothing about the guard under test changes.
+        _flatten();
+
+        // TWO warm-up deposits, and both are needed. `_crystallizeFees` bails on `supply == 0`, and
+        // separately records-without-charging when the HWM is still unset — the deliberate guard that
+        // stops a fee being back-charged on pre-existing gain. Since the crystallise runs on the
+        // PRE-deposit book, the first deposit sees supply 0 (bail, no seed) and only the second one
+        // actually seeds the HWM. Skipping either leaves the crystallise under test charging nothing
+        // and the whole test vacuous — which is exactly what the assertion at the bottom caught.
+        usdc.mint(lp, 20_000e6);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), 20_000e6);
+        strategy.deposit(10_000e6, 0); // supply 0 -> crystallise bails, shares minted
+        strategy.deposit(10_000e6, 0); // supply > 0, hwm unset -> HWM seeded here
+        vm.stopPrank();
+
+        // Appreciate the book above that recorded HWM. The donation has to be LARGE — larger than
+        // intuition suggests — because `_execute` in this suite seeds the strategy with USDC without
+        // minting genesis shares, so the whole seed backs zero shares and `navPerShare` FALLS with
+        // each deposit rather than holding flat. The HWM was seeded at a per-share level the book is
+        // now well below, and only a donation on the order of the seed itself clears it.
+        usdc.mint(address(strategy), SEED * 2);
+
+        uint256 navNow = strategy.nav();
+        vm.prank(owner);
+        vault.setMaxTotalAssets(navNow + 250_000e6);
+
+        uint256 room = vault.remainingCapacity();
+        assertEq(room, 250_000e6, "room == cap - nav");
+
+        // PASS 1 — the documented recipe: deposit exactly the reported room. This must always work.
+        uint256 snap = vm.snapshotState();
+        usdc.mint(lp, room);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), room);
+        uint256 shares = strategy.deposit(room, 0);
+        vm.stopPrank();
+        assertGt(shares, 0, "the exact-room deposit minted");
+        assertLe(strategy.nav(), vault.maxTotalAssets(), "book never crossed the ceiling");
+
+        // ANTI-VACUITY: with no protocol fee accrued the two bases coincide and this test would prove
+        // nothing. `nav()` is net of `protocolFeeOwed`, so a book that grew by STRICTLY LESS than the
+        // deposit is proof the slice was really taken — the bases genuinely differed when the guard ran.
+        uint256 slice = (navNow + room) - strategy.nav();
+        assertGt(slice, 0, "protocol fee actually accrued (test is not vacuous)");
+
+        // PASS 2 — the assertion that actually pins the DIRECTION. An exact-room deposit lands on the
+        // ceiling under either basis, and the guard is strict (`>`), so pass 1 alone cannot tell
+        // `navNet` from raw `navPre` — verified: the `navPre` mutant survives pass 1. The bases only
+        // separate in the window `(room, room + slice]`, which is admissible precisely BECAUSE
+        // `navNet <= nav()`. Depositing `room + slice` therefore succeeds on the shipped basis and
+        // reverts `FundAtCapacity` on the raw one, which is what makes under-reported room safe rather
+        // than merely believed to be.
+        vm.revertToState(snap);
+        uint256 overRoom = room + slice;
+        usdc.mint(lp, overRoom);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), overRoom);
+        uint256 shares2 = strategy.deposit(overRoom, 0);
+        vm.stopPrank();
+        assertGt(shares2, 0, "room is under-reported by exactly the protocol slice, and that slack is real");
+        assertLe(strategy.nav(), vault.maxTotalAssets(), "even the slack deposit stays within the ceiling");
+    }
+
+    /// @dev Second real-pair assertion on the guard itself. `testDepositIsRefusedOnceTheFundReachesCapacity`
+    ///      approaches the ceiling from below and stops exactly on it; this one starts ALREADY over it
+    ///      (the ceiling lowered under a live book, the ordinary way an operator tightens capacity) and
+    ///      pins that the guard still fires. The mock suite carries its own parallel cap, so it does not
+    ///      backstop this path — without a second test here the real guard hinges on a single case.
+    function testDepositIsRefusedWhenTheCeilingIsLoweredBelowTheLiveBook() public {
+        _execute(SEED);
+
+        uint256 navNow = strategy.nav();
+        vm.prank(owner);
+        vault.setMaxTotalAssets(navNow / 2);
+        assertEq(vault.remainingCapacity(), 0, "over the ceiling reports no room");
+
+        usdc.mint(lp, 1_000e6);
+        vm.startPrank(lp);
+        usdc.approve(address(strategy), 1_000e6);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.FundAtCapacity.selector);
+        strategy.deposit(1_000e6, 0);
+        vm.stopPrank();
+
+        // Nothing moved: the guard runs before the transfer.
+        assertEq(usdc.balanceOf(lp), 1_000e6, "rejected deposit moved no USDC");
     }
 
     function testDepositAndRedeemWorkOnAFlatBook() public {
