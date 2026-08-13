@@ -261,6 +261,12 @@ library LeveragedAeroManager {
 
     /// @notice Full proportional unwind to the strategy (body of the strategy's `_settle`). The
     ///         strategy forwards the realized USDC to the vault afterward.
+    /// @dev Sweeps the two LEG tokens ONLY. The `gauge.withdraw` inside `_unwindLiquidity` auto-claims
+    ///      a final reward tranche, and selling THAT is the caller's job — deliberately, because the
+    ///      two callers need opposite failure modes on the same sale: `LeveragedAeroVenue.flattenImpl`
+    ///      sells it fail-closed under the proposer's floor (it is resumable), while the strategy's
+    ///      terminal `_settle` sells it best-effort through a self-`try/catch` (it must not be
+    ///      blockable). Doing it here would collapse the two and silently drop `flatten`'s floor.
     /// @return realizedUsdc USDC held by the strategy after the unwind.
     function settleImpl() public returns (uint256 realizedUsdc) {
         Layout storage $ = _layout();

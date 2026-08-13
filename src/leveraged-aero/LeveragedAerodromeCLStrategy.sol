@@ -157,6 +157,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint8 private constant OP_FULFILL = 2; // proportional redeem (fulfill / emergency)
     uint8 private constant OP_COMPOUND = 3; // harvest / redeploy
 
+    /// @dev The terminal settle's best-effort sale of the final reward tranche reverted and was
+    ///      skipped; the settle completed. Expect it on a stale/paused reward feed or a reward-route
+    ///      failure — the tranche is left on the strategy and, now that the strategy is `Settled`, is
+    ///      recoverable with `rescueToVault(rewardToken)` → the vault's `rescueERC20`.
+    event SettleRewardSaleDeferred();
+
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
     //
     // LEG SLOTS, not token identities. The `weth`/`mWeth`/`wethFeed` slots are leg A (the slot that
@@ -703,9 +709,29 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @notice Full proportional unwind to the vault. The unwind — remove 100% liquidity, repay both
     ///         Moonwell borrows (self-funding any IL/fee shortfall), redeem collateral, sweep residual
     ///         cbBTC/WETH → USDC, clear state — lives in `LeveragedAeroManager.settleImpl()`; the
-    ///         realized USDC is pushed to the vault here (the manager never touches `vault()`).
+    ///         final gauge-reward tranche is sold here (best-effort, see below) and the realized USDC
+    ///         is pushed to the vault here (the manager never touches `vault()`).
     function _settle() internal override {
         LeveragedAeroManager.settleImpl();
+        // Sell the reward tranche the unwind's `gauge.withdraw` auto-claimed: `settleImpl` sweeps only
+        // the two LEG tokens, so without this the tranche never reaches the USDC pot `redeemSettled`
+        // pays holders from — it is stranded on a `Settled` strategy, recoverable only by the owner's
+        // two-transaction `rescueToVault` → `vault.rescueERC20`, and arriving there as a stray token
+        // rather than as shareholder proceeds.
+        //
+        // BEST-EFFORT, and that is the whole asymmetry with `flatten` (which calls the same
+        // `LeveragedAeroVenue` helper FAIL-CLOSED, with the proposer's floor): `flatten` is a
+        // RESUMABLE op on a book that stays `Executed` — a revert is just a retry after the feed
+        // recovers. `settle()` is TERMINAL, owner-driven and argument-less: a hard revert here would
+        // let a stale reward feed or a broken reward route BLOCK the fund's only exit. The self-call
+        // is what makes the swallow safe — the sale still fails closed INSIDE its own frame (oracle
+        // floor post-checked against the measured fill), so a caught revert rolls the swap back
+        // entirely and degrades to exactly the pre-fix behaviour: the tranche is left in place,
+        // rescuable now that the state is `Settled`. It is never sold blind.
+        try this.sellSettleRewardSelf() {}
+        catch {
+            emit SettleRewardSaleDeferred();
+        }
         // Discharge the accrued protocol fee from realized USDC BEFORE pushing the rest to the
         // vault. Pays `min(owed, balance)` to the live recipient; skips silently when recipient == 0
         // or owed == 0 (liability persists until a recipient exists — see edge note on `redeem`).
@@ -730,6 +756,17 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
             }
         }
         _pushAllToVault($.usdc);
+    }
+
+    /// @dev Self-only external wrapper so `_settle` can sell the final reward tranche best-effort via
+    ///      `try/catch` (H3 pattern, as `crystallizeFeesSelf`). Isolating the sale in its own call
+    ///      frame is what lets a stale reward feed / reverting reward route roll back ONLY the sale
+    ///      (tranche untouched, still rescuable) while the TERMINAL settle completes — see the
+    ///      flatten-vs-settle note at the call site and on `LeveragedAeroVenue.sellSettleRewardImpl`.
+    ///      Gated to `address(this)`; runs inside settle's own frame, so it adds no reentrancy surface.
+    function sellSettleRewardSelf() external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        LeveragedAeroVenue.sellSettleRewardImpl();
     }
 
     /// @dev Crystallise management + HWM performance fees on the PRE-ACTION vault state. The caller
@@ -1394,10 +1431,13 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///           this the pair `rescueToVault(vault) → vault.rescueERC20(vault, attacker)` would
     ///           exfiltrate every escrowed claim. Escrows are recovered via `cancelRedeem`.
     ///         - the gauge reward token (read live from the gauge) WHILE EXECUTED, so a sweep can't
-    ///           bypass `compound()`. Once `Settled` that reason is gone — `compound` reverts
-    ///           `NotExecuted` and the unwind's `gauge.withdraw` auto-claims a final AERO tranche
-    ///           that `settleImpl` never sells — so post-settle it IS a stray and sweeping it to the
+    ///           bypass `compound()`. Once `Settled` that reason is gone (`compound` reverts
+    ///           `NotExecuted`), so post-settle the reward token IS a stray and sweeping it to the
     ///           vault (where the owner's non-asset `rescueERC20` applies) is the only recovery.
+    ///           `_settle` DOES sell the tranche its unwind auto-claims, so this is the RESIDUAL
+    ///           case only: the sale is best-effort and a stale reward feed / broken reward route
+    ///           leaves the tranche in place (`SettleRewardSaleDeferred`), as does a sub-micro-USD
+    ///           dust balance. That residue, plus any post-settle donation, is what this recovers.
     ///
     ///         The position NFT is never swept (no ERC-721 path).
     function rescueToVault(address token) external nonReentrant {
@@ -1440,7 +1480,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         gate of its own and `_unwindLiquidity`'s mins are derived from the same `slot0()` it
     ///         burns at, so they bind nothing against a shoved tick — and the reward tranche the
     ///         unwind auto-claims is SOLD here, so the flat-book `nav()` (idle USDC only) is again the
-    ///         whole book rather than understating it for the length of the flat window.
+    ///         whole book rather than understating it for the length of the flat window. That sale is
+    ///         FAIL-CLOSED under the caller's floor, because a reverted `flatten` is just a retry;
+    ///         `_settle` sells the same tranche BEST-EFFORT, because a reverted `settle` is a fund
+    ///         that cannot exit (see the note at that call site).
     /// @param minRewardUsdcOut Minimum USDC out of the gauge-reward sale. Required nonzero only when
     ///                         a reward balance is actually present; the L9 oracle floor applies on
     ///                         top, so the effective bound is `max(this, floor)`.

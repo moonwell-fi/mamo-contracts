@@ -322,9 +322,11 @@ Pushes the full balance of a **stray** ERC-20 (airdrop / accidental send) to `va
 `CannotRescuePositionToken()` for any position/accounting token: the vault's own share token, `usdc`,
 leg B, leg A, `mUsdc`, `mCbBTC`, `mWeth`, and — **while `Executed`** — the gauge reward token (read live
 from the gauge so a sweep can't bypass `compound()`). That last block is state-scoped on purpose: once
-`Settled`, `compound` is unreachable and the unwind's `gauge.withdraw` has auto-claimed a final AERO
-tranche that `settleImpl` never sells, so post-settle AERO **is** a stray and sweeping it is the only
-recovery. Harvest before settling (see the runbook) so there is nothing to recover. The
+`Settled`, `compound` is unreachable, so post-settle AERO **is** a stray and sweeping it is the only
+recovery. `_settle` does sell the tranche its unwind auto-claims, so this covers the **residual** case
+only: a best-effort sale that skipped (`SettleRewardSaleDeferred` — stale reward feed, broken reward
+route, or a fill under the oracle floor), a sub-micro-USD dust balance, or a post-settle donation.
+Harvest before settling (see the runbook) so there is nothing to recover. The
 position NFT is never swept (no ERC-721 path), and **native ETH is not sweepable at all** (§G).
 
 This is a two-hop recovery: the strategy can only push to the vault, and the vault owner then moves it out
@@ -408,12 +410,16 @@ request still outstanding when the vault owner calls `settleStrategy()` becomes 
 must `cancelRedeem(id)` (callable in **any** state) to get the shares back and then exit via the vault's
 `redeemSettled`. If a settlement is planned, clear the queue first and flag any request you can't fulfill.
 
-**And `compound()` last, immediately before the owner settles.** `settle`'s unwind auto-claims the final
-AERO tranche through `gauge.withdraw` but never **sells** it, so it is stranded on the strategy: outside
-NAV and outside the USDC pot `redeemSettled` pays holders from. A harvest in the block before settlement
-bounds that to a single block of emissions. Recovery afterwards is owner-only and manual
-(`rescueToVault(aero)` → `vault.rescueERC20`), so treat "compound, then hand off to the owner" as the
-settlement procedure.
+**And `compound()` last, immediately before the owner settles — defense-in-depth, not a requirement.**
+`settle`'s unwind auto-claims the final AERO tranche through `gauge.withdraw`, and `_settle` now **sells**
+it into the USDC pot `redeemSettled` pays holders from. That sale is **best-effort by design**: `settle()`
+is terminal, owner-driven and argument-less, so it is wrapped in a self-`try/catch` and skips (emitting
+`SettleRewardSaleDeferred`) on a stale AERO/USD feed, a broken AERO→USDC route, or a fill under the L9
+oracle floor — the swap rolls back whole, so it is never sold blind, but the tranche then stays on the
+strategy. Harvesting in the block before settlement means the exit never depends on that path and bounds
+any residue to a single block of emissions. Recovery of a residue is owner-only and manual
+(`rescueToVault(aero)` → `vault.rescueERC20`), so keep "compound, then hand off to the owner" as the
+settlement procedure and check the strategy's AERO balance afterwards.
 
 ### Why deleverage before fulfill — the self-funding unwind
 

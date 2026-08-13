@@ -22,7 +22,7 @@ import {
     MockNpm
 } from "./LeveragedAeroVenuesHarness.sol";
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 /**
@@ -657,6 +657,132 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _assertFlat();
         assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg A debt fully cleared");
         assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg B debt fully cleared");
+    }
+
+    // ============ settle: the final reward tranche (finding 9) ============
+
+    /**
+     * @dev REGRESSION (finding 9) — the TERMINAL settle's unwind auto-claims a last reward tranche
+     *      through `gauge.withdraw`, and `settleImpl` sweeps only the two LEG tokens. Left unsold it
+     *      never joins the USDC pot the vault's `redeemSettled` pays holders from: it stranded on a
+     *      `Settled` strategy, recoverable only through the owner's two-transaction
+     *      `rescueToVault` → `vault.rescueERC20`, and arriving there as a stray token rather than as
+     *      shareholder proceeds. `_settle` now sells it (best-effort — see the tests below).
+     */
+    function testSettleSellsTheAutoClaimedRewardTranche() public {
+        _execute(SEED);
+        uint256 tranche = 1000e18; // 1 AERO == 1 USDC at this fixture's router rate and feed mark
+        aero.mint(address(gauge), tranche);
+        gauge.setAeroToPayOnWithdraw(tranche);
+
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "reward tranche sold, not stranded");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "the whole realized balance was pushed to the vault");
+        // TIGHT on purpose (as in `testFlattenUnwindsWholeBookToIdleUsdcAndStaysExecuted`): the swap
+        // mocks fill at exact oracle parity, so the settled pot is the book PLUS the tranche's 1000
+        // USDC, and the only permitted gap is integer rounding.
+        assertApproxEqRel(
+            usdc.balanceOf(address(vault)), SEED + 1000e6, 0.0001e18, "reward proceeds reached the settled pot"
+        );
+    }
+
+    /**
+     * @dev THE DEADMAN PROPERTY. `settle()` is terminal, owner-driven and argument-less, so the
+     *      reward sale must never be able to block it. A stale reward feed fails the sale CLOSED
+     *      inside its own call frame (`StaleOracle`), the strategy's self-`try/catch` swallows it,
+     *      and the settle completes with the tranche left exactly where it was — degrading to the
+     *      pre-fix behaviour instead of bricking the fund's only exit. (`flatten` takes the opposite
+     *      posture on the same helper, and `testFlattenStillFailsClosedOnAStaleFeedAboveTheOracleFreeBand`
+     *      pins it: `flatten` is resumable, so failing closed there costs only a retry.)
+     */
+    function testSettleSurvivesAStaleRewardFeedAndLeavesTheTrancheRescuable() public {
+        _execute(SEED);
+        uint256 tranche = 1000e18;
+        aero.mint(address(gauge), tranche);
+        gauge.setAeroToPayOnWithdraw(tranche);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours); // past the 1 hour maxDelay
+
+        vm.expectEmit(false, false, false, false, address(strategy));
+        emit LeveragedAerodromeCLStrategy.SettleRewardSaleDeferred();
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(uint8(strategy.state()), uint8(BaseStrategy.State.Settled), "settle completed");
+        assertEq(aero.balanceOf(address(strategy)), tranche, "tranche untouched, never sold blind");
+        assertApproxEqRel(usdc.balanceOf(address(vault)), SEED, 0.0001e18, "the book itself still settled");
+        // ...and the residue is recoverable exactly as the pre-fix tranche was: the reward-token
+        // block on `rescueToVault` is scoped to `Executed`.
+        vm.prank(proposer);
+        strategy.rescueToVault(address(aero));
+        assertEq(aero.balanceOf(address(vault)), tranche, "residual tranche recovered post-settle");
+    }
+
+    /// @dev Same deadman property against a REVERTING reward route rather than a stale feed (the
+    ///      route is a third swap venue — a de-gauged/illiquid AERO pair fails here, not in the
+    ///      oracle). The settle must still complete.
+    function testSettleSurvivesARevertingRewardRoute() public {
+        _execute(SEED);
+        uint256 tranche = 1000e18;
+        aero.mint(address(gauge), tranche);
+        gauge.setAeroToPayOnWithdraw(tranche);
+        // PUSH1 0 PUSH1 0 REVERT — every call into the reward route reverts cleanly.
+        vm.etch(AERO_V2_ROUTER, hex"60006000fd");
+
+        vm.expectEmit(false, false, false, false, address(strategy));
+        emit LeveragedAerodromeCLStrategy.SettleRewardSaleDeferred();
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(uint8(strategy.state()), uint8(BaseStrategy.State.Settled), "settle completed");
+        assertEq(aero.balanceOf(address(strategy)), tranche, "tranche untouched");
+    }
+
+    /// @dev Best-effort is NOT "sell at any price": the L9 floor is post-checked against the measured
+    ///      fill INSIDE the self-call, so an under-paying router reverts that frame and the swap is
+    ///      rolled back whole. The catch then leaves the tranche rescuable — it never books the bad
+    ///      fill. (`flatten` surfaces the identical condition as `BelowOracleFloor`.)
+    function testSettleDoesNotAcceptARewardFillBelowTheOracleFloor() public {
+        _execute(SEED);
+        uint256 tranche = 1000e18;
+        aero.mint(address(gauge), tranche);
+        gauge.setAeroToPayOnWithdraw(tranche);
+        // Re-etch a router paying 50% under the 1e8 feed mark (immutables => new instance + etch).
+        MockAeroV2Router cheap = new MockAeroV2Router(address(aero), address(usdc), 5e5);
+        vm.etch(AERO_V2_ROUTER, address(cheap).code);
+
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(aero.balanceOf(address(strategy)), tranche, "under-priced fill rolled back, tranche intact");
+        assertApproxEqRel(usdc.balanceOf(address(vault)), SEED, 0.0001e18, "no under-priced proceeds booked");
+    }
+
+    /// @dev A zero reward balance must skip the sale CHEAPLY — before the oracle read and before the
+    ///      reward route. Proved by making BOTH fatal: the reward feed is stale and the v2 router is
+    ///      etched with invalid code, so any attempt to price or to sell would revert into the
+    ///      settle's catch and log `SettleRewardSaleDeferred`. No such log ⇒ neither was touched.
+    function testSettleWithNoRewardBalanceMakesNoRewardSaleCall() public {
+        _execute(SEED);
+        gauge.setAeroToPayOnWithdraw(0);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+        vm.etch(AERO_V2_ROUTER, hex"60006000fd");
+
+        vm.recordLogs();
+        vm.prank(address(vault));
+        strategy.settle();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics.length == 0) continue;
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.SettleRewardSaleDeferred.selector,
+                "a zero reward balance still reached the oracle or the router"
+            );
+        }
+        assertEq(aero.balanceOf(address(strategy)), 0, "no reward balance to begin with");
+        assertApproxEqRel(usdc.balanceOf(address(vault)), SEED, 0.0001e18, "settle unaffected");
     }
 
     // ==================== staging ====================

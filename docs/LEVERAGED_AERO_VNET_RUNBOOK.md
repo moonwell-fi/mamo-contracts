@@ -429,18 +429,22 @@ the vault's permissionless `redeemSettled(shares)` — pro-rata on pre-burn supp
 balance. Do **not** settle a staging instance you still want to use: the strategy's own redeem paths
 require `State.Executed` and there is no path back.
 
-> **Operational rule — ALWAYS `compound()` immediately before `settle()`.** Verified: settling **strands
-> the final AERO tranche.** The unwind's `gauge.withdraw` does auto-claim whatever emissions accrued since
-> the last harvest, but `settleImpl` never **sells** them — so that AERO sits on the strategy as an
-> unsold token: it does not reach the swap, does not reach NAV, and is not part of the USDC pushed to the
-> vault for `redeemSettled` to pay out. Harvesting in the block before settling bounds the loss to a
-> single block of emissions. The fix for this lives on the **venue-migration branch, not here**, so treat
-> the ordering as a procedure, not a nicety.
+> **Operational rule (defense-in-depth) — `compound()` immediately before `settle()`.** No longer
+> mandatory: `_settle` now **sells** the final AERO tranche its unwind auto-claims (`gauge.withdraw`
+> auto-claims whatever accrued since the last harvest), so the proceeds land in the USDC pushed to the
+> vault for `redeemSettled` to pay out. Compounding first is still the recommended procedure, because
+> that sale is **best-effort**: `settle()` is terminal, owner-driven and argument-less, so a hard revert
+> there would block the fund's only exit — the sale is therefore wrapped in a self-`try/catch` and a
+> stale AERO/USD feed, a broken AERO→USDC route, or a fill under the L9 oracle floor makes it **skip**
+> (the swap is rolled back whole — it never sells blind) and emit `SettleRewardSaleDeferred`. Harvesting
+> in the block before settling means you are not relying on that path at all, and bounds the residue to a
+> single block of emissions either way.
 >
-> The AERO is not lost, but recovering it is no longer automatic: it is claimable **only** through
+> **Check `SettleRewardSaleDeferred` / the strategy's AERO balance after settling.** If the sale did
+> skip, the AERO is not lost but recovery is not automatic: it is claimable **only** through
 > `rescueToVault(aero)` → the vault's `rescueERC20(aero, to, amount)`.
 > That path does work post-settle — `rescueToVault`'s reward-token block is scoped to `State.Executed`
-> precisely so a `Settled` strategy can sweep the stranded tranche — but it is two privileged
+> precisely so a `Settled` strategy can sweep a stranded tranche — but it is two privileged
 > transactions after the fact, and the AERO reaches the vault as a **stray token the owner disposes of**,
 > not as part of the settled USDC pot `redeemSettled` pays holders out of.
 

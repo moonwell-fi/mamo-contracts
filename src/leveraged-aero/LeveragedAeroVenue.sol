@@ -235,7 +235,7 @@ library LeveragedAeroVenue {
         // USDC only), unsellable (`compound` early-returns on a flat book) and un-rescuable
         // (`rescueToVault` denies the reward token while Executed) — so every deposit and redeem in
         // the flat window would price against an understated NAV.
-        _sellRewardBalance(minRewardUsdcOut);
+        _sellRewardBalance(minRewardUsdcOut, true);
         // Same pathological-case belt as `_settle`: repays drive the bases to 0 through `_repay`'s
         // clamp except when residual debt could not be covered at all — zero them explicitly so a
         // flat book never carries a stale hedge basis into the next venue.
@@ -248,6 +248,29 @@ library LeveragedAeroVenue {
         uint256 idle = IERC20($.usdc).balanceOf(address(this));
         if (idle < minIdleUsdcOut) revert InsufficientIdleAfterFlatten(idle, minIdleUsdcOut);
         emit Flattened(idle);
+    }
+
+    /// @notice Sell the reward tranche the TERMINAL settle's unwind auto-claimed, floored by the L9
+    ///         oracle read ALONE — `BaseStrategy.settle()` takes no arguments, so there is no caller
+    ///         `minOut` to require and the oracle floor is the whole guard (post-checked against the
+    ///         measured fill, exactly as in `flattenImpl`).
+    /// @dev BEST-EFFORT BY CONTRACT — the strategy MUST reach this through its self-`try/catch`
+    ///      wrapper (`LeveragedAerodromeCLStrategy.sellSettleRewardSelf`), never directly. This
+    ///      function still FAILS CLOSED on its own (stale reward feed → `StaleOracle`; a fill under
+    ///      the floor → `BelowOracleFloor`), which is what makes the catch safe: the revert unwinds
+    ///      the whole sub-call including the swap, so the reward balance is left untouched and
+    ///      rescuable rather than sold blind.
+    ///
+    ///      WHY THE ASYMMETRY WITH `flattenImpl`, which calls the same helper fail-closed: `flatten`
+    ///      is RESUMABLE — a reverted flatten leaves an `Executed` book the proposer simply retries
+    ///      once the feed recovers, so failing closed costs nothing and preserves the caller's floor.
+    ///      `settle` is TERMINAL and owner-driven (`Executed → Settled`, one-way, no retry, no
+    ///      argument to widen): a hard revert here would let a stale reward feed or a reverting router
+    ///      BLOCK the fund's only exit. Degrading to "leave the tranche rescuable via
+    ///      `rescueToVault` post-`Settled`" — the pre-fix behaviour for the whole tranche — is the
+    ///      strictly better failure mode.
+    function sellSettleRewardImpl() public {
+        _sellRewardBalance(0, false);
     }
 
     /// @dev Sell the gauge-reward balance to USDC, floored exactly as `compoundImpl`'s harvest is:
@@ -270,7 +293,11 @@ library LeveragedAeroVenue {
     ///      only exit. Skipping is safe precisely where the floor rounds to 0: the mandatory-sale
     ///      rationale is that an unsold balance is invisible to `nav()`, and a sub-micro-USD balance
     ///      rounds out of a 6dp NAV by construction.
-    function _sellRewardBalance(uint256 minRewardUsdcOut) private {
+    /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
+    /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error. TRUE for
+    ///        `flatten`, whose proposer supplies one; FALSE for the terminal settle, which has no
+    ///        argument to supply and is bounded by the oracle floor alone (see `sellSettleRewardImpl`).
+    function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired) private {
         Layout storage $ = _layout();
         address rewardTok = ICLGauge($.gauge).rewardToken();
         uint256 bal = IERC20(rewardTok).balanceOf(address(this));
@@ -294,7 +321,7 @@ library LeveragedAeroVenue {
             bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
         ) * (10000 - uint256($.maxSlippageBps)) / 10000;
         if (floor == 0) return; // dust: unsellable, and worth strictly less than one NAV unit
-        if (minRewardUsdcOut == 0) revert ZeroMinOut();
+        if (callerFloorRequired && minRewardUsdcOut == 0) revert ZeroMinOut();
         uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(rewardTok, $.usdc, bal, minRewardUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor();
     }
