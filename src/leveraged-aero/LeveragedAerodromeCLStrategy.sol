@@ -461,63 +461,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     }
 
     /// @notice Full strategy storage layout (single accessor for tests / off-chain reads), minus the
-    ///         `redeemRequests` mapping (queried via `redeemRequest(id)`). Field-by-field (not a
-    ///         struct-literal) so the Yul IR emits one sload→mstore per field — avoids the
-    ///         >16-live-variable overflow a struct-literal trips under via_ir.
+    ///         `redeemRequests` mapping (queried via `redeemRequest(id)`).
+    /// @dev THE 51-FIELD READ ITSELF LIVES IN `LeveragedAeroVenue.layoutView()` — see the relocation note
+    ///      there. It is the same field-by-field copy off the same ERC-7201 slot (the venue library's
+    ///      `Layout`/`STORAGE_SLOT` copy is parity-tested byte-identical to this one, and it is
+    ///      delegatecalled, so it reads THIS contract's storage); this selector, its ABI and its
+    ///      semantics are unchanged. It moved because it was the largest block of bytecode on this
+    ///      contract that is not on a value path, and this contract is at the EIP-170 margin.
     function layout() external view returns (LayoutView memory v) {
-        Layout storage $ = _layout();
-        v.usdc = $.usdc;
-        v.mUsdc = $.mUsdc;
-        v.mCbBTC = $.mCbBTC;
-        v.mWeth = $.mWeth;
-        v.cbBTC = $.cbBTC;
-        v.weth = $.weth;
-        v.pool = $.pool;
-        v.cbBTCFeed = $.cbBTCFeed;
-        v.wethFeed = $.wethFeed;
-        v.usdcFeed = $.usdcFeed;
-        v.sequencerFeed = $.sequencerFeed;
-        v.maxDelay = $.maxDelay;
-        v.gracePeriod = $.gracePeriod;
-        v.calmDeviationTicks = $.calmDeviationTicks;
-        v.twapWindow = $.twapWindow;
-        v.comptroller = $.comptroller;
-        v.npm = $.npm;
-        v.gauge = $.gauge;
-        v.swapRouter = $.swapRouter;
-        v.tickSpacing = $.tickSpacing;
-        v.targetLtvBps = $.targetLtvBps;
-        v.maxLtvBps = $.maxLtvBps;
-        v.minHealthBps = $.minHealthBps;
-        v.maxSlippageBps = $.maxSlippageBps;
-        v.usdcCollateralFactorBps = $.usdcCollateralFactorBps;
-        v.tokenId = $.tokenId;
-        v.posTickLower = $.posTickLower;
-        v.posTickUpper = $.posTickUpper;
-        v.managementFeeBps = $.managementFeeBps;
-        v.performanceFeeBps = $.performanceFeeBps;
-        v.feeRecipient = $.feeRecipient;
-        v.hwmPerShare = $.hwmPerShare;
-        v.lastFeeAccrualTimestamp = $.lastFeeAccrualTimestamp;
-        v.protocolFeeOwed = $.protocolFeeOwed;
-        v.aeroUsdFeed = $.aeroUsdFeed;
-        v.nextRedeemRequestId = $.nextRedeemRequestId;
-        v.cbBTCDecimals = $.cbBTCDecimals;
-        v.wethDecimals = $.wethDecimals;
-        v.wethIsToken0 = $.wethIsToken0;
-        v.wethDeliversNative = $.wethDeliversNative;
-        v.cbBTCSwapTickSpacing = $.cbBTCSwapTickSpacing;
-        v.wethSwapTickSpacing = $.wethSwapTickSpacing;
-        v.width = $.width;
-        v.minWidth = $.minWidth;
-        v.maxWidth = $.maxWidth;
-        v.legBIsAsset = $.legBIsAsset;
-        v.skewBps = $.skewBps;
-        v.minSkewBps = $.minSkewBps;
-        v.maxSkewBps = $.maxSkewBps;
-        v.hedgedDebtA = $.hedgedDebtA;
-        v.hedgedDebtB = $.hedgedDebtB;
-        v.stagedVenueHash = $.stagedVenueHash;
+        return LeveragedAeroVenue.layoutView();
     }
 
     /// @notice The borrowed PRINCIPAL each leg's LP side currently hedges, and therefore the
@@ -654,7 +606,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.skewBps = p.skewBps;
         $.minSkewBps = p.minSkewBps;
         $.maxSkewBps = p.maxSkewBps;
-        LeveragedAeroVenue.applyVenue(_venueParamsOf(p));
+        // `applyVenueFromInit` = the venue subset of `InitParams` marshalled into `VenueParams`, then
+        // `applyVenue`. Both halves live in the venue library now: the marshalling was this contract's
+        // `_venueParamsOf`, moved verbatim for EIP-170 headroom (`migrateVenue` still calls `applyVenue`
+        // directly with its own calldata `VenueParams`, so init and migration keep sharing ONE
+        // validation + store path — that is unchanged, only the marshalling moved).
+        LeveragedAeroVenue.applyVenueFromInit(p);
 
         // Risk / oracle / fee ladder — relocated whole (rung for rung, same order, same selectors) into
         // `LeveragedAeroValuation`, for EIP-170 headroom. What is NOT here any more: the four RISK
@@ -700,31 +657,6 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // The venue subset — decimals / ordering / shape / width band / LTV band / spacings — was
         // persisted by `applyVenue`; the skew triple was written ahead of it (see the note there).
         // tokenId / posTickLower / posTickUpper / hwmPerShare default to 0 (set in _execute / on first deposit).
-    }
-
-    /// @dev The venue subset of `InitParams`, marshalled for `LeveragedAeroVenue.applyVenue` (one
-    ///      shared validation + store path for init and `migrateVenue`). Field-by-field so the Yul
-    ///      IR streams memory copies instead of holding a wide struct-literal live.
-    function _venueParamsOf(InitParams memory p) private pure returns (LeveragedAeroVenue.VenueParams memory v) {
-        v.mCbBTC = p.mCbBTC;
-        v.mWeth = p.mWeth;
-        v.cbBTC = p.cbBTC;
-        v.weth = p.weth;
-        v.pool = p.pool;
-        v.gauge = p.gauge;
-        v.cbBTCFeed = p.cbBTCFeed;
-        v.wethFeed = p.wethFeed;
-        v.aeroUsdFeed = p.aeroUsdFeed;
-        v.tickSpacing = p.tickSpacing;
-        v.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
-        v.wethSwapTickSpacing = p.wethSwapTickSpacing;
-        v.wethDeliversNative = p.wethDeliversNative;
-        v.width = p.width;
-        v.minWidth = p.minWidth;
-        v.maxWidth = p.maxWidth;
-        v.targetLtvBps = p.targetLtvBps;
-        v.maxLtvBps = p.maxLtvBps;
-        v.minHealthBps = p.minHealthBps;
     }
 
     // ── NAV ──
