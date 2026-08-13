@@ -10,6 +10,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller, MockMoonwellMarket} from "../mocks/MockMoonwellMarket.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockToken} from "../mocks/MockToken.sol";
+import {MockAeroV2Factory} from "./LeveragedAeroVenuesHarness.sol";
 
 import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -86,6 +87,16 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      the two `uint128` hedged principals share slot 27.
     uint256 internal constant TAIL_SLOT_OFFSET = 26;
 
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
+    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
+    ///      `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         usdc = new MockToken("USD Coin", "USDC", 6);
         legA = new MockToken("Leg A", "LEGA", 18);
@@ -97,12 +108,19 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
         // Default ordering: leg B is token0, leg A is token1 (i.e. `wethIsToken0 == false`).
         pool = new MockCLPool(address(legB), address(legA), SPACING);
-        clFactory = new MockCLFactory();
-        pool.setFactory(address(clFactory));
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legA), address(legB), SPACING, address(pool));
         // Both leg<->USDC swap venues exist at their configured spacings (init probes for them).
         _registerSwapPools(address(legB), address(legA));
 
         gauge = new MockCLGauge(address(aero));
+        gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockMoonwellMarket(address(usdc));
         mLegA = new MockMoonwellMarket(address(legA));
@@ -181,6 +199,14 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         clFactory.setPool(address(usdc), legA_, LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
     }
 
+    /// @dev Re-register the LP pool in the canonical factory at its CURRENT pair + spacing.
+    ///      `applyVenue` requires `CLFactory.getPool(pair, spacing) == pool`, so any test that
+    ///      rewires `pool`'s tokens must re-register it or it stops being an adoptable venue and
+    ///      every later guard becomes unreachable behind `VenueMismatch`.
+    function _registerLpPool() internal {
+        clFactory.setPool(pool.token0(), pool.token1(), pool.tickSpacing(), address(pool));
+    }
+
     /// @dev Rewire the pool pair + both borrow markets + both swap venues so `legB_`/`legA_` clear
     ///      the venue-identity guards; lets a test reach a LATER guard (leg identity, decimals) with
     ///      a swapped leg.
@@ -189,6 +215,10 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         mLegB.setUnderlying(legB_);
         mLegA.setUnderlying(legA_);
         _registerSwapPools(legB_, legA_);
+        // LAST: `_registerSwapPools` writes (usdc, legB_, LEG_B_SWAP_SPACING), which is the SAME
+        // factory key as the LP pool whenever that spacing equals SPACING. One key holds one pool,
+        // so the LP registration has to win — the swap probe only asserts non-zero.
+        _registerLpPool();
     }
 
     /// @dev `_baseParams()` with the `i`-th address member zeroed. An if-ladder rather than a loop
@@ -265,7 +295,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     function testInitDerivesWethIsToken0True() public {
-        pool.setTokens(address(legA), address(legB)); // leg A first
+        pool.setTokens(address(legA), address(legB));
+        _registerLpPool(); // leg A first
         assertTrue(_init(_baseParams()).layout().wethIsToken0, "leg A sorts first");
     }
 
@@ -290,10 +321,27 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
     }
 
+    /// @dev The LEG feeds are pinned to 8dp at validation time too, not only at read time — a non-8dp
+    ///      aggregator mis-scales every token↔USDC conversion by orders of magnitude. `wethFeed` had a
+    ///      test; `cbBTCFeed` (the very next clause, same selector) did not, so a mutant deleting the
+    ///      `cbBTCFeed.decimals() != 8` line alone survived. Only `cbBTCFeed` is odd here (others 8dp),
+    ///      so this clause is what fires. Leg A stays 8dp so the earlier `wethFeed` clause passes.
+    function testInitRevertsOnNonEightDecimalCbBtcFeed() public {
+        MockPriceFeed odd = new MockPriceFeed(1e18, 18, block.timestamp);
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.cbBTCFeed = address(odd);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
+    }
+
     /// @dev The same floor hardcodes an 18dp reward token (`mulDiv(aeroBal, price8, 1e20)`).
     function testInitRevertsOnNonEighteenDecimalRewardToken() public {
         MockToken sixDpReward = new MockToken("Reward", "RWD", 6);
         MockCLGauge oddGauge = new MockCLGauge(address(sixDpReward));
+        // Bind BOTH directions so the reward-decimals check is what fires: the gauge↔pool binding is
+        // reciprocal, and leaving `pool.gauge()` pointing at the default gauge would mask this guard
+        // behind a `VenueMismatch`.
+        oddGauge.setPool(address(pool));
+        pool.setGauge(address(oddGauge));
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.gauge = address(oddGauge);
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
@@ -321,26 +369,108 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.initialize(address(oddVault), proposer, abi.encode(p));
     }
 
+    // ==================== GAUGE BINDING — ONE DIRECTION AT A TIME ====================
+
+    /// @dev UNMASKING. The gauge↔pool binding is two checks that share the `VenueMismatch` selector,
+    ///      and every existing fixture breaks BOTH at once — so deleting `gauge.pool() != pool` left
+    ///      the suite green, its partner absorbing the mutant. That is the same-selector masking the
+    ///      clause-by-clause work removed elsewhere. Here `pool.gauge()` is CORRECT and only the
+    ///      gauge lies, so this test can be killed by exactly one of the two clauses.
+    function testInitRejectsAGaugeThatMisreportsItsPool() public {
+        MockCLGauge liar = new MockCLGauge(address(aero));
+        liar.setPool(makeAddr("someOtherPool")); // the lie
+        pool.setGauge(address(liar)); // reciprocal AGREES, so it cannot fire
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.gauge = address(liar);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev The mirror, isolating the other clause: the gauge tells the truth and the POOL names a
+    ///      different gauge. Only `pool.gauge() != gauge` can fire.
+    function testInitRejectsAPoolThatNamesADifferentGauge() public {
+        MockCLGauge honest = new MockCLGauge(address(aero));
+        honest.setPool(address(pool)); // truthful, so its clause passes
+        pool.setGauge(makeAddr("someOtherGauge")); // the lie
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.gauge = address(honest);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    // ==================== CANONICAL FACTORY BINDING ====================
+
+    /// @dev The seam this closes: `pool.factory()` is SELF-ATTESTED. Before the binding, a pool that
+    ///      named an attacker-controlled "factory" was adopted on that factory's say-so, and the two
+    ///      leg↔USDC probes then asked THAT contract whether the swap venues existed.
+    function testInitRejectsAPoolThatNominatesAForeignFactory() public {
+        MockCLFactory rogue = new MockCLFactory();
+        rogue.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("rogueLegBPool"));
+        rogue.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("rogueLegAPool"));
+        rogue.setPool(address(legB), address(legA), SPACING, address(pool));
+        // Fully self-consistent under its own registry — and rejected anyway.
+        pool.setFactory(address(rogue));
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev The other half: claiming the canonical factory is not enough, it must actually have
+    ///      registered this pool at the declared pair + spacing.
+    function testInitRejectsAPoolTheCanonicalFactoryDoesNotRegister() public {
+        clFactory.setPool(address(legB), address(legA), SPACING, address(0));
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev And it must be registered as THIS pool — a look-alike at the same key is not the venue.
+    function testInitRejectsAnImpostorAtTheRegisteredKey() public {
+        clFactory.setPool(address(legB), address(legA), SPACING, makeAddr("someOtherPool"));
+        _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    // ==================== TWAP AVAILABILITY (live at init) ====================
+
+    /// @dev REGRESSION for the vacuous-probe bug: `$.twapWindow` used to be written AFTER
+    ///      `applyVenue`, so the probe ran as `observe([0, 0])` — which every pool answers — and a
+    ///      pool younger than the window was adoptable at init, then bricked `execute`/`rerange`.
+    ///      With the store hoisted ahead of `applyVenue` the probe uses the REAL window, so this
+    ///      pool is rejected up front. Fails against the pre-fix ordering.
+    function testInitProbesTheTwapWindowAgainstTheRealHistory() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        pool.setMaxObservationAge(p.twapWindow - 1); // history one second short of the window
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
+    }
+
+    /// @dev Boundary companion: history exactly spanning the window is adoptable, so the guard is
+    ///      rejecting on the window and not merely on the knob being set.
+    function testInitAcceptsAPoolWhoseHistoryExactlySpansTheWindow() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        pool.setMaxObservationAge(p.twapWindow);
+        LeveragedAerodromeCLStrategy s = _clone();
+        s.initialize(address(vault), proposer, abi.encode(p));
+        assertEq(s.layout().twapWindow, p.twapWindow, "twapWindow stored");
+    }
+
     // ==================== VENUE IDENTITY GUARDS ====================
 
     function testInitRevertsOnPoolTickSpacingMismatch() public {
         pool.setTickSpacing(200);
+        _registerLpPool();
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
     function testInitRevertsWhenPoolToken0IsForeign() public {
         pool.setTokens(address(aero), address(legA));
+        _registerLpPool();
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
     function testInitRevertsWhenPoolToken1IsForeign() public {
         pool.setTokens(address(legB), address(aero));
+        _registerLpPool();
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
     /// @dev Both pool tokens are legs but the SAME leg twice — the set compare must reject it.
     function testInitRevertsWhenPoolIsNotTheLegPair() public {
         pool.setTokens(address(legB), address(legB));
+        _registerLpPool();
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
@@ -423,6 +553,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      selects the pool token ordering so both `wethIsToken0` branches are reachable.
     function _assetModeParams(bool legAFirst) internal returns (LeveragedAerodromeCLStrategy.InitParams memory p) {
         pool.setTokens(legAFirst ? address(legA) : address(usdc), legAFirst ? address(usdc) : address(legA));
+        _registerLpPool();
         mLegA.setUnderlying(address(legA));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
 
@@ -501,11 +632,13 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      token — or the degenerate all-USDC pool — is rejected by the same pair check as before.
     function testInitRevertsWhenAssetModePoolIsNotTheLegAUsdcPair() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _assetModeParams(false);
-        pool.setTokens(address(usdc), address(legB)); // legB is a foreign token now, not a slot
+        pool.setTokens(address(usdc), address(legB));
+        _registerLpPool(); // legB is a foreign token now, not a slot
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
 
         p = _assetModeParams(false);
-        pool.setTokens(address(usdc), address(usdc)); // degenerate USDC/USDC
+        pool.setTokens(address(usdc), address(usdc));
+        _registerLpPool(); // degenerate USDC/USDC
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
@@ -530,6 +663,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         mLegB.setUnderlying(address(legB));
         clFactory.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("legBSwapPool"));
         clFactory.setPool(address(usdc), address(usdc), LEG_A_SWAP_SPACING, makeAddr("bogusSelfPool"));
+        _registerLpPool(); // after the swap pools — same key collision as `_wireLegs`
 
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.weth = address(usdc);
@@ -636,6 +770,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     function testInitRevertsOnNonPositiveTickSpacing() public {
         pool.setTickSpacing(0);
+        _registerLpPool();
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.tickSpacing = 0;
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
@@ -645,6 +780,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      the correct predicate (the pool is rewired so the identity guard passes first).
     function testInitRevertsOnNegativeTickSpacing() public {
         pool.setTickSpacing(-100);
+        _registerLpPool();
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.tickSpacing = -100;
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);

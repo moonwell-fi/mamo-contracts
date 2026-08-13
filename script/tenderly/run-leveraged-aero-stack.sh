@@ -183,7 +183,7 @@ SEED="${SEED:-100000000000}"          # 100,000 USDC (6dp). A seed is MANDATORY:
                                       # ExecuteZeroBalance inside execute(), not in the vault.
 ETH_FUND_HEX=0x56BC75E2D63100000      # 100 ETH
 # Base per-tx gas cap is 16,777,216 (2^24): estimate x multiplier must stay under it. The
-# template CREATE (+ its 3 delegatecall libraries) is the big one — 200% clears it. The two
+# template CREATE (+ its 4 delegatecall libraries) is the big one — 200% clears it. The two
 # heavy sends get EXPLICIT limits instead of trusting the vnet's estimate, which
 # under-reports deep nested delegatecalls (the LPV2 harness hit an OOG at forge's 1.3x).
 DEPLOY_GAS_MULT=200

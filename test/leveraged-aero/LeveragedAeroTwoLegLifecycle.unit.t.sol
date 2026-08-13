@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
@@ -12,6 +13,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
 import {
+    MockAeroV2Factory,
     MockAeroV2Router,
     MockChainlinkFeed,
     MockClSwapRouter,
@@ -95,6 +97,16 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     ///      value — see `testDeployAtASkewedRangeStrandsTheSamePredictedFractionEitherWay`).
     int24 internal constant TICK_ORACLE_CONSISTENT = 265_300;
 
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
+    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
+    ///      `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         vm.warp(1_800_000_000);
 
@@ -106,17 +118,27 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         pool = new MockCLPool(address(legB), address(legA), SPACING);
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         pool.setTick(TICK);
-        clFactory = new MockCLFactory();
-        pool.setFactory(address(clFactory));
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legA), address(legB), SPACING, address(pool));
         clFactory.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("legBSwapPool"));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
 
         gauge = new MockCLGauge(address(aero));
+        gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegB = new MockLendingMarket(address(legB));
         mLegA = new MockLendingMarket(address(legA));
         npm = new MockNpm(pool);
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
+        // that forgets to unstake first reverts here exactly as it would on chain.
+        gauge.setNpm(address(npm));
         router = new MockClSwapRouter();
 
         sequencerFeed = new MockChainlinkFeed(0, 8, 1, block.timestamp - 2 hours);
@@ -316,6 +338,65 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.adjustLeverage(3000, 0, 0); // lever DOWN
         assertLt(mLegB.borrowBalance(address(strategy)), debtBUp, "lever DOWN repaid leg B");
+    }
+
+    // ==================== FULL LEVER-DOWN (the orphaned-NFT guard) ====================
+
+    /**
+     * @dev REGRESSION — a lever-down to zero debt must be REJECTED, not executed.
+     *
+     *      `_unwindLiquidity` unstakes unconditionally but re-stakes only while liquidity remains, and
+     *      `_leverDown` is the one 100%-unwind caller that neither clears `$.tokenId` nor mints a
+     *      replacement. Executing it therefore left a live `tokenId` pointing at an NFT the gauge no
+     *      longer held, and every later `gauge.withdraw` — settle, flatten, rerange, deployIdle,
+     *      compound, migrateVenue, redeploy, fulfillRedeem, emergencyRedeem — reverted forever.
+     *
+     *      Reverting is the fix rather than retiring the position: with the collateral still supplied,
+     *      clearing `tokenId` would send `nav()` down its flat-book branch, which counts ONLY idle USDC
+     *      and would erase the mUSDC collateral from NAV. A true full unwind has to redeem the
+     *      collateral too — that is what `flatten()` is for.
+     */
+    function testAdjustLeverageToZeroIsRejected() public {
+        _execute(SEED);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroManager.FullUnwindNotSupported.selector);
+        strategy.adjustLeverage(0, 0, 0);
+
+        // Nothing moved, and the position is still staked — the whole point of the guard.
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "position untouched");
+        assertTrue(gauge.stakedContains(address(strategy), tokenIdBefore), "NFT still staked");
+        assertGt(mLegB.borrowBalance(address(strategy)), 0, "leg B debt untouched");
+        assertGt(mLegA.borrowBalance(address(strategy)), 0, "leg A debt untouched");
+    }
+
+    /// @dev The guard is on the DEBT delta, not on the literal argument: a tiny non-zero target whose
+    ///      `targetDebt` floors to 0 against the live collateral reaches the same branch and must be
+    ///      rejected identically.
+    function testAdjustLeverageToADustTargetThatFloorsToZeroDebtIsRejected() public {
+        _execute(SEED);
+        // targetDebt = targetLtvBps * collateral / 10000; with collateral < 10000 (USDC 6dp) any
+        // targetLtvBps of 1 floors to 0. Shrink the collateral basis to reach that band.
+        mUsdc.setExchangeRateStored(1);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroManager.FullUnwindNotSupported.selector);
+        strategy.adjustLeverage(1, 0, 0);
+    }
+
+    /// @dev The guard must NOT catch an ordinary lever-down: a partial repay leaves liquidity, so the
+    ///      re-stake fires and the invariant holds.
+    function testPartialLeverDownKeepsThePositionStaked() public {
+        _execute(SEED);
+        uint256 tokenId = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(3000, 0, 0);
+
+        assertEq(strategy.layout().tokenId, tokenId, "same position");
+        assertTrue(gauge.stakedContains(address(strategy), tokenId), "re-staked after a partial unwind");
+        assertGt(mLegB.borrowBalance(address(strategy)), 0, "debt reduced, not cleared");
     }
 
     // ==================== TARGET-LTV PERSISTENCE (two-borrowed-legs) ====================

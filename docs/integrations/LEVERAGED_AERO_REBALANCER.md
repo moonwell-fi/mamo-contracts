@@ -720,6 +720,60 @@ the clone rather than assuming the launch pair:
 
 ---
 
+## G2. Venue migration — owner-staged pool/pair change
+
+The fund can move to a **different Slipstream pool — including a different token pair — in place**:
+same vault, same share token, same user accounts, no user action. Three new strategy entry points
+(impls in `LeveragedAeroVenue.sol`, the third delegatecall library):
+
+| Call | Who | What |
+|---|---|---|
+| `stageVenue(bytes32)` | **vault owner (multisig)** | Commit `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))` for the destination venue; `0` clears. Inert until executed. |
+| `flatten(minRewardUsdcOut, minIdleUsdcOut)` | proposer | `settleImpl`'s exact unwind (exit gauge+CL, repay both legs, redeem all collateral, sweep legs → USDC) but **no settle**: state stays `Executed`, USDC stays in the strategy, deposits/redeems keep working (flat NAV = idle USDC, oracle-free). **Calm-gated** before the burn, and it **sells the reward tranche** the unwind auto-claims (L9 oracle floor + your `minRewardUsdcOut`) so the flat NAV is the whole book. `minIdleUsdcOut` is your aggregate floor on the realised unwind. Idempotent. |
+| `migrateVenue(VenueParams)` | proposer | Executes the staged rewrite. Requires byte-exact hash match AND a flat book (`tokenId == 0`, hedged bases 0, zero debt on both current leg markets). Re-runs full init-grade validation (incl. the **two-way** gauge↔pool binding `gauge.pool() == pool` *and* `pool.gauge() == gauge`, and a probe that the reward token has an Aerodrome v2 volatile USDC route) and rewrites the venue subset of storage. Moves **no funds**. **The skew triple is NOT in `VenueParams`** — `skewBps`/`minSkewBps`/`maxSkewBps` are venue-independent governance config and a migration never rewrites them; but the destination's `width` + `tickSpacing` ARE rewritten, and `checkRange`'s one-spacing-per-side floor couples the two, so `migrateVenue` re-validates the **live** skew against the destination and reverts `OutOfBounds` if that venue would starve either side. Pick a destination width/spacing the standing `skewBps` still fits, or the migration is rejected (nothing changes). |
+| `redeploy(minLiquidity)` | proposer | Re-opens a **fresh** position from the flat book — `executeImpl`'s genesis sequence, entire idle balance, stored width/target-LTV, floored by your `minLiquidity`. **Clears any staged venue hash.** `deployIdle` can NOT do this (it `increaseLiquidity`s the stored tokenId, 0 when flat); conversely `redeploy` reverts `PositionAlreadyOpen` on a live book. |
+
+**Runbook (per migration):**
+
+1. Owner multisig: `stageVenue(keccak256(abi.encode(params)))` — encode the exact `VenueParams`
+   struct (legs, markets, leg feeds, **the reward feed `aeroUsdFeed`**, pool, gauge, spacings, width
+   band, LTV params; the non-migratable core — usdc/mUsdc/comptroller/npm/router/usdcFeed/
+   sequencerFeed/oracle-calm params/fees — is read from live storage and is NOT in the struct).
+   The reward feed travels WITH the gauge on purpose: the gauge determines `rewardToken()`, so
+   pinning its feed separately would let a migration price a new reward token at AERO's price and
+   mis-scale the L9 harvest floor.
+2. Rebalancer: `flatten(minRewardUsdcOut, minIdleUsdcOut)` (oracle must be live — the leg sweeps and
+   the reward sale are Chainlink-floored via `maxSlippageBps`, and the pool is calm-gated, so a
+   shoved tick reverts rather than unwinding at a manipulated price). Size `minIdleUsdcOut` off the
+   expected realised unwind; pass a nonzero `minRewardUsdcOut` whenever a tranche is pending.
+3. Rebalancer: `migrateVenue(params)` — pure config rewrite; NAV is provably unchanged (flat NAV is
+   the idle-USDC balance, which no venue field touches).
+4. Rebalancer: `redeploy(minLiquidity)`; afterwards sweep old-leg unwind dust with
+   `rescueToVault(oldLeg)` (former legs leave the deny-list at the rewrite; the NEW legs enter it).
+
+**Trust split:** the owner alone picks the venue (hash-committed, byte-exact); the proposer alone
+sequences execution and can neither deviate from the committed config nor move funds out of the
+contract at any step.
+
+**Residual owner trust (state it plainly).** The bound above is on the *proposer*, not on the owner.
+A compromised owner multisig can stage a venue whose contracts it controls, and `redeploy` then mints
+the position NFT into that venue's gauge. Validation narrows this but does not erase it: the gauge
+must be attested by the pool (`pool.gauge()`) as well as attesting the pool itself, so a hostile gauge
+alone no longer suffices — the attacker must control the *pool*, which in turn must satisfy the leg /
+market / spacing / feed-decimal / width / LTV checks and expose a working reward route. It is still a
+smaller step than `stageVenue`'s existing authority implies, and it is the same trust root that
+already governs `rescueToVault`'s owner leg and the vault's fee configuration. Treat owner-key
+compromise as fund-loss, not merely config-loss.
+
+**Rollback:** before step 3, `redeploy(minLiquidity)` re-enters the *old* venue (nothing changed) and
+**clears the staged hash as a side effect** — re-stage if the migration is still intended. A failed
+step 3 reverts atomically; after step 3, stage the old venue's params and repeat.
+
+**Pair constraints:** both legs need live borrowable Moonwell markets and Chainlink USD feeds on
+Base; asset-mode (leg-B slot == USDC) is selected emergently by the config exactly as at init.
+Pending withdraw-queue requests survive the whole sequence (share-denominated, fulfillable against
+post-migration NAV).
+
 ## H. Testing rebalance operations on the vnet
 
 Rebalance operations **are** testable on the Tenderly vnet — the fork is not frozen in the way it first
@@ -768,6 +822,7 @@ mechanism protecting the fund from being rebalanced at a manipulated price — a
 | `skewBps` | 47 | **5000** | fraction of `width` placed BELOW spot; 5000 = centered (`OutOfBounds` outside `(0, 10000)`, outside the skew band below, or if either span < `tickSpacing`). **Appended after `legBIsAsset`, not next to the width band** — decode by name, not by eyeballing the group |
 | skew band (`minSkewBps` / `maxSkewBps`) | 48 / 49 | [1000, 9000] (harness default) | init-immutable governance band on `skewBps`, checked at init **and** every `rerange` → the same `OutOfBounds` |
 | `hedgedDebtA` / `hedgedDebtB` | 50 / 51 | — | hedged borrow principal per leg; **these moved from 48/49** when the skew band was inserted |
+| `stagedVenueHash` | 52 | `0x00…0` | `keccak256(abi.encode(VenueParams))` the vault owner has staged as the migration destination; `0` == nothing staged. Appended **last**, so it shifts nothing |
 
 > **The two skew-band fields were INSERTED after `skewBps`, not appended**, so every field below them
 > shifted by two — `hedgedDebtA`/`hedgedDebtB` were 48/49 and are now 50/51. Anything decoding `layout()`

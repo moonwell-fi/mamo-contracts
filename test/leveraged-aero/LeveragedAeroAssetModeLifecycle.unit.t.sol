@@ -11,7 +11,13 @@ import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
-import {MockChainlinkFeed, MockClSwapRouter, MockLendingMarket, MockNpm} from "./LeveragedAeroVenuesHarness.sol";
+import {
+    MockAeroV2Factory,
+    MockChainlinkFeed,
+    MockClSwapRouter,
+    MockLendingMarket,
+    MockNpm
+} from "./LeveragedAeroVenuesHarness.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -82,6 +88,16 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     /// @dev Leg-A price (8dp) implied by the pool's sqrtP, for THIS fixture's ordering (legA = token1).
     uint256 internal legAPrice8;
 
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
+    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
+    ///      `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         vm.warp(1_800_000_000); // a sane clock for feed freshness / sequencer grace
 
@@ -94,17 +110,27 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         uint160 sqrtP = TickMath.getSqrtRatioAtTick(TICK);
         pool.setSqrtPriceX96(sqrtP);
         pool.setTick(TICK); // also pins the TWAP tick → calm-gate passes
-        clFactory = new MockCLFactory();
-        pool.setFactory(address(clFactory));
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legA), address(usdc), SPACING, address(pool));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
 
         legAPrice8 = _legAPriceFromSqrtP(sqrtP);
 
         gauge = new MockCLGauge(address(aero));
+        gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegA = new MockLendingMarket(address(legA));
         npm = new MockNpm(pool);
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
+        // that forgets to unstake first reverts here exactly as it would on chain.
+        gauge.setNpm(address(npm));
         router = new MockClSwapRouter();
 
         sequencerFeed = new MockChainlinkFeed(0, 8, 1, block.timestamp - 2 hours); // 0 == sequencer up
@@ -803,6 +829,39 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         uint256 healthAfter = (collateralAfter * 10_000) / debtAfter;
         assertGt(healthAfter, healthBefore, "health strictly improved");
         assertGe(healthAfter, 12_000, "health restored above the minimum");
+    }
+
+    /// @dev THE CLAMP, in the collateral≈0 tail it exists for. `deleverageImpl` targets
+    ///      `targetDebt = collateral × 1e4 / targetHealth`; once collateral is dust that floors to 0, so
+    ///      the requested `repayUsd == debtBefore` and `_leverDown`'s orphaned-NFT guard
+    ///      (`repayUsd >= debtUsd → FullUnwindNotSupported`) would fire — turning the PERMISSIONLESS
+    ///      health valve OFF in exactly the distressed state it exists for. The clamp
+    ///      (`repayUsd = debtBefore - 1`) keeps `num < den` so ≥1 liquidity and the re-stake survive.
+    ///
+    ///      Construction: after execute, set the mUSDC exchange rate to `1e18 / mBal + 1`, which drives
+    ///      the collateral read to EXACTLY 1 unit — `collateral = mBal × rate / 1e18 ∈ [1e18, 1e18+mBal)`
+    ///      / 1e18 = 1. That is the only collateral value (with 0) for which `targetDebt` floors to 0
+    ///      while health can still strictly improve. Against the clamp deletion this reverts
+    ///      `FullUnwindNotSupported`.
+    function testDeleverageClampKeepsTheValveAliveWhenCollateralIsDust() public {
+        _execute(SEED);
+        uint256 mBal = mUsdc.balanceOf(address(strategy));
+        mUsdc.setExchangeRateStored(1e18 / mBal + 1); // collateral read → exactly 1 unit
+
+        (uint256 collateralBefore, uint256 debtBefore) = _collateralAndDebt();
+        assertEq(collateralBefore, 1, "collateral driven to the 1-unit dust tail (targetDebt floors to 0)");
+        assertGt(debtBefore, 0, "debt still live");
+        assertEq((collateralBefore * 10_000) / debtBefore, 0, "health is zero, the valve must engage");
+
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        vm.prank(makeAddr("keeper"));
+        strategy.deleverage(0); // clamp path; without it, FullUnwindNotSupported
+
+        assertLt(mLegA.borrowBalance(address(strategy)), debtBefore, "debt was repaid down");
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "position survived, not fully unwound/orphaned");
+        assertTrue(
+            gauge.stakedContains(address(strategy), strategy.layout().tokenId), "the >=1-liquidity re-stake fired"
+        );
     }
 
     // ==================== THE CRUX INVARIANT ====================

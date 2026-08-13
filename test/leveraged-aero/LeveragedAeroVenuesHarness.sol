@@ -281,12 +281,30 @@ contract MockNpm {
     }
 
     mapping(uint256 => Pos) internal _pos;
+    /// @notice ERC-721 owner of each minted position.
+    /// @dev MODELLED ON PURPOSE. The previous stub had a no-op `approve` and no owner at all, so every
+    ///      liquidity call succeeded regardless of who held the NFT — which makes a
+    ///      touch-the-position-before-unstaking bug invisible to the suite and a revert on chain (the
+    ///      real NPM authorises `increaseLiquidity`/`decreaseLiquidity`/`collect` against the owner or
+    ///      an approved operator, and a staked NFT is owned by the GAUGE). Same fidelity-gap class as
+    ///      the `MockCLGauge._stakes` set.
+    mapping(uint256 => address) public ownerOf;
+    mapping(uint256 => address) public getApproved;
     uint256 public nextId = 1;
-    MockCLPool public immutable pool;
+    /// @dev Settable (not immutable): the real NPM is pool-agnostic, so a venue-migration test
+    ///      re-points the mock at the destination pool before driving `redeploy`.
+    MockCLPool public pool;
 
     error MockNpmSlippage();
+    error MockNpmNotAuthorised();
+    error MockNpmNotOwner();
 
     constructor(MockCLPool pool_) {
+        pool = pool_;
+    }
+
+    /// @notice Re-point the geometry source at a different pool (venue-migration tests).
+    function setPool(MockCLPool pool_) external {
         pool = pool_;
     }
 
@@ -324,11 +342,31 @@ contract MockNpm {
             owed0: 0,
             owed1: 0
         });
+        ownerOf[tokenId] = mp.recipient;
+    }
+
+    /// @dev Authorised == owner or the single approved operator, mirroring the real NPM's
+    ///      `isAuthorizedForToken`.
+    modifier onlyAuthorised(uint256 tokenId) {
+        if (msg.sender != ownerOf[tokenId] && msg.sender != getApproved[tokenId]) revert MockNpmNotAuthorised();
+        _;
+    }
+
+    /// @notice ERC-721 transfer, as the gauge performs on stake/unstake.
+    function transferFrom(address from, address to, uint256 tokenId) public onlyAuthorised(tokenId) {
+        if (ownerOf[tokenId] != from) revert MockNpmNotOwner();
+        ownerOf[tokenId] = to;
+        getApproved[tokenId] = address(0);
+    }
+
+    function safeTransferFrom(address from, address to, uint256 tokenId) external {
+        transferFrom(from, to, tokenId);
     }
 
     function increaseLiquidity(INonfungiblePositionManager.IncreaseLiquidityParams calldata ip)
         external
         payable
+        onlyAuthorised(ip.tokenId)
         returns (uint128 liquidity, uint256 amount0, uint256 amount1)
     {
         Pos storage p = _pos[ip.tokenId];
@@ -341,6 +379,7 @@ contract MockNpm {
     function decreaseLiquidity(INonfungiblePositionManager.DecreaseLiquidityParams calldata dp)
         external
         payable
+        onlyAuthorised(dp.tokenId)
         returns (uint256 amount0, uint256 amount1)
     {
         Pos storage p = _pos[dp.tokenId];
@@ -359,6 +398,7 @@ contract MockNpm {
     function collect(INonfungiblePositionManager.CollectParams calldata cp)
         external
         payable
+        onlyAuthorised(cp.tokenId)
         returns (uint256 amount0, uint256 amount1)
     {
         Pos storage p = _pos[cp.tokenId];
@@ -370,8 +410,12 @@ contract MockNpm {
         if (amount1 > 0) IERC20(p.token1).safeTransfer(cp.recipient, amount1);
     }
 
-    /// @dev ERC-721 approve — the manager calls this raw before staking; only success matters.
-    function approve(address, uint256) external {}
+    /// @dev ERC-721 approve — the manager calls this raw before staking. Records the operator (and
+    ///      rejects a non-owner) so the gauge's pull is authorised the way the real one is.
+    function approve(address to, uint256 tokenId) external {
+        if (msg.sender != ownerOf[tokenId]) revert MockNpmNotOwner();
+        getApproved[tokenId] = to;
+    }
 
     function _addFor(int24 tickLower, int24 tickUpper, uint256 desired0, uint256 desired1)
         internal
@@ -388,6 +432,31 @@ contract MockNpm {
     function _pull(address token0, address token1, uint256 amount0, uint256 amount1) internal {
         if (amount0 > 0) IERC20(token0).safeTransferFrom(msg.sender, address(this), amount0);
         if (amount1 > 0) IERC20(token1).safeTransferFrom(msg.sender, address(this), amount1);
+    }
+}
+
+/// @notice Aerodrome **v2 (AMM)** PoolFactory stand-in for venue validation's reward-route probe.
+/// @dev Same etch-at-a-hardcoded-address constraint as {MockAeroV2Router} below, and the same
+///      immutables-only rule for the same reason: `applyVenue` probes `AERO_V2_FACTORY.getPool(reward,
+///      usdc, false)` to prove the reward leg has a route BEFORE adopting a venue, and that address has
+///      no code in a fork-free test. Answers with `pool` for the configured volatile pair (either
+///      ordering, as the real factory sorts) and `address(0)` for everything else — so a test can model
+///      "reward token with no USDC route" by etching an instance configured for a different pair.
+contract MockAeroV2Factory {
+    address public immutable tokenA;
+    address public immutable tokenB;
+    address public immutable pool;
+
+    constructor(address tokenA_, address tokenB_, address pool_) {
+        tokenA = tokenA_;
+        tokenB = tokenB_;
+        pool = pool_;
+    }
+
+    function getPool(address a, address b, bool stable) external view returns (address) {
+        if (stable) return address(0);
+        if ((a == tokenA && b == tokenB) || (a == tokenB && b == tokenA)) return pool;
+        return address(0);
     }
 }
 

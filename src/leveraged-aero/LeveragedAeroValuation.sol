@@ -33,6 +33,14 @@ interface IAeroRouter {
     ) external returns (uint256[] memory amounts);
 }
 
+/// @dev Aerodrome v2 (AMM) PoolFactory — the registry the Route above names, used to PROVE a
+///      reward→USDC route exists before a venue is adopted. Note the arity difference from
+///      Slipstream's `ICLFactory.getPool(address,address,int24)`: v2 pools are keyed by a
+///      stable/volatile flag, not a tick spacing.
+interface IAeroV2Factory {
+    function getPool(address tokenA, address tokenB, bool stable) external view returns (address pool);
+}
+
 /// @title  LeveragedAeroValuation
 /// @notice Net-equity **oracle** NAV for the leveraged Aerodrome CL strategy. This is
 ///         the single safety-critical computation — it prices DEPOSITS, so a wrong
@@ -295,24 +303,6 @@ library LeveragedAeroValuation {
         if (cfBps == 0) revert ComptrollerCallFailed();
     }
 
-    /// @notice The INIT-ONLY range ladder: the two governance BANDS' own shape, then the genesis
-    ///         `(width_, skewBps_)` pair against them via the very same `checkRange` every later
-    ///         `rerange` runs — so genesis and per-cycle validation cannot drift.
-    /// @dev One entrypoint rather than two calls from `_initialize`: the strategy is at the EIP-170 cap
-    ///      and a second library call site there costs ~100 bytes of it.
-    function checkInitRange(
-        uint24 width_,
-        uint16 skewBps_,
-        int24 tickSpacing_,
-        uint24 minWidth_,
-        uint24 maxWidth_,
-        uint16 minSkewBps_,
-        uint16 maxSkewBps_
-    ) public pure {
-        checkBands(tickSpacing_, minWidth_, maxWidth_, minSkewBps_, maxSkewBps_);
-        checkRange(width_, skewBps_, tickSpacing_, minWidth_, maxWidth_, minSkewBps_, maxSkewBps_);
-    }
-
     /// @notice The INIT-ONLY shape check on the two governance bands themselves — the bounds every later
     ///         `checkRange` is measured against, fixed for the clone's life.
     /// @dev WIDTH BAND: both bounds on the `tickSpacing_` grid, `minWidth_ >= 2 × spacing` (so an aligned
@@ -336,6 +326,21 @@ library LeveragedAeroValuation {
         if (minWidth_ > maxWidth_) revert OutOfBounds();
         if (uint256(maxWidth_) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert OutOfBounds();
         if (minSkewBps_ == 0 || minSkewBps_ > maxSkewBps_ || maxSkewBps_ >= 10000) revert OutOfBounds();
+    }
+
+    /// @notice The four VENUE-SCOPED risk invariants, in one place: the LTV band's own shape and its
+    ///         relationship to the destination market's collateral factor. Shared by `checkRiskParams`
+    ///         (the init ladder) and `LeveragedAeroVenue.applyVenue` (which re-runs them at every
+    ///         `migrateVenue` against the NEW markets' live CF) — the two cannot drift.
+    /// @dev L4 (the `minHealthBps × maxLtvBps` rung): the permissionless deleverage triggers at
+    ///      `LTV = 1e8 / minHealthBps`; that trigger LTV MUST sit strictly above `maxLtvBps`, else there
+    ///      is an in-band range anyone can grief-deleverage. Cross-multiplied to stay overflow-free.
+    /// @param cfBps The Moonwell USDC collateral factor (bps) the caller read for the target markets.
+    function checkLtvBand(uint16 targetLtvBps, uint16 maxLtvBps, uint16 minHealthBps, uint16 cfBps) public pure {
+        if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
+        if (minHealthBps < 10500) revert MinHealthTooLow();
+        if (maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
+        if (uint256(minHealthBps) * uint256(maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
     }
 
     /// @notice The INIT-ONLY numeric ladder over the risk, oracle and fee params, in the order the
@@ -372,10 +377,7 @@ library LeveragedAeroValuation {
         uint16 calmDeviationTicks,
         uint16 maxSlippageBps
     ) public pure {
-        if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
-        if (minHealthBps < 10500) revert MinHealthTooLow();
-        if (maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
-        if (uint256(minHealthBps) * uint256(maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
+        checkLtvBand(targetLtvBps, maxLtvBps, minHealthBps, cfBps);
         if (maxDelay == 0 || maxDelay > 7 days) revert OracleParamOutOfRange();
         if (gracePeriod > 1 days) revert OracleParamOutOfRange();
         if (twapWindow == 0 || twapWindow > 1 days) revert OracleParamOutOfRange();
@@ -759,6 +761,18 @@ library LeveragedAeroValuation {
     address private constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     /// @dev Aerodrome v2 PoolFactory on Base (`router.defaultFactory()`), required by the Route.
     address private constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @notice The Aerodrome v2 VOLATILE pool `swapAeroToUsdc` would route `reward → usdc` through,
+    ///         or `address(0)` when no such pool is registered.
+    /// @dev Exists so venue validation can probe the reward leg the same way it probes the two
+    ///      leg↔USDC CL swap pools. The route below is byte-for-byte the one `swapAeroToUsdc`
+    ///      constructs (same factory, `stable == false`), so a nonzero answer here is exactly the
+    ///      condition under which that swap can resolve a pool at all. Reads the factory rather than
+    ///      the router's `poolFor` helper: the helper is a deterministic CREATE2 predictor and
+    ///      returns a nonzero address for pairs that were never deployed.
+    function aeroV2VolatilePool(address tokenA, address tokenB) public view returns (address) {
+        return IAeroV2Factory(AERO_V2_FACTORY).getPool(tokenA, tokenB, false);
+    }
 
     /// @notice Swap `amountIn` AERO to USDC through the Aerodrome v2 volatile pool and report the
     ///         MEASURED fill (balance delta, not the router's own return value).
