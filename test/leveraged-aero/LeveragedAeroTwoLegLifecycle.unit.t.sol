@@ -1049,4 +1049,166 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(mLegA.borrowBalance(address(strategy)), debtA, "leg-A debt only grew (redeploy borrow)");
         assertGt(mLegB.borrowBalance(address(strategy)), debtB, "leg-B debt only grew (redeploy borrow)");
     }
+
+    // ========= REDEEM-SWEEP ORACLE FLOORS, DEADMAN-PRESERVING (review finding 4) =========
+    //
+    // `redeemUnwindImpl` step E sweeps the two residual legs to USDC. Those were the LAST zero-min-out
+    // swaps in the system: a hostile router / sandwich could fill them at any price, and the loss landed
+    // entirely on the REDEEMER (the stayers' `(1-f)` share is reserved BEFORE the sweep and stays behind
+    // as legs). They now carry the same Chainlink floor every sibling sweep does —
+    // `oracleValue(amount ACTUALLY SOLD) x (1 - maxSlippageBps)` — derived behind a try-able external hop
+    // so `emergencyRedeem`, the deadman for the oracle-down-AND-backend-dead state, still completes with
+    // the floors falling back to 0.
+
+    /// @dev A rerange-remainder-shaped idle balance on BOTH legs: $100k of leg B, $30k of leg A. Big
+    ///      enough that step E genuinely sells something (without it the unwind's collect is consumed by
+    ///      the pro-rata repay and the sweep is ~dust).
+    uint256 internal constant IDLE_LEG_B = 1e8;
+    uint256 internal constant IDLE_LEG_A = 10e18;
+
+    uint256 internal constant SUPPLY = 1_000_000e12;
+
+    /// @dev Live position + `SUPPLY` shares outstanding + an idle remainder on both legs, then a request
+    ///      for `shares`. Returns the request id.
+    function _armRedeemWithIdleLegs(uint256 shares) internal returns (uint256 id) {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+        legB.mint(address(strategy), IDLE_LEG_B);
+        legA.mint(address(strategy), IDLE_LEG_A);
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        vm.prank(lp);
+        id = strategy.requestRedeem(shares, 0);
+    }
+
+    /// @dev Re-price the leg->USDC SELL direction at `bps` of the oracle mark (10000 == the fair rate
+    ///      `setUp` installs). The buy direction is untouched, so only the step-E sweeps are affected.
+    function _setLegSellRate(uint256 bps) internal {
+        router.setRate(address(legB), address(usdc), (P_LEG_B * 1e18 * bps) / (100 * 1e8 * 10000));
+        router.setRate(address(legA), address(usdc), (P_LEG_A * 1e18 * bps) / (100 * 1e18 * 10000));
+    }
+
+    /// @dev The stayers' reserved leg share: `(1-f)` of the leg balance MEASURED just before the unwind,
+    ///      which is exactly what step E must leave behind on that leg. Measured, not assumed off
+    ///      `IDLE_LEG_*`: a genesis mint at a skewed/oracle-inconsistent tick already strands a real leg
+    ///      remainder (the documented per-borrow ratchet), so the pre-unwind balance is that PLUS the
+    ///      idle mint above.
+    function _stayerLegOf(uint256 preBal, uint256 shares) internal pure returns (uint256) {
+        return preBal - Math.mulDiv(preBal, shares, SUPPLY);
+    }
+
+    /**
+     * @dev (a) THE FINDING. A fill 2% under the oracle mark — outside the clone's `maxSlippageBps` band
+     *      of 100bps — is now REFUSED. Before the floor this filled silently and the redeemer simply got
+     *      less USDC, with nothing on-chain to say so.
+     */
+    function testRedeemLegSweepRefusesAFillBelowTheOracleFloor() public {
+        uint256 id = _armRedeemWithIdleLegs(SUPPLY / 4);
+        _setLegSellRate(9800); // 200bps under oracle vs. a 100bps floor
+
+        vm.prank(proposer);
+        vm.expectRevert(MockClSwapRouter.MockRouterMinOut.selector);
+        strategy.fulfillRedeem(id);
+    }
+
+    /**
+     * @dev (b) BINDING BUT NOT TRIPPING. A fill 50bps under the mark is inside the 100bps band and must
+     *      go through — the floor is a slippage bound, not a demand for a perfect fill. Together with (a)
+     *      this brackets the floor at `maxSlippageBps`, so the test pins the actual band and not merely
+     *      "some floor exists".
+     */
+    function testRedeemLegSweepAcceptsAFairFillWithTheFloorBinding() public {
+        uint256 shares = SUPPLY / 4;
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        _setLegSellRate(9950); // 50bps under oracle: inside the band
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 preB = legB.balanceOf(address(strategy));
+        uint256 preA = legA.balanceOf(address(strategy));
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeem completed and paid out");
+        // The sold slice really did clear a floor priced off the SOLD amount, not the raw balance: the
+        // stayers' reservation is untouched on both legs (see (d)).
+        assertEq(legB.balanceOf(address(strategy)), _stayerLegOf(preB, shares), "leg-B reservation intact");
+        assertEq(legA.balanceOf(address(strategy)), _stayerLegOf(preA, shares), "leg-A reservation intact");
+    }
+
+    /**
+     * @dev (c) THE DEADMAN TEST — the one that matters most. `emergencyRedeem` is the trustless exit for
+     *      the state where the ORACLE IS DOWN **and** the backend is dead, and it routes through this
+     *      exact sweep. If the floor were derived fail-closed, adding it would have converted a
+     *      value-protection guard into a fund freeze in precisely the state the deadman exists for.
+     *
+     *      Armed as hostilely as the state allows: every feed stale (the 2-day `FULFILL_WINDOW` warp does
+     *      that on its own, with `maxDelay` at 1 hour) AND the router filling 200bps under the mark — the
+     *      exact combination that reverts in (a). It must complete, at floor 0, paying the redeemer.
+     */
+    function testEmergencyRedeemStillCompletesWithStaleFeedsAndAHostileFill() public {
+        uint256 shares = SUPPLY / 4;
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        _setLegSellRate(9800);
+
+        vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed; every feed now stale
+        vm.expectRevert(); // sanity: the oracle really is down for this book
+        strategy.nav();
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 preB = legB.balanceOf(address(strategy));
+        uint256 preA = legA.balanceOf(address(strategy));
+        vm.prank(lp);
+        uint256 assetsOut = strategy.emergencyRedeem(id, 0);
+
+        assertGt(assetsOut, 0, "the deadman exit completed with the oracle down");
+        assertEq(usdc.balanceOf(lp) - lpBefore, assetsOut, "...and the redeemer was paid");
+        // Floor 0 is the PRE-FIX behaviour, reached only here: the swaps ran despite the hostile rate.
+        assertEq(legB.balanceOf(address(strategy)), _stayerLegOf(preB, shares), "leg-B swept at floor 0");
+        assertEq(legA.balanceOf(address(strategy)), _stayerLegOf(preA, shares), "leg-A swept at floor 0");
+    }
+
+    /**
+     * @dev (d) INSULATION REGRESSION. The floors must not move the stayer/redeemer boundary: stayers keep
+     *      exactly `(1-f)` of every leg and of the idle USDC, whatever the fill was. Asserted in closed
+     *      form against the pre-unwind snapshot, and asserted to be the SAME number under a fair fill and
+     *      under a hostile-but-floor-0 deadman fill — the floor changes whether a swap is allowed, never
+     *      who owns what.
+     */
+    function testStayerReservationIsIdenticalWithAndWithoutABindingFloor() public {
+        uint256 shares = SUPPLY / 4;
+        uint256 idleUsdc = 200_000e6;
+
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        usdc.mint(address(strategy), idleUsdc);
+        uint256 idlePre = usdc.balanceOf(address(strategy));
+        uint256 preB = legB.balanceOf(address(strategy));
+        uint256 preA = legA.balanceOf(address(strategy));
+
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id); // fair fill: the floor binds and is cleared
+
+        uint256 legBKept = legB.balanceOf(address(strategy));
+        uint256 legAKept = legA.balanceOf(address(strategy));
+        assertEq(legBKept, _stayerLegOf(preB, shares), "stayers keep (1-f) of leg B");
+        assertEq(legAKept, _stayerLegOf(preA, shares), "stayers keep (1-f) of leg A");
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            idlePre - Math.mulDiv(idlePre, shares, SUPPLY),
+            "stayers keep (1-f) of the idle USDC"
+        );
+
+        // Same book, same f, but reached through the floor-0 deadman path under a hostile fill: the
+        // reservation is byte-identical, so the floor moved no value between the two parties.
+        setUp();
+        id = _armRedeemWithIdleLegs(shares);
+        usdc.mint(address(strategy), idleUsdc);
+        _setLegSellRate(9800);
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.prank(lp);
+        strategy.emergencyRedeem(id, 0);
+
+        assertEq(legB.balanceOf(address(strategy)), legBKept, "leg-B reservation byte-identical");
+        assertEq(legA.balanceOf(address(strategy)), legAKept, "leg-A reservation byte-identical");
+    }
 }

@@ -378,7 +378,8 @@ stored `minAssetsOut`, then burning the escrowed shares. See §C for the full lo
 | | |
 |---|---|
 | Preconditions | `state() == Executed`; request not `settled` (else `RequestSettled()`). |
-| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. |
+| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). |
+| Oracle posture | Still **oracle-free in the sense that matters**: the floor is derived behind a catchable call and falls back to **0** when the feeds are unreadable, so a down oracle/sequencer never blocks a fulfill or the `emergencyRedeem` deadman — it only removes the floor. A sandwicher cannot *make* a feed stale, so the floor binds whenever it can bind. Consequence for the agent: a fulfill that reverts on the sweep's min-out is a **venue-liquidity/pricing** signal (thin leg↔USDC pool, or someone shoving it), not an oracle problem — retry, or lever down first to shrink the residual being sold. |
 | Fee interaction | Best-effort crystallize (never blocks the exit): on an oracle outage `navPre = 0`, so the price-free **management** fee still accrues while the **performance** fee defers; a fee-mint revert emits `FeeCrystallizeDeferred(2, navPre)` and proceeds. |
 | Events | `RedeemFulfilled(id, owner, assetsOut)`. |
 | When to call | On every `RedeemRequested`, after ensuring the unwind self-funds (deleverage first if needed). |
@@ -524,6 +525,12 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
   **redeemer's own** budget (`balance − stayersIdle`), recomputed before each cover buy. A shortfall
   needing more than the redeemer's slice reverts the whole redeem (fail-safe — never touches stayers'
   reserved `(1-f)` share of idle USDC/legs).
+- **The closing leg sweeps are oracle-floored.** Whatever leg balance survives the repays (minus the
+  stayers' reserved `(1-f)`) is sold to USDC at `oracleValue(amount sold) × (1 − maxSlippageBps)`. The
+  loss on a bad fill there was always the **redeemer's** (stayers are insulated by the pre-unwind
+  snapshot), and it is now bounded. **The floor never blocks the deadman**: it is derived behind a
+  catchable call, so an unreadable feed silently drops it to 0 and `emergencyRedeem` still completes —
+  the whole point being that the deadman exists for the oracle-down-and-backend-dead state.
 
 Because a levered position tends to run a debt/IL shortfall against the collected legs, levering
 **down** first shrinks the debt the unwind must repay, so the proportional unwind self-funds cleanly
@@ -618,6 +625,12 @@ function vault() external view returns (address);
 // so a rebalancer can read them without decoding the whole LayoutView.
 function targetLtvBps() external view returns (uint16);                         // the STANDING target
 function hedgedDebt() external view returns (uint128 legA, uint128 legB);       // hedged borrow PRINCIPAL
+
+// The Chainlink min-out floors the proportional unwind's two residual leg sweeps must clear, for the
+// given leg-B / leg-A amounts being sold. Reverts (fail-closed) when a feed is stale — inside the
+// unwind that revert is CAUGHT and the floors fall back to 0, which is what keeps `emergencyRedeem`
+// alive with the oracle down. Pass 0 for leg B in asset-mode (that sweep is the identity).
+function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns (uint256, uint256);
 ```
 
 - **`targetLtvBps()`** is the fund's **standing** target — set at init, re-set in either direction by the

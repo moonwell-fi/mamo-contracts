@@ -1223,6 +1223,63 @@ library LeveragedAeroValuation {
         sellFloor = _usdcValue(sellAmt, surplusDec, pSurplus, pUsdc) * (10000 - slipBps) / 10000;
     }
 
+    /// @notice The Chainlink min-out floors for the two residual leg sweeps at the END of a proportional
+    ///         redeem (`LeveragedAeroManager.redeemUnwindImpl` step E) — the same
+    ///         `oracleValue(amountSold) × (1 − maxSlippageBps)` idiom `settleImpl`'s `_sweepAtOracleFloor`
+    ///         and `_rebalanceCover`'s `sellFloor` already use, applied to the last two zero-floor swaps
+    ///         in the system.
+    ///
+    /// @dev FAIL-CLOSED HERE, DEADMAN-SAFE AT THE CALL SITE. This function reverts on a stale feed / down
+    ///      sequencer exactly like every other priced path (it goes through `readUsd8`, so there is ONE
+    ///      hardened ladder, not a second non-reverting copy of it). The caller reaches it through a
+    ///      try-able EXTERNAL hop — `LeveragedAerodromeCLStrategy.redeemSweepFloors`, invoked as
+    ///      `this.`-style call from the delegatecalled manager, the same idiom `_proportionalRedeem`
+    ///      already uses for `try this.nav()` — and treats a revert as "floors = 0".
+    ///
+    ///      WHY THAT SPLIT IS THE WHOLE POINT. `emergencyRedeem` routes through step E and exists
+    ///      precisely for the ORACLE-DOWN-AND-BACKEND-DEAD state (see `FULFILL_WINDOW`): a hard revert
+    ///      here would brick the trustless exit — turning a value-protection guard into a fund-freeze.
+    ///      Conversely a sandwicher cannot MAKE a feed stale, so whenever the feeds are readable the
+    ///      floor binds and the hostile fill reverts. Fail-open only in the state where there is nothing
+    ///      to price against and the alternative is no exit at all.
+    ///
+    ///      COARSE BY DESIGN: one unreadable feed drops BOTH floors, not just its own leg's. The
+    ///      direction is safe (it can only ever fall back to the pre-existing behaviour, never block the
+    ///      deadman) and the alternative — two independently try-able hops — costs the manager bytes it
+    ///      does not have. Each leg's feed is only read when that leg has something to sell, so a book
+    ///      with a single residual leg is unaffected by the other feed's health.
+    ///
+    ///      LOSS INCIDENCE, unchanged: slippage on these sweeps is borne by the REDEEMER (the stayers'
+    ///      reservation `keep` is snapshot BEFORE the sweep and stays behind as legs). The floor protects
+    ///      the redeemer from a hostile fill; it does not move value between the two parties.
+    ///
+    ///      TAKES THE EXISTING `Config` rather than a bespoke input struct: every field it needs
+    ///      (leg decimals, the two leg feeds, the USDC feed, and the whole sequencer/staleness triple)
+    ///      is already there, and the strategy already builds exactly one `Config` for `nav()`. Reusing
+    ///      it means no second config builder to keep in sync — and none of the strategy's precious
+    ///      EIP-170 headroom spent on one. Only `slipBps` is passed separately (it is not a valuation
+    ///      input, so it is not, and should not be, a `Config` member).
+    /// @param c         The valuation config (`LeveragedAerodromeCLStrategy._config()`).
+    /// @param cbAmt     Leg-B units ACTUALLY being sold (0 in asset-mode — that sweep is the identity).
+    /// @param wethAmt   Leg-A units ACTUALLY being sold.
+    /// @param slipBps   `maxSlippageBps`; bounded to (0, 1000] at init so `10000 - slipBps` can't underflow.
+    /// @return cbFloor   Min USDC out for the leg-B sweep (0 when nothing is being sold).
+    /// @return wethFloor Min USDC out for the leg-A sweep (0 when nothing is being sold).
+    function sweepFloors(Config memory c, uint256 cbAmt, uint256 wethAmt, uint256 slipBps)
+        public
+        view
+        returns (uint256 cbFloor, uint256 wethFloor)
+    {
+        if (cbAmt == 0 && wethAmt == 0) return (0, 0);
+        uint256 pUsdc = _readUsd8(c, c.usdcFeed);
+        if (cbAmt > 0) {
+            cbFloor = _usdcValue(cbAmt, c.cbBTCDecimals, _readUsd8(c, c.cbBTCFeed), pUsdc) * (10000 - slipBps) / 10000;
+        }
+        if (wethAmt > 0) {
+            wethFloor = _usdcValue(wethAmt, c.wethDecimals, _readUsd8(c, c.wethFeed), pUsdc) * (10000 - slipBps) / 10000;
+        }
+    }
+
     /// @dev Spot-vs-TWAP calm-gate (fail-closed). Reverts `CalmGateBreached` when the pool
     ///      spot tick deviates from the `twapWindow` arithmetic-mean tick beyond
     ///      `calmDeviationTicks`. Pattern: `AerodromeLPAdapter` deviation gate; mechanism:

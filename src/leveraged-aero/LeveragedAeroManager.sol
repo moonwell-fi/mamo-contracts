@@ -17,6 +17,16 @@ interface IWETH9 {
     function deposit() external payable;
 }
 
+/// @dev The one strategy selector this library calls back into, declared here rather than imported so
+///      the manager keeps no dependency on `LeveragedAerodromeCLStrategy` (which imports THIS file).
+///      `redeemUnwindImpl` runs under DELEGATECALL, so its own price reads are INTERNAL and a Solidity
+///      `try` cannot catch them; routing the redeem-sweep floor derivation through a call on
+///      `address(this)` gives it a catchable frame — the same idiom the strategy's own
+///      `_proportionalRedeem` uses for `try this.nav()`. See `LeveragedAeroValuation.sweepFloors`.
+interface IRedeemSweepFloors {
+    function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns (uint256, uint256);
+}
+
 /// @title  LeveragedAeroManager
 /// @notice DEPLOYED, delegatecalled venue library for `LeveragedAerodromeCLStrategy`. The clone is at
 ///         the EIP-170 margin, so the heavy on-venue sequences (supply / borrow / mint / stake /
@@ -381,12 +391,40 @@ library LeveragedAeroManager {
             }
         }
 
-        // E — sweep residual cbBTC/WETH → USDC, LEAVING the stayers' reserved leg share un-swept
-        // (min-out=0; aggregate guard applies). For a full redeem (f=1) or no rerange remainder,
-        // stayers* == 0 → sweep all (identical to the prior unconditional sweep). In the common
-        // partial case this hands the redeemer exactly f*(idleLeg + LP_leg − debt_leg).
-        _sweepLegToUsdc($.cbBTC, stayersCb, 0);
-        _sweepLegToUsdc($.weth, stayersWeth, 0);
+        // E — sweep residual cbBTC/WETH → USDC, LEAVING the stayers' reserved leg share un-swept. For a
+        // full redeem (f=1) or no rerange remainder, stayers* == 0 → sweep all (identical to the prior
+        // unconditional sweep). In the common partial case this hands the redeemer exactly
+        // f*(idleLeg + LP_leg − debt_leg).
+        //
+        // ORACLE-FLOORED, DEADMAN-PRESERVING. These were the last zero-min-out swaps in the system: a
+        // hostile router / sandwich could fill them at any price and the loss landed entirely on the
+        // REDEEMER (the stayers' `keep` is reserved BEFORE the sweep and stays behind as legs). Each
+        // floor is now `oracleValue(amount ACTUALLY SOLD) × (1 − maxSlippageBps)` — the `_rebalanceCover`
+        // / `_sweepAtOracleFloor` idiom, priced off the sold amount and NOT the raw balance, or an
+        // unreachable floor would revert every partial sweep.
+        //
+        // THE `try` IS THE LOAD-BEARING PART. `emergencyRedeem` routes through this exact path and
+        // exists for the oracle-down-AND-backend-dead state (see the strategy's `FULFILL_WINDOW`
+        // deadman note), so a fail-closed floor here would convert a value guard into a fund freeze.
+        // The derivation therefore lives behind an external hop the manager can catch, and an
+        // unreadable feed degrades to floor = 0 — exactly the pre-fix behaviour, in exactly the state
+        // that behaviour exists for. A sandwicher cannot MAKE a feed stale, so the floor binds whenever
+        // it can bind.
+        {
+            uint256 cbFloor;
+            uint256 wethFloor;
+            // `_sellable` mirrors `_sweepLegToUsdc`'s own gate (unit-of-account identity, `bal <= keep`)
+            // so the floor is always priced on the amount that swap will actually sell.
+            try IRedeemSweepFloors(address(this)).redeemSweepFloors(
+                _sellable($.cbBTC, stayersCb), _sellable($.weth, stayersWeth)
+            ) returns (uint256 f0, uint256 f1) {
+                (cbFloor, wethFloor) = (f0, f1);
+            } catch {
+                // Oracle down / sequencer down: floors stay 0 so the deadman exit still completes.
+            }
+            _sweepLegToUsdc($.cbBTC, stayersCb, cbFloor);
+            _sweepLegToUsdc($.weth, stayersWeth, wethFloor);
+        }
 
         // assetsOut = total USDC minus the (1-f) idle-USDC portion that stays for stayers (the
         // stayers' idle-leg share already stayed un-swept above, as legs).
@@ -1324,6 +1362,17 @@ library LeveragedAeroManager {
         if (bal <= keep) return;
         uint256 amt = bal - keep;
         LeveragedAeroValuation.swapExactIn($.swapRouter, tokenIn, $.usdc, _legSwapSpacing(tokenIn), amt, minOut);
+    }
+
+    /// @dev The amount `_sweepLegToUsdc(tokenIn, keep, …)` would ACTUALLY sell — the same two gates it
+    ///      applies, in the same order (unit-of-account identity ⇒ no swap at all; `bal <= keep` ⇒
+    ///      nothing above the stayers' reservation). Exists so the redeem-sweep oracle floor is priced
+    ///      on the sold amount rather than the raw balance; keeping it as ONE expression is what stops
+    ///      the floor and the swap from drifting apart.
+    function _sellable(address tokenIn, uint256 keep) private view returns (uint256) {
+        if (tokenIn == _layout().usdc) return 0;
+        uint256 bal = IERC20(tokenIn).balanceOf(address(this));
+        return bal > keep ? bal - keep : 0;
     }
 
     /// @dev (1-f) of the strategy's current `token` balance, f = shares/supply. Used by redeem to

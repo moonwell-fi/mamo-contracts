@@ -509,6 +509,38 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         return ($.hedgedDebtA, $.hedgedDebtB);
     }
 
+    /// @notice The Chainlink min-out floors for the two residual leg sweeps that END a proportional
+    ///         redeem, for `cbAmt` leg-B units and `wethAmt` leg-A units actually being sold:
+    ///         `oracleValue(amount) × (1 − maxSlippageBps)` per leg, on the same hardened 8dp reads
+    ///         every other priced path uses. Reverts (fail-closed) on a stale feed / down sequencer.
+    ///
+    /// @dev EXISTS TO BE `try`-ABLE. `LeveragedAeroManager.redeemUnwindImpl` runs under DELEGATECALL, so
+    ///      its own price reads are INTERNAL and a Solidity `try` cannot catch them. Routing the
+    ///      derivation through this external entry point — reached from the manager as a call on
+    ///      `address(this)`, the same idiom `_proportionalRedeem` already uses for `try this.nav()` —
+    ///      gives it a catchable frame, which is what lets the sweeps carry a real oracle floor while
+    ///      `emergencyRedeem` (the deadman, built for exactly the oracle-down-AND-backend-dead state)
+    ///      still completes with the floors falling back to 0. See `LeveragedAeroValuation.sweepFloors`
+    ///      for the full rationale; the math and the hardened reads live THERE, this is marshalling only.
+    ///
+    ///      NOT `OnlySelf`-gated, unlike `crystallizeFeesSelf` / `sellSettleRewardSelf`: those MUTATE
+    ///      state, this is a `view` over public storage and public feeds. Ungated it doubles as a keeper
+    ///      read — "what floor would a sweep of this size have to clear right now" — and a gate would
+    ///      cost bytes on a contract with well under 1 KB of EIP-170 headroom for no security gain.
+    ///
+    ///      Reuses `_config()` (the SAME builder `nav()` uses) rather than marshalling a second config
+    ///      struct: every field the floor needs is already in it, so this wrapper costs one extra sload
+    ///      and one call, not a duplicate builder.
+    /// @param cbAmt   Leg-B units being sold (pass 0 in asset-mode: that sweep is the identity).
+    /// @param wethAmt Leg-A units being sold.
+    function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt)
+        external
+        view
+        returns (uint256 cbFloor, uint256 wethFloor)
+    {
+        return LeveragedAeroValuation.sweepFloors(_config(), cbAmt, wethAmt, _layout().maxSlippageBps);
+    }
+
     /// @notice A single escrowed async-redeem request by id (queue introspection for tests / UI).
     function redeemRequest(uint256 id) external view returns (RedeemRequest memory) {
         return _layout().redeemRequests[id];
