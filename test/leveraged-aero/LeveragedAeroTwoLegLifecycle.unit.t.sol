@@ -21,7 +21,7 @@ import {
     MockNpm
 } from "./LeveragedAeroVenuesHarness.sol";
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -1210,6 +1210,54 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         assertEq(legB.balanceOf(address(strategy)), legBKept, "leg-B reservation byte-identical");
         assertEq(legA.balanceOf(address(strategy)), legAKept, "leg-A reservation byte-identical");
+    }
+
+    /**
+     * @dev (e) THE FALLBACK IS MARKED ON CHAIN (review round 2, item 3). The `catch {}` that drops the
+     *      floors to 0 is deliberate — the deadman in (c) depends on it — but it cannot distinguish a
+     *      stale feed / down sequencer from an out-of-gas, and before this it left NO on-chain trace at
+     *      all. A monitor could not tell a healthy fulfill from one whose swaps ran unbounded.
+     *
+     *      Both directions asserted, because an event that always fires says nothing: the healthy fulfill
+     *      of (b) must emit NOTHING, and the deadman of (c) must emit `RedeemSweepFloorsDegraded` — FROM
+     *      THE STRATEGY ADDRESS, since the manager that raises it is delegatecalled.
+     */
+    function testTheRedeemFloorFallbackIsMarkedOnChain() public {
+        uint256 shares = SUPPLY / 4;
+
+        // HEALTHY: floors derived and cleared — no marker.
+        uint256 snap = vm.snapshotState();
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        _setLegSellRate(9950);
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector,
+                "a healthy fulfill must not mark a degradation"
+            );
+        }
+        vm.revertToState(snap);
+
+        // DEGRADED: the deadman warp staled every feed, so the derivation reverts and the floors fall
+        // back to 0 — the one state that fail-open exists for, now visible.
+        id = _armRedeemWithIdleLegs(shares);
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.recordLogs();
+        vm.prank(lp);
+        strategy.emergencyRedeem(id, 0);
+
+        bool marked;
+        logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (
+                logs[i].emitter == address(strategy)
+                    && logs[i].topics[0] == LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector
+            ) marked = true;
+        }
+        assertTrue(marked, "the floor fallback is marked, from the STRATEGY address (manager is delegatecalled)");
     }
 
     // ============ PRO-RATA INTEREST-HEDGE ALLOCATION (review finding 7) ============

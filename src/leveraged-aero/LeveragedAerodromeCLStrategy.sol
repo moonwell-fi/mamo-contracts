@@ -184,11 +184,36 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint8 private constant OP_FULFILL = 2; // proportional redeem (fulfill / emergency)
     uint8 private constant OP_COMPOUND = 3; // harvest / redeploy
 
+    // ── Degradation markers for the three DELIBERATE fail-opens in this stack ──
+    //
+    // Each of these sits behind a `catch {}` that exists for a good reason (a terminal exit or the
+    // async-redeem deadman must not be blockable) but that CANNOT distinguish the expected cause — a
+    // stale feed, a paused aggregator, a broken route — from an out-of-gas or any other revert. Without
+    // a log the degradation leaves no on-chain trace whatsoever, so a monitor cannot tell a healthy op
+    // from one that ran with a guard switched off.
+    //
+    // NAMING, applied consistently across the three: `…Deferred` = an optional ACTION was skipped (the
+    // reward sales); `…Degraded` = a GUARD fell back and the op ran with less protection (the redeem
+    // sweep floors, declared on `LeveragedAeroManager` and emitted from this address via delegatecall).
+
     /// @dev The terminal settle's best-effort sale of the final reward tranche reverted and was
     ///      skipped; the settle completed. Expect it on a stale/paused reward feed or a reward-route
     ///      failure — the tranche is left on the strategy and, now that the strategy is `Settled`, is
     ///      recoverable with `rescueToVault(rewardToken)` → the vault's `rescueERC20`.
     event SettleRewardSaleDeferred();
+
+    /// @dev An async redeem's best-effort sale of the tranche its OWN unwind auto-claimed reverted and
+    ///      was skipped; the redeem completed and paid. Same causes as above. Consequence to monitor:
+    ///      the redeemer was paid `f × (assets − reward)` for that call and the tranche stayed with the
+    ///      stayers — the one residual case of the pre-fix behaviour (see `sellRedeemRewardSelf`). Clear
+    ///      it with `compound` once the feed/route recovers.
+    event RedeemRewardSaleDeferred();
+
+    /// @dev Mirror of `LeveragedAeroManager.RedeemSweepFloorsDegraded` — the manager is delegatecalled,
+    ///      so it emits from THIS address and belongs in this ABI. Declared in both, exactly as the
+    ///      venue-migration events above are. Means an async redeem's closing leg sweeps ran with their
+    ///      Chainlink min-out floors at ZERO: the swaps were unbounded for that call.
+    event RedeemSweepFloorsDegraded();
 
     // ── Access control ──
 
@@ -879,7 +904,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      whole — the tranche is left in place, never sold blind. Swallowing is REQUIRED here:
     ///      `emergencyRedeem` routes through this path and exists for the oracle-down-AND-backend-dead
     ///      state, so a stale reward feed must not be able to block the exit (same posture, same reason,
-    ///      as the redeem-sweep floors). Residual on failure = exactly the pre-fix behaviour.
+    ///      as the redeem-sweep floors). Residual on failure = exactly the pre-fix behaviour, marked by
+    ///      `RedeemRewardSaleDeferred` so it is not a silent degradation.
     ///
     ///      Nested self-call (`this.sellRewardSelf()` from a frame whose `msg.sender` is already
     ///      `address(this)`) — the `OnlySelf` gate passes, and neither hop is `nonReentrant` because the
@@ -891,7 +917,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (msg.sender != address(this)) revert OnlySelf();
         IERC20 usdc_ = IERC20(_layout().usdc);
         uint256 sold = usdc_.balanceOf(address(this));
-        try this.sellRewardSelf() {} catch {}
+        try this.sellRewardSelf() {}
+        catch {
+            emit RedeemRewardSaleDeferred();
+        }
         sold = usdc_.balanceOf(address(this)) - sold;
         return sold - Math.mulDiv(sold, shares, supply);
     }

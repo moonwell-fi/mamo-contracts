@@ -530,8 +530,10 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
   stayers' reserved `(1-f)`) is sold to USDC at `oracleValue(amount sold) × (1 − maxSlippageBps)`. The
   loss on a bad fill there was always the **redeemer's** (stayers are insulated by the pre-unwind
   snapshot), and it is now bounded. **The floor never blocks the deadman**: it is derived behind a
-  catchable call, so an unreadable feed silently drops it to 0 and `emergencyRedeem` still completes —
-  the whole point being that the deadman exists for the oracle-down-and-backend-dead state.
+  catchable call, so an unreadable feed drops it to 0 and `emergencyRedeem` still completes — the whole
+  point being that the deadman exists for the oracle-down-and-backend-dead state. Not *silently*, though:
+  the fallback emits **`RedeemSweepFloorsDegraded`** (§E), because the `catch` cannot tell a stale feed
+  from an out-of-gas and those swaps then run unbounded.
 - **The redeem sells the reward tranche its own unwind claims, and splits it `f / (1−f)`.** The unwind's
   `gauge.withdraw` auto-claims the whole accrued AERO tranche — on *every* async redeem, because the
   redeem's own unwind is what creates the balance. The leg sweeps above only touch the two leg tokens, so
@@ -543,7 +545,8 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
   sweep floors:** a stale AERO/USD feed or a broken AERO→USDC route makes the sale fail *closed inside its
   own frame* (the swap rolls back whole — never sold blind), the redeem swallows it and completes, and the
   tranche simply stays with the stayers. That residual is the only case in which the old behaviour still
-  applies. Stayers are never worse off than before; the redeemer is, at worst, no better off.
+  applies, and it emits **`RedeemRewardSaleDeferred`** (§E) so it is never silent. Stayers are never worse
+  off than before; the redeemer is, at worst, no better off.
 
 Because a levered position tends to run a debt/IL shortfall against the collected legs, levering
 **down** first shrinks the debt the unwind must repay, so the proportional unwind self-funds cleanly
@@ -749,6 +752,16 @@ Strategy events that exist today:
 |---|---|
 | `RedeemRequested / RedeemFulfilled / RedeemCancelled / RedeemEmergency` | withdraw-queue tracking (§C) |
 | `FeeCrystallizeDeferred(uint8 op, uint256 navPre)` | a best-effort crystallize deferred (`op`: 0=deposit, 1=fast redeem, 2=proportional redeem). The fee-share mint failed — on the vanilla vault the realistic cause is `depositsOpen == false` (`"LAV: deposits closed"`); investigate. |
+| `SettleRewardSaleDeferred()` | the **terminal settle**'s best-effort reward-tranche sale was skipped (stale/paused AERO feed, broken AERO→USDC route, or a fill under the L9 floor). The settle completed; the tranche is left on the now-`Settled` strategy and needs the owner's `rescueToVault(rewardToken)` → `vault.rescueERC20`. **Check the strategy's AERO balance after any settle.** |
+| `RedeemRewardSaleDeferred()` | an **async redeem**'s sale of the tranche its own unwind auto-claimed was skipped, same causes. The redeem completed and paid, but that redeemer got `f × (assets − reward)` and the tranche stayed with the stayers — the one residual of the pre-fix behaviour (§C). Clear it with `compound` once the feed/route recovers; a *recurring* one means every redeemer is being short-paid, so treat it as a feed/route incident, not noise. |
+| `RedeemSweepFloorsDegraded()` | an **async redeem**'s closing leg→USDC sweeps ran with their Chainlink min-out floors at **zero** — the derivation reverted (stale feed / down sequencer, or an out-of-gas: the `catch` cannot tell them apart). Deliberately fail-open so the `emergencyRedeem` deadman still completes, but those swaps were **unbounded** for that call. Expect it only alongside a real oracle outage; seeing it while feeds are healthy is a gas/venue problem worth investigating before the next fulfill. |
+
+> **The naming rule for the three fail-opens above.** `…Deferred` = an optional **action** was skipped;
+> `…Degraded` = a **guard** fell back and the op ran with less protection. All three are emitted from the
+> strategy address (`RedeemSweepFloorsDegraded` is declared on `LeveragedAeroManager` and reaches the
+> strategy's ABI through delegatecall). None of them reverts anything — they exist because the `catch`
+> blocks they mark cannot distinguish their expected cause from any other revert, and a silent fail-open
+> leaves no on-chain trace at all.
 
 ---
 

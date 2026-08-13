@@ -23,7 +23,7 @@ import {
     MockNpm
 } from "./LeveragedAeroVenuesHarness.sol";
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -1217,7 +1217,8 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
      *
      *      The residual is the pre-fix behaviour, and it is the ONLY case in which it still applies: the
      *      tranche stays with the stayers. Stayers are never worse off than before the change; the
-     *      redeemer is, at worst, no better off.
+     *      redeemer is, at worst, no better off. It is MARKED on chain (`RedeemRewardSaleDeferred`)
+     *      rather than silent, because the `catch` cannot tell a stale feed from any other revert.
      */
     function testAStaleRewardFeedDefersTheRedeemSaleWithoutBlockingTheRedeem() public {
         _armBook();
@@ -1227,10 +1228,51 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         // Every feed but the reward feed stays fresh, so ONLY the reward sale is unpriceable.
         aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
 
+        vm.recordLogs();
         uint256 paid = _asyncRedeem(shares);
 
         assertGt(paid, 0, "the redeem completed and paid - the deadman is intact");
         assertEq(aero.balanceOf(address(strategy)), TRANCHE, "THE RESIDUAL: the tranche stayed, unsold");
+        assertTrue(
+            _sawFrom(address(strategy), LeveragedAerodromeCLStrategy.RedeemRewardSaleDeferred.selector),
+            "the deferral is MARKED on chain, from the strategy address"
+        );
+    }
+
+    /// @dev True if the recorded logs contain `topic` emitted by `emitter` (delegatecalled libraries emit
+    ///      from the strategy address, which is exactly what these markers must prove).
+    function _sawFrom(address emitter, bytes32 topic) internal returns (bool) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == emitter && logs[i].topics[0] == topic) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @dev THE OTHER DIRECTION — an event that always fires says nothing. A redeem whose reward sale
+     *      SUCCEEDS must mark no degradation, and neither must the sweep floors, which are derived
+     *      normally here. Together with the two stale-feed tests this brackets both markers.
+     */
+    function testAHealthyRedeemMarksNoDegradation() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+
+        vm.recordLogs();
+        _asyncRedeem(SHARES / 4);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.RedeemRewardSaleDeferred.selector,
+                "the sale succeeded - nothing was deferred"
+            );
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector,
+                "the floors were derived - nothing was degraded"
+            );
+        }
+        assertEq(aero.balanceOf(address(strategy)), 0, "sanity: the sale really did run");
     }
 
     /**

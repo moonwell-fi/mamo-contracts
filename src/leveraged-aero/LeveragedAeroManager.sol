@@ -110,6 +110,18 @@ library LeveragedAeroManager {
     // is raised by `LeveragedAeroValuation.assetModeLeverUpPair`, alongside the arithmetic that sizes the
     // draw, exactly as `DegenerateRange` is. Same convention: valuation-raised errors are not mirrored.
 
+    // ── Events (emitted from the STRATEGY's address via delegatecall; mirrored in its ABI) ──
+    /// @notice `redeemUnwindImpl`'s closing leg sweeps ran with their Chainlink min-out floors at ZERO
+    ///         because the floor derivation reverted. Deliberately fail-open — `emergencyRedeem` is the
+    ///         deadman and must complete with the oracle down — but the `catch` cannot tell a stale feed
+    ///         / down sequencer from an out-of-gas, so the degradation is marked here instead of being
+    ///         silent. A monitor seeing this knows the redeem's swaps were UNBOUNDED for that call.
+    ///
+    ///         NAMING, shared by the three fail-opens this stack added: `…Degraded` means a GUARD fell
+    ///         back (the op ran, with less protection); `…Deferred` means an optional ACTION was skipped
+    ///         (`SettleRewardSaleDeferred`, `RedeemRewardSaleDeferred`, both on the strategy).
+    event RedeemSweepFloorsDegraded();
+
     // ── Constants (compile-time literals, duplicated from the strategy) ──
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
     ///      minimum so a rescue doesn't land on the threshold and immediately re-trigger.
@@ -385,8 +397,9 @@ library LeveragedAeroManager {
         // sold blind. Swallowing is what keeps `emergencyRedeem` — the deadman, built for the
         // oracle-down-AND-backend-dead state — able to complete, exactly as the sweep floors below do.
         // The residual when the sale fails is precisely today's behaviour: the tranche stays as reward
-        // token and the stayers keep it — the one documented residual. STAYERS ARE NEVER WORSE OFF than
-        // before this change; the redeemer is, at worst, no better off.
+        // token and the stayers keep it — the one documented residual, marked on chain by the wrapper's
+        // `RedeemRewardSaleDeferred`. STAYERS ARE NEVER WORSE OFF than before this change; the redeemer
+        // is, at worst, no better off.
         stayersIdle += IRewardSaleSelf(address(this)).sellRedeemRewardSelf(shares, supply);
 
         // B — repay f of each debt from collected tokens; capture any IL shortfall. The repay is
@@ -462,6 +475,9 @@ library LeveragedAeroManager {
                 (cbFloor, wethFloor) = (f0, f1);
             } catch {
                 // Oracle down / sequencer down: floors stay 0 so the deadman exit still completes.
+                // MARKED, because this `catch` cannot distinguish a stale feed from an out-of-gas and
+                // the swaps below then run UNBOUNDED. Silent fail-open leaves no on-chain trace at all.
+                emit RedeemSweepFloorsDegraded();
             }
             _sweepLegToUsdc($.cbBTC, stayersCb, cbFloor);
             _sweepLegToUsdc($.weth, stayersWeth, wethFloor);
