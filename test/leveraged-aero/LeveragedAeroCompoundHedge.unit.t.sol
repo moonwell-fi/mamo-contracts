@@ -13,6 +13,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
 import {
+    MockAeroV2Factory,
     MockAeroV2Router,
     MockChainlinkFeed,
     MockClSwapRouter,
@@ -105,6 +106,16 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     /// @dev Leg-A price (8dp) implied by the pool's `sqrtP` for this fixture's ordering (legA = token1).
     uint256 internal legAPrice8;
 
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
+    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
+    ///      `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         vm.warp(1_800_000_000);
 
@@ -115,18 +126,27 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         pool = new MockCLPool(address(usdc), address(legA), SPACING);
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         pool.setTick(TICK);
-        clFactory = new MockCLFactory();
-        pool.setFactory(address(clFactory));
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legA), address(usdc), SPACING, address(pool));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
 
         legAPrice8 = _legAPriceFromSqrtP(pool.sqrtPriceX96());
 
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegA = new MockLendingMarket(address(legA));
         npm = new MockNpm(pool);
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
+        // that forgets to unstake first reverts here exactly as it would on chain.
+        gauge.setNpm(address(npm));
         router = new MockClSwapRouter();
 
         sequencerFeed = new MockChainlinkFeed(0, 8, 1, block.timestamp - 2 hours);
@@ -658,6 +678,41 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         uint256 collateralBefore = _collateralUsdc();
         _compound(1);
         assertGt(_collateralUsdc(), collateralBefore, "the stray balance was harvested and redeployed");
+    }
+
+    /// @dev DUST NO-OP, the compound-side twin of `flatten`'s `_sellRewardBalance` skip. A reward
+    ///      balance worth under one micro-USD prices to a ZERO oracle floor, and the router fills it
+    ///      at 0 USDC — so the nonzero `minUsdcOut` compound is FORCED to demand (the `ZeroMinOut`
+    ///      belt rejects 0) makes the AERO→USDC swap revert on the router's own min-out check. Without
+    ///      the `floor == 0` early return, a single dust donation to the gauge bricks every subsequent
+    ///      `compound`. `1e6` wei AERO × `$1` (1e8) / 1e20 == 0 (6dp), so it lands in the dust band.
+    function testCompoundNoOpsOnADustRewardInsteadOfBricking() public {
+        _armBook();
+        _clearRewards();
+        aero.mint(address(strategy), 1e6); // sub-micro-USD: floor rounds to 0
+
+        uint256 collateralBefore = _collateralUsdc();
+        // A nonzero minUsdcOut is mandatory (ZeroMinOut belt); the dust skip must fire BEFORE the swap.
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place, not force-sold at a loss");
+        assertEq(_collateralUsdc(), collateralBefore, "no redeploy: the harvest cleanly no-oped");
+    }
+
+    /// @dev The skip must NOT widen the guard for a real tranche: the smallest balance whose HAIRCUT
+    ///      floor is nonzero still swaps and redeploys. The threshold is the post-`maxSlippageBps`
+    ///      floor, not the raw one — at `1e12` the raw floor is 1 unit and the 100bps haircut rounds
+    ///      it back to 0 (still skipped); `2e12` gives raw 2, haircut floor 1, the first that sells.
+    function testCompoundStillHarvestsTheSmallestNonDustBalance() public {
+        _armBook();
+        _clearRewards();
+        aero.mint(address(strategy), 2e12);
+
+        uint256 collateralBefore = _collateralUsdc();
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "above-dust balance is sold, not skipped");
+        assertGt(_collateralUsdc(), collateralBefore, "the tranche was harvested and redeployed");
     }
 
     // ==================== 3. FEE TIMING (findings 3 + 4) ====================

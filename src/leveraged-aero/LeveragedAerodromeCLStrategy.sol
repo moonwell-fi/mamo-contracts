@@ -104,6 +104,24 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     // NFT. Declared once in the manager (same selector); re-declared here so it is on the strategy's
     // public ABI for the rebalancer, exactly as `InsufficientIdleForLeverUp` is. Use `flatten()`.
     error FullUnwindNotSupported();
+    // The migration surface, for the same reason as `FullUnwindNotSupported` above and applied to the
+    // whole set rather than one case: `LeveragedAeroVenue` is DELEGATECALLED, so these revert from THIS
+    // address and are indistinguishable from raw bytes to anyone holding only the strategy ABI —
+    // indexers, the rebalancer (which the operator docs tell to branch on `PositionAlreadyOpen`), and
+    // every `vm.expectRevert` written against the strategy. Selectors match the library's by name and
+    // arity; re-declaring costs zero runtime bytes. The rest of the library's set (`VenueMismatch`,
+    // `UnsupportedLeg`, the width/LTV/health family, `ZeroAddress` via `BaseStrategy`) is already above.
+    error VenueNotStaged(); // migrate without a staged hash, or params that do not match it
+    error BookNotFlat(); // migrate while a CL position, hedged basis, or leg debt is still live
+    error PositionAlreadyOpen(); // redeploy on a book that already has a position (use deployIdle)
+    error ZeroMinOut(); // flatten with a reward balance to sell but no caller floor
+    error BelowOracleFloor(); // a reward-sale fill landed under the AERO/USD oracle floor (L9)
+    error InsufficientIdleAfterFlatten(uint256 idle, uint256 minIdle); // caller's aggregate unwind floor
+
+    // ── Venue-migration events (emitted from this address via delegatecall; see above) ──
+    event VenueStaged(bytes32 venueHash);
+    event Flattened(uint256 idleUsdc);
+    event VenueMigrated(address indexed oldPool, address indexed newPool);
 
     // ── Constants ──
     /// @dev Position `kind` tag for the PriceRouter adapter registry.
@@ -275,7 +293,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
         // ── appended for the borrow-interest hedge (keep byte-identical) ──
-        uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with the widths above)
+        uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
         // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
         bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
@@ -487,18 +505,25 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.mUsdc = p.mUsdc;
         $.usdcFeed = p.usdcFeed;
         $.comptroller = p.comptroller;
+        // FIFTH live-storage read, and it must be written HERE, not with the other oracle params
+        // below: `applyVenue`'s TWAP-availability probe calls `pool.observe([$.twapWindow, 0])`, so
+        // with the write left downstream the init-time probe ran as `observe([0, 0])` — which every
+        // pool answers, making the probe vacuous at init and live only at migrate. Its own bound
+        // check therefore has to move up with it, ahead of the sibling bounds below.
+        if (p.twapWindow == 0 || p.twapWindow > 1 days) revert OracleParamOutOfRange();
+        $.twapWindow = p.twapWindow;
         LeveragedAeroVenue.applyVenue(_venueParamsOf(p));
 
         // L3 (+L5): bound the oracle / calm-gate params so a misconfig can't silently disable a guard.
         // Bounds admit the confirmed config yet block degenerate values:
         //   maxDelay           ∈ (0, 7 days] — a huge value disables staleness detection
         //   gracePeriod        ∈ [0, 1 days] — sequencer-restart grace
-        //   twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate
+        //   twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate (checked ABOVE, with
+        //                                      its store, so `applyVenue`'s observe probe is live)
         //   calmDeviationTicks ∈ (0, 5000]   — a huge value disables the calm-gate
         //   maxSlippageBps     ∈ (0, 1000]   — 0 or huge disables swap-slippage protection (10% cap)
         if (p.maxDelay == 0 || p.maxDelay > 7 days) revert OracleParamOutOfRange();
         if (p.gracePeriod > 1 days) revert OracleParamOutOfRange();
-        if (p.twapWindow == 0 || p.twapWindow > 1 days) revert OracleParamOutOfRange();
         if (p.calmDeviationTicks == 0 || p.calmDeviationTicks > 5000) revert OracleParamOutOfRange();
         if (p.maxSlippageBps == 0 || p.maxSlippageBps > 1000) revert OracleParamOutOfRange();
         if ((p.managementFeeBps != 0 || p.performanceFeeBps != 0) && p.feeRecipient == address(0)) {
@@ -517,7 +542,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.maxDelay = p.maxDelay;
         $.gracePeriod = p.gracePeriod;
         $.calmDeviationTicks = p.calmDeviationTicks;
-        $.twapWindow = p.twapWindow;
+        // `$.twapWindow` was stored ahead of `applyVenue` — see the note there.
         $.maxSlippageBps = p.maxSlippageBps;
         $.managementFeeBps = p.managementFeeBps;
         $.performanceFeeBps = p.performanceFeeBps;
@@ -638,7 +663,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         sequence lives in `LeveragedAeroManager.executeImpl()` (delegatecalled, so
     ///         `address(this)` / `_layout()` resolve to this clone).
     function _execute() internal override {
-        LeveragedAeroManager.executeImpl();
+        // `minLiquidity == 0`: activation is a once-per-lifetime, owner-driven open on a book holding
+        // only the seed — no depositor state exists for a bad fill to dilute, and the base contract's
+        // activation signature carries no slippage argument. The §8 two-sided `maxSlippageBps` mins
+        // inside the mint still apply. `redeploy` is the repeatable variant and DOES take a floor.
+        LeveragedAeroManager.executeImpl(0);
         // Belt-and-suspenders: keep the fee-accrual clock running even if a clone bypassed
         // _initialize (guards against a ~54-year dt on the first crystallize).
         if (_layout().lastFeeAccrualTimestamp == 0) _layout().lastFeeAccrualTimestamp = block.timestamp;
@@ -1400,9 +1429,16 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `migrateVenue`). Runs `executeImpl`'s exact genesis sequence via
     ///         `LeveragedAeroVenue.redeployImpl`; reverts `PositionAlreadyOpen` when a position is
     ///         live (top-ups go through `deployIdle`, which conversely cannot mint from flat).
-    function redeploy() external onlyProposer nonReentrant {
+    ///
+    ///         CLEARS ANY STAGED VENUE HASH — re-entering the current venue is the documented rollback
+    ///         of an aborted migration, and an authorization that survived it could be fired later
+    ///         into unevaluated conditions. Re-stage (owner) if the migration is still intended.
+    /// @param minLiquidity Minimum CL liquidity the fresh mint must produce. Required here and not on
+    ///                     `execute` because this path is repeatable and runs against live depositors;
+    ///                     the mint's own §8 mins come off the same `slot0()` it executes at.
+    function redeploy(uint256 minLiquidity) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        LeveragedAeroVenue.redeployImpl();
+        LeveragedAeroVenue.redeployImpl(minLiquidity);
     }
 
     /// @dev No tunable params.

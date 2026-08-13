@@ -6,6 +6,7 @@ import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroVal
 import {LeveragedAeroVenue} from "@contracts/leveraged-aero/LeveragedAeroVenue.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
+import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
@@ -13,6 +14,7 @@ import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 import {MockToken} from "../mocks/MockToken.sol";
 import {
+    MockAeroV2Factory,
     MockAeroV2Router,
     MockChainlinkFeed,
     MockClSwapRouter,
@@ -104,6 +106,17 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
     /// @dev Split into per-venue frames: one flat setUp of this size overflows the Yul stack
     ///      under via_ir (each helper keeps its locals in its own frame).
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
+    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
+    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE, and every
+    ///      destination pool must be REGISTERED at its declared pair + spacing to be adoptable.
+    ///      Etch is safe despite `MockCLFactory` being storage-based: only the code is copied, and
+    ///      every `setPool` below writes to the etched address's own storage.
+    address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+
     function setUp() public {
         vm.warp(1_800_000_000);
         // EXTERNAL self-calls, not internal helpers: via_ir re-inlines single-call-site internal
@@ -120,7 +133,8 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     function setUpCore() external {
         usdc = new MockToken("USD Coin", "USDC", 6);
         aero = new MockToken("Aerodrome", "AERO", 18);
-        clFactory = new MockCLFactory();
+        clFactory = MockCLFactory(AERODROME_CL_FACTORY);
+        vm.etch(AERODROME_CL_FACTORY, address(new MockCLFactory()).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         router = new MockClSwapRouter();
@@ -135,16 +149,24 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         pool = new MockCLPool(address(legB), address(legA), SPACING);
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         pool.setTick(TICK);
-        pool.setFactory(address(clFactory));
+        pool.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legB), address(legA), SPACING, address(pool));
         clFactory.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("legBSwapPool"));
         clFactory.setPool(address(usdc), address(legA), LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
+        pool.setGauge(address(gauge));
+        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
+        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         mLegB = new MockLendingMarket(address(legB));
         mLegA = new MockLendingMarket(address(legA));
         legBFeed = new MockChainlinkFeed(int256(P_LEG_B), 8, 1, block.timestamp);
         legAFeed = new MockChainlinkFeed(int256(P_LEG_A), 8, 1, block.timestamp);
         npm = new MockNpm(pool);
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
+        // that forgets to unstake first reverts here exactly as it would on chain.
+        gauge.setNpm(address(npm));
     }
 
     /// @dev Cross-pair destination: same prices/tick as venue A, different spacing.
@@ -154,11 +176,14 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         poolB = new MockCLPool(address(legB2), address(legA2), SPACING_B);
         poolB.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK));
         poolB.setTick(TICK);
-        poolB.setFactory(address(clFactory));
+        poolB.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legB2), address(legA2), SPACING_B, address(poolB));
         clFactory.setPool(address(usdc), address(legB2), LEG_B2_SWAP_SPACING, makeAddr("legB2SwapPool"));
         clFactory.setPool(address(usdc), address(legA2), LEG_A2_SWAP_SPACING, makeAddr("legA2SwapPool"));
         gaugeB = new MockCLGauge(address(aero));
         gaugeB.setPool(address(poolB));
+        poolB.setGauge(address(gaugeB));
+        gaugeB.setNpm(address(npm));
         mLegB2 = new MockLendingMarket(address(legB2));
         mLegA2 = new MockLendingMarket(address(legA2));
         legB2Feed = new MockChainlinkFeed(int256(P_LEG_B), 8, 1, block.timestamp);
@@ -168,9 +193,12 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     /// @dev Asset-mode destination {usdc, legA2}: migrate-only, so no price/tick setup needed.
     function setUpVenueC() external {
         poolC = new MockCLPool(address(usdc), address(legA2), SPACING);
-        poolC.setFactory(address(clFactory));
+        poolC.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(usdc), address(legA2), SPACING, address(poolC));
         gaugeC = new MockCLGauge(address(aero));
         gaugeC.setPool(address(poolC));
+        poolC.setGauge(address(gaugeC));
+        gaugeC.setNpm(address(npm));
     }
 
     function fundVenues() external {
@@ -247,6 +275,31 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         p.managementFeeBps = 0;
         p.performanceFeeBps = 0;
         p.feeRecipient = address(0);
+    }
+
+    /// @dev Venue A as a MIGRATION DESTINATION — the same venue `_baseParams()` initialises with,
+    ///      marshalled as `VenueParams` so a test can migrate BACK to it. Every field must match
+    ///      `_baseParams()`'s venue subset or the round trip is not a round trip.
+    function _venueAParams() internal view returns (LeveragedAeroVenue.VenueParams memory v) {
+        v.mCbBTC = address(mLegB);
+        v.mWeth = address(mLegA);
+        v.cbBTC = address(legB);
+        v.weth = address(legA);
+        v.pool = address(pool);
+        v.gauge = address(gauge);
+        v.cbBTCFeed = address(legBFeed);
+        v.wethFeed = address(legAFeed);
+        v.aeroUsdFeed = address(aeroFeed);
+        v.tickSpacing = SPACING;
+        v.cbBTCSwapTickSpacing = LEG_B_SWAP_SPACING;
+        v.wethSwapTickSpacing = LEG_A_SWAP_SPACING;
+        v.wethDeliversNative = false;
+        v.width = WIDTH;
+        v.minWidth = 200;
+        v.maxWidth = 20_000;
+        v.targetLtvBps = TARGET_LTV_BPS;
+        v.maxLtvBps = 6500;
+        v.minHealthBps = 12_000;
     }
 
     /// @dev Venue B (cross-pair): fresh legs/markets/feeds/pool/gauge, spacing 200, width band on grid.
@@ -333,7 +386,10 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
         _assertFlat();
         uint256 idle = usdc.balanceOf(address(strategy));
-        assertGt(idle, (SEED * 98) / 100, "essentially the whole book realized as idle USDC");
+        // TIGHT on purpose: this fixture's swap mocks fill at exact oracle parity, so a lossless
+        // unwind is the CORRECT expectation and the only permitted gap is integer rounding. A 2%
+        // band here would let a real conservation bug through unnoticed.
+        assertApproxEqRel(idle, SEED, 0.0001e18, "whole book realized as idle USDC (lossless fixture)");
         assertEq(strategy.nav(), idle, "flat NAV == idle USDC (oracle-free)");
         // Still Executed: the proposer-gated venue ops remain reachable (settle would brick them).
         vm.prank(proposer);
@@ -510,6 +566,85 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
     }
 
     /**
+     * @dev REGRESSION (dust-donation deadlock) — a reward balance worth under one micro-USD prices to
+     *      a ZERO oracle floor and the router fills it at 0 USDC, so BOTH arguments used to be
+     *      unsatisfiable: `0` hit `ZeroMinOut` and anything nonzero hit the router's own min-out
+     *      check. Since nothing else can clear a reward balance on a live `Executed` book — `compound`
+     *      early-returns once flat and reverts identically while live, and `rescueToVault` denies the
+     *      reward token until `Settled` — a 1e6-wei donation permanently blocked `flatten`, and with it
+     *      `migrateVenue`'s flat-book precondition. The sale is now skipped exactly where the floor
+     *      rounds to 0, which is exactly where an unsold balance cannot move a 6dp NAV.
+     */
+    function testFlattenSurvivesARewardDustDonation() public {
+        _execute(SEED);
+        aero.mint(address(strategy), 1e6); // sub-micro-USD at the 1e8 (== $1) feed mark
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        _assertFlat();
+        assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place, not force-sold");
+        assertEq(strategy.nav(), usdc.balanceOf(address(strategy)), "flat NAV still == idle USDC");
+        // And the migration it used to block now completes.
+        _stage(_venueBParams());
+        _migrate(_venueBParams());
+        assertEq(strategy.layout().pool, address(poolB), "migration no longer blocked by dust");
+    }
+
+    /// @dev The dust skip used to sit AFTER `readUsd8`, so dust still gated `flatten` on the reward
+    ///      feed being healthy — and `flatten` is `migrateVenue`'s own precondition, which made a
+    ///      feed outage plus one wei of donated dust enough to stall a migration for the duration of
+    ///      the outage, for zero economic benefit. The oracle-free band now short-circuits first.
+    function testFlattenIgnoresDustWithoutConsultingAStaleRewardFeed() public {
+        _execute(SEED);
+        aero.mint(address(strategy), 1e6);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours); // past the 1 hour maxDelay
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        _assertFlat();
+        assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place");
+        // The migration the outage would otherwise have stalled still completes.
+        _stage(_venueBParams());
+        _migrate(_venueBParams());
+        assertEq(strategy.layout().pool, address(poolB), "migration not stalled by a stale feed");
+    }
+
+    /// @dev The narrow half of the same branch, and the reason it is safe: the oracle-free band is
+    ///      derived from a price CEILING, so anything above it still consults the feed and still
+    ///      fails closed when that feed is stale. The band can only ever be narrower than the priced
+    ///      `floor == 0` skip, never wider.
+    function testFlattenStillFailsClosedOnAStaleFeedAboveTheOracleFreeBand() public {
+        _execute(SEED);
+        aero.mint(address(strategy), 1e9); // > 1e20 / REWARD_PRICE_CEILING_USD8 (== 1e8)
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+    }
+
+    /// @dev The dust skip must NOT widen the guard for a real tranche: a balance whose oracle floor is
+    ///      nonzero still has to clear both the caller's floor and the L9 post-check.
+    function testFlattenStillSellsABalanceJustAboveTheDustThreshold() public {
+        _execute(SEED);
+        // 1e15 wei AERO × 1e8 / 1e20 == 1000 (6dp), and the `maxSlippageBps` haircut still leaves a
+        // NONZERO floor — which is what separates "dust" from "small". (The threshold is the haircut
+        // one, not the raw one: at 1e12 the raw floor is 1 unit and the haircut rounds it to 0.)
+        aero.mint(address(gauge), 1e15);
+        gauge.setAeroToPayOnWithdraw(1e15);
+
+        vm.expectRevert(LeveragedAeroVenue.ZeroMinOut.selector);
+        vm.prank(proposer);
+        strategy.flatten(0, 0);
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+        assertEq(aero.balanceOf(address(strategy)), 0, "above-dust balance is still sold");
+    }
+
+    /**
      * @dev REGRESSION (finding 7) — `settleImpl` carries no calm gate of its own, and
      *      `_unwindLiquidity` derives its `amount0Min`/`amount1Min` from the same `slot0()` it burns
      *      at, so those mins bind nothing against a shoved tick. `flatten` is proposer-callable and
@@ -543,6 +678,44 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         vm.expectPartialRevert(LeveragedAeroVenue.InsufficientIdleAfterFlatten.selector);
         vm.prank(proposer);
         strategy.flatten(1, unreachable);
+    }
+
+    /// @dev REGRESSION for the `_settleRepayDebts` stale-index bug. That function decides full-repay
+    ///      (`type(uint256).max`) vs partial off a leg's debt read; the fix reads `borrowBalanceCurrent`
+    ///      (which ACCRUES) instead of the stale `borrowBalanceStored`. The bug window: a leg whose
+    ///      HELD balance covers the STORED debt but not the ACCRUED debt takes the `>= stored` full-repay
+    ///      branch, approves only the held balance, and Moonwell's `repayBorrow` then capitalises and
+    ///      pulls the larger ACCRUED debt — reverting the whole flatten, and with it `migrateVenue`'s
+    ///      flat-book precondition. Construction: arm PENDING interest (invisible to `borrowBalanceStored`)
+    ///      so accrued > stored, and mint a small cushion so each leg's held balance lands in
+    ///      `[stored, accrued)`. With the fix, flatten reads the accrued debt, repays what it holds, and
+    ///      `_settleShortfall` covers the remainder from collateral. Fails against the stored read.
+    function testFlattenSurvivesPendingInterestBetweenStoredAndAccruedDebt() public {
+        _execute(SEED);
+        uint256 storedA = mLegA.borrowBalance(address(strategy));
+        uint256 storedB = mLegB.borrowBalance(address(strategy));
+        assertGt(storedA, 0, "leg A borrowed");
+        assertGt(storedB, 0, "leg B borrowed");
+
+        // Arm 20% of PENDING (un-capitalised) interest on each borrow: stored stays put, accrued jumps.
+        mLegA.accruePendingBorrowInterest(address(strategy), storedA * 20 / 100);
+        mLegB.accruePendingBorrowInterest(address(strategy), storedB * 20 / 100);
+        assertEq(mLegA.borrowBalance(address(strategy)), storedA, "stored read is still the pre-accrual debt");
+        assertGt(mLegA.borrowBalanceAccrued(address(strategy)), storedA, "accrued read reveals the gap");
+
+        // Cushion each leg so the post-unwind held balance robustly clears STORED (genesis rounds the
+        // LP down by dust) while staying well under ACCRUED — i.e. squarely inside the bug window.
+        legA.mint(address(strategy), storedA * 3 / 100);
+        legB.mint(address(strategy), storedB * 3 / 100);
+
+        // With the fix this succeeds; against `borrowBalanceStored` the full-repay branch over-pulls
+        // the accrued debt past the held-balance approval and the unwind reverts.
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        _assertFlat();
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg A debt fully cleared");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg B debt fully cleared");
     }
 
     // ==================== staging ====================
@@ -653,6 +826,185 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         MockCLGauge unbound = new MockCLGauge(address(aero)); // pool() == address(0)
         v.gauge = address(unbound);
         _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /// @dev The gauge↔pool binding is checked in BOTH directions. `gauge.pool()` is self-attested by
+    ///      the staged contract, so a hostile gauge returns the real pool for free; only the pool's own
+    ///      `gauge()` (Voter-written on a real Slipstream pool) makes the pair non-forgeable.
+    function testMigrateRejectsAGaugeThePoolDoesNotClaim() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        MockCLGauge impostor = new MockCLGauge(address(aero));
+        impostor.setPool(address(poolB)); // passes the self-attested direction...
+        // ...but poolB.gauge() still points at the real gaugeB.
+        v.gauge = address(impostor);
+        _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    // ==================== CANONICAL FACTORY BINDING (migrate side) ====================
+
+    /// @dev The migrate-side half of the init binding: a destination pool is adoptable only if the
+    ///      CANONICAL Slipstream factory registers it. A pool that nominates its own registry — the
+    ///      self-attestation the binding removes — is rejected even when that registry vouches for
+    ///      it completely. This is the seam that mattered most at runtime: init is deployer-driven,
+    ///      whereas `migrateVenue` re-points a LIVE fund at a pool chosen months later.
+    function testMigrateRejectsADestinationPoolThatNominatesAForeignFactory() public {
+        _execute(SEED);
+        _flatten();
+        MockCLFactory rogue = new MockCLFactory();
+        rogue.setPool(address(usdc), address(legB2), LEG_B2_SWAP_SPACING, makeAddr("rogueB2Swap"));
+        rogue.setPool(address(usdc), address(legA2), LEG_A2_SWAP_SPACING, makeAddr("rogueA2Swap"));
+        rogue.setPool(address(legB2), address(legA2), SPACING_B, address(poolB));
+        poolB.setFactory(address(rogue));
+        _expectMigrateRevert(_venueBParams(), LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /// @dev And the registration itself is load-bearing, not just the factory address.
+    function testMigrateRejectsADestinationTheCanonicalFactoryDoesNotRegister() public {
+        _execute(SEED);
+        _flatten();
+        clFactory.setPool(address(legB2), address(legA2), SPACING_B, address(0));
+        _expectMigrateRevert(_venueBParams(), LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    // ==================== ROUND TRIP ====================
+
+    /// @dev A→B→A. Every prior migration test moves the fund ONE way, so nothing ever migrated OUT of
+    ///      a venue with a different token ordering or shape — which is exactly why migrate-staleness
+    ///      mutants on the DERIVED fields survived: a stale `wethIsToken0` / `legBIsAsset` / leg
+    ///      decimals looks identical to a correct one until a second migration has to overwrite it.
+    ///      Venue B is deliberately a different pair AND a different spacing, so the return leg has to
+    ///      rewrite the derived set rather than leave it alone.
+    function testMigrateRoundTripRestoresEveryDerivedField() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAerodromeCLStrategy.LayoutView memory before = strategy.layout();
+        assertFalse(before.wethIsToken0, "venue A sorts leg B first");
+
+        // FLIP THE ORDERING on the destination. Without this the round trip is blind to the mutant
+        // it exists to catch: venues A and B both sort leg B into token0, so a DELETED
+        // `$.wethIsToken0` write is indistinguishable from a correct one and the mutant survives.
+        // Verified: with the flip, deleting that write fails this test.
+        poolB.setTokens(address(legA2), address(legB2));
+        clFactory.setPool(address(legA2), address(legB2), SPACING_B, address(poolB));
+
+        _stage(_venueBParams());
+        _migrate(_venueBParams());
+        assertEq(strategy.layout().pool, address(poolB), "outbound leg landed");
+        assertTrue(strategy.layout().wethIsToken0, "ordering flipped on the way out");
+
+        _stage(_venueAParams());
+        _migrate(_venueAParams());
+
+        LeveragedAerodromeCLStrategy.LayoutView memory afterTrip = strategy.layout();
+        assertEq(afterTrip.pool, before.pool, "pool restored");
+        assertEq(afterTrip.gauge, before.gauge, "gauge restored");
+        assertEq(afterTrip.cbBTC, before.cbBTC, "leg B restored");
+        assertEq(afterTrip.weth, before.weth, "leg A restored");
+        assertEq(afterTrip.mCbBTC, before.mCbBTC, "leg B market restored");
+        assertEq(afterTrip.mWeth, before.mWeth, "leg A market restored");
+        assertEq(afterTrip.tickSpacing, before.tickSpacing, "spacing restored");
+        // The DERIVED set — the fields a stale-write mutant leaves behind.
+        assertEq(afterTrip.wethIsToken0, before.wethIsToken0, "ordering re-derived");
+        assertEq(afterTrip.legBIsAsset, before.legBIsAsset, "shape re-derived");
+        assertEq(afterTrip.cbBTCDecimals, before.cbBTCDecimals, "leg B decimals re-derived");
+        assertEq(afterTrip.wethDecimals, before.wethDecimals, "leg A decimals re-derived");
+    }
+
+    /// @dev The shape half of the same gap: venue C is ASSET-MODE (`cbBTC == usdc`), so
+    ///      `legBIsAsset` must flip false→true on the way out and true→false on the way back. Only a
+    ///      migration OUT of asset mode can catch a stale write to it, and until now nothing migrated
+    ///      out of anything.
+    function testMigrateRoundTripThroughAssetModeRestoresTheShape() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAerodromeCLStrategy.LayoutView memory before = strategy.layout();
+        assertFalse(before.legBIsAsset, "venue A is the two-borrowed-legs shape");
+
+        _stage(_venueCParams());
+        _migrate(_venueCParams());
+        assertTrue(strategy.layout().legBIsAsset, "asset mode adopted");
+
+        _stage(_venueAParams());
+        _migrate(_venueAParams());
+        assertFalse(strategy.layout().legBIsAsset, "shape re-derived on the way back");
+        assertEq(strategy.layout().cbBTC, before.cbBTC, "leg B is a real borrowed leg again");
+        assertEq(strategy.layout().mCbBTC, before.mCbBTC, "leg B market restored");
+        assertEq(strategy.layout().cbBTCSwapTickSpacing, before.cbBTCSwapTickSpacing, "leg B spacing restored");
+    }
+
+    /// @dev The leg-A DECIMALS half of the same gap. Venues A/B/C all carry an 18dp leg A, so the
+    ///      `wethDecimals` value never changes across any migration among them and a stale
+    ///      `$.wethDecimals = wethDec` write is invisible — the A↔B↔C round trips above pass even with
+    ///      that write deleted. Venue D is a two-leg destination whose leg A is 8dp, so the migration
+    ///      forces `wethDecimals` 18→8 and back, catching the stale write. Migrate-only (no redeploy),
+    ///      so venue D needs no tick/price — `applyVenue` reads no pool price.
+    function testMigrateRoundTripThroughAnEightDecimalLegARestoresTheDecimals() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAerodromeCLStrategy.LayoutView memory before = strategy.layout();
+        assertEq(before.wethDecimals, 18, "venue A leg A is 18dp");
+
+        // ── Venue D: fresh 8dp leg A, reusing venue B's 8dp leg B + collateral market. ──
+        MockToken legAD = new MockToken("Leg A 8dp", "LEGAD", 8);
+        MockLendingMarket mLegAD = new MockLendingMarket(address(legAD));
+        MockChainlinkFeed legADFeed = new MockChainlinkFeed(int256(P_LEG_A), 8, 1, block.timestamp);
+        MockCLPool poolD = new MockCLPool(address(legB2), address(legAD), SPACING);
+        poolD.setFactory(AERODROME_CL_FACTORY);
+        clFactory.setPool(address(legB2), address(legAD), SPACING, address(poolD));
+        clFactory.setPool(address(usdc), address(legAD), LEG_A_SWAP_SPACING, makeAddr("legADSwapPool"));
+        MockCLGauge gaugeD = new MockCLGauge(address(aero));
+        gaugeD.setPool(address(poolD));
+        poolD.setGauge(address(gaugeD));
+        gaugeD.setNpm(address(npm));
+
+        LeveragedAeroVenue.VenueParams memory d = _venueBParams();
+        d.mWeth = address(mLegAD);
+        d.weth = address(legAD);
+        d.wethFeed = address(legADFeed);
+        d.pool = address(poolD);
+        d.gauge = address(gaugeD);
+        d.tickSpacing = SPACING;
+        d.wethSwapTickSpacing = LEG_A_SWAP_SPACING;
+
+        _stage(d);
+        _migrate(d);
+        assertEq(strategy.layout().wethDecimals, 8, "leg A decimals re-derived to 8 on the way out");
+
+        _stage(_venueAParams());
+        _migrate(_venueAParams());
+        assertEq(strategy.layout().wethDecimals, before.wethDecimals, "leg A decimals restored to 18");
+    }
+
+    /// @dev The reward leg is a THIRD swap venue (Aerodrome v2, volatile, hardcoded route). Without a
+    ///      probe, a gauge whose reward token has no v2/USDC pool passes every other check and then
+    ///      reverts inside BOTH `compound` and `flatten` once a tranche accrues — permanently, since
+    ///      `flatten` is also the precondition for migrating away.
+    function testMigrateRejectsARewardTokenWithNoUsdcRoute() public {
+        _execute(SEED);
+        _flatten();
+        MockToken orphanReward = new MockToken("Orphan", "ORPH", 18); // no pool in the v2 factory mock
+        MockCLGauge orphanGauge = new MockCLGauge(address(orphanReward));
+        orphanGauge.setPool(address(poolB));
+        poolB.setGauge(address(orphanGauge));
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.gauge = address(orphanGauge);
+        _expectMigrateRevert(v, LeveragedAeroVenue.VenueMismatch.selector);
+    }
+
+    /// @dev Leg feeds are validated at STAGE time, not only at read time. `readUsd8` does fail closed
+    ///      on a non-8dp answer, but it fails after the venue is already adopted — bricking `redeploy`
+    ///      on a fund that has no way back except re-staging.
+    function testMigrateRejectsANonEightDecimalLegFeed() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.wethFeed = address(new MockChainlinkFeed(int256(1e18), 18, 1, block.timestamp));
+        _expectMigrateRevert(v, LeveragedAeroVenue.UnexpectedFeedDecimals.selector);
     }
 
     function testMigrateRejectsAMissingLegSwapPool() public {
@@ -785,6 +1137,57 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(l.cbBTCFeed, address(usdcFeed), "leg B feed pinned to USDC/USD");
         assertEq(l.cbBTCSwapTickSpacing, 0, "leg B swap spacing declared unused");
         assertFalse(l.wethIsToken0, "usdc is token0 in poolC");
+        // CROSS-DECIMAL: venue A's leg B is 8dp, venue C's is USDC at 6dp. The stored decimals drive
+        // every token↔USDC conversion, so a migration that failed to rewrite them would mis-scale the
+        // whole book by 100x while every other assertion above still passed.
+        assertEq(l.cbBTCDecimals, 6, "leg B decimals re-read at migrate (8dp -> 6dp)");
+        assertEq(l.wethDecimals, 18, "leg A decimals re-read at migrate");
+    }
+
+    /**
+     * @dev The scenario the reward feed lives in `VenueParams` FOR: a destination gauge that rewards a
+     *      DIFFERENT token. Pinning the feed at init would price that token with AERO's mark and
+     *      mis-scale the L9 harvest floor. Nothing exercised it end-to-end — both fixture gauges reward
+     *      AERO — so this drives the full sequence and then sells a real tranche of the new token
+     *      against the new feed.
+     */
+    function testMigrationToAGaugeWithADifferentRewardTokenHarvestsAgainstTheNewFeed() public {
+        _execute(SEED);
+        _flatten();
+
+        MockToken newReward = new MockToken("Reward2", "RWD2", 18);
+        MockChainlinkFeed newRewardFeed = new MockChainlinkFeed(2e8, 8, 1, block.timestamp); // $2
+        MockCLGauge gaugeB2 = new MockCLGauge(address(newReward));
+        gaugeB2.setPool(address(poolB));
+        poolB.setGauge(address(gaugeB2));
+        // The route probe and the sale both key off the destination's reward token now.
+        vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(newReward), address(usdc), address(0xA2F))).code);
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.gauge = address(gaugeB2);
+        v.aeroUsdFeed = address(newRewardFeed);
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().aeroUsdFeed, address(newRewardFeed), "feed migrated with the gauge");
+
+        npm.setPool(poolB);
+        vm.prank(proposer);
+        strategy.redeploy(0);
+
+        // Arm a tranche of the NEW reward token and a router that fills it at the new feed's $2 mark.
+        uint256 tranche = 1000e18;
+        newReward.mint(address(gaugeB2), tranche);
+        gaugeB2.setAeroToPayOnWithdraw(tranche);
+        MockAeroV2Router r = new MockAeroV2Router(address(newReward), address(usdc), 2e6);
+        vm.etch(AERO_V2_ROUTER, address(r).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        assertEq(newReward.balanceOf(address(strategy)), 0, "new reward token sold, not stranded");
+        assertEq(aero.balanceOf(address(strategy)), 0, "old reward token not involved");
+        assertEq(strategy.nav(), usdc.balanceOf(address(strategy)), "flat NAV == idle USDC");
     }
 
     // ==================== redeploy ====================
@@ -799,7 +1202,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         uint256 idle = usdc.balanceOf(address(strategy));
 
         vm.prank(proposer);
-        strategy.redeploy();
+        strategy.redeploy(0);
 
         assertGt(strategy.layout().tokenId, 0, "fresh position minted");
         assertEq(gaugeB.depositCallCount(), 1, "staked in the NEW gauge");
@@ -817,7 +1220,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         vm.expectRevert(LeveragedAeroVenue.PositionAlreadyOpen.selector);
         vm.prank(proposer);
-        strategy.redeploy();
+        strategy.redeploy(0);
     }
 
     function testRedeployRevertsForNonProposer() public {
@@ -825,7 +1228,153 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _flatten();
         vm.expectRevert(BaseStrategy.NotProposer.selector);
         vm.prank(lp);
-        strategy.redeploy();
+        strategy.redeploy(0);
+    }
+
+    /// @dev `redeploy` is the ONE repeatable value-moving proposer op, and the mint's own §8 mins come
+    ///      off the same `slot0()` the mint executes at — self-referential. The caller's floor is the
+    ///      only bound that is not derived from the price being bounded.
+    function testRedeployHonoursTheCallerLiquidityFloor() public {
+        _execute(SEED);
+        _flatten();
+
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientLiquidity.selector);
+        vm.prank(proposer);
+        strategy.redeploy(type(uint128).max);
+
+        assertEq(strategy.layout().tokenId, 0, "nothing opened when the floor is unmet");
+
+        // A reachable floor still opens the position.
+        vm.prank(proposer);
+        strategy.redeploy(1);
+        assertGt(strategy.layout().tokenId, 0, "position opened under a satisfiable floor");
+    }
+
+    /// @dev ROLLBACK (B → A): `flatten → redeploy` re-enters the ORIGINAL venue with nothing changed,
+    ///      and the staged destination hash must NOT survive it. Leaving it armed would let the
+    ///      proposer fire an owner authorization months later into conditions nobody re-evaluated —
+    ///      the replay the migrate path already closes by consuming on use.
+    function testRedeployRollsBackToTheOldVenueAndClearsTheStagedHash() public {
+        _execute(SEED);
+        _flatten();
+        _stage(_venueBParams());
+        assertTrue(strategy.layout().stagedVenueHash != bytes32(0), "hash armed");
+
+        vm.prank(proposer);
+        strategy.redeploy(0);
+
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "staged hash cleared by the rollback");
+        assertEq(strategy.layout().pool, address(pool), "still on the ORIGINAL venue");
+        assertEq(strategy.layout().gauge, address(gauge), "still on the original gauge");
+        assertGt(strategy.layout().tokenId, 0, "position reopened on venue A");
+        assertEq(gauge.depositCallCount(), 2, "restaked in the OLD gauge (genesis + rollback)");
+        assertEq(gaugeB.depositCallCount(), 0, "venue B never touched");
+
+        // And the abandoned authorization can no longer be executed without a fresh stage.
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        vm.expectRevert(LeveragedAeroVenue.VenueNotStaged.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+    }
+
+    /// @dev Same-venue round trip with no migration in between — the plain "unwind, wait, re-enter"
+    ///      operation, distinct from the rollback above in that nothing was ever staged.
+    function testFlattenThenRedeployRoundTripsOnTheSameVenue() public {
+        _execute(SEED);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        uint256 navBefore = strategy.nav();
+
+        _flatten();
+        _assertFlat();
+        vm.prank(proposer);
+        strategy.redeploy(0);
+
+        assertGt(strategy.layout().tokenId, 0, "reopened");
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "a FRESH position, not the old id");
+        assertEq(strategy.layout().pool, address(pool), "same venue throughout");
+        assertApproxEqRel(strategy.nav(), navBefore, 0.0001e18, "round trip is value-neutral (lossless fixture)");
+    }
+
+    // ==================== post-settle gating (mutation survivors) ====================
+
+    /// @dev ERC-7201 base slot, byte-identical to the three `STORAGE_SLOT` copies in `src`.
+    bytes32 internal constant LAYOUT_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
+
+    /// @dev Poke `Layout.tokenId` directly. Needed because the flat-book gate is a conjunction whose
+    ///      clauses cannot all be driven through the public surface — a real book with a live `tokenId`
+    ///      also carries debt, so the leg-debt clause would mask this one (exactly what let the mutant
+    ///      survive). The read-back assert doubles as a check that the slot offset is still correct.
+    function _writeTokenId(uint256 id) internal {
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 18), bytes32(id));
+        assertEq(strategy.layout().tokenId, id, "tokenId slot offset drifted");
+    }
+
+    /// @dev Same, for the packed `hedgedDebtA | hedgedDebtB` slot.
+    function _writeHedgedDebt(uint128 a, uint128 b) internal {
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 27), bytes32((uint256(b) << 128) | uint256(a)));
+        (uint128 ra, uint128 rb) = strategy.hedgedDebt();
+        assertEq(ra, a, "hedgedDebtA slot offset drifted");
+        assertEq(rb, b, "hedgedDebtB slot offset drifted");
+    }
+
+    /// @dev All three new entry points gate on `Executed`. Nothing covered them post-`settle`, where
+    ///      `redeploy` in particular would re-open a levered position on a wound-down fund whose assets
+    ///      have already been pushed to the vault.
+    function testMigrationEntryPointsAreRejectedAfterSettle() public {
+        _execute(SEED);
+        vm.prank(address(vault));
+        strategy.settle();
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        vm.prank(proposer);
+        strategy.redeploy(0);
+    }
+
+    /// @dev The flat-book gate is a CONJUNCTION, and the mutation sweep found the first two clauses
+    ///      masked by the leg-debt clause firing with the same selector. Drive each in isolation.
+    function testMigrateFlatBookGateIsCheckedClauseByClause() public {
+        _execute(SEED);
+        _flatten();
+        _stage(_venueBParams());
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+
+        // (1) tokenId alone: no debt, no hedged basis, but a live position id.
+        _writeTokenId(1234);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+        _writeTokenId(0);
+
+        // (2) hedged basis A alone.
+        _writeHedgedDebt(1, 0);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        // (3) hedged basis B alone.
+        _writeHedgedDebt(0, 1);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+        _writeHedgedDebt(0, 0);
+
+        // (4) leg-B debt alone (the leg-A case is `testMigrateRevertsWhileLegDebtRemains`).
+        vm.prank(address(strategy));
+        mLegB.borrow(1e8);
+        vm.expectRevert(LeveragedAeroVenue.BookNotFlat.selector);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
     }
 
     // ==================== continuity across the full sequence ====================
@@ -845,7 +1394,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _migrate(_venueBParams());
         npm.setPool(poolB);
         vm.prank(proposer);
-        strategy.redeploy();
+        strategy.redeploy(0);
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
         vm.prank(proposer);

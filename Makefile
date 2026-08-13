@@ -38,8 +38,13 @@ weth-price-checker:
 strategy-factory:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationTest
 
+# NO --fork-url here: MulticallIntegrationTest self-forks at a PINNED block via vm.createSelectFork in
+# setUp (with the vm.fee(0) op-revm Isthmus workaround). Passing --fork-url base in addition makes
+# foundry init the OP-stack L1Block handler against the CLI fork and panic before vm.fee(0) runs — the
+# same reason lp-auto-balancer-v2 / lp-v2-setup omit it. Pinning also removes the "could not calculate
+# block delta" flake the unpinned `latest` fork produced inside Moonwell's timestamp accrual.
 strategy-multicall:
-	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MulticallIntegrationTest
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --ffi --mc MulticallIntegrationTest
 
 mamo-staking:
 	forge test --fork-url base --ffi --mc MamoStaking -vvv

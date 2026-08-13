@@ -588,8 +588,8 @@ same vault, same share token, same user accounts, no user action. Three new stra
 |---|---|---|
 | `stageVenue(bytes32)` | **vault owner (multisig)** | Commit `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))` for the destination venue; `0` clears. Inert until executed. |
 | `flatten(minRewardUsdcOut, minIdleUsdcOut)` | proposer | `settleImpl`'s exact unwind (exit gauge+CL, repay both legs, redeem all collateral, sweep legs → USDC) but **no settle**: state stays `Executed`, USDC stays in the strategy, deposits/redeems keep working (flat NAV = idle USDC, oracle-free). **Calm-gated** before the burn, and it **sells the reward tranche** the unwind auto-claims (L9 oracle floor + your `minRewardUsdcOut`) so the flat NAV is the whole book. `minIdleUsdcOut` is your aggregate floor on the realised unwind. Idempotent. |
-| `migrateVenue(VenueParams)` | proposer | Executes the staged rewrite. Requires byte-exact hash match AND a flat book (`tokenId == 0`, hedged bases 0, zero debt on both current leg markets). Re-runs full init-grade validation (incl. a `gauge.pool() == pool` binding check) and rewrites the venue subset of storage. Moves **no funds**. |
-| `redeploy()` | proposer | Re-opens a **fresh** position from the flat book — `executeImpl`'s genesis sequence, entire idle balance, stored width/target-LTV. `deployIdle` can NOT do this (it `increaseLiquidity`s the stored tokenId, 0 when flat); conversely `redeploy` reverts `PositionAlreadyOpen` on a live book. |
+| `migrateVenue(VenueParams)` | proposer | Executes the staged rewrite. Requires byte-exact hash match AND a flat book (`tokenId == 0`, hedged bases 0, zero debt on both current leg markets). Re-runs full init-grade validation (incl. the **two-way** gauge↔pool binding `gauge.pool() == pool` *and* `pool.gauge() == gauge`, and a probe that the reward token has an Aerodrome v2 volatile USDC route) and rewrites the venue subset of storage. Moves **no funds**. |
+| `redeploy(minLiquidity)` | proposer | Re-opens a **fresh** position from the flat book — `executeImpl`'s genesis sequence, entire idle balance, stored width/target-LTV, floored by your `minLiquidity`. **Clears any staged venue hash.** `deployIdle` can NOT do this (it `increaseLiquidity`s the stored tokenId, 0 when flat); conversely `redeploy` reverts `PositionAlreadyOpen` on a live book. |
 
 **Runbook (per migration):**
 
@@ -606,14 +606,26 @@ same vault, same share token, same user accounts, no user action. Three new stra
    expected realised unwind; pass a nonzero `minRewardUsdcOut` whenever a tranche is pending.
 3. Rebalancer: `migrateVenue(params)` — pure config rewrite; NAV is provably unchanged (flat NAV is
    the idle-USDC balance, which no venue field touches).
-4. Rebalancer: `redeploy()`; afterwards sweep old-leg unwind dust with `rescueToVault(oldLeg)`
-   (former legs leave the deny-list at the rewrite; the NEW legs enter it).
+4. Rebalancer: `redeploy(minLiquidity)`; afterwards sweep old-leg unwind dust with
+   `rescueToVault(oldLeg)` (former legs leave the deny-list at the rewrite; the NEW legs enter it).
 
 **Trust split:** the owner alone picks the venue (hash-committed, byte-exact); the proposer alone
 sequences execution and can neither deviate from the committed config nor move funds out of the
-contract at any step. **Rollback:** before step 3, `redeploy()` re-enters the *old* venue (nothing
-changed) and the owner can `stageVenue(0)`; a failed step 3 reverts atomically; after step 3, stage
-the old venue's params and repeat.
+contract at any step.
+
+**Residual owner trust (state it plainly).** The bound above is on the *proposer*, not on the owner.
+A compromised owner multisig can stage a venue whose contracts it controls, and `redeploy` then mints
+the position NFT into that venue's gauge. Validation narrows this but does not erase it: the gauge
+must be attested by the pool (`pool.gauge()`) as well as attesting the pool itself, so a hostile gauge
+alone no longer suffices — the attacker must control the *pool*, which in turn must satisfy the leg /
+market / spacing / feed-decimal / width / LTV checks and expose a working reward route. It is still a
+smaller step than `stageVenue`'s existing authority implies, and it is the same trust root that
+already governs `rescueToVault`'s owner leg and the vault's fee configuration. Treat owner-key
+compromise as fund-loss, not merely config-loss.
+
+**Rollback:** before step 3, `redeploy(minLiquidity)` re-enters the *old* venue (nothing changed) and
+**clears the staged hash as a side effect** — re-stage if the migration is still intended. A failed
+step 3 reverts atomically; after step 3, stage the old venue's params and repeat.
 
 **Pair constraints:** both legs need live borrowable Moonwell markets and Chainlink USD feeds on
 Base; asset-mode (leg-B slot == USDC) is selected emergently by the config exactly as at init.
