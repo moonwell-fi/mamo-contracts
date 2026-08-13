@@ -1133,15 +1133,41 @@ library LeveragedAeroValuation {
     ///      it the moment `compound` claims and sells (measured at ~4.5% of a 100k deposit, post-fee, in a
     ///      single block). Pricing the reward wherever it currently sits is what actually closes it.
     ///
-    ///      THE `try/catch` IS THE MECHANISM, AND THE CATCH-TO-0 IS CORRECT — NOT AN UNDERSTATEMENT.
-    ///      Slipstream's gauge reverts `"NA"` on `earned()` for a tokenId it does not have staked. The
-    ///      gauge is a DIFFERENT contract, so that revert is a plain external failure a Solidity `try`
-    ///      catches (the same idiom `LPAutoBalancerV2` already uses for its `earned()` reads) — `nav()`
-    ///      gains no revert path. And the state where `earned()` reverts is EXACTLY the state where the
-    ///      tokenId is unstaked, which is exactly when the gauge has just auto-claimed the tranche into
-    ///      the held balance that (1) prices. So the two terms hand off cleanly: whatever leaves `earned()`
-    ///      arrives in the balance in the same transaction, and the sum is continuous across the unstake.
-    ///      `c.tokenId == 0` (flat book / pre-genesis) skips the call entirely.
+    ///      THE `try/catch` IS THE MECHANISM, AND THE CATCH-TO-0 IS CORRECT **FOR THE ONE STATE IT WAS
+    ///      WRITTEN FOR** — not, in general, an understatement. Slipstream's gauge reverts `"NA"` on
+    ///      `earned()` for a tokenId it does not have staked. The gauge is a DIFFERENT contract, so that
+    ///      revert is a plain external failure a Solidity `try` catches (the same idiom `LPAutoBalancerV2`
+    ///      already uses for its `earned()` reads) — `nav()` gains no revert path. And the state where
+    ///      `earned()` reverts `"NA"` is EXACTLY the state where the tokenId is unstaked, which is exactly
+    ///      when the gauge has just auto-claimed the tranche into the held balance that (1) prices. So the
+    ///      two terms hand off cleanly: whatever leaves `earned()` arrives in the balance in the same
+    ///      transaction, and the sum is continuous across the unstake. `c.tokenId == 0` (flat book /
+    ///      pre-genesis) skips the call entirely.
+    ///
+    ///      WHAT THE CATCH DOES **NOT** COVER — STATED PLAINLY, BECAUSE THE CONTINUITY ARGUMENT ABOVE IS
+    ///      ABOUT `"NA"` AND ONLY ABOUT `"NA"`. `catch {}` is indiscriminate: it equally swallows an
+    ///      out-of-gas in the subcall (63/64 forwarding), a selector/ABI change across a gauge upgrade or
+    ///      a venue migration onto a non-Slipstream gauge, and any future Aerodrome revert. In every one
+    ///      of those states the earned term silently drops to zero — and a zero there is NOT "the accrual
+    ///      is zero, priced correctly"; it is the PRE-FIX MIS-PRICING this term exists to close, restored
+    ///      in full and running on every deposit, every block, with nothing in any transaction to show
+    ///      for it. The trade is deliberate and it is NOT revisited here: `nav()` must stay revert-free on
+    ///      this read (see the deadman rationale on `sweepFloors` — a hard revert on a reward probe would
+    ///      brick pricing over a term that is a small fraction of a levered book). What the trade OWES,
+    ///      and what is paid here, is that the state be NAMED rather than papered over: a non-`"NA"`
+    ///      revert degrades NAV to the pre-fix mis-pricing, NOT to a semantically-zero accrual.
+    ///
+    ///      THE `code.length` PRECHECK, and what it is actually for. A `try` DOES NOT COVER an empty-code
+    ///      target: Solidity guards a high-level call to a typed contract with an `extcodesize` check
+    ///      emitted OUTSIDE the try's protected region, so a gauge with no code reverts UNCATCHABLY
+    ///      ("call to non-contract address") straight through `catch {}`. Prechecking therefore does two
+    ///      things — it separates "the gauge contract is gone/empty" from "the tokenId is unstaked" (two
+    ///      states the catch could not distinguish, because only ONE of them ever reached the catch), and
+    ///      it removes a revert the catch was never absorbing in the first place. `nav()` is unaffected
+    ///      either way, but NOT because the catch stood in: it cannot reach this probe against a
+    ///      code-less gauge at all, because the `rewardToken()` read on the first line of the body
+    ///      already fail-closes the whole call (empty revert data). The value of removing that revert is
+    ///      for a reader that must answer WITHOUT reverting — which is the next item.
     ///
     ///      GATED ON THE SUM, NOT ON THE BALANCE: `earned()` can be non-zero while the balance is zero
     ///      (the steady state, in fact — emissions accrue every second between harvests), so the feed read
@@ -1186,7 +1212,7 @@ library LeveragedAeroValuation {
     ///      realisation basis cannot drift and a venue migration can never orphan a second pinned copy.
     function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
         uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
-        if (c.tokenId != 0) {
+        if (c.tokenId != 0 && c.gauge.code.length != 0) {
             try ICLGauge(c.gauge).earned(strategy, c.tokenId) returns (uint256 e) {
                 amt += e;
             } catch {}
