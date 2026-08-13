@@ -6,7 +6,6 @@ import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -41,12 +40,10 @@ library LeveragedAeroVenue {
     error UnsupportedLeg(); // leg A is the unit of account, or a leg is the gauge reward token
     error UnexpectedFeedDecimals();
     error LegDecimalsOutOfRange(); // a leg token reports decimals outside [2, 18]
-    error WidthOutOfBounds();
-    error TargetLtvExceedsMax();
-    error MinHealthTooLow(); // minHealthBps < 10500 (1.05x floor)
-    error MaxLtvExceedsCF(); // maxLtvBps >= Moonwell USDC collateral factor
-    error MinHealthMaxLtvConflict();
-    error ComptrollerCallFailed();
+    // The RANGE and LTV-band errors (`OutOfBounds`, `TargetLtvExceedsMax`, `MinHealthTooLow`,
+    // `MaxLtvExceedsCF`, `MinHealthMaxLtvConflict`) and `ComptrollerCallFailed` are NOT re-declared
+    // here: `applyVenue` raises them through `LeveragedAeroValuation`'s copies, which already carry
+    // the strategy's selectors. Re-declaring would be a second definition of the same ladder.
     error VenueNotStaged(); // migrate without a staged hash, or params that do not match it
     error BookNotFlat(); // migrate while a CL position, hedged basis, or leg debt is still live
     error PositionAlreadyOpen(); // redeploy on a book that already has a CL position (use deployIdle)
@@ -163,11 +160,18 @@ library LeveragedAeroVenue {
         int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (NOT the LP pool's)
         int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing (NOT the LP pool's)
         // ── appended for the per-cycle rerange width band (keep byte-identical) ──
-        uint24 width; // current full range width in ticks (rerange spans width/2 each side)
+        uint24 width; // current full range width in ticks (split across the tick by `skewBps`)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
+        // ── appended for the rerange SKEW and its governance band (keep byte-identical). Placed HERE,
+        //    not after the hedged principals, so all three free-pack into the existing tail slot
+        //    (20 bytes used → 26) and `hedgedDebtA`/`hedgedDebtB` keep a byte-identical slot AND offset:
+        //    26 + 16 > 32, so `hedgedDebtA` still starts the NEXT slot at offset 0. ──
+        uint16 skewBps; // fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == centred)
+        uint16 minSkewBps; // lower bound for a proposer-supplied rerange skew
+        uint16 maxSkewBps; // upper bound for a proposer-supplied rerange skew
         // ── appended for the borrow-interest hedge (keep byte-identical) ──
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
@@ -231,7 +235,7 @@ library LeveragedAeroVenue {
         // USDC only), unsellable (`compound` early-returns on a flat book) and un-rescuable
         // (`rescueToVault` denies the reward token while Executed) — so every deposit and redeem in
         // the flat window would price against an understated NAV.
-        _sellRewardBalance(minRewardUsdcOut);
+        _sellRewardBalance(minRewardUsdcOut, true);
         // Same pathological-case belt as `_settle`: repays drive the bases to 0 through `_repay`'s
         // clamp except when residual debt could not be covered at all — zero them explicitly so a
         // flat book never carries a stale hedge basis into the next venue.
@@ -244,6 +248,29 @@ library LeveragedAeroVenue {
         uint256 idle = IERC20($.usdc).balanceOf(address(this));
         if (idle < minIdleUsdcOut) revert InsufficientIdleAfterFlatten(idle, minIdleUsdcOut);
         emit Flattened(idle);
+    }
+
+    /// @notice Sell the reward tranche the TERMINAL settle's unwind auto-claimed, floored by the L9
+    ///         oracle read ALONE — `BaseStrategy.settle()` takes no arguments, so there is no caller
+    ///         `minOut` to require and the oracle floor is the whole guard (post-checked against the
+    ///         measured fill, exactly as in `flattenImpl`).
+    /// @dev BEST-EFFORT BY CONTRACT — the strategy MUST reach this through its self-`try/catch`
+    ///      wrapper (`LeveragedAerodromeCLStrategy.sellSettleRewardSelf`), never directly. This
+    ///      function still FAILS CLOSED on its own (stale reward feed → `StaleOracle`; a fill under
+    ///      the floor → `BelowOracleFloor`), which is what makes the catch safe: the revert unwinds
+    ///      the whole sub-call including the swap, so the reward balance is left untouched and
+    ///      rescuable rather than sold blind.
+    ///
+    ///      WHY THE ASYMMETRY WITH `flattenImpl`, which calls the same helper fail-closed: `flatten`
+    ///      is RESUMABLE — a reverted flatten leaves an `Executed` book the proposer simply retries
+    ///      once the feed recovers, so failing closed costs nothing and preserves the caller's floor.
+    ///      `settle` is TERMINAL and owner-driven (`Executed → Settled`, one-way, no retry, no
+    ///      argument to widen): a hard revert here would let a stale reward feed or a reverting router
+    ///      BLOCK the fund's only exit. Degrading to "leave the tranche rescuable via
+    ///      `rescueToVault` post-`Settled`" — the pre-fix behaviour for the whole tranche — is the
+    ///      strictly better failure mode.
+    function sellSettleRewardImpl() public {
+        _sellRewardBalance(0, false);
     }
 
     /// @dev Sell the gauge-reward balance to USDC, floored exactly as `compoundImpl`'s harvest is:
@@ -266,7 +293,11 @@ library LeveragedAeroVenue {
     ///      only exit. Skipping is safe precisely where the floor rounds to 0: the mandatory-sale
     ///      rationale is that an unsold balance is invisible to `nav()`, and a sub-micro-USD balance
     ///      rounds out of a 6dp NAV by construction.
-    function _sellRewardBalance(uint256 minRewardUsdcOut) private {
+    /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
+    /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error. TRUE for
+    ///        `flatten`, whose proposer supplies one; FALSE for the terminal settle, which has no
+    ///        argument to supply and is bounded by the oracle floor alone (see `sellSettleRewardImpl`).
+    function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired) private {
         Layout storage $ = _layout();
         address rewardTok = ICLGauge($.gauge).rewardToken();
         uint256 bal = IERC20(rewardTok).balanceOf(address(this));
@@ -290,7 +321,7 @@ library LeveragedAeroVenue {
             bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
         ) * (10000 - uint256($.maxSlippageBps)) / 10000;
         if (floor == 0) return; // dust: unsellable, and worth strictly less than one NAV unit
-        if (minRewardUsdcOut == 0) revert ZeroMinOut();
+        if (callerFloorRequired && minRewardUsdcOut == 0) revert ZeroMinOut();
         uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(rewardTok, $.usdc, bal, minRewardUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor();
     }
@@ -484,23 +515,29 @@ library LeveragedAeroVenue {
         uint8 wethDec = IERC20Metadata(p.weth).decimals();
         if (cbDec < 2 || cbDec > 18 || wethDec < 2 || wethDec > 18) revert LegDecimalsOutOfRange();
 
-        // Rerange width band: on the tickSpacing grid, floor spans ≥ two spacings, ceiling inside
-        // the tick domain (see `_initialize`'s original block for the int24-wrap rationale).
-        if (p.tickSpacing <= 0) revert WidthOutOfBounds();
-        uint24 spacing = uint24(p.tickSpacing);
-        if (p.minWidth % spacing != 0 || p.maxWidth % spacing != 0) revert WidthOutOfBounds();
-        if (uint256(p.minWidth) < 2 * uint256(spacing)) revert WidthOutOfBounds();
-        if (p.minWidth > p.maxWidth) revert WidthOutOfBounds();
-        if (uint256(p.maxWidth) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert WidthOutOfBounds();
-        if (p.width % spacing != 0 || p.width < p.minWidth || p.width > p.maxWidth) revert WidthOutOfBounds();
+        // ── RANGE LADDER — ONE copy, in `LeveragedAeroValuation`, shared with the strategy's per-cycle
+        // `rerange`. `checkBands` is the destination band's own shape (both bounds on the new grid,
+        // floor ≥ two spacings, ceiling inside the tick domain, and `0 < minSkew <= maxSkew < 1e4`);
+        // `checkRange` is the pair that will actually be minted at `redeploy`.
+        //
+        // THE SKEW COMES FROM STORAGE, not from `p`: the skew band is venue-independent governance
+        // config (non-migratable core, like `maxSlippageBps` and the fee params), so a migration never
+        // rewrites it. It still has to be RE-VALIDATED here, because `checkRange`'s one-spacing-per-side
+        // span guard couples the live skew to `(width, tickSpacing)` and a migration rewrites both: a
+        // destination whose grid or width would starve one side is rejected HERE, rather than adopted
+        // and then discovered as a `DegenerateRange` inside `redeploy`, with the book already flat on a
+        // venue it cannot re-enter. At init the strategy writes the triple ahead of this call for
+        // exactly this reason. Raises `OutOfBounds` (the renamed `WidthOutOfBounds`, now covering both
+        // knobs) — same selector a `rerange` would raise for the same pair.
+        LeveragedAeroValuation.checkBands(p.tickSpacing, p.minWidth, p.maxWidth, $.minSkewBps, $.maxSkewBps);
+        LeveragedAeroValuation.checkRange(
+            p.width, $.skewBps, p.tickSpacing, p.minWidth, p.maxWidth, $.minSkewBps, $.maxSkewBps
+        );
 
         // Risk invariants against the LIVE collateral factor (re-read here — fresher than init's).
-        uint16 cfBps = _readCollateralFactor($.comptroller, mUsdc);
-        if (p.targetLtvBps > p.maxLtvBps) revert TargetLtvExceedsMax();
-        if (p.minHealthBps < 10500) revert MinHealthTooLow();
-        if (p.maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
-        // L4: the permissionless-deleverage trigger LTV must sit strictly above maxLtvBps.
-        if (uint256(p.minHealthBps) * uint256(p.maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
+        // Both the read and the four rungs are the Valuation copies, shared with the init ladder.
+        uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, mUsdc);
+        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps);
 
         // ── Persist the venue subset (every field a pool/pair change touches, nothing else) ──
         $.mCbBTC = p.mCbBTC;
@@ -527,19 +564,5 @@ library LeveragedAeroVenue {
         $.wethDecimals = wethDec;
         $.wethIsToken0 = wethIsToken0_;
         $.legBIsAsset = legBIsAsset_;
-    }
-
-    /// @dev USDC collateral factor (bps) from `Comptroller.markets(mUsdc)` — verbatim the strategy's
-    ///      original `_readCollateralFactor` (moved here with the venue block; init was its only caller).
-    function _readCollateralFactor(address comptroller_, address mUsdc_) private view returns (uint16 cfBps) {
-        (bool ok, bytes memory ret) = comptroller_.staticcall(abi.encodeWithSignature("markets(address)", mUsdc_));
-        if (!ok || ret.length < 64) revert ComptrollerCallFailed();
-        uint256 cfMantissa;
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            cfMantissa := mload(add(ret, 0x40))
-        }
-        cfBps = uint16(cfMantissa / 1e14); // 0.88e18 / 1e14 = 8800
-        if (cfBps == 0) revert ComptrollerCallFailed();
     }
 }

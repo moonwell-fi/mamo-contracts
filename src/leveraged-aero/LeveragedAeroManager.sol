@@ -166,11 +166,18 @@ library LeveragedAeroManager {
         int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (NOT the LP pool's)
         int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing (NOT the LP pool's)
         // ── appended for the per-cycle rerange width band (keep byte-identical) ──
-        uint24 width; // current full range width in ticks (rerange spans width/2 each side)
+        uint24 width; // current full range width in ticks (split across the tick by `skewBps`)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
+        // ── appended for the rerange SKEW and its governance band (keep byte-identical). Placed HERE,
+        //    not after the hedged principals, so all three free-pack into the existing tail slot
+        //    (20 bytes used → 26) and `hedgedDebtA`/`hedgedDebtB` keep a byte-identical slot AND offset:
+        //    26 + 16 > 32, so `hedgedDebtA` still starts the NEXT slot at offset 0. ──
+        uint16 skewBps; // fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == centred)
+        uint16 minSkewBps; // lower bound for a proposer-supplied rerange skew
+        uint16 maxSkewBps; // upper bound for a proposer-supplied rerange skew
         // ── appended for the borrow-interest hedge (keep byte-identical) ──
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
@@ -214,6 +221,20 @@ library LeveragedAeroManager {
     ///      LOOKS worst — `assetModeSplit` reads the live `sqrtP` for its sizing before any gate — but
     ///      the mint that consumes that sizing is gated, so a shoved tick still unwinds the whole op.
     ///
+    ///      THE PATHS THAT REACH NO CALM GATE AT ALL — `_leverDown` (`adjustLeverage` down and the
+    ///      permissionless `deleverage`), `settleImpl` and `redeemUnwindImpl` — are omitted from the list
+    ///      above because they never mint. That is deliberate, not an oversight, and it is safe for three
+    ///      independent reasons. (1) CONCAVITY: they BURN liquidity. A CL bundle removed at a shoved
+    ///      price is worth strictly MORE at the true price than one removed at it, so shoving the pool
+    ///      hands the protocol the better side of the trade — a gate would only let an attacker DENY an
+    ///      exit, which is the wrong failure mode for a redeem valve. (2) THE UNWIND MINS CANNOT BIND:
+    ///      they are derived from the SAME `slot0` the `decreaseLiquidity` executes at (see
+    ///      `_unwindLiquidity`), so the comparison is a strict identity — gating would change nothing
+    ///      about what those mins admit. (3) THE ENTRY HEALTH GATE IS ORACLE-PRICED: `_assertHealthy` and
+    ///      `_readCollateralDebt` read Chainlink-priced Moonwell state, which a pool shove cannot move,
+    ///      so `deleverage`'s "am I unhealthy" trigger is not shove-able either. The residual swaps on
+    ///      those paths are bounded instead by oracle floors/ceilings (`_rebalanceCover`) or by the
+    ///      redeemer's own budget — a slippage bound, not a tick bound.
     /// @param minLiquidity Caller's floor on the CL liquidity the genesis mint must produce, on top of
     ///                     the §8 two-sided `maxSlippageBps` mins the mint already enforces. Activation
     ///                     (`execute`) passes 0 — it runs ONCE, owner-driven, on a book that holds only
@@ -230,7 +251,8 @@ library LeveragedAeroManager {
         markets[0] = $.mUsdc;
         IComptroller($.comptroller).enterMarkets(markets);
         LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
-        (int24 tickLower, int24 tickUpper) = LeveragedAeroValuation.centeredTickRange($.pool, $.tickSpacing, $.width);
+        (int24 tickLower, int24 tickUpper) =
+            LeveragedAeroValuation.skewedTickRange($.pool, $.tickSpacing, $.width, $.skewBps);
         (uint256 cbBTCAmt, uint256 wethAmt) = _supplyAndBorrow(usdcAmt, tickLower, tickUpper);
         _wrapNativeEth();
         _mintAndStake(cbBTCAmt, wethAmt, tickLower, tickUpper, minLiquidity);
@@ -239,6 +261,12 @@ library LeveragedAeroManager {
 
     /// @notice Full proportional unwind to the strategy (body of the strategy's `_settle`). The
     ///         strategy forwards the realized USDC to the vault afterward.
+    /// @dev Sweeps the two LEG tokens ONLY. The `gauge.withdraw` inside `_unwindLiquidity` auto-claims
+    ///      a final reward tranche, and selling THAT is the caller's job — deliberately, because the
+    ///      two callers need opposite failure modes on the same sale: `LeveragedAeroVenue.flattenImpl`
+    ///      sells it fail-closed under the proposer's floor (it is resumable), while the strategy's
+    ///      terminal `_settle` sells it best-effort through a self-`try/catch` (it must not be
+    ///      blockable). Doing it here would collapse the two and silently drop `flatten`'s floor.
     /// @return realizedUsdc USDC held by the strategy after the unwind.
     function settleImpl() public returns (uint256 realizedUsdc) {
         Layout storage $ = _layout();
@@ -255,17 +283,8 @@ library LeveragedAeroManager {
         // 5. Sweep residual WETH + cbBTC → USDC (Chainlink-bounded min-out)
         {
             (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
-            uint256 slip = uint256($.maxSlippageBps);
-            _swapTokenToUsdc(
-                $.weth,
-                _tokenToUsdc(IERC20($.weth).balanceOf(address(this)), $.wethDecimals, pETH, pUsdc) * (10000 - slip)
-                    / 10000
-            );
-            _swapTokenToUsdc(
-                $.cbBTC,
-                _tokenToUsdc(IERC20($.cbBTC).balanceOf(address(this)), $.cbBTCDecimals, pBTC, pUsdc) * (10000 - slip)
-                    / 10000
-            );
+            _sweepAtOracleFloor($.weth, $.wethDecimals, pETH, pUsdc);
+            _sweepAtOracleFloor($.cbBTC, $.cbBTCDecimals, pBTC, pUsdc);
         }
         // 6. Clear position state (flat-book invariant: nav() reads tokenId==0 branch)
         $.tokenId = 0;
@@ -545,7 +564,7 @@ library LeveragedAeroManager {
         return LeveragedAeroValuation.hedgeBorrowInterest(b);
     }
 
-    /// @notice Recenter the CL position on the current tick WITHOUT swapping (body of the strategy's
+    /// @notice Re-range the CL position around the current tick WITHOUT swapping (body of the strategy's
     ///         `rerange`): calm-gate → remove 100% liquidity + collect → new tickSpacing-aligned range
     ///         → re-add the collected legs → restake → assert health. Debt + collateral untouched.
     ///
@@ -553,37 +572,48 @@ library LeveragedAeroManager {
     ///         remainder of ONE borrowed leg is left idle (NAV-counted, stays redeployable). A new
     ///         tokenId is minted (Slipstream ticks are immutable); the old empty NFT is harmless dust.
     ///         No-op on a flat book.
-    /// @param width_  Full range width in ticks for this cycle (validated against the stored band by
-    ///                the strategy entrypoint, then persisted here as the new `width`).
+    /// @dev TAKES NO RANGE PARAMS — which is exactly WHY the persist must precede this delegatecall. The
+    ///      proposer's `width` / `skewBps` for this cycle were validated AND PERSISTED by the strategy
+    ///      entrypoint (see the ordering note on `LeveragedAerodromeCLStrategy.rerange`), and step 3
+    ///      below reads both straight out of storage: write after, and the re-range would land at the OLD
+    ///      pair. The frame the two `sstore`s live in is a bytecode relocation for EIP-170 headroom, not a
+    ///      semantic choice. The persists also sit ahead of the flat-book bail-out below — see the
+    ///      entrypoint's note for what that does and does NOT buy on a terminal (fully-redeemed) book.
     /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
     /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
-    function rerangeImpl(uint24 width_, uint256 minLiq0, uint256 minLiq1) public {
+    function rerangeImpl(uint256 minLiq0, uint256 minLiq1) public {
         Layout storage $ = _layout();
-        // Persist the (already band-validated) width BEFORE the flat-book bail-out. `deployIdle` /
-        // `compound` mint at the STORED width, so a rerange on a flat book must still take effect —
-        // otherwise the proposer's width choice is silently dropped and the next redeploy reopens at
-        // the stale one.
-        $.width = width_;
-        if ($.tokenId == 0) return; // flat book — nothing to recenter (width above already stored)
+        if ($.tokenId == 0) return; // flat book — nothing to re-range (width/skew already stored)
 
         // 1. Calm-gate BEFORE touching the pool — never recenter at a manipulated tick.
         LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
 
         // 2. Unstake + remove 100% liquidity + collect (num==den → no restake). The old NFT is
         //    left empty + unstaked; a recenter needs a fresh range == fresh tokenId.
+        //
+        //    ASSET-MODE: snapshot leg B BEFORE the unwind, exactly as `redeemUnwindImpl` snapshots
+        //    `idleUsdcBefore` and for the same reason (see its comment). Leg B IS the unit of account
+        //    there, so its raw balance is idle deposits + the redeem cover budget — NOT what this op
+        //    collected. Only the DELTA is this re-range's own principal; folding the rest in would let a
+        //    re-range silently draw unlevered idle USDC into the LP, a capability no entrypoint declares
+        //    (`deployIdle` is THE path that adds idle, and it levers it). Zero in the two-borrowed-legs
+        //    shape, where the leg-B balance is a genuine rerange remainder and redeploying it IS intended.
+        uint256 legBBefore = $.legBIsAsset ? IERC20($.cbBTC).balanceOf(address(this)) : 0;
         _unwindLiquidity(1, 1);
 
-        // 3. Derive the tickSpacing-aligned range centered on the current (calm) tick from the width
-        //    stored above. Every later mint (deployIdle / compound) reuses that stored width.
-        (int24 tickLower, int24 tickUpper) = LeveragedAeroValuation.centeredTickRange($.pool, $.tickSpacing, $.width);
+        // 3. Derive the tickSpacing-aligned range around the current (calm) tick from the width/skew
+        //    the entrypoint stored. Every later mint (deployIdle / compound) reuses that same pair.
+        (int24 tickLower, int24 tickUpper) =
+            LeveragedAeroValuation.skewedTickRange($.pool, $.tickSpacing, $.width, $.skewBps);
 
-        // 4. Re-add the collected legs (full balances as desired) into the new range. No swap →
-        //    principal conserved. `_mintPosition` enforces the two-sided `maxSlippageBps` mins
+        // 4. Re-add the legs THIS op collected into the new range — the full leg-A balance, and leg B
+        //    net of the pre-unwind snapshot (0 outside asset-mode, so this is the full balance there).
+        //    No swap → principal conserved. `_mintPosition` enforces the two-sided `maxSlippageBps` mins
         //    (the §8 always-on floor) and approves the NPM; the caller's `minLiq0/minLiq1` add an
         //    explicit two-sided guard on the consumed amounts (proposer-tightenable, like
         //    compound's `minUsdcOut`).
         (uint256 amt0, uint256 amt1) =
-            _amounts01(IERC20($.cbBTC).balanceOf(address(this)), IERC20($.weth).balanceOf(address(this)));
+            _amounts01(IERC20($.cbBTC).balanceOf(address(this)) - legBBefore, IERC20($.weth).balanceOf(address(this)));
         (uint256 newTokenId,, uint256 used0, uint256 used1) = _mintPosition(amt0, amt1, tickLower, tickUpper);
         if (used0 < minLiq0 || used1 < minLiq1) revert InsufficientLiquidity();
 
@@ -619,8 +649,8 @@ library LeveragedAeroManager {
     /// @param minLiq        Minimum CL liquidity on a lever-UP add (slippage guard).
     /// @param minOut        Minimum USDC out of a lever-DOWN residual swap (slippage guard).
     function adjustLeverageImpl(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut) public {
-        // Persist the (already max-validated) target BEFORE the venue ops, exactly as `rerangeImpl`
-        // persists `width`. Three reasons this ordering is the right one:
+        // Persist the (already max-validated) target BEFORE the venue ops, exactly as `rerange`
+        // persists `width` / `skewBps`. Three reasons this ordering is the right one:
         //
         //   1. SAFETY IS UNAFFECTED. The strategy entrypoint already rejected `targetLtvBps_ >
         //      maxLtvBps`, and this is the ONLY caller — so no out-of-band value can reach this write.
@@ -642,9 +672,11 @@ library LeveragedAeroManager {
         //      headroom: that frame already loads `_layout()` for the `maxLtvBps` check, so the write
         //      costs ~20 bytes there versus ~71 in this library, and this library is at the cap.
         //      Semantics are identical — same transaction, same all-or-nothing revert, and still ahead
-        //      of the no-op branch below. (`rerangeImpl` persists `width` in-library because the
-        //      manager had room when it was written; if this file is ever refactored for space, that
-        //      write is the same candidate for relocation.)
+        //      of the no-op branch below. (`rerangeImpl` used to persist `width` in-library, back when
+        //      the manager had room; the rerange-skew work made it the earmarked relocation candidate
+        //      and took it — `rerange` now writes BOTH `width` and `skewBps` in the strategy frame,
+        //      still ahead of the impl's own flat-book bail-out, and `rerangeImpl` takes no range
+        //      params at all.)
         (uint256 collateralUsdc, uint256 debtUsdc) = _readCollateralDebt();
         uint256 targetDebt = (uint256(targetLtvBps_) * collateralUsdc) / 10000;
         if (targetDebt > debtUsdc) {
@@ -806,16 +838,32 @@ library LeveragedAeroManager {
         }
     }
 
-    /// @dev Cover an IL-driven debt shortfall on `deficitTok` by selling the over-collected
-    ///      `surplusTok` → USDC, then buying exactly the deficit from that USDC and repaying it.
-    ///      Any leftover USDC stays idle (NAV-counted; recoverable via `deployIdle`/`redeem`).
+    /// @dev Cover an IL-driven debt shortfall on `deficitTok` by selling ONLY AS MUCH of the over-collected
+    ///      `surplusTok` as that cover needs → USDC, then buying exactly the deficit from that USDC and
+    ///      repaying it. Any leftover USDC stays idle (NAV-counted; recoverable via `deployIdle`/`redeem`).
+    ///
+    ///      **NEED-SIZED, NOT WHOLESALE** — the sell keeps `surplusBal − needed`. The surplus-leg BALANCE
+    ///      is not the same thing as this op's surplus: it can also hold a PRE-EXISTING idle remainder (a
+    ///      skewed-`rerange` leftover is the ordinary source) which is still matched 1:1 by that leg's
+    ///      Moonwell debt and is therefore delta-NEUTRAL where it sits. Selling it would convert a hedged
+    ///      holding into an unrecorded SHORT that no monitor surfaces: `hedgeBorrowInterest` measures
+    ///      interest drift (`debt − hedgedDebt`) only, and `_repay`'s clamp re-anchors `hedgedDebt` to the
+    ///      post-repay debt, so the missing leg leaves no trace in either. Same reasoning as the stayer
+    ///      snapshots `redeemUnwindImpl` documents — a balance is not evidence of entitlement to it.
+    ///      `needed` is the ORACLE conversion of `shortAmt` into surplus-leg units, grossed up by
+    ///      `maxSlippageBps` on BOTH conversions (the buy ceiling and the sell floor) so a fill landing on
+    ///      the floor still raises the ceiling-priced buy; short of that the exact-output cover would
+    ///      revert on `amountInMax` rather than silently under-repay.
     ///
     ///      **Oracle-floor guard** — the minimum USDC out of the surplus-leg sell is enforced as
     ///      `max(callerMinUsdcOut, oracleFloor)` where
-    ///      `oracleFloor = _tokenToUsdc(surplusBal) × (1 − maxSlippageBps)`.
+    ///      `oracleFloor = _tokenToUsdc(amount ACTUALLY sold) × (1 − maxSlippageBps)`.
     ///      This prevents a griefer from passing `minOut=0` to the permissionless `deleverage()`
     ///      and sandwiching the IL-residual swap.  If a Chainlink feed is stale the read reverts —
-    ///      fail-safe and consistent with `_assertHealthy`.
+    ///      fail-safe and consistent with `_assertHealthy`. The floor tracks the SOLD amount, not the
+    ///      balance: derived off the balance it would be unreachable whenever `keep > 0` and would brick
+    ///      every need-sized sell. A caller `minUsdcOut` sized for the whole balance can still bind — it
+    ///      is a per-call proposer guard, so size it against the shortfall, not the wallet.
     ///
     ///      **Redeem path unaffected** — redeem calls `_sweepLegToUsdc` directly with a
     ///      stayers' `keep > 0`; it never routes through `_rebalanceCover`.
@@ -827,26 +875,27 @@ library LeveragedAeroManager {
         uint256 minUsdcOut
     ) private {
         Layout storage $ = _layout();
-        uint256 pUsdc = _readUsd8($.usdcFeed); // hoisted: floors the surplus sell AND ceils the deficit buy
-        uint256 surplusBal = IERC20(surplusTok).balanceOf(address(this));
-        // ASSET-MODE: when the surplus leg IS the unit of account there is nothing to sell — the sweep
-        // below no-ops, so deriving an oracle floor for it would be dead arithmetic. Skip straight to
-        // the deficit buy, which spends that surplus USDC directly (bounded by the oracle ceiling).
-        if (surplusBal > 0 && surplusTok != $.usdc) {
-            bool isCbBTC = surplusTok == $.cbBTC;
-            uint8 dec = isCbBTC ? $.cbBTCDecimals : $.wethDecimals;
-            uint256 pSurplus = _readUsd8(isCbBTC ? $.cbBTCFeed : $.wethFeed);
-            uint256 oracleFloor =
-                _tokenToUsdc(surplusBal, dec, pSurplus, pUsdc) * (10000 - uint256($.maxSlippageBps)) / 10000;
-            if (oracleFloor > minUsdcOut) minUsdcOut = oracleFloor;
-        }
-        _sweepLegToUsdc(surplusTok, 0, minUsdcOut);
-        // Oracle-ceiling the deficit BUY (H1): a sandwiched/manipulated permissionless `deleverage`
-        // can't overpay past the oracle+slippage bound. The redeem path passes max (oracle-free).
         bool deficitIsCb = deficitTok == $.cbBTC;
-        uint256 pDeficit = _readUsd8(deficitIsCb ? $.cbBTCFeed : $.wethFeed);
-        uint256 buyMax = _tokenToUsdc(shortAmt, deficitIsCb ? $.cbBTCDecimals : $.wethDecimals, pDeficit, pUsdc)
-            * (10000 + uint256($.maxSlippageBps)) / 10000;
+        bool surplusIsCb = surplusTok == $.cbBTC;
+        // ASSET-MODE: when the surplus leg IS the unit of account there is nothing to sell — the sweep
+        // below no-ops, so pricing it would be dead arithmetic (and one more feed that could revert).
+        // A zero balance short-circuits `coverBounds` to the deficit buy alone, which spends that
+        // surplus USDC directly (bounded by the oracle ceiling).
+        uint256 surplusBal = surplusTok == $.usdc ? 0 : IERC20(surplusTok).balanceOf(address(this));
+        // The three oracle bounds (need-sized sell amount, its floor, the buy ceiling) are derived in
+        // `LeveragedAeroValuation.coverBounds` — this library is at the EIP-170 cap.
+        (uint256 buyMax, uint256 sellAmt, uint256 sellFloor) = LeveragedAeroValuation.coverBounds(
+            shortAmt,
+            deficitIsCb ? $.cbBTCDecimals : $.wethDecimals,
+            _readUsd8(deficitIsCb ? $.cbBTCFeed : $.wethFeed),
+            surplusBal,
+            surplusIsCb ? $.cbBTCDecimals : $.wethDecimals,
+            surplusBal == 0 ? 0 : _readUsd8(surplusIsCb ? $.cbBTCFeed : $.wethFeed),
+            _readUsd8($.usdcFeed),
+            uint256($.maxSlippageBps)
+        );
+        if (sellFloor > minUsdcOut) minUsdcOut = sellFloor;
+        _sweepLegToUsdc(surplusTok, surplusBal - sellAmt, minUsdcOut);
         _redeemCoverShortfall(deficitTok, deficitMkt, shortAmt, buyMax);
     }
 
@@ -1261,9 +1310,14 @@ library LeveragedAeroManager {
         );
     }
 
-    /// @dev Sweep the full balance of `tokenIn` to USDC via exactInputSingle (minOut may be 0).
-    function _swapTokenToUsdc(address tokenIn, uint256 minOut) private {
-        _sweepLegToUsdc(tokenIn, 0, minOut);
+    /// @dev Sweep the WHOLE `tokenIn` balance → USDC at a Chainlink-derived floor
+    ///      (`oracle value × (1 − maxSlippageBps)`). One definition for both settle legs; the asset-mode
+    ///      identity is handled downstream (`_sweepLegToUsdc` early-returns on the unit of account, where
+    ///      the floor is dead arithmetic anyway).
+    function _sweepAtOracleFloor(address tokenIn, uint8 dec, uint256 price, uint256 pUsdc) private {
+        uint256 floor = _tokenToUsdc(IERC20(tokenIn).balanceOf(address(this)), dec, price, pUsdc)
+            * (10000 - uint256(_layout().maxSlippageBps)) / 10000;
+        _sweepLegToUsdc(tokenIn, 0, floor);
     }
 
     /// @dev Sweep (balance − `keep`) of `tokenIn` → USDC via exactInputSingle. `keep` reserves a
@@ -1471,24 +1525,21 @@ library LeveragedAeroManager {
     ///         Moonwell reports a shortfall. Scaling mirrors `LeveragedAeroValuation`.
     function _assertHealthy() private view {
         Layout storage $ = _layout();
-        // ── Collateral (USDC face, 6dp) ──
-        address mUsdc_ = $.mUsdc;
-        uint256 cBal = ICToken(mUsdc_).balanceOf(address(this));
-        uint256 rate = ICToken(mUsdc_).exchangeRateStored();
-        uint256 collateralUsd = (cBal * rate) / 1e18;
-
-        // ── Raw borrow balances ──
-        uint256 cbDebt = IMoonwellMarket($.mCbBTC).borrowBalanceStored(address(this));
-        uint256 wethDebt = IMoonwellMarket($.mWeth).borrowBalanceStored(address(this));
-        if (cbDebt == 0 && wethDebt == 0) return; // no debt → trivially healthy (skip oracle)
-
-        // ── Price via hardened Chainlink (same feeds + staleness guards as nav()) ──
-        (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
-
-        // ── Debt (USDC face, 6dp) ──
-        uint256 debtUsd =
-            _tokenToUsdc(cbDebt, $.cbBTCDecimals, pBTC, pUsdc) + _tokenToUsdc(wethDebt, $.wethDecimals, pETH, pUsdc);
-        if (debtUsd == 0) return; // dust-level debt rounds to 0 → trivially healthy
+        // ── Collateral + debt (both USDC face, 6dp) ──
+        //
+        // ONE definition, shared with `readCollateralDebtImpl` / `deleverageImpl` / `fastRedeemImpl`.
+        // This function used to carry a VERBATIM second copy of `_readCollateralDebt`'s body — the
+        // same mUSDC `balanceOf × exchangeRateStored`, the same two `borrowBalanceStored` reads, the
+        // same `_readAllPrices` + two `_tokenToUsdc` conversions — so the post-op health gate and the
+        // LTV the rest of the library steers on agreed only by inspection. They are now the same
+        // function, which is also where the EIP-170 bytes for the venue-migration merge came from.
+        //
+        // The oracle-skip is preserved exactly: `_readCollateralDebt` returns `debt == 0` WITHOUT
+        // reading any feed when both borrow balances are zero, so the no-debt case still never touches
+        // Chainlink. The single `debtUsd == 0` guard below therefore covers both the original
+        // early-returns — genuinely no debt, and dust-level debt that rounds to 0.
+        (uint256 collateralUsd, uint256 debtUsd) = _readCollateralDebt();
+        if (debtUsd == 0) return; // no debt (oracle untouched) or dust rounding to 0 → trivially healthy
 
         // ── LTV check — binding post-op gate ──
         uint16 maxLtv = $.maxLtvBps;

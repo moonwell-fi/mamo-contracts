@@ -29,7 +29,9 @@ Audience: Mamo engineers with a checkout of **this repo only**.
 > - Paths and type names under `src/leveraged-aero/sherwood/` are preserved **only** so the vendored
 >   strategy's imports still compile. They are shims. Nothing calls Sherwood.
 > - The post-settlement exit is the vault's **permissionless** `redeemSettled(shares)`.
-> - The strategy now initializes against **any** Aerodrome Slipstream pool, and `rerange` is in-repo.
+> - The strategy now initializes against **any** Aerodrome Slipstream pool, and `rerange` is in-repo —
+>   in its 4-arg `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` form, which
+>   carries a per-cycle **skew** alongside the width (see B.3).
 
 ---
 
@@ -254,6 +256,13 @@ why B.1 is a forge script at all. Each library is its own tx, so the Base per-tx
 constructor sets `_initialized = true`, permanently locking `initialize` on the template itself
 (ERC-1167 clones skip constructors, so clones stay initializable).
 
+> **Never pass `--libraries` for this stack.** The three delegatecall libraries must be deployed and
+> linked by the **same compilation** that produces the template. Pointing the link at libraries from an
+> earlier run reverts inside the delegatecall dispatcher rather than failing at link time, and it is not
+> a theoretical risk here: this PR changed the libraries' public selectors (`centeredTickRange` →
+> `skewedTickRange`, the new `checkRange`). Let the broadcast deploy and link them; if you have stale
+> library addresses in an env or a config, delete them.
+
 **The vault.** `src/LeveragedAeroVault.sol`, constructor
 `(address asset_, address owner_, string name_, string symbol_)`:
 
@@ -318,7 +327,8 @@ phase).
 `VenueMismatch` (pool spacing or token set, a Moonwell `underlying()` that does not match its leg, or a
 leg↔USDC swap pool that does not exist at the configured spacing — both swap spacings are
 existence-probed through the CL factory), `UnsupportedLeg`, `LegDecimalsOutOfRange`, `AssetMismatch`,
-`UnexpectedFeedDecimals`, `WidthOutOfBounds`, or one of the risk / oracle / fee bound errors.
+`UnexpectedFeedDecimals`, `OutOfBounds` (the width band **or** `skewBps` — one error covers both), or one
+of the risk / oracle / fee bound errors.
 
 `InitParams` is **leg slots, not token identities** (`weth*` = leg A, the natively-wrappable slot;
 `cbBTC*` = leg B — the names are historical). Any Slipstream pool whose two tokens have Moonwell borrow
@@ -331,6 +341,8 @@ constants:
 | `cbBTCSwapTickSpacing`, `wethSwapTickSpacing` | spacings of the leg↔USDC **swap** pools — separate venues from the LP pool, nonzero required. These replaced three hardcoded `int24(100)` literals |
 | `wethDeliversNative` | leg A's Moonwell market pays native ETH on borrow → the strategy wraps it. `false` on an ERC-20-delivering market (and then stray ETH is stranded — there is no ETH rescue path) |
 | `width`, `minWidth`, `maxWidth` | rerange width band, validated once at init: both bounds on the spacing grid, `minWidth ≥ 2 × spacing`, `minWidth ≤ maxWidth`, and `width` inside the band. Genesis mints at `width` |
+| `skewBps` | fraction of `width` placed **below** the current tick, bps (`10000` = 1.00). `5000` = centered — the genesis/ops default, and what `SKEW_BPS` defaults to in the runner. Must be in `(0, 10000)` exclusive, inside `[minSkewBps, maxSkewBps]`, **and** leave both spans ≥ one `tickSpacing` → `OutOfBounds()`. Persisted like `width`: genesis mints at it, `rerange` moves it |
+| `minSkewBps`, `maxSkewBps` | the **skew governance band**, the skew analogue of `[minWidth, maxWidth]`. Two new fields sitting immediately after `skewBps` in `InitParams` / `Layout` / `layout()`. The band itself is validated once at init — `0 < minSkewBps ≤ maxSkewBps < 10000`, so it can only ever **tighten** the open `(0, 10000)` interval, never widen it — and the genesis `skewBps` is then checked against it by the same `checkRange` that runs on **every** `rerange`. All of it raises the same `OutOfBounds()`; no new selector. Runner env: `MIN_SKEW_BPS` (default `1000`) / `MAX_SKEW_BPS` (default `9000`). Immutable after init: widening the band means a new clone |
 
 Derived at init, never passed: **leg token ordering** (`wethIsToken0` from `pool.token0()`) and **leg
 decimals** (`IERC20Metadata.decimals()`, bounded `[2, 18]` → `LegDecimalsOutOfRange`).
@@ -348,10 +360,26 @@ Init guards that will bite during a first deploy against a new pool:
   `twapWindow ∈ (0, 1 day]`, `calmDeviationTicks ∈ (0, 5000]`, `maxSlippageBps ∈ (0, 1000]`.
 - Fee ceilings, and a nonzero `feeRecipient` whenever either fee bps is nonzero.
 
-`rerange(uint24 width, uint256 minLiq0, uint256 minLiq1)` is **in-repo** (`onlyProposer`, persisted
-per-cycle width, re-checked against the init band → `WidthOutOfBounds()`, selector `0x1f9f54af`). The
-old "the vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — delete it on
-sight.
+`rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` is **in-repo**
+(`onlyProposer`, persisted per-cycle width **and** skew, re-checked against the init width band, the
+init skew band and the one-spacing-per-side floor → `OutOfBounds()`, selector `0xb4120f14`). That whole
+check now lives in `LeveragedAeroValuation.checkRange`, called from the strategy before the venue
+delegatecall — same behaviour as the previous strategy-local checks, plus the skew band. The old "the
+vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — delete it on sight.
+
+> **Two signature/selector changes landed together here.** `rerange` grew a `uint16 skewBps_` second
+> argument (was `rerange(uint24,uint256,uint256)`), and `WidthOutOfBounds()` (`0x1f9f54af`) was renamed
+> `OutOfBounds()` (`0xb4120f14`) and now covers skew failures as well as width ones. Anything holding
+> either value hardcoded — the Mamo backend's rebalance-param error table above all — must be
+> re-pointed. Re-derive rather than copy: `cast sig 'OutOfBounds()'`,
+> `cast sig 'rerange(uint24,uint16,uint256,uint256)'`.
+>
+> **A third break landed with the skew band: two fields were INSERTED, not appended.** `minSkewBps` /
+> `maxSkewBps` sit immediately after `skewBps` in both `InitParams` and `Layout`/`layout()`, so every
+> later field shifted by two (`hedgedDebtA`/`hedgedDebtB` moved from tuple positions 48/49 to 50/51).
+> Any hand-rolled `abi.encode` of `InitParams`, and any positional decode of `layout()`, must be
+> regenerated against the current ABI — `buildInitData()` is generated from the struct and needs no
+> change, but a copied calldata blob from an earlier run will initialize the wrong fields.
 
 ### B.4 — the bind (already done by B.3)
 
@@ -400,6 +428,25 @@ unwinds the whole levered book and pushes realized USDC to the vault, after whic
 the vault's permissionless `redeemSettled(shares)` — pro-rata on pre-burn supply and pre-transfer
 balance. Do **not** settle a staging instance you still want to use: the strategy's own redeem paths
 require `State.Executed` and there is no path back.
+
+> **Operational rule (defense-in-depth) — `compound()` immediately before `settle()`.** No longer
+> mandatory: `_settle` now **sells** the final AERO tranche its unwind auto-claims (`gauge.withdraw`
+> auto-claims whatever accrued since the last harvest), so the proceeds land in the USDC pushed to the
+> vault for `redeemSettled` to pay out. Compounding first is still the recommended procedure, because
+> that sale is **best-effort**: `settle()` is terminal, owner-driven and argument-less, so a hard revert
+> there would block the fund's only exit — the sale is therefore wrapped in a self-`try/catch` and a
+> stale AERO/USD feed, a broken AERO→USDC route, or a fill under the L9 oracle floor makes it **skip**
+> (the swap is rolled back whole — it never sells blind) and emit `SettleRewardSaleDeferred`. Harvesting
+> in the block before settling means you are not relying on that path at all, and bounds the residue to a
+> single block of emissions either way.
+>
+> **Check `SettleRewardSaleDeferred` / the strategy's AERO balance after settling.** If the sale did
+> skip, the AERO is not lost but recovery is not automatic: it is claimable **only** through
+> `rescueToVault(aero)` → the vault's `rescueERC20(aero, to, amount)`.
+> That path does work post-settle — `rescueToVault`'s reward-token block is scoped to `State.Executed`
+> precisely so a `Settled` strategy can sweep a stranded tranche — but it is two privileged
+> transactions after the fact, and the AERO reaches the vault as a **stray token the owner disposes of**,
+> not as part of the settled USDC pot `redeemSettled` pays holders out of.
 
 ### B.6 — post-conditions Phase C requires
 

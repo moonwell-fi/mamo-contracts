@@ -73,6 +73,20 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev `2 * TickMath.MAX_TICK` — the ceiling `_initialize` enforces on `maxWidth`.
     uint24 internal constant MAX_BAND_WIDTH = 1_774_544;
 
+    /// @dev The strategy's ERC-7201 base slot (private there):
+    ///      `keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))`.
+    bytes32 internal constant STORAGE_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
+
+    /// @dev Slots consumed by `Layout` BEFORE its packed tail, i.e. the index of the slot holding
+    ///      `cbBTCDecimals … skewBps`. Counted off the struct: 11 addresses (0-10), `maxDelay` (11),
+    ///      `gracePeriod` (12), the packed `calmDeviationTicks`/`twapWindow`/`comptroller` slot (13),
+    ///      `npm`/`gauge`/`swapRouter` (14-16), the packed `tickSpacing` + risk-params slot (17),
+    ///      `tokenId` (18), the packed ticks + fee-params + `feeRecipient` slot (19), `hwmPerShare` (20),
+    ///      `lastFeeAccrualTimestamp` (21), `protocolFeeOwed` (22), `aeroUsdFeed` (23),
+    ///      `nextRedeemRequestId` (24), the `redeemRequests` mapping (25) — so the tail is slot 26 and
+    ///      the two `uint128` hedged principals share slot 27.
+    uint256 internal constant TAIL_SLOT_OFFSET = 26;
+
     /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
     ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
@@ -146,6 +160,12 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.width = 4000;
         p.minWidth = 200; // 2 x SPACING
         p.maxWidth = 20_000;
+        p.skewBps = 5000; // centred — the historical behaviour, and the baseline every skew test perturbs
+        // The WIDEST LEGAL governance band, on purpose: `[1, 9999]` is exactly the open `(0, 10000)`
+        // interval `checkRange` already enforces, so the band is a no-op here and the skew cases below
+        // keep testing the SPAN predicate in isolation. The band-binding cases set it explicitly.
+        p.minSkewBps = 1;
+        p.maxSkewBps = 9999;
         p.targetLtvBps = 5000;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
@@ -710,42 +730,42 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     function testInitRevertsWhenWidthOffTheSpacingGrid() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.width = 4050; // not a multiple of SPACING
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitRevertsWhenMinWidthBelowTwoSpacings() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minWidth = 100; // 1 x SPACING
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitRevertsWhenMinWidthAboveMaxWidth() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minWidth = 30_000;
         p.maxWidth = 20_000;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitRevertsWhenWidthBelowMinWidth() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.width = 100;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitRevertsWhenWidthAboveMaxWidth() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.width = 30_000;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitRevertsWhenBandBoundsOffTheSpacingGrid() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minWidth = 250;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
 
         p = _baseParams();
         p.maxWidth = 20_050;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitRevertsOnNonPositiveTickSpacing() public {
@@ -753,7 +773,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _registerLpPool();
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.tickSpacing = 0;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     /// @dev A NEGATIVE spacing must fail the same way — `int24` is signed and `<= 0`, not `== 0`, is
@@ -763,15 +783,15 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _registerLpPool();
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.tickSpacing = -100;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
-    /// @dev `_computeTickRange` spans `width/2` each side of the pool tick, so the band is capped at
-    ///      the full tick domain (`2 x TickMath.MAX_TICK`). Both edges of the cap.
+    /// @dev `skewedTickRange` spans up to `width` ticks on ONE side of the pool tick (the skew limit),
+    ///      so the band is capped at the full tick domain (`2 x TickMath.MAX_TICK`). Both edges of the cap.
     function testInitRevertsWhenMaxWidthExceedsTheTickDomain() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.maxWidth = MAX_BAND_WIDTH + uint24(uint24(SPACING)); // aligned, but past the ceiling
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
     function testInitAcceptsMaxWidthAtTheTickDomainEdge() public {
@@ -987,26 +1007,363 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         if (ok) {
             assertEq(_init(p).layout().width, width_, "accepted width persisted");
         } else {
-            _expectInitRevert(p, LeveragedAerodromeCLStrategy.WidthOutOfBounds.selector);
+            _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
         }
     }
 
     // ==================== RERANGE ENTRYPOINT ====================
 
-    /// @dev The new 3-arg signature is live and its gates are ordered lifecycle-first: a Pending
-    ///      clone rejects an otherwise-valid width with `NotExecuted`, before any width check.
+    /// @dev The 4-arg `(width, skewBps, minLiq0, minLiq1)` signature is live and its gates are ordered
+    ///      lifecycle-first: a Pending clone rejects an otherwise-valid pair with `NotExecuted`, before
+    ///      any range-param check.
     function testRerangeRevertsBeforeExecute() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         vm.prank(proposer);
         vm.expectRevert(BaseStrategy.NotExecuted.selector);
-        s.rerange(4000, 0, 0);
+        s.rerange(4000, 5000, 0, 0);
     }
 
     function testRerangeRevertsForNonProposer() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         vm.prank(owner);
         vm.expectRevert(BaseStrategy.NotProposer.selector);
-        s.rerange(4000, 0, 0);
+        s.rerange(4000, 5000, 0, 0);
+    }
+
+    // ==================== RERANGE SKEW ====================
+    //
+    // `skewBps` is the fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == the historical
+    // centred range). ONE predicate — `_checkSkew` — validates it at init and on every rerange, and both
+    // callers raise the SHARED `OutOfBounds()` error (the old `WidthOutOfBounds()`, renamed and widened
+    // to cover both range knobs).
+    //
+    // These tests drive the predicate through the LIVE `rerange` entrypoint against a FLAT book
+    // (`tokenId == 0`), where `rerangeImpl` returns immediately — so the validation ladder plus the two
+    // persists are the only things that execute, and no Slipstream / Moonwell venue is needed.
+
+    /// @dev An Executed clone on a flat book: `rerange` reaches `_checkWidth` / `_checkSkew` and, once
+    ///      they pass, is a persist-only no-op.
+    function _executedClone() internal returns (LeveragedAerodromeCLStrategy s) {
+        s = _init(_baseParams());
+        _forceState(s, BaseStrategy.State.Executed);
+    }
+
+    function _expectRerangeOutOfBounds(uint24 width_, uint16 skewBps_) internal {
+        LeveragedAerodromeCLStrategy s = _executedClone();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.rerange(width_, skewBps_, 0, 0);
+    }
+
+    /// @dev A ZERO skew puts the WHOLE width above the tick — a one-sided range no `assetModeSplit` can
+    ///      size, and one that silently stops hedging. Rejected before any span arithmetic runs.
+    function testRerangeRevertsForZeroSkew() public {
+        _expectRerangeOutOfBounds(4000, 0);
+    }
+
+    /// @dev The mirror image at the top of the band: 10000 would put the whole width BELOW the tick. The
+    ///      bound is STRICT (`>= 10000`), so 10000 itself is out — there is no "100% below" range.
+    function testRerangeRevertsForFullSkew() public {
+        _expectRerangeOutOfBounds(4000, 10_000);
+    }
+
+    /// @dev Above the 1e4 scale entirely. Worth its own case: `skewBps` is a uint16, so an out-of-scale
+    ///      value is representable and a `> 10000` check that had been written as `!= 10000` would pass it
+    ///      through into `width x skew / 1e4` and produce a lower span WIDER than the whole width.
+    function testRerangeRevertsForSkewAbove10000() public {
+        _expectRerangeOutOfBounds(4000, 12_000);
+    }
+
+    /**
+     * @dev THE REASON THE GUARD IS SPAN-BASED AND NOT A FLAT bps BAND. At the narrowest legal width
+     *      (`2 x tickSpacing`) there is no room to skew at all: 1000 bps of 200 ticks is 20 ticks, a
+     *      fifth of one spacing, so BOTH down-aligned bounds would land on the same grid point below the
+     *      tick and the range would stop STRICTLY BRACKETING it — exactly the invariant `assetModeSplit`
+     *      relies on. A flat band (say "skew must be within 2000 of centre") would have waved this
+     *      through while needlessly rejecting the same 1000 bps at a 200-spacing width, where it is safe.
+     *
+     *      Both starved sides are pinned, and the centred split at the same width is shown to be
+     *      ACCEPTED — so the rejection is about the span, not about the narrow width.
+     */
+    function testRerangeRevertsWhenSkewStarvesASideBelowOneSpacing() public {
+        uint24 tightWidth = 2 * uint24(uint24(SPACING)); // == minWidth: a legal width with no skew room
+        _expectRerangeOutOfBounds(tightWidth, 1000); // lower side starved (20 ticks < 100)
+        _expectRerangeOutOfBounds(tightWidth, 9000); // upper side starved, symmetrically
+
+        LeveragedAerodromeCLStrategy s = _executedClone();
+        vm.prank(proposer);
+        s.rerange(tightWidth, 5000, 0, 0); // one spacing each way — the tightest legal geometry
+        assertEq(s.layout().skewBps, 5000, "the centred split spans a full spacing each way and passes");
+        assertEq(s.layout().width, tightWidth, "...and the width is persisted with it");
+
+        // The SAME 1000 bps is fine once the width can afford it — proof the guard bounds the span,
+        // not the skew value.
+        s = _executedClone();
+        vm.prank(proposer);
+        s.rerange(2000, 1000, 0, 0); // 200 ticks below, 1800 above
+        assertEq(s.layout().skewBps, 1000, "a hard skew is legal at a width that can carry it");
+    }
+
+    /// @dev Gate ORDER around the new param: `onlyProposer` (a modifier) fires before the body, and the
+    ///      lifecycle check fires before the range params. So a stranger learns `NotProposer` and a
+    ///      proposer on a Pending clone learns `NotExecuted` — neither is told anything about the skew,
+    ///      and a bad skew can never be the reason an unauthorised call reverts.
+    function testRerangeSkewGatesAfterLifecycleAndAuth() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams()); // Pending
+        vm.prank(proposer);
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        s.rerange(4000, 0, 0, 0); // skew 0 IS OutOfBounds — the lifecycle gate still wins
+
+        _forceState(s, BaseStrategy.State.Executed);
+        vm.prank(owner);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        s.rerange(4000, 0, 0, 0); // ...and auth wins over the params too
+    }
+
+    /// @dev The genesis skew round-trips into storage — `layout().skewBps` is what every subsequent mint
+    ///      (`execute` / `deployIdle` / `compound`) derives its range from, so a dropped write would
+    ///      silently reopen every position centred.
+    function testInitPersistsSkew() public {
+        uint16[4] memory skews = [uint16(500), 3500, 5000, 9500];
+        for (uint256 i; i < skews.length; ++i) {
+            LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+            p.skewBps = skews[i];
+            assertEq(_init(p).layout().skewBps, skews[i], "genesis skew persisted");
+        }
+    }
+
+    // ==================== SKEW GOVERNANCE BAND ====================
+    //
+    // `[minSkewBps, maxSkewBps]` is fixed at init and caps how far off centre a PROPOSER may rerange.
+    // It can only ever TIGHTEN the open `(0, 1e4)` interval the span predicate already enforces —
+    // `0 < minSkewBps <= maxSkewBps < 10000` is checked at init — so the band is a governance knob, not
+    // a second, contradictory definition of a legal skew. Every rejection is the SAME `OutOfBounds()`.
+
+    /// @dev A clone whose band is `[2000, 8000]`, i.e. genuinely narrower than `(0, 1e4)`.
+    function _bandedParams() internal view returns (LeveragedAerodromeCLStrategy.InitParams memory p) {
+        p = _baseParams();
+        p.minSkewBps = 2000;
+        p.maxSkewBps = 8000;
+    }
+
+    /// @dev The band round-trips into storage — it is what every later `rerange` is measured against.
+    function testInitPersistsTheSkewBand() public {
+        LeveragedAerodromeCLStrategy.LayoutView memory v = _init(_bandedParams()).layout();
+        assertEq(v.minSkewBps, 2000, "minSkewBps persisted");
+        assertEq(v.maxSkewBps, 8000, "maxSkewBps persisted");
+    }
+
+    /// @dev A genesis skew OUTSIDE the band is refused, on both sides — even though the SAME skew is
+    ///      legal against the spans at this width (4000 ticks / 100 spacing carries 1000 and 9000 fine,
+    ///      which `testRerangeRevertsWhenSkewStarvesASideBelowOneSpacing` already pins). So the rejection
+    ///      is the band biting, not the span guard.
+    function testInitRevertsWhenGenesisSkewIsOutsideTheBand() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _bandedParams();
+        p.skewBps = 1999;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        p.skewBps = 8001;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+    }
+
+    /// @dev The band is INCLUSIVE at both ends — a proposer may sit exactly on the governance limit.
+    function testInitAcceptsGenesisSkewAtBothBandEdges() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _bandedParams();
+        p.skewBps = 2000;
+        assertEq(_init(p).layout().skewBps, 2000, "the lower band edge is legal");
+        p.skewBps = 8000;
+        assertEq(_init(p).layout().skewBps, 8000, "the upper band edge is legal");
+    }
+
+    /// @dev An INVERTED band would make every rerange impossible (an empty interval) — refused at init
+    ///      rather than left to brick the entrypoint later. `min == max` is NOT inverted: it pins the
+    ///      skew to a single value, which is a legal (if rigid) governance choice.
+    function testInitRevertsOnInvertedSkewBand() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minSkewBps = 6000;
+        p.maxSkewBps = 4000;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+
+        p.minSkewBps = 4000;
+        p.maxSkewBps = 4000;
+        p.skewBps = 4000;
+        assertEq(_init(p).layout().skewBps, 4000, "a degenerate min == max band pins the skew and is legal");
+    }
+
+    /// @dev The band's own edges: `minSkewBps == 0` and `maxSkewBps == 10000` would each admit a value
+    ///      the span predicate rejects outright, i.e. a band that claims to widen `(0, 1e4)`. Both are
+    ///      refused at init, so the band can only ever tighten.
+    function testInitRevertsWhenTheBandWouldWidenTheOpenInterval() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minSkewBps = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+
+        p = _baseParams();
+        p.maxSkewBps = 10_000;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+
+        // ...and the widest LEGAL band is `[1, 9999]`, which is exactly `(0, 1e4)` — the suite default.
+        p = _baseParams();
+        assertEq(_init(p).layout().maxSkewBps, 9999, "the widest legal band is accepted");
+    }
+
+    /// @dev THE POINT OF THE BAND: `rerange` — the proposer-facing knob — is bounded by it. A skew the
+    ///      spans would happily carry is still refused outside the band, and both edges are reachable.
+    function testRerangeRefusesASkewOutsideTheBand() public {
+        LeveragedAerodromeCLStrategy s = _init(_bandedParams());
+        _forceState(s, BaseStrategy.State.Executed);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.rerange(4000, 1000, 0, 0); // legal span, below the band
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.rerange(4000, 9000, 0, 0); // legal span, above the band
+
+        vm.prank(proposer);
+        s.rerange(4000, 2000, 0, 0);
+        assertEq(s.layout().skewBps, 2000, "the lower band edge reranges");
+        vm.prank(proposer);
+        s.rerange(4000, 8000, 0, 0);
+        assertEq(s.layout().skewBps, 8000, "...and so does the upper one");
+    }
+
+    /**
+     * @dev THE QUANTIZATION CLIFF, stated as a test so the band's interaction with `width` is not a
+     *      surprise: the USABLE skew set widens with `width / tickSpacing`. At the floor
+     *      (`width == 2 x spacing`) the only geometry leaving both spans >= one spacing is the centred
+     *      one, so a band that EXCLUDES ~5000 refuses every rerange at that width no matter what it
+     *      admits — the band and the spans are independent gates, and the narrower one wins.
+     */
+    function testBandAndSpanGatesAreIndependentAtTheWidthFloor() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minSkewBps = 2000;
+        p.maxSkewBps = 4000;
+        p.width = 2000; // 20 x spacing: 4000 bps leaves 800 below / 1200 above — both spans fine
+        p.skewBps = 4000;
+        LeveragedAerodromeCLStrategy s = _init(p);
+        _forceState(s, BaseStrategy.State.Executed);
+
+        // The SAME in-band skew at the narrowest legal width starves the lower span (2 x 100 ticks x
+        // 0.4 = 80 < 100) — the span guard refuses what the band allows.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.rerange(200, 4000, 0, 0);
+
+        // ...and the centred skew that WOULD clear the spans at that width is outside this band.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.rerange(200, 5000, 0, 0);
+    }
+
+    /**
+     * @dev ONE PREDICATE, TWO ENTRYPOINTS — they cannot drift. Whatever `_initialize` accepts as a
+     *      genesis `(width, skew)` pair, `rerange` accepts as a per-cycle one, and whatever either
+     *      rejects the other rejects with the same typed `OutOfBounds()`. The band is FUZZED alongside
+     *      the pair, and the whole predicate is restated independently here (from the spans and the
+     *      band, not by calling the contract) so the fuzz is a check on `checkRange` rather than a
+     *      tautology.
+     */
+    function testFuzzInitSkewBandMirrorsRerange(uint16 skewBps_, uint24 width_, uint16 minSkew_, uint16 maxSkew_)
+        public
+    {
+        skewBps_ = uint16(bound(uint256(skewBps_), 0, 12_000));
+        width_ = uint24(bound(uint256(width_), 2, 200)) * uint24(uint24(SPACING)); // aligned, in [200, 20000]
+        // A LEGAL band (`0 < min <= max < 1e4`) that STRADDLES centre — an illegal one is refused at init
+        // before the pair is ever looked at (the dedicated cases above own that), and straddling centre
+        // is what guarantees the mirror clone below has a genesis skew that is both in-band and
+        // span-legal at the reference width.
+        minSkew_ = uint16(bound(uint256(minSkew_), 1, 5000));
+        maxSkew_ = uint16(bound(uint256(maxSkew_), 5000, 9999));
+
+        uint256 spacing = uint256(uint24(SPACING));
+        uint256 lowerSpan = (uint256(width_) * uint256(skewBps_)) / 10_000;
+        bool ok = skewBps_ > 0 && skewBps_ < 10_000 && skewBps_ >= minSkew_ && skewBps_ <= maxSkew_
+            && lowerSpan >= spacing && (uint256(width_) - lowerSpan) >= spacing;
+
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.width = width_;
+        p.skewBps = skewBps_;
+        p.minSkewBps = minSkew_;
+        p.maxSkewBps = maxSkew_;
+
+        if (ok) {
+            LeveragedAerodromeCLStrategy s = _init(p);
+            assertEq(s.layout().skewBps, skewBps_, "init accepted the pair and persisted the skew");
+            assertEq(s.layout().width, width_, "...and the width");
+            _forceState(s, BaseStrategy.State.Executed);
+            vm.prank(proposer);
+            s.rerange(width_, skewBps_, 0, 0); // the SAME pair clears the rerange gate
+        } else {
+            _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+            // The mirror clone must carry the SAME band, or `rerange` would be measured against
+            // different bounds than init was. Its genesis pair is the centred one at the reference
+            // width, which the straddling bound above keeps in-band.
+            LeveragedAerodromeCLStrategy.InitParams memory q = _baseParams();
+            q.minSkewBps = minSkew_;
+            q.maxSkewBps = maxSkew_;
+            LeveragedAerodromeCLStrategy s = _init(q); // valid genesis, then the bad pair
+            _forceState(s, BaseStrategy.State.Executed);
+            vm.prank(proposer);
+            vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+            s.rerange(width_, skewBps_, 0, 0);
+        }
+    }
+
+    /**
+     * @dev THE FREE-PACKING CLAIM, MACHINE-CHECKED. `skewBps` and its governance band
+     *      (`minSkewBps` / `maxSkewBps`) were inserted immediately after `legBIsAsset` — NOT appended
+     *      after the hedged principals — precisely because the packed tail slot had room (20 bytes used
+     *      -> 26), which leaves `hedgedDebtA` / `hedgedDebtB` on a byte-identical slot AND offset (26 + 16
+     *      > 32, so `hedgedDebtA` still starts the NEXT slot). Get that wrong and every live clone's
+     *      borrow-interest hedge basis reads garbage from the next upgrade onward, silently mis-sizing
+     *      every `compound` re-hedge.
+     *
+     *      Both halves of the claim are checked mechanically rather than by eyeballing the struct: the
+     *      packed tail is decoded field-by-field out of `vm.load` at its expected byte offsets and
+     *      compared against `layout()`, and a sentinel is `vm.store`d into the NEXT slot and read back
+     *      through the `hedgedDebt()` getter.
+     */
+    function testLayoutTailPacksSkewWithoutMovingTheHedgedDebts() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        // Distinctive aligned in-band values, so a decode at the wrong offset cannot pass on zeros.
+        p.width = 1300;
+        p.maxWidth = 12_700;
+        p.skewBps = 3500;
+        p.minSkewBps = 2000;
+        p.maxSkewBps = 8000;
+        LeveragedAerodromeCLStrategy s = _init(p);
+
+        uint256 tailSlot = uint256(STORAGE_SLOT) + TAIL_SLOT_OFFSET;
+        uint256 tail = uint256(vm.load(address(s), bytes32(tailSlot)));
+
+        assertEq(uint256(uint8(tail)), 8, "cbBTCDecimals at byte 0");
+        assertEq(uint256(uint8(tail >> 8)), 18, "wethDecimals at byte 1");
+        assertEq(uint256(uint8(tail >> 16)), 0, "wethIsToken0 at byte 2 (leg A is token1 here)");
+        assertEq(uint256(uint8(tail >> 24)), 1, "wethDeliversNative at byte 3");
+        assertEq(int256(int24(uint24(tail >> 32))), int256(LEG_B_SWAP_SPACING), "cbBTCSwapTickSpacing at byte 4");
+        assertEq(int256(int24(uint24(tail >> 56))), int256(LEG_A_SWAP_SPACING), "wethSwapTickSpacing at byte 7");
+        assertEq(uint256(uint24(tail >> 80)), 1300, "width at byte 10");
+        assertEq(uint256(uint24(tail >> 104)), 200, "minWidth at byte 13");
+        assertEq(uint256(uint24(tail >> 128)), 12_700, "maxWidth at byte 16");
+        assertEq(uint256(uint8(tail >> 152)), 0, "legBIsAsset at byte 19 (two-borrowed-legs here)");
+        assertEq(uint256(uint16(tail >> 160)), 3500, "skewBps FREE-PACKS at byte 20 -- the tail still fits");
+        assertEq(uint256(uint16(tail >> 176)), 2000, "minSkewBps FREE-PACKS at byte 22");
+        assertEq(uint256(uint16(tail >> 192)), 8000, "maxSkewBps FREE-PACKS at byte 24 -- 26 of 32 bytes used");
+        assertEq(tail >> 208, 0, "bytes 26..31 of the tail slot are still SPARE");
+
+        // The decode above must agree with the public view, or it is reading the wrong slot entirely.
+        LeveragedAerodromeCLStrategy.LayoutView memory v = s.layout();
+        assertEq(v.width, 1300, "layout() agrees on width");
+        assertEq(v.skewBps, 3500, "layout() agrees on skewBps");
+        assertEq(v.minSkewBps, 2000, "layout() agrees on minSkewBps");
+        assertEq(v.maxSkewBps, 8000, "layout() agrees on maxSkewBps");
+
+        // ...so `hedgedDebtA` / `hedgedDebtB` are still the LOW / HIGH halves of the NEXT slot.
+        vm.store(address(s), bytes32(tailSlot + 1), bytes32((uint256(7) << 128) | uint256(3)));
+        (uint128 legAHedged, uint128 legBHedged) = s.hedgedDebt();
+        assertEq(uint256(legAHedged), 3, "hedgedDebtA is STILL slot+1 offset 0 (low 16 bytes)");
+        assertEq(uint256(legBHedged), 7, "hedgedDebtB is STILL slot+1 offset 16 (high 16 bytes)");
     }
 
     // ==================== COMPOUND FEE-CRYSTALLISE ROUTING ====================

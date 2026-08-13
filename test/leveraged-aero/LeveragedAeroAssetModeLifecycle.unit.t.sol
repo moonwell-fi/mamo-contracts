@@ -76,6 +76,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     ///      worth ~$100k needs a NEGATIVE tick (`ln(1e-3)/ln(1.0001) ~ -69078`, aligned to the grid).
     int24 internal constant TICK = -69_100;
     uint24 internal constant WIDTH = 4000;
+    /// @dev The centred skew — `width/2` each side, i.e. the pre-skew behaviour.
+    uint16 internal constant SKEW_CENTERED = 5000;
     uint16 internal constant TARGET_LTV_BPS = 5000;
     uint8 internal constant LEG_A_DECIMALS = 8;
     uint256 internal constant P_USDC = 1e8;
@@ -199,6 +201,9 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         p.width = WIDTH;
         p.minWidth = 200;
         p.maxWidth = 20_000;
+        p.skewBps = SKEW_CENTERED;
+        p.minSkewBps = 1000; // governance band: wide enough for every skew this suite drives
+        p.maxSkewBps = 9000;
         p.targetLtvBps = TARGET_LTV_BPS;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
@@ -239,7 +244,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     }
 
     function _centeredRange() internal view returns (int24, int24) {
-        return LeveragedAeroValuation.centeredTickRange(address(pool), SPACING, WIDTH);
+        return LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, SKEW_CENTERED);
     }
 
     /// @dev On-chain collateral (USDC face) and leg-A debt, on the strategy's own health basis.
@@ -388,6 +393,167 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(proposer);
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         strategy.deployIdle(100_000e6, 0);
+    }
+
+    // ==================== RERANGE SKEW (asset-mode) ====================
+
+    /// @dev The SKEWED range for this fixture, recomputed independently of the production path.
+    function _skewedRange(uint16 skewBps_) internal view returns (int24, int24) {
+        return LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, skewBps_);
+    }
+
+    /**
+     * @dev A skewed re-range in asset-mode must land on the SKEWED range and leave a book that is still
+     *      SIZEABLE against it. The second half is the one that matters here: asset-mode's whole deploy
+     *      path goes through `assetModeSplit`, which fails closed on a one-sided range, so a skew that
+     *      produced a range not bracketing spot would not merely be suboptimal — it would brick every
+     *      subsequent `deployIdle` / lever-up. The split is therefore run against the realised range and
+     *      asserted to solve.
+     */
+    function testRerangeSkewedAssetModeSizesAgainstTheSkewedRange() public {
+        _execute(SEED);
+        uint256 oldTokenId = strategy.layout().tokenId;
+        uint256 navBefore = strategy.nav();
+
+        (int24 expLower, int24 expUpper) = _skewedRange(3500);
+        (int24 cenLower, int24 cenUpper) = _skewedRange(SKEW_CENTERED);
+        assertTrue(expLower != cenLower && expUpper != cenUpper, "3500 must actually move the range off centre");
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 3500, 0, 0);
+
+        assertEq(strategy.layout().posTickLower, expLower, "minted at the SKEWED lower bound");
+        assertEq(strategy.layout().posTickUpper, expUpper, "minted at the SKEWED upper bound");
+        assertEq(strategy.layout().skewBps, 3500, "the skew is persisted");
+        assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId");
+        assertApproxEqRel(strategy.nav(), navBefore, 1e16, "a no-swap re-range is NAV-neutral");
+
+        // The realised range still brackets spot, so `assetModeSplit` can size against it — asserted by
+        // running the real thing rather than by re-deriving the geometry.
+        (uint256 c, uint256 u, uint256 a) = _expectedSplit(100_000e6, expLower, expUpper);
+        assertEq(c + u, 100_000e6, "the skewed range is still two-sided and sizeable");
+        assertGt(a, 0, "...with a real leg-A borrow behind it");
+    }
+
+    /**
+     * @dev THE PERSISTENCE THAT MATTERS ECONOMICALLY: the next `deployIdle` sizes its collateral / borrow
+     *      split against the STORED SKEWED range, not against a centred one. The two candidate sizings are
+     *      computed and asserted to DIFFER first, so the test discriminates — an implementation that
+     *      dropped `skewBps` on the way to storage (or re-derived a centred range at mint time) would size
+     *      at `expCCentered` and fail here, not pass on a loose tolerance.
+     */
+    function testDeployIdleAfterSkewedRerangeUsesStoredSkewedRange() public {
+        _execute(SEED);
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 3500, 0, 0);
+
+        int24 lower = strategy.layout().posTickLower;
+        int24 upper = strategy.layout().posTickUpper;
+        (int24 cenLower, int24 cenUpper) = _skewedRange(SKEW_CENTERED);
+
+        uint256 topUp = 250_000e6;
+        (uint256 expCSkewed,,) = _expectedSplit(topUp, lower, upper);
+        (uint256 expCCentered,,) = _expectedSplit(topUp, cenLower, cenUpper);
+        assertTrue(expCSkewed != expCCentered, "the skewed and centred sizings must differ, or this proves nothing");
+
+        (uint256 collateralBefore,) = _collateralAndDebt();
+        usdc.mint(address(strategy), topUp);
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+
+        (uint256 collateralAfter, uint256 debtAfter) = _collateralAndDebt();
+        assertEq(collateralAfter - collateralBefore, expCSkewed, "deployIdle sized C against the STORED SKEWED range");
+        assertApproxEqAbs(
+            (debtAfter * 10_000) / collateralAfter, uint256(TARGET_LTV_BPS), 2, "LTV still on target after the skew"
+        );
+    }
+
+    // ==================== RERANGE MUST NOT DRAW IDLE USDC (asset-mode) ====================
+    //
+    // THE ASSET-MODE HAZARD: `rerangeImpl` re-adds "the collected legs" by reading its two leg BALANCES
+    // after the unwind. In this shape leg B IS the unit of account, so that balance is not just what the
+    // unwind collected — it is also every undeployed deposit and the whole redeem cover budget. Offering
+    // it to the mint would let a re-range silently pull UNLEVERED idle USDC into the LP: value-conserving
+    // but a capability no entrypoint declares (`deployIdle` is THE path that adds idle, and it levers it
+    // first), and it shrinks the cover budget a redeem depends on. The fix snapshots leg B BEFORE the
+    // unwind and offers only the delta — exactly the distinction `redeemUnwindImpl`'s `idleUsdcBefore`
+    // snapshot draws.
+    //
+    // Both tests measure against a BASELINE re-range run from the same post-genesis snapshot with no
+    // extra idle, so the assertion is an exact identity (`idle_after == baseline + seed`) rather than an
+    // inequality: the seeded USDC must be neither consumed nor otherwise moved, to the wei.
+
+    /// @dev Re-range at an EXTREME (but legal) skew with a large idle USDC balance present. THE
+    ///      DIRECTION MATTERS: leg A is token1 here, so pushing the range ABOVE spot (skew 2000: 800
+    ///      ticks below, 3200 above) is what makes the new range hungriest for token0 — the unit of
+    ///      account — while the unwind hands it a mix sized for the OLD range. That is precisely the
+    ///      shape where an implementation reading the raw leg-B balance tops the mint up out of idle.
+    ///      (The mirror skew is not a regression test at all: its range wants MORE leg A and less USDC,
+    ///      so the collected USDC already covers it and no idle is drawn either way.)
+    function testSkewedRerangeDoesNotDrawIdleUsdcIntoTheLp() public {
+        _execute(SEED);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 2000, 0, 0);
+        uint256 baselineIdle = usdc.balanceOf(address(strategy));
+        vm.revertToState(snap);
+
+        uint256 idleSeed = 400_000e6;
+        usdc.mint(address(strategy), idleSeed);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 2000, 0, 0);
+
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            baselineIdle + idleSeed,
+            "the idle USDC was neither drawn into the LP nor otherwise moved"
+        );
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "the re-range still minted a fresh position");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "...with real liquidity in it");
+        assertEq(strategy.layout().skewBps, 2000, "...at the requested skew");
+    }
+
+    /// @dev The CENTRED case, after a price drift — the pre-existing leak this fix also closes. Skew is
+    ///      not the cause: any re-range that leaves the collected pair short of the new range's desired
+    ///      ratio would have topped it up out of idle. The drift is what makes the collected ratio wrong
+    ///      at an unchanged `skewBps`.
+    function testCenteredRerangeAfterAPriceDriftDoesNotDrawIdleUsdc() public {
+        _execute(SEED);
+
+        // Drift the pool (spot AND TWAP together, so the calm-gate stays open) and keep the leg-A oracle
+        // on the same mark, or the fixture would be testing an oracle/pool divergence instead.
+        int24 newTick = TICK + 300;
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
+        pool.setTick(newTick);
+        legAFeed.setAnswer(int256(_legAPriceFromSqrtP(pool.sqrtPriceX96())));
+        // FIXTURE ONLY: `MockNpm` custodies exactly what it was minted, so after a price move its
+        // `collect` owes a leg-A amount re-priced at the NEW sqrtP that it never received. Float it, the
+        // way a real pool's other LPs do. Nothing here touches the strategy's USDC, which is what the
+        // assertion below is about.
+        legA.mint(address(npm), 1_000e8);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+        uint256 baselineIdle = usdc.balanceOf(address(strategy));
+        vm.revertToState(snap);
+
+        uint256 idleSeed = 250_000e6;
+        usdc.mint(address(strategy), idleSeed);
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            baselineIdle + idleSeed,
+            "a centred recenter leaves idle USDC untouched too"
+        );
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the recenter still minted real liquidity");
     }
 
     // ==================== ASSET-MODE LEVER UP (idle-funded) ====================

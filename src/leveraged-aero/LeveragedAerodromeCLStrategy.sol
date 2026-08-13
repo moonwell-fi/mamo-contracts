@@ -14,7 +14,6 @@ import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAeroVenue} from "./LeveragedAeroVenue.sol";
 import {BaseStrategy} from "./sherwood/BaseStrategy.sol";
-import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
 import {IProtocolConfig} from "./sherwood/interfaces/IProtocolConfig.sol";
 import {ICLGauge, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
@@ -46,6 +45,14 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     using SafeERC20 for IERC20;
 
     // ── Errors ──
+    //
+    // THE INIT-VALIDATION ERRORS ARE RAISED FROM THE LIBRARY, NOT FROM THIS FRAME. `TargetLtvExceedsMax`,
+    // `MinHealthTooLow`, `MaxLtvExceedsCF`, `MinHealthMaxLtvConflict`, `FeeRecipientRequired`,
+    // `PerformanceFeeTooHigh`, `ManagementFeeTooHigh`, `OracleParamOutOfRange`, `ComptrollerCallFailed`
+    // and `OutOfBounds` are all declared IDENTICALLY in `LeveragedAeroValuation` (which runs those
+    // ladders — the relocation bought EIP-170 headroom here). Same signature == same selector, so they
+    // stay on this contract's ABI and a caller/test may expect them off either. Do not delete them as
+    // "unused": the ABI is the interface a frontend and the init suite bind to.
     error NotImplemented();
     error TargetLtvExceedsMax();
     error MinHealthTooLow(); // minHealthBps < 10500 (1.05x floor)
@@ -89,7 +96,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     // Raised by `LeveragedAeroValuation.assetModeLeverUpPair`; re-declared here (same selector) so it is on
     // the strategy's public ABI for the rebalancer / frontend.
     error InsufficientIdleForLeverUp(uint256 needed, uint256 available);
-    error WidthOutOfBounds(); // rerange width off the tickSpacing grid or outside [minWidth, maxWidth]
+    // rerange width off the tickSpacing grid / outside [minWidth, maxWidth], OR a skew outside (0, 1e4)
+    // or one that starves either side of the range below a single tickSpacing. ONE error for both knobs:
+    // they are validated together, by the same two callers (`_initialize` and `rerange`), and a caller
+    // that has to fix its range params does not branch on which half was wrong.
+    error OutOfBounds();
     error ZeroShares(); // deposit would mint 0 shares (dust assets against a large book) — pay-for-nothing
     error NotVaultOwner(); // stageVenue caller is not the vault's owner (the venue-selection authority)
     // A lever-down that would repay the ENTIRE debt is rejected — it would orphan the staked position
@@ -122,9 +133,6 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev ERC-4626 virtual share offset matching the vault's `_decimalsOffset()` (USDC 6dp → 1e6).
     uint256 private constant SHARES_VIRTUAL_OFFSET = 1e6;
 
-    /// @dev Annual management-fee ceiling (bps); mirrors `SyndicateFactory.MAX_MANAGEMENT_FEE_BPS` (5%/yr).
-    uint16 private constant MAX_MANAGEMENT_FEE_BPS = 500;
-
     /// @dev Deadman window: after this elapses on an unfulfilled `requestRedeem`, its owner can
     ///      `emergencyRedeem` trustlessly (oracle-free). The backend fulfills in minutes; 2 days
     ///      tolerates a weekend outage while keeping the trustless exit reachable.
@@ -148,6 +156,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint8 private constant OP_REDEEM = 1; // fast redeem
     uint8 private constant OP_FULFILL = 2; // proportional redeem (fulfill / emergency)
     uint8 private constant OP_COMPOUND = 3; // harvest / redeploy
+
+    /// @dev The terminal settle's best-effort sale of the final reward tranche reverted and was
+    ///      skipped; the settle completed. Expect it on a stale/paused reward feed or a reward-route
+    ///      failure — the tranche is left on the strategy and, now that the strategy is `Settled`, is
+    ///      recoverable with `rescueToVault(rewardToken)` → the vault's `rescueERC20`.
+    event SettleRewardSaleDeferred();
 
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
     //
@@ -187,9 +201,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         int24 cbBTCSwapTickSpacing; // tickSpacing of the leg B↔USDC swap pool (independent of the LP pool's)
         int24 wethSwapTickSpacing; // tickSpacing of the leg A↔USDC swap pool
         bool wethDeliversNative; // leg A's Moonwell market pays native ETH on borrow (wrap it to leg A)
-        uint24 width; // initial full range width in ticks (rerange spans width/2 each side)
+        uint24 width; // initial full range width in ticks (split across the tick by `skewBps`)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
+        uint16 skewBps; // initial fraction of `width` placed BELOW the tick (1e4 scale; 5000 == centred)
+        uint16 minSkewBps; // lower bound for a proposer-supplied rerange skew (governance band)
+        uint16 maxSkewBps; // upper bound for a proposer-supplied rerange skew (governance band)
         // ── Risk params ──
         uint16 targetLtvBps; // Target LTV in bps (e.g. 5000 = 50%)
         uint16 maxLtvBps; // Maximum LTV cap in bps (e.g. 6500 = 65%)
@@ -279,11 +296,18 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         int24 cbBTCSwapTickSpacing; // leg B↔USDC swap-pool tickSpacing (NOT the LP pool's)
         int24 wethSwapTickSpacing; // leg A↔USDC swap-pool tickSpacing (NOT the LP pool's)
         // ── appended for the per-cycle rerange width band (keep byte-identical) ──
-        uint24 width; // current full range width in ticks (rerange spans width/2 each side)
+        uint24 width; // current full range width in ticks (split across the tick by `skewBps`)
         uint24 minWidth; // lower bound for a proposer-supplied rerange width
         uint24 maxWidth; // upper bound for a proposer-supplied rerange width
         // ── appended for the config-emergent pool shape (keep byte-identical) ──
         bool legBIsAsset; // DERIVED at init: leg-B slot == usdc → asset-as-a-leg shape (packs above)
+        // ── appended for the rerange SKEW and its governance band (keep byte-identical). Placed HERE,
+        //    not after the hedged principals, so all three free-pack into the existing tail slot
+        //    (20 bytes used → 26) and `hedgedDebtA`/`hedgedDebtB` keep a byte-identical slot AND offset:
+        //    26 + 16 > 32, so `hedgedDebtA` still starts the NEXT slot at offset 0. ──
+        uint16 skewBps; // fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == centred)
+        uint16 minSkewBps; // lower bound for a proposer-supplied rerange skew
+        uint16 maxSkewBps; // upper bound for a proposer-supplied rerange skew
         // ── appended for the borrow-interest hedge (keep byte-identical) ──
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
@@ -352,6 +376,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint24 minWidth;
         uint24 maxWidth;
         bool legBIsAsset;
+        uint16 skewBps;
+        uint16 minSkewBps;
+        uint16 maxSkewBps;
         uint128 hedgedDebtA;
         uint128 hedgedDebtB;
         bytes32 stagedVenueHash;
@@ -409,6 +436,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         v.minWidth = $.minWidth;
         v.maxWidth = $.maxWidth;
         v.legBIsAsset = $.legBIsAsset;
+        v.skewBps = $.skewBps;
+        v.minSkewBps = $.minSkewBps;
+        v.maxSkewBps = $.maxSkewBps;
         v.hedgedDebtA = $.hedgedDebtA;
         v.hedgedDebtB = $.hedgedDebtB;
         v.stagedVenueHash = $.stagedVenueHash;
@@ -504,26 +534,44 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // check therefore has to move up with it, ahead of the sibling bounds below.
         if (p.twapWindow == 0 || p.twapWindow > 1 days) revert OracleParamOutOfRange();
         $.twapWindow = p.twapWindow;
+        // SIXTH/SEVENTH/EIGHTH live-storage reads, up here for the same reason. The SKEW triple is
+        // NOT in `VenueParams` — it is venue-independent governance config (`0 < minSkew <= maxSkew <
+        // 1e4` mentions no address and no grid), so it sits with `maxSlippageBps` and the fee params
+        // in the non-migratable core. But the one-spacing-per-side span guard COUPLES the live skew to
+        // `(width, tickSpacing)`, both of which a migration rewrites — so `applyVenue` re-validates
+        // the STORED skew against the DESTINATION's width and grid, and a venue that would make the
+        // live skew degenerate is a rejected migrate rather than a `DegenerateRange` at `redeploy`.
+        // Writing them here is what lets init use that same one copy of the ladder.
+        $.skewBps = p.skewBps;
+        $.minSkewBps = p.minSkewBps;
+        $.maxSkewBps = p.maxSkewBps;
         LeveragedAeroVenue.applyVenue(_venueParamsOf(p));
 
-        // L3 (+L5): bound the oracle / calm-gate params so a misconfig can't silently disable a guard.
-        // Bounds admit the confirmed config yet block degenerate values:
-        //   maxDelay           ∈ (0, 7 days] — a huge value disables staleness detection
-        //   gracePeriod        ∈ [0, 1 days] — sequencer-restart grace
-        //   twapWindow         ∈ (0, 1 days] — 0 disables the TWAP / calm-gate (checked ABOVE, with
-        //                                      its store, so `applyVenue`'s observe probe is live)
-        //   calmDeviationTicks ∈ (0, 5000]   — a huge value disables the calm-gate
-        //   maxSlippageBps     ∈ (0, 1000]   — 0 or huge disables swap-slippage protection (10% cap)
-        if (p.maxDelay == 0 || p.maxDelay > 7 days) revert OracleParamOutOfRange();
-        if (p.gracePeriod > 1 days) revert OracleParamOutOfRange();
-        if (p.calmDeviationTicks == 0 || p.calmDeviationTicks > 5000) revert OracleParamOutOfRange();
-        if (p.maxSlippageBps == 0 || p.maxSlippageBps > 1000) revert OracleParamOutOfRange();
-        if ((p.managementFeeBps != 0 || p.performanceFeeBps != 0) && p.feeRecipient == address(0)) {
-            revert FeeRecipientRequired();
-        }
-        // M3: hard ceilings on both fee rates (perf mirrors the protocol-wide cap; mgmt the factory's).
-        if (p.performanceFeeBps > FeeConstants.MAX_PERFORMANCE_FEE_BPS) revert PerformanceFeeTooHigh();
-        if (p.managementFeeBps > MAX_MANAGEMENT_FEE_BPS) revert ManagementFeeTooHigh();
+        // Risk / oracle / fee ladder — relocated whole (rung for rung, same order, same selectors) into
+        // `LeveragedAeroValuation`, for EIP-170 headroom. What is NOT here any more: the four RISK
+        // invariants (`targetLtv <= maxLtv`, the 1.05x health floor, `maxLtv < CF`, the L4
+        // health×LTV conflict) and the whole RANGE ladder both ran inside `applyVenue` above — they
+        // are venue-scoped (measured against the destination's collateral factor and tickSpacing
+        // grid), so `migrateVenue` has to re-run them and init gets them from the same one copy.
+        // What remains here is the non-migratable core: the five ORACLE rungs and the fee rungs.
+        // `checkRiskParams` re-runs the four risk rungs against the same values `applyVenue` just
+        // validated — cheap, and it keeps the relocated ladder in its original rung order. The
+        // collateral-factor read moved with it: it is a context-free `staticcall`, so running it in
+        // this frame under delegatecall is identical. The fee rungs are a separate call only because a
+        // 12-argument `checkRiskParams` put this frame one slot too deep for the Yul stack allocator.
+        uint16 cfBps = LeveragedAeroValuation.readCollateralFactor(p.comptroller, p.mUsdc);
+        LeveragedAeroValuation.checkRiskParams(
+            p.targetLtvBps,
+            p.maxLtvBps,
+            p.minHealthBps,
+            cfBps,
+            p.maxDelay,
+            p.gracePeriod,
+            p.twapWindow,
+            p.calmDeviationTicks,
+            p.maxSlippageBps
+        );
+        LeveragedAeroValuation.checkFeeParams(p.managementFeeBps, p.performanceFeeBps, p.feeRecipient);
 
         // Non-migratable core stores (the venue subset — legs, markets, pool, gauge, feeds,
         // spacings, widths, LTV band, derived decimals/ordering/shape — was persisted inside
@@ -540,16 +588,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.performanceFeeBps = p.performanceFeeBps;
         $.feeRecipient = p.feeRecipient;
         $.lastFeeAccrualTimestamp = block.timestamp;
+        // The venue subset — decimals / ordering / shape / width band / LTV band / spacings — was
+        // persisted by `applyVenue`; the skew triple was written ahead of it (see the note there).
         // tokenId / posTickLower / posTickUpper / hwmPerShare default to 0 (set in _execute / on first deposit).
-    }
-
-    /// @dev Width band check shared by `_initialize` (the genesis width) and `rerange` (each
-    ///      per-cycle width): on the tickSpacing grid and inside `[minWidth_, maxWidth_]`. The band
-    ///      itself is validated once at init (multiples, `minWidth_ >= 2 × spacing`, min ≤ max).
-    function _checkWidth(uint24 width_, int24 tickSpacing_, uint24 minWidth_, uint24 maxWidth_) private pure {
-        if (tickSpacing_ <= 0) revert WidthOutOfBounds();
-        if (width_ % uint24(tickSpacing_) != 0) revert WidthOutOfBounds();
-        if (width_ < minWidth_ || width_ > maxWidth_) revert WidthOutOfBounds();
     }
 
     /// @dev The venue subset of `InitParams`, marshalled for `LeveragedAeroVenue.applyVenue` (one
@@ -668,9 +709,29 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @notice Full proportional unwind to the vault. The unwind — remove 100% liquidity, repay both
     ///         Moonwell borrows (self-funding any IL/fee shortfall), redeem collateral, sweep residual
     ///         cbBTC/WETH → USDC, clear state — lives in `LeveragedAeroManager.settleImpl()`; the
-    ///         realized USDC is pushed to the vault here (the manager never touches `vault()`).
+    ///         final gauge-reward tranche is sold here (best-effort, see below) and the realized USDC
+    ///         is pushed to the vault here (the manager never touches `vault()`).
     function _settle() internal override {
         LeveragedAeroManager.settleImpl();
+        // Sell the reward tranche the unwind's `gauge.withdraw` auto-claimed: `settleImpl` sweeps only
+        // the two LEG tokens, so without this the tranche never reaches the USDC pot `redeemSettled`
+        // pays holders from — it is stranded on a `Settled` strategy, recoverable only by the owner's
+        // two-transaction `rescueToVault` → `vault.rescueERC20`, and arriving there as a stray token
+        // rather than as shareholder proceeds.
+        //
+        // BEST-EFFORT, and that is the whole asymmetry with `flatten` (which calls the same
+        // `LeveragedAeroVenue` helper FAIL-CLOSED, with the proposer's floor): `flatten` is a
+        // RESUMABLE op on a book that stays `Executed` — a revert is just a retry after the feed
+        // recovers. `settle()` is TERMINAL, owner-driven and argument-less: a hard revert here would
+        // let a stale reward feed or a broken reward route BLOCK the fund's only exit. The self-call
+        // is what makes the swallow safe — the sale still fails closed INSIDE its own frame (oracle
+        // floor post-checked against the measured fill), so a caught revert rolls the swap back
+        // entirely and degrades to exactly the pre-fix behaviour: the tranche is left in place,
+        // rescuable now that the state is `Settled`. It is never sold blind.
+        try this.sellSettleRewardSelf() {}
+        catch {
+            emit SettleRewardSaleDeferred();
+        }
         // Discharge the accrued protocol fee from realized USDC BEFORE pushing the rest to the
         // vault. Pays `min(owed, balance)` to the live recipient; skips silently when recipient == 0
         // or owed == 0 (liability persists until a recipient exists — see edge note on `redeem`).
@@ -695,6 +756,17 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
             }
         }
         _pushAllToVault($.usdc);
+    }
+
+    /// @dev Self-only external wrapper so `_settle` can sell the final reward tranche best-effort via
+    ///      `try/catch` (H3 pattern, as `crystallizeFeesSelf`). Isolating the sale in its own call
+    ///      frame is what lets a stale reward feed / reverting reward route roll back ONLY the sale
+    ///      (tranche untouched, still rescuable) while the TERMINAL settle completes — see the
+    ///      flatten-vs-settle note at the call site and on `LeveragedAeroVenue.sellSettleRewardImpl`.
+    ///      Gated to `address(this)`; runs inside settle's own frame, so it adds no reentrancy surface.
+    function sellSettleRewardSelf() external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        LeveragedAeroVenue.sellSettleRewardImpl();
     }
 
     /// @dev Crystallise management + HWM performance fees on the PRE-ACTION vault state. The caller
@@ -971,30 +1043,62 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         }
     }
 
-    /// @notice Recenter the CL position on the current pool tick WITHOUT swapping, via
-    ///         `LeveragedAeroManager.rerangeImpl()`. The calm-gate runs FIRST, so a recenter can never
+    /// @notice Re-range the CL position around the current pool tick WITHOUT swapping, via
+    ///         `LeveragedAeroManager.rerangeImpl()`. The calm-gate runs FIRST, so a re-range can never
     ///         execute at a manipulated tick. No swap → principal conserved (IL is realized only on a
     ///         true exit); the collected ratio can't match the new range, so a remainder of ONE
-    ///         borrowed leg is left idle — `nav()` prices it, so the recenter is NAV-neutral and the
+    ///         borrowed leg is left idle — `nav()` prices it, so the re-range is NAV-neutral and the
     ///         remainder stays redeployable. Debt + collateral are untouched (health preserved); a new
     ///         tokenId is minted (Slipstream ticks are immutable), the old empty NFT is harmless dust.
     ///
     ///         NO fee crystallisation: rerange changes neither supply nor NAV, so the streaming fee is
     ///         deferred to the next crystallize point (not lost) and the HWM is unaffected.
-    /// @param width_  Full range width in ticks for this cycle (span = `width_/2` each side of the
-    ///                calm tick). Must sit on the tickSpacing grid inside `[minWidth, maxWidth]`;
-    ///                persisted as the new `width` so `nav()`/subsequent mints see it — including on
-    ///                a FLAT book, where the recenter itself is a no-op but the width still takes
-    ///                effect for the next `deployIdle` / `compound` mint. Centring is grid-approximate:
-    ///                both bounds round DOWN onto the spacing grid, so the realised range sits off the
-    ///                calm tick by up to one spacing (largest when `width_ / tickSpacing` is odd).
-    /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
-    /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
-    function rerange(uint24 width_, uint256 minLiq0, uint256 minLiq1) external onlyProposer nonReentrant {
+    /// @param width_   Full range width in ticks for this cycle. Must sit on the tickSpacing grid inside
+    ///                 `[minWidth, maxWidth]`.
+    /// @param skewBps_ WHERE that width sits relative to the calm tick: the fraction of `width_` placed
+    ///                 BELOW it, on a 1e4 scale. `5000` is centred (`width_/2` each side, the historical
+    ///                 behaviour); `3500` puts 35% of the width below spot and 65% above, which is how a
+    ///                 rebalancer expresses a directional view without swapping. Must be in `(0, 10000)`,
+    ///                 inside the governance band `[minSkewBps, maxSkewBps]`, AND leave both sides
+    ///                 spanning at least one `tickSpacing` — see `LeveragedAeroValuation.checkRange`.
+    ///
+    ///                 Placement is grid-approximate: both bounds round DOWN onto the spacing grid, so
+    ///                 the realised range sits off the requested split by up to one spacing.
+    /// @param minLiq0  Minimum token0 the re-add must consume (two-sided slippage guard).
+    /// @param minLiq1  Minimum token1 the re-add must consume (two-sided slippage guard).
+    ///
+    /// @dev BOTH `width_` and `skewBps_` are PERSISTED here, in this frame, BEFORE the delegatecall,
+    ///      because `rerangeImpl` TAKES NO RANGE PARAMS: it reads the pair straight out of storage, so
+    ///      the persist must precede the delegatecall or the impl would re-range at the OLD pair. (The
+    ///      stored pair's only readers are `executeImpl` and `rerangeImpl` — `nav()` does not read it,
+    ///      and `deployIdle` / `compound` do not re-derive a range at all: they `increaseLiquidity` into
+    ///      the STORED `posTickLower`/`posTickUpper`. So the stored pair takes economic effect at the
+    ///      NEXT `rerange`, or at `execute` on a pre-genesis book.) Placing the two `sstore`s in THIS
+    ///      frame rather than in the impl is a bytecode relocation for EIP-170 headroom: this frame
+    ///      already holds `_layout()` for the validation, so the writes cost ~20 bytes here versus ~70 in
+    ///      the manager library, which is at the cap. Exactly the same move `adjustLeverage`'s target-LTV
+    ///      write already makes.
+    ///
+    ///      FLAT BOOK (`tokenId == 0` while still `Executed`): `rerangeImpl` returns early and the
+    ///      persist is all that happens. That is deliberate — and deliberately NOT a revert — but the
+    ///      honest reading is that such a book is TERMINAL UNTIL SETTLE: nothing can mint again
+    ///      (`execute` is one-shot, `deployIdle` fails closed with no NFT to add into, `compound` no-ops), so
+    ///      no later op consumes the stored pair. The write is kept for `layout()` / monitoring
+    ///      consistency — so the fund's advertised range matches what a proposer last asked for — not
+    ///      because anything re-reads it.
+    function rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)
+        external
+        onlyProposer
+        nonReentrant
+    {
         if (_state != State.Executed) revert NotExecuted();
         Layout storage $ = _layout();
-        _checkWidth(width_, $.tickSpacing, $.minWidth, $.maxWidth);
-        LeveragedAeroManager.rerangeImpl(width_, minLiq0, minLiq1);
+        LeveragedAeroValuation.checkRange(
+            width_, skewBps_, $.tickSpacing, $.minWidth, $.maxWidth, $.minSkewBps, $.maxSkewBps
+        );
+        $.width = width_;
+        $.skewBps = skewBps_;
+        LeveragedAeroManager.rerangeImpl(minLiq0, minLiq1);
     }
 
     /// @notice Retarget the position's LTV to `targetLtvBps_` (borrow/repay; no new USDC). Collateral
@@ -1327,10 +1431,13 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///           this the pair `rescueToVault(vault) → vault.rescueERC20(vault, attacker)` would
     ///           exfiltrate every escrowed claim. Escrows are recovered via `cancelRedeem`.
     ///         - the gauge reward token (read live from the gauge) WHILE EXECUTED, so a sweep can't
-    ///           bypass `compound()`. Once `Settled` that reason is gone — `compound` reverts
-    ///           `NotExecuted` and the unwind's `gauge.withdraw` auto-claims a final AERO tranche
-    ///           that `settleImpl` never sells — so post-settle it IS a stray and sweeping it to the
+    ///           bypass `compound()`. Once `Settled` that reason is gone (`compound` reverts
+    ///           `NotExecuted`), so post-settle the reward token IS a stray and sweeping it to the
     ///           vault (where the owner's non-asset `rescueERC20` applies) is the only recovery.
+    ///           `_settle` DOES sell the tranche its unwind auto-claims, so this is the RESIDUAL
+    ///           case only: the sale is best-effort and a stale reward feed / broken reward route
+    ///           leaves the tranche in place (`SettleRewardSaleDeferred`), as does a sub-micro-USD
+    ///           dust balance. That residue, plus any post-settle donation, is what this recovers.
     ///
     ///         The position NFT is never swept (no ERC-721 path).
     function rescueToVault(address token) external nonReentrant {
@@ -1373,7 +1480,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         gate of its own and `_unwindLiquidity`'s mins are derived from the same `slot0()` it
     ///         burns at, so they bind nothing against a shoved tick — and the reward tranche the
     ///         unwind auto-claims is SOLD here, so the flat-book `nav()` (idle USDC only) is again the
-    ///         whole book rather than understating it for the length of the flat window.
+    ///         whole book rather than understating it for the length of the flat window. That sale is
+    ///         FAIL-CLOSED under the caller's floor, because a reverted `flatten` is just a retry;
+    ///         `_settle` sells the same tranche BEST-EFFORT, because a reverted `settle` is a fund
+    ///         that cannot exit (see the note at that call site).
     /// @param minRewardUsdcOut Minimum USDC out of the gauge-reward sale. Required nonzero only when
     ///                         a reward balance is actually present; the L9 oracle floor applies on
     ///                         top, so the effective bound is `max(this, floor)`.

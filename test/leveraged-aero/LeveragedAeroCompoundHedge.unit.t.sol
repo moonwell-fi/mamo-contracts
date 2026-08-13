@@ -226,6 +226,9 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         p.width = WIDTH;
         p.minWidth = 200;
         p.maxWidth = 20_000;
+        p.skewBps = 5000;
+        p.minSkewBps = 1000; // governance band (unused here — this suite never reranges)
+        p.maxSkewBps = 9000;
         p.targetLtvBps = TARGET_LTV_BPS;
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
@@ -593,7 +596,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         legA.mint(address(npm), 1_000e8);
 
         vm.prank(proposer);
-        strategy.rerange(WIDTH, 0, 0);
+        strategy.rerange(WIDTH, 5000, 0, 0);
 
         assertGt(legA.balanceOf(address(strategy)), 0, "rerange left an idle leg-A remainder");
         assertEq(_driftLegA(), 0, "an idle-leg remainder is NOT interest drift");

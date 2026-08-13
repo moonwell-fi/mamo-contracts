@@ -355,23 +355,168 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
     // ==================== RANGE GEOMETRY (why genesis is always two-sided) ====================
 
     /**
-     * @dev `centeredTickRange` must STRICTLY BRACKET the current tick for every width init permits
-     *      (`width >= 2 x tickSpacing`). This is load-bearing for asset-mode: it is what guarantees a
-     *      FRESH range is never one-sided, so `executeImpl` can always size. Only a STORED range the
-     *      price has since left can degenerate — hence `deployIdle`'s documented `rerange`-first
-     *      remedy.
+     * @dev `skewedTickRange` must STRICTLY BRACKET the current tick at the CENTRED skew for every width
+     *      init permits (`width >= 2 x tickSpacing`). This is load-bearing for asset-mode: it is what
+     *      guarantees a FRESH range is never one-sided, so `executeImpl` can always size. Only a STORED
+     *      range the price has since left can degenerate — hence `deployIdle`'s documented
+     *      `rerange`-first remedy. (The skewed generalisation is the fuzz two tests below.)
      */
     function testFuzzCenteredRangeStrictlyBracketsTheTick(int24 tick, uint24 width) public {
         tick = int24(int256(bound(int256(tick), -600_000, 600_000)));
         width = uint24(bound(uint256(width), 2, 4000)) * uint24(SPACING);
         _setPoolTick(int24(tick / SPACING * SPACING)); // an on-grid tick, as a real pool reports
 
-        (int24 lower, int24 upper) = LeveragedAeroValuation.centeredTickRange(address(pool), SPACING, width);
+        (int24 lower, int24 upper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, 5000);
         int24 current = pool.tick();
         assertLe(lower, current, "lower bound must not sit above the current tick");
         assertGt(upper, current, "upper bound must sit strictly above the current tick");
         assertEq(lower % SPACING, 0, "lower bound on the spacing grid");
         assertEq(upper % SPACING, 0, "upper bound on the spacing grid");
+    }
+
+    // ==================== RANGE GEOMETRY: THE SKEW ====================
+
+    /// @dev `LeveragedAeroValuation._alignTick`, restated so the equalities below compare against an
+    ///      INDEPENDENT expression rather than against the code under test.
+    function _alignDown(int24 tick) internal pure returns (int24) {
+        int24 rem = tick % SPACING;
+        if (rem < 0) rem += SPACING;
+        return tick - rem;
+    }
+
+    /**
+     * @dev SKEW 5000 IS THE OLD CENTRED FORMULA, BIT FOR BIT — the compatibility pin for every live
+     *      clone and every existing test fixture. The pre-skew math was `span = width / 2` each side; the
+     *      skewed form computes `lowerSpan = width x 5000 / 1e4` and `upperSpan = width - lowerSpan`,
+     *      which coincide exactly whenever `width` is even (and every width on an even spacing grid is).
+     *      Asserted against the OLD expression verbatim, at on- AND off-grid ticks and both signs, so it
+     *      is a real regression pin and not a restatement of the new code.
+     */
+    function testSkewedRangeReproducesCenteredAtHalf() public {
+        uint24[4] memory widths = [uint24(200), 1000, 4000, 40_000];
+        int24[4] memory ticks = [int24(0), TICK, TICK + 37, -TICK - 37]; // two of them deliberately off-grid
+        for (uint256 t; t < ticks.length; ++t) {
+            int24 current = ticks[t];
+            _setPoolTick(current);
+            for (uint256 i; i < widths.length; ++i) {
+                (int24 lower, int24 upper) =
+                    LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, widths[i], 5000);
+                int24 span = int24(widths[i] / 2); // the pre-skew expression, verbatim
+                assertEq(lower, _alignDown(current - span), "lower == the OLD centred lower bound");
+                assertEq(upper, _alignDown(current + span), "upper == the OLD centred upper bound");
+            }
+        }
+    }
+
+    /**
+     * @dev THE GENERALISED BRACKETING INVARIANT. Over the whole `_checkSkew`-LEGAL set — any in-domain
+     *      tick, any aligned width in the init band, and any skew whose two spans each reach at least one
+     *      `tickSpacing` — the range must still strictly bracket the tick, sit on the grid, and measure
+     *      `width` to within one spacing. This is what licenses the skew at all: `assetModeSplit` can only
+     *      size a range that brackets the price, so if ANY legal skew produced a one-sided range the
+     *      feature would brick the deploy path.
+     *
+     *      The legal skew floor is derived, not guessed: `lowerSpan >= spacing` means
+     *      `skew >= ceil(spacing x 1e4 / width)`, and the same bound mirrored from the top caps the upper
+     *      side (`upperSpan = width - lowerSpan >= spacing` follows algebraically).
+     */
+    function testFuzzSkewedRangeStrictlyBracketsTheTick(int24 tick, uint24 width, uint16 skewBps) public {
+        tick = int24(int256(bound(int256(tick), -600_000, 600_000)));
+        width = uint24(bound(uint256(width), 2, 4000)) * uint24(SPACING);
+        uint256 spacing = uint256(uint24(SPACING));
+        uint256 minSkew = (spacing * 10_000 + uint256(width) - 1) / uint256(width); // ceil
+        skewBps = uint16(bound(uint256(skewBps), minSkew, 10_000 - minSkew));
+
+        _setPoolTick(int24(tick / SPACING * SPACING)); // an on-grid tick, as a real pool reports
+        int24 current = pool.tick();
+
+        (int24 lower, int24 upper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, skewBps);
+
+        int24 maxAligned = (TickMath.MAX_TICK / SPACING) * SPACING;
+        assertLe(lower, current, "lower bound must not sit above the current tick");
+        assertGt(upper, current, "upper bound must sit STRICTLY above the current tick");
+        assertEq(lower % SPACING, 0, "lower bound on the spacing grid");
+        assertEq(upper % SPACING, 0, "upper bound on the spacing grid");
+        assertGe(lower, -maxAligned, "lower bound stays inside the aligned tick domain");
+        assertLe(upper, maxAligned, "upper bound stays inside the aligned tick domain");
+
+        // The realised width claim holds only when NEITHER domain clamp fired: a clamped range is
+        // deliberately TRUNCATED (that is the clamp's whole job), so measuring it against `width` would
+        // be asserting the opposite of the intended behaviour. Reconstruct the pre-clamp bounds from the
+        // same align-down rule to tell the two cases apart — the clamped ones are covered by
+        // `testSkewedRangeClampsAtTickDomainEdges`, which asserts they stay mintable.
+        uint256 lowerSpan = (uint256(width) * uint256(skewBps)) / 10_000;
+        int24 nominalLower = _alignDown(int24(int256(current) - int256(lowerSpan)));
+        int24 nominalUpper = _alignDown(int24(int256(current) + int256(uint256(width) - lowerSpan)));
+        if (nominalLower >= -maxAligned && nominalUpper <= maxAligned) {
+            // Each bound aligns DOWN independently, so the realised width can differ from `width` by at
+            // most the two alignment remainders' difference — strictly less than one spacing.
+            assertApproxEqAbs(
+                uint256(int256(upper - lower)), uint256(width), spacing, "realised span == width (+/- one spacing)"
+            );
+        } else {
+            assertLt(
+                uint256(int256(upper - lower)), uint256(width) + spacing, "a clamped range is never WIDER than asked"
+            );
+        }
+    }
+
+    /**
+     * @dev THE SEMANTIC CLAIM: `skewBps` really is the fraction of the width placed BELOW the tick.
+     *      Asserted at a large width, where the one-spacing alignment drift is 0.025% of the span, and
+     *      stated first as an ABSOLUTE tick tolerance of one spacing (not a loose ratio) so it cannot
+     *      pass on slack — then restated as the ratio a rebalancer actually reasons about.
+     */
+    function testSkewedRangeSpanRatioMatchesSkew() public {
+        uint24 width = 400_000; // 4000 spacings
+        _setPoolTick(TICK);
+        int24 current = pool.tick();
+        uint256 spacing = uint256(uint24(SPACING));
+        uint16[5] memory skews = [uint16(1000), 2500, 5000, 7500, 9000];
+
+        for (uint256 i; i < skews.length; ++i) {
+            (int24 lower, int24 upper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, skews[i]);
+            uint256 below = uint256(int256(current - lower));
+            uint256 total = uint256(int256(upper - lower));
+
+            assertApproxEqAbs(
+                below, (uint256(width) * uint256(skews[i])) / 10_000, spacing, "below-span == skew x width"
+            );
+            assertApproxEqAbs(total, uint256(width), spacing, "total span == width");
+            assertApproxEqRel(
+                (below * 10_000) / total, uint256(skews[i]), 1e15, "realised fraction below spot == skewBps"
+            );
+        }
+    }
+
+    /**
+     * @dev THE DOMAIN EDGES, which the skew makes reachable in a way centring never did: at the extreme
+     *      legal skews essentially the WHOLE width lands on ONE side of the tick, so a bound near
+     *      ±MAX_TICK leaves the tick domain outright. The `±_alignTick(MAX_TICK)` clamps must leave both
+     *      bounds ON the spacing grid, inside the domain and strictly ordered — i.e. MINTABLE, not merely
+     *      non-panicking. `getSqrtRatioAtTick` is called on both as the proof (it reverts out of domain,
+     *      which is the unhelpful deep-in-TickMath failure the clamps exist to prevent).
+     */
+    function testSkewedRangeClampsAtTickDomainEdges() public {
+        int24 maxAligned = (TickMath.MAX_TICK / SPACING) * SPACING;
+        uint24 width = 1_774_400; // ~2 x MAX_TICK: the init ceiling on `maxWidth`, aligned to SPACING
+        int24[2] memory ticks = [maxAligned, -maxAligned];
+        uint16[2] memory skews = [uint16(1), 9999]; // the extreme legal skews at this width
+
+        for (uint256 t; t < ticks.length; ++t) {
+            _setPoolTick(ticks[t]);
+            for (uint256 i; i < skews.length; ++i) {
+                (int24 lower, int24 upper) =
+                    LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, skews[i]);
+                assertEq(lower % SPACING, 0, "clamped lower is still on the spacing grid");
+                assertEq(upper % SPACING, 0, "clamped upper is still on the spacing grid");
+                assertGe(lower, -maxAligned, "lower stays inside the aligned tick domain");
+                assertLe(upper, maxAligned, "upper stays inside the aligned tick domain");
+                assertLt(lower, upper, "the clamped range is still non-empty");
+                TickMath.getSqrtRatioAtTick(lower); // reverts if the clamp left the domain
+                TickMath.getSqrtRatioAtTick(upper);
+            }
+        }
     }
 
     // ==================== LEVER-UP SIZING (`assetModeLeverUpPair`) ====================
