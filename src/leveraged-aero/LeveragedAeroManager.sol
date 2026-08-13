@@ -629,8 +629,9 @@ library LeveragedAeroManager {
         _assertHealthy();
     }
 
-    /// @notice Retarget the position's LTV to `targetLtvBps_` (body of the strategy's `adjustLeverage`;
-    ///         the entrypoint already enforced `targetLtvBps_ ≤ maxLtvBps`). Collateral is untouched,
+    /// @notice Retarget the position's LTV to `targetLtvBps_` (body of the strategy's `adjustLeverage`,
+    ///         which passes the fund's STORED standing target — already bounded by `maxLtvBps` when the
+    ///         admin wrote it via `setTargetLtv`, and non-zero). Collateral is untouched,
     ///         so LTV moves on the debt side: lever UP borrows the cbBTC/WETH delta and adds it
     ///         (`minLiq`); lever DOWN unwinds the matching CL fraction and repays (per-leg residual
     ///         rebalanced through USDC, bounded by `minOut`). Ends with `_assertHealthy`.
@@ -643,40 +644,29 @@ library LeveragedAeroManager {
     ///         into the LP, not a loss) but it shrinks the redeem cover budget until the next deposit, so
     ///         size lever-ups against available idle; an under-funded one reverts
     ///         `InsufficientIdleForLeverUp(needed, available)` and changes nothing.
-    /// @param targetLtvBps_ Target LTV in bps (≤ `maxLtvBps`). PERSISTED as the fund's standing target —
-    ///                      `execute` / `deployIdle` size their borrow off the STORED value, so a retarget
-    ///                      that did not persist would be silently undone by the next redeploy.
+    /// @param targetLtvBps_ Target LTV in bps. The caller passes the fund's STORED standing target
+    ///                      (`$.targetLtvBps`), which the admin's `setTargetLtv` already validated as
+    ///                      non-zero and `≤ maxLtvBps`; this function neither validates nor writes it.
     /// @param minLiq        Minimum CL liquidity on a lever-UP add (slippage guard).
     /// @param minOut        Minimum USDC out of a lever-DOWN residual swap (slippage guard).
     function adjustLeverageImpl(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut) public {
-        // Persist the (already max-validated) target BEFORE the venue ops, exactly as `rerange`
-        // persists `width` / `skewBps`. Three reasons this ordering is the right one:
+        // NO PERSIST HERE — and none in the caller either. `targetLtvBps_` IS the stored standing
+        // target: the admin/proposer split moved the write out of this op entirely, into the
+        // admin-only `LeveragedAerodromeCLStrategy.setTargetLtv` (the proposer must be able to move the
+        // book toward policy, not to change policy). Two consequences worth stating:
         //
-        //   1. SAFETY IS UNAFFECTED. The strategy entrypoint already rejected `targetLtvBps_ >
-        //      maxLtvBps`, and this is the ONLY caller — so no out-of-band value can reach this write.
-        //      A later venue revert rolls the whole tx back atomically (there is no partial-failure
-        //      state in the EVM), so "stored target that doesn't match the position" is unreachable
-        //      either way: writing first cannot leave a stale target behind.
-        //   2. IT MUST APPLY EVEN WHEN NEITHER BRANCH RUNS. When `targetDebt == debtUsdc` (already at
-        //      target, or zero collateral pre-`execute`) both branches are skipped and the op is a
-        //      venue no-op — but the proposer's new target must still take effect, or it is silently
-        //      dropped. Identical to `rerange`-on-a-flat-book, and why the write is ahead of the
-        //      branches rather than tucked inside them.
-        //   3. NOTHING ON THE LEVERAGE PATH READS IT. `_leverUp` / `_leverDown` / `_assertHealthy` size
-        //      off the `targetDebt` computed below and off `maxLtvBps` / `minHealthBps`, never off
-        //      `$.targetLtvBps` (its only reader is `_supplyAndBorrow`, the deploy path). So this write
-        //      is behaviourally independent of the venue work in THIS call and only changes what the
-        //      NEXT `deployIdle` / `compound` sizes at.
-        //   4. WHERE THE WRITE LIVES. The `sstore` itself is performed by the STRATEGY entrypoint
-        //      (`LeveragedAerodromeCLStrategy.adjustLeverage`) rather than here, purely for EIP-170
-        //      headroom: that frame already loads `_layout()` for the `maxLtvBps` check, so the write
-        //      costs ~20 bytes there versus ~71 in this library, and this library is at the cap.
-        //      Semantics are identical — same transaction, same all-or-nothing revert, and still ahead
-        //      of the no-op branch below. (`rerangeImpl` used to persist `width` in-library, back when
-        //      the manager had room; the rerange-skew work made it the earmarked relocation candidate
-        //      and took it — `rerange` now writes BOTH `width` and `skewBps` in the strategy frame,
-        //      still ahead of the impl's own flat-book bail-out, and `rerangeImpl` takes no range
-        //      params at all.)
+        //   1. NOTHING ON THIS PATH READS `$.targetLtvBps` AGAIN. `_leverUp` / `_leverDown` /
+        //      `_assertHealthy` size off the `targetDebt` computed below and off `maxLtvBps` /
+        //      `minHealthBps`; `$.targetLtvBps`'s only other reader is `_supplyAndBorrow` (the deploy
+        //      path). So this op is purely "move the book to where policy already says".
+        //   2. THE NO-OP CASE IS NOW GENUINELY A NO-OP. When `targetDebt == debtUsdc` (already at
+        //      target, or zero collateral pre-`execute`) both branches are skipped and nothing happens
+        //      — previously this call still had to land the target write, which is what the ordering
+        //      argument that used to live here was about. The per-cycle range knobs are unaffected and
+        //      keep their own persistence: `rerange` writes BOTH `width` and `skewBps` in the STRATEGY
+        //      frame (for EIP-170 headroom, ahead of `rerangeImpl`'s own flat-book bail-out, so
+        //      `rerangeImpl` takes no range params at all) because those remain per-call proposer
+        //      knobs. The leverage target is not one.
         (uint256 collateralUsdc, uint256 debtUsdc) = _readCollateralDebt();
         uint256 targetDebt = (uint256(targetLtvBps_) * collateralUsdc) / 10000;
         if (targetDebt > debtUsdc) {
@@ -759,8 +749,8 @@ library LeveragedAeroManager {
     ///            SHORT the swapped amount — an op whose contract is "move leverage only" would silently
     ///            rewrite the fund's delta profile.
     ///
-    ///      (a) is implemented. `U′` is DERIVED, never passed, so `adjustLeverage`'s signature is
-    ///      unchanged: collateral is untouched by this op, so the debt delta is fixed by
+    ///      (a) is implemented. `U′` is DERIVED, never passed, so `adjustLeverage` needs no funding
+    ///      parameter for it: collateral is untouched by this op, so the debt delta is fixed by
     ///      `targetLtvBps_ × collateral` (computed in `adjustLeverageImpl`) and `U′` is that delta's
     ///      leg-A borrow paired at the STORED range's required (legA : USDC) ratio —
     ///      `LeveragedAeroValuation.assetModeLeverUpPair`, which shares its ratio probe and its

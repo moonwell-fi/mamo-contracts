@@ -143,6 +143,34 @@ explicitly, and note that the two backend keys above are **different addresses**
 > backend.** The backend drives the account layer (`createStrategyForUser`, `depositIdle`); the rebalancer
 > drives the strategy (`compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`). Confirm with
 > `strategy.proposer()` before wiring any keeper.
+>
+> ### The operations / policy split — `proposer` is operations only
+>
+> **The `proposer` role IS the rebalancer** (we deliberately did not rename it) and it covers
+> **operations** only. Fund **policy** sits behind a second, derived role: **`admin` ==
+> `Ownable(vault()).owner()`, the MAMO multisig** — no stored field, no setter, it simply follows the
+> vault owner. The gate is `onlyAdmin` → `NotAdmin()`.
+>
+> The principle: **the backend/keeper must not be capable of rugging you — RAISING fund risk is
+> multisig-only.** Admin-only entrypoints on the strategy are **`setTargetLtv(uint16)`** (the fund's
+> standing target LTV, either direction) and **`rescueToVault(address)`** (stray-token sweep; the
+> proposer could previously call this and can no longer). Neither is a backend touchpoint; both are
+> listed so the role model is unambiguous.
+>
+> ### The direction rule
+>
+> **The admin sets the target LTV in either direction; the proposer may only reduce it.** The proposer's
+> **`lowerTargetLtv(uint16)`** (`0xbd41b78c`) is monotonic down — it reverts `TargetLtvNotLower()`
+> (`0x4f3f9c5d`) unless the new value is *strictly* below the stored one, and it shares the same non-zero
+> floor (`TargetLtvZero()`). So a compromised keeper key can never raise leverage, never reach a zero
+> target, and never move tokens; it *can* ratchet the target down and destroy yield, which is bounded,
+> emits `TargetLtvUpdated` every step, and is reversible by the admin in one `setTargetLtv`. This is what
+> keeps the 2-day fulfil SLA off the multisig's critical path (see "SLA — the 2-day deadman" below).
+>
+> **ABI note for anyone remapping selectors:** `adjustLeverage` lost its target parameter —
+> `adjustLeverage(uint16,uint256,uint256)` (`0x9792419f`) → `adjustLeverage(uint256,uint256)`
+> (`0x4be1cadd`). Target LTV is now standing policy rather than a per-call argument. This is a
+> rebalancer-surface change; the account layer (`MamoLeveragedAeroStrategy`) is **unaffected**.
 
 ---
 
@@ -205,7 +233,7 @@ sequenceDiagram
 
     A-->>BE: WithdrawRequested(id, shares, minAssetsOut)   (account event — backend indexes it)
     A-->>RB: RedeemRequested(id, account, shares)          (strategy event — the keeper trigger)
-    Note over RB: optionally adjustLeverage down first so the unwind self-funds
+    Note over RB: if the unwind needs it, RB lowers policy ITSELF (lowerTargetLtv, down only) and runs adjustLeverage down — no multisig
     RB->>S: fulfillRedeem(id)                              (PROPOSER key = rebalancer)
     S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
     Note over A: owner then sweeps via claimWithdrawnUsdc() → UsdcClaimed(amount)
@@ -214,8 +242,10 @@ sequenceDiagram
 
 1. The backend watches each account's `WithdrawRequested(id, shares, minAssetsOut)` (equivalently the
    strategy's `RedeemRequested(id, account, shares)`) for UX/product state — **not** to fulfil it.
-2. The rebalancer optionally levers down first (`adjustLeverage`) so the oracle-free proportional unwind
-   self-funds its IL, then calls `fulfillRedeem(id)` with the **proposer** key.
+2. The book is optionally levered **down** first so the oracle-free proportional unwind self-funds its IL
+   — a **single-actor** step: the rebalancer lowers the standing target itself with
+   `lowerTargetLtv(newTargetBps)` (proposer-only, strictly-lower) and runs `adjustLeverage(minLiq, minOut)`,
+   then calls `fulfillRedeem(id)` — all three with the **proposer** key, no multisig on the path.
 3. USDC lands on the account; the **owner** claims it with `claimWithdrawnUsdc()`.
 4. Confirm downstream via the account's `UsdcClaimed(amount)` (owner-initiated) or the strategy's
    `RedeemFulfilled`.
@@ -227,6 +257,10 @@ account, owner-gated) can trustlessly self-service via `emergencyWithdraw(id, mi
 `emergencyRedeem` (oracle-free proportional unwind). 2 days is the hard fulfillment SLA — it is the
 rebalancer's to meet, and the backend's to alert on: unfulfilled requests become user-executable and remove
 the operator from the loop.
+
+**No multisig signature sits inside that window.** The pre-fulfil de-risk is `lowerTargetLtv` +
+`adjustLeverage`, both proposer-only, so the SLA never depends on assembling multisig signers. The admin's
+`setTargetLtv` is needed only to **raise** the target back afterwards, which is off the critical path.
 
 ---
 

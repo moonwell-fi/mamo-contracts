@@ -80,13 +80,53 @@ Read `strategy.proposer()` off the clone you actually target before wiring a kee
 per-clone immutable, granted at `initialize`, and is unaffected by the removal of the Sherwood stack.
 Unless `FEE_RECIPIENT` overrides it at init, the proposer is also the strategy's fee recipient.
 
-Three authorization tiers appear on the strategy:
+> ### The **operations / policy split**: `proposer` ≠ `admin`
+>
+> **The `proposer` role IS the rebalancer.** We deliberately did **not** rename it — `proposer()` is the
+> keeper address and every operational entrypoint is `onlyProposer`.
+>
+> **`admin` is a second, derived role: `Ownable(vault()).owner()` — the MAMO multisig.** It is *not* a
+> stored field on the strategy and there is no setter; it simply follows whoever owns the vault, so a
+> vault-owner handover carries the strategy's admin rights with it. The gate is
+> `if (msg.sender != Ownable(vault()).owner()) revert NotAdmin();`.
+>
+> The split exists because **the backend/keeper must not be capable of rugging you: raising fund risk is
+> multisig-only.** The rebalancer moves the book toward the fund's standing policy and may **de-risk** it;
+> it cannot increase leverage and it cannot move tokens out of the strategy.
+>
+> ### 🧭 The direction rule — memorize this one line
+>
+> **The admin sets the target LTV in either direction; the proposer may only reduce it.**
+>
+> | Move | Who | Entrypoint |
+> |---|---|---|
+> | Raise the standing target (more leverage) | **admin only** | `setTargetLtv(uint16)` |
+> | Lower the standing target (de-risk) | admin **or** proposer | `setTargetLtv(uint16)` / `lowerTargetLtv(uint16)` |
+>
+> `lowerTargetLtv` is **monotonic down**: it reverts `TargetLtvNotLower()` unless the new value is
+> *strictly* below the stored one (equal is refused too), and it shares the non-zero floor. So a
+> compromised keeper key can never raise leverage, never reach a zero target, and never move tokens —
+> the split's premise survives intact, because levering *down* is not a rug.
+>
+> **Accepted residual, stated plainly:** a compromised or buggy keeper *can* ratchet the target toward the
+> floor and destroy yield. That harm is bounded (it cannot pass the non-zero floor), loud (every step
+> emits `TargetLtvUpdated` — monitor it), and reversible by the admin in **one** `setTargetLtv`.
+>
+> Three concrete consequences for keeper operators:
+> - **`adjustLeverage` no longer takes a target.** Target LTV is policy; `adjustLeverage(minLiq, minOut)`
+>   reads the stored `targetLtvBps()`.
+> - **The keeper can de-risk without a multisig.** `lowerTargetLtv` + `adjustLeverage` is a
+>   proposer-only sequence, which is what keeps the 2-day `FULFILL_WINDOW` off the multisig's critical
+>   path (§C).
+> - **`rescueToVault` is admin-only.** The proposer used to be able to call it. It can't any more.
+
+Four authorization tiers appear on the strategy:
 
 | Tier | Functions | Gate |
 |---|---|---|
-| Proposer-only | `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams` | `onlyProposer` (== `MAMO_REBALANCER`) |
+| Proposer-only (operations) | `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams`, **`lowerTargetLtv`** (policy, but **down only**) | `onlyProposer` (== `MAMO_REBALANCER`) |
+| **Admin-only (policy / custody)** | **`setTargetLtv`** (the only way to **raise** the target), `rescueToVault` | `onlyAdmin` — `Ownable(vault()).owner()`, the MAMO multisig → `NotAdmin()` |
 | Permissionless | `deleverage` | anyone (by design — safety backstop) |
-| Proposer **or** vault owner | `rescueToVault` | `proposer() \|\| Ownable(vault()).owner()` |
 | Vault-only (lifecycle) | `execute`, `settle` | `onlyVault` — the vault **owner** drives these, not the agent |
 
 - **State gate.** Every proposer op (and `deleverage`) opens with `if (_state != State.Executed) revert
@@ -100,9 +140,10 @@ Three authorization tiers appear on the strategy:
   deleverage is the user-safety backstop for an open-ended position (no fixed term, no scheduled unwind).
   It reverts `HealthyNoDeleverage` unless the position is genuinely unhealthy (conditions in §B). The
   agent should run it proactively, but anyone (a watcher bot, a user) can trigger it when health slips.
-- **`rescueToVault` always pays the vault.** The recovery target is hardcoded to `vault()`, never
-  caller-supplied, so neither the proposer nor the vault owner can exfiltrate; it only sweeps stray
-  (non-position) tokens.
+- **`rescueToVault` is ADMIN-ONLY and always pays the vault.** *(Behaviour change — the proposer could
+  previously call it; it now reverts `NotAdmin()` for the keeper.)* Moving tokens out of the strategy is
+  a custody action, not an operation. The recovery target is still hardcoded to `vault()`, never
+  caller-supplied, so even the admin cannot exfiltrate; it only sweeps stray (non-position) tokens.
 - **`updateParams(bytes)` is a no-op** here (`_updateParams` has an empty body — there are no tunable
   params). Listed for completeness; the agent never needs it.
 
@@ -256,26 +297,73 @@ a one-tick side is a lopsided range, and in asset-mode the next `deployIdle` / l
 > re-add). Making the borrow **range-aware** is the planned follow-up that removes the drag at source; it
 > is **out of scope** here.
 
-### `adjustLeverage` — move LTV toward a target
+### `setTargetLtv` — **ADMIN-ONLY**: set the fund's standing target LTV (either direction)
 
 ```solidity
-function adjustLeverage(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut)
-    external onlyProposer nonReentrant;
+function setTargetLtv(uint16 targetLtvBps_) external onlyAdmin;   // selector 0x45325ee3
 ```
+
+**Not a rebalancer call.** Listed here because the rebalancer must *read* what it writes, and because it
+is **the only way to RAISE the target** — the keeper's `lowerTargetLtv` (below) covers the down
+direction. Only `Ownable(vault()).owner()` (the MAMO multisig) may call it; anyone else reverts
+`NotAdmin()` (`0x7bfa4b9f`) — including the proposer.
 
 | | |
 |---|---|
-| `targetLtvBps_` | Desired LTV in bps. **Checked at the entrypoint**: `targetLtvBps_ > maxLtvBps` reverts `TargetLtvExceedsMax()`. |
+| `targetLtvBps_` | The new **standing** target in bps. Must be **non-zero** → `TargetLtvZero()` (`0xcc7b6172`), and `≤ maxLtvBps` → `TargetLtvExceedsMax()`. A rejected value stores nothing and emits nothing. |
+| Why zero is refused | A zero standing target is not a brick — it borrows nothing, so `debtUsdc == 0`, `adjustLeverage`'s two branches both skip, and `_leverDown` guards the full-unwind case anyway (`FullUnwindNotSupported`). What it *is* is a fund that can silently never lever. Refused on **all three** write paths: the two setters, and `migrateVenue` (the guard sits in `LeveragedAeroVenue.applyVenue`, the route `_initialize` and `migrateVenue` share). |
+| Position effect | **None.** This is policy only; it moves nothing on chain. The value takes effect on the next `adjustLeverage` (retargets the live position to it) or the next `deployIdle` / `compound` / `execute` (sizes its collateral/borrow split at it). |
+| State gate | **None** — legal in `Pending` as well as `Executed`, so the multisig can correct an init-time target before the genesis `execute` without redeploying the clone. |
+| Events | `TargetLtvUpdated(uint16 previousBps, uint16 newBps)` — topic0 `0x74a1eafe22c602fe09147945eeb780f3482d293fefdceaa3ff058fd31134093e`. The only leverage-policy event on the contract; monitor it as a multisig-signed risk change. **Three emitters, one topic**: this setter, `lowerTargetLtv`, and `migrateVenue` — a migration's staged params carry their own `targetLtvBps`, and `applyVenue` announces it when it differs from the stored one (it stays quiet when it does not, and it also fires once at init, `previousBps == 0`). So the log stream is the complete history of the stored target, with no per-path special case. |
+| Read-back | `targetLtvBps()` or `layout().targetLtvBps` (§E) — the same storage read. |
+
+### `lowerTargetLtv` — **PROPOSER-ONLY, DOWN ONLY**: de-risk without a multisig
+
+```solidity
+function lowerTargetLtv(uint16 newTargetBps) external onlyProposer;   // selector 0xbd41b78c
+```
+
+**This one IS a rebalancer call.** It exists so the pre-`fulfillRedeem` lever-down does not need a
+multisig signature inside the 2-day `FULFILL_WINDOW` (§C): the keeper lowers policy itself, then runs
+`adjustLeverage` and `fulfillRedeem` — all three proposer-only.
+
+| | |
+|---|---|
+| `newTargetBps` | The new **standing** target in bps. Must be **strictly below** the current `targetLtvBps()` → `TargetLtvNotLower()` (`0x4f3f9c5d`); **equal also reverts**. Must be **non-zero** → `TargetLtvZero()` (`0xcc7b6172`), the same floor `setTargetLtv` and init enforce. A rejected value stores nothing and emits nothing. |
+| No `maxLtvBps` check | Not needed and not present: strictly below an already-validated stored target is below the cap by transitivity. |
+| Direction rule | The keeper can **only reduce**. Raising is `setTargetLtv`, admin-only. A compromised keeper key can de-lever the fund (bounded by the non-zero floor, loud via `TargetLtvUpdated`, reversible by the admin in one transaction) but can never lever it up and can never move tokens. |
+| Position effect | **None** — policy only, exactly like `setTargetLtv`. Takes effect on the next `adjustLeverage` / `deployIdle` / `compound`. |
+| State gate | **None** — matches `setTargetLtv` deliberately; legal in `Pending` as well as `Executed`. |
+| Events | `TargetLtvUpdated(uint16 previousBps, uint16 newBps)` — **the same event**, no second one to index. A monitor cannot tell admin from keeper (or a migration) by the event alone; use `tx.from` / the trace. |
+| What the ratchet rests on | The keeper's down-only rule is **not** the whole story: `migrateVenue` is proposer-gated and rewrites both `targetLtvBps` and `maxLtvBps` from its staged params. The keeper still cannot raise leverage only because (1) `stageVenue` is **owner-gated** and (2) `migrateVenue` re-derives `keccak256(abi.encode(p))` and requires it to equal the staged hash — so the keeper can execute only the exact parameter set the owner signed. Loosening either would silently un-gate the target LTV. |
+| Read-back | `targetLtvBps()` or `layout().targetLtvBps` (§E). |
+
+### `adjustLeverage` — move LTV toward the **stored** target
+
+```solidity
+function adjustLeverage(uint256 minLiq, uint256 minOut)
+    external onlyProposer nonReentrant;                           // selector 0x4be1cadd
+```
+
+> **⚠️ SIGNATURE CHANGED — the backend must remap.** Was
+> `adjustLeverage(uint16,uint256,uint256)` → `0x9792419f`. Now
+> `adjustLeverage(uint256,uint256)` → `0x4be1cadd`. The target LTV is **no longer a per-call argument**:
+> it is policy, set by the multisig with `setTargetLtv` (above). Read the target with `targetLtvBps()`
+> before deciding whether a retarget op is even worth sending.
+
+| | |
+|---|---|
+| Target | Read from storage (`layout().targetLtvBps`), **not** passed. No `maxLtvBps` check happens here — the stored value cleared that bound when the admin wrote it. |
 | `minLiq` | Minimum CL liquidity on a lever-**UP** add. |
 | `minOut` | Minimum USDC out of a lever-**DOWN** residual rebalancing swap. |
-| Position effect (both shapes) | Collateral untouched; LTV moves on the **debt** side. `targetDebt = targetLtvBps_ × collateralUsdc / 1e4`. Lever **down**: unwind the matching CL fraction and repay, per-leg residual rebalanced through USDC (`minOut`) — unchanged in asset-mode, where the leg-B residual **is** USDC and flows straight into the leg-A cover. Closes with `_assertHealthy()`. |
+| Position effect (both shapes) | Collateral untouched; LTV moves on the **debt** side. `targetDebt = targetLtvBps() × collateralUsdc / 1e4`. Lever **down**: unwind the matching CL fraction and repay, per-leg residual rebalanced through USDC (`minOut`) — unchanged in asset-mode, where the leg-B residual **is** USDC and flows straight into the leg-A cover. Closes with `_assertHealthy()`. |
 | Lever **down** — the cover sell is now **need-sized** | When one leg comes back short and the other long, `_rebalanceCover` sells the surplus leg to cover the shortfall. It now sells **only as much as covering the shortfall requires** and keeps the rest, instead of dumping the whole surplus balance. Two consequences for the operator: a lever-down (and the permissionless `deleverage`, same helper) realizes **less** unnecessary swap slippage and fees, and it **leaves the unsold surplus as an idle leg balance** — priced by `nav()`, still hedging its own debt, and redeployable on the next add. Do not model the residual sweep as "the surplus leg ends at zero" any more. |
 | Lever **up** — two borrowed legs | Borrow the delta 50/50 by USD across both legs and LP them against each other. **Self-funding**: the pair *is* the two borrows, so no idle USDC is consumed. |
 | Lever **up** — asset-mode | Borrows **only leg A** and pairs it with USDC **drawn from the strategy's idle balance**, sized closed-form (`assetModeLeverUpPair`) so the LP's leg-A amount equals the added leg-A debt — that is what preserves the delta-hedge (swapping part of the borrow to USDC would leave the book net short). **Operator consequence: an asset-mode lever-up CONSUMES idle USDC.** Value-conserving (a NAV component moving idle → LP, not a loss) but it shrinks the redeem cover budget until the next deposit. **Size lever-ups against available idle**; an under-funded one reverts `InsufficientIdleForLeverUp(needed, available)` and changes nothing — deliberately not a partial fill and not a silent cap. |
-| `targetLtvBps_` is **persisted** | The value is stored as the fund's standing target, so `execute` / `deployIdle` / `compound` size their **next** borrow at it. This holds even when neither branch runs (`targetDebt == debtUsdc`) — the retarget still takes effect, exactly like `rerange`-on-a-flat-book persisting `width` and `skewBps`. Read it back with `targetLtvBps()` or `layout().targetLtvBps` (§E). |
+| It writes **nothing** | The op no longer persists a target — the persist moved to `setTargetLtv`. When neither branch runs (`targetDebt == debtUsdc`, i.e. the book is already at policy) the call is a genuine no-op. The per-cycle range knobs are unaffected: `rerange` still persists `width` and `skewBps`. |
 | Fee interaction | **No crystallization** (like `rerange`): no supply change, no PnL realized; streaming fee defers, HWM unaffected. |
-| Errors | `TargetLtvExceedsMax`, `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`; **asset-mode lever-up also** `InsufficientIdleForLeverUp(uint256 needed, uint256 available)` and `DegenerateRange()` (the pairing is sized against the STORED range — a one-sided one fails closed; `rerange` unblocks it). `InsufficientIdleForLeverUp` is raised inside `LeveragedAeroValuation` but **re-declared on the strategy** (`LeveragedAerodromeCLStrategy.sol:93`, same selector) so it is on the clone's own ABI for the rebalancer / frontend — decode it off the strategy ABI, no library ABI needed. |
-| When to call | To hold the fund near `targetLtvBps`, and — critically — **before `fulfillRedeem`** to lever **down** so the oracle-free proportional unwind self-funds its IL/debt shortfall (see §C). In asset-mode note the two directions are asymmetric on idle: lever **down** frees USDC, lever **up** spends it. |
+| Errors | `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`; **asset-mode lever-up also** `InsufficientIdleForLeverUp(uint256 needed, uint256 available)` and `DegenerateRange()` (the pairing is sized against the STORED range — a one-sided one fails closed; `rerange` unblocks it). `InsufficientIdleForLeverUp` is raised inside `LeveragedAeroValuation` but **re-declared on the strategy** (same selector) so it is on the clone's own ABI for the rebalancer / frontend — decode it off the strategy ABI, no library ABI needed. `TargetLtvExceedsMax` is **no longer reachable here** — it moved to `setTargetLtv` with the parameter. |
+| When to call | To hold the fund near the standing `targetLtvBps()`. **To lever DOWN before `fulfillRedeem`** — so the oracle-free proportional unwind self-funds its IL/debt shortfall (see §C) — the keeper first calls **`lowerTargetLtv`** itself and then `adjustLeverage`: **no multisig step**, so the fulfil runbook is a single-actor sequence. Levering back **UP** afterwards is the multisig's `setTargetLtv`, and that one is not on the redemption critical path. (The permissionless `deleverage` remains available for the genuinely-unhealthy case.) In asset-mode note the two directions are asymmetric on idle: lever **down** frees USDC, lever **up** spends it. |
 
 ### `fulfillRedeem` — drain the withdraw queue
 
@@ -437,10 +525,13 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
   needing more than the redeemer's slice reverts the whole redeem (fail-safe — never touches stayers'
   reserved `(1-f)` share of idle USDC/legs).
 
-Because a levered position tends to run a debt/IL shortfall against the collected legs, calling
-`adjustLeverage` to lever **down** first shrinks the debt the unwind must repay, so the proportional
-unwind self-funds cleanly instead of eating deep into collateral. This is the standard pre-fulfill
-step for anything but small requests.
+Because a levered position tends to run a debt/IL shortfall against the collected legs, levering
+**down** first shrinks the debt the unwind must repay, so the proportional unwind self-funds cleanly
+instead of eating deep into collateral. This is the standard pre-fulfill step for anything but small
+requests, and it is a **single-actor** step: the keeper lowers policy itself with
+`lowerTargetLtv(newTargetBps)` (down only) and then runs `adjustLeverage(minLiq, minOut)`. **No multisig
+signature is on the fulfil path**, which is what keeps the 2-day SLA achievable — raising the target back
+afterwards is the multisig's `setTargetLtv` and can happen at leisure.
 
 ### If `fulfillRedeem` reverts `InsufficientAssetsOut`
 
@@ -448,8 +539,8 @@ step for anything but small requests.
 position can't currently produce that floor (adverse IL / price move, or too much of the payout eaten
 by shortfall cover), the fulfill reverts `InsufficientAssetsOut()`. Reason from the code: the escrowed
 shares **carry no frozen price** — they keep bearing PnL until fulfilled — so the agent's options are
-(1) `adjustLeverage` down further to reduce the unwind's shortfall and raise the achievable net, then
-retry, or (2) **wait** for the position to recover and retry. Do **not** try to lower the floor — it is
+(1) lower policy further (the keeper's own `lowerTargetLtv`) and re-run `adjustLeverage` to reduce the unwind's
+shortfall and raise the achievable net, then retry, or (2) **wait** for the position to recover and retry. Do **not** try to lower the floor — it is
 the requester's, not the agent's. A stuck request self-resolves at the 2-day deadman (the account owner
 can also `cancelRedeem` to reclaim the shares).
 
@@ -457,13 +548,15 @@ can also `cancelRedeem` to reclaim the shares).
 sequenceDiagram
     participant A as Mamo account
     participant K as Agent keeper (proposer)
+    participant M as MAMO multisig (admin == vault owner)
     participant S as Strategy (LeveragedAerodromeCL)
 
     A->>S: requestRedeem(shares, minAssetsOut)
     S-->>K: RedeemRequested(id, account, shares)
     Note over K: read redeemRequest(id); assess if unwind self-funds
     opt shortfall likely (non-trivial size)
-        K->>S: adjustLeverage(lowerTarget, minLiq, minOut)   (lever DOWN)
+        K->>S: lowerTargetLtv(lowerTarget)                   (PROPOSER, down only — no multisig)
+        K->>S: adjustLeverage(minLiq, minOut)                (lever DOWN to it)
     end
     K->>S: fulfillRedeem(id)
     alt payout ≥ requester minAssetsOut
@@ -472,6 +565,8 @@ sequenceDiagram
         Note over K: deleverage/adjust more, or wait, then retry (never lower the floor)
     end
     Note over K: escalation — if unfulfilled at requestedAt + 2 days, the account can emergencyRedeem (missed SLA)
+    Note over M: the multisig is OFF this path; only raising the target back afterwards is its call
+    M-->>S: setTargetLtv(restoreTarget)                      (ADMIN-only, at leisure)
 ```
 
 ---
@@ -525,9 +620,11 @@ function targetLtvBps() external view returns (uint16);                         
 function hedgedDebt() external view returns (uint128 legA, uint128 legB);       // hedged borrow PRINCIPAL
 ```
 
-- **`targetLtvBps()`** is the fund's **standing** target — set at init and re-set by every `adjustLeverage`
-  — and it is what `execute` / `deployIdle` / `compound` size their borrow at. Read it **before** deciding
-  whether to retarget; do not infer it from the position's current LTV, which drifts with price.
+- **`targetLtvBps()`** is the fund's **standing** target — set at init, re-set in either direction by the
+  admin's `setTargetLtv`, and reducible by the keeper's `lowerTargetLtv` — and it is what `execute` /
+  `deployIdle` / `compound` size their borrow at and what `adjustLeverage` retargets the live position to.
+  Read it **before** rebalancing; do not infer it from the position's current LTV, which drifts with price.
+  If policy should be **higher** than it is, that is a multisig action, not a keeper one.
 - **`hedgedDebt()`** returns the borrowed **principal** each leg's LP side currently hedges. The unhedged
   accrued borrow interest is `borrowBalanceStored(market) − hedgedDebt*` per leg, and that difference is
   exactly what `compound` buys back and repays out of harvest proceeds (§B). Use it two ways: to decide
@@ -575,8 +672,10 @@ function hedgedDebt() external view returns (uint128 legA, uint128 legB);       
   plus the rest of the queue set (`RedeemFulfilled`/`RedeemCancelled`/`RedeemEmergency`) and
   `FeeCrystallizeDeferred`. Nothing needs to be added for the keeper's core watch-and-fulfill duty.
 - **Position-management ops emit nothing** — `deployIdle`, `compound`, `rerange`, `adjustLeverage`, and
-  `deleverage` are event-silent from both the strategy and the manager (verified: the manager emits no
-  events at all; the strategy declares only the five below). Until that changes, dashboards key off
+  `deleverage` are event-silent from both the strategy and the manager (the manager emits no events at
+  all). What *does* emit is every write to the standing target — the admin's `setTargetLtv`, the keeper's
+  `lowerTargetLtv`, and a `migrateVenue` whose staged params change it — all as
+  `TargetLtvUpdated(previousBps, newBps)`; watch it as a risk change. Until that changes, dashboards key off
   venue-level events (Moonwell mint/borrow/repay/redeem, Slipstream NPM increase/decrease, gauge
   stake/getReward) and transaction receipts.
 - **Adding events is an open option, not a blocker.** If the rebalancer or an indexer ends up needing
@@ -1067,11 +1166,11 @@ Production addresses are published separately at deploy.
 - [ ] **Read `layout().legBIsAsset` first and branch on it** — asset-mode changes `deployIdle` sizing, makes lever-**up** consume idle USDC, and adds `InsufficientIdleForLeverUp` / `DegenerateRange` to the error set (§G). `rerange` is **not** on that list any more: it re-adds only what its own unwind collected and never reaches idle.
 - [ ] `compound(minUsdcOut, minLiquidity)` on cadence with a **non-zero** `minUsdcOut`; expect it to defer (revert) on a stale AERO feed. **Do not predict the redeploy as `usdcOut − fee`** — `compound` first repays accrued borrow interest out of the harvest (§B), so the CL add is smaller by that amount; `MoonwellRepayFailed` is on that path.
 - [ ] Track drift with `hedgedDebt()` vs. each market's `borrowBalanceStored` (§E) to size the harvest cadence, and confirm it returns to ~0 after a compound; remember the on-chain measure accrues first, so the off-chain `…Stored` read is a lower bound.
-- [ ] Read the standing target with `targetLtvBps()`, not from the position's current LTV — `adjustLeverage` **persists** it and the next `deployIdle`/`compound` borrows at it.
+- [ ] Read the standing target with `targetLtvBps()`, not from the position's current LTV — the admin's `setTargetLtv` **persists** it, and `adjustLeverage` / the next `deployIdle`/`compound` all size at it.
 - [ ] `rerange(width, skewBps, minLiq0, minLiq1)` when spot drifts out of range or the model picks a new width **or skew** — `width` in raw ticks, tickSpacing-aligned, inside `[minWidth, maxWidth]`; `skewBps` in `(0, 10000)` (5000 = centered), inside the init-immutable `[minSkewBps, maxSkewBps]` band, with **both** spans ≥ one `tickSpacing` (else `OutOfBounds`, selector `0xb4120f14` — **re-point the backend error table off the retired `WidthOutOfBounds` `0x1f9f54af`**); expect calm-gate reverts on a shoved pool (retry when calm).
 - [ ] Size `(width, skewBps)` for the **realised** geometry, not the requested one: down-alignment preserves width exactly but always moves up to `tickSpacing − 1` ticks from the upper span into the lower one, so keep `upperSpan ≥ 2 × tickSpacing`; and remember skew is inert at `width == 2 × tickSpacing` (needs `≥ 3 × tickSpacing` to do anything) (§B).
 - [ ] In the two-borrowed-legs shape, budget for the **per-borrow ratchet** a skewed range creates against the range-blind 50/50 borrow: each `deployIdle`/`compound` strands a fresh, debt-funded slice of its own borrow (≈19 % at `skewBps` 3500, ≈33.5 % at 2000 *or* 8000) and the idle fraction grows with every compound until an op that resizes the book folds it back in (§B). Utilisation drag and borrow carry — not a hedge or health change.
-- [ ] `adjustLeverage(target, minLiq, minOut)` to hold near `targetLtvBps` — and to lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds.
+- [ ] `adjustLeverage(minLiq, minOut)` — **selector `0x4be1cadd`, no target argument** — to hold near `targetLtvBps()`. To lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds, call `lowerTargetLtv(newTargetBps)` first (**selector `0xbd41b78c`, proposer-only, strictly-lower**) — no multisig step. Raising the target back is the admin's `setTargetLtv`.
 - [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
 - [ ] Treat `FULFILL_WINDOW = 2 days` as the hard SLA; alert before it; every `RedeemEmergency` is a missed SLA.
 - [ ] Alert on **supply reaching zero**: a full redeem burns the position NFT (`tokenId == 0` while still `Executed`) and the book cannot be rebuilt — `rerange` silently mints nothing, `deployIdle` fails closed, `compound` no-ops, and the only way forward is `settleStrategy()` plus a **new vault** (§F).

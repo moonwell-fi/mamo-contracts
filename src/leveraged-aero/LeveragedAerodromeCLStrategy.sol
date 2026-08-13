@@ -75,7 +75,28 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error InsufficientIdle();
     error HealthyNoDeleverage();
     error CannotRescuePositionToken();
-    error NotProposerOrOwner();
+    // Caller is not the ADMIN — i.e. not `Ownable(vault()).owner()`, the vault owner / MAMO multisig.
+    // The admin/proposer split (§8): the proposer is the rebalancer keeper and drives OPERATIONS; only
+    // the admin sets fund POLICY (`setTargetLtv`) or sweeps strays (`rescueToVault`). A compromised
+    // keeper key therefore cannot re-point the fund's leverage or move tokens out of the strategy.
+    error NotAdmin();
+    // A ZERO standing target is refused at EVERY route that can store one — `_initialize`, and both
+    // setters through the shared `_storeTargetLtv` floor check (so they cannot drift apart) — and the
+    // defence has always had a second, structural barrier behind those checks:
+    // a stored zero means `_supplyAndBorrow` borrows nothing, so `debtUsdc == 0`, so
+    // `adjustLeverageImpl`'s `targetDebt == debtUsdc` and both branches skip — `_unwindLiquidity`'s
+    // `num == den` full-removal branch (strips ALL liquidity, skips the re-stake, leaves `$.tokenId`
+    // pointing at an UNSTAKED NFT that every later venue op assumes is staked) is never reached.
+    // `deleverageImpl` computes its own non-zero `targetDebt` and gates on `debtBefore > targetDebt`,
+    // so nor can it. An unguarded init-zero is therefore milder than a brick: a clone that silently
+    // never levers, correctable only by a `setTargetLtv` the deployer must notice they need.
+    // `setTargetLtv(0)` on an ALREADY-LEVERED book is the sharp case — there `debtUsdc > 0`, so the
+    // full-removal branch IS reachable and the fund would be left with no trustless exit.
+    error TargetLtvZero();
+    // `lowerTargetLtv` is MONOTONIC DOWN: the proposer's copy of the leverage dial only ever reduces
+    // risk. Equal is refused too — a no-op write would emit a misleading `TargetLtvUpdated`, and the
+    // strict inequality is what makes the "keeper can never raise leverage" claim checkable in one line.
+    error TargetLtvNotLower();
     error OnlySelf();
     error PerformanceFeeTooHigh();
     error ManagementFeeTooHigh();
@@ -144,6 +165,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     event RedeemCancelled(uint256 indexed id, address indexed owner, uint256 shares);
     event RedeemEmergency(uint256 indexed id, address indexed owner, uint256 assetsOut);
 
+    /// @dev The fund's STANDING target LTV was re-set by the admin (`setTargetLtv`). This is a POLICY
+    ///      change, not an operation: it does not move the book by itself — the next `adjustLeverage`
+    ///      / `deployIdle` / `compound` sizes at the new value. Monitors should treat it as a
+    ///      multisig-signed risk change, and it is the only leverage-policy event on this contract.
+    event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
+
     /// @dev A best-effort fee crystallise (deposit / fast redeem / proportional redeem) reverted and was
     ///      deferred; the op proceeded. Reverts on the fee-MINT (vault paused / feeRecipient
     ///      de-whitelisted) — or, near-unreachably, on the config read inside the crystallise (see the
@@ -162,6 +189,30 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      failure — the tranche is left on the strategy and, now that the strategy is `Settled`, is
     ///      recoverable with `rescueToVault(rewardToken)` → the vault's `rescueERC20`.
     event SettleRewardSaleDeferred();
+
+    // ── Access control ──
+
+    /// @dev ADMIN == `Ownable(vault()).owner()` — the vault owner, i.e. the MAMO multisig. DERIVED,
+    ///      never stored: adding an admin field would mean a `Layout` change, and the vault owner is
+    ///      already the root of trust for this fund (it owns the vault that owns the shares, and it is
+    ///      the only party that can rotate the strategy). Following it also means an owner handover on
+    ///      the vault carries the strategy's admin rights with it, with no second migration to forget.
+    ///      Same read `rescueToVault` has always used for its owner leg.
+    ///
+    ///      This is the POLICY half of the operations/policy split — `onlyProposer` (BaseStrategy) is
+    ///      the operations half, held by the rebalancer keyed hot key. The keeper must not be capable
+    ///      of increasing what the fund risks: it can move the book toward the standing target and it
+    ///      can lower that target (`lowerTargetLtv`, strictly down, never to zero), but it can never
+    ///      raise it and it can never move tokens (`rescueToVault`).
+    ///
+    ///      DEPENDS ON TWO `LeveragedAeroVault` PROPERTIES (src/LeveragedAeroVault.sol): it overrides
+    ///      `renounceOwnership` to revert, and it is `Ownable2Step` so ownership cannot be handed to an
+    ///      address that never accepts. Drop either and one transaction on THAT contract permanently
+    ///      strands `setTargetLtv` and `rescueToVault` here, with no recovery path.
+    modifier onlyAdmin() {
+        if (msg.sender != Ownable(vault()).owner()) revert NotAdmin();
+        _;
+    }
 
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
     //
@@ -463,9 +514,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         return _layout().redeemRequests[id];
     }
 
-    /// @notice The fund's STANDING target LTV in bps — set at init and re-set by every `adjustLeverage`.
-    ///         This is what `execute` / `deployIdle` / `compound` size their borrow at, so it is the value
-    ///         a rebalancer needs before deciding whether to retarget. Exposed as its own selector purely
+    /// @notice The fund's STANDING target LTV in bps — set at init and re-set ONLY by the admin's
+    ///         `setTargetLtv` (it is policy, not an operation). This is what `execute` / `deployIdle` /
+    ///         `compound` size their borrow at and what `adjustLeverage` retargets the live position to,
+    ///         so it is the value a rebalancer must read before rebalancing. Exposed as its own selector purely
     ///         for keeper ergonomics: `layout()` already carries it, but decoding a 40-plus-field
     ///         `LayoutView` to read one uint16 is needless work off-chain.
     /// @dev Same single storage read as `layout().targetLtvBps` (`_layout().targetLtvBps`, one diamond
@@ -741,8 +793,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // where residual debt could not be covered at all, where no repay runs and the basis would
         // survive a book that no longer exists. Zeroed in THIS frame (not in the manager) because it
         // already holds `_layout()` for the fee discharge below, so the two `sstore`s cost ~20 bytes here
-        // versus ~70 in the manager, which is at the EIP-170 cap — the same relocation `adjustLeverage`'s
-        // target-LTV write already makes.
+        // versus ~70 in the manager, which is at the EIP-170 cap — the same relocation `setTargetLtv`'s
+        // target-LTV write makes.
         $.hedgedDebtA = 0;
         $.hedgedDebtB = 0;
         uint256 owed = $.protocolFeeOwed;
@@ -1101,11 +1153,116 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         LeveragedAeroManager.rerangeImpl(minLiq0, minLiq1);
     }
 
-    /// @notice Retarget the position's LTV to `targetLtvBps_` (borrow/repay; no new USDC). Collateral
-    ///         is untouched, so LTV moves on the debt side via `LeveragedAeroManager.adjustLeverageImpl`:
-    ///         lever UP borrows the cbBTC/WETH delta and adds it (`minLiq`); lever DOWN unwinds the
-    ///         matching CL fraction and repays (per-leg residual rebalanced through USDC, bounded by
-    ///         `minOut`). Ends with `_assertHealthy`. `targetLtvBps_ ≤ maxLtvBps` is checked here.
+    /// @notice ADMIN-ONLY POLICY: set the fund's STANDING target LTV, in EITHER direction. This is the
+    ///         multisig's leverage dial: the proposer moves the book toward the target
+    ///         (`adjustLeverage`) and may de-risk by lowering it (`lowerTargetLtv`), but only the admin
+    ///         can RAISE it. That is the whole point of `onlyAdmin` here: a compromised rebalancer key
+    ///         can rebalance and de-lever, but it cannot lever the fund up toward the cap.
+    ///
+    ///         Sets policy ONLY — it moves nothing on chain. `execute` / `deployIdle` / `compound` size
+    ///         their collateral/borrow split off the STORED target, and `adjustLeverage` retargets the
+    ///         live position to it, so the new value takes effect on the next such call.
+    ///
+    ///         NOT state-gated: legal in `Pending` as well as `Executed`. Setting policy before the
+    ///         genesis `execute` is exactly the case that most wants to be settable — it is how the
+    ///         multisig corrects an init-time target without redeploying the clone — and there is no
+    ///         invariant that a stored target only be meaningful post-execute (`_initialize` already
+    ///         writes one while Pending). Post-`Settled` it is a harmless no-op on a dead book.
+    /// @param targetLtvBps_ New standing target in bps. Must be non-zero (see `TargetLtvZero` — a zero
+    ///                      target is not a brick, but it borrows nothing, so it is a fund that can
+    ///                      silently never lever) and `≤ maxLtvBps`. A rejected value stores nothing and
+    ///                      emits nothing.
+    function setTargetLtv(uint16 targetLtvBps_) external onlyAdmin {
+        Layout storage $ = _layout();
+        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
+        _storeTargetLtv($, targetLtvBps_);
+    }
+
+    /// @notice PROPOSER-SAFE DE-RISK: the proposer (rebalancer) may lower the standing target, and only
+    ///         ever lower it. This is the one leverage knob the keeper holds, and it exists so the
+    ///         pre-`fulfillRedeem` lever-down does not need a multisig signature inside the 2-day
+    ///         `FULFILL_WINDOW` — the keeper can de-risk ahead of a large unwind and then run
+    ///         `adjustLeverage` itself.
+    ///
+    ///         THE SECURITY PROPERTY, PLAINLY: the proposer can lower leverage, but it can NEVER raise
+    ///         it (strictly-lower only), NEVER reach zero (`TargetLtvZero`, same floor as
+    ///         `setTargetLtv`), and NEVER move tokens (`rescueToVault` stays `onlyAdmin`). Raising the
+    ///         standing target remains admin-only via `setTargetLtv`. So the operations/policy split's
+    ///         premise survives intact: a compromised keeper key still cannot rug the fund, because
+    ///         levering DOWN is not a rug.
+    ///
+    ///         ACCEPTED RESIDUAL, stated honestly: a compromised or buggy keeper CAN ratchet the target
+    ///         down toward the floor and destroy yield. That harm is bounded (it cannot pass the
+    ///         non-zero floor, and de-levering conserves value modulo unwind costs), loud (every step
+    ///         emits `TargetLtvUpdated` — monitor it), and reversible by the admin in ONE `setTargetLtv`.
+    ///         "Every step emits `TargetLtvUpdated`" is a claim about the WHOLE contract, not just this
+    ///         function: `migrateVenue` rewrites the target too, and `LeveragedAeroVenue.applyVenue`
+    ///         emits the same event (same signature, same `topic0`, same emitting address) when it does.
+    ///         Do not add a fourth write path without an emit — the monitor built on this sentence would
+    ///         go blind to it.
+    ///
+    ///         THE GATE THIS RESTS ON, RECORDED SO IT IS NOT LOOSENED BY ACCIDENT. "The keeper cannot
+    ///         raise leverage" is NOT a property of this function alone. `migrateVenue` is `onlyProposer`
+    ///         and rewrites BOTH `targetLtvBps` and `maxLtvBps`, so a keeper that could choose the
+    ///         migration params could raise both in one call and walk straight past the strictly-lower
+    ///         rule here. It cannot, for exactly two reasons, and only those two:
+    ///           1. `stageVenue` is OWNER-gated — the keeper cannot author a destination; and
+    ///           2. the params are BYTE-COMMITTED — `migrateVenue` re-derives
+    ///              `keccak256(abi.encode(p))` and requires it to equal the staged hash, so the keeper
+    ///              can only execute the exact parameter set the owner signed off, never a variant.
+    ///         Both hold today. LOOSENING `stageVenue`'s GATE LATER — to the proposer, to a role, to a
+    ///         "trusted" relayer — WOULD SILENTLY UN-GATE THE TARGET LTV, with nothing in this file
+    ///         changing to say so. Same for weakening the hash commitment to a partial or field-wise
+    ///         check. If either must change, the target and `maxLtvBps` have to move out of the
+    ///         migratable venue subset first.
+    ///
+    ///         Sets policy ONLY — it moves nothing on chain; the next `adjustLeverage` / `deployIdle` /
+    ///         `compound` sizes at the new value. NOT state-gated, for the same reason `setTargetLtv`
+    ///         is not: the stored target is meaningful in `Pending` too, and a post-`Settled` write is a
+    ///         harmless no-op on a dead book.
+    /// @param newTargetBps New standing target in bps. Must be STRICTLY below the current
+    ///                     `targetLtvBps()` (equal reverts `TargetLtvNotLower`) and non-zero. A rejected
+    ///                     value stores nothing and emits nothing.
+    function lowerTargetLtv(uint16 newTargetBps) external onlyProposer {
+        Layout storage $ = _layout();
+        if (newTargetBps >= $.targetLtvBps) revert TargetLtvNotLower();
+        // NO `maxLtvBps` CHECK, deliberately — do not "fix" its absence. The stored target already
+        // cleared that bound (at init or via `setTargetLtv`), and this value is strictly below the
+        // stored one, so it clears the cap by transitivity.
+        _storeTargetLtv($, newTargetBps);
+    }
+
+    /// @dev Shared floor-check + persist behind BOTH target-LTV entrypoints, so the two cannot drift on
+    ///      the invariant that matters (never store a zero) or on the event contract. Each caller
+    ///      checks its OWN bound first — the admin's cap, the proposer's strict decrease — and passes
+    ///      `$` in rather than have this re-read it, both to save bytes on a contract at the EIP-170 cap.
+    ///
+    ///      Persists HERE, in the strategy frame, not in the manager library: the callers already hold
+    ///      `$` for their bound check, so the write is ~20 bytes here versus ~71 in the manager, which
+    ///      is itself at the cap. (That rationale moved with the write from `adjustLeverage`, which no
+    ///      longer takes or persists a target.)
+    ///
+    ///      Checking the floor AFTER the caller's bound is not an observable reorder for either caller:
+    ///      zero can never exceed `maxLtvBps`, and zero is never `>=` a stored target that is itself
+    ///      guaranteed non-zero — so a zero argument reaches `TargetLtvZero` on both paths, exactly as
+    ///      it did when `setTargetLtv` checked the floor first.
+    function _storeTargetLtv(Layout storage $, uint16 newTargetBps) private {
+        if (newTargetBps == 0) revert TargetLtvZero();
+        emit TargetLtvUpdated($.targetLtvBps, newTargetBps);
+        $.targetLtvBps = newTargetBps;
+    }
+
+    /// @notice Retarget the position's LTV to the fund's STORED standing target `targetLtvBps()`
+    ///         (borrow/repay; no new USDC). Collateral is untouched, so LTV moves on the debt side via
+    ///         `LeveragedAeroManager.adjustLeverageImpl`: lever UP borrows the cbBTC/WETH delta and adds
+    ///         it (`minLiq`); lever DOWN unwinds the matching CL fraction and repays (per-leg residual
+    ///         rebalanced through USDC, bounded by `minOut`). Ends with `_assertHealthy`.
+    ///
+    ///         The target is NOT a parameter — it is policy, written at init, by the admin via
+    ///         `setTargetLtv` (either direction), or by the proposer via `lowerTargetLtv` (DOWN only).
+    ///         That is what keeps the `onlyProposer` keeper unable to INCREASE the fund's risk. No
+    ///         `maxLtvBps` check is needed here: the stored target cleared that bound when it was
+    ///         written, so this entrypoint is purely "move the book to where policy already says".
     ///
     ///         ASSET-MODE (leg-B slot == usdc): a lever-UP borrows ONLY leg A and pairs it with USDC
     ///         drawn from the strategy's IDLE balance, sized closed-form so the LP's leg-A amount equals
@@ -1117,28 +1274,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///
     ///         NO fee crystallisation (like `rerange`): no supply change, no PnL realized; the
     ///         streaming fee is deferred and the HWM is unaffected.
-    ///         PERSISTED, like `rerange`'s `width`: `targetLtvBps_` becomes the fund's STANDING target
-    ///         (readable via `targetLtvBps()` / `layout().targetLtvBps`), not a one-shot per-call knob.
-    ///         `execute` / `deployIdle` / `compound` size their borrow off the STORED target, so a
-    ///         retarget that did not persist would be silently dragged back by the next redeploy —
-    ///         the rebalancer would be fighting its own book.
-    /// @param targetLtvBps_ Target LTV in bps (must be ≤ `maxLtvBps`). Persisted as the new standing
-    ///                      target once that check passes; a rejected value stores nothing.
-    /// @param minLiq        Minimum CL liquidity on a lever-UP add (slippage guard).
-    /// @param minOut        Minimum USDC out of a lever-DOWN residual swap (slippage guard).
-    function adjustLeverage(uint16 targetLtvBps_, uint256 minLiq, uint256 minOut) external onlyProposer nonReentrant {
+    /// @param minLiq Minimum CL liquidity on a lever-UP add (slippage guard).
+    /// @param minOut Minimum USDC out of a lever-DOWN residual swap (slippage guard).
+    function adjustLeverage(uint256 minLiq, uint256 minOut) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        Layout storage $ = _layout();
-        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
-        // Persist the new standing target HERE, not in the manager: this frame already holds `$` for
-        // the bound check above, so the write is ~20 bytes here versus ~71 in the manager library,
-        // which sits at the EIP-170 cap. Semantics are unchanged — the write is in the same
-        // transaction as the venue work (a later revert rolls it back), it happens only after the
-        // `maxLtvBps` check, and it lands even when the retarget is a venue no-op
-        // (`targetDebt == debtUsdc`), which is the `rerange`-on-a-flat-book analogue. See the ordering
-        // note in `LeveragedAeroManager.adjustLeverageImpl`.
-        $.targetLtvBps = targetLtvBps_;
-        LeveragedAeroManager.adjustLeverageImpl(targetLtvBps_, minLiq, minOut);
+        LeveragedAeroManager.adjustLeverageImpl(_layout().targetLtvBps, minLiq, minOut);
     }
 
     /// @notice Permissionless safety valve: when health falls below `minHealthBps`, ANYONE may unwind
@@ -1294,7 +1434,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         fast path can't serve (or when the oracle is down). Shares are pulled NOW
     ///         (`vault.approve(strategy, shares)` required) and held in the strategy; NO price is
     ///         stamped (shares keep bearing PnL until `fulfillRedeem`), so `cancelRedeem` is not a free
-    ///         look-back option. The backend deleverages (via `adjustLeverage`) then `fulfillRedeem`s.
+    ///         look-back option. Levering down before the fulfill stays a ONE-PARTY step under the
+    ///         admin/proposer split: the proposer (rebalancer) lowers the standing target itself with
+    ///         `lowerTargetLtv` (monotonic down), then runs `adjustLeverage` and `fulfillRedeem` — no
+    ///         multisig round trip inside `FULFILL_WINDOW`. Only RAISING the target back afterwards is
+    ///         the admin's `setTargetLtv`.
     /// @param shares       Vault shares to escrow (12dp).
     /// @param minAssetsOut Slippage floor enforced (on the net amount) at fulfill.
     /// @return id          The request id (also emitted).
@@ -1315,9 +1459,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @notice Fulfill an escrowed request via the oracle-free proportional unwind (the demoted
     ///         everyday path, now reachable ONLY here and via `emergencyRedeem`). `onlyProposer`: the
-    ///         backend deleverages first (`adjustLeverage`) so the unwind's IL self-funds, then fulfills
-    ///         paying `request.owner`. NOT owner-callable — an owner-callable fulfill would resurrect
-    ///         the demoted oracle-free path through the side door.
+    ///         proposer (rebalancer) lowers the standing target with `lowerTargetLtv` if the unwind
+    ///         needs it, runs `adjustLeverage` so the unwind's IL self-funds, then fulfills paying
+    ///         `request.owner` — all three are proposer-callable, so the 2-day `FULFILL_WINDOW` never
+    ///         depends on a multisig signature. NOT owner-callable — an owner-callable fulfill would
+    ///         resurrect the demoted oracle-free path through the side door.
     /// @param id Request id to fulfill.
     function fulfillRedeem(uint256 id) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
@@ -1417,10 +1563,13 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         IERC20($.usdc).safeTransfer(recipient, fee);
     }
 
-    /// @notice Sweep a STRAY ERC-20 (airdrop / accidental send) back to the vault. Callable by the
-    ///         proposer OR the vault owner (§8) — the owner leg is what keeps the sweep reachable
-    ///         through a dead proposer key. Target is always `vault()`, never caller-supplied, so
-    ///         neither caller picks the destination (§13); onward recovery is the vault's own
+    /// @notice Sweep a STRAY ERC-20 (airdrop / accidental send) back to the vault. ADMIN-ONLY (§8) —
+    ///         the vault owner / multisig, NOT the proposer. Moving tokens out of the strategy is a
+    ///         custody action, not an operation, and the operations/policy split says the keeper key
+    ///         must not be able to move funds; the sweep is also rare and never time-critical, so
+    ///         routing it through the multisig costs nothing operationally. (It was previously
+    ///         `proposer() || owner()`; the proposer leg is gone.) Target is always `vault()`, never
+    ///         caller-supplied, so the caller cannot pick the destination (§13); onward recovery is the vault's own
     ///         owner-only `rescueERC20`, which refuses BOTH the vault asset (while shares are
     ///         outstanding) and the share token itself. Reverts `CannotRescuePositionToken` for any
     ///         position/accounting token — usdc / cbBTC / weth (all NAV-counted) / mUsdc / mCbBTC /
@@ -1440,8 +1589,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///           dust balance. That residue, plus any post-settle donation, is what this recovers.
     ///
     ///         The position NFT is never swept (no ERC-721 path).
-    function rescueToVault(address token) external nonReentrant {
-        if (msg.sender != proposer() && msg.sender != Ownable(vault()).owner()) revert NotProposerOrOwner();
+    function rescueToVault(address token) external onlyAdmin nonReentrant {
         Layout storage $ = _layout();
         address aero = ICLGauge($.gauge).rewardToken();
         if (
