@@ -139,7 +139,14 @@ contract LPAutoBalancerV2SetupTest is Test {
         return this.onERC721Received.selector;
     }
 
+    /// @dev The single test below drives the main FULLY out of range on the token0 (WETH) side, so
+    ///      the teardown returns 100% token0 and `_mainRange` takes the token0-majority single-sided
+    ///      branch: [floorAlign(spot) + spacing, +width]. That is the range committed to here — the
+    ///      off-chain half of the tick commitment a real rebalancer computes from a decision-time
+    ///      snapshot before submitting.
     function _defaultRebalanceParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 expectedTl = _align(spotTick) + TICK_SPACING;
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
             amount0MinMain: 0,
@@ -150,7 +157,9 @@ contract LPAutoBalancerV2SetupTest is Test {
             amount1MinWithdraw: 0,
             amount0MinWithdrawAlt: 0,
             amount1MinWithdrawAlt: 0,
-            deadline: block.timestamp + 1
+            deadline: block.timestamp + 1,
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTl + 400
         });
     }
 
@@ -200,13 +209,27 @@ contract LPAutoBalancerV2SetupTest is Test {
         skip(2 hours);
         vm.roll(block.number + 1);
 
+        // The fork PINS the block, so both Chainlink feeds' `updatedAt` is frozen while this test
+        // warps 4 hours forward to accrue AERO and let the TWAP converge. On a live chain ETH/USD
+        // and BTC/USD would each have published a dozen times across that window; on a pinned fork
+        // they cannot, so the bound the proposal arms (3600s) correctly reads the warp as stale.
+        // Re-publish both feeds at the current timestamp, preserving their real answers.
+        // Deliberately NOT "widen the bound to make the test pass": the entire point of this test is
+        // to assert the values the proposal actually ships, and loosening them here would hollow it
+        // out into a test of a configuration nobody deploys.
+        _refreshPriceFeeds();
+
         LPAutoBalancerV2.DecisionSnapshotV2 memory snapBefore = lab.getDecisionSnapshot();
         assertFalse(snapBefore.mainInRange, "main driven out of range");
         assertTrue(snapBefore.deviationGateOpen, "TWAP converged: deviation gate open for rebalanceUsingAlt");
 
         // As the granted rebalancer: rebalanceUsingAlt must succeed (no revert) and rebuild a real position.
+        // HOISTED: _defaultRebalanceParams reads live spot (an external call). In ARGUMENT position
+        // it would be evaluated first and consume the one-shot vm.prank, so the call would run as
+        // this test contract and fail the REBALANCER_ROLE check.
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultRebalanceParams();
         vm.prank(rebalancerEOA);
-        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
@@ -264,6 +287,22 @@ contract LPAutoBalancerV2SetupTest is Test {
         _mockSequencer(feed, 0, block.timestamp - 2 hours);
         vm.prank(safe);
         lab.setOracles(eth, btc);
+    }
+
+    /// @dev Re-publish both price feeds at the CURRENT block timestamp, keeping their real answers,
+    ///      so a warped pinned fork models a live chain's continuously-updating feeds.
+    function _refreshPriceFeeds() internal {
+        _refreshPriceFeed(addresses.getAddress("CHAINLINK_ETH_USD"));
+        _refreshPriceFeed(addresses.getAddress("CHAINLINK_BTC_USD"));
+    }
+
+    function _refreshPriceFeed(address feed) internal {
+        (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+        vm.mockCall(
+            feed,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+        );
     }
 
     /// @dev Force the uptime aggregator's answer/startedAt. `answer` 0 == up, 1 == down.

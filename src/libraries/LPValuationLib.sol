@@ -7,7 +7,6 @@ import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {FullMath} from "@libraries/uniswap/FullMath.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /// @title LPValuationLib
 /// @notice USD valuation for LPAutoBalancerV2: Chainlink feed reads and the 1e8-scale pricing of
@@ -119,19 +118,6 @@ library LPValuationLib {
                 readFeed(cfg.oracle1, cfg.maxDelay1, cfg.sequencerUptimeFeed, cfg.sequencerGracePeriod);
             usd += FullMath.mulDiv(amount1, p1, 10 ** dec1) * (10 ** 8) / (10 ** fd1);
         }
-    }
-
-    /// @notice `valueInUsd` that resolves the ERC-20 decimals itself. For call sites (diagnostic
-    ///         views) that do not already hold the decimals from a calm-gate read. Returns 0
-    ///         without touching the tokens or the feeds when both amounts are zero, so it stays
-    ///         callable on an un-registered / torn-down position.
-    function valueTokensInUsd(uint256 amount0, uint256 amount1, address token0, address token1, OracleConfig memory cfg)
-        public
-        view
-        returns (uint256)
-    {
-        if (amount0 == 0 && amount1 == 0) return 0;
-        return valueInUsd(amount0, amount1, cfg, IERC20Metadata(token0).decimals(), IERC20Metadata(token1).decimals());
     }
 
     /// @notice Raw token amounts backing `tokenId`'s liquidity at sqrt price `sqrtP`. Returns

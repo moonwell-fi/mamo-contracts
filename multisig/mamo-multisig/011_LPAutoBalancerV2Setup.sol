@@ -24,11 +24,17 @@ import {console} from "forge-std/console.sol";
 ///                   address(0) on a fresh deployment, and `LPValuationLib.checkSequencer`
 ///                   early-returns while unset, so a deployment that never runs this action ships
 ///                   with the guard OFF — on Base, an L2, that is the whole exposure MOO-741 exists
-///                   to close. Ordered first so the registration probes in (c) also run under it.
-///                b. NFPM.safeTransferFrom(F-MAMO, balancer, tokenId)  — deposit the pre-minted
+///                   to close. Ordered first so the registration probes in (d) also run under it.
+///                b. balancer.setMaxOracleDelays(delay0, delay1) — arm BOTH per-feed Chainlink
+///                   staleness bounds (MOO-740), also before any feed read. Same lens as (a): the
+///                   finding is that one 26-hour bound is far too loose for two ~20-minute feeds, and
+///                   splitting it in two closes nothing unless something actually tightens them. The
+///                   value that ships is the value that protects the position, so it is named here
+///                   and asserted in validate(), never inherited implicitly from a constructor default.
+///                c. NFPM.safeTransferFrom(F-MAMO, balancer, tokenId)  — deposit the pre-minted
 ///                   WETH/cbBTC Slipstream NFT into the balancer.
-///                c. balancer.registerPosition(config)                 — register the phase-1 position.
-///                d. balancer.grantRole(REBALANCER_ROLE, rebalancerEOA) — authorize the backend signer.
+///                d. balancer.registerPosition(config)                 — register the phase-1 position.
+///                e. balancer.grantRole(REBALANCER_ROLE, rebalancerEOA) — authorize the backend signer.
 ///              The AERO->drop wiring is intentionally NOT an action here — see the NOTE below.
 ///
 ///         PRECONDITION (off-chain Phase B): the WETH/cbBTC Slipstream position NFT must already be
@@ -111,6 +117,25 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     ///         `setSequencerUptimeFeed`), which is why it is a variable and not a constant.
     uint256 public sequencerGracePeriod = 3600;
 
+    /// @notice Staleness bound armed for oracle0 (CHAINLINK_ETH_USD on Base). Base ETH/USD publishes
+    ///         on a ~1200s heartbeat, so 3600s tolerates two consecutive missed rounds before the
+    ///         balancer refuses to price — three heartbeats, not the 78 that 26 hours would allow.
+    /// @dev    MOO-740 is only closed if a tight bound is the bound that SHIPS. Splitting the single
+    ///         shared bound into per-feed `maxOracleDelay0`/`maxOracleDelay1` is necessary but not
+    ///         sufficient: the balancer's constructor has to seed SOME default, and whatever the
+    ///         setup proposal does not overwrite is what protects the position on chain. So this
+    ///         proposal names both values explicitly, arms them before anything reads a feed, and
+    ///         `validate()` asserts them — the same lens MOO-741 was closed under (a guard whose
+    ///         setter is never called is a guard that is not there). Per-run overridable via
+    ///         `setMaxOracleDelays` below, which is why these are variables and not constants.
+    uint256 public maxOracleDelay0 = 3600;
+
+    /// @notice Staleness bound armed for oracle1 (CHAINLINK_BTC_USD on Base). Same ~1200s heartbeat
+    ///         and the same three-heartbeat reasoning as `maxOracleDelay0`. Kept as its own field
+    ///         rather than a shared one precisely so a future pair with genuinely different feed
+    ///         cadences tunes each leg instead of flattening both to the slower one.
+    uint256 public maxOracleDelay1 = 3600;
+
     function setTokenId(uint256 tokenId_) external {
         tokenId = tokenId_;
     }
@@ -123,6 +148,16 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     ///         non-zero and <= 7 days — the balancer rejects anything else with InvalidConfig.
     function setSequencerGracePeriod(uint256 gracePeriod_) external {
         sequencerGracePeriod = gracePeriod_;
+    }
+
+    /// @notice Override the per-feed staleness bounds this proposal arms. Each must be non-zero and
+    ///         <= LPAutoBalancerV2.MAX_ORACLE_DELAY (1 day) — the balancer rejects anything else with
+    ///         InvalidConfig. Both must be named: there is deliberately no one-value form, here or on
+    ///         the balancer, because writing a single number to both feeds is how per-feed tuning
+    ///         gets silently flattened back to the shared bound MOO-740 was raised about.
+    function setMaxOracleDelays(uint256 delay0_, uint256 delay1_) external {
+        maxOracleDelay0 = delay0_;
+        maxOracleDelay1 = delay1_;
     }
 
     function _initializeAddresses() internal {
@@ -191,8 +226,12 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     function build() public override buildModifier(addresses.getAddress("F-MAMO")) {
         LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
 
-        // 0. Arm the L2 sequencer guard first (own frame: keeps build() under the via_ir stack limit).
+        // 0. Arm the L2 sequencer guard and both per-feed staleness bounds first (own frame: keeps
+        //    build() under the via_ir stack limit). BOTH must precede registerPosition in (c): that
+        //    call probes oracle0/oracle1, and the probe is only meaningful once the bounds it checks
+        //    against are the ones this deployment intends to run with.
         _wireSequencer(lab);
+        _wireOracleDelays(lab);
 
         // Steps 1-3 in a block so the config struct + locals free before _wireModule inlines
         // (keeps build() under the via_ir stack limit — position config has 21 fields).
@@ -252,6 +291,20 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         lab.setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), sequencerGracePeriod);
     }
 
+    /// @dev Arm both per-feed oracle staleness bounds (MOO-740). Not optional decoration, for exactly
+    ///      the reason `_wireSequencer` is not: the finding was that ONE 26-hour bound is far too
+    ///      loose for two ~20-minute feeds, and splitting it into two bounds does not by itself
+    ///      tighten anything. If no proposal or deploy script ever calls the setter, the bound that
+    ///      ships on chain is whatever the constructor seeded — i.e. the finding would read "fixed"
+    ///      while the live position still prices off answers hours past their validity. The balancer's
+    ///      constructor default is now itself tight (DEFAULT_MAX_ORACLE_DELAY), so this action is
+    ///      defence in depth rather than the sole line — but it is what makes the shipped values
+    ///      EXPLICIT and assertable in validate(), instead of an implicit inheritance from a default
+    ///      that a later refactor could loosen without any proposal changing.
+    function _wireOracleDelays(LPAutoBalancerV2 lab) internal {
+        lab.setMaxOracleDelays(maxOracleDelay0, maxOracleDelay1);
+    }
+
     /// @dev Wire the balancer to the compound module and set the F-MAMO-doable compound config.
     ///      approveCowSwap() + the SlippagePriceChecker AERO->WETH/cbBTC config are DEFERRED (see the
     ///      COMPOUND NOTE at the top): the checker owner is NOT F-MAMO, so AERO cannot be whitelisted
@@ -292,6 +345,15 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         );
         assertEq(lab.sequencerGracePeriod(), sequencerGracePeriod, "sequencer grace period set");
         assertTrue(lab.sequencerGracePeriod() != 0, "sequencer guard not silently disabled");
+
+        // MOO-740: the per-feed staleness bounds must be the ones this proposal armed, not whatever
+        // the constructor happened to seed. Asserting the exact values (rather than merely "non-zero"
+        // or "<= cap") is the point: the failure mode the finding describes is a bound that is
+        // technically valid and economically meaningless, which every weaker assertion would pass.
+        assertEq(lab.maxOracleDelay0(), maxOracleDelay0, "oracle0 staleness bound armed");
+        assertEq(lab.maxOracleDelay1(), maxOracleDelay1, "oracle1 staleness bound armed");
+        assertTrue(lab.maxOracleDelay0() <= lab.MAX_ORACLE_DELAY(), "oracle0 bound within cap");
+        assertTrue(lab.maxOracleDelay1() <= lab.MAX_ORACLE_DELAY(), "oracle1 bound within cap");
 
         // Position config + NFT custody, and the compound module wiring — split into `this.` external
         // views so via_ir compiles each in its own frame (position() returns a 21-field tuple; inlining

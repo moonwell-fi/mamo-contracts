@@ -319,7 +319,7 @@ contract LPValuationLibUnitTest is Test {
         assertEq(z1, 0);
     }
 
-    // ─── contractPairValue / valueTokensInUsd ────────────────────────────────
+    // ─── contractPairValue ───────────────────────────────────────────────────
 
     function test_contractPairValue_valuesHolderBalances() public {
         address holder = makeAddr("holder");
@@ -329,14 +329,5 @@ contract LPValuationLibUnitTest is Test {
         uint256 v =
             LPValuationLib.contractPairValue(token0, token1, holder, _cfg(address(feed0), address(feed1)), 18, 18);
         assertEq(v, 4e8);
-    }
-
-    /// @dev valueTokensInUsd resolves decimals itself, and short-circuits on an all-zero pair
-    ///      WITHOUT touching the tokens — so the balancer's window getters stay callable when no
-    ///      position is registered (token0/token1 are address(0) then).
-    function test_valueTokensInUsd_resolvesDecimals_andShortCircuits() public view {
-        LPValuationLib.OracleConfig memory cfg = _cfg(address(feed0), address(feed1));
-        assertEq(LPValuationLib.valueTokensInUsd(3e18, 1e18, token0, token1, cfg), 4e8);
-        assertEq(LPValuationLib.valueTokensInUsd(0, 0, address(0), address(0), cfg), 0);
     }
 }

@@ -94,6 +94,20 @@ contract LPAutoBalancerV2Integration is Test {
         vm.txGasPrice(0);
         vm.fee(0);
         lab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, NFPM, AERO);
+
+        // The fork PINS the block, so the Chainlink feeds' `updatedAt` is frozen at the pinned
+        // timestamp while these tests warp hours forward (to accrue AERO and let the TWAP converge).
+        // On a live chain both feeds keep publishing across that interval; on a pinned fork they
+        // cannot, so the balancer's shipped 1-hour default reads the warp as a stale feed and every
+        // rebalance fails closed. Widen both bounds to the contract's own maximum for these
+        // mechanics tests. This does NOT weaken coverage of the bound itself: the shipped default,
+        // the cap, and the per-feed staleness behaviour are all asserted in the unit suite
+        // (test_constructor_seedsTightOracleDelayDefaults, test_setMaxOracleDelays_revertsOutOfBounds,
+        // test_rebalanceUsingAlt_perFeedDelay_rejectsStaleLeg).
+        // `cap` is HOISTED: an external call in argument position would consume the vm.prank below.
+        uint256 cap = lab.MAX_ORACLE_DELAY();
+        vm.prank(admin);
+        lab.setMaxOracleDelays(cap, cap);
     }
 
     // ─── CL pool swap callback (this contract is the swapper) ──────────────────
@@ -193,7 +207,20 @@ contract LPAutoBalancerV2Integration is Test {
         return this.onERC721Received.selector;
     }
 
+    /// @dev Default rebalanceUsingAlt params, committing to the BALANCED range at live spot. Tests
+    ///      that push the position fully out of range take _mainRange's SINGLE-SIDED branch and must
+    ///      commit to that range instead — see _rebalanceParamsAt.
     function _defaultParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        (int24 tl, int24 tu) = _expectedStraddle(400);
+        return _rebalanceParamsAt(tl, tu);
+    }
+
+    /// @dev rebalanceUsingAlt params committing to an explicit range.
+    function _rebalanceParamsAt(int24 expectedTl, int24 expectedTu)
+        internal
+        view
+        returns (LPAutoBalancerV2.RebalanceParams memory)
+    {
         // Width 400 (= 4 * spacing); mins 0 (fork is deterministic, pinned).
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
@@ -205,8 +232,24 @@ contract LPAutoBalancerV2Integration is Test {
             amount1MinWithdraw: 0,
             amount0MinWithdrawAlt: 0,
             amount1MinWithdrawAlt: 0,
-            deadline: block.timestamp + 1
+            deadline: block.timestamp + 1,
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTu
         });
+    }
+
+    /// @dev The SINGLE-SIDED main range _mainRange derives when one leg is dust: token0-majority →
+    ///      [floorAlign(spot) + spacing, +width]; token1-majority → [floorAlign(spot) - width, floor].
+    function _expectedSingleSided(uint24 width, bool token0Majority) internal view returns (int24 tl, int24 tu) {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 floorTick = _align(spotTick);
+        if (token0Majority) {
+            tl = floorTick + TICK_SPACING;
+            tu = tl + int24(width);
+        } else {
+            tu = floorTick;
+            tl = tu - int24(width);
+        }
     }
 
     /// @dev The BALANCED main range the contract will derive at the CURRENT live spot, reproducing
@@ -354,9 +397,12 @@ contract LPAutoBalancerV2Integration is Test {
         uint256 feeColl1Before = IERC20(CBBTC).balanceOf(feeCollector);
         uint256 aeroBefore = IERC20(AERO).balanceOf(feeCollector);
 
+        // HOISTED: _defaultParams reads live spot (external call). In ARGUMENT position it would be
+        // evaluated first and consume the one-shot vm.prank, so the call would run as this contract.
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultParams();
         vm.prank(rebalancer);
         vm.recordLogs();
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
@@ -395,10 +441,14 @@ contract LPAutoBalancerV2Integration is Test {
         uint256 feeColl1Before = IERC20(CBBTC).balanceOf(feeCollector);
         uint256 aeroBefore = IERC20(AERO).balanceOf(feeCollector);
 
+        // Teardown returns 100% WETH (token0), so _mainRange takes the token0-majority single-sided
+        // branch — commit to THAT range, not the straddle. Hoisted: see the note at the balanced site.
+        (int24 ssTl, int24 ssTu) = _expectedSingleSided(400, true);
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _rebalanceParamsAt(ssTl, ssTu);
         vm.prank(rebalancer);
         vm.recordLogs();
         // Without the _mainRange fix this reverts inside the position manager (0-liquidity straddle).
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
@@ -456,8 +506,9 @@ contract LPAutoBalancerV2Integration is Test {
 
         skip(120);
         vm.roll(block.number + 1);
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultParams(); // hoist: see note above
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,,) = _readSlot();
         assertGt(newMain, 0, "new main minted");
@@ -614,8 +665,9 @@ contract LPAutoBalancerV2Integration is Test {
         new ForceEtherFork{value: 1}(payable(NFPM));
         assertGt(NFPM.balance, 0, "ETH forced into the shared position manager");
 
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultParams(); // hoist: see note above
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,,) = _readSlot();
         assertGt(newMain, 0, "principal redeployed despite the donation");

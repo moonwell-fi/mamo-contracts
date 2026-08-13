@@ -50,15 +50,17 @@ library LPPositionLib {
     ///        so every balanced rebalance would revert inside `alignedRange`.
     ///      - both widths aligned to `2 * tickSpacing` (which implies spacing-aligned; an unaligned
     ///        bound only fails deep inside the pool mint). The EVEN-multiple requirement — not merely
-    ///        spacing-aligned — is what makes `rebuildAfterSwap`'s tick commitment pin the ALT too:
-    ///        the balanced main is `[floorAlign(spot - width/2), +width]`, so only when `width/2` is
-    ///        itself a multiple of `tickSpacing` does the committed `tickLower` determine
+    ///        spacing-aligned — is what makes the rebalance paths' tick commitment pin the ALT's
+    ///        ANCHOR: the balanced main is `[floorAlign(spot - width/2), +width]`, so only when
+    ///        `width/2` is itself a multiple of `tickSpacing` does the committed `tickLower` determine
     ///        `floorAlign(spot) = tickLower + width/2`, which is the anchor `mintAlt` places the alt
     ///        from. With an ODD multiple (e.g. spacing 100, width 300) spot has a 2-spacing-wide
     ///        preimage for the same main range — spot 150 and spot 249 both give main [0, 300] —
     ///        and the alt slides a full spacing while TickMismatch stays silent. `minWidth >=
     ///        2 * tickSpacing` above guarantees the smallest legal width already satisfies this, so
-    ///        the constraint never makes a config uninhabitable.
+    ///        the constraint never makes a config uninhabitable. NOTE the limit of what this buys:
+    ///        it pins the alt's candidate RANGES, not which side is chosen — see the SCOPE OF THE
+    ///        COMMITMENT note on `LPAutoBalancerV2.rebuildAfterSwap`.
     ///      - `maxWidth <= int24.max`: widths are uint24 but the tick math casts them to int24,
     ///        which bit-REINTERPRETS rather than reverting — a huge maxWidth passes every check
     ///        above and then corrupts the geometry.
@@ -295,11 +297,15 @@ library LPPositionLib {
     ///      parked the alt width/2 ticks away on the straddle branch, where it earned nothing until
     ///      price traversed half the main width. Overlapping the main range is fine: separate NFTs,
     ///      independent liquidity.
-    /// @dev Anchoring on spot does NOT put the alt outside `rebuildAfterSwap`'s tick commitment.
-    ///      `validateRebalanceConfig` forces every legal width to be an even multiple of tickSpacing,
-    ///      which makes `floorAlign(spotTick)` a function of the committed MAIN bounds (see the TICK
-    ///      COMMITMENT note on `LPAutoBalancerV2.rebuildAfterSwap`) — so committing the main range
-    ///      pins this anchor, and with it both alt branches, to a single legal value.
+    /// @dev Anchoring on spot keeps the alt's ANCHOR inside the callers' tick commitment, but not its
+    ///      SIDE. `validateRebalanceConfig` forces every legal width to be an even multiple of
+    ///      tickSpacing, which makes `floorAlign(spotTick)` a function of the committed MAIN bounds
+    ///      (see the TICK COMMITMENT note on `LPAutoBalancerV2.rebuildAfterSwap`), so committing the
+    ///      main range pins both candidate alt ranges below to exact ticks. It does NOT pin which one
+    ///      is minted: `surplus0` is decided from the post-`_mintBalanced` residual balances, and the
+    ///      position manager splits those at the exact `sqrtP`, not at `floorAlign(spotTick)` — so a
+    ///      spot that moves within the committed bucket can flip the side while TickMismatch stays
+    ///      silent. See the SCOPE OF THE COMMITMENT note on `rebuildAfterSwap` for the bound on that.
     /// @dev Forwards NO dust. The caller must run the value floor AFTER this returns — counting both
     ///      the fresh alt and any loose balance — and only THEN forward the sub-threshold remainder;
     ///      forwarding here would let a non-trivial surplus escape the floor as "dust".

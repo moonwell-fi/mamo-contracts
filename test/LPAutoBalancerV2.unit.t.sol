@@ -538,8 +538,22 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     // ─── rebalanceUsingAlt() helpers ───────────────────────────────────────────────────────
 
-    /// @dev Default rebalanceUsingAlt params: width 400, all mins 0, deadline now+1.
+    /// @dev Default rebalanceUsingAlt params: width 400, all mins 0, deadline now+1, and the tick
+    ///      commitment for the BALANCED branch at the shared fixture's geometry (spotTick=100,
+    ///      spacing=200, width=400 → alignedRange floors 100-200 to -200, upper 200 — i.e. exactly
+    ///      OLD_TL/OLD_TU). Mirrors _defaultRebuildParams: both rebalance entry points carry the same
+    ///      commitment, so both default builders pin the same range. Tests that drive
+    ///      rebalanceUsingAlt down the SINGLE-SIDED branch must use _rebalanceParamsAt.
     function _defaultRebalanceParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        return _rebalanceParamsAt(OLD_TL, OLD_TU);
+    }
+
+    /// @dev rebalanceUsingAlt params committing to an explicit range.
+    function _rebalanceParamsAt(int24 expectedTl, int24 expectedTu)
+        internal
+        view
+        returns (LPAutoBalancerV2.RebalanceParams memory)
+    {
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
             amount0MinMain: 0,
@@ -550,7 +564,9 @@ contract LPAutoBalancerV2UnitTest is Test {
             amount1MinWithdraw: 0,
             amount0MinWithdrawAlt: 0,
             amount1MinWithdrawAlt: 0,
-            deadline: block.timestamp + 1
+            deadline: block.timestamp + 1,
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTu
         });
     }
 
@@ -606,8 +622,8 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(address(lab.POSITION_MANAGER()), address(mockPM));
         assertEq(lab.AERO(), address(mockAero));
         // Per-feed staleness bounds, both seeded to the pre-split default.
-        assertEq(lab.maxOracleDelay0(), 26 hours);
-        assertEq(lab.maxOracleDelay1(), 26 hours);
+        assertEq(lab.maxOracleDelay0(), lab.DEFAULT_MAX_ORACLE_DELAY());
+        assertEq(lab.maxOracleDelay1(), lab.DEFAULT_MAX_ORACLE_DELAY());
         // Sequencer guard is opt-in; disabled until an admin wires it.
         assertEq(lab.sequencerUptimeFeed(), address(0));
         assertEq(lab.sequencerGracePeriod(), 0);
@@ -1147,7 +1163,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _stageMixedPrincipal(1e10, 0);
 
         vm.prank(rebalancer);
-        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
+        dLab.rebalanceUsingAlt(_rebalanceParamsAt(200, 600));
 
         // NEW: floor counted the loose surplus → no spurious revert → rebalanceUsingAlt succeeded.
         // (OLD ordering would have to forward that surplus out before the floor — the leak — for the
@@ -1169,7 +1185,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
-        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
+        dLab.rebalanceUsingAlt(_rebalanceParamsAt(200, 600));
     }
 
     /// @dev H-1 (accounting asymmetry). A loose token0/token1 balance ALREADY on the contract before
@@ -1204,7 +1220,7 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.ValueFloor.selector);
-        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
+        dLab.rebalanceUsingAlt(_rebalanceParamsAt(200, 600));
     }
 
     /// @dev M-2. setGauge must reject when EITHER leg is staked. If a partial unstake ever leaves
@@ -1589,7 +1605,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+        lab.rebalanceUsingAlt(_rebalanceParamsAt(200, 600));
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         // The new main must start at or above spot: range strictly above spot holds only token0.
@@ -1611,7 +1627,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(NEW_TOKEN_ID, -400, 0, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+        lab.rebalanceUsingAlt(_rebalanceParamsAt(-400, 0));
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         // The new main must end at or below spot: range strictly below spot holds only token1.
@@ -1629,7 +1645,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         _stagePrincipal(1e18, 0); // token0-only: single-sided branch, range above spot
         mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
 
-        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        LPAutoBalancerV2.RebalanceParams memory params = _rebalanceParamsAt(200, 600);
         params.amount0MinMain = 123; // funded leg: forwarded as-is
         params.amount1MinMain = 456; // unfunded leg: must be zeroed, not forwarded
 
@@ -1791,7 +1807,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(NEW_TOKEN_ID, 200, 600, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultRebalanceParams()); // must NOT revert StaleOracle
+        lab.rebalanceUsingAlt(_rebalanceParamsAt(200, 600)); // must NOT revert StaleOracle
 
         (uint256 mainId,,) = _readMainAlt();
         assertEq(mainId, NEW_TOKEN_ID, "single-leg valuation skipped the stale unused feed");
@@ -1815,7 +1831,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         dPM.setNextMintResult(D_NEW_ID, 1e12);
 
         vm.prank(rebalancer);
-        dLab.rebalanceUsingAlt(_defaultRebalanceParams());
+        dLab.rebalanceUsingAlt(_rebalanceParamsAt(200, 600));
 
         // The MAIN mint (1st mint) must be single-sided above spot — lower >= spotTick (100).
         // _mainRange: spotTick=100, spacing=200 → floor=0, up=200 → [200, 600].
@@ -2760,20 +2776,25 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.setOracles(staleFeed, oracle1);
     }
 
-    /// @dev The pre-split setter is preserved verbatim and now writes BOTH per-feed bounds.
-    function test_setMaxOracleDelay_updatesBothFeeds() public {
-        vm.prank(admin);
-        lab.setMaxOracleDelay(1 days);
-        assertEq(lab.maxOracleDelay0(), 1 days);
-        assertEq(lab.maxOracleDelay1(), 1 days);
+    /// @dev MOO-740, the part that actually ships: the value seeded by the CONSTRUCTOR is the bound
+    ///      that protects a deployment whose setup proposal forgets to tighten it. Splitting one
+    ///      loose bound into two loose bounds changes no on-chain state, so the default is asserted
+    ///      here directly rather than only through the setter.
+    function test_constructor_seedsTightOracleDelayDefaults() public view {
+        assertEq(lab.maxOracleDelay0(), lab.DEFAULT_MAX_ORACLE_DELAY(), "oracle0 default");
+        assertEq(lab.maxOracleDelay1(), lab.DEFAULT_MAX_ORACLE_DELAY(), "oracle1 default");
+        // 3x the ~20-minute heartbeat of the feeds this contract is built for — a real bound, not a
+        // day-scale placeholder that accepts answers dozens of heartbeats past their validity.
+        assertEq(lab.DEFAULT_MAX_ORACLE_DELAY(), 1 hours, "default is heartbeat-scaled");
+        assertTrue(lab.DEFAULT_MAX_ORACLE_DELAY() <= lab.MAX_ORACLE_DELAY(), "default within cap");
     }
 
     /// @dev MOO-740: each feed gets its own bound. Admin control is not dropped — it is widened.
     function test_setMaxOracleDelays_perFeed() public {
         vm.prank(admin);
-        lab.setMaxOracleDelays(20 minutes, 26 hours);
+        lab.setMaxOracleDelays(20 minutes, 12 hours);
         assertEq(lab.maxOracleDelay0(), 20 minutes);
-        assertEq(lab.maxOracleDelay1(), 26 hours);
+        assertEq(lab.maxOracleDelay1(), 12 hours);
     }
 
     function test_setMaxOracleDelays_revertsOutOfBounds() public {
@@ -2783,7 +2804,23 @@ contract LPAutoBalancerV2UnitTest is Test {
 
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
-        lab.setMaxOracleDelays(1 hours, 7 days + 1);
+        lab.setMaxOracleDelays(1 hours, 0);
+
+        // The cap is a DAY, not a week. A 7-day staleness bound on a 20-minute feed validates under
+        // the old ceiling while being economically indistinguishable from no bound at all.
+        // `overCap` is HOISTED deliberately: a call in ARGUMENT position is evaluated first and
+        // would consume the armed one-shot expectRevert, so the real call would run unguarded.
+        uint256 overCap = lab.MAX_ORACLE_DELAY() + 1;
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
+        lab.setMaxOracleDelays(overCap, 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
+        lab.setMaxOracleDelays(1 hours, overCap);
+
+        assertEq(lab.MAX_ORACLE_DELAY(), 1 days, "cap is one day");
     }
 
     function test_setMaxOracleDelays_revertsNonAdmin() public {
@@ -2792,24 +2829,34 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.setMaxOracleDelays(1 hours, 1 hours);
     }
 
-    /// @dev MOO-740 end-to-end through the balancer: token0's feed is 2 hours stale while token1's
-    ///      is fresh. Under ONE shared 26-hour bound the rebalance proceeds on a stale leg (and
-    ///      _mainRange picks a side from that stale comparison); with token0 held to a 20-minute
-    ///      bound the whole call fails closed.
+    /// @dev MOO-740 end-to-end through the balancer, asserted against the bound that actually SHIPS.
+    ///      token0's feed is 2 hours stale while token1's is fresh. The finding was that one loose
+    ///      shared bound lets the rebalance proceed on a stale leg — and `_mainRange`/`_mintAlt` both
+    ///      pick a SIDE from a value0-vs-value1 comparison, so a stale leg puts principal on the
+    ///      wrong side of the market. This asserts the DEFAULT configuration rejects it: no setter
+    ///      call, no proposal, nothing but a freshly constructed balancer.
     function test_rebalanceUsingAlt_perFeedDelay_rejectsStaleLeg() public {
         _register(false);
         _stagePrincipal(1e18, 1e18);
         // Age ONLY oracle0 (the shared fixture's feeds are separate MockPriceFeed instances).
         MockPriceFeed(oracle0).setUpdatedAt(block.timestamp - 2 hours);
 
-        // Shared 26h bound (the pre-fix configuration): the stale leg sails through.
+        // Shipped default (1h) already fails closed on the 2h-old leg — no admin action required.
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+
+        // Per-feed independence, in the direction that proves the split is real: widen ONLY token0
+        // past the feed's age and the same call proceeds, while token1 keeps its own tight bound.
+        vm.prank(admin);
+        lab.setMaxOracleDelays(6 hours, 20 minutes);
         vm.prank(rebalancer);
         lab.rebalanceUsingAlt(_defaultRebalanceParams());
-        assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "26h bound accepts the 2h-old feed");
+        assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "widened oracle0 bound accepts the 2h-old feed");
 
-        // Same feed age, token0 now bounded at its real 20-minute heartbeat → StaleOracle.
-        vm.prank(admin);
-        lab.setMaxOracleDelays(20 minutes, 26 hours);
+        // And the mirror: age token1 instead: its own 20-minute bound rejects it while oracle0's
+        // 6-hour bound is untouched, so neither leg can hide behind the other's tolerance.
+        MockPriceFeed(oracle1).setUpdatedAt(block.timestamp - 2 hours);
         _stagePrincipal(1e18, 1e18);
         mockPM.setPosition(NEW_TOKEN_ID, OLD_TL, OLD_TU, NEW_LIQ, token0, token1);
         vm.prank(rebalancer);
@@ -2872,16 +2919,6 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         vm.expectPartialRevert(IAccessControl.AccessControlUnauthorizedAccount.selector);
         lab.setSequencerUptimeFeed(makeAddr("seq"), 1 hours);
-    }
-
-    function test_setMaxOracleDelay_revertsOutOfBounds() public {
-        vm.prank(admin);
-        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
-        lab.setMaxOracleDelay(0);
-
-        vm.prank(admin);
-        vm.expectRevert(LPAutoBalancerV2.InvalidConfig.selector);
-        lab.setMaxOracleDelay(7 days + 1);
     }
 
     function test_recoverERC20_sweepsToRecipient() public {
@@ -3089,6 +3126,120 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.rebuildAfterSwap(_rebuildParamsAt(OLD_TL, OLD_TU + 200));
     }
 
+    // ---------- rebalanceUsingAlt tick commitment (MOO-727, other path) ----------
+
+    /// @dev The same sandwich MOO-727 closed on rebuildAfterSwap, run against rebalanceUsingAlt.
+    ///      Being single-transaction is NOT the protection: `calmGate` bounds |spot - TWAP| and
+    ///      ACCEPTS dev == maxTickDeviation, then hands LIVE spot to `_mainRange`, which floor-aligns
+    ///      it — so one spacing of manipulation shifts the whole range and the tx still commits.
+    ///      Neither the withdraw minima, the mint minima, nor the value floor can see it: the floor
+    ///      measures at the manipulated sqrtP, where the fresh position holds exactly the tokens just
+    ///      deposited. Only the committed range rejects it.
+    function test_rebalanceUsingAlt_revertsWhenSpotShiftsOneSpacing() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18);
+
+        // Caller decided at spotTick=100 → straddle [-200, 200] (the default commitment).
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+
+        // Searcher moves spot to 200: |200 - 0| == maxTickDeviation(200), which the calm gate
+        // ACCEPTS. The derived range becomes [0, 400].
+        mockPool.setSlot0(SQRT_P, 200);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.TickMismatch.selector);
+        lab.rebalanceUsingAlt(params);
+
+        // Nothing was torn down: the revert unwound the whole transaction, so the position is intact
+        // and the rebalancer can re-decide. This is the structural advantage this path DOES have
+        // over the two-transaction one — but it is an advantage in RECOVERY, not in prevention.
+        assertEq(lab.exposed_position().mainTokenId, TOKEN_ID, "position untouched after TickMismatch");
+    }
+
+    /// @dev Not over-strict: committing to the range the CONTRACT derives at the shifted spot
+    ///      succeeds, so an honest re-decision still rebalances.
+    function test_rebalanceUsingAlt_shiftedSpot_succeedsWithMatchingCommitment() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18);
+
+        mockPool.setSlot0(SQRT_P, 200);
+        mockPM.setPosition(NEW_TOKEN_ID, 0, 400, NEW_LIQ, token0, token1);
+
+        vm.prank(rebalancer);
+        lab.rebalanceUsingAlt(_rebalanceParamsAt(0, 400));
+        assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "rebalance succeeds on a matching commitment");
+    }
+
+    /// @dev A wrong commitment is rejected even when spot never moved — the check compares against
+    ///      the derived range, not against a "did spot change" heuristic.
+    function test_rebalanceUsingAlt_revertsOnMismatchedCommitmentAtStableSpot() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.TickMismatch.selector);
+        lab.rebalanceUsingAlt(_rebalanceParamsAt(OLD_TL, OLD_TU + 200));
+    }
+
+    // ---------- unwindForSwap oracle precheck ----------
+
+    /// @dev The teardown must not proceed when the matching rebuild provably cannot price itself.
+    ///      `_snapshotAmounts` is deliberately oracle-free, so before this check `unwindForSwap` read
+    ///      no feed at all: a stale feed let the unwind burn BOTH NFTs and only surfaced as a
+    ///      StaleOracle revert in `rebuildAfterSwap`, stranding principal loose and unstaked with
+    ///      `exit()` (DEFAULT_ADMIN_ROLE, the timelocked Safe) as the only escape.
+    function test_unwindForSwap_revertsOnStaleFeed_beforeBurningAnything() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+
+        // oracle0 ages past its bound; oracle1 stays fresh (per-feed bounds, per-feed failure).
+        MockPriceFeed(oracle0).setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        // The load-bearing assertions: nothing burned, no window opened, no relayer approval left
+        // live. A revert AFTER _exitAll would still revert the tx here, so what this really pins is
+        // that the guard sits ahead of the teardown and stays there.
+        assertEq(mockPM.burnCallCount(), 0, "no NFT burned");
+        assertEq(lab.exposed_position().mainTokenId, TOKEN_ID, "position intact");
+        assertFalse(lab.rebalanceInFlight(), "no window opened");
+        assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "no relayer approval");
+    }
+
+    /// @dev The same for the L2 sequencer guard, which is the trigger this PR ADDS. `checkSequencer`
+    ///      lives inside the feed-read path, so once the guard is armed every Base sequencer recovery
+    ///      opens a grace window during which a rebuild reverts SequencerGracePeriod. Without this
+    ///      precheck, each recovery is a window where unwind succeeds and its rebuild cannot.
+    function test_unwindForSwap_revertsInsideSequencerGrace_beforeBurningAnything() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+
+        LPSequencerFeedMock seq = new LPSequencerFeedMock(0, block.timestamp - 2 hours);
+        vm.prank(admin);
+        lab.setSequencerUptimeFeed(address(seq), 1 hours);
+
+        // Sequencer restarted 30 minutes ago — inside the 1h grace. The price feeds' own updatedAt
+        // is untouched and would pass every freshness check, which is the whole point of the guard.
+        seq.set(0, block.timestamp - 30 minutes);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.SequencerGracePeriod.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        assertEq(mockPM.burnCallCount(), 0, "no NFT burned inside sequencer grace");
+        assertFalse(lab.rebalanceInFlight(), "no window opened inside sequencer grace");
+
+        // Past the grace period the unwind proceeds normally — the guard gates, it does not brick.
+        seq.set(0, block.timestamp - 2 hours);
+        vm.prank(rebalancer);
+        lab.unwindForSwap(_defaultUnwindParams());
+        assertTrue(lab.rebalanceInFlight(), "unwind resumes after grace");
+    }
+
     // ---------- MOO-728: pause must stop an in-flight principal swap ----------
 
     /// @dev unwindForSwap leaves a live VAULT_RELAYER allowance and pause() does not revoke it, so
@@ -3226,7 +3377,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setNextAltMintResult(ALT_TOKEN_ID, NEW_LIQ);
         mockPM.setPosition(ALT_TOKEN_ID, 200, 400, NEW_LIQ, token0, token1);
 
-        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        LPAutoBalancerV2.RebalanceParams memory params = _rebalanceParamsAt(-1000, 1000);
         params.width = 2000;
 
         vm.prank(rebalancer);
@@ -3250,7 +3401,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setNextAltMintResult(ALT_TOKEN_ID, NEW_LIQ);
         mockPM.setPosition(ALT_TOKEN_ID, -200, 0, NEW_LIQ, token0, token1);
 
-        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        LPAutoBalancerV2.RebalanceParams memory params = _rebalanceParamsAt(-1000, 1000);
         params.width = 2000;
 
         vm.prank(rebalancer);
@@ -3275,7 +3426,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         mockPM.setPosition(ALT_TOKEN_ID, -200, 0, NEW_LIQ, token0, token1);
 
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+        lab.rebalanceUsingAlt(_rebalanceParamsAt(-400, 0));
 
         assertEq(mockPM.mintTickUpperByCall(1), 0, "main upper is spot's aligned floor, adjacent to the market");
         assertEq(mockPM.mintTickLowerByCall(1), -400);

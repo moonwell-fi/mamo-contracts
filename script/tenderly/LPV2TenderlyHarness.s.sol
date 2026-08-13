@@ -158,7 +158,24 @@ contract LPV2TenderlyHarness is Script {
         (, t,,,,) = ICLPool(POOL).slot0();
     }
 
+    /// @dev The main range `rebalanceUsingAlt` will derive at the CURRENT live spot — the off-chain
+    ///      half of the tick commitment, reproducing `_mainRange` for the scenario this harness ran.
+    ///      The balanced scenario withdraws two-sided principal and takes the straddle branch; the
+    ///      singlesided scenario withdraws 100% token0 (WETH) and takes the token0-majority branch,
+    ///      which parks the range on the first aligned tick strictly above spot.
+    function _expectedMainRange() internal view returns (int24 tl, int24 tu) {
+        int24 spot = _spotTick();
+        if (_isSingleSided()) {
+            tl = _align(spot) + TICK_SPACING;
+            tu = tl + int24(WIDTH);
+        } else {
+            tl = _align(spot - int24(WIDTH) / 2);
+            tu = tl + int24(WIDTH);
+        }
+    }
+
     function _resetParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        (int24 expectedTl, int24 expectedTu) = _expectedMainRange();
         // mins = 0: the vnet is calm (no in-harness price manipulation), so the rebuild is
         // deterministic. Sandwich-min wiring is asserted in the unit suite.
         return LPAutoBalancerV2.RebalanceParams({
@@ -174,7 +191,12 @@ contract LPV2TenderlyHarness is Script {
             // Generous: a broadcast tx lands in a LATER block than simulation, so a `+1` deadline
             // (fine for in-process fork tests) would expire before the tx mines. 1 day is safe and
             // well inside the harness's lifetime.
-            deadline: block.timestamp + 1 days
+            deadline: block.timestamp + 1 days,
+            // Tick commitment. NOTE this is computed at SIMULATION time while the broadcast lands in
+            // a later block: if spot crosses an alignment boundary in between, the tx reverts
+            // TickMismatch. That is the guard working as designed on a live chain — re-run the step.
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTu
         });
     }
 

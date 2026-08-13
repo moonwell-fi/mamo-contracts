@@ -12,8 +12,12 @@
 > | Change | Then | Now |
 > | --- | --- | --- |
 > | `RebuildParams` | 6 fields | **8** — `expectedTickLower`/`expectedTickUpper` appended. Different selector (§2.2). |
+> | `RebalanceParams` | 10 fields | **12** — same two tick-commitment fields appended. Different selector (§2.2). |
 > | Value-floor snapshot | `rebalanceValueBeforePos()` / `rebalanceLooseBefore()` / `rebalanceValueBefore()`, USD 1e8 | **removed.** One `rebalanceAmountsBefore()` returning four raw TOKEN amounts (§2.1, §8.2). |
 > | Oracle staleness | one `maxOracleDelay()` | **`maxOracleDelay0()` / `maxOracleDelay1()`**, one bound per feed. |
+> | Oracle staleness DEFAULT | 26 hours | **1 hour** (`DEFAULT_MAX_ORACLE_DELAY`), cap **1 day** (`MAX_ORACLE_DELAY`); proposal 011 arms 3600s on both (§7). |
+> | `setMaxOracleDelay(uint256)` | writes both bounds | **removed.** Use `setMaxOracleDelays(uint256,uint256)` — both values must be named. |
+> | `unwindForSwap` | read no oracle | **probes both feeds + the sequencer guard** before teardown; can now revert `StaleOracle`/`SequencerDown`/`SequencerGracePeriod` (§2.2). |
 > | Sequencer uptime | backend-only compensating control | **enforced on-chain** — `sequencerUptimeFeed()` / `sequencerGracePeriod()` (§7). |
 > | Legal `width` | any multiple of `tickSpacing` | multiple of **`2 × tickSpacing`** (§5). |
 > | `claimEmissions()` | permissionless | **`REBALANCER_ROLE`** (§1, §9.1). |
@@ -99,9 +103,14 @@ Supplementary reads the decision engine needs beyond the snapshot:
   `position.oracle0` (ETH/USD) only and `maxOracleDelay1` bounds `position.oracle1` (BTC/USD) only —
   a shared bound sized for the slower feed accepted the faster feed's answers far past their own
   validity, and both `_mainRange` and `_mintAlt` pick a SIDE from a value0-vs-value1 comparison, so
-  one stale leg puts the position on the wrong side of the market. The admin setter
-  `setMaxOracleDelay(uint256)` survives verbatim (it writes both), and `setMaxOracleDelays(uint256,uint256)`
-  sets them independently; only the READ split.
+  one stale leg puts the position on the wrong side of the market. `setMaxOracleDelays(uint256,uint256)`
+  (`0x3c528ef6`) is now the ONLY writer — the single-argument `setMaxOracleDelay(uint256)` was REMOVED
+  along with its `MaxOracleDelayUpdated` event, because a setter that writes one value to both feeds
+  silently flattens the per-feed tuning this split exists to provide. Both bounds must be named at
+  every write. Two new constants bound them: `DEFAULT_MAX_ORACLE_DELAY()` (`0x4b77e25e`) = **1 hour**,
+  the value the constructor seeds, and `MAX_ORACLE_DELAY()` (`0xc6d3107f`) = **1 day**, the hard
+  ceiling either bound may take (the old ceiling was 7 days — ~500x the feeds' ~20-minute heartbeat,
+  loose enough that a fat-fingered value validated). Proposal 011 arms **3600s on both**.
 - **Sequencer guard: `sequencerUptimeFeed()` (`0xa7264705`) and `sequencerGracePeriod()`
   (`0x26a97b94`).** Non-zero after the 011 proposal (`0xBCF85224fc0756B9Fa45aA7892530B47e10b6433`,
   grace 3600s). See §7 — this is now an on-chain guard, not a backend-only precondition.
@@ -136,6 +145,8 @@ struct RebalanceParams {         // rebalanceUsingAlt ONLY (has withdraw-min fie
     uint256 amount0MinWithdrawAlt;
     uint256 amount1MinWithdrawAlt;
     uint256 deadline;
+    int24   expectedTickLower;   // ── TICK COMMITMENT (fields 11 and 12, appended in this order)
+    int24   expectedTickUpper;   //    reverts TickMismatch() unless the on-chain main range matches
 }
 
 struct RebuildParams {           // rebuildAfterSwap ONLY — NO withdraw-min fields (teardown
@@ -157,16 +168,29 @@ rebuildAfterSwap((uint24,uint256,uint256,uint256,uint256,uint256,int24,int24))  
 ```
 
 (for reference: `unwindForSwap((address,uint256,uint256,uint256,uint256,uint256,uint256))` = `0x6792a3dc`,
-`rebalanceUsingAlt((uint24,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` = `0xb1d2c9ac`.)
+`rebalanceUsingAlt((uint24,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,int24,int24))` = `0x924a74b4` —
+the pre-audit 10-field encoding `0xb1d2c9ac` no longer decodes.)
 The pre-audit 6-field encoding hits a **different selector and will not decode** — it lands in the
 fallback and reverts. Both new fields are `int24`, ABI-encoded as sign-extended 32-byte words.
 
-**Computing the commitment.** `expectedTickLower`/`expectedTickUpper` are the main range you decided
-on off-chain; the contract recomputes the range from LIVE spot and reverts `TickMismatch()` on any
-difference. Reproduce `_mainRange` exactly, using `spotTick` from `slot0()` in the same block you
-build the call, and the SAME per-leg USD values the contract computes (Chainlink `oracle0`/`oracle1`
-against the balancer's loose token0/token1 balances — mid-flight the principal is loose, so
-`balanceOf` is the input):
+**Computing the commitment — required on BOTH rebalance paths.** `expectedTickLower`/`expectedTickUpper`
+are the main range you decided on off-chain; the contract recomputes the range from LIVE spot and
+reverts `TickMismatch()` on any difference. `rebalanceUsingAlt` now enforces the identical check:
+being a single transaction is not a substitute, because the calm gate bounds spot against the TWAP
+but still hands LIVE spot to `_mainRange`, so a sandwich that moves spot by up to `maxTickDeviation`
+(one full spacing at the phase-1 config) shifts the whole range, and neither the mint minima nor the
+value floor can detect it (the floor measures at the manipulated price, where the fresh position
+holds exactly the tokens just deposited).
+
+Reproduce `_mainRange` exactly, using `spotTick` from `slot0()` in the same block you build the call,
+and the SAME per-leg USD values the contract computes (Chainlink `oracle0`/`oracle1`):
+
+- **`rebuildAfterSwap`** — the principal is already loose on the balancer, so `balanceOf(token0|1)`
+  is the input directly.
+- **`rebalanceUsingAlt`** — the principal is still IN the positions at call time. Use the amounts the
+  teardown will return: `principalAmounts(mainTokenId, sqrtP) + principalAmounts(altTokenId, sqrtP)`
+  (derive from `positions()` liquidity + ticks at the current `sqrtPriceX96`) **plus** any loose
+  `balanceOf` already on the balancer. That sum is exactly what `_mainRange` will see post-`_exitAll`.
 
 ```
 floor = floorAlign(spotTick, tickSpacing)          // largest aligned tick <= spot, floors toward -inf
@@ -194,7 +218,13 @@ an error (§8). Do NOT widen the commitment to "whatever the contract computes":
 because the amount minima cannot detect a shifted range (a single-sided mint consumes the whole
 funded balance at the honest and the manipulated price alike, so `amount0MinMain` passes either way).
 
-- `unwindForSwap(UnwindParams)` — guards in order: active → not-in-flight → cooldown → module set → sellToken/amount valid → calm gate. Snapshots the value floor as FOUR raw TOKEN AMOUNTS, readable via `rebalanceAmountsBefore()`: `(amount0Pos, amount1Pos)` = main + alt PRINCIPAL, `(loose0, loose1)` = loose token0/token1 already on the contract. **No oracle is consulted at unwind at all** — pricing happens at rebuild. Tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight` and `sellTokenInFlight = sellToken`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
+- `unwindForSwap(UnwindParams)` — guards in order: active → not-in-flight → cooldown → module set → sellToken/amount valid → calm gate. Snapshots the value floor as FOUR raw TOKEN AMOUNTS, readable via `rebalanceAmountsBefore()`: `(amount0Pos, amount1Pos)` = main + alt PRINCIPAL, `(loose0, loose1)` = loose token0/token1 already on the contract. **The snapshot itself is oracle-free** (pricing happens at rebuild, so a market move between the two
+transactions cancels on both sides of the floor) — but the call now PROBES both feeds and the sequencer
+guard before the teardown, purely to fail fast. It can therefore revert `StaleOracle`, `SequencerDown` or
+`SequencerGracePeriod`. This closes a teardown that provably could not be rebuilt: previously a feed
+stale at unwind burned both NFTs and only surfaced when `rebuildAfterSwap` reverted, leaving principal
+loose and unstaked with `exit()` (DEFAULT_ADMIN_ROLE, the timelocked Safe) as the only escape. Note the
+residual: a feed that goes stale BETWEEN the two calls still strands the rebuild until it recovers. Tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight` and `sellTokenInFlight = sellToken`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
 - `rebuildAfterSwap(RebuildParams)` — **takes `RebuildParams`, NOT `RebalanceParams`** (8 fields: no withdraw-mins, plus the two tick-commitment fields — a `RebalanceParams`-encoded call, or a pre-audit 6-field `RebuildParams`, hits a different selector and reverts). Requires in-flight; **no cooldown**; revokes approval; re-runs calm gate; checks `width` bounds and the `2 × tickSpacing` alignment; derives the main range and reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)`; mints main (+alt from surplus); enforces
 
   ```
@@ -206,7 +236,7 @@ funded balance at the honest and the manipulated price alike, so `amount0MinMain
   produce `valueAfter` (position term haircut, loose term added back UN-haircut — same H-1 treatment
   as `rebalanceUsingAlt`). Then clears in-flight state; forwards dust; restakes iff staked at unwind;
   **stamps `lastRebalance`**. Emits `RebalanceRebuilt(uint256 mainTokenId, uint256 altTokenId)`.
-- `rebalanceUsingAlt(RebalanceParams)` — the atomic no-swap path (same-transaction floor: `valueAfter ≥ valueBeforePos × (10000 − maxRebalanceLossBps)/10000 + looseBefore`). Emits `RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper)`.
+- `rebalanceUsingAlt(RebalanceParams)` — the atomic no-swap path (same-transaction floor: `valueAfter ≥ valueBeforePos × (10000 − maxRebalanceLossBps)/10000 + looseBefore`). **Takes 12 fields now**, and derives the main range then reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)` — same rule as `rebuildAfterSwap`; see §2.2 for how to compute the commitment on this path (the principal is still in the positions, so you must predict the teardown output). Emits `RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper)`.
 - `compound(uint16 compoundBps)` — harvests AERO from staked legs; `compoundBps`/10000 → module, remainder → feeCollector. Emits `CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps)`.
 - `stake()` / `unstake()` — gauge deposit/withdraw for both legs.
 
@@ -365,10 +395,10 @@ While in flight, anyone can post a validating order against the approved princip
 | `allowance(balancer → VAULT_RELAYER, both tokens) == 0` while idle | Approval-leak tripwire — nonzero when `rebalanceInFlight == false` means a closed window left residue (should be impossible; page ops). |
 | `module.compoundAppData()` has a registered preimage: `GET /app_data/{hash}` == 200 | Placement uses the full JSON document (§6.3). Placeholder `keccak256("mamo-lpv2-compound")` = `0x4e685fb45a0eeffd9bed35e33c88cfcfa7fd6712902fed22a9b934df9a748efa` has NO valid preimage — launch blocker until replaced (§10). |
 | `width % (2 × position.tickSpacing) == 0` for every planned width, and for `minWidth`/`maxWidth` | On-chain rule (§5). A width that is a plain `tickSpacing` multiple but an odd one reverts `InvalidWidth()` after the teardown on `rebuildAfterSwap`, wasting the cycle. Assert at startup against the live `position()` bounds, not against a hardcoded 100. |
-| ETH/USD and BTC/USD `updatedAt` fresh within their OWN heartbeats | The balancer now bounds each feed separately — `maxOracleDelay0()` for ETH/USD, `maxOracleDelay1()` for BTC/USD (both seeded to 26h; tighten each to its real heartbeat via `setMaxOracleDelays`). Assert each read against its own getter, never one shared value. Still refuse to `unwindForSwap` on feeds older than `FEED_FRESHNESS_MAX` (default 2× heartbeat); a frozen feed makes the value floor a no-op. |
+| ETH/USD and BTC/USD `updatedAt` fresh within their OWN heartbeats | The balancer now bounds each feed separately — `maxOracleDelay0()` for ETH/USD, `maxOracleDelay1()` for BTC/USD (both seeded to `DEFAULT_MAX_ORACLE_DELAY` = 1 hour, capped at `MAX_ORACLE_DELAY` = 1 day, and armed at 3600s by proposal 011; retune via `setMaxOracleDelays`). Assert each read against its own getter, never one shared value. Still refuse to `unwindForSwap` on feeds older than `FEED_FRESHNESS_MAX` (default 2× heartbeat); a frozen feed makes the value floor a no-op. |
 | `sequencerUptimeFeed() != address(0)` and `sequencerGracePeriod() != 0` | **The guard now lives on-chain** (`checkSequencer` runs ahead of every Chainlink read) — but it is DISABLED by default and armed only by the 011 setup proposal. A zero feed is a silently-off guard indistinguishable from "never wired": treat it as a launch blocker, and alert if it ever reads zero afterwards. Expect `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` / `3600`. |
 | Base sequencer healthy for ≥ `sequencerGracePeriod()` | The contract fails closed with `SequencerDown()` / `SequencerGracePeriod()`, so the backend is no longer the only control — but it should still gate proactively rather than burn gas on a guaranteed revert. Keep `MOONWELL_LP_SEQUENCER_GRACE_S` ≥ the on-chain value. |
-| No admin config changes mid-cycle | `setOracles`/`setMaxOracleDelay`/`setMaxOracleDelays`/`setSequencerUptimeFeed`/`setPositionConfig`/`setGauge` mid-flight rebase the two-transaction floor. Watch the config events (`OraclesUpdated`, `MaxOracleDelayUpdated`, `MaxOracleDelaysUpdated`, `SequencerUptimeFeedUpdated`, `PositionConfigUpdated`, `GaugeUpdated`); if one fires while in flight, alert and prefer rebuild-unswapped. |
+| No admin config changes mid-cycle | `setOracles`/`setMaxOracleDelays`/`setSequencerUptimeFeed`/`setPositionConfig`/`setGauge` mid-flight rebase the two-transaction floor. Watch the config events (`OraclesUpdated`, `MaxOracleDelaysUpdated`, `SequencerUptimeFeedUpdated`, `PositionConfigUpdated`, `GaugeUpdated`); if one fires while in flight, alert and prefer rebuild-unswapped. |
 
 ## 8. Monitoring, alerting, failure playbook
 

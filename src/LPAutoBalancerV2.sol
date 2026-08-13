@@ -54,14 +54,23 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         base units: the phase-1 pair is WETH (18-dec) / cbBTC (8-dec), so a flat raw
     ///         threshold means wildly different USD amounts per leg. 1e6 = $0.01.
     ///
-    ///         INVARIANT: MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD (asserted in the unit suite). A
-    ///         single-sided main sits one spacing off spot, so the OPPOSITE-side alt range would
-    ///         straddle spot — an in-range two-sided "single-sided" mint whose in-range leg's min is
-    ///         forced to 0 (sandwichable). That is only reachable if a minority leg can clear the alt
-    ///         threshold while still being sub-MIN_MAIN_LEG_USD (i.e. this constant drops below it).
-    ///         Keeping MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD guarantees any sub-main-threshold minority
-    ///         is also sub-alt-threshold and returns 0 in _mintAlt before such a range can mint. If you
-    ///         bump MIN_ALT_VALUE_USD, keep it >= MIN_MAIN_LEG_USD or add a spot-containment guard.
+    ///         ORDERING: MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD (asserted in the unit suite). This was
+    ///         originally a SAFETY invariant, and no longer is — the hazard it existed to block was
+    ///         removed when `mintAlt` stopped anchoring the alt to the MAIN range's bounds and started
+    ///         anchoring it to `floorAlign(spotTick)`. Under the old anchoring, a single-sided main
+    ///         sitting one spacing off spot could place the opposite-side alt straddling spot: an
+    ///         in-range two-sided "single-sided" mint whose in-range leg's min is forced to 0, hence
+    ///         sandwichable. Spot anchoring makes that unreachable by construction — a token0 alt is
+    ///         `[floor + spacing, floor + 2*spacing]`, whose tickLower is strictly above spot, and a
+    ///         token1 alt is `[floor - spacing, floor]`, whose tickUpper is at or below spot. Neither
+    ///         can contain spot, whatever the main did. See `LPPositionLib.mintAlt`.
+    ///
+    ///         What the ordering buys NOW is only a dust-vs-deploy choice: it keeps any leg too small
+    ///         to seed a main from also being seeded as an alt, so sub-threshold remainders take one
+    ///         consistent path (forwarded as dust) rather than two. The unit assertion is retained as
+    ///         a change-detector on that choice. It is no longer load-bearing for sandwich safety, so
+    ///         do not treat it as a licence to skip re-deriving safety if `mintAlt`'s placement rule
+    ///         changes again — the anchoring is what carries that property.
     uint256 public constant MIN_ALT_VALUE_USD = 1e6;
 
     /// @notice Minimum USD value (8-decimal scale) a minority leg must hold for the main to be built
@@ -75,14 +84,35 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     INonfungiblePositionManager public immutable POSITION_MANAGER;
     address public immutable AERO;
 
+    /// @notice Hard ceiling on either per-feed staleness bound. 1 day is ~72x the ~20-minute
+    ///         heartbeat of the feeds this contract is built for (Base ETH/USD, BTC/USD), so it
+    ///         leaves ample room for a slow or degraded feed while still rejecting a fat-fingered
+    ///         value outright. Deliberately NOT the 7-day cap the sequencer grace period uses: a
+    ///         staleness bound three orders of magnitude above the heartbeat is indistinguishable
+    ///         from no bound at all, which is the substance of MOO-740.
+    uint256 public constant MAX_ORACLE_DELAY = 1 days;
+
+    /// @notice Constructor default for BOTH per-feed staleness bounds. 3x the ~20-minute heartbeat
+    ///         of the feeds this contract is built for: tight enough that the value which SHIPS is
+    ///         already a real bound, loose enough to ride out a couple of missed rounds.
+    /// @dev    The value a deployment ships with is the value that protects it. A default sized for
+    ///         "some feed, somewhere" (the old 26 hours) means a deployment whose setup proposal
+    ///         forgets to tighten the bound is running with no meaningful staleness check at all —
+    ///         and nothing on chain distinguishes that from a deliberate choice. Failing CLOSED is
+    ///         cheap here: `registerPosition`/`setOracles` probe both feeds against these bounds, so
+    ///         pairing this contract with a genuinely slower feed reverts in the admin transaction
+    ///         rather than shipping a silent hole.
+    uint256 public constant DEFAULT_MAX_ORACLE_DELAY = 1 hours;
+
     /// @notice Staleness bound for `position.oracle0` ONLY.
     /// @dev Per-feed, not shared. The two legs are different assets on different heartbeats — Base
     ///      cbBTC/USD and ETH/USD both publish on ~20-minute cadences — so a single bound sized for
     ///      the slowest feed accepts the fastest feed's answers many multiples past their own
     ///      validity. Both `_mainRange` and `_mintAlt` pick a SIDE from a value0-vs-value1
     ///      comparison, so one stale leg puts the position on the wrong side of the market.
-    ///      Constructor seeds 26 hours for both (the pre-split default); admins are expected to
-    ///      tighten each to its feed's real heartbeat via `setMaxOracleDelays`.
+    ///      Constructor seeds `DEFAULT_MAX_ORACLE_DELAY` for both; admins tighten each to its feed's
+    ///      real heartbeat via `setMaxOracleDelays` (proposal 011 does this explicitly for the
+    ///      phase-1 pair, and its `validate()` asserts the result).
     uint256 public maxOracleDelay0;
 
     /// @notice Staleness bound for `position.oracle1` ONLY. See `maxOracleDelay0`.
@@ -230,7 +260,6 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     event FeeCollectorUpdated(address feeCollector);
     event OraclesUpdated(address oracle0, address oracle1);
     event GaugeUpdated(address gauge);
-    event MaxOracleDelayUpdated(uint256 oldDelay, uint256 newDelay);
     event MaxOracleDelaysUpdated(uint256 delay0, uint256 delay1);
     event SequencerUptimeFeedUpdated(address feed, uint256 gracePeriod);
     event TokensRecovered(address indexed token, address indexed to, uint256 amount);
@@ -264,8 +293,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         POSITION_MANAGER = INonfungiblePositionManager(positionManager_);
         AERO = aero_;
-        maxOracleDelay0 = 26 hours;
-        maxOracleDelay1 = 26 hours;
+        maxOracleDelay0 = DEFAULT_MAX_ORACLE_DELAY;
+        maxOracleDelay1 = DEFAULT_MAX_ORACLE_DELAY;
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external view returns (bytes4) {
@@ -424,24 +453,25 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit GaugeUpdated(gauge);
     }
 
-    /// @notice Update the maximum acceptable oracle staleness for BOTH feeds at once.
-    /// @dev Preserved verbatim (same name, same signature, same event) so existing runbooks and
-    ///      Safe batches keep working; it now writes both per-feed bounds. Use `setMaxOracleDelays`
-    ///      when the two feeds have different heartbeats — which, on the phase-1 WETH/cbBTC pair,
-    ///      they effectively do.
-    function setMaxOracleDelay(uint256 newDelay) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        emit MaxOracleDelayUpdated(maxOracleDelay0, newDelay);
-        _setMaxOracleDelays(newDelay, newDelay);
-    }
-
-    /// @notice Update each feed's staleness bound independently.
+    /// @notice Update each feed's staleness bound independently. The ONLY way to write these bounds.
+    /// @dev There is deliberately no single-argument `setMaxOracleDelay(uint256)` convenience
+    ///      overload. The whole point of splitting one shared bound into two (MOO-740) is that the
+    ///      legs are different assets on different heartbeats; a setter that writes one value to both
+    ///      silently flattens exactly the per-feed tuning the split exists to enable, and does so
+    ///      through the shortest, most reachable call path. Forcing both values to be named at every
+    ///      write makes flattening them a visible choice rather than an accident. Nothing on chain
+    ///      depends on the old selector — this contract is deployed for the first time by proposal
+    ///      011, so there is no prior ABI to stay compatible with.
     function setMaxOracleDelays(uint256 newDelay0, uint256 newDelay1) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setMaxOracleDelays(newDelay0, newDelay1);
     }
 
-    /// @dev Shared writer for both setters: same bounds, same event, one definition.
+    /// @dev Sole writer for both bounds. Each must be non-zero (a zero bound rejects every read) and
+    ///      within `MAX_ORACLE_DELAY` — see that constant for why the ceiling is a day and not a week.
     function _setMaxOracleDelays(uint256 newDelay0, uint256 newDelay1) private {
-        if (newDelay0 == 0 || newDelay0 > 7 days || newDelay1 == 0 || newDelay1 > 7 days) revert InvalidConfig();
+        if (newDelay0 == 0 || newDelay0 > MAX_ORACLE_DELAY || newDelay1 == 0 || newDelay1 > MAX_ORACLE_DELAY) {
+            revert InvalidConfig();
+        }
         maxOracleDelay0 = newDelay0;
         maxOracleDelay1 = newDelay1;
         emit MaxOracleDelaysUpdated(newDelay0, newDelay1);
@@ -711,6 +741,29 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Phase 1 of a swap rebalance: tears down both positions, snapshots value,
     ///         approves the CowSwap vault relayer for exactly `sellAmount`, and opens the
     ///         order-validation window. No mint happens here; `rebuildAfterSwap` completes the cycle.
+    /// @dev    ORACLE PRECHECK. Both feeds are probed below purely for the revert, before `_exitAll`
+    ///         burns anything. This function does not need a price — `_snapshotAmounts` is
+    ///         oracle-free by design — but `rebuildAfterSwap` cannot complete without one: it prices
+    ///         the snapshot through `_mainRange`, `_mintAlt` and the value floor. Unwinding while a
+    ///         feed (or the sequencer guard) is already blocking is therefore a teardown that
+    ///         provably cannot be rebuilt: both NFTs burn, principal sits loose and unstaked, and the
+    ///         only exit is `exit()` behind DEFAULT_ADMIN_ROLE (the timelocked Safe) until the feed
+    ///         recovers. An earlier revision got this check for free — the unwind used to compute a
+    ///         USD snapshot, which read both feeds incidentally. Moving the snapshot to raw amounts
+    ///         (correct: a USD baseline frozen across two transactions reads an ordinary market move
+    ///         as a rebalance loss) dropped the read, and with it the precondition. It is restored
+    ///         here as an explicit, intentional gate rather than a side effect of a computation.
+    ///
+    ///         Sharpened by the L2 sequencer guard on this same path: after every Base sequencer
+    ///         recovery, `checkSequencer` rejects reads for the whole grace period (3600s as
+    ///         proposal 011 arms it), so without this probe each recovery opens a window in which
+    ///         unwind succeeds and the matching rebuild reverts SequencerGracePeriod.
+    ///
+    ///         RESIDUAL (unchanged, and not closable here): this bounds the state at unwind, not the
+    ///         state at rebuild. A feed that goes stale BETWEEN the two transactions still strands
+    ///         the rebuild until it recovers. Closing that would require an oracle-free rebuild path,
+    ///         which would mean minting and clearing the value floor with no price — strictly worse.
+    ///         The probe removes the case the contract can see coming; the rest is monitoring.
     function unwindForSwap(UnwindParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -737,6 +790,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             p.twapWindow,
             p.maxTickDeviation
         );
+
+        // Probe both feeds (and, inside them, the sequencer guard) BEFORE `_exitAll` burns the NFTs.
+        // Discarded return values: called for the revert, not for a price — see the ORACLE PRECHECK
+        // note above. Each leg is checked against ITS OWN bound, exactly as the rebuild will check
+        // it. Two direct `_readFeed` calls, deliberately: routing this through a single
+        // `LPValuationLib.probeFeeds(cfg)` helper reads better but measures WORSE (+34 bytes on the
+        // balancer), because materialising the six-field OracleConfig in memory costs more than the
+        // second external call it saves. The balancer is inside 100 bytes of EIP-170; that trade is
+        // not available here.
+        _readFeed(p.oracle0, maxOracleDelay0);
+        _readFeed(p.oracle1, maxOracleDelay1);
 
         // Split the snapshot the same way rebalanceUsingAlt does: position principal (haircut by
         // the floor below) vs. pre-existing loose token0/token1 (added back un-haircut). See H-1.
@@ -782,18 +846,36 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         the manipulated price, so amount0MinMain passes either way. Committing to the exact
     ///         ticks is what makes the placement verifiable rather than merely bounded.
     ///
-    ///         The commitment names only the MAIN bounds, but it pins the ALT too — because the
-    ///         width is required to be an even multiple of tickSpacing (per-call check below and
+    ///         SCOPE OF THE COMMITMENT — what it pins, and what it does NOT. The commitment names
+    ///         only the MAIN bounds. From them it also pins the ALT's ANCHOR, because the width is
+    ///         required to be an even multiple of tickSpacing (per-call check below and
     ///         `LPPositionLib.validateRebalanceConfig` on the bounds). `_mintAlt` anchors on
     ///         `floorAlign(spotTick)`, and each `_mainRange` branch inverts to that anchor uniquely
     ///         under that constraint: balanced → `floorAlign(spot) = tickLower + width/2` (valid only
     ///         because `width/2` is a whole number of spacings); token0-single-sided →
-    ///         `tickLower - tickSpacing`; token1-single-sided → `tickUpper`. The branch itself is
-    ///         chosen from oracle-priced leg VALUES, which spot does not move. So a spot that
-    ///         satisfies the main commitment leaves exactly one legal alt placement. Drop the
-    ///         even-multiple rule and that stops being true: at spacing 100 / width 300, spot 150 and
-    ///         spot 249 both yield main [0, 300] while the token0 alt slides from [200, 300] to
-    ///         [300, 400] with TickMismatch silent.
+    ///         `tickLower - tickSpacing`; token1-single-sided → `tickUpper`. Drop the even-multiple
+    ///         rule and even that stops holding: at spacing 100 / width 300, spot 150 and spot 249
+    ///         both yield main [0, 300] while the token0 alt slides from [200, 300] to [300, 400]
+    ///         with TickMismatch silent. So the alt's two candidate ranges — [floor + spacing,
+    ///         floor + 2*spacing] and [floor - spacing, floor] — are pinned to exact ticks.
+    ///
+    ///         It does NOT pin WHICH of the two is minted. That choice is `_mintAlt`'s
+    ///         `surplus0 = value0 >= value1`, computed from the balances left AFTER `_mintBalanced`,
+    ///         and the position manager consumes the in-ratio portion at the exact `sqrtP` — not at
+    ///         `floorAlign(spot)`. So spot can move WITHIN the committed bucket, leave TickMismatch
+    ///         silent, and still flip the alt to the other side of spot. (`_mainRange`'s own branch is
+    ///         immune: it classifies on oracle-priced leg values, which spot does not move. Only the
+    ///         alt's post-mint residual is spot-sensitive.)
+    ///
+    ///         Bounded, and here is the bound. The flip can only occur near `value0 == value1`, since
+    ///         that is the comparison being flipped — so the two candidate legs are close in USD value
+    ///         precisely where the outcome is in doubt, and both candidate ranges sit one spacing from
+    ///         spot on opposite sides. What actually changes is which leg is deposited into the alt
+    ///         and which is left loose for `_forwardDust` to sweep to the feeCollector after the value
+    ///         floor. That is a real, if narrow, effect on principal placement, and it is stated here
+    ///         rather than papered over: the even-multiple width rule buys a pinned alt ANCHOR, not a
+    ///         pinned alt SIDE. Pinning the side would need the alt's own bounds (and its
+    ///         "no alt was minted" case) added to the commitment.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
     ///         out of the floor per H-1), BOTH floor snapshots here (the position and loose amounts)
     ///         are taken back in unwindForSwap — a prior transaction. A token
@@ -872,6 +954,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit RebalanceRebuilt(newMain, p.altTokenId);
     }
 
+    /// @param expectedTickLower the main range's lower bound the CALLER computed off-chain, with the
+    ///        same meaning and the same TickMismatch enforcement as on `RebuildParams` — see the TICK
+    ///        COMMITMENT note on `rebuildAfterSwap`.
+    /// @param expectedTickUpper the main range's upper bound the CALLER committed to.
     struct RebalanceParams {
         uint24 width;
         uint256 amount0MinMain;
@@ -883,6 +969,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 amount0MinWithdrawAlt;
         uint256 amount1MinWithdrawAlt;
         uint256 deadline;
+        int24 expectedTickLower;
+        int24 expectedTickUpper;
     }
 
     /// @notice Parameters for phase 2 of a swap rebalance (rebuildAfterSwap). Unlike
@@ -971,11 +1059,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
         // Config bounds are 2*spacing-aligned but the per-call width is caller-supplied: an unaligned
-        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
-        // Same even-multiple rule as rebuildAfterSwap — this path is atomic and carries no tick
-        // commitment, so the rule buys it nothing directly; it is applied here so "legal width" has
-        // ONE definition across both rebalance paths and across the config bounds. A width accepted
-        // by rebalanceUsingAlt but rejected by rebuildAfterSwap would be a live footgun.
+        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint, and
+        // an ODD multiple of the spacing would un-pin the alt anchor from the tick commitment below
+        // (see the TICK COMMITMENT note on rebuildAfterSwap). Identical rule on both rebalance paths,
+        // so "legal width" has ONE definition across them and across the config bounds.
         if (params.width % (2 * uint24(p.tickSpacing)) != 0) revert InvalidWidth();
 
         // Choose the new main range. The common case is a spot-centered straddle. But rebalancing a
@@ -986,6 +1073,20 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // FUNDED side, adjacent to spot — a valid single-sided main that waits for price to oscillate
         // back into balance (Beefy "never sell"). Principal is fully redeployed; nothing is sold.
         (int24 tl, int24 tu) = _mainRange(p, cfg, spotTick, params.width, dec0, dec1);
+        // TICK COMMITMENT — same rule, same enforcement as rebuildAfterSwap (see its natspec).
+        // Being single-transaction does NOT substitute for it. Atomicity guarantees the teardown and
+        // the mint see one price; it says nothing about whether that price is honest. `calmGate`
+        // bounds spot against the TWAP but then hands LIVE spot to `_mainRange`, which floor-aligns
+        // it — so a sandwich that moves spot by up to maxTickDeviation (one full spacing at the
+        // phase-1 config) shifts the entire range by a spacing and reverts the price afterwards.
+        // Neither the withdraw minima nor the mint minima can see it: `_mintBalanced` zeroes the
+        // unfunded leg's min on the single-sided branch, and the funded leg's min passes at ANY range
+        // because the whole balance is consumed either way. Nor can the value floor: `valueAfter` is
+        // measured at the manipulated sqrtP, where the freshly minted position still holds exactly
+        // the tokens just deposited. The mis-ranging only materialises once spot reverts — after this
+        // transaction has committed. Committing to the exact ticks is what makes the placement
+        // verifiable rather than merely bounded.
+        if (tl != params.expectedTickLower || tu != params.expectedTickUpper) revert TickMismatch();
 
         uint256 newMain =
             _mintBalanced(p, spotTick, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
@@ -1268,10 +1369,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function collectFees() external whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
-        // Mid-swap-rebalance both NFTs are burned but p.mainTokenId/altTokenId still hold the burned
-        // ids until rebuildAfterSwap re-mints (same window getDecisionSnapshot guards); collect() on
-        // a burned id reverts deep inside the position manager, and mainStaked is already false here,
-        // so fail fast with a clear error instead.
+        // Mid-swap-rebalance there is nothing to collect: unwindForSwap burned both NFTs and zeroed
+        // both ids (_exitAll step 5), and rebuildAfterSwap does not re-mint until a LATER transaction
+        // (same window getDecisionSnapshot guards). Without this, _skimFees would run collect() on
+        // tokenId 0 and revert deep inside the position manager; mainStaked is already false here, so
+        // no other guard catches it. Fail fast with a clear error instead.
         if (_window.inFlight) revert AlreadyInFlight();
         if (p.mainStaked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
         // Skim BOTH legs to the feeCollector via the shared helper. Ignoring the alt here would strand
@@ -1307,10 +1409,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Return a snapshot of the fields the off-chain rebalancer reads to decide
     ///         whether and how to rebalanceUsingAlt a position. All values are read atomically in one
     ///         call. The `earnedAero` field uses try/catch so a broken gauge never blocks the view.
-    /// @dev    Mid-swap-rebalance (rebalanceInFlight), unwindForSwap has already burned both NFTs —
-    ///         p.mainTokenId/p.altTokenId point at burned tokenIds until rebuildAfterSwap re-mints.
-    ///         POSITION_MANAGER.positions() on a burned tokenId reverts on the real position manager,
-    ///         so the main/alt geometry + gauge-earned reads are SKIPPED while in flight (both legs
+    /// @dev    Mid-swap-rebalance (rebalanceInFlight), unwindForSwap has already burned both NFTs and
+    ///         zeroed both ids (_exitAll step 5); nothing is re-minted until rebuildAfterSwap lands in
+    ///         a LATER transaction. POSITION_MANAGER.positions() reverts on the real position manager
+    ///         for tokenId 0 just as it does for a burned id, so the geometry reads would revert
+    ///         either way — the main/alt geometry + gauge-earned reads are SKIPPED while in flight (both legs
     ///         are already unstaked by unwindForSwap's teardown, so mainStaked/altStaked read false
     ///         here regardless). This keeps the view itself always callable — the off-chain agent
     ///         must be able to observe rebalanceInFlight/rebalanceStartedAt precisely when a rebalance

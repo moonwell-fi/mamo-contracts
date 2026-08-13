@@ -103,7 +103,7 @@ Call `registerPosition` with the `ManagedPositionV2` config. The contract **vali
 - `mainTokenId = INIT_TOKEN_ID` and the NFT is **already held** by the contract (B3 done first).
 - `pool = 0x70aCDF…` and **`pool.token0()/token1()/tickSpacing()` must equal** `token0=WETH`, `token1=cbBTC`, `tickSpacing=100` (`PoolMismatch` otherwise).
 - `gauge = 0x41b2…` and **`gauge.rewardToken()` must equal `AERO`** (`GaugeRewardMismatch` otherwise).
-- `oracle0 = ETH/USD (0x71041d…)`, `oracle1 = BTC/USD (0x64c911…)` — both must return a **fresh, non-zero** answer at call time (within `maxOracleDelay`, default 26h).
+- `oracle0 = ETH/USD (0x71041d…)`, `oracle1 = BTC/USD (0x64c911…)` — both must return a **fresh, non-zero** answer at call time. Each leg is bounded SEPARATELY: `maxOracleDelay0` for `oracle0`, `maxOracleDelay1` for `oracle1` (constructor seeds `DEFAULT_MAX_ORACLE_DELAY` = 1h, hard cap `MAX_ORACLE_DELAY` = 1 day). Proposal 011 arms both at 3600s — 3x the feeds' ~20-minute heartbeat.
 - `minWidth ≥ 2·tickSpacing = 200`, `minWidth % 100 == 0`, `maxWidth ≥ minWidth` (`WidthTooNarrow` / `InvalidWidth`).
 - `maxRebalanceLossBps ≤ MAX_LOSS_CAP_BPS`, `maxTickDeviation > 0`, `maxCenterDeviation > 0`, `twapWindow > 0`.
 - `feeCollector = DROP_AUTOMATION`.
