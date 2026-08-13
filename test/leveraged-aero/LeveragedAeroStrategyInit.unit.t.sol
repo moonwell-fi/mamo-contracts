@@ -35,6 +35,7 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev Mirrored from {LeveragedAerodromeCLStrategy} for `vm.expectEmit` / topic matching.
     event FeeCrystallizeDeferred(uint8 op, uint256 navPre);
+    event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
     /// @dev The strategy's `OP_COMPOUND` deferral code (private there).
     uint8 internal constant OP_COMPOUND = 3;
@@ -803,6 +804,14 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== RISK PARAMS ====================
 
+    /// @dev `_initialize` is one of the routes to a stored ZERO standing target (the two setters are the
+    ///      others); all are guarded. An init-zero would deploy a clone that silently never levers.
+    function testInitRevertsOnZeroTargetLtv() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.targetLtvBps = 0;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.TargetLtvZero.selector);
+    }
+
     function testInitRevertsWhenTargetLtvExceedsMax() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.targetLtvBps = 7000;
@@ -1489,11 +1498,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         vault.setStrategy(address(s));
 
-        vm.prank(proposer);
+        vm.prank(owner);
         vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
         s.rescueToVault(address(vault));
 
-        // Same answer through the owner leg, and after settlement.
+        // Same answer after settlement.
         _forceState(s, BaseStrategy.State.Settled);
         vm.prank(owner);
         vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
@@ -1509,7 +1518,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         address[6] memory denied =
             [address(usdc), address(legB), address(legA), address(mUsdc), address(mLegB), address(mLegA)];
         for (uint256 i; i < denied.length; ++i) {
-            vm.prank(proposer);
+            vm.prank(owner);
             vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
             s.rescueToVault(denied[i]);
         }
@@ -1523,7 +1532,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vault.setStrategy(address(s));
         _forceState(s, BaseStrategy.State.Executed);
 
-        vm.prank(proposer);
+        vm.prank(owner);
         vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
         s.rescueToVault(address(aero));
     }
@@ -1543,7 +1552,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         aero.mint(address(s), 7e18); // the settle-claimed tranche
         _forceState(s, BaseStrategy.State.Settled);
 
-        vm.prank(proposer);
+        vm.prank(owner);
         s.rescueToVault(address(aero));
 
         assertEq(aero.balanceOf(address(s)), 0, "strategy swept");
@@ -1561,7 +1570,207 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vault.setStrategy(address(s));
 
         vm.prank(lp);
-        vm.expectRevert(LeveragedAerodromeCLStrategy.NotProposerOrOwner.selector);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
         s.rescueToVault(address(aero));
+    }
+
+    /**
+     * @dev BEHAVIOUR CHANGE (admin/proposer split): `rescueToVault` used to accept the proposer OR the
+     *      vault owner; it is now ADMIN-ONLY. Moving tokens out of the strategy is a custody action, and
+     *      the split's whole premise is that the keeper key cannot move funds. The admin leg still works,
+     *      so nothing is stranded — the sweep just costs a multisig signature.
+     */
+    function testRescueToVaultIsAdminOnlyAndRejectsTheProposer() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        vm.prank(owner);
+        vault.setStrategy(address(s));
+        aero.mint(address(s), 3e18);
+        _forceState(s, BaseStrategy.State.Settled); // post-settle AERO is a genuine stray
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.rescueToVault(address(aero));
+        assertEq(aero.balanceOf(address(s)), 3e18, "the proposer's sweep changed nothing");
+
+        // The admin can.
+        vm.prank(owner);
+        s.rescueToVault(address(aero));
+        assertEq(aero.balanceOf(address(vault)), 3e18, "the admin's sweep landed on the vault");
+    }
+
+    // ==================== setTargetLtv (ADMIN-ONLY POLICY) ====================
+
+    /// @dev The happy path: the vault owner (== admin) writes the standing target, it is readable
+    ///      through both `targetLtvBps()` and `layout()`, and the policy event carries (previous, new).
+    function testSetTargetLtvPersistsAndEmits() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.targetLtvBps(), 5000, "the init target is the starting standing target");
+
+        vm.expectEmit(true, true, true, true, address(s));
+        emit TargetLtvUpdated(5000, 6200);
+        vm.prank(owner);
+        s.setTargetLtv(6200);
+
+        assertEq(s.targetLtvBps(), 6200, "the new standing target persisted");
+        assertEq(s.layout().targetLtvBps, 6200, "getter == layout()");
+    }
+
+    /// @dev THE POINT OF THE SPLIT: the proposer — the rebalancer keeper, the hot key — cannot set
+    ///      policy. Neither can anyone else. A compromised keeper can rebalance the book toward the
+    ///      standing target; it cannot move the target itself.
+    function testSetTargetLtvRevertsForProposerAndStrangers() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setTargetLtv(6000);
+
+        vm.prank(lp);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setTargetLtv(6000);
+
+        assertEq(s.targetLtvBps(), 5000, "a refused caller stores nothing");
+    }
+
+    /// @dev Zero is refused. On an already-levered book this is the sharp case: a zero target sends
+    ///      `_leverDown` through `_unwindLiquidity`'s full-removal branch — stripping all liquidity,
+    ///      skipping the re-stake, and leaving `$.tokenId` unstaked, which bricks every later venue op
+    ///      INCLUDING the `emergencyRedeem` deadman. Every route that can store a target shares this
+    ///      floor (`_initialize`, `setTargetLtv`, `lowerTargetLtv`). Refusal stores nothing.
+    function testSetTargetLtvRevertsOnZero() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvZero.selector);
+        s.setTargetLtv(0);
+
+        assertEq(s.targetLtvBps(), 5000, "the zero target stored nothing");
+    }
+
+    /// @dev The upper bound is `maxLtvBps` (6500 here) — the boundary itself is legal, one bps past it
+    ///      is not, and a refusal stores nothing.
+    function testSetTargetLtvRevertsAboveMaxLtv() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        s.setTargetLtv(6501);
+        assertEq(s.targetLtvBps(), 5000, "a rejected target stores nothing");
+
+        vm.prank(owner);
+        s.setTargetLtv(6500); // the bound is inclusive
+        assertEq(s.targetLtvBps(), 6500, "maxLtvBps itself is a legal target");
+    }
+
+    /**
+     * @dev NOT state-gated: policy is settable while `Pending`, i.e. before the genesis `execute`.
+     *      Deliberate — correcting an init-time target before the fund is funded is exactly the case
+     *      that most wants to be settable, and it avoids redeploying the clone. Nothing about a stored
+     *      target requires a live position (`_initialize` itself writes one while Pending).
+     */
+    function testSetTargetLtvIsAllowedWhilePending() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(uint8(s.state()), uint8(BaseStrategy.State.Pending), "fixture is Pending");
+
+        vm.prank(owner);
+        s.setTargetLtv(4000);
+        assertEq(s.targetLtvBps(), 4000, "the target is settable before execute");
+    }
+
+    // ==================== lowerTargetLtv (PROPOSER-ONLY, MONOTONIC DOWN) ====================
+
+    /// @dev The happy path: the proposer — the keeper, the hot key — may REDUCE the standing target, so
+    ///      the pre-`fulfillRedeem` de-risk needs no multisig signature inside `FULFILL_WINDOW`. Same
+    ///      storage and the SAME `TargetLtvUpdated(previous, new)` event as the admin's setter (no second
+    ///      event to monitor), readable through both `targetLtvBps()` and `layout()`.
+    function testLowerTargetLtvPersistsAndEmits() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.targetLtvBps(), 5000, "the init target is the starting standing target");
+
+        vm.expectEmit(true, true, true, true, address(s));
+        emit TargetLtvUpdated(5000, 3000);
+        vm.prank(proposer);
+        s.lowerTargetLtv(3000);
+
+        assertEq(s.targetLtvBps(), 3000, "the reduced standing target persisted");
+        assertEq(s.layout().targetLtvBps, 3000, "getter == layout()");
+    }
+
+    /// @dev THE ASYMMETRY IS THE DESIGN, so it gets its own test: this entrypoint is the exact INVERSE
+    ///      gating of `setTargetLtv`. The admin — who may set policy in either direction there — is
+    ///      refused here, as is any stranger; only the proposer passes.
+    function testLowerTargetLtvRevertsForAdminAndStrangers() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        s.lowerTargetLtv(3000);
+
+        vm.prank(lp);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        s.lowerTargetLtv(3000);
+
+        assertEq(s.targetLtvBps(), 5000, "a refused caller stores nothing");
+    }
+
+    /// @dev MONOTONIC DOWN, strictly: the keeper can never raise leverage, and equal is refused too — a
+    ///      no-op write would emit a misleading policy event. Both refusals store nothing.
+    function testLowerTargetLtvRevertsOnEqualOrHigher() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvNotLower.selector);
+        s.lowerTargetLtv(5000); // equal
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvNotLower.selector);
+        s.lowerTargetLtv(5001); // higher
+
+        assertEq(s.targetLtvBps(), 5000, "a rejected target stores nothing");
+
+        // One bps below IS legal — the bound is strict, not a band.
+        vm.prank(proposer);
+        s.lowerTargetLtv(4999);
+        assertEq(s.targetLtvBps(), 4999, "strictly lower is accepted");
+    }
+
+    /// @dev The floor is the SAME one `setTargetLtv` and `_initialize` enforce (`_storeTargetLtv`), so
+    ///      the keeper cannot ratchet the target all the way to the zero-target hazard.
+    function testLowerTargetLtvRevertsOnZero() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvZero.selector);
+        s.lowerTargetLtv(0);
+
+        assertEq(s.targetLtvBps(), 5000, "the zero target stored nothing");
+    }
+
+    /// @dev Matches `setTargetLtv`'s state gating deliberately — neither is gated to `Executed`, and the
+    ///      same reasoning applies: the stored target is meaningful while `Pending` too.
+    function testLowerTargetLtvIsAllowedWhilePending() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(uint8(s.state()), uint8(BaseStrategy.State.Pending), "fixture is Pending");
+
+        vm.prank(proposer);
+        s.lowerTargetLtv(4000);
+        assertEq(s.targetLtvBps(), 4000, "the target is reducible before execute");
+    }
+
+    /// @dev The admin's setter is unaffected by sharing `_storeTargetLtv` with the proposer's: it still
+    ///      raises (the direction the keeper can never take) and still enforces the cap.
+    function testAdminCanStillRaiseAfterAProposerLower() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        s.lowerTargetLtv(2000);
+
+        vm.prank(owner);
+        s.setTargetLtv(6000);
+        assertEq(s.targetLtvBps(), 6000, "the admin reverses a keeper ratchet in one transaction");
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        s.setTargetLtv(6501);
     }
 }

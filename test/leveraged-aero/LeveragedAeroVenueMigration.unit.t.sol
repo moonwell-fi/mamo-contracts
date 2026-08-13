@@ -713,8 +713,9 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(aero.balanceOf(address(strategy)), tranche, "tranche untouched, never sold blind");
         assertApproxEqRel(usdc.balanceOf(address(vault)), SEED, 0.0001e18, "the book itself still settled");
         // ...and the residue is recoverable exactly as the pre-fix tranche was: the reward-token
-        // block on `rescueToVault` is scoped to `Executed`.
-        vm.prank(proposer);
+        // block on `rescueToVault` is scoped to `Executed`. Caller is the ADMIN (the vault owner):
+        // the admin/proposer split made `rescueToVault` admin-only.
+        vm.prank(owner);
         strategy.rescueToVault(address(aero));
         assertEq(aero.balanceOf(address(vault)), tranche, "residual tranche recovered post-settle");
     }
@@ -1168,6 +1169,96 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         LeveragedAeroVenue.VenueParams memory v = _venueBParams();
         v.targetLtvBps = 6100; // > maxLtvBps 6000
         _expectMigrateRevert(v, LeveragedAeroValuation.TargetLtvExceedsMax.selector);
+    }
+
+    /// @dev The LOWER twin of the bound above, and the reason the zero guard lives in `applyVenue`
+    ///      rather than beside `setTargetLtv`: `migrateVenue` is a THIRD write path to `targetLtvBps`,
+    ///      alongside the two setters, and it is the only one whose value is not typed by a human at
+    ///      call time — it comes out of a staged struct. `TargetLtvZero` is raised from the library
+    ///      (`LeveragedAeroVenue`) here, not from the strategy, but the selector is the same one
+    ///      `setTargetLtv` / `lowerTargetLtv` raise, so a caller decodes it off the strategy ABI either
+    ///      way. A zero target is not a brick — it borrows nothing — but it is a fund that can silently
+    ///      never lever, and a migration is precisely where that would go unnoticed.
+    function testMigrateRejectsZeroTargetLtv() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.targetLtvBps = 0;
+        _expectMigrateRevert(v, LeveragedAeroVenue.TargetLtvZero.selector);
+    }
+
+    // ==================== migrate: the target-LTV write is LOUD ====================
+
+    /// @dev `applyVenue` persists `p.targetLtvBps`, so a migration MOVES THE FUND'S LEVERAGE POLICY.
+    ///      `migrateVenue` only emits `VenueMigrated`, which says nothing about the target — so without
+    ///      the emit in `applyVenue` this would be the one silent policy change on the contract, and
+    ///      `lowerTargetLtv`'s "every step emits `TargetLtvUpdated` — monitor it" would be false. Same
+    ///      event, same signature, same emitting address (the library is delegatecalled), so a monitor
+    ///      filtering `TargetLtvUpdated` on the clone needs no new subscription.
+    function testMigrateEmitsTargetLtvUpdatedWhenTheStagedTargetDiffers() public {
+        _execute(SEED);
+        _flatten();
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "live target before the migration");
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams(); // targetLtvBps 4000 != 5000
+        _stage(v);
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.TargetLtvUpdated(TARGET_LTV_BPS, 4000);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().targetLtvBps, 4000, "the staged target is what got stored");
+    }
+
+    /// @dev The other half of the inequality guard: a migration that carries the SAME target is quiet.
+    ///      The event has to mean "policy moved", not "a migration happened" — `VenueMigrated` already
+    ///      says the latter, and a `TargetLtvUpdated(5000, 5000)` on every venue rewrite would train a
+    ///      monitor to ignore the event that matters.
+    function testMigrateDoesNotEmitTargetLtvUpdatedWhenTheStagedTargetIsUnchanged() public {
+        _execute(SEED);
+        _flatten();
+
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // targetLtvBps == the live one
+        _stage(v);
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool sawMigrated;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(strategy)) continue;
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.TargetLtvUpdated.selector,
+                "an unchanged target must not announce a policy change"
+            );
+            if (logs[i].topics[0] == LeveragedAeroVenue.VenueMigrated.selector) sawMigrated = true;
+        }
+        assertTrue(sawMigrated, "the migration itself did run -- the assertion above is not vacuous");
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "target unchanged");
+    }
+
+    /// @dev THE SCENARIO THE EVENT EXISTS FOR. The proposer ratchets the target down ahead of a large
+    ///      unwind (`lowerTargetLtv`, its one leverage knob), and a subsequently-executed migration —
+    ///      whose staged params carry their own `targetLtvBps` — RESTORES it. That is authorised: the
+    ///      params were byte-committed by the vault owner at `stageVenue`, so the raise is the owner's
+    ///      decision, not the keeper's. But authorised is not the same as visible, and the restore is
+    ///      not the migration's headline effect. It emits.
+    function testMigrateAnnouncesRestoringATargetTheProposerLowered() public {
+        _execute(SEED);
+        vm.prank(proposer);
+        strategy.lowerTargetLtv(3000);
+        assertEq(strategy.layout().targetLtvBps, 3000, "keeper de-risked");
+
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // same venue, target back to 5000
+        _stage(v);
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.TargetLtvUpdated(3000, TARGET_LTV_BPS);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "the staged target won, loudly");
     }
 
     // ==================== migrate: happy paths ====================

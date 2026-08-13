@@ -44,6 +44,12 @@ library LeveragedAeroVenue {
     // `MaxLtvExceedsCF`, `MinHealthMaxLtvConflict`) and `ComptrollerCallFailed` are NOT re-declared
     // here: `applyVenue` raises them through `LeveragedAeroValuation`'s copies, which already carry
     // the strategy's selectors. Re-declaring would be a second definition of the same ladder.
+    //
+    // `TargetLtvZero` IS declared here, and deliberately so: it is not part of that mirrored four-rung
+    // band (`checkLtvBand` / `checkRiskParams` carry the same four rungs on both the venue and init
+    // routes, and neither carries this one). It is a lower bound `applyVenue` alone enforces — see the
+    // rung itself, below the band call.
+    error TargetLtvZero(); // targetLtvBps == 0 — a standing target of zero can never lever
     error VenueNotStaged(); // migrate without a staged hash, or params that do not match it
     error BookNotFlat(); // migrate while a CL position, hedged basis, or leg debt is still live
     error PositionAlreadyOpen(); // redeploy on a book that already has a CL position (use deployIdle)
@@ -58,6 +64,24 @@ library LeveragedAeroVenue {
     event Flattened(uint256 idleUsdc);
     /// @notice The staged venue rewrite executed on a flat book.
     event VenueMigrated(address indexed oldPool, address indexed newPool);
+    /// @notice The fund's STANDING target LTV changed as a side effect of writing a venue — at init, and
+    ///         on every `migrateVenue` whose staged params carry a different `targetLtvBps`.
+    /// @dev RE-DECLARED, not imported: this is the SAME event `LeveragedAerodromeCLStrategy` declares for
+    ///      `setTargetLtv` / `lowerTargetLtv`, with the same signature and therefore the same `topic0`,
+    ///      and (like every event above) it is emitted from the STRATEGY's address because this library
+    ///      is linked and delegatecalled. A monitor filtering `TargetLtvUpdated` on the clone sees the
+    ///      migration-time change in the same stream as the setter-driven ones, with no ABI change on the
+    ///      strategy — it already declares this event. Importing the strategy here purely to qualify the
+    ///      name would make the strategy↔library import cycle two-way for zero behavioural difference;
+    ///      duplicate declaration is already this library's convention (`VenueStaged` et al. are declared
+    ///      here and consumed off the strategy ABI).
+    ///
+    ///      WHY IT MATTERS (review finding): `applyVenue` persists `p.targetLtvBps` unconditionally, and
+    ///      `migrateVenue` emits only `VenueMigrated`. Without this, an owner-staged migration could
+    ///      silently RESTORE a target the proposer had just ratcheted down with `lowerTargetLtv` —
+    ///      authorised (the params are hash-committed by the owner) but invisible to a monitor built on
+    ///      `lowerTargetLtv`'s "every step emits `TargetLtvUpdated`" contract.
+    event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
     /// @notice The venue subset of the strategy's config — everything a pool/pair change touches.
     ///         Field semantics are LEG SLOTS exactly as in `InitParams` (names historical): `weth*`
@@ -537,6 +561,15 @@ library LeveragedAeroVenue {
         // Risk invariants against the LIVE collateral factor (re-read here — fresher than init's).
         // Both the read and the four rungs are the Valuation copies, shared with the init ladder.
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, mUsdc);
+        // Lower bound as well as upper, and the ONLY rung of the band that is not mirrored in the init
+        // ladder. `applyVenue` is the SHARED route for both `_initialize` and `migrateVenue`, so this
+        // one check closes every path to a stored zero target that does not go through `setTargetLtv`.
+        // A zero standing target is not a brick (a zero target borrows nothing, so `debtUsdc == 0` and
+        // the full-unwind branch is unreachable — and `_leverDown` guards it anyway via
+        // `FullUnwindNotSupported`) but it IS a fund that can silently never lever. It stays HERE rather
+        // than inside `checkLtvBand` so the venue and init copies of that band remain the same four
+        // rungs in the same order.
+        if (p.targetLtvBps == 0) revert TargetLtvZero();
         LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps);
 
         // ── Persist the venue subset (every field a pool/pair change touches, nothing else) ──
@@ -556,6 +589,14 @@ library LeveragedAeroVenue {
         $.width = p.width;
         $.minWidth = p.minWidth;
         $.maxWidth = p.maxWidth;
+        // The target LTV is the one venue field that is also POLICY — the strategy exposes two setters
+        // for it and documents them as loud. Announce it here too, or a migration becomes the one route
+        // that moves the fund's leverage policy in silence (see `TargetLtvUpdated` above). Guarded on
+        // inequality: a migration that carries the SAME target stays quiet, so the event means "policy
+        // moved", never "a migration happened" (`VenueMigrated` already says that). At init the guard is
+        // trivially true (previous is 0), so a clone's opening policy is announced as well — a monitor
+        // can bootstrap the target from the log stream alone, with no init-time special case.
+        if ($.targetLtvBps != p.targetLtvBps) emit TargetLtvUpdated($.targetLtvBps, p.targetLtvBps);
         $.targetLtvBps = p.targetLtvBps;
         $.maxLtvBps = p.maxLtvBps;
         $.minHealthBps = p.minHealthBps;
