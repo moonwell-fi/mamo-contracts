@@ -29,11 +29,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *      after the existing ones.
  *
  *      Design notes:
- *      - Terminal/Settled vault-queue exit is deliberately NOT implemented as a bespoke flow. The
+ *      - Terminal/Settled exit is deliberately NOT implemented as a bespoke flow. The
  *        inherited `recoverERC20(vaultShares, owner, amount)` is an always-available `onlyOwner` hatch
  *        (no state gate — it does not go through the withdraw slippage/LTV path, consistent with the
  *        other Mamo strategies); its intended use here is the Settled terminal state, where the owner
- *        pulls the raw shares out and interacts with the vault redemption queue directly.
+ *        pulls the raw shares out and burns them for their pro-rata slice of the settled USDC via the
+ *        vault's `redeemSettled`.
  *      - The fast {withdraw}/{withdrawAll} paths are oracle-dependent and LTV-gated: they revert when the
  *        oracle is down or the LTV gate trips, in which case the owner should route through the async
  *        {requestWithdraw} flow instead.

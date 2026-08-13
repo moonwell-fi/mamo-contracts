@@ -7,7 +7,8 @@ import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
-import {ISyndicateVault} from "@contracts/leveraged-aero/sherwood/interfaces/ISyndicateVault.sol";
+import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy.sol";
 import {DeployLeveragedAeroAccountConfig} from "@script/DeployLeveragedAeroAccountConfig.sol";
 import {LeveragedAeroAccountDeployer} from "@script/LeveragedAeroAccountDeployer.s.sol";
 
@@ -18,18 +19,28 @@ import {LeveragedAeroAccountDeployer} from "@script/LeveragedAeroAccountDeployer
  *           - deploys the {MamoLeveragedAeroStrategy} implementation + {MamoLeveragedAeroStrategyFactory};
  *           - whitelists the implementation under a NEW strategy type id (see config);
  *           - grants the factory BACKEND_ROLE on the registry so it can register user accounts;
- *           - opens deposits on the SyndicateVault so the accounts can deposit USDC.
+ *           - opens deposits on the {LeveragedAeroVault} so the accounts can deposit USDC.
  *
  * @dev This account has NO Moonwell/Morpho split and NO CowSwap reward path, so there is deliberately
  *      no SlippagePriceChecker / reward-token configuration here (unlike 010/011).
  *
- *      NOT-YET-DEPLOYED DEPENDENCIES: the Sherwood system (SyndicateVault + LeveragedAerodromeCLStrategy)
- *      is deployed separately — Tenderly vnet Base fork first, Base mainnet after. Until then the address
- *      book has no `SHERWOOD_LEVERAGED_AERO_STRATEGY` / `SHERWOOD_SYNDICATE_VAULT` entries, so this
- *      proposal COMPILES but cannot be run end-to-end: any `addresses.getAddress("SHERWOOD_...")` reverts
- *      until those two keys are added at Sherwood-deploy time. The vault referenced by
- *      `SHERWOOD_SYNDICATE_VAULT` MUST be owned by MAMO_MULTISIG at execution time for the
- *      `setOpenDeposits(true)` call in {build} to succeed.
+ *      NOT-YET-DEPLOYED DEPENDENCIES: the {LeveragedAeroVault} and its vendored
+ *      {LeveragedAerodromeCLStrategy} clone are deployed separately — Tenderly vnet Base fork first,
+ *      Base mainnet after. Until then the address book has no `SHERWOOD_LEVERAGED_AERO_STRATEGY` /
+ *      `LEVERAGED_AERO_VAULT` entries, so this proposal COMPILES but cannot be run end-to-end: either
+ *      `addresses.getAddress(...)` lookup reverts until those keys are added at that deploy time. The vault
+ *      referenced by `LEVERAGED_AERO_VAULT` MUST be owned by MAMO_MULTISIG at execution time for the
+ *      `setOpenDeposits(true)` call in {build} to succeed (the vault is {Ownable2Step}, so the multisig
+ *      must have ACCEPTED ownership, not merely been nominated).
+ *
+ *      RUNBOOK — WIND-DOWN: before `settleStrategy()` is called on the vault, every outstanding
+ *      `requestRedeem` escrow on the Sherwood strategy must be drained (`fulfillRedeem`) or its owner
+ *      told to `cancelRedeem`. Escrowed shares are held BY THE STRATEGY and still count toward
+ *      `totalSupply()`, but post-settle `fulfillRedeem` / `emergencyRedeem` revert `NotExecuted` and
+ *      the strategy has no path to the vault's `redeemSettled`. An abandoned escrow therefore FREEZES
+ *      its pro-rata slice of the settled pot — pinned out of every other holder's payout — until its
+ *      owner cancels (`cancelRedeem` is state-agnostic and stays open forever) and redeems the shares
+ *      themselves. No value is lost; it is an open-ended operational tail on the wind-down.
  */
 contract DeployLeveragedAeroAccountSystem is MultisigProposal {
     uint256 public immutable strategyTypeId;
@@ -39,7 +50,7 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
     string public strategyImplementationKey;
     string public strategyFactoryKey;
     string public sherwoodStrategyKey;
-    string public syndicateVaultKey;
+    string public vaultKey;
 
     constructor() {
         deployConfig = new DeployLeveragedAeroAccountConfig("./config/strategies/LeveragedAeroAccountConfig.json");
@@ -53,7 +64,7 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         strategyImplementationKey = cfg.strategyImplementation;
         strategyFactoryKey = cfg.strategyFactory;
         sherwoodStrategyKey = cfg.sherwoodStrategy;
-        syndicateVaultKey = cfg.syndicateVault;
+        vaultKey = cfg.vault;
     }
 
     function run() public override {
@@ -77,7 +88,7 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Deploy MamoLeveragedAeroStrategy implementation + factory, whitelist the new strategy type, grant the factory BACKEND_ROLE, and open SyndicateVault deposits";
+        return "Deploy MamoLeveragedAeroStrategy implementation + factory, whitelist the new strategy type, grant the factory BACKEND_ROLE, and open LeveragedAeroVault deposits";
     }
 
     function deploy() public override {
@@ -100,9 +111,12 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         // an implementation is whitelisted with id 0 (auto-assign); whitelisting with an explicit non-zero
         // id (as 010/011 and this proposal do) leaves it untouched. On Base mainnet it currently reads 4
         // while ids 1-4 are all filled, i.e. it is a stale lower bound, NOT the next free slot. We assert
-        // the counter has not advanced PAST our chosen slot so the registry's auto-assign path can never
-        // hand out our explicitly-claimed id to another type before this proposal executes.
-        assertLe(registry.nextStrategyTypeId(), strategyTypeId, "nextStrategyTypeId advanced past the configured id");
+        // the counter has not reached our chosen slot so the registry's auto-assign path can never hand
+        // out our explicitly-claimed id to another type before this proposal executes.
+        //
+        // STRICTLY less-than: auto-assign takes `nextStrategyTypeId++`, so a counter EQUAL to our id
+        // means the very next auto-assigned type collides with the slot we are claiming.
+        assertLt(registry.nextStrategyTypeId(), strategyTypeId, "nextStrategyTypeId reached the configured id");
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -117,9 +131,9 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         // 2. Grant the factory BACKEND_ROLE so it can register user accounts with the registry.
         registry.grantRole(registry.BACKEND_ROLE(), factory);
 
-        // 3. Open deposits on the SyndicateVault so the accounts can deposit USDC.
+        // 3. Open deposits on the LeveragedAeroVault so the accounts can deposit USDC.
         //    The vault must be owned by MAMO_MULTISIG at execution time (see contract-level NatSpec).
-        ISyndicateVault(addresses.getAddress(syndicateVaultKey)).setOpenDeposits(true);
+        LeveragedAeroVault(addresses.getAddress(vaultKey)).setOpenDeposits(true);
     }
 
     function simulate() public override {
@@ -148,10 +162,23 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
             registry.hasRole(registry.BACKEND_ROLE(), factory), "Factory should have BACKEND_ROLE on the registry"
         );
 
-        // SyndicateVault deposits are open.
-        assertTrue(
-            ISyndicateVault(addresses.getAddress(syndicateVaultKey)).openDeposits(),
-            "SyndicateVault deposits should be open"
+        // LeveragedAeroVault deposits are open.
+        LeveragedAeroVault vault = LeveragedAeroVault(addresses.getAddress(vaultKey));
+        assertTrue(vault.depositsOpen(), "LeveragedAeroVault deposits should be open");
+
+        // The vault <-> Sherwood-strategy binding is what the whole account system rests on: the
+        // accounts deposit into the strategy and the strategy mints/burns THIS vault's shares. Assert
+        // it in both directions plus the unit of account, so a vault pointed at the wrong (or an
+        // unbound) strategy fails here rather than at the first user deposit.
+        address sherwoodStrategy = addresses.getAddress(sherwoodStrategyKey);
+        assertEq(vault.strategy(), sherwoodStrategy, "Vault should be bound to the configured Sherwood strategy");
+        assertEq(
+            IStrategy(vault.strategy()).vault(), address(vault), "Sherwood strategy should point back at the vault"
+        );
+        assertEq(
+            vault.asset(),
+            addresses.getAddress(deployConfig.getConfig().token),
+            "Vault asset should be the configured token"
         );
 
         // Every factory immutable matches config / address book.

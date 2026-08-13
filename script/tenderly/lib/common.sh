@@ -122,7 +122,7 @@ resolve_vnet() {
     local resp
     resp="$(curl -s -X POST "$TENDERLY_API/account/$TENDERLY_ACCOUNT_SLUG/project/$TENDERLY_PROJECT_SLUG/vnets" \
       -H "X-Access-Key: $TENDERLY_ACCESS_KEY" -H "Content-Type: application/json" -H "Accept: application/json" \
-      -d "{\"slug\":\"${slug}-$(date +%s)\",\"display_name\":\"${display}\",\"fork_config\":{\"network_id\":8453},\"virtual_network_config\":{\"chain_config\":{\"chain_id\":8453}},\"sync_state_config\":{\"enabled\":false},\"explorer_page_config\":{\"enabled\":false,\"verification_visibility\":\"bytecode\"}}")"
+      -d "{\"slug\":\"${slug}-$(date +%s)\",\"display_name\":\"${display}\",\"fork_config\":{\"network_id\":8453},\"virtual_network_config\":{\"chain_config\":{\"chain_id\":${VNET_CHAIN_ID:-8453}}},\"sync_state_config\":{\"enabled\":false},\"explorer_page_config\":{\"enabled\":false,\"verification_visibility\":\"bytecode\"}}")"
     VNET_ID="$(echo "$resp" | jq -r '.id // empty')"
     RPC="$(echo "$resp" | jq -r '.rpcs[]? | select(.name=="Admin RPC") | .url')"
     [ -n "$RPC" ] || die "vnet create failed: $resp"
@@ -138,7 +138,7 @@ resolve_vnet() {
 
 # Assert the fork is the expected chain (default Base 8453).
 chain_sanity() {
-  local expected="${EXPECTED_CHAIN:-8453}"
+  local expected="${EXPECTED_CHAIN:-${VNET_CHAIN_ID:-8453}}"
   local chain; chain="$(cast chain-id --rpc-url "$RPC" 2>/dev/null)"
   [ "$chain" = "$expected" ] || die "expected chain $expected, got '$chain'"
   ok "chain id $chain, block $(cast block-number --rpc-url "$RPC" 2>/dev/null)"

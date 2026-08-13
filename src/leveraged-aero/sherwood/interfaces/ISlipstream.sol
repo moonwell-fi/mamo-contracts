@@ -154,6 +154,18 @@ interface ICLPool {
 
     /// @notice The gauge address associated with this pool (set by the Voter on first epoch).
     function gauge() external view returns (address);
+
+    /// @notice The CLFactory that deployed this pool.
+    function factory() external view returns (address);
+}
+
+/// @title Aerodrome Slipstream CL Factory
+/// @notice Minimal interface for pool-existence probes. Slipstream keys pools by
+///         `(tokenA, tokenB, tickSpacing)` — there is no `fee` dimension.
+interface ICLFactory {
+    /// @notice The pool for `(tokenA, tokenB, tickSpacing)`, or `address(0)` when none exists.
+    /// @dev Token order is irrelevant — the factory sorts the pair internally.
+    function getPool(address tokenA, address tokenB, int24 tickSpacing) external view returns (address pool);
 }
 
 /// @title Aerodrome Slipstream CL Gauge
@@ -174,6 +186,11 @@ interface ICLGauge {
 
     /// @notice The ERC-20 token distributed as gauge rewards (AERO on Base).
     function rewardToken() external view returns (address);
+
+    /// @notice Rewards currently claimable by `account` for the staked position `tokenId`.
+    /// @dev Read by `LeveragedAerodromeCLStrategy.compound` to tell a GENUINE no-op (nothing to harvest)
+    ///      apart from a real harvest BEFORE it crystallises fees — a poll must have no side effects.
+    function earned(address account, uint256 tokenId) external view returns (uint256);
 }
 
 /// @title Aerodrome Slipstream CL Swap Router

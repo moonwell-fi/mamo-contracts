@@ -18,6 +18,7 @@ memory-bank/
 
 # Tenderly harness run artifacts (logs + per-phase forge output)
 script/tenderly/harness-results.log
+script/tenderly/harness-results-*.log
 script/tenderly/.phase-*.log
 # Tenderly staging vnet: generated hand-off doc holds a live/recreatable Public RPC URL; share it
 # directly with the frontend (or commit intentionally), don't bake a soon-stale URL into history.

@@ -8,6 +8,10 @@
 #   ./run-harness.sh                    → LPAutoBalancerV2 (default; back-compat)
 #   ./run-harness.sh lpv2 [flags]       → LPAutoBalancerV2   (run-lpv2.sh)
 #   ./run-harness.sh price-checker [..] → SlippagePriceChecker (run-price-checker.sh)
+#   ./run-harness.sh leveraged-aero-stack [..]   → leveraged-Aero POOLED layer
+#                                         (run-leveraged-aero-stack.sh) — run this FIRST
+#   ./run-harness.sh leveraged-aero-account [..] → MamoLeveragedAeroStrategy account
+#                                         (run-leveraged-aero-account.sh)
 #
 # Flags passed with no leading subcommand still route to lpv2, so the historical
 # `make tenderly-harness` and `./run-harness.sh --scenario balanced` keep working.
@@ -23,6 +27,8 @@ case "$1" in
   lpv2)          shift; exec "$SCRIPT_DIR/run-lpv2.sh" "$@" ;;
   lpv2-matrix)   shift; exec "$SCRIPT_DIR/run-lpv2-matrix.sh" "$@" ;;
   price-checker) shift; exec "$SCRIPT_DIR/run-price-checker.sh" "$@" ;;
+  leveraged-aero-stack)   shift; exec "$SCRIPT_DIR/run-leveraged-aero-stack.sh" "$@" ;;
+  leveraged-aero-account) shift; exec "$SCRIPT_DIR/run-leveraged-aero-account.sh" "$@" ;;
   --*)           exec "$SCRIPT_DIR/run-lpv2.sh" "$@" ;;   # bare flags → lpv2 (back-compat)
-  *) echo "unknown harness '$1' (expected: lpv2 | lpv2-matrix | price-checker)"; exit 2 ;;
+  *) echo "unknown harness '$1' (expected: lpv2 | lpv2-matrix | price-checker | leveraged-aero-stack | leveraged-aero-account)"; exit 2 ;;
 esac

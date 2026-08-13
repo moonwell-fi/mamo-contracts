@@ -13,10 +13,10 @@ import {Test} from "forge-std/Test.sol";
  *      implementation + factory constructors need, plus the strategy type id.
  *
  *      Every non-numeric value is an ADDRESS-BOOK KEY (resolved through FPS `Addresses`), not a literal
- *      address — matching repo convention. Two of those keys ({sherwoodStrategy}, {syndicateVault}) do
- *      NOT exist in `addresses/8453.json` yet: the Sherwood system (SyndicateVault +
- *      LeveragedAerodromeCLStrategy) is deployed separately (Tenderly vnet first, Base mainnet after),
- *      and its addresses are added under those keys at that time.
+ *      address — matching repo convention. Two of those keys ({sherwoodStrategy}, {vault}) do NOT exist
+ *      in `addresses/8453.json` yet: the {LeveragedAeroVault} and its vendored
+ *      {LeveragedAerodromeCLStrategy} clone are deployed separately (Tenderly Base-fork vnet first,
+ *      Base mainnet after), and their addresses are added under those keys at that time.
  */
 contract DeployLeveragedAeroAccountConfig is Test {
     using stdJson for string;
@@ -32,8 +32,8 @@ contract DeployLeveragedAeroAccountConfig is Test {
         string token;
         // Address-book key of the vendored Sherwood leveraged Aerodrome CL strategy.
         string sherwoodStrategy;
-        // Address-book key of the SyndicateVault whose deposits must be opened.
-        string syndicateVault;
+        // Address-book key of the LeveragedAeroVault whose deposits must be opened.
+        string vault;
         // MamoStrategyRegistry strategy type id assigned to this account family.
         //
         // Next available MamoStrategyRegistry strategy type id. Base mainnet currently has ids 1-4
@@ -64,7 +64,7 @@ contract DeployLeveragedAeroAccountConfig is Test {
         // Field-by-field decode (avoids whole-struct abi.decode ordering pitfalls).
         config.token = abi.decode(vm.parseJson(configData, ".token"), (string));
         config.sherwoodStrategy = abi.decode(vm.parseJson(configData, ".sherwoodStrategy"), (string));
-        config.syndicateVault = abi.decode(vm.parseJson(configData, ".syndicateVault"), (string));
+        config.vault = abi.decode(vm.parseJson(configData, ".vault"), (string));
         config.strategyTypeId = abi.decode(vm.parseJson(configData, ".strategyTypeId"), (uint256));
         config.strategyImplementation = abi.decode(vm.parseJson(configData, ".strategyImplementation"), (string));
         config.strategyFactory = abi.decode(vm.parseJson(configData, ".strategyFactory"), (string));
