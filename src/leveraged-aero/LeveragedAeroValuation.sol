@@ -895,25 +895,80 @@ library LeveragedAeroValuation {
     ///      ASSET-MODE. The manager calls this for leg A only when `legBIsAsset` (leg B is the unit of
     ///      account there and structurally carries no debt), so `h.leg != h.usdc` always holds and the
     ///      identity swap that `_swapUsdcExactIn` guards against is unreachable from here.
+    ///      PRO-RATA ACROSS THE LEGS — MEASURE BOTH, *THEN* SPEND. The budget is one shared ceiling over
+    ///      two independent drifts, so how it is divided is a real decision and it used to be made
+    ///      implicitly: leg A was handed the WHOLE budget and leg B got `budget − spentA`. Whenever leg A's
+    ///      drift priced at or above the harvest — the normal state for the larger/faster-accruing leg on a
+    ///      thin harvest — leg B received exactly 0 and was never even MEASURED (the spend path returned on
+    ///      `budget == 0` before reading the market), so every harvest in that band closed leg A and left
+    ///      leg B's short untouched. Nothing was LOST (the remainder persists in `debt − hedged` and is
+    ///      hedged once the budget allows), but the residual short CONCENTRATED 100% on one leg, which is
+    ///      the opposite of what a leg-neutral book wants: a partial hedge should shrink the book's net
+    ///      exposure evenly, not rotate it onto whichever leg the code happens to serve second.
+    ///
+    ///      So both drifts are measured first, then the budget is split `budget × costᵢ / (costA + costB)`.
+    ///      Leg A takes its allocation and leg B takes the EXACT COMPLEMENT (`budget − allocationA`), so
+    ///      integer division strands no dust. When the budget covers everything the split is a no-op — each
+    ///      leg's spend is capped at its own cost, so both are neutralised exactly as before.
+    ///
+    ///      THE ACCRUE-THEN-MEASURE DISCIPLINE IS PRESERVED, and it is the thing this refactor most had to
+    ///      not break: `borrowBalanceCurrent` is still called exactly ONCE per leg, in the measure phase,
+    ///      and the number it returns is what BOTH the allocation and the spend are computed from. There is
+    ///      no second read that could see a different (post-repay, re-capitalised) index. The one behaviour
+    ///      change is that leg B is now accrued even when it will receive no budget — that is inherent to
+    ///      measuring before allocating, it costs one market touch, and it leaves the leg market fresh for
+    ///      the rest of the transaction (the same benefit the accrual note above already claims).
     /// @param b       The whole book's inputs; see `HedgeBook`.
-    /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget).
+    /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget); never
+    ///                more than `b.budgetUsdc`.
     function hedgeBorrowInterest(HedgeBook memory b) public returns (uint256 spent) {
         if (b.budgetUsdc == 0) return 0;
         uint256 pUsdc = readUsd8(b.usdcFeed, b.sequencerFeed, b.maxDelay, b.gracePeriod);
-        spent = _hedgeLeg(b, b.marketA, b.legA, b.feedA, b.spacingA, b.decimalsA, b.hedgedA, b.budgetUsdc, pUsdc);
+
+        // ── MEASURE (both legs, before a single USDC is committed) ──
+        LegDrift memory dA = _measureLeg(b, b.marketA, b.feedA, b.decimalsA, b.hedgedA, pUsdc);
         // Leg B drifts too whenever it is BORROWED — the two-borrowed-legs shape LPs both borrows against
         // each other, so both accrue interest the LP never grows to match. `marketB == 0` is the
-        // asset-mode book, where leg B IS the unit of account, is never borrowed, and cannot drift.
+        // asset-mode book, where leg B IS the unit of account, is never borrowed, and cannot drift: the
+        // gate keeps that shape on exactly its old single-leg path (`dB` stays zero ⇒ leg A is allocated
+        // the whole budget ⇒ byte-identical behaviour).
+        LegDrift memory dB;
         if (b.marketB != address(0)) {
-            // `budgetUsdc - spent`: leg A already committed its share of the one shared ceiling.
-            spent += _hedgeLeg(
-                b, b.marketB, b.legB, b.feedB, b.spacingB, b.decimalsB, b.hedgedB, b.budgetUsdc - spent, pUsdc
-            );
+            dB = _measureLeg(b, b.marketB, b.feedB, b.decimalsB, b.hedgedB, pUsdc);
+        }
+
+        uint256 total = dA.costUsdc + dB.costUsdc;
+        if (total == 0) return 0; // no drift on either leg, or both priced below 1 USDC unit
+
+        // ── ALLOCATE (pro-rata by USD cost) ──
+        // No branch for the "budget covers everything" case: each leg's spend is capped at its own cost
+        // inside `_spendLeg`, so an over-allocation simply goes unused and both legs neutralise fully.
+        uint256 budgetA = Math.mulDiv(b.budgetUsdc, dA.costUsdc, total);
+
+        // ── SPEND ──
+        spent = _spendLeg(b, b.marketA, b.legA, b.spacingA, dA, budgetA);
+        if (b.marketB != address(0)) {
+            // The EXACT complement, not a second `mulDiv`: whatever leg A's share rounded away lands here
+            // rather than being stranded by the division.
+            spent += _spendLeg(b, b.marketB, b.legB, b.spacingB, dB, b.budgetUsdc - budgetA);
         }
     }
 
-    /// @dev One leg of `hedgeBorrowInterest`. See that function's header for the measure, the
-    ///      repay-vs-add decision, the budget bound and the graceful-degradation contract.
+    /// @dev One leg's MEASURED state, carried from the measure phase of `hedgeBorrowInterest` into its
+    ///      spend phase. Exists so `borrowBalanceCurrent` is read once per leg and that single accrued
+    ///      number feeds both the pro-rata allocation and the buy/repay — the accrue-then-measure
+    ///      discipline the whole interest hedge was built around (see `_measureLeg`).
+    struct LegDrift {
+        uint256 amount; // unhedged accrued interest in LEG units (`debt − hedged`); the repay cap
+        uint256 costUsdc; // what closing ALL of `amount` would cost (USDC 6dp); the allocation weight
+        uint256 num; // `price8 × 1e6` — the `_tokenToUsdc` numerator, kept as a factor
+        uint256 den; // `10^decimals × pUsdc` — ...and its denominator, so the INVERSE is the same numbers
+    }
+
+    /// @dev THE MEASURE PHASE for one leg of `hedgeBorrowInterest` — no USDC is committed here, nothing
+    ///      is swapped, and the result is the ONLY view of this leg the spend phase gets. See that
+    ///      function's header for the measure itself, the repay-vs-add decision, the budget bound, the
+    ///      pro-rata allocation and the graceful-degradation contract.
     ///
     ///      ACCRUE, *THEN* MEASURE — `borrowBalanceCurrent`, never `borrowBalanceStored`.
     ///      `borrowBalanceStored` is `principal × borrowIndex / interestIndex` on the market's LAST-ACCRUED
@@ -945,48 +1000,68 @@ library LeveragedAeroValuation {
     ///      fixed. Moonwell wraps it in `require(... == NO_ERROR)`, so using their wrapper makes the
     ///      fail-closed behaviour structural and un-droppable (see `IMoonwellMarket`).
     ///
-    ///      `budgetUsdc == 0` is checked BEFORE the call so a leg whose share of the shared ceiling was
-    ///      already spent by the other leg does not pay for an accrual it cannot act on.
-    function _hedgeLeg(
+    ///      NO EARLY BUDGET GATE HERE ANY MORE. The previous shape returned on `budgetUsdc == 0` BEFORE
+    ///      touching the market, which is precisely what let a budget-starved leg go unmeasured and
+    ///      therefore unhedged for as long as the other leg's drift exceeded the harvest. Measuring is
+    ///      unconditional now; the budget only decides how much of what was measured gets SPENT.
+    ///
+    ///      A leg with no drift still reads no feed: the `debt <= hedged` return happens before the
+    ///      `readUsd8`, so a quiet book adds no oracle-liveness dependency to the harvest.
+    function _measureLeg(
         HedgeBook memory b,
         address market,
-        address leg,
         address feed,
-        int24 spacing,
         uint8 legDecimals,
         uint256 hedged,
-        uint256 budgetUsdc,
         uint256 pUsdc
-    ) private returns (uint256 spentUsdc) {
-        if (budgetUsdc == 0) return 0;
+    ) private returns (LegDrift memory d) {
         uint256 debt = IMoonwellMarket(market).borrowBalanceCurrent(address(this));
-        if (debt <= hedged) return 0;
-        uint256 drift = debt - hedged;
+        if (debt <= hedged) return d;
+        d.amount = debt - hedged;
 
         // `num/den` is the manager's `_tokenToUsdc` basis, kept as its two factors so the INVERSE
         // (USDC→leg, for the min-out) is the same numbers read the other way and the two cannot drift.
-        uint256 num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
-        uint256 den = (10 ** uint256(legDecimals)) * pUsdc;
-        uint256 spend = Math.mulDiv(drift, num, den);
-        if (spend > budgetUsdc) spend = budgetUsdc; // graceful: partial hedge, remainder carries
-        if (spend == 0) return 0; // drift priced below 1 USDC unit — leave it to accumulate
+        d.num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
+        d.den = (10 ** uint256(legDecimals)) * pUsdc;
+        d.costUsdc = Math.mulDiv(d.amount, d.num, d.den);
+    }
+
+    /// @dev THE SPEND PHASE for one leg: buy `min(cost, budget)` USDC worth of the leg and repay it.
+    ///      Consumes ONLY the `LegDrift` the measure phase produced — it never re-reads the market, so
+    ///      the accrued balance the allocation was computed from is the same one the repay is capped
+    ///      against.
+    ///
+    ///      GRACEFUL BY CONTRACT, per leg: a budget short of this leg's cost buys and repays what it can
+    ///      and the remainder STAYS in `debt − hedged`, so the next harvest resumes exactly here. It never
+    ///      reverts the harvest for insufficiency, and that is now true of BOTH legs rather than only of
+    ///      whichever leg the budget happened to reach.
+    function _spendLeg(
+        HedgeBook memory b,
+        address market,
+        address leg,
+        int24 spacing,
+        LegDrift memory d,
+        uint256 budgetUsdc
+    ) private returns (uint256 spentUsdc) {
+        uint256 spend = d.costUsdc > budgetUsdc ? budgetUsdc : d.costUsdc;
+        if (spend == 0) return 0; // no drift, no allocation, or drift priced below 1 USDC unit
 
         // Oracle-floored exact-IN buy (the `_settleShortfall` posture, not the exact-OUT one): exact-out
         // would REVERT the whole harvest the moment `budgetUsdc` could not cover the drift, and this path
         // must degrade instead. The min-out is the oracle-implied leg amount for `spend`, haircut by
         // `maxSlippageBps`, so a sandwiched buy reverts rather than overpaying.
-        uint256 minOut = (Math.mulDiv(spend, den, num) * (10000 - b.maxSlippageBps)) / 10000;
+        uint256 minOut = (Math.mulDiv(spend, d.den, d.num) * (10000 - b.maxSlippageBps)) / 10000;
         uint256 legBefore = IERC20(leg).balanceOf(address(this));
         swapExactIn(b.swapRouter, b.usdc, leg, spacing, spend, minOut);
         spentUsdc = spend;
 
-        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `drift` is what
+        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `d.amount` is what
         // keeps `Layout.hedgedDebtA/B` untouched by this repay: post-repay debt is `hedged + (drift −
         // repaid) >= hedged`, so the manager's `_repay` clamp is provably a no-op here and the basis
         // discipline stays single-sited. Any tiny overshoot of the buy stays as an idle leg balance,
         // which is NAV-counted and redeployable.
         uint256 got = IERC20(leg).balanceOf(address(this)) - legBefore;
-        uint256 repaid = got < drift ? got : drift;
+        uint256 repaid = got < d.amount ? got : d.amount;
         if (repaid > 0) {
             IERC20(leg).forceApprove(market, repaid);
             uint256 err = IMoonwellMarket(market).repayBorrow(repaid);

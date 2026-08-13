@@ -1211,4 +1211,140 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(legB.balanceOf(address(strategy)), legBKept, "leg-B reservation byte-identical");
         assertEq(legA.balanceOf(address(strategy)), legAKept, "leg-A reservation byte-identical");
     }
+
+    // ============ PRO-RATA INTEREST-HEDGE ALLOCATION (review finding 7) ============
+
+    /// @dev Etch + fund the Aerodrome-v2 router the AERO->USDC harvest leg hardcodes.
+    function _armAeroRouter() internal {
+        MockAeroV2Router impl = new MockAeroV2Router(address(aero), address(usdc), 1e6);
+        vm.etch(AERO_V2_ROUTER, address(impl).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+    }
+
+    /// @dev Make `usdcWorth` (6dp) of harvest proceeds claimable at the fixture's $1/AERO mark.
+    function _armHarvest(uint256 usdcWorth) internal {
+        uint256 aeroAmt = usdcWorth * 1e12;
+        aero.mint(address(gauge), aeroAmt);
+        gauge.setAeroToPayOnGetReward(aeroAmt);
+        gauge.setEarnedAmount(aeroAmt);
+    }
+
+    /// @dev THE DRIFT MEASURE the production code uses, per leg: live debt minus the hedged principal.
+    function _driftLegA() internal view returns (uint256) {
+        (uint128 h,) = strategy.hedgedDebt();
+        uint256 d = mLegA.borrowBalance(address(strategy));
+        return d > h ? d - h : 0;
+    }
+
+    function _driftLegB() internal view returns (uint256) {
+        (, uint128 h) = strategy.hedgedDebt();
+        uint256 d = mLegB.borrowBalance(address(strategy));
+        return d > h ? d - h : 0;
+    }
+
+    /**
+     * @dev THE FINDING. The harvest budget is ONE ceiling over TWO independent drifts. It used to be
+     *      handed to leg A whole, with leg B getting `budget - spentA` — and the spend path returned on
+     *      `budget == 0` BEFORE reading its market, so whenever leg A's drift priced at or above the
+     *      harvest (the normal state for the larger/faster leg on a thin harvest) leg B was never even
+     *      MEASURED. Every harvest in that band closed leg A and left leg B's short untouched, so a
+     *      partial hedge ROTATED the residual short onto one leg instead of shrinking it evenly.
+     *
+     *      Armed exactly in that band: leg A's drift alone costs more than the whole harvest, so the old
+     *      allocation gives leg B precisely zero. Both legs must now be hedged, and by the SAME FRACTION
+     *      of their own drift — which is what pro-rata means and what keeps a partial hedge leg-neutral.
+     */
+    function testPartialBudgetHedgesBothLegsProRataInsteadOfStarvingLegB() public {
+        _armAeroRouter();
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        // ASYMMETRIC drift on purpose — leg A at 100bps of its debt, leg B at 25bps. A 4:1 cost ratio
+        // makes a pro-rata split visibly different from any equal split as well as from "leg A first".
+        uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
+        uint256 iB = mLegB.borrowBalance(address(strategy)) / 400;
+        assertGt(iA, 0, "fixture must produce a measurable leg-A accrual");
+        assertGt(iB, 0, "fixture must produce a measurable leg-B accrual");
+        mLegA.accrueBorrowInterest(address(strategy), iA);
+        mLegB.accrueBorrowInterest(address(strategy), iB);
+
+        uint256 costA = _valueUsdc(iA, P_LEG_A, 18);
+        uint256 costB = _valueUsdc(iB, P_LEG_B, 8);
+        uint256 budget = (costA + costB) / 4; // covers a quarter of the total drift...
+        assertLt(budget, costA, "...and less than leg A ALONE: the band where leg B used to be starved");
+        _armHarvest(budget);
+
+        uint256 driftA0 = _driftLegA();
+        uint256 driftB0 = _driftLegB();
+        uint256 routerUsdc0 = usdc.balanceOf(address(router));
+
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        // THE BOUND: the shared ceiling still holds, and the whole of it was put to work.
+        uint256 spent = usdc.balanceOf(address(router)) - routerUsdc0;
+        assertLe(spent, budget, "total spend never exceeds the harvest budget");
+        assertApproxEqRel(spent, budget, 1e15, "...and no allocation dust was stranded by the division");
+
+        // THE ASSERTION: both legs hedged, at the SAME coverage ratio.
+        uint256 closedA = driftA0 - _driftLegA();
+        uint256 closedB = driftB0 - _driftLegB();
+        assertGt(closedB, 0, "leg B was hedged AT ALL - the finding (pre-fix this is exactly 0)");
+        uint256 fracA = Math.mulDiv(closedA, 1e18, driftA0);
+        uint256 fracB = Math.mulDiv(closedB, 1e18, driftB0);
+        assertApproxEqRel(fracA, fracB, 1e15, "the same FRACTION of each leg's drift was closed");
+        assertApproxEqRel(
+            fracA, Math.mulDiv(budget, 1e18, costA + costB), 1e15, "...and that fraction is the budget's coverage"
+        );
+
+        // GRACEFUL DEGRADATION, both legs: the unfunded remainder stays measured and carries.
+        assertGt(_driftLegA(), 0, "leg-A remainder carries");
+        assertGt(_driftLegB(), 0, "leg-B remainder carries");
+    }
+
+    /**
+     * @dev REGRESSION on the full-budget case, stated separately from
+     *      `testCompoundRehedgesBorrowInterestOnBOTHLegs` because the pro-rata split is a NO-OP there and
+     *      that has to stay true: each leg's spend is capped at its own cost, so an ample budget
+     *      neutralises both legs exactly as before and leaves the surplus for the redeploy.
+     */
+    function testFullBudgetStillNeutralisesBothLegsExactlyAndLeavesTheSurplusToRedeploy() public {
+        _armAeroRouter();
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
+        uint256 iB = mLegB.borrowBalance(address(strategy)) / 400;
+        mLegA.accrueBorrowInterest(address(strategy), iA);
+        mLegB.accrueBorrowInterest(address(strategy), iB);
+
+        uint256 total = _valueUsdc(iA, P_LEG_A, 18) + _valueUsdc(iB, P_LEG_B, 8);
+        uint256 budget = total * 5; // 5x the whole drift
+        _armHarvest(budget);
+
+        uint256 driftA0 = _driftLegA();
+        uint256 driftB0 = _driftLegB();
+        uint256 collateralBefore = (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18;
+        uint256 routerUsdc0 = usdc.balanceOf(address(router));
+
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        // >99.99% of each leg's drift closed. The residue is integer-division dust on the two-way oracle
+        // conversion (the spend is floored in 6dp USDC, then the min-out re-derived from it) and is the
+        // SAME dust the pre-refactor single-leg-at-a-time path left.
+        assertLt(_driftLegA() * 10_000, driftA0, "leg-A drift fully neutralised (to rounding dust)");
+        assertLt(_driftLegB() * 10_000, driftB0, "leg-B drift fully neutralised (to rounding dust)");
+        assertApproxEqRel(
+            usdc.balanceOf(address(router)) - routerUsdc0, total, 1e15, "spent ~the drift and not the budget"
+        );
+        assertGt(collateralBefore, 0, "sanity");
+        assertGt(
+            (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18,
+            collateralBefore,
+            "the surplus was redeployed"
+        );
+    }
 }
