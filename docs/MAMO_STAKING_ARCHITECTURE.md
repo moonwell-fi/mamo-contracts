@@ -459,6 +459,7 @@ sequenceDiagram
 | `setDefaultSlippage()` | StakingRegistry | Mamo Backend | Backend role | Global slippage configuration |
 | `pause()/unpause()` | StakingRegistry | Guardian | Guardian role | Emergency controls |
 | `setSlippagePriceChecker()` | StakingRegistry | Admin | Admin role, NOT pause-gated | Same reasoning as `setDEXRouter()` |
+| `setStakingRegistry(newRegistry)` | Strategy | Admin of the CURRENT staking registry | `stakingRegistry.hasRole(DEFAULT_ADMIN_ROLE, caller)`, NOT pause-gated | Migrates a strategy onto a redeployed registry. That role already controls the router and price checker the strategy uses, so this adds no capability. Candidate registry is probed for `slippagePriceChecker()`, `dexRouter()` and a matching `mamoToken()` |
 | `recoverERC20()/recoverETH()` | StakingRegistry | Admin | Admin role | Recovery functions |
 | `createStrategy(user)` | Factory | Backend, or `user` themselves | `hasRole(BACKEND_ROLE) \|\| msg.sender == user` | Thin alias for `createStrategyForUser`. Takes a `user` argument — it is NOT permissionless and NOT caller-implicit |
 | `createStrategyForUser(user)` | Factory | Backend, or `user` themselves | `hasRole(BACKEND_ROLE) \|\| msg.sender == user` | Address is deterministic in `user` alone, so a strategy can only ever be created once per user |
@@ -491,13 +492,28 @@ sequenceDiagram
      move a proxy to `latestImplementationById[itsOwnTypeId]`. The 3,846 strategies deployed by the
      deprecated factory `0xd7C3f474…` are `strategyTypeId == 2`, and this release whitelists its
      implementation under a NEW type id, so those proxies keep running the pre-fix code and the
-     guardian's pause does not stop reward processing for them. They also cannot take this
-     implementation even if it were whitelisted for type 2: it reads
-     `stakingRegistry.slippagePriceChecker()`, which reverts on both deployed staking registries
-     (`0xFf3bB816…`, `0xeC2fa154…`), and `stakingRegistry` is set once in `initialize` with no
-     setter. This is an accepted residual, not an oversight — closing it needs a fleet migration,
-     not a code change. `MamoStakingRegistry` is likewise not upgradeable (plain constructor, no
-     proxy), so every registry-side fix below also applies only to newly deployed registries.
+     guardian's pause does not stop reward processing for them. Whitelisting this implementation for
+     type 2 as well would make the fix reachable — the registry incompatibility that used to block
+     that is now solvable, see `setStakingRegistry` below — but it still requires each of the 3,846
+     owners to call `upgradeStrategy` themselves, since nothing can upgrade a user's strategy on
+     their behalf. Accepted residual pending that migration, not a code gap.
+   - ✅ **Registry-side fixes are deliverable to existing strategies (`setStakingRegistry`).**
+     `MamoStakingRegistry` is not upgradeable — plain constructor, no proxy — so any fix to it ships
+     as a fresh deployment. `stakingRegistry` used to be write-once in `initialize`, which stranded
+     every existing strategy on the registry it was born with: registry-side remediation could never
+     reach the fleet, and a strategy pointed at a registry missing a selector `compound()` needs was
+     permanently unable to compound (both registries deployed to date lack `slippagePriceChecker()`).
+     `setStakingRegistry` closes that. It is authorised by the **current** registry's
+     `DEFAULT_ADMIN_ROLE`, which grants no new capability: that role can already call `setDEXRouter`,
+     `setSlippagePriceChecker` and `setDefaultSlippage` on the registry every strategy reads, so it
+     already decides which router receives the reward-token allowance and what minimum-out floor
+     applies. Gating on `MamoStrategyRegistry`'s admin instead *would* be an escalation, since that
+     role cannot presently change a strategy's behaviour without the owner opting into an upgrade.
+     It is not pause-gated (migrating off a broken registry is remediation, and a registry can break
+     in ways that make unpausing impossible), and it cannot reach the staked principal —
+     `withdraw`/`withdrawAll` stay `onlyOwner` and `multiRewards` is a separate slot. The candidate
+     registry is probed by raw `staticcall` for `slippagePriceChecker()`, `dexRouter()` and a matching
+     `mamoToken()` before the write, so the exact dead-end above cannot be re-entered.
    - ⚠️ **`BACKEND_ROLE` setters are pause-gated, so remediation via them is not.** `addRewardToken`,
      `removeRewardToken`, `updateRewardTokenPool`, `setQuoter` and `setDefaultSlippage` all carry
      `whenNotPaused`, matching the convention in `MamoStrategyRegistry` and `MarketRegistry`. If an

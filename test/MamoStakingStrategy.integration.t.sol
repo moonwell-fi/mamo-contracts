@@ -1337,6 +1337,175 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         MamoStakingStrategy(userStrategy).compound(now_);
     }
 
+    // ─── setStakingRegistry: migrating off a non-upgradeable registry ────────────
+
+    /// @dev Deploys a MamoStakingRegistry from this branch's source, wired to the same MAMO token and
+    ///      the same admin/backend/guardian as the live one. MamoStakingRegistry has a plain
+    ///      constructor and no proxy, so a registry-side fix can only ship as a new deployment —
+    ///      which is exactly the migration setStakingRegistry exists to make possible.
+    function _deployReplacementRegistry() internal returns (MamoStakingRegistry replacement) {
+        replacement = new MamoStakingRegistry(
+            _stakingRegistryAdmin(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0),
+            address(mamoToken),
+            address(stakingRegistry.dexRouter()),
+            address(stakingRegistry.quoter()),
+            address(slippagePriceChecker),
+            100
+        );
+    }
+
+    function _stakingRegistryAdmin() internal view returns (address) {
+        return stakingRegistry.getRoleMember(stakingRegistry.DEFAULT_ADMIN_ROLE(), 0);
+    }
+
+    function testSetStakingRegistryByAdmin() public {
+        userStrategy = _deployUserStrategy(user);
+        MamoStakingRegistry replacement = _deployReplacementRegistry();
+        address admin = _stakingRegistryAdmin();
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit MamoStakingStrategy.StakingRegistryUpdated(address(stakingRegistry), address(replacement));
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(replacement));
+
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            address(replacement),
+            "Strategy should read configuration from the replacement registry"
+        );
+    }
+
+    /// @notice The whole point: a strategy must be able to compound after being migrated.
+    /// @dev Without setStakingRegistry, `stakingRegistry` was write-once, so a strategy born against a
+    ///      registry lacking a selector compound() needs could never compound again. This drives the
+    ///      real swap path against the replacement registry.
+    function testCompoundWorksAfterRegistryMigration() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MamoStakingRegistry replacement = _deployReplacementRegistry();
+
+        // The replacement needs the same reward-token configuration to route the accrued cbBTC.
+        address cbBtcPool = stakingRegistry.getRewardTokenPool(cbBTC);
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        replacement.addRewardToken(cbBTC, cbBtcPool);
+
+        vm.prank(_stakingRegistryAdmin());
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(replacement));
+
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(_deadline());
+
+        assertGt(multiRewards.balanceOf(userStrategy), stakedBefore, "Compound must work through the new registry");
+        assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Reward token should have been swapped");
+    }
+
+    /// @notice Rejects a registry that would brick compound() — the situation that created this need.
+    /// @dev MAMO_STAKING_REGISTRY_DEPRECATED genuinely reverts on `slippagePriceChecker()` on chain,
+    ///      and it is deliberately NOT covered by setUp's mock, so this is the real failure mode
+    ///      rather than a synthetic one. A typed call to a missing selector reverts in the caller's
+    ///      frame with empty returndata, so the probe has to be a raw staticcall with a length check.
+    function testSetStakingRegistryRevertsWhenRegistryHasNoPriceChecker() public {
+        userStrategy = _deployUserStrategy(user);
+        address deprecated = addresses.getAddress("MAMO_STAKING_REGISTRY_DEPRECATED");
+
+        // Prove the fixture is the real thing: the selector genuinely does not answer.
+        (bool ok,) = deprecated.staticcall(abi.encodeWithSignature("slippagePriceChecker()"));
+        assertFalse(ok, "Fixture must be a registry that truly lacks slippagePriceChecker()");
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Staking registry has no price checker");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(deprecated);
+    }
+
+    function testSetStakingRegistryRevertsOnMamoTokenMismatch() public {
+        userStrategy = _deployUserStrategy(user);
+
+        MamoStakingRegistry wrongToken = new MamoStakingRegistry(
+            _stakingRegistryAdmin(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0),
+            addresses.getAddress("cbBTC"), // not MAMO
+            address(stakingRegistry.dexRouter()),
+            address(stakingRegistry.quoter()),
+            address(slippagePriceChecker),
+            100
+        );
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Staking registry MAMO token mismatch");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(wrongToken));
+    }
+
+    /// @notice Neither the backend nor the strategy owner may repoint the registry.
+    /// @dev The authority is the CURRENT registry's DEFAULT_ADMIN_ROLE, chosen because that role can
+    ///      already redirect every compound() swap via setDEXRouter. Pinning backend and owner as
+    ///      rejected is what makes this test discriminating — a random-address check would pass under
+    ///      almost any gate.
+    function testSetStakingRegistryRevertsForNonAdmin() public {
+        userStrategy = _deployUserStrategy(user);
+        address replacement = address(_deployReplacementRegistry());
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+
+        assertTrue(
+            stakingRegistry.hasRole(stakingRegistry.BACKEND_ROLE(), backend),
+            "backend must genuinely hold BACKEND_ROLE for this to mean anything"
+        );
+
+        vm.prank(backend);
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        vm.prank(user); // the strategy owner
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        vm.prank(makeAddr("randomUser"));
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+    }
+
+    function testSetStakingRegistryRevertsOnInvalidTargets() public {
+        userStrategy = _deployUserStrategy(user);
+        address admin = _stakingRegistryAdmin();
+
+        vm.prank(admin);
+        vm.expectRevert("Invalid staking registry");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(0));
+
+        vm.prank(admin);
+        vm.expectRevert("Staking registry already set");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(stakingRegistry));
+
+        vm.prank(admin);
+        vm.expectRevert("Staking registry not a contract");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(makeAddr("notAContract"));
+    }
+
+    /// @notice Migration must work while the old registry is paused.
+    /// @dev Moving off a broken registry is remediation, and a registry can be broken in ways that
+    ///      make unpausing it impossible, so the pause must not stand between the fleet and the fix.
+    function testSetStakingRegistrySucceedsWhileOldRegistryPaused() public {
+        userStrategy = _deployUserStrategy(user);
+        MamoStakingRegistry replacement = _deployReplacementRegistry();
+        address guardian = stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0);
+
+        vm.prank(guardian);
+        stakingRegistry.pause();
+        assertTrue(stakingRegistry.paused(), "old registry should be paused");
+
+        vm.prank(_stakingRegistryAdmin());
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(replacement));
+
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            address(replacement),
+            "Migration must not require unpausing the broken registry"
+        );
+    }
+
     /// @notice MOO-744 follow-up: the caller-supplied deadline needs an upper bound too.
     /// @dev Without one, compound(type(uint256).max) restores exactly the tautology the
     ///      caller-supplied deadline removed — an unbounded-lifetime swap authorisation — while

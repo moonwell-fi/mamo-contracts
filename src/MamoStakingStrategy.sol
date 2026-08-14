@@ -55,6 +55,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
+    event StakingRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
     /// @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -106,6 +107,71 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         stakingRegistry = MamoStakingRegistry(params.stakingRegistry);
         multiRewards = IMultiRewards(params.multiRewards);
         mamoToken = IERC20(params.mamoToken);
+    }
+
+    /**
+     * @notice Repoints this strategy at a different MamoStakingRegistry
+     * @dev MamoStakingRegistry is NOT upgradeable — plain constructor, no proxy — so any fix to it
+     *      ships as a fresh deployment. Without this function `stakingRegistry` was write-once in
+     *      initialize(), which stranded every existing strategy on the registry it was born with:
+     *      registry-side remediations could never reach the deployed fleet, and a strategy pointed at
+     *      a registry missing a selector compound() needs was permanently bricked for compounding.
+     *
+     * @dev Authorised by the CURRENT registry's DEFAULT_ADMIN_ROLE, and that choice is the security
+     *      argument: this grants no capability that role does not already hold. It can already call
+     *      setDEXRouter, setSlippagePriceChecker and setDefaultSlippage on the registry every
+     *      strategy reads, so it already decides which router receives the reward-token allowance in
+     *      compound() and what minimum-out floor applies. Gating instead on MamoStrategyRegistry's
+     *      admin WOULD be an escalation: that role cannot presently change a strategy's behaviour
+     *      without the owner opting into an upgrade.
+     *
+     * @dev Deliberately not gated on the registry's pause state. Migrating off a broken registry is
+     *      remediation, and a registry can be broken in ways that make unpausing impossible.
+     *
+     * @dev Cannot reach the staked principal: withdraw/withdrawAll stay onlyOwner and multiRewards is
+     *      a separate storage slot this function does not touch. The blast radius is reward routing
+     *      during compound(), which is the current admin's existing reach.
+     *
+     * @param newStakingRegistry The registry to point at
+     */
+    function setStakingRegistry(address newStakingRegistry) external {
+        MamoStakingRegistry currentRegistry = stakingRegistry;
+        require(currentRegistry.hasRole(currentRegistry.DEFAULT_ADMIN_ROLE(), msg.sender), "Not staking registry admin");
+
+        require(newStakingRegistry != address(0), "Invalid staking registry");
+        require(newStakingRegistry != address(currentRegistry), "Staking registry already set");
+        require(newStakingRegistry.code.length != 0, "Staking registry not a contract");
+
+        // Probe the surface compound() depends on before committing. This is the check whose absence
+        // produced the un-migratable fleet in the first place: both registries deployed to date lack
+        // slippagePriceChecker(), so a strategy pointed at one can never compound. Raw staticcalls
+        // with an explicit returndata check, because a typed call against a contract missing the
+        // selector reverts in THIS frame with no data and is indistinguishable from an internal bug.
+        require(_readsAddress(newStakingRegistry, "slippagePriceChecker()"), "Staking registry has no price checker");
+        require(_readsAddress(newStakingRegistry, "dexRouter()"), "Staking registry has no DEX router");
+
+        // The MAMO token is what this strategy stakes; a registry disagreeing about it would price
+        // and route swaps for a different asset than the one held.
+        (bool ok, bytes memory ret) = newStakingRegistry.staticcall(abi.encodeWithSignature("mamoToken()"));
+        require(ok && ret.length == 32, "Staking registry has no MAMO token");
+        require(abi.decode(ret, (address)) == address(mamoToken), "Staking registry MAMO token mismatch");
+
+        stakingRegistry = MamoStakingRegistry(newStakingRegistry);
+
+        emit StakingRegistryUpdated(address(currentRegistry), newStakingRegistry);
+    }
+
+    /**
+     * @notice Whether `target` answers `selector` with a non-zero address
+     * @dev Fails closed: a missing selector returns empty returndata, which reads as false rather
+     *      than bubbling an undecodable revert out of the caller's frame.
+     */
+    function _readsAddress(address target, string memory signature) private view returns (bool) {
+        (bool ok, bytes memory ret) = target.staticcall(abi.encodeWithSignature(signature));
+        if (!ok || ret.length != 32) {
+            return false;
+        }
+        return abi.decode(ret, (address)) != address(0);
     }
 
     /**
