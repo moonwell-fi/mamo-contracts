@@ -150,6 +150,24 @@ library LeveragedAeroValuation {
     ///         Selector shared with the strategy.
     error ComptrollerCallFailed();
 
+    // ── Events (this library's `public` functions are DELEGATECALLED, so they log from the STRATEGY's
+    //    address and the declaration is mirrored in `LeveragedAerodromeCLStrategy`'s ABI) ──
+
+    /// @notice `_measureLeg` could not read `market`'s accrued debt — the Moonwell accrual reverted — so
+    ///         that leg's drift was taken as ZERO for this harvest and the leg went UNHEDGED.
+    /// @dev The fourth of this stack's deliberate fail-opens, and it follows the same naming: `…Degraded`
+    ///      means a GUARD fell back and the op ran on with less protection (the interest hedge is the
+    ///      guard against accumulating short exposure; `compound` itself completes). Exactly like
+    ///      `RedeemSweepFloorsDegraded`, a degraded INPUT (here the measured debt, there the min-out
+    ///      floors) is substituted with a zero and the surrounding code path runs unchanged — which is
+    ///      why this is not a `…Deferred`, even though the effect on that one leg is a skipped buy.
+    ///
+    ///      WHY A LOG IS MANDATORY HERE. The unhedged remainder stays in `debt − hedged` and the next
+    ///      healthy harvest closes it, so nothing is lost — but a leg whose market never recovers accrues
+    ///      an unbounded, unintended SHORT with a perfectly successful `compound` in every block, i.e. the
+    ///      precise failure the hedge exists to prevent, returning invisibly. `market` identifies the leg.
+    event HedgeLegMeasureDegraded(address market);
+
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
 
@@ -697,7 +715,7 @@ library LeveragedAeroValuation {
     /// @dev VENUE PLUMBING ONLY — every decision stays with the caller: which token, how much (and the
     ///      caps that bound it), and what `minOut` bound applies. `LeveragedAeroManager` calls this from
     ///      `_swapUsdcExactIn` and `_sweepLegToUsdc` AFTER their identity guards / balance caps, and
-    ///      `_hedgeLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
+    ///      `_spendLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
     ///      construction exists once instead of three times. Relocated out of the manager for EIP-170
     ///      headroom; a 6-argument flat surface is why it is a net saving there.
     /// @param router      Slipstream CL SwapRouter.
@@ -877,7 +895,7 @@ library LeveragedAeroValuation {
     ///      track — making `debt − hedged` the market's own "interest accrued since our last touch",
     ///      obtained with no `borrowIndex()` read and no extra Layout field per leg beyond the basis
     ///      itself. The `debt` side of that subtraction is read with `borrowBalanceCurrent`, i.e. AFTER
-    ///      accruing the market — see `_hedgeLeg` for why the stored index is not good enough here.
+    ///      accruing the market — see `_measureLeg` for why the stored index is not good enough here.
     ///
     ///      WHY REPAY RATHER THAN BUY-AND-ADD. Adding the interest amount into the LP would keep leverage
     ///      constant, but a CL add needs PAIRED USDC at the live range ratio, so it re-levers the book and
@@ -920,7 +938,9 @@ library LeveragedAeroValuation {
     ///      no second read that could see a different (post-repay, re-capitalised) index. The one behaviour
     ///      change is that leg B is now accrued even when it will receive no budget — that is inherent to
     ///      measuring before allocating, it costs one market touch, and it leaves the leg market fresh for
-    ///      the rest of the transaction (the same benefit the accrual note above already claims).
+    ///      the rest of the transaction (the same benefit the accrual note above already claims). Because
+    ///      that touch would otherwise make a sick leg market able to revert the WHOLE harvest, the measure
+    ///      is fail-open per leg and marks itself — see `_measureLeg` and `HedgeLegMeasureDegraded`.
     /// @param b       The whole book's inputs; see `HedgeBook`.
     /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget); never
     ///                more than `b.budgetUsdc`.
@@ -1010,6 +1030,28 @@ library LeveragedAeroValuation {
     ///
     ///      A leg with no drift still reads no feed: the `debt <= hedged` return happens before the
     ///      `readUsd8`, so a quiet book adds no oracle-liveness dependency to the harvest.
+    ///
+    ///      ...AND THE MARKET TOUCH IS THEREFORE FAIL-OPEN (`HedgeLegMeasureDegraded`). Unconditional
+    ///      measuring is what makes the pro-rata split correct, but it also makes `borrowBalanceCurrent`
+    ///      — a STATE-CHANGING Moonwell call that reverts whenever `accrueInterest` fails, e.g. a paused
+    ///      or arithmetically-broken market — a hard liveness dependency of `compound` on BOTH legs. In
+    ///      the two-borrowed-legs shape with fee + hedge consuming the whole harvest, `deployIdleImpl` is
+    ///      skipped and this is the ONLY touch of the leg's market in the transaction, so one sick market
+    ///      would revert the entire harvest: the AERO sale, the fee crystallisation and the OTHER leg's
+    ///      hedge included. That contradicts this hedge's founding contract — a hedge that cannot be
+    ///      completed carries its remainder to the next harvest, it never reverts the harvest.
+    ///
+    ///      So the read is `try`/`catch`ed and a failure degrades THIS leg's drift to zero: the leg goes
+    ///      unhedged for this harvest, the other leg still gets the whole budget (its `costUsdc` is then
+    ///      the whole of `total`), and `compound` completes. BOTH legs are wrapped, not just leg B: the
+    ///      invariant is about the harvest surviving a hedge problem, not about which leg had it, and
+    ///      `_measureLeg` is one function serving both — a leg-B-only fail-open would need an extra
+    ///      parameter to make the behaviour WORSE. Degrading is never silent (see the event) and never
+    ///      loses value: the unmeasured interest stays in `debt − hedged` for the next harvest, exactly
+    ///      as a budget shortfall does.
+    ///
+    ///      The `catch` cannot distinguish the expected causes from an out-of-gas — the same caveat the
+    ///      stack's other fail-opens carry, and the same reason the degradation is marked on-chain.
     function _measureLeg(
         HedgeBook memory b,
         address market,
@@ -1018,7 +1060,13 @@ library LeveragedAeroValuation {
         uint256 hedged,
         uint256 pUsdc
     ) private returns (LegDrift memory d) {
-        uint256 debt = IMoonwellMarket(market).borrowBalanceCurrent(address(this));
+        uint256 debt;
+        try IMoonwellMarket(market).borrowBalanceCurrent(address(this)) returns (uint256 accrued) {
+            debt = accrued;
+        } catch {
+            emit HedgeLegMeasureDegraded(market);
+            return d; // zero drift ⇒ zero allocation ⇒ `_spendLeg` no-ops on this leg
+        }
         if (debt <= hedged) return d;
         d.amount = debt - hedged;
 

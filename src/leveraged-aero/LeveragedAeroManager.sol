@@ -989,7 +989,7 @@ library LeveragedAeroManager {
     ///      Returns `debtUsdc == 0` (skipping the price reads) when both borrows are clear.
     ///
     ///      STORED-INDEX STALENESS HERE IS A KNOWN, DELIBERATELY UNCHANGED RESIDUAL — do not "fix" it by
-    ///      analogy with `LeveragedAeroValuation._hedgeLeg` (which reads `borrowBalanceCurrent`). The two
+    ///      analogy with `LeveragedAeroValuation._measureLeg` (which reads `borrowBalanceCurrent`). The two
     ///      cases are not alike:
     ///
     ///        - The hedge MEASURES accrued interest, so a stale read makes its answer ~0 and the feature

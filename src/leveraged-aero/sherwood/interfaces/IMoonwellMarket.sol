@@ -23,7 +23,7 @@ interface IMoonwellMarket is ICToken {
     ///      `_assertHealthy`, `_readCollateralDebt`) and for the reads that immediately follow a
     ///      borrow/repay in the same tx (those calls accrue+capitalise first, so stored IS current).
     ///      Any path that MEASURES accrued interest must use `borrowBalanceCurrent` instead — see
-    ///      `LeveragedAeroValuation._hedgeLeg`.
+    ///      `LeveragedAeroValuation._measureLeg`.
     function borrowBalanceStored(address account) external view returns (uint256);
 
     /// @notice Accrues interest to the current timestamp, then returns `account`'s borrow balance.

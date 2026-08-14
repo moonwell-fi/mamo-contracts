@@ -5,6 +5,7 @@ import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
+import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
@@ -1152,7 +1153,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         _setLegSellRate(9800);
 
         vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed; every feed now stale
-        vm.expectRevert(); // sanity: the oracle really is down for this book
+        // Sanity: the oracle really is down for this book — and down for THAT reason. The specific
+        // selector matters: a bare `expectRevert()` would also pass if `nav()` broke for an unrelated
+        // reason, quietly turning the premise of this test into a tautology. `nav()` prices its legs
+        // through `LeveragedAeroValuation.readUsd8` → `ChainlinkReader.readUsd`, whose `age > maxDelay`
+        // branch (the 1-hour `maxDelay` against a 2-day warp) raises `StaleOracle`.
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
         strategy.nav();
 
         uint256 lpBefore = usdc.balanceOf(lp);
@@ -1394,5 +1400,167 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             collateralBefore,
             "the surplus was redeployed"
         );
+    }
+
+    // ====== A SICK LEG MARKET DEGRADES ITS OWN HEDGE, NOT THE HARVEST (review finding: liveness) ======
+    //
+    // Measuring both legs unconditionally is what makes the pro-rata split above correct, but it turned
+    // `borrowBalanceCurrent` — a STATE-CHANGING Moonwell call that reverts whenever `accrueInterest`
+    // fails (a paused / arithmetically-broken market) — into a hard liveness dependency of `compound` on
+    // BOTH legs. The old shape returned on a per-leg `budget == 0` BEFORE touching the market, so a
+    // budget-starved leg never reached it. In the band armed below (fee + hedge consume the whole
+    // harvest, so `deployIdleImpl` is skipped) the hedge measure is the ONLY touch of that leg's market
+    // in the call, and one sick market would therefore have reverted the WHOLE harvest — the AERO sale,
+    // the fee crystallisation and the OTHER leg's hedge included.
+    //
+    // `_measureLeg` now degrades that leg's drift to zero instead, marking it with
+    // `HedgeLegMeasureDegraded`. Both legs are wrapped, not just leg B: the invariant is that the harvest
+    // survives a hedge problem, not that leg B is special — the (b) test below is the leg-A mirror.
+
+    /// @dev Break `market`'s accrual the way Moonwell does — `borrowBalanceCurrent` is
+    ///      `require(accrueInterest() == NO_ERROR, "accrue interest failed")`, so the failure surfaces as
+    ///      a plain string revert. `borrowBalanceStored` (used by `nav()`, `_assertHealthy` and this
+    ///      suite's own helpers) is deliberately left working: the point is a market that cannot ACCRUE,
+    ///      not a market that has vanished.
+    function _breakAccrual(address market) internal {
+        vm.mockCallRevert(
+            market,
+            abi.encodeWithSelector(MockLendingMarket.borrowBalanceCurrent.selector),
+            abi.encodeWithSignature("Error(string)", "accrue interest failed")
+        );
+    }
+
+    /// @dev Count the degradation markers raised from the STRATEGY's address (both the manager and the
+    ///      valuation library are delegatecalled), and return the market named by the last one.
+    function _degradations(Vm.Log[] memory logs) internal view returns (uint256 n, address market) {
+        for (uint256 i; i < logs.length; i++) {
+            if (
+                logs[i].emitter == address(strategy)
+                    && logs[i].topics[0] == LeveragedAerodromeCLStrategy.HedgeLegMeasureDegraded.selector
+            ) {
+                n++;
+                market = abi.decode(logs[i].data, (address));
+            }
+        }
+    }
+
+    /// @dev Arm the two-leg book with drift on BOTH legs and a harvest budget SHORT of leg A's drift
+    ///      alone — the band where the whole harvest is consumed by the hedge, `deployIdleImpl` is
+    ///      skipped, and the measure is consequently the only touch of either leg's market.
+    /// @return driftA0 leg-A drift, `driftB0` leg-B drift, `budget` the armed harvest (6dp).
+    function _armTwoLegDriftAndAThinHarvest() internal returns (uint256 driftA0, uint256 driftB0, uint256 budget) {
+        _armAeroRouter();
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
+        uint256 iB = mLegB.borrowBalance(address(strategy)) / 100;
+        mLegA.accrueBorrowInterest(address(strategy), iA);
+        mLegB.accrueBorrowInterest(address(strategy), iB);
+
+        driftA0 = _driftLegA();
+        driftB0 = _driftLegB();
+        assertGt(driftA0, 0, "fixture must arm a leg-A drift");
+        assertGt(driftB0, 0, "fixture must arm a leg-B drift");
+
+        // 99% of the SMALLER leg's cost: strictly below either leg's own cost, so whichever leg survives
+        // takes the whole budget, spends all of it, and leaves `redeploy == 0`.
+        uint256 costA = _valueUsdc(driftA0, P_LEG_A, 18);
+        uint256 costB = _valueUsdc(driftB0, P_LEG_B, 8);
+        budget = ((costA < costB ? costA : costB) * 99) / 100;
+        _armHarvest(budget);
+    }
+
+    /**
+     * @dev (a) THE REGRESSION, on the leg it bites. Leg B's market cannot accrue; the harvest must still
+     *      complete in full and only leg B's hedge may be lost.
+     */
+    function testABrokenLegBMarketDegradesThatLegAndTheHarvestStillCompletes() public {
+        (uint256 driftA0, uint256 driftB0, uint256 budget) = _armTwoLegDriftAndAThinHarvest();
+        _breakAccrual(address(mLegB));
+
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
+        uint256 usdcInSwapRouter0 = usdc.balanceOf(address(router));
+        uint256 collateral0 = mUsdc.balanceOf(address(strategy));
+        assertEq(strategy.layout().hwmPerShare, 0, "no crystallisation has happened on this book yet");
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.compound(1, 0); // pre-fix: reverts here, taking the whole harvest with it
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        // 1. THE DEGRADATION IS MARKED, once, naming leg B's market, from the strategy's own address.
+        (uint256 marks, address named) = _degradations(logs);
+        assertEq(marks, 1, "exactly one leg degraded");
+        assertEq(named, address(mLegB), "...and it is leg B's market that is named");
+
+        // 2. THE REWARD SALE HAPPENED — the AERO left the strategy and reached the v2 router.
+        assertEq(aero.balanceOf(address(strategy)), 0, "the whole claim was sold");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, budget * 1e12, "...to the AERO->USDC router");
+
+        // 3. THE FEE CRYSTALLISATION HAPPENED and its state stuck (it precedes the hedge, so a reverting
+        //    hedge would have rolled it back with everything else). No deferral marker either.
+        assertGt(strategy.layout().hwmPerShare, 0, "the pre-compound crystallise ran and persisted");
+        for (uint256 i; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.FeeCrystallizeDeferred.selector,
+                "the crystallise was not deferred either"
+            );
+        }
+
+        // 4. LEG A'S HEDGE HAPPENED, and took the WHOLE budget: with leg B's cost degraded to 0 the
+        //    pro-rata split allocates everything to the surviving leg.
+        assertEq(usdc.balanceOf(address(router)) - usdcInSwapRouter0, budget, "the whole budget bought leg A");
+        assertApproxEqRel(driftA0 - _driftLegA(), (driftA0 * 99) / 100, 1e15, "leg A hedged by ~the budget's coverage");
+
+        // 5. LEG B PAID FOR ITS OWN BROKEN MARKET, AND ONLY THAT: its drift is untouched and carries
+        //    whole to the next harvest, exactly as an unfunded remainder does.
+        assertEq(_driftLegB(), driftB0, "leg B's drift carries in full");
+
+        // 6. ...and this really WAS the only touch of leg B's market: the hedge consumed the whole
+        //    harvest, so `deployIdleImpl` never ran. Nothing else in the call could have covered it.
+        assertEq(mUsdc.balanceOf(address(strategy)), collateral0, "redeploy skipped (redeploy == 0)");
+    }
+
+    /**
+     * @dev (b) THE SYMMETRY, and the reason the fail-open is not leg-B-only. Nothing about the argument
+     *      is specific to leg B — it is "the harvest survives a hedge problem", and leg A's market can be
+     *      paused just as leg B's can. Same book, same budget, the OTHER market broken: the harvest still
+     *      completes and leg B is now the one hedged with the whole budget.
+     */
+    function testABrokenLegAMarketDegradesThatLegInstead() public {
+        (uint256 driftA0, uint256 driftB0, uint256 budget) = _armTwoLegDriftAndAThinHarvest();
+        _breakAccrual(address(mLegA));
+
+        uint256 usdcInSwapRouter0 = usdc.balanceOf(address(router));
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        (uint256 marks, address named) = _degradations(vm.getRecordedLogs());
+        assertEq(marks, 1, "exactly one leg degraded");
+        assertEq(named, address(mLegA), "...and it is leg A's market that is named");
+
+        assertEq(usdc.balanceOf(address(router)) - usdcInSwapRouter0, budget, "the whole budget bought leg B");
+        assertApproxEqRel(driftB0 - _driftLegB(), (driftB0 * 99) / 100, 1e15, "leg B hedged by ~the budget's coverage");
+        assertEq(_driftLegA(), driftA0, "leg A's drift carries in full");
+    }
+
+    /**
+     * @dev (c) THE MARKER IS NOT FREE-RUNNING. A healthy two-leg harvest must emit NOTHING — an event
+     *      that always fires tells a monitor nothing about a leg that has stopped being hedged.
+     */
+    function testAHealthyTwoLegHarvestMarksNoDegradation() public {
+        _armTwoLegDriftAndAThinHarvest();
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        (uint256 marks,) = _degradations(vm.getRecordedLogs());
+        assertEq(marks, 0, "a healthy harvest degrades nothing");
     }
 }

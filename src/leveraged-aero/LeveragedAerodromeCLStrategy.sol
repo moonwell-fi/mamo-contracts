@@ -192,9 +192,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     // a log the degradation leaves no on-chain trace whatsoever, so a monitor cannot tell a healthy op
     // from one that ran with a guard switched off.
     //
-    // NAMING, applied consistently across the three: `…Deferred` = an optional ACTION was skipped (the
+    // NAMING, applied consistently across the four: `…Deferred` = an optional ACTION was skipped (the
     // reward sales); `…Degraded` = a GUARD fell back and the op ran with less protection (the redeem
-    // sweep floors, declared on `LeveragedAeroManager` and emitted from this address via delegatecall).
+    // sweep floors, declared on `LeveragedAeroManager`, and the interest-hedge measure, declared on
+    // `LeveragedAeroValuation` — both emitted from this address via delegatecall).
 
     /// @dev The terminal settle's best-effort sale of the final reward tranche reverted and was
     ///      skipped; the settle completed. Expect it on a stale/paused reward feed or a reward-route
@@ -214,6 +215,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      venue-migration events above are. Means an async redeem's closing leg sweeps ran with their
     ///      Chainlink min-out floors at ZERO: the swaps were unbounded for that call.
     event RedeemSweepFloorsDegraded();
+
+    /// @dev Mirror of `LeveragedAeroValuation.HedgeLegMeasureDegraded` — that library's `public`
+    ///      functions are delegatecalled too, so it logs from THIS address and belongs in this ABI.
+    ///      Means a `compound` could not read one leg's accrued Moonwell debt (the accrual reverted), so
+    ///      that leg's borrow-interest hedge was SKIPPED for that harvest while the rest of the compound
+    ///      — reward sale, fee crystallisation, the other leg's hedge, the redeploy — completed. The
+    ///      remainder carries to the next harvest; a leg that keeps emitting this is accumulating an
+    ///      unintended short and needs its market looked at. `market` is the leg's Moonwell market.
+    event HedgeLegMeasureDegraded(address market);
 
     // ── Access control ──
 
