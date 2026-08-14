@@ -646,12 +646,14 @@ library LeveragedAeroValuation {
     ///      pairing must be idle-funded rather than funded by swapping part of the borrow, and for the
     ///      operator consequence (idle moves into the LP, shrinking the redeem cover budget).
     ///      Deliberately NOT a partial fill and NOT a silent cap — a quietly under-levered position is
-    ///      worse for a rebalancer than a loud, diagnosable `(needed, available)` refusal.
+    ///      worse for a rebalancer than a loud, diagnosable `(needed, available)` refusal. (Through the
+    ///      manager the corrected draw is provably < raw + collateral, so this bound is defence in
+    ///      depth for DIRECT library callers; the manager's realistic funding failure is Moonwell
+    ///      refusing the mid-op redeem — see `_leverUp`.)
     ///
     ///      Ratio basis / overflow / one-sided-range behaviour are exactly `assetModeSplit`'s (shared
     ///      `_rangeRatio`): the pool's live `sqrtP` (calm-gate is the caller's job), `Math.mulDiv` for
     ///      the 512-bit intermediate, and `DegenerateRange` when the stored range is one-sided.
-    /// @param pool         The Slipstream CL pool (read for the live `sqrtP`).
     ///      ── THE COLLATERAL-FUNDED CORRECTION (`targetLtvBps`) ──
     ///
     ///      The relation above is exact only while `U′` comes from a NAV component that is NOT
@@ -695,6 +697,7 @@ library LeveragedAeroValuation {
     ///          case above.
     ///      The clamp is not a safety valve, it is the boundary of the piecewise solution: past `R = U′`
     ///      the collateral draw is zero and cannot go negative, so scaling UP would over-pair.
+    /// @param pool           The Slipstream CL pool (read for the live `sqrtP`).
     /// @param tickLower      Lower tick of the STORED range the add will target.
     /// @param tickUpper      Upper tick of that range.
     /// @param borrowUsd6     The NAIVE debt delta (`ltv·C − D`, USDC face 6dp) the caller wants to add;

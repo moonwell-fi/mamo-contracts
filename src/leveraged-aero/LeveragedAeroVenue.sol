@@ -61,6 +61,8 @@ library LeveragedAeroVenue {
     error BelowOracleFloor(); // flatten's reward-swap fill < the AERO/USD oracle floor (L9)
     error InsufficientIdleAfterFlatten(uint256 idle, uint256 minIdle); // caller's aggregate unwind floor
     error MoonwellMintFailed(uint256 errCode); // selector mirrors the strategy's / the manager's
+    error MoonwellRedeemFailed(uint256 errCode); // selector mirrors the manager's
+    error InsufficientIdle(); // selector mirrors the strategy's / the manager's
 
     // ── Events (emitted from the strategy's address via delegatecall) ──
     /// @notice A destination venue hash was staged (or cleared, when `venueHash == 0`) by the vault owner.
@@ -264,6 +266,62 @@ library LeveragedAeroVenue {
         IERC20($.usdc).forceApprove($.mUsdc, amount);
         uint256 err = ICToken($.mUsdc).mint(amount);
         if (err != 0) revert MoonwellMintFailed(err);
+    }
+
+    /// @notice Redeem `amount` of raw USDC out of the strategy's mUSDC collateral — the body of the
+    ///         proposer's `LeveragedAerodromeCLStrategy.withdrawIdle`, the exact inverse of
+    ///         `supplyIdleImpl`.
+    /// @dev THE DIAL TURNS BOTH WAYS. `supplyIdle`'s trade-off — supplied USDC earns, raw USDC is the
+    ///      oracle-free IL-cover budget `redeemUnwindImpl` Phase 1 (and so the `emergencyRedeem`
+    ///      deadman) spends — is only an operator POLICY if the operator can move it in both
+    ///      directions. Without this op a keeper who over-parked could restore the raw float only by
+    ///      levering the book (`deployIdle`) or exiting the venue entirely (`flatten`); with it,
+    ///      re-sizing the float is the same class of keeper action as parking it.
+    ///
+    ///      AUTH LIVES IN THE STRATEGY ENTRYPOINT; THE BOUND LIVES HERE: `amount` is restricted to
+    ///      the UN-LEVERED collateral (`_unleveredCollateral`), so the op can never push LTV above
+    ///      the standing target — the same discipline `checkDeployableIdle` enforces on the way
+    ///      in. FAIL-CLOSED: a redeem the market's cash (or Moonwell's own collateral check)
+    ///      cannot cover reverts `MoonwellRedeemFailed(err)` with nothing moved.
+    function withdrawIdleImpl(uint256 amount) public {
+        if (amount == 0) return;
+        if (amount > _unleveredCollateral()) revert InsufficientIdle();
+        Layout storage $ = _layout();
+        uint256 err = ICToken($.mUsdc).redeemUnderlying(amount);
+        if (err != 0) revert MoonwellRedeemFailed(err);
+    }
+
+    /// @notice Revert `InsufficientIdle` unless `amount` ≤ raw USDC + UN-LEVERED collateral — the
+    ///         funding bound of the proposer's `deployIdle` (the manager's own `_usdcAvailable()`
+    ///         check stays as a belt).
+    /// @dev WHY NOT RAW + ALL COLLATERAL: `_supplyAndBorrow` sizes its borrow off the GROSS amount on
+    ///      the assumption that the amount is fresh, not-yet-levered NAV. Funded from collateral that
+    ///      already backs debt, a `deployIdle` is redeem → supply-straight-back → borrow — a net
+    ///      debt-only increase that re-levers the same USDC twice and walks LTV from `targetLtvBps`
+    ///      toward `maxLtvBps` with no admin action, the exact capability the admin-only target split
+    ///      denies the `onlyProposer` key. Bounding by the un-levered slice refuses that with a typed
+    ///      error instead of deferring to Moonwell's free-collateral line (`MoonwellRedeemFailed`).
+    function checkDeployableIdle(uint256 amount) public view {
+        Layout storage $ = _layout();
+        if (amount > IERC20($.usdc).balanceOf(address(this)) + _unleveredCollateral()) {
+            revert InsufficientIdle();
+        }
+    }
+
+    /// @dev mUSDC collateral NOT already backing debt at the standing target:
+    ///      `C − ceil(D·1e4/targetLtvBps)`, floored at 0. THE PROPOSER'S SPENDABLE-COLLATERAL BASIS —
+    ///      `deployIdle` may fund itself from raw + this, `withdrawIdle` from this alone. Both bounds
+    ///      exist for the same reason: collateral backing debt at target is NOT idle, and either
+    ///      spending it (deploy) or removing it (withdraw) moves LTV above the admin-set target with
+    ///      no admin action. Zero-debt books take `_readCollateralDebt`'s fast path (no feed reads),
+    ///      so the bound stays oracle-free exactly where `supplyIdle`'s flat-book use case needs it;
+    ///      with live debt the feeds are read — the same fail-closed posture as every levered op.
+    function _unleveredCollateral() private view returns (uint256) {
+        (uint256 collateralUsdc, uint256 debtUsdc) = LeveragedAeroManager.readCollateralDebtImpl();
+        if (debtUsdc == 0) return collateralUsdc;
+        uint256 t = uint256(_layout().targetLtvBps);
+        uint256 backing = (debtUsdc * 10_000 + t - 1) / t;
+        return collateralUsdc > backing ? collateralUsdc - backing : 0;
     }
 
     // ── Migration ops (auth + state gates live in the strategy's entry points) ──

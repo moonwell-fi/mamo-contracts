@@ -719,6 +719,62 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved across the collateral-funded lever-up");
     }
 
+    /**
+     * @dev THE INTERMEDIATE FUNDING REGIME — `0 < raw < U′`, the state a real book lives in most of
+     *      the time (a keeper float, a rerange remainder, an IL-cover leftover). This is the ONLY
+     *      regime where both terms of the fixed point are load-bearing at once: the `ltv·R` credit in
+     *      the numerator vanishes at `raw == 0`, and the clamp discards the whole correction when
+     *      `raw ≥ U′` — so a sign or scale error in that term is invisible to both endpoint tests and
+     *      shows up only here.
+     *
+     *      Asserted: the raw float is consumed FIRST and in full, only the shortfall `U′ − R` comes
+     *      out of the collateral, the post-op LTV is the requested target (not the overshoot, not the
+     *      over-corrected undershoot), and NAV is conserved.
+     */
+    function testAssetModeLeverUpLandsOnTargetWithAPartialRawFloat() public {
+        _execute(SEED);
+        // Sweep the genesis dust, then leave a float sized strictly inside (0, U′): half the U′ the
+        // zero-raw probe reports (the real U′ at this raw is slightly LARGER — the credit scales the
+        // whole pair up — so the float stays strictly short of it).
+        uint256 dust = usdc.balanceOf(address(strategy));
+        if (dust > 0) {
+            vm.prank(address(strategy));
+            usdc.transfer(address(0xDEAD), dust);
+        }
+        uint16 newTarget = 6000;
+        (, uint256 u0Probe) = _expectedLeverUpPair(newTarget);
+        uint256 float_ = u0Probe / 2;
+        usdc.mint(address(strategy), float_);
+
+        (uint256 expBorrow, uint256 expLpUsdc) = _expectedLeverUpPair(newTarget); // at the LIVE raw
+        assertGt(expLpUsdc, float_, "fixture: the float must NOT cover the draw (else this is the clamp regime)");
+
+        uint256 debtLegABefore = mLegA.borrowBalance(address(strategy));
+        (uint256 collateralBefore,) = _collateralAndDebt();
+        uint256 navBefore = strategy.nav();
+
+        _retarget(newTarget);
+
+        (uint256 collateralAfter, uint256 debtUsdcAfter) = _collateralAndDebt();
+
+        // 1. Raw first, collateral only for the shortfall — the piecewise seam, stated numerically.
+        assertLt(usdc.balanceOf(address(strategy)), 1e4, "the whole float was consumed, bar add-truncation dust");
+        assertApproxEqRel(
+            collateralBefore - collateralAfter,
+            expLpUsdc - float_,
+            1e15,
+            "the collateral draw is exactly the shortfall U' - R, not the whole U'"
+        );
+
+        // 2. ON target — the independent pin. An `ltv·R` term with the wrong sign or scale lands the
+        //    book off-target in exactly this regime.
+        assertApproxEqAbs((debtUsdcAfter * 10_000) / collateralAfter, uint256(newTarget), 2, "LTV == new target");
+
+        // 3. Exactly the sized borrow, and value only moved.
+        assertEq(mLegA.borrowBalance(address(strategy)) - debtLegABefore, expBorrow, "leg-A debt grew by exactly A");
+        assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved across the mixed-funded lever-up");
+    }
+
     /// @dev A STORED range the price has since left is one-sided, so the lever-up pairing ratio cannot be
     ///      formed and it fails closed — the same `rerange`-first contract `deployIdle` has, and NOT an
     ///      unhedged single-sided add.

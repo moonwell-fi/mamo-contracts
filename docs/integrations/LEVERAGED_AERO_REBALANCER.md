@@ -124,7 +124,7 @@ Four authorization tiers appear on the strategy:
 
 | Tier | Functions | Gate |
 |---|---|---|
-| Proposer-only (operations) | **`supplyIdle`**, `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams`, **`lowerTargetLtv`** (policy, but **down only**) | `onlyProposer` (== `MAMO_REBALANCER`) |
+| Proposer-only (operations) | **`supplyIdle`**, **`withdrawIdle`**, `deployIdle`, `compound`, `rerange`, `adjustLeverage`, `fulfillRedeem`, `updateParams`, **`lowerTargetLtv`** (policy, but **down only**) | `onlyProposer` (== `MAMO_REBALANCER`) |
 | **Admin-only (policy / custody)** | **`setTargetLtv`** (the only way to **raise** the target), `rescueToVault` | `onlyAdmin` — `Ownable(vault()).owner()`, the MAMO multisig → `NotAdmin()` |
 | Permissionless | `deleverage` | anyone (by design — safety backstop) |
 | Vault-only (lifecycle) | `execute`, `settle` | `onlyVault` — the vault **owner** drives these, not the agent |
@@ -190,8 +190,27 @@ could refuse deposits outright — and (b) drive the Phase-1 budget structurally
 shortfall-carrying full redeem oracle-dependent. As an operator dial, both stay under your control.
 
 Rule of thumb: park the working capital, hold back a float sized against the redemptions you would want
-to be able to cover with the oracle down. `supplyIdle` then `adjustLeverage` is a two-step spelling of
-`deployIdle` — see the next entry for when to use which.
+to be able to cover with the oracle down. And the dial turns **both ways**: `withdrawIdle` (next entry)
+un-parks collateral back into a raw float, so an over-parked book is one keeper call away from
+recovering its oracle-free cover — no levering, no `flatten`. On a **live** book, `supplyIdle` then
+`adjustLeverage` is a two-step spelling of `deployIdle` — see below for when to use which. On a **flat**
+book neither `adjustLeverage` nor `deployIdle` can run (there is no position to add into); `redeploy` is
+the op that re-enters a flat book, parked or raw.
+
+### `withdrawIdle` — un-park collateral back to a raw USDC float (the inverse of `supplyIdle`)
+
+```solidity
+function withdrawIdle(uint256 amount) external onlyProposer nonReentrant;
+```
+
+| | |
+|---|---|
+| `amount` | USDC (6dp) to redeem out of mUSDC back to the raw balance. Bounded by the **un-levered** collateral — `C − ceil(D·1e4 / targetLtvBps)`, i.e. collateral not already backing debt at the standing target — `InsufficientIdle()` above it. On a flat book (no debt) the whole parked pot is withdrawable. |
+| Position effect | `mUsdc.redeemUnderlying(amount)`. No borrow, no repay, no LP touch. |
+| Effect on NAV | **Zero** (collateral at `exchangeRateStored` becomes raw USDC at face; the same 1–2 unit rounding budget as `supplyIdle`). |
+| Effect on LTV | LTV **rises** (collateral shrinks, debt does not) — which is exactly why the bound stops at the un-levered slice: post-op LTV can never exceed `targetLtvBps`. Withdrawing levered collateral is not a float adjustment, it is a de-risk — use `adjustLeverage` down or `flatten`. |
+| Errors | `InsufficientIdle` (asked past the un-levered slice), `MoonwellRedeemFailed(errCode)` (market short of cash — a retry), `NotProposer`, `NotExecuted`. |
+| When to call | Whenever the raw float has drifted below the redemption cover you want to hold oracle-free — after over-parking, after Phase-1 covers spent the float, or on a flat book you parked and now expect exits from. |
 
 ### `deployIdle` — put idle USDC to work
 
@@ -207,14 +226,18 @@ function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer 
 > USDC earning *now* and will lever on a separate cadence, or when the book is flat and there is nothing
 > to add to.
 >
-> `amount` may now exceed the raw balance: the bound is raw **plus** redeemable mUSDC collateral, and the
-> op redeems the shortfall on demand (`MoonwellRedeemFailed(errCode)` if Moonwell will not release it —
-> supply-cap-style codes, or a high-utilisation market short of cash). So USDC you parked with
-> `supplyIdle` is still deployable without un-parking it first.
+> `amount` may now exceed the raw balance: the bound is raw **plus un-levered** mUSDC collateral
+> (`C − ceil(D·1e4 / targetLtvBps)`), and the op redeems the shortfall on demand. So USDC you parked
+> with `supplyIdle` is still deployable without un-parking it first — but collateral **already backing
+> debt at target is not "idle" and is refused** (`InsufficientIdle`). That refusal is load-bearing:
+> funded from levered collateral, the op would be redeem → supply-straight-back → borrow — a pure debt
+> increase that re-levers the same USDC twice and walks LTV from `targetLtvBps` toward `maxLtvBps`,
+> which is precisely the risk-increase capability the proposer key must not have. A redeem Moonwell
+> itself refuses (market short of cash) still surfaces as `MoonwellRedeemFailed(errCode)` — a retry.
 
 | | |
 |---|---|
-| `amount` | USDC (6dp) to deploy. Bounded by the strategy's idle USDC balance and **nothing else** (`InsufficientIdle()` above it) — there is no leverage-derived size ceiling to compute, and structurally cannot be one: the op supplies fresh collateral and borrows against it at exactly the stored `targetLtvBps`, so the incremental tranche's LTV **is** the target. A bigger deploy therefore pulls blended LTV *toward* target and cannot itself breach `maxLtvBps`. Partial deploys are expected and legal; bigger is directionally the safer one. |
+| `amount` | USDC (6dp) to deploy. Bounded by raw USDC **plus un-levered collateral** (`InsufficientIdle()` above it) — no other size ceiling to compute, and inside that bound none is needed: the op supplies not-yet-levered value and borrows against it at exactly the stored `targetLtvBps`, so the incremental tranche's LTV **is** the target and a bigger deploy pulls blended LTV *toward* target. (The un-levered cap is what keeps that reasoning true — collateral already backing debt would make the "tranche" pure debt.) Partial deploys are expected and legal. |
 | `minLiquidity` | Minimum CL liquidity the add must produce (slippage floor). |
 | Position effect (two borrowed legs) | supply **all** of `amount` USDC → mUSDC → borrow both legs at **`targetLtvBps`** (50/50 by USD value) → wrap native ETH **iff** `wethDeliversNative` (§G) → `increaseLiquidity` into the existing CL NFT → restake in the gauge. |
 | Position effect (asset-mode) | `LeveragedAeroValuation.assetModeSplit` solves the split closed-form against the **STORED** range: only `C < amount` is supplied as collateral, a **single** leg-A borrow is taken against `C` at `targetLtvBps`, and `U = amount − C` is held back as the LP's USDC side so the add lands at exactly the ratio the stored range needs. Net leg-A exposure stays 0 (LP leg == debt leg). |
@@ -408,10 +431,10 @@ function adjustLeverage(uint256 minLiq, uint256 minOut)
 | Position effect (both shapes) | Collateral untouched; LTV moves on the **debt** side. `targetDebt = targetLtvBps() × collateralUsdc / 1e4`. Lever **down**: unwind the matching CL fraction and repay, per-leg residual rebalanced through USDC (`minOut`) — unchanged in asset-mode, where the leg-B residual **is** USDC and flows straight into the leg-A cover. Closes with `_assertHealthy()`. |
 | Lever **down** — the cover sell is now **need-sized** | When one leg comes back short and the other long, `_rebalanceCover` sells the surplus leg to cover the shortfall. It now sells **only as much as covering the shortfall requires** and keeps the rest, instead of dumping the whole surplus balance. Two consequences for the operator: a lever-down (and the permissionless `deleverage`, same helper) realizes **less** unnecessary swap slippage and fees, and it **leaves the unsold surplus as an idle leg balance** — priced by `nav()`, still hedging its own debt, and redeployable on the next add. Do not model the residual sweep as "the surplus leg ends at zero" any more. |
 | Lever **up** — two borrowed legs | Borrow the delta 50/50 by USD across both legs and LP them against each other. **Self-funding**: the pair *is* the two borrows, so no idle USDC is consumed. |
-| Lever **up** — asset-mode | Borrows **only leg A** and pairs it with USDC **drawn from the strategy's idle balance**, sized closed-form (`assetModeLeverUpPair`) so the LP's leg-A amount equals the added leg-A debt — that is what preserves the delta-hedge (swapping part of the borrow to USDC would leave the book net short). **Operator consequence: an asset-mode lever-up CONSUMES idle USDC.** Value-conserving (a NAV component moving idle → LP, not a loss) but it shrinks the redeem cover budget until the next deposit. **Size lever-ups against available idle**; an under-funded one reverts `InsufficientIdleForLeverUp(needed, available)` and changes nothing — deliberately not a partial fill and not a silent cap. |
+| Lever **up** — asset-mode | Borrows **only leg A** and pairs it with USDC **drawn from the book's own USDC — raw balance first, then a `redeemUnderlying` off the mUSDC collateral** (where the USDC lives once you have run `supplyIdle`), sized closed-form (`assetModeLeverUpPair`) so the LP's leg-A amount equals the added leg-A debt — that is what preserves the delta-hedge (swapping part of the borrow to USDC would leave the book net short). The sizing solves a fixed point that accounts for the collateral it consumes, so the book lands **AT** target, not past it; with raw ≥ the draw it clamps to the exact pre-change behaviour. **Operator consequences: (1) an asset-mode lever-up CONSUMES raw float and/or collateral into the LP** — value-conserving, but it shrinks the oracle-free redeem cover until you restore it (`withdrawIdle` or the next deposit). **(2) Near a range edge, do not retarget — `rerange` first.** The USDC the pairing demands per unit of new debt is the live range ratio; near the leg-A-poor edge it diverges, and the op — still landing exactly at target — can draw essentially the whole excess collateral into a nearly one-sided LP for vanishing new debt. The LTV gates cannot see that composition shift, and the op takes no amount parameter, so your control is sequencing. An under-funded op fails closed with everything rolled back — realistically `MoonwellRedeemFailed(errCode)` from the mid-op collateral redeem (market short of cash, or the draw crossing Moonwell's free-collateral line). |
 | It writes **nothing** | The op no longer persists a target — the persist moved to `setTargetLtv`. When neither branch runs (`targetDebt == debtUsdc`, i.e. the book is already at policy) the call is a genuine no-op. The per-cycle range knobs are unaffected: `rerange` still persists `width` and `skewBps`. |
 | Fee interaction | **No crystallization** (like `rerange`): no supply change, no PnL realized; streaming fee defers, HWM unaffected. |
-| Errors | `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`; **asset-mode lever-up also** `InsufficientIdleForLeverUp(uint256 needed, uint256 available)` and `DegenerateRange()` (the pairing is sized against the STORED range — a one-sided one fails closed; `rerange` unblocks it). `InsufficientIdleForLeverUp` is raised inside `LeveragedAeroValuation` but **re-declared on the strategy** (same selector) so it is on the clone's own ABI for the rebalancer / frontend — decode it off the strategy ABI, no library ABI needed. `TargetLtvExceedsMax` is **no longer reachable here** — it moved to `setTargetLtv` with the parameter. |
+| Errors | `InsufficientLiquidity`, `MoonwellRepayFailed`/`MoonwellBorrowFailed`, `UnhealthyPosition`; **asset-mode lever-up also** `MoonwellRedeemFailed(errCode)` (the realistic funding failure — the mid-op collateral redeem refused) and `DegenerateRange()` (the pairing is sized against the STORED range — a one-sided one fails closed; `rerange` unblocks it). `InsufficientIdleForLeverUp(uint256 needed, uint256 available)` is retained as defence in depth but is **provably unreachable through this entrypoint** (the corrected draw is always inside raw + collateral) — do not build runbook logic around receiving it. It stays re-declared on the strategy ABI for direct-library integrations. `TargetLtvExceedsMax` is **no longer reachable here** — it moved to `setTargetLtv` with the parameter. |
 | When to call | To hold the fund near the standing `targetLtvBps()`. **To lever DOWN before `fulfillRedeem`** — so the oracle-free proportional unwind self-funds its IL/debt shortfall (see §C) — the keeper first calls **`lowerTargetLtv`** itself and then `adjustLeverage`: **no multisig step**, so the fulfil runbook is a single-actor sequence. Levering back **UP** afterwards is the multisig's `setTargetLtv`, and that one is not on the redemption critical path. (The permissionless `deleverage` remains available for the genuinely-unhealthy case.) In asset-mode note the two directions are asymmetric on idle: lever **down** frees USDC, lever **up** spends it. |
 
 ### `fulfillRedeem` — drain the withdraw queue

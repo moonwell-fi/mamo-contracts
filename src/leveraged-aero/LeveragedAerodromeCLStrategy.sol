@@ -1041,7 +1041,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         The supplied USDC is LEVERAGEABLE by policy: there is no buffer/book distinction in
     ///         `Layout` and `_readCollateralDebt` is untouched, so the next `adjustLeverage` sees the
     ///         grown collateral base and levers the WHOLE book to `targetLtvBps`. That is intended —
-    ///         `supplyIdle` then `adjustLeverage` is a two-step spelling of `deployIdle`.
+    ///         on a book with a live position, `supplyIdle` then `adjustLeverage` is a two-step
+    ///         spelling of `deployIdle`. On a FLAT book neither `adjustLeverage` nor `deployIdle` can
+    ///         run (there is no position to add into; both revert downstream) — `redeploy` is the op
+    ///         that re-enters a flat book, swept or not. The inverse is `withdrawIdle`: parked USDC
+    ///         can be pulled back to a raw balance without levering or flattening, bounded to the
+    ///         un-levered collateral so the pair of ops can never move LTV above target.
     ///
     ///         `State.Executed` gate matches `deployIdle` / `compound` / `adjustLeverage` (every venue
     ///         op is gated the same way): pre-`execute` the seed is the owner's to activate with, and
@@ -1057,11 +1062,46 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @notice Deploy `amount` of idle strategy USDC into the levered position (supply + borrow +
     ///         increaseLiquidity + health-assert) via `LeveragedAeroManager.deployIdleImpl()`.
-    /// @param amount       USDC to deploy (6dp); must be ≤ idle USDC held.
+    ///
+    ///         `amount` IS BOUNDED BY RAW + UN-LEVERED COLLATERAL, NOT RAW + ALL COLLATERAL. The
+    ///         manager sizes the borrow off the GROSS `amount` on the assumption that `amount` is
+    ///         fresh, not-yet-levered NAV — raw USDC satisfies that by construction, and so does
+    ///         collateral the keeper parked with `supplyIdle` but nothing has borrowed against.
+    ///         Collateral already backing debt at the standing target does NOT: a `deployIdle` funded
+    ///         from it is redeem → supply-straight-back → borrow, i.e. a net debt-only increase that
+    ///         re-levers the same USDC twice and walks LTV from `targetLtvBps` toward `maxLtvBps` —
+    ///         the exact capability the admin-only target split denies this `onlyProposer` key. The
+    ///         `_unleveredCollateral` bound refuses that with a typed `InsufficientIdle` (which is
+    ///         also what keeps refusals diagnosable instead of surfacing as `MoonwellRedeemFailed`
+    ///         from Moonwell's own free-collateral line).
+    /// @param amount       USDC to deploy (6dp); must be ≤ raw balance + un-levered collateral.
     /// @param minLiquidity Minimum liquidity to accept (slippage guard).
     function deployIdle(uint256 amount, uint256 minLiquidity) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
+        LeveragedAeroVenue.checkDeployableIdle(amount);
         LeveragedAeroManager.deployIdleImpl(amount, minLiquidity);
+    }
+
+    /// @notice Redeem `amount` of the strategy's parked mUSDC collateral back to a RAW USDC balance —
+    ///         the exact inverse of `supplyIdle`. Does not borrow, repay, or touch the LP.
+    ///
+    ///         WHY THE INVERSE EXISTS: the raw float is the oracle-free IL-cover budget of
+    ///         `redeemUnwindImpl` Phase 1 — the budget the trustless `emergencyRedeem` deadman spends
+    ///         when feeds are down. `supplyIdle`'s float-vs-yield trade-off is only an operator POLICY
+    ///         if it can be turned in both directions; without this op, an over-parked float could be
+    ///         restored only by levering (`deployIdle`) or exiting the venue (`flatten`).
+    ///
+    ///         BOUNDED TO UN-LEVERED COLLATERAL (`C − ceil(D·1e4/targetLtvBps)`, 0 when the book is at
+    ///         or above target): withdrawing collateral raises LTV, and this bound is exactly what
+    ///         keeps the post-op book at or under the standing target — the mirror of `deployIdle`'s
+    ///         funding bound. Exceeding it reverts `InsufficientIdle`; a redeem Moonwell's cash cannot
+    ///         cover fails closed as `MoonwellRedeemFailed(err)` with nothing moved. Same gates as
+    ///         `supplyIdle` (`onlyProposer`, `State.Executed`), and like it, works on a flat book —
+    ///         where debt is zero, so the whole parked pot is withdrawable.
+    /// @param amount USDC (6dp) to redeem back to the raw balance; must be ≤ un-levered collateral.
+    function withdrawIdle(uint256 amount) external onlyProposer nonReentrant {
+        if (_state != State.Executed) revert NotExecuted();
+        LeveragedAeroVenue.withdrawIdleImpl(amount);
     }
 
     /// @notice Compound AERO rewards: claim → swap to USDC (Aerodrome v2 volatile pool, the deepest
@@ -1304,7 +1344,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     }
 
     /// @notice Retarget the position's LTV to the fund's STORED standing target `targetLtvBps()`
-    ///         (borrow/repay; no new USDC). Collateral is untouched, so LTV moves on the debt side via
+    ///         (borrow/repay; no new USDC enters). In the two-borrowed-legs shape collateral is
+    ///         untouched, so LTV moves on the debt side via
     ///         `LeveragedAeroManager.adjustLeverageImpl`: lever UP borrows the cbBTC/WETH delta and adds
     ///         it (`minLiq`); lever DOWN unwinds the matching CL fraction and repays (per-leg residual
     ///         rebalanced through USDC, bounded by `minOut`). Ends with `_assertHealthy`.
@@ -1316,12 +1357,18 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         written, so this entrypoint is purely "move the book to where policy already says".
     ///
     ///         ASSET-MODE (leg-B slot == usdc): a lever-UP borrows ONLY leg A and pairs it with USDC
-    ///         drawn from the strategy's IDLE balance, sized closed-form so the LP's leg-A amount equals
-    ///         the added leg-A debt — the delta-hedge is preserved (the alternative, swapping part of the
-    ///         borrow to USDC, would leave the book net short). The drawn idle is value-conserving (it
-    ///         moves from idle into the LP) but it shrinks the redeem cover budget until the next
-    ///         deposit, so size lever-ups against available idle: an under-funded one reverts
-    ///         `InsufficientIdleForLeverUp(needed, available)` and changes nothing.
+    ///         drawn from the book's OWN USDC — raw balance first, then the mUSDC collateral the
+    ///         keeper's `supplyIdle` parked it in — sized closed-form so the LP's leg-A amount equals
+    ///         the added leg-A debt — the delta-hedge is preserved (the alternative, swapping part of
+    ///         the borrow to USDC, would leave the book net short). The draw is value-conserving (a
+    ///         NAV component moving into the LP) and the sizing corrects for the collateral it
+    ///         consumes, landing the book AT target (see `assetModeLeverUpPair`'s fixed point). It
+    ///         does shrink the raw redeem-cover float and/or the collateral cushion, and near a range
+    ///         edge the draw per unit of new debt diverges — `rerange` first when the price sits near
+    ///         an edge (operator note on `adjustLeverageImpl`). An under-funded op fails closed with
+    ///         the whole call rolled back: realistically `MoonwellRedeemFailed(err)` from the mid-op
+    ///         collateral redeem (the typed `InsufficientIdleForLeverUp` bound is unreachable from
+    ///         this entrypoint and kept as defence in depth).
     ///
     ///         NO fee crystallisation (like `rerange`): no supply change, no PnL realized; the
     ///         streaming fee is deferred and the HWM is unaffected.

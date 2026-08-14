@@ -604,8 +604,14 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         (uint256 a2, uint256 u2) = LeveragedAeroValuation.assetModeLeverUpPair(
             address(pool), lower, upper, borrowUsd6 * 3, type(uint256).max, 0, 5000, LEG_A_DECIMALS, legAIsToken0, pA
         );
-        assertApproxEqRel(a2, a1 * 3, 1e12, "borrow scales linearly in the delta");
-        assertApproxEqRel(u2, u1 * 3, 1e12, "the pairing USDC scales linearly in the delta");
+        // Tolerance is INTEGER RESOLUTION, derived: each output passes through at most three floor
+        // divisions (`a0`, the fixed-point rescale, the pairing mulDiv), so `a1`/`a2` each sit within
+        // ~2 units of the real line and the ×3 comparison within ~8 — on the smallest bound-permitted
+        // delta (`a1 ≈ 2e6` units) that is ~4e-6 relative. 1e13 (1e-5) covers it with 2.5× headroom;
+        // the previous 1e12 sat BELOW the floor noise and flaked on fuzz seeds hitting small deltas
+        // (observed: `borrowUsd6 = 1022244657` → 3 units = 1.46e-6 relative).
+        assertApproxEqRel(a2, a1 * 3, 1e13, "borrow scales linearly in the delta");
+        assertApproxEqRel(u2, u1 * 3, 1e13, "the pairing USDC scales linearly in the delta");
 
         // The pair is balanced at the tick — the same property the split has, so the LP consumes both.
         (uint256 amt0, uint256 amt1) = legAIsToken0 ? (a1, u1) : (u1, a1);
