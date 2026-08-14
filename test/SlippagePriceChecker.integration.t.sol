@@ -77,6 +77,43 @@ contract SlippagePriceCheckerTest is BaseTest {
 
         chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
         chainlinkBtcUsd = addresses.getAddress("CHAINLINK_BTC_USD");
+
+        _freshenRewardFeeds();
+    }
+
+    /// @notice Re-stamps every configured price feed's `updatedAt` to now, keeping its real answer.
+    /// @dev This suite forks at `latest` and prices reward tokens against `underlying` in most tests,
+    ///      so a feed older than its configured heartbeat turns an unrelated assertion into
+    ///      "Price feed update time exceeds heartbeat". Under the WETH config that is not a remote
+    ///      possibility: `underlying` is WETH, so every quote traverses CHAINLINK_ETH_USD, whose live
+    ///      configured bound is 1200s while that feed's observed cadence on Base is ~1230s. Seven
+    ///      tests fail whenever the fork block lands in that window — enumerated by warping past the
+    ///      bound: testCheckPrice, testCheckPriceFail, testFeedSaneRangeBounds, testGetExpectedOut,
+    ///      testRevertIfSlippageExceedsMaximum, testSequencerUptimeGuard,
+    ///      testUpgradeDoesNotLowerExistingQuotes.
+    ///
+    ///      Proposal 013 raises that bound to 3600s on chain, which fixes the cause; this keeps the
+    ///      suite deterministic before the Safe executes it and after. Freshening here does not weaken
+    ///      the tests that care about feed timing: each installs its OWN mock for the feed it
+    ///      exercises and a later vm.mockCall replaces this one, so the heartbeat, zero-price,
+    ///      incomplete-round and future-timestamp tests stay discriminating. Only timestamps move —
+    ///      the live answer is preserved so the arithmetic under test stays production arithmetic.
+    function _freshenRewardFeeds() internal {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.PriceFeedConfig[] memory feeds = assetConfig.rewardTokens[i].priceFeeds;
+
+            for (uint256 j = 0; j < feeds.length; j++) {
+                address feed = addresses.getAddress(feeds[j].priceFeed);
+
+                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+
+                vm.mockCall(
+                    feed,
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+                );
+            }
+        }
     }
 
     function testInitialState() public view {
@@ -84,7 +121,21 @@ contract SlippagePriceCheckerTest is BaseTest {
         assertEq(OwnableUpgradeable(address(slippagePriceChecker)).owner(), owner, "Owner should be set correctly");
     }
 
-    function testTokenConfigurationMatchesAssetConfig() public view {
+    /// @notice The live checker's per-pair oracle configuration must match the asset config JSON.
+    /// @dev Runs proposal 013 first, so this asserts parity for the state the release LANDS in rather
+    ///      than the state it starts from. That matters because 013 rewrites the WETH pairs'
+    ///      ETH/USD heartbeat from 1200s to 3600s: the live 1200s bound is below that feed's own
+    ///      ~1230s cadence, so quotes revert during the tail of every update cycle. Asserting against
+    ///      pre-proposal chain state would force the JSON to keep documenting the broken value.
+    ///      For the USDC and cbBTC configs 013 touches none of their pairs, so parity is unchanged.
+    function testTokenConfigurationMatchesAssetConfig() public {
+        SlippagePriceCheckerOracleHardening proposal = new SlippagePriceCheckerOracleHardening();
+        proposal.setAddresses(addresses);
+        proposal.setPrimaryForkId(vm.activeFork());
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+
         for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
             DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
             assertEq(
