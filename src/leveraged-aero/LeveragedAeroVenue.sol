@@ -103,6 +103,14 @@ library LeveragedAeroVenue {
     ///      `lowerTargetLtv`'s "every step emits `TargetLtvUpdated`" contract.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
+    /// @notice `withdrawIdle` could not read the oracle its POLICY bound needs, so it fell through to
+    ///         Moonwell's own collateral check for that call. The op still happened — the bound that did
+    ///         not run is the strategy's tighter target-LTV one, not the venue's solvency one. A monitor
+    ///         should treat a burst of these as "the proposer moved collateral while the feeds were
+    ///         down" and reconcile LTV once they recover. Same posture, and the same marker discipline,
+    ///         as `RedeemSweepFloorsDegraded`.
+    event WithdrawIdleBoundDegraded();
+
     /// @notice The venue subset of the strategy's config — everything a pool/pair change touches.
     ///         Field semantics are LEG SLOTS exactly as in `InitParams` (names historical): `weth*`
     ///         is leg A (the natively-wrappable, always-borrowed slot), `cbBTC*` is leg B (the slot
@@ -297,11 +305,47 @@ library LeveragedAeroVenue {
     ///      AUTH LIVES IN THE STRATEGY ENTRYPOINT; THE BOUND LIVES HERE: `amount` is restricted to
     ///      the UN-LEVERED collateral (`_unleveredCollateral`), so the op can never push LTV above
     ///      the standing target — the same discipline `checkDeployableIdle` enforces on the way
-    ///      in. FAIL-CLOSED: a redeem the market's cash (or Moonwell's own collateral check)
-    ///      cannot cover reverts `MoonwellRedeemFailed(err)` with nothing moved.
+    ///      in. FAIL-CLOSED on the venue: a redeem the market's cash (or Moonwell's own collateral
+    ///      check) cannot cover reverts `MoonwellRedeemFailed(err)` with nothing moved.
+    ///
+    ///      TWO BELTS, AND THEY ARE NOT THE SAME BELT — which is why the oracle-dependent one degrades
+    ///      instead of blocking. The bound above is the STRATEGY'S POLICY (post-op LTV stays at the
+    ///      admin-set `targetLtvBps`) and it is priced in Chainlink. Underneath it, Moonwell runs its
+    ///      OWN check on every redeem out of an entered market with live borrows — the account's
+    ///      hypothetical liquidity — and refuses at its collateral factor, which `_redeemUnderlying`
+    ///      surfaces as `MoonwellRedeemFailed`. Solvency therefore never depends on our feed; only the
+    ///      tighter policy line does.
+    ///
+    ///      SO A DOWN FEED DEGRADES THIS OP, IT DOES NOT JAM IT. `_unleveredCollateral` reads three
+    ///      Chainlink feeds whenever there IS debt (a zero-debt book short-circuits and reads none), and
+    ///      each read fail-closes. That made the RESTORE direction of the `supplyIdle` dial — the one
+    ///      that rebuilds the oracle-free raw float `redeemUnwindImpl` Phase 1 and the `emergencyRedeem`
+    ///      deadman spend from — unavailable in exactly the outage where an operator most wants raw
+    ///      USDC on hand, while the PARK direction (`supplyIdle`, raw balance only) stayed available.
+    ///      The read is now try-able through the strategy's `previewCollateralDebt` self-view: readable
+    ///      feeds enforce the policy bound exactly as before; an unreadable one emits
+    ///      `WithdrawIdleBoundDegraded` and leans on Moonwell's own check for that call.
+    ///
+    ///      WHAT THE DEGRADED PATH GIVES UP, stated plainly: during the outage the proposer can move
+    ///      collateral to raw beyond the un-levered slice, up to Moonwell's collateral-factor line. Both
+    ///      sides of that move stay inside the strategy (NAV is unchanged — `nav()` prices raw and
+    ///      mUSDC-parked USDC alike), so it cannot remove value; it can only raise LTV toward a line
+    ///      Moonwell itself enforces. The marker is what makes it reconcilable after the fact.
+    ///
+    ///      NOT APPLIED TO `checkDeployableIdle`, deliberately: that bound gates `deployIdle`, which
+    ///      LEVERS UP. Degrading a lever-up bound during an oracle outage would let the keeper add debt
+    ///      blind. Availability is only the right trade on the direction that REMOVES leverage.
     function withdrawIdleImpl(uint256 amount) public {
         if (amount == 0) return;
-        if (amount > _unleveredCollateral()) revert InsufficientIdle();
+        try LeveragedAerodromeCLStrategy(payable(address(this))).previewCollateralDebt() returns (
+            uint256 collateralUsdc, uint256 debtUsdc
+        ) {
+            if (amount > _unleveredFrom(collateralUsdc, debtUsdc)) revert InsufficientIdle();
+        } catch {
+            // Policy unpriceable → Moonwell's collateral check is the belt for this call. Marked, not
+            // silent: a `view` cannot emit, but this op is a transaction and can.
+            emit WithdrawIdleBoundDegraded();
+        }
         _redeemUnderlying(_layout().mUsdc, amount);
     }
 
@@ -526,6 +570,13 @@ library LeveragedAeroVenue {
     ///      with live debt the feeds are read — the same fail-closed posture as every levered op.
     function _unleveredCollateral() private view returns (uint256) {
         (uint256 collateralUsdc, uint256 debtUsdc) = LeveragedAeroManager.readCollateralDebtImpl();
+        return _unleveredFrom(collateralUsdc, debtUsdc);
+    }
+
+    /// @dev The bound's ARITHMETIC, split out from the read so `withdrawIdleImpl` can apply the same
+    ///      formula to a collateral/debt pair it obtained through a try-able hop. One definition; the
+    ///      two entry points cannot compute a different spendable slice.
+    function _unleveredFrom(uint256 collateralUsdc, uint256 debtUsdc) private view returns (uint256) {
         if (debtUsdc == 0) return collateralUsdc;
         uint256 t = uint256(_layout().targetLtvBps);
         uint256 backing = (debtUsdc * 10_000 + t - 1) / t;

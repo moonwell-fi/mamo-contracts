@@ -1214,6 +1214,56 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), pot, "nav unchanged: same value, raw again");
     }
 
+    /**
+     * @dev THE RESTORE DIRECTION SURVIVES AN ORACLE OUTAGE — the reviewers' Venue:304 finding. The
+     *      policy bound (`_unleveredCollateral`, the un-levered slice) is Chainlink-priced and reads
+     *      three feeds whenever there is debt, and each read fail-closes. That made `withdrawIdle`
+     *      unavailable in exactly the outage where an operator most wants raw USDC on hand — while
+     *      `supplyIdle`, which reads only the raw balance, stayed available. The dial jammed in the
+     *      PARK direction.
+     *
+     *      TWO BELTS, NOT ONE. The Chainlink bound is the STRATEGY'S POLICY (post-op LTV stays at the
+     *      admin-set target). Moonwell runs its OWN check underneath on every redeem out of an entered
+     *      market with live borrows and refuses at its collateral factor. Solvency never depended on our
+     *      feed, so an unreadable feed now degrades the POLICY line rather than blocking the op:
+     *      `WithdrawIdleBoundDegraded` is emitted and Moonwell's check is the belt for that call.
+     *
+     *      Asserted here on a LEVERED book (the only shape that reads feeds at all): stale feeds, the
+     *      withdraw goes through, the marker fires, and the value moved is real.
+     */
+    function testWithdrawIdleDegradesToMoonwellsCheckWhenTheOracleIsDown() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top); // parked on a LEVERED book: the bound reads feeds here
+        assertGt(mLegA.borrowBalance(address(strategy)), 0, "precondition: live debt, so the bound prices");
+        uint256 collateralBefore = _collateralUsdc();
+
+        // Every feed stale: the policy bound cannot be priced at all.
+        vm.warp(block.timestamp + 2 days + 1);
+
+        vm.expectEmit(false, false, false, false, address(strategy));
+        emit LeveragedAerodromeCLStrategy.WithdrawIdleBoundDegraded();
+        vm.prank(proposer);
+        strategy.withdrawIdle(top);
+
+        assertEq(usdc.balanceOf(address(strategy)), top, "the raw float was restored during the outage");
+        assertEq(_collateralUsdc(), collateralBefore - top, "...and it really came out of the collateral");
+    }
+
+    /// @dev THE OTHER HALF: readable feeds still enforce the policy bound EXACTLY as before. The
+    ///      degrade is scoped to "cannot price", not "levered collateral is now withdrawable" — the
+    ///      typed `InsufficientIdle` refusal is unchanged whenever the oracle answers.
+    function testWithdrawIdleStillEnforcesThePolicyBoundWhenFeedsAreReadable() public {
+        _execute(SEED); // at target: no un-levered collateral at all
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);
+        strategy.withdrawIdle(20_000e6);
+    }
+
     /// @dev Same gates as `supplyIdle`: proposer-only, `Executed`-only, fail-closed on the redeem.
     function testWithdrawIdleGatesAndFailureSurface() public {
         vm.prank(proposer);
