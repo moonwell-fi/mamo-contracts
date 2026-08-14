@@ -584,8 +584,15 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(total == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
     }
 
+    /**
+     * @dev The reward-token gate applies to GRANTING an allowance, not to revoking one. Now that
+     *      isRewardToken follows live pair configuration (MOO-726) instead of latching on forever,
+     *      gating amount == 0 too would mean removing a token's last pair permanently strands the
+     *      standing relayer allowance: the only call that could zero it would revert
+     *      "Token not allowed". Revocation only ever reduces risk, so it needs no allow-list.
+     */
     function _approveCowSwap(address tokenAddress, uint256 amount) internal {
-        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
+        require(amount == 0 || slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
         IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
     }
 

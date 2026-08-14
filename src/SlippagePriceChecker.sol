@@ -259,6 +259,13 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @dev Zero is accepted and CLEARS the flag. Rejecting zero made the flag a one-way latch: a
      *      token configured before configuredPairCount existed could never stop being reported as a
      *      reward token, even after every pair for it had been removed.
+     * @dev SECURITY: this value doubles as the maximum lifetime of an order, and the sequencer-outage
+     *      protection in _requireSequencerUp only closes the replay window because that lifetime is
+     *      no longer than sequencerGracePeriod. An order signed just before an outage stays valid for
+     *      _maxTimePriceValid seconds; the grace period is how long after recovery quotes stay
+     *      refused. Setting this ABOVE sequencerGracePeriod silently reopens the window MOO-741
+     *      closed — the two are deployed equal (1 hours / 3600) on purpose. Raise the grace period
+     *      first if this ever needs to grow.
      * @param fromToken The token the flag applies to
      * @param _maxTimePriceValid Seconds a price stays valid, or zero to clear the flag
      */
@@ -378,12 +385,21 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
     /**
      * @notice Checks if a token pair is configured
+     * @dev Answers from the pair's own oracle data, the single source of truth addTokenConfiguration
+     *      writes and removeTokenConfiguration clears. It previously also required
+     *      maxTimePriceValid[fromToken] > 0 — the legacy per-token reward flag that
+     *      addTokenConfiguration never writes — so a pair configured the modern way reported false
+     *      even though every pricing path would serve it. That is the same two-sources-of-truth
+     *      defect MOO-726 fixed in isRewardToken.
+     * @dev Configured is not the same as settleable: an order also needs maxTimePriceValid[fromToken]
+     *      to be non-zero (see GPv2OrderChecks), which setMaxTimePriceValid controls independently.
+     *      Read both when checking whether a pair can actually trade.
      * @param fromToken The address of the token to swap from
      * @param toToken The address of the token to swap to
      * @return Whether the token pair is configured
      */
     function isTokenPairConfigured(address fromToken, address toToken) external view override returns (bool) {
-        return tokenPairOracleData[fromToken][toToken].length > 0 && maxTimePriceValid[fromToken] > 0;
+        return tokenPairOracleData[fromToken][toToken].length > 0;
     }
 
     /**
@@ -498,8 +514,13 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
                 : Math.mulDiv(_running, uint256(answer), _scaleAnswerBy);
         }
 
-        // Convert to the output token's smallest units exactly once, rounding DOWN so a caller's
-        // slippage floor derived from this quote can only tighten, never loosen.
+        // Convert to the output token's smallest units exactly once. This floor division is the only
+        // rounding left in the chain, and it rounds AGAINST the protocol, not for it: both consumers
+        // derive a minimum-out from this quote (expectedOut * (MAX_BPS - slippage) / MAX_BPS), so a
+        // quote one unit low makes the floor one unit looser, not tighter. The strictly conservative
+        // direction would be Math.Rounding.Ceil. Kept as floor division because the discrepancy is a
+        // single smallest-unit of the output token, orders of magnitude inside any configured
+        // slippage tolerance — do not read this line as a safety margin, it is not one.
         _expectedOutFromChainlink = _running / (10 ** (INTERNAL_DECIMALS - _toTokenDecimals));
     }
 

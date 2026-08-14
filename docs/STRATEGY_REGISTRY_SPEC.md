@@ -19,7 +19,7 @@ The contract is initialized with three distinct roles that are passed as constru
 - `mapping(address => bool) public whitelistedImplementations`: Mapping of whitelisted implementation addresses
 - `mapping(uint256 => address) public latestImplementationById`: Maps strategy IDs to their latest implementation
 - `mapping(address => uint256) public implementationToId`: Maps implementations to their strategy ID
-- `uint256 private _nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
+- `uint256 public nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
 
 ### Strategy Type ID
 
@@ -33,7 +33,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID; passing a non-zero value adds another implementation version to an existing type. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.**
+- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID from `nextStrategyTypeId`. Passing a non-zero value uses that id verbatim — the intent is to add another implementation version to an existing type, but **the contract does not check that the id exists**, and it does not advance `nextStrategyTypeId`. Passing an id that no strategy uses silently creates an orphan type reachable by nobody, and passing an id at or above `nextStrategyTypeId` can later collide with an auto-assigned one (see the warning in `script/DeployLeveragedAeroAccountConfig.sol`). The caller is responsible for passing an id that is already in use. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.**
 
   Whitelisting is the trust root of the entire upgrade path: `upgradeStrategy` will only move a user's proxy to `latestImplementationById[strategyTypeId]`, so whoever can whitelist can decide what code every strategy of that type eventually runs. It therefore sits behind the admin multisig with a timelock, and the operational flow is:
 
@@ -50,7 +50,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function checks that the strategy has the correct registry address set up. This function is pausable.
 
-- `function upgradeStrategy(address strategy) external`: Updates the implementation of a strategy to the latest implementation of the same type. Only callable by the user. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
+- `function upgradeStrategy(address strategy, address newImplementation) external`: Updates the implementation of a strategy to the latest implementation of the same type. `newImplementation` must equal `latestImplementationById[implementationToId[currentImplementation]]`, so the second argument is an explicit confirmation of what the caller expects to upgrade to, not a free choice. Only callable by the strategy's owner. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface. This function is pausable.
 
 - `function getUserStrategies(address user) external view returns (address[] memory)`: Gets all strategies for a user.
 
@@ -65,22 +65,32 @@ This contract is responsible for validating swap prices using Chainlink price fe
 ### Storage
 
 - `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
-- `mapping(address token => TokenFeedConfiguration[]) public tokenOracleData`: Maps token addresses to their oracle configurations
+- `mapping(address fromToken => mapping(address toToken => TokenFeedConfiguration[])) public tokenPairOracleData`: Maps each `fromToken -> toToken` pair to its oracle path
+- `mapping(address token => uint256) public maxTimePriceValid`: Per-`fromToken` price validity window, also the legacy reward-token flag
+- `mapping(address fromToken => uint256) public configuredPairCount`: How many configured pairs a token has
+- `mapping(address fromToken => mapping(address toToken => bool)) public pairCounted`: Whether a pair is already represented in `configuredPairCount`
 
 ### TokenFeedConfiguration
 
 - `address chainlinkFeed`: The address of the Chainlink price feed
 - `bool reverse`: Whether to reverse the price calculation (divide instead of multiply)
+- `uint256 heartbeat`: Maximum age accepted for that feed's answer
 
 ### Functions
 
 - `function initialize(address _owner) external initializer`: Initializes the contract with the given owner
 - `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Function that authorizes an upgrade to a new implementation, only callable by the owner
 - `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks if a swap meets the price requirements with the provided slippage
-- `function addTokenConfiguration(address token, TokenFeedConfiguration[] calldata configurations, uint256 maxTimePriceValid) external`: Adds a configuration for a token with price checker data and sets the maximum time a price is considered valid. Only callable by the owner.
-- `function removeTokenConfiguration(address token) external`: Removes all configurations for a token. Only callable by the owner.
+- `function addTokenConfiguration(address fromToken, address toToken, TokenFeedConfiguration[] calldata configurations) external`: Configures the oracle path for a single `fromToken -> toToken` pair. Only callable by the owner. Does NOT write `maxTimePriceValid` — that is a separate, per-`fromToken` setting.
+- `function removeTokenConfiguration(address fromToken, address toToken) external`: Removes the configuration for one pair. Only callable by the owner. When it removes the last counted pair for `fromToken` it also clears that token's `maxTimePriceValid`.
+- `function setMaxTimePriceValid(address fromToken, uint256 maxTimePriceValid) external`: Sets, or with zero clears, how long a price stays valid for `fromToken`. Only callable by the owner. **This value also bounds an order's lifetime, and the sequencer-outage protection only closes its replay window while this is no greater than the sequencer grace period.**
+- `function setSequencerUptimeFeed(address feed, uint256 gracePeriod) external`: Points the checker at a Chainlink L2 sequencer uptime feed and sets how long after recovery quotes stay refused. Only callable by the owner. While `feed` is unset the check is a no-op.
+- `function backfillPairCount(address[] calldata fromTokens, address[] calldata toTokens) external`: Registers pairs configured before `configuredPairCount` existed into that counter. Only callable by the owner, and idempotent. Required because the nested pair mapping cannot be enumerated on chain.
+- `function configuredPairCount(address fromToken) external view returns (uint256)`: How many configured pairs a token has. Together with the legacy `maxTimePriceValid` flag this is what `isRewardToken` answers from.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap
 - `function maxTimePriceValid(address token) external view returns (uint256)`: Gets the maximum time a price is considered valid for a token.
+- `function isRewardToken(address token) external view returns (bool)`: Whether the token has at least one configured pair, or a non-zero legacy `maxTimePriceValid`.
+- `function isTokenPairConfigured(address fromToken, address toToken) external view returns (bool)`: Whether that pair has oracle data. Configured is not the same as settleable — an order also needs a non-zero `maxTimePriceValid` for `fromToken`.
 
 ## ERC20MoonwellMorphoStrategy
 
@@ -140,7 +150,7 @@ The contract is initialized with three distinct roles that are passed as constru
 - `mapping(address => bool) public whitelistedImplementations`: Mapping of whitelisted implementation addresses
 - `mapping(uint256 => address) public latestImplementationById`: Maps strategy IDs to their latest implementation
 - `mapping(address => uint256) public implementationToId`: Maps implementations to their strategy ID
-- `uint256 private _nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
+- `uint256 public nextStrategyTypeId`: Counter for strategy type IDs, starting from 1
 
 ### Strategy Type ID
 
@@ -154,7 +164,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID; passing a non-zero value adds another implementation version to an existing type. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.**
+- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID from `nextStrategyTypeId`. Passing a non-zero value uses that id verbatim — the intent is to add another implementation version to an existing type, but **the contract does not check that the id exists**, and it does not advance `nextStrategyTypeId`. Passing an id that no strategy uses silently creates an orphan type reachable by nobody, and passing an id at or above `nextStrategyTypeId` can later collide with an auto-assigned one (see the warning in `script/DeployLeveragedAeroAccountConfig.sol`). The caller is responsible for passing an id that is already in use. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.**
 
   Whitelisting is the trust root of the entire upgrade path: `upgradeStrategy` will only move a user's proxy to `latestImplementationById[strategyTypeId]`, so whoever can whitelist can decide what code every strategy of that type eventually runs. It therefore sits behind the admin multisig with a timelock, and the operational flow is:
 
@@ -171,7 +181,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function addStrategy(address user, address strategy) external`: Adds a strategy for a user. Only callable by accounts with the BACKEND_ROLE. The backend is responsible for deploying the strategy before calling this function. This function checks that the strategy has the correct registry address set up. This function is pausable.
 
-- `function upgradeStrategy(address strategy) external`: Updates the implementation of a strategy to the latest implementation of the same type. Only callable by the user. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface.
+- `function upgradeStrategy(address strategy, address newImplementation) external`: Updates the implementation of a strategy to the latest implementation of the same type. `newImplementation` must equal `latestImplementationById[implementationToId[currentImplementation]]`, so the second argument is an explicit confirmation of what the caller expects to upgrade to, not a free choice. Only callable by the strategy's owner. This function calls the `upgradeToAndCall` method on the strategy contract through the `IUUPSUpgradeable` interface. This function is pausable.
 
 - `function getUserStrategies(address user) external view returns (address[] memory)`: Gets all strategies for a user.
 

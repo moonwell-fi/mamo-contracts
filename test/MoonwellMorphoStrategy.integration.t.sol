@@ -1820,6 +1820,50 @@ contract MoonwellMorphoStrategyTest is Test {
         assertEq(finalAllowance, 0, "Allowance should be set to zero");
     }
 
+    /// @notice MOO-726 side-effect: revoking must not be gated on the token still being a reward token.
+    /// @dev isRewardToken now follows live pair configuration instead of latching on forever, so once a
+    ///      token's last pair is removed the reward-token gate stops passing. If revocation shared that
+    ///      gate, a standing max relayer allowance granted while the token WAS configured could never
+    ///      be zeroed — the only call able to do it would revert "Token not allowed". Granting stays
+    ///      gated; revoking does not, because it can only reduce risk.
+    function testApproveCowSwapZeroAmountStillRevokesAfterTokenDeconfigured() public {
+        vm.prank(owner);
+        strategy.approveCowSwap(address(well), type(uint256).max);
+        assertEq(
+            IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER()),
+            type(uint256).max,
+            "Fixture must start from a standing relayer allowance"
+        );
+
+        // Put WELL into the post-deconfiguration state: isRewardToken is what the gate reads, and
+        // after its last pair is removed and the legacy flag cleared it answers false.
+        vm.mockCall(
+            address(slippagePriceChecker),
+            abi.encodeWithSelector(ISlippagePriceChecker.isRewardToken.selector, address(well)),
+            abi.encode(false)
+        );
+
+        assertFalse(
+            slippagePriceChecker.isRewardToken(address(well)),
+            "Fixture must actually have deconfigured the reward token"
+        );
+
+        // Granting is refused, as it should be.
+        vm.prank(owner);
+        vm.expectRevert("Token not allowed");
+        strategy.approveCowSwap(address(well), type(uint256).max);
+
+        // Revoking still works, which is the point.
+        vm.prank(owner);
+        strategy.approveCowSwap(address(well), 0);
+
+        assertEq(
+            IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER()),
+            0,
+            "The standing relayer allowance must remain revocable after deconfiguration"
+        );
+    }
+
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
         MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy();

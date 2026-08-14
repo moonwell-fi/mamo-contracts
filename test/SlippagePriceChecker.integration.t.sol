@@ -635,6 +635,43 @@ contract SlippagePriceCheckerTest is BaseTest {
         assertFalse(checker.isRewardToken(newRewardToken), "Removing the last pair clears the flag");
     }
 
+    /// @notice MOO-726: isTokenPairConfigured must answer from the pair, not from the legacy flag.
+    /// @dev It used to require maxTimePriceValid[fromToken] > 0 as well — the same per-token legacy
+    ///      flag addTokenConfiguration never writes — so a pair configured the modern way reported
+    ///      false while every pricing path would happily serve it. That is the two-sources-of-truth
+    ///      defect this finding was about, left in place one function over from the one that got fixed.
+    function testIsTokenPairConfiguredFromPairDataAlone() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        address newRewardToken = makeAddr("freshPairToken");
+        assertFalse(checker.isTokenPairConfigured(newRewardToken, address(underlying)), "Unconfigured pair is false");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1 days
+        });
+
+        // Configure the pair the modern way ONLY -- setMaxTimePriceValid is never called.
+        vm.prank(owner);
+        checker.addTokenConfiguration(newRewardToken, address(underlying), configs);
+
+        assertEq(checker.maxTimePriceValid(newRewardToken), 0, "Legacy flag must stay unset for this to mean anything");
+        assertTrue(
+            checker.isTokenPairConfigured(newRewardToken, address(underlying)),
+            "Pair configuration alone must make the pair report as configured"
+        );
+
+        // And it goes back to false when the pair itself goes away, not when the flag changes.
+        vm.prank(owner);
+        checker.removeTokenConfiguration(newRewardToken, address(underlying));
+        assertFalse(
+            checker.isTokenPairConfigured(newRewardToken, address(underlying)), "Removing the pair must clear it"
+        );
+    }
+
     /// @notice MOO-726: tokens configured before the upgrade keep reporting as reward tokens.
     function testIsRewardTokenStillTrueForPreUpgradeConfiguration() public {
         SlippagePriceChecker checker = _upgradeChecker();

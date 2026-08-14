@@ -92,7 +92,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function unpause() external`: Unpauses the contract. Only callable by accounts with the GUARDIAN_ROLE.
 
-- `function whitelistImplementation(address implementation) external returns (uint256 strategyTypeId)`: Adds an implementation to the whitelist with a new strategy type ID and sets it as the latest implementation for that type. Returns the assigned strategy type ID. Only callable by accounts with the BACKEND_ROLE.
+- `function whitelistImplementation(address implementation, uint256 strategyTypeId) external returns (uint256 assignedStrategyTypeId)`: Adds an implementation to the whitelist and sets it as the latest implementation for its strategy type. Passing `strategyTypeId == 0` assigns a new type ID. Returns the assigned strategy type ID. **Only callable by accounts with the DEFAULT_ADMIN_ROLE — not the backend.** See `STRATEGY_REGISTRY_SPEC.md` for the authoritative description; this section is a copy kept for convenience.
 
 - `function getImplementationId(address implementation) external view returns (uint256)`: Gets the strategy ID for an implementation.
 

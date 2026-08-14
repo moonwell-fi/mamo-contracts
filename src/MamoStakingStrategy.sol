@@ -28,6 +28,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using SafeERC20 for IERC20;
 
+    /// @notice Furthest into the future a caller-supplied compound() deadline may sit.
+    /// @dev Without an upper bound, `compound(type(uint256).max)` silently restores the tautology
+    ///      the caller-supplied deadline exists to remove, leaving no on-chain trace that the
+    ///      protection was bypassed. Sized to the SlippagePriceChecker's max order lifetime
+    ///      (maxTimePriceValid == 1 hours), since a swap authorised past the point its reference
+    ///      price expires is not protected by that price.
+    uint256 public constant MAX_COMPOUND_DEADLINE = 1 hours;
+
     /// @notice The MultiRewards contract for staking
     IMultiRewards public multiRewards;
 
@@ -209,6 +217,7 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      */
     function compound(uint256 deadline) external onlyBackend {
         require(deadline >= block.timestamp, "Deadline in the past");
+        require(deadline <= block.timestamp + MAX_COMPOUND_DEADLINE, "Deadline too far in the future");
 
         multiRewards.getReward();
 
@@ -263,10 +272,19 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             uint256 received = IERC20(mamoTokenAddr).balanceOf(address(this)) - mamoBalanceBefore;
             require(received >= amountOutMinimum, "Insufficient MAMO received");
 
+            // Measure the input side too, for the same reason as the output side: the event is the
+            // feed off-chain reconciliation uses to compare claimed against swapped, so emitting the
+            // requested balance would let an under-pulling router drift that reconciliation silently
+            // — and reconciliation is the natural monitor for a malicious-router incident.
+            // Unguarded subtraction on purpose: a post-swap balance above the pre-swap balance means
+            // the router sent reward tokens in rather than taking them, which is not a state this
+            // strategy should continue through.
+            uint256 pulled = rewardBalance - rewardToken.balanceOf(address(this));
+
             // Leave no standing allowance behind if the router pulled less than it was approved for.
             rewardToken.forceApprove(address(dexRouter), 0);
 
-            emit CompoundRewardTokenProcessed(address(rewardToken), rewardBalance, received);
+            emit CompoundRewardTokenProcessed(address(rewardToken), pulled, received);
         }
 
         // Stake all MAMO
