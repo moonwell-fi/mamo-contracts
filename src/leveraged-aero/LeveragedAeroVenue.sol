@@ -483,8 +483,9 @@ library LeveragedAeroVenue {
         LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
         LeveragedAeroManager.settleImpl();
         // Sell the reward tranche the unwind's `gauge.withdraw` just auto-claimed. WITHOUT this the
-        // book keeps a balance that is invisible to `nav()` (the `tokenId == 0` branch prices idle
-        // USDC only), unsellable (`compound` early-returns on a flat book) and un-rescuable
+        // book keeps a balance that is invisible to `nav()` (the `tokenId == 0` branch prices USDC —
+        // raw and mUSDC-parked — and the reward token is neither), unsellable (`compound`
+        // early-returns on a flat book) and un-rescuable
         // (`rescueToVault` denies the reward token while Executed) — so every deposit and redeem in
         // the flat window would price against an understated NAV.
         _sellRewardBalance(minRewardUsdcOut, true);

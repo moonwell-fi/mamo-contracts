@@ -100,6 +100,19 @@ contract MockLendingMarket {
     address public immutable underlying;
     uint256 public exchangeRateStored = 1e18;
 
+    /// @dev The exchange rate the next accrual will adopt; 0 means "nothing pending". The SUPPLY-side
+    ///      twin of `_pendingBorrowIndex`, and modelled for the same reason: real Compound/Moonwell
+    ///      accrues inside every MUTATING entry point (`mint`, `redeem`, `redeemUnderlying`) but not
+    ///      inside a view, so a caller that SIZES a draw off `exchangeRateStored` and then executes it
+    ///      is sizing at the stale rate and burning at the fresh one. That gap is exactly what
+    ///      `_redeemCollateral`'s full-redeem branch exists to avoid — sizing a "redeem everything" as
+    ///      an UNDERLYING amount at the stored rate strands `cBal x (1 - stored/fresh)` cTokens — and
+    ///      with one settable rate serving both roles it was not representable at all: the mock burned
+    ///      at the same rate the caller sized with, so the dust could never appear and a test could
+    ///      "pin" the branch while passing with it deleted.
+    /// @dev 0 by default ⇒ every existing suite behaves exactly as before; this is opt-in.
+    uint256 internal _pendingExchangeRate;
+
     mapping(address => uint256) public balanceOf; // cToken balance
 
     // ── Compound borrow book ──
@@ -135,6 +148,29 @@ contract MockLendingMarket {
 
     function setExchangeRateStored(uint256 rate) external {
         exchangeRateStored = rate;
+    }
+
+    /// @notice Arm supply-side interest that has accrued in wall-clock time but that no transaction has
+    ///         folded in yet: views keep reporting `exchangeRateStored`, and the next mutating call
+    ///         adopts `rate` before it moves anything. Real Moonwell derives this from the supply rate
+    ///         and elapsed blocks; a test double sets it directly so a suite can arm an exact gap.
+    function setPendingExchangeRate(uint256 rate) external {
+        _pendingExchangeRate = rate;
+    }
+
+    /// @notice The rate a mutating call would adopt right now (== `exchangeRateStored` when nothing is
+    ///         pending). The supply-side twin of `pendingBorrowIndex()`.
+    function pendingExchangeRate() external view returns (uint256) {
+        return _pendingExchangeRate == 0 ? exchangeRateStored : _pendingExchangeRate;
+    }
+
+    /// @dev `accrueInterest()`'s supply half: fold the pending rate in and disarm. Called at the top of
+    ///      every mutating entry point, as Compound does, and NOT by any view.
+    function _accrueExchangeRate() internal {
+        if (_pendingExchangeRate != 0) {
+            exchangeRateStored = _pendingExchangeRate;
+            _pendingExchangeRate = 0;
+        }
     }
 
     /// @notice Arm the supply-side failure codes (test-only). `0` restores normal behaviour.
@@ -224,6 +260,7 @@ contract MockLendingMarket {
 
     function mint(uint256 amount) external returns (uint256) {
         if (mintError != 0) return mintError; // paused / at supply cap: answer with the code, move nothing
+        _accrueExchangeRate();
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
         balanceOf[msg.sender] += (amount * 1e18) / exchangeRateStored;
         return 0;
@@ -231,6 +268,7 @@ contract MockLendingMarket {
 
     function redeem(uint256 cAmount) external returns (uint256) {
         if (redeemError != 0) return redeemError;
+        _accrueExchangeRate();
         balanceOf[msg.sender] -= cAmount; // under-collateralised redeem reverts, as Moonwell would
         IERC20(underlying).safeTransfer(msg.sender, (cAmount * exchangeRateStored) / 1e18);
         return 0;
@@ -238,6 +276,7 @@ contract MockLendingMarket {
 
     function redeemUnderlying(uint256 amount) external returns (uint256) {
         if (redeemError != 0) return redeemError; // insufficient cash / paused
+        _accrueExchangeRate();
         balanceOf[msg.sender] -= (amount * 1e18) / exchangeRateStored;
         IERC20(underlying).safeTransfer(msg.sender, amount);
         return 0;

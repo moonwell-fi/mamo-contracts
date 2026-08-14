@@ -1561,7 +1561,13 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 supply = 1_000_000e12;
         vm.prank(address(strategy));
         vault.strategyMint(lp, supply);
-        mUsdc.setExchangeRateStored(1.37e18); // stored < fresh is the on-chain norm; any non-unit rate splits the forms
+        // The gap the branch exists for: views report 1.37e18, the next MUTATING mUSDC call accrues to
+        // 1.40e18 first. Sizing a full draw as an UNDERLYING amount off the stored rate therefore burns
+        // `amount x 1e18 / 1.40e18` cTokens and strands `cBal x (1 - 1.37/1.40)`. Without a separate
+        // fresh rate this test passed with the branch deleted: one settable rate meant the mock burned
+        // at exactly the rate the caller sized with, so the dust could not exist.
+        mUsdc.setExchangeRateStored(1.37e18); // stored < fresh is the on-chain norm
+        mUsdc.setPendingExchangeRate(1.4e18); // ...and this is the fresh rate the redeem accrues to
 
         vm.prank(lp);
         vault.approve(address(strategy), supply);

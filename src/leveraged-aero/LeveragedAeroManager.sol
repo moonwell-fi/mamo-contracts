@@ -963,10 +963,12 @@ library LeveragedAeroManager {
         // both require a flat book and never touch the gauge with a live `tokenId`. They are bricked
         // transitively — reaching them requires `flatten`, which is in the list.)
         //
-        // Rejecting is the fix rather than retiring the position (`$.tokenId = 0`): the collateral is
-        // still supplied at this point, and `nav()`'s `tokenId == 0` branch prices ONLY idle USDC, so
-        // clearing the id would erase the mUSDC collateral from NAV. A genuine full unwind must redeem
-        // the collateral too — that is `flatten()`, which reaches a flat book the NAV branch can price.
+        // Rejecting is the fix rather than retiring the position (`$.tokenId = 0`): clearing the id
+        // would leave the same orphaned, gauge-less NFT behind, which is the whole problem above. (It
+        // would no longer mis-price NAV — since `supplyIdle`, the `tokenId == 0` branch values mUSDC
+        // collateral too — but the bricking argument never needed that second leg and does not rest on
+        // it.) A genuine full unwind must dispose of the position and redeem the collateral: that is
+        // `flatten()`.
         if (repayUsd >= debtUsd) revert FullUnwindNotSupported();
         _unwindLiquidity(repayUsd, debtUsd);
         (uint256 cbShort, uint256 wethShort) = _redeemRepayFromCollected(repayUsd, debtUsd, 0, 0);

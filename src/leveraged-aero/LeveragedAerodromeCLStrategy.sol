@@ -681,8 +681,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @notice Oracle NAV of the levered book, in USDC (6dp), NET of the accrued protocol-fee
     ///         liability (`protocolFeeOwed`). `tokenId == 0` (the flat-book invariant, maintained by
-    ///         `_execute`/`_settle`) → face value of strategy-controlled idle USDC only (vault float
-    ///         excluded — M2 deposit/redeem symmetry), no oracle. Active position →
+    ///         `_execute`/`_settle`) → face value of the strategy's USDC WHEREVER IT SITS: the raw
+    ///         balance PLUS the mUSDC collateral it has been parked in, valued at
+    ///         `balanceOf × exchangeRateStored` (`LeveragedAeroValuation.usdcAvailable`). Still no
+    ///         oracle — mUSDC is a USDC claim, so the flat book prices at face either way, which is what
+    ///         lets `supplyIdle` park a flat book's whole pot without moving share price. Vault float is
+    ///         excluded (M2 deposit/redeem symmetry). Active position →
     ///         `LeveragedAeroValuation.netEquityUsdc` (oracle-implied sqrtP, fail-closed: reverts on
     ///         any oracle/calm failure or ≤0 equity). `protocolFeeOwed` is subtracted here (floored at
     ///         0, never reverts on owed > gross) — this is the fairness mechanism that replaces
