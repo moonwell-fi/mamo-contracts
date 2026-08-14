@@ -75,6 +75,7 @@ library LeveragedAeroVenue {
     error MoonwellMintFailed(uint256 errCode); // selector mirrors the strategy's / the manager's
     error MoonwellRedeemFailed(uint256 errCode); // selector mirrors the manager's
     error InsufficientIdle(); // selector mirrors the strategy's / the manager's
+    error FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps); // selector mirrors the strategy's
 
     // ── Events (emitted from the strategy's address via delegatecall) ──
     /// @notice A destination venue hash was staged (or cleared, when `venueHash == 0`) by the vault owner.
@@ -275,6 +276,9 @@ library LeveragedAeroVenue {
     function supplyIdleImpl(uint256 amount) public {
         if (amount == 0) return;
         Layout storage $ = _layout();
+        // The bound lives HERE, next to the mint it protects (the entrypoint carries only auth + the
+        // lifecycle gate — EIP-170 pressure on the strategy, same rationale as the rest of this file).
+        if (amount > IERC20($.usdc).balanceOf(address(this))) revert InsufficientIdle();
         IERC20($.usdc).forceApprove($.mUsdc, amount);
         uint256 err = ICToken($.mUsdc).mint(amount);
         if (err != 0) revert MoonwellMintFailed(err);
@@ -298,9 +302,109 @@ library LeveragedAeroVenue {
     function withdrawIdleImpl(uint256 amount) public {
         if (amount == 0) return;
         if (amount > _unleveredCollateral()) revert InsufficientIdle();
+        _redeemUnderlying(_layout().mUsdc, amount);
+    }
+
+    /// @notice Oracle-priced fast-redeem funding (body of the strategy's `redeem`): source `assetsOut`
+    ///         USDC from the redeemer's pro-rata idle share FIRST, then free only the remainder from the
+    ///         Moonwell mUSDC collateral — no LP touch, no debt repay. `idleShare = f×idle` (f =
+    ///         shares/supply, computed by the strategy) caps the idle draw so a partial redeem never
+    ///         dips into a stayer's `(1-f)×idle` (the same reservation `redeemUnwindImpl` makes). The
+    ///         LTV gate is computed BEFORE the withdraw on the same `_readCollateralDebt` basis as
+    ///         `_assertHealthy`, but against the collateral-funded REMAINDER only: a redeem that would
+    ///         push post-withdraw LTV above `maxLtvBps` reverts `FastRedeemExceedsLtv` (a typed,
+    ///         frontend-routable error — send the user to `requestRedeem`), and `assertHealthyImpl()`
+    ///         runs after as belt. When idle alone covers `assetsOut` (e.g. a flat book), no collateral
+    ///         is touched and the LTV gate is skipped. The strategy pays the redeemer + burns shares;
+    ///         the idle already held plus the freed collateral cover the payout.
+    /// @dev RELOCATED from `LeveragedAeroManager` verbatim (manager at the EIP-170 cap — same rationale
+    ///      as everything else in this file); the two manager-private dependencies became the public
+    ///      `readCollateralDebtImpl` / `assertHealthyImpl`, both delegatecalled against the same
+    ///      strategy storage, so behaviour is unchanged.
+    function fastRedeemImpl(uint256 assetsOut, uint256 idleShare) public {
         Layout storage $ = _layout();
-        uint256 err = ICToken($.mUsdc).redeemUnderlying(amount);
+        // Idle-first: draw at most the redeemer's `f×idle` share (also clamped to the live balance);
+        // the strategy's payout transfer consumes it implicitly, leaving `(1-f)×idle` for stayers.
+        uint256 idle = IERC20($.usdc).balanceOf(address(this));
+        uint256 fromIdle = assetsOut < idleShare ? assetsOut : idleShare;
+        if (fromIdle > idle) fromIdle = idle;
+        uint256 fromCollateral = assetsOut - fromIdle;
+        if (fromCollateral == 0) return; // idle fully funds the redeem — collateral + LTV gate untouched
+
+        (uint256 collateralUsdc, uint256 debtUsdc) = LeveragedAeroManager.readCollateralDebtImpl();
+        if (debtUsdc > 0) {
+            uint256 maxLtv = uint256($.maxLtvBps);
+            // Predict the post-withdraw LTV on the pre-withdraw prices (collateral shrinks by the
+            // collateral-funded remainder, debt unchanged). `>= collateralUsdc` would zero/negate the
+            // denominator — but it is only an LTV breach when there IS debt, so the guard lives INSIDE
+            // this branch. On a ZERO-DEBT book `fromCollateral == collateralUsdc` is a legitimate state,
+            // not an error: a full redeem of a flat book the keeper parked with `supplyIdle` funds the
+            // entire payout from collateral. Guarding it out here would strand the last holder of a
+            // parked flat book behind `requestRedeem` + the deadman with a misleading
+            // `FastRedeemExceedsLtv(uint256.max, …)` on a book carrying no debt at all. The zero-debt
+            // draw falls through to `_redeemUnderlying`, which fails closed (`MoonwellRedeemFailed`)
+            // if the collateral cannot actually cover it.
+            if (fromCollateral >= collateralUsdc) revert FastRedeemExceedsLtv(type(uint256).max, maxLtv);
+            uint256 postLtv = (debtUsdc * 10_000) / (collateralUsdc - fromCollateral);
+            if (postLtv > maxLtv) revert FastRedeemExceedsLtv(postLtv, maxLtv);
+        }
+        _redeemUnderlying($.mUsdc, fromCollateral);
+        LeveragedAeroManager.assertHealthyImpl(); // authoritative post-op gate (belt over the prediction)
+    }
+
+    /// @dev `mUsdc.redeemUnderlying(amt)` with the uniform error-check (this library's copy of the
+    ///      manager's helper — shared by `withdrawIdleImpl` and `fastRedeemImpl`).
+    function _redeemUnderlying(address cToken, uint256 amt) private {
+        uint256 err = ICToken(cToken).redeemUnderlying(amt);
         if (err != 0) revert MoonwellRedeemFailed(err);
+    }
+
+    /// @notice Advisory preview of the fast-path exit — the body of the strategy's `previewRedeem`,
+    ///         relocated here verbatim under EIP-170 pressure on the strategy (same rationale as
+    ///         `layoutView`). See the strategy entrypoint's docs for the full quote/`fastOk` contract.
+    /// @dev BEHAVIOUR-IDENTICAL RELOCATION: the fail-closed hops still go through the STRATEGY's own
+    ///      external self-views (`nav`, `simulateCrystallizeSelf`, `previewCollateralDebt`) so a down
+    ///      oracle or a reverting config read degrades to `(0,false)`/`(assetsOut,false)` exactly as
+    ///      before. Under delegatecall `address(this)` IS the strategy, so the `OnlySelf` guards on
+    ///      those hooks see the same self-call they always did.
+    function previewRedeemImpl(uint256 shares) public view returns (uint256 assetsOut, bool fastOk) {
+        LeveragedAerodromeCLStrategy self = LeveragedAerodromeCLStrategy(payable(address(this)));
+        uint256 supply = IERC20(self.vault()).totalSupply();
+        if (supply == 0) return (0, false);
+        uint256 navPre;
+        try self.nav() returns (uint256 n) {
+            navPre = n;
+        } catch {
+            return (0, false);
+        }
+        // Simulate the pending crystallise the executed `redeem` performs — the SAME arg-marshalling as
+        // `_crystallizeFees` (via `_simulateCrystallize`, F4 dedup). Wrapped in a try/catch so a reverting
+        // ProtocolConfig read inside `_protocolFeeBps()` degrades to `(0, false)` symmetrically with the other
+        // preview failure modes (executed `redeem` swallows the same via its own crystallise try/catch).
+        uint256 navNet;
+        uint256 supplyPost;
+        try self.simulateCrystallizeSelf(navPre, supply) returns (uint256 nn, uint256 sp) {
+            navNet = nn;
+            supplyPost = sp;
+        } catch {
+            return (0, false);
+        }
+        assetsOut = Math.mulDiv(shares, navNet, supplyPost);
+        // Mirror `redeem`'s `ZeroAssetsOut` guard: never quote a payout the executed path would revert on.
+        if (assetsOut == 0) return (0, false);
+        // Idle-first (mirror `fastRedeemImpl`): the redeemer's `f×idle` share funds part of `assetsOut`,
+        // so the LTV gate only sees the collateral-funded remainder.
+        uint256 idleShare = Math.mulDiv(IERC20(_layout().usdc).balanceOf(address(this)), shares, supplyPost);
+        uint256 fromCollateral = assetsOut > idleShare ? assetsOut - idleShare : 0;
+        if (fromCollateral == 0) return (assetsOut, true); // idle alone covers it — no LTV constraint
+        // Predict the LTV gate on the same pre-withdraw basis as `fastRedeemImpl`.
+        try self.previewCollateralDebt() returns (uint256 collateralUsdc, uint256 debtUsdc) {
+            if (fromCollateral >= collateralUsdc) return (assetsOut, false);
+            uint256 maxLtv = uint256(_layout().maxLtvBps);
+            fastOk = debtUsdc == 0 || (debtUsdc * 10_000) / (collateralUsdc - fromCollateral) <= maxLtv;
+        } catch {
+            return (assetsOut, false); // collateral/debt oracle read failed → advise the async path
+        }
     }
 
     /// @notice Revert `InsufficientIdle` unless `amount` ≤ raw USDC + UN-LEVERED collateral — the

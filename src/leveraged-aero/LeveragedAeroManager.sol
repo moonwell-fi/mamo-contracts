@@ -101,7 +101,6 @@ library LeveragedAeroManager {
     error FeedDecimalsMismatch();
     error ZeroMinOut();
     error BelowOracleFloor(); // compound swap fill < AERO/USD oracle floor (L9)
-    error FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps); // fast-path redeem would breach maxLtvBps
     error UnsupportedLeg(); // a swap was routed for a token that is neither configured leg
     // A lever-down would repay the ENTIRE debt, which removes 100% of the liquidity and orphans the
     // staked position NFT (see the guard in `_leverDown`). Route full unwinds through `flatten()`.
@@ -508,48 +507,9 @@ library LeveragedAeroManager {
         return usdcFinal > stayersIdle ? usdcFinal - stayersIdle : 0;
     }
 
-    /// @notice Oracle-priced fast-redeem funding (body of the strategy's `redeem`): source `assetsOut`
-    ///         USDC from the redeemer's pro-rata idle share FIRST, then free only the remainder from the
-    ///         Moonwell mUSDC collateral — no LP touch, no debt repay. `idleShare = f×idle` (f =
-    ///         shares/supply, computed by the strategy) caps the idle draw so a partial redeem never
-    ///         dips into a stayer's `(1-f)×idle` (the same reservation `redeemUnwindImpl` makes). The
-    ///         LTV gate is computed BEFORE the withdraw on the same `_readCollateralDebt` basis as
-    ///         `_assertHealthy`, but against the collateral-funded REMAINDER only: a redeem that would
-    ///         push post-withdraw LTV above `maxLtvBps` reverts `FastRedeemExceedsLtv` (a typed,
-    ///         frontend-routable error — send the user to `requestRedeem`), and `_assertHealthy()` runs
-    ///         after as belt. When idle alone covers `assetsOut` (e.g. a flat book), no collateral is
-    ///         touched and the LTV gate is skipped. The strategy pays the redeemer + burns shares; the
-    ///         idle already held plus the freed collateral cover the payout.
-    function fastRedeemImpl(uint256 assetsOut, uint256 idleShare) public {
-        Layout storage $ = _layout();
-        // Idle-first: draw at most the redeemer's `f×idle` share (also clamped to the live balance);
-        // the strategy's payout transfer consumes it implicitly, leaving `(1-f)×idle` for stayers.
-        uint256 idle = IERC20($.usdc).balanceOf(address(this));
-        uint256 fromIdle = assetsOut < idleShare ? assetsOut : idleShare;
-        if (fromIdle > idle) fromIdle = idle;
-        uint256 fromCollateral = assetsOut - fromIdle;
-        if (fromCollateral == 0) return; // idle fully funds the redeem — collateral + LTV gate untouched
-
-        (uint256 collateralUsdc, uint256 debtUsdc) = _readCollateralDebt();
-        if (debtUsdc > 0) {
-            uint256 maxLtv = uint256($.maxLtvBps);
-            // Predict the post-withdraw LTV on the pre-withdraw prices (collateral shrinks by the
-            // collateral-funded remainder, debt unchanged). `>= collateralUsdc` would zero/negate the
-            // denominator — but it is only an LTV breach when there IS debt, so the guard lives INSIDE
-            // this branch. On a ZERO-DEBT book `fromCollateral == collateralUsdc` is a legitimate state,
-            // not an error: a full redeem of a flat book the keeper parked with `supplyIdle` funds the
-            // entire payout from collateral. Guarding it out here would strand the last holder of a
-            // parked flat book behind `requestRedeem` + the deadman with a misleading
-            // `FastRedeemExceedsLtv(uint256.max, …)` on a book carrying no debt at all. The zero-debt
-            // draw falls through to `_redeemUnderlying`, which fails closed (`MoonwellRedeemFailed`)
-            // if the collateral cannot actually cover it.
-            if (fromCollateral >= collateralUsdc) revert FastRedeemExceedsLtv(type(uint256).max, maxLtv);
-            uint256 postLtv = (debtUsdc * 10_000) / (collateralUsdc - fromCollateral);
-            if (postLtv > maxLtv) revert FastRedeemExceedsLtv(postLtv, maxLtv);
-        }
-        _redeemUnderlying($.mUsdc, fromCollateral);
-        _assertHealthy(); // authoritative post-op gate (belt over the pre-withdraw prediction)
-    }
+    // NOTE: `fastRedeemImpl` (body of the strategy's fast `redeem`) LIVES IN `LeveragedAeroVenue`,
+    // relocated verbatim under EIP-170 pressure here — it reaches back through the public
+    // `readCollateralDebtImpl` / `assertHealthyImpl` below, so the gate basis is still this library's.
 
     /// @notice Public view wrapper over `_readCollateralDebt` for the strategy's `previewRedeem`
     ///         (advisory fast-path gate prediction). Delegatecalled under staticcall — the oracle

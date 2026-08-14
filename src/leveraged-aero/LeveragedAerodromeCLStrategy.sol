@@ -1149,8 +1149,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///               louder venue ops, a keeper sweeping "whatever is raw" may legitimately pass 0.
     function supplyIdle(uint256 amount) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        if (amount > IERC20(_layout().usdc).balanceOf(address(this))) revert InsufficientIdle();
-        LeveragedAeroVenue.supplyIdleImpl(amount);
+        LeveragedAeroVenue.supplyIdleImpl(amount); // raw-balance bound enforced inside (typed)
     }
 
     /// @notice Deploy `amount` of idle strategy USDC into the levered position (supply + borrow +
@@ -1535,7 +1534,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         //    partial redeem never dips into a stayer's `(1-f)×idle`), remainder from collateral
         //    (LTV-gated in the manager on that remainder only).
         uint256 idleShare = Math.mulDiv(IERC20(_layout().usdc).balanceOf(address(this)), shares, supply);
-        LeveragedAeroManager.fastRedeemImpl(assetsOut, idleShare);
+        LeveragedAeroVenue.fastRedeemImpl(assetsOut, idleShare);
 
         // 5. Pay out + burn.
         IERC20(_layout().usdc).safeTransfer(msg.sender, assetsOut);
@@ -1575,42 +1574,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @return assetsOut Predicted USDC out (0 when unpriceable or the payout floors to 0).
     /// @return fastOk    True iff the fast path would price AND clear the LTV gate (advisory — see above).
     function previewRedeem(uint256 shares) external view returns (uint256 assetsOut, bool fastOk) {
-        uint256 supply = IERC20(vault()).totalSupply();
-        if (supply == 0) return (0, false);
-        uint256 navPre;
-        try this.nav() returns (uint256 n) {
-            navPre = n;
-        } catch {
-            return (0, false);
-        }
-        // Simulate the pending crystallise the executed `redeem` performs — the SAME arg-marshalling as
-        // `_crystallizeFees` (via `_simulateCrystallize`, F4 dedup). Wrapped in a try/catch so a reverting
-        // ProtocolConfig read inside `_protocolFeeBps()` degrades to `(0, false)` symmetrically with the other
-        // preview failure modes (executed `redeem` swallows the same via its own crystallise try/catch).
-        uint256 navNet;
-        uint256 supplyPost;
-        try this.simulateCrystallizeSelf(navPre, supply) returns (uint256 nn, uint256 sp) {
-            navNet = nn;
-            supplyPost = sp;
-        } catch {
-            return (0, false);
-        }
-        assetsOut = Math.mulDiv(shares, navNet, supplyPost);
-        // Mirror `redeem`'s `ZeroAssetsOut` guard: never quote a payout the executed path would revert on.
-        if (assetsOut == 0) return (0, false);
-        // Idle-first (mirror `fastRedeemImpl`): the redeemer's `f×idle` share funds part of `assetsOut`,
-        // so the LTV gate only sees the collateral-funded remainder.
-        uint256 idleShare = Math.mulDiv(IERC20(_layout().usdc).balanceOf(address(this)), shares, supplyPost);
-        uint256 fromCollateral = assetsOut > idleShare ? assetsOut - idleShare : 0;
-        if (fromCollateral == 0) return (assetsOut, true); // idle alone covers it — no LTV constraint
-        // Predict the LTV gate on the same pre-withdraw basis as `fastRedeemImpl`.
-        try this.previewCollateralDebt() returns (uint256 collateralUsdc, uint256 debtUsdc) {
-            if (fromCollateral >= collateralUsdc) return (assetsOut, false);
-            uint256 maxLtv = uint256(_layout().maxLtvBps);
-            fastOk = debtUsdc == 0 || (debtUsdc * 10_000) / (collateralUsdc - fromCollateral) <= maxLtv;
-        } catch {
-            return (assetsOut, false); // collateral/debt oracle read failed → advise the async path
-        }
+        // Body relocated to `LeveragedAeroVenue.previewRedeemImpl` under EIP-170 pressure (same
+        // rationale as `layout()`). Behaviour identical — see the note there.
+        return LeveragedAeroVenue.previewRedeemImpl(shares);
     }
 
     /// @dev Self-only external view so `previewRedeem` can try/catch the manager's oracle reads
