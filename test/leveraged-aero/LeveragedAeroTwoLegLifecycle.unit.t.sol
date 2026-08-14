@@ -24,7 +24,7 @@ import {
     MockNpm
 } from "./LeveragedAeroVenuesHarness.sol";
 
-import {Test, Vm} from "@forge-std/Test.sol";
+import {Test, Vm, stdError} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -1523,6 +1523,61 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         // preview's `false` and the executed revert are the same decision.
         vm.expectPartialRevert(LeveragedAeroVenue.FastRedeemExceedsLtv.selector);
         strategy.redeem(supply, 0);
+        vm.stopPrank();
+    }
+
+    /**
+     * @dev THE OTHER DIRECTION OF THE SAME MIRROR, and the reason the zero-debt branch is a BOUND rather
+     *      than an unconditional `true`. A zero-debt book is NOT necessarily a flat one: `repayBorrowBehalf`
+     *      is permissionless, so anyone can retire the fund's debt while the LP position stays open (modelled
+     *      here by repaying both legs as the strategy). `nav()` then prices LP equity the mUSDC collateral
+     *      alone cannot fund, so a full redeem's `fromCollateral` STRICTLY exceeds `collateralUsdc` and the
+     *      fast path cannot serve it — the executed redeem refuses at Moonwell.
+     *
+     *      An unconditional `fastOk = true` on zero debt (the shape this suite briefly shipped) told a
+     *      frontend to call a `redeem` that reverts. The bound keeps EXACT cover true — that is the parked
+     *      flat-book case above — and flips only the strict over-draw.
+     */
+    function testPreviewRefusesAZeroDebtOverDrawAgainstALiveLpPosition() public {
+        _execute(SEED);
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        // Anyone can retire the debt; the LP position is untouched and stays live.
+        _retireAllDebtPermissionlessly();
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt retired");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt retired");
+        assertGt(strategy.layout().tokenId, 0, "...and the LP position is still live");
+
+        (uint256 quoted, bool fastOk) = strategy.previewRedeem(supply);
+        assertGt(quoted, _collateralUsdc(), "precondition: the payout exceeds the collateral that funds it");
+        assertFalse(fastOk, "zero debt is not a free pass - the collateral must still COVER the draw");
+
+        // ...and the executed path agrees. Production surfaces Moonwell's refusal as
+        // `MoonwellRedeemFailed(err)`; `MockLendingMarket` models an over-draw as the cToken-balance
+        // underflow, so the revert here is the arithmetic one. Either way: the fast path does not serve it.
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        vm.expectRevert(stdError.arithmeticError);
+        strategy.redeem(supply, 0);
+        vm.stopPrank();
+    }
+
+    /// @dev Retire BOTH leg debts from outside the strategy's own ops — the reachable-by-anyone state
+    ///      `repayBorrowBehalf` creates on a live Compound-fork market. Pranked as the strategy because
+    ///      `MockLendingMarket.repayBorrow` is `msg.sender`-scoped; the resulting STATE (zero debt, live
+    ///      LP, untouched collateral) is what matters and is identical either way.
+    function _retireAllDebtPermissionlessly() internal {
+        uint256 debtA = mLegA.borrowBalance(address(strategy));
+        uint256 debtB = mLegB.borrowBalance(address(strategy));
+        legA.mint(address(strategy), debtA);
+        legB.mint(address(strategy), debtB);
+        vm.startPrank(address(strategy));
+        legA.approve(address(mLegA), debtA);
+        mLegA.repayBorrow(debtA);
+        legB.approve(address(mLegB), debtB);
+        mLegB.repayBorrow(debtB);
         vm.stopPrank();
     }
 

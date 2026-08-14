@@ -325,31 +325,73 @@ library LeveragedAeroVenue {
         Layout storage $ = _layout();
         // Idle-first: draw at most the redeemer's `f×idle` share (also clamped to the live balance);
         // the strategy's payout transfer consumes it implicitly, leaving `(1-f)×idle` for stayers.
-        uint256 idle = IERC20($.usdc).balanceOf(address(this));
-        uint256 fromIdle = assetsOut < idleShare ? assetsOut : idleShare;
-        if (fromIdle > idle) fromIdle = idle;
-        uint256 fromCollateral = assetsOut - fromIdle;
-        if (fromCollateral == 0) return; // idle fully funds the redeem — collateral + LTV gate untouched
+        uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, IERC20($.usdc).balanceOf(address(this)));
+        // Idle alone covers it → no collateral touched, NO collateral/debt read at all. Keeping this
+        // early-return ahead of `readCollateralDebtImpl` is what keeps an idle-funded redeem free of any
+        // oracle dependency; moving it into `_fastGate` would silently add one.
+        if (fromCollateral == 0) return;
 
         (uint256 collateralUsdc, uint256 debtUsdc) = LeveragedAeroManager.readCollateralDebtImpl();
-        if (debtUsdc > 0) {
-            uint256 maxLtv = uint256($.maxLtvBps);
-            // Predict the post-withdraw LTV on the pre-withdraw prices (collateral shrinks by the
-            // collateral-funded remainder, debt unchanged). `>= collateralUsdc` would zero/negate the
-            // denominator — but it is only an LTV breach when there IS debt, so the guard lives INSIDE
-            // this branch. On a ZERO-DEBT book `fromCollateral == collateralUsdc` is a legitimate state,
-            // not an error: a full redeem of a flat book the keeper parked with `supplyIdle` funds the
-            // entire payout from collateral. Guarding it out here would strand the last holder of a
-            // parked flat book behind `requestRedeem` + the deadman with a misleading
-            // `FastRedeemExceedsLtv(uint256.max, …)` on a book carrying no debt at all. The zero-debt
-            // draw falls through to `_redeemUnderlying`, which fails closed (`MoonwellRedeemFailed`)
-            // if the collateral cannot actually cover it.
-            if (fromCollateral >= collateralUsdc) revert FastRedeemExceedsLtv(type(uint256).max, maxLtv);
-            uint256 postLtv = (debtUsdc * 10_000) / (collateralUsdc - fromCollateral);
-            if (postLtv > maxLtv) revert FastRedeemExceedsLtv(postLtv, maxLtv);
-        }
+        uint256 maxLtv = uint256($.maxLtvBps);
+        (bool ok, uint256 postLtv) = _fastGate(fromCollateral, collateralUsdc, debtUsdc, maxLtv);
+        // THE TYPED ERROR IS FOR LTV BREACHES, and only those. A zero-debt over-draw is not an LTV
+        // breach — there is no LTV — it is "the collateral cannot cover this", and Moonwell is the
+        // authority on that: the draw falls through to `_redeemUnderlying`, which fails closed with
+        // `MoonwellRedeemFailed(err)`. That is the pre-existing behaviour of this path and the reason
+        // the revert selector for that state is unchanged by the gate extraction.
+        if (!ok && debtUsdc > 0) revert FastRedeemExceedsLtv(postLtv, maxLtv);
         _redeemUnderlying($.mUsdc, fromCollateral);
         LeveragedAeroManager.assertHealthyImpl(); // authoritative post-op gate (belt over the prediction)
+    }
+
+    /// @dev The idle-first split, shared by `fastRedeemImpl` and `previewRedeemImpl`: how much of
+    ///      `assetsOut` the collateral has to fund once the redeemer's pro-rata idle share is spent.
+    ///      `idleShare` is `f×idle` (computed by the strategy from the same `f` it prices with); the
+    ///      clamp to the LIVE balance is belt — `idleShare ≤ idle` holds by construction.
+    function _fromCollateral(uint256 assetsOut, uint256 idleShare, uint256 idle) private pure returns (uint256) {
+        uint256 fromIdle = assetsOut < idleShare ? assetsOut : idleShare;
+        if (fromIdle > idle) fromIdle = idle;
+        return assetsOut - fromIdle;
+    }
+
+    /// @dev THE FAST-PATH GATE — ONE DEFINITION, consumed by BOTH the executed `fastRedeemImpl` (which
+    ///      reverts on `!ok`) and the advisory `previewRedeemImpl` (which returns it as `fastOk`). The
+    ///      mirror between preview and execution is now STRUCTURAL rather than two hand-kept copies of
+    ///      the same conditional — which is exactly how it drifted before: `416d9b4` moved the executed
+    ///      copy's `>= collateralUsdc` check inside the debt branch and the preview's copy did not
+    ///      follow.
+    ///
+    ///      THE THREE STATES, on the pre-withdraw basis (collateral shrinks by the collateral-funded
+    ///      remainder, debt unchanged):
+    ///
+    ///        - `fromCollateral == 0` → OK. Idle funds the whole payout; no collateral moves.
+    ///
+    ///        - `debtUsdc == 0` → OK iff `fromCollateral <= collateralUsdc`. There is no LTV to breach,
+    ///          so the only question is whether the collateral can COVER the draw. EXACT COVER MUST STAY
+    ///          OK: that is the parked-flat-book full redeem (`supplyIdle` parked the whole pot, the
+    ///          sole holder exits, `fromCollateral == collateralUsdc`), which the fast path serves and
+    ///          which answering `false` would strand behind `requestRedeem` + the deadman. Only a STRICT
+    ///          over-draw is refused — reachable with a live LP position and no debt (a zero-debt book
+    ///          is not necessarily flat: `repayBorrowBehalf` is permissionless, so anyone can retire the
+    ///          fund's debt while the LP stays open), where `nav()` prices LP equity the collateral
+    ///          alone cannot fund.
+    ///
+    ///        - `debtUsdc > 0` → the LTV prediction. `>= collateralUsdc` would zero or negate the
+    ///          denominator, so it is refused as the `type(uint256).max` sentinel; otherwise
+    ///          `postLtv = debt × 1e4 / (collateral − fromCollateral)` must be within `maxLtvBps`.
+    ///
+    ///      `postLtv` is meaningful ONLY in the third state; the callers use it solely for the typed
+    ///      `FastRedeemExceedsLtv(postLtv, maxLtv)` they raise there.
+    function _fastGate(uint256 fromCollateral, uint256 collateralUsdc, uint256 debtUsdc, uint256 maxLtv)
+        private
+        pure
+        returns (bool ok, uint256 postLtv)
+    {
+        if (fromCollateral == 0) return (true, 0);
+        if (debtUsdc == 0) return (fromCollateral <= collateralUsdc, 0);
+        if (fromCollateral >= collateralUsdc) return (false, type(uint256).max);
+        postLtv = (debtUsdc * 10_000) / (collateralUsdc - fromCollateral);
+        ok = postLtv <= maxLtv;
     }
 
     /// @dev `mUsdc.redeemUnderlying(amt)` with the uniform error-check (this library's copy of the
@@ -394,27 +436,16 @@ library LeveragedAeroVenue {
         if (assetsOut == 0) return (0, false);
         // Idle-first (mirror `fastRedeemImpl`): the redeemer's `f×idle` share funds part of `assetsOut`,
         // so the LTV gate only sees the collateral-funded remainder.
-        uint256 idleShare = Math.mulDiv(IERC20(_layout().usdc).balanceOf(address(this)), shares, supplyPost);
-        uint256 fromCollateral = assetsOut > idleShare ? assetsOut - idleShare : 0;
+        uint256 idle = IERC20(_layout().usdc).balanceOf(address(this));
+        uint256 idleShare = Math.mulDiv(idle, shares, supplyPost);
+        uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, idle);
         if (fromCollateral == 0) return (assetsOut, true); // idle alone covers it — no LTV constraint
-        // Predict the LTV gate on the same pre-withdraw basis as `fastRedeemImpl` — INCLUDING WHERE ITS
-        // GUARD SITS. The `>= collateralUsdc` check protects a division that only exists when there is
-        // debt, so it lives INSIDE the debt branch, exactly as it does in `fastRedeemImpl` (which moved
-        // it there in `416d9b4`; this copy did not follow, and the two are now one shape again). On a
-        // ZERO-DEBT book `fromCollateral == collateralUsdc` is a legitimate state, not an error: a full
-        // redeem of a flat book the keeper parked with `supplyIdle` funds the whole payout from
-        // collateral, and the executed `redeem` pays it. Answering `false` here would send the LAST
-        // HOLDER of a parked flat book down `requestRedeem` + the deadman for a redeem the fast path
-        // serves — the preview contradicting the path it exists to predict.
+        // Predict the executed gate by RUNNING THE EXECUTED GATE: `_fastGate` is the same function
+        // `fastRedeemImpl` decides with, so the preview cannot disagree with the path it exists to
+        // predict. (It did: this copy of the conditional was hand-kept and drifted from the executed
+        // one — see the note on `_fastGate`.)
         try self.previewCollateralDebt() returns (uint256 collateralUsdc, uint256 debtUsdc) {
-            // Second-order, unchanged by this and deliberately left alone: on a zero-debt book with a
-            // LIVE LP position, an oversized collateral draw surfaces from Moonwell as
-            // `MoonwellRedeemFailed` rather than the typed `FastRedeemExceedsLtv`. Reaching it needs a
-            // book whose collateral cannot cover a payout `nav()` has already priced.
-            if (debtUsdc == 0) return (assetsOut, true); // no debt ⇒ no LTV constraint (mirrors the manager)
-            if (fromCollateral >= collateralUsdc) return (assetsOut, false);
-            uint256 maxLtv = uint256(_layout().maxLtvBps);
-            fastOk = (debtUsdc * 10_000) / (collateralUsdc - fromCollateral) <= maxLtv;
+            (fastOk,) = _fastGate(fromCollateral, collateralUsdc, debtUsdc, uint256(_layout().maxLtvBps));
         } catch {
             return (assetsOut, false); // collateral/debt oracle read failed → advise the async path
         }
