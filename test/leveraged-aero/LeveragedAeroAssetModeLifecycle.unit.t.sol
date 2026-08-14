@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
@@ -668,6 +669,87 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
      *      shrank (so the funding came from where we claim), the post-op LTV is the requested target
      *      and not the overshoot, and NAV is conserved across the whole move.
      */
+    /**
+     * @dev THE ROLLBACK PIN for the funding path above — successor to the deleted
+     *      `testAssetModeLeverUpRevertsWhenIdleIsInsufficientAndLeavesStateUntouched`, which went away
+     *      with the bound it exercised (`InsufficientIdleForLeverUp` is provably unreachable from
+     *      `adjustLeverage` now) and left NOTHING pinning the failure mode that replaced it.
+     *
+     *      WHAT REPLACED IT: with the pairing funded out of collateral, the binding constraint is
+     *      MOONWELL's — a mid-op `redeemUnderlying` refused because the market is cash-short or the draw
+     *      crosses the free-collateral line. The contract for that is `MoonwellRedeemFailed(err)` with
+     *      the WHOLE op rolled back and nothing moved: deliberately not a partial fill and not a silent
+     *      cap.
+     *
+     *      WHAT THIS TEST ACTUALLY PINS, stated precisely because the obvious claim is wrong: it does
+     *      NOT pin `_leverUp`'s internal ordering (size, then materialise, then borrow). Every assertion
+     *      below runs AFTER a reverted call, so it observes rolled-back state — inverting the
+     *      materialise/borrow order still passes, because the EVM undoes both either way. What it does
+     *      pin is the contract a caller can actually observe: the refusal surfaces as the TYPED
+     *      `MoonwellRedeemFailed(err)` rather than an untyped failure downstream, the op is atomic
+     *      (nothing partially applied), the POLICY half is not rolled back with it, and the whole thing
+     *      is retry-able once the market recovers.
+     *
+     *      Pinning the ordering itself would need a mock that observes intermediate state mid-call
+     *      (a reentrant hook on `redeemUnderlying`); that is a separate piece of machinery, noted as a
+     *      follow-up rather than faked here.
+     */
+    function testAssetModeLeverUpRollsBackWhenMoonwellRefusesTheMidOpRedeem() public {
+        _execute(SEED);
+
+        // Same zero-raw steady state as the success test above: the pairing MUST come from collateral,
+        // so the mid-op redeem is on the critical path and its refusal is reachable.
+        uint256 dust = usdc.balanceOf(address(strategy));
+        if (dust > 0) {
+            vm.prank(address(strategy));
+            usdc.transfer(address(0xDEAD), dust);
+        }
+        assertEq(usdc.balanceOf(address(strategy)), 0, "the fixture must start with NO raw USDC");
+
+        uint16 newTarget = 6000;
+        (, uint256 expLpUsdc) = _expectedLeverUpPair(newTarget);
+        assertGt(expLpUsdc, 0, "the op must actually need pairing USDC, or the test proves nothing");
+
+        (uint256 collateralBefore, uint256 debtBefore) = _collateralAndDebt();
+        uint256 debtLegABefore = mLegA.borrowBalance(address(strategy));
+        uint256 navBefore = strategy.nav();
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        uint128 liqBefore = npm.liquidityOf(tokenIdBefore);
+        uint16 targetBefore = strategy.targetLtvBps();
+
+        // Moonwell refuses the redeem (cash-short / free-collateral line), the way a live market does:
+        // a nonzero return code, nothing moved.
+        mUsdc.setSupplyErrors(0, 9);
+
+        vm.prank(owner);
+        strategy.setTargetLtv(newTarget); // policy half succeeds - it touches no market
+        vm.prank(proposer);
+        vm.expectRevert(abi.encodeWithSelector(LeveragedAeroManager.MoonwellRedeemFailed.selector, uint256(9)));
+        strategy.adjustLeverage(0, 0);
+
+        // NOTHING MOVED. Debt is the assertion that matters most: the refusal must land before the
+        // borrow, or the fund is left levered with no pairing USDC.
+        (uint256 collateralAfter, uint256 debtAfter) = _collateralAndDebt();
+        assertEq(mLegA.borrowBalance(address(strategy)), debtLegABefore, "no leg-A debt was taken on");
+        assertEq(debtAfter, debtBefore, "debt unchanged");
+        assertEq(collateralAfter, collateralBefore, "collateral unchanged - the redeem moved nothing");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "still no raw USDC");
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "same position");
+        assertEq(npm.liquidityOf(tokenIdBefore), liqBefore, "no liquidity was added");
+        assertEq(strategy.nav(), navBefore, "NAV unchanged");
+        // The standing target IS updated - `setTargetLtv` is a separate admin op that never touched a
+        // market. The BOOK simply did not move to it, which is the retry-able state.
+        assertEq(strategy.targetLtvBps(), newTarget, "policy stands; the book is just not there yet");
+        assertTrue(targetBefore != newTarget, "precondition: the retarget was a real change");
+
+        // ...and it is genuinely retry-able: clear the refusal and the same op goes through.
+        mUsdc.setSupplyErrors(0, 0);
+        vm.prank(proposer);
+        strategy.adjustLeverage(0, 0);
+        (uint256 collateralFinal, uint256 debtFinal) = _collateralAndDebt();
+        assertApproxEqAbs((debtFinal * 10_000) / collateralFinal, uint256(newTarget), 2, "the retry lands on target");
+    }
+
     function testAssetModeLeverUpFundsThePairFromCollateralWhenRawIdleIsZero() public {
         _execute(SEED);
 
