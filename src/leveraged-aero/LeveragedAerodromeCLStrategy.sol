@@ -1538,7 +1538,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         //    partial redeem never dips into a stayer's `(1-f)×idle`), remainder from collateral
         //    (LTV-gated in the manager on that remainder only).
         uint256 idleShare = Math.mulDiv(IERC20(_layout().usdc).balanceOf(address(this)), shares, supply);
-        LeveragedAeroVenue.fastRedeemImpl(assetsOut, idleShare);
+        //    `shares == supply` is threaded through so the funding step can recognise a FULL redeem and
+        //    burn the cTOKEN balance rather than a stored-rate underlying amount (otherwise the rate gap
+        //    strands collateral in a fund that no longer has shares). It returns the payout it actually
+        //    funded: identical to `assetsOut` on every other path, and `assetsOut` PLUS the fresh-rate
+        //    surplus on that one — never less, so the `minAssetsOut` floor checked above still holds.
+        assetsOut = LeveragedAeroVenue.fastRedeemImpl(assetsOut, idleShare, shares == supply);
 
         // 5. Pay out + burn.
         IERC20(_layout().usdc).safeTransfer(msg.sender, assetsOut);
@@ -1552,10 +1557,18 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         Here we SIMULATE that crystallise with the current storage — same pure `LeveragedAeroFees`
     ///         inputs `_crystallizeFees` uses — and price on `navNet = navPre − freshSlice` over the
     ///         post-mint `supply + feeShares`, so the quote equals the executed payout to the wei *when
-    ///         executed at the same `block.timestamp`*. A frontend passing it as `minAssetsOut` should
+    ///         executed at the same `block.timestamp`* — with ONE carve-out, below. A frontend passing it
+    ///         as `minAssetsOut` should
     ///         still apply a small slippage tolerance: the streaming management fee accrues with `dt`, so
     ///         a redeem landing a few blocks later pays marginally LESS than this quote (and the NAV may
     ///         drift), which would otherwise bounce an exact-quote `minAssetsOut`.
+    ///
+    ///         THE CARVE-OUT, and it is in the SAFE direction: a FULL redeem of a flat, zero-debt book
+    ///         burns the whole cToken balance and pays the redeemer the FRESH-rate proceeds, while this
+    ///         quote prices the same collateral at `nav()`'s stored (last-accrued) rate. With un-accrued
+    ///         supply interest outstanding the executed payout is therefore LARGER than the quote (on the
+    ///         suite's fixture: quotes 1,370,000e6, pays 1,400,000e6). It only ever under-quotes, so a
+    ///         preview-derived `minAssetsOut` cannot bounce on it.
     ///
     ///         Safe-direction edge for the PAYOUT (opposite sign): if the executed crystallise DEFERS
     ///         (fee-mint reverts on a paused / un-whitelisted vault, H3), the actual pays MORE than this

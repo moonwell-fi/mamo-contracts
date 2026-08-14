@@ -1460,6 +1460,101 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "collateral fully drawn");
     }
 
+    /**
+     * @dev THE FAST-PATH TWIN of `testFullAsyncRedeemLeavesNoCollateralDustAtANonUnitRate`, and the more
+     *      dangerous half. `redeemUnderlying(amt)` accrues and burns at the FRESH rate while `amt` was
+     *      sized off `nav()`'s `exchangeRateStored`, so a full fast redeem used to strand
+     *      `cBal x (1 - stored/fresh)` cTokens. `_redeemCollateral` fixed exactly this on the ASYNC path;
+     *      the fast path never got it, and the parked-flat-book fast full redeem is precisely the state
+     *      that makes it reachable.
+     *
+     *      WHY IT IS WORSE THAN DUST: the redeem burns the LAST shares, so the residue is a fund with
+     *      assets and no shares — `nav() > 0` at `totalSupply() == 0`. The next depositor of 1 USDC mints
+     *      100% of a book that already holds the stranded collateral. The fix burns the cTOKEN balance
+     *      and pays the fresh-rate proceeds to the sole holder they belong to.
+     */
+    function testFastFullRedeemLeavesNoCollateralDustAtANonUnitRate() public {
+        uint256 pot = _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        // Views report 1.37e18; the redeem's own mUSDC call accrues to 1.40e18 before it burns.
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18);
+        uint256 quotedAtStoredRate = strategy.nav();
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, 0);
+        vm.stopPrank();
+
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "no rate-gap cToken dust after a full fast redeem");
+        assertEq(vault.totalSupply(), 0, "the last shares are burnt");
+        assertEq(strategy.nav(), 0, "a fund with zero shares outstanding prices at exactly zero");
+        assertGt(out, quotedAtStoredRate, "the sole holder is paid the FRESH-rate proceeds, not the stored-rate quote");
+        assertEq(usdc.balanceOf(lp), out, "...and it is delivered");
+        // The surplus is exactly the rate gap on the parked pot: the pot was supplied at rate 1.0, so
+        // `cBal == pot` and the gap is `pot x (1.40 - 1.37)` == 30,000e6 on a 1,000,000e6 park — the
+        // precise figure james-saint's repro showed the next depositor would have minted against.
+        assertEq(out - quotedAtStoredRate, (pot * 3) / 100, "surplus == pot x (fresh - stored)");
+    }
+
+    /// @dev ERC-7201 base of the strategy's diamond storage (`LeveragedAerodromeCLStrategy.STORAGE_SLOT`),
+    ///      used to arm `protocolFeeOwed` directly — there is no setter for it and reaching a non-zero
+    ///      accrual through the fee machinery would drag HWM/timestamp state into a test about payout
+    ///      arithmetic. The write is asserted through `layout()` before it is relied on.
+    bytes32 internal constant LAYOUT_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
+
+    /**
+     * @dev THE FEE MUST STAY FUNDED ACROSS THE FULL-REDEEM BURN — the sign-flipped twin of the windfall
+     *      bug above, and the reason the surplus is measured against `collateralUsdc` rather than
+     *      `fromCollateral`.
+     *
+     *      `fromCollateral` is already NET of `protocolFeeOwed`: on a full redeem
+     *      `assetsOut == navNet == raw + C - owed` and the idle draw is the whole raw balance, so
+     *      `fromCollateral == C - owed`. Baselining the fresh-rate surplus there pays out
+     *      `(C_fresh - C) + owed` — the rate gap PLUS the accrued fee — and the redeemer walks off with
+     *      a liability that has nothing behind it: `protocolFeeOwed` survives the redeem pointing at an
+     *      empty book, so the NEXT depositor's capital settles it.
+     *
+     *      `nav()` cannot see this either way (it floors at `gross > owed ? gross - owed : 0`, so it
+     *      reads 0 whether the fee is funded or drained), which is exactly why the dust test above —
+     *      which runs with `owed == 0`, where the two baselines coincide — cannot tell them apart. This
+     *      one arms a real fee.
+     *
+     *      REACHABLE ON THIS FIXTURE'S OWN CONFIG: with `performanceFeeBps == 0` and a protocol fee
+     *      configured, a crystallise accrues `protocolFeeOwed` while minting NO fee shares, so a sole
+     *      holder is still `shares == supply` and takes the full-redeem branch.
+     */
+    function testFastFullRedeemKeepsTheProtocolFeeFunded() public {
+        uint256 pot = _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18);
+
+        uint256 owed = 50_000e6;
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 22), bytes32(owed));
+        assertEq(strategy.layout().protocolFeeOwed, owed, "precondition: the fee liability is armed");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "precondition: nothing raw - the fee is not funded yet");
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, 0);
+        vm.stopPrank();
+
+        // The whole book at the FRESH rate, minus the fee the fund still owes.
+        uint256 freshBook = (pot * 140) / 100;
+        assertEq(out, freshBook - owed, "redeemer paid the fresh-rate book MINUS the protocol fee");
+        assertEq(usdc.balanceOf(address(strategy)), owed, "the fee stays funded in raw USDC, to the wei");
+        assertEq(strategy.layout().protocolFeeOwed, owed, "...and the liability still points at real USDC");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "no cToken dust either");
+        assertEq(strategy.nav(), 0, "book net of the fee is exactly zero");
+    }
+
     // ==================== previewRedeem MIRRORS THE EXECUTED redeem ====================
     //
     // `previewRedeem`'s natspec promises it mirrors `redeem` EXACTLY, and a frontend routes on its

@@ -321,15 +321,16 @@ library LeveragedAeroVenue {
     ///      as everything else in this file); the two manager-private dependencies became the public
     ///      `readCollateralDebtImpl` / `assertHealthyImpl`, both delegatecalled against the same
     ///      strategy storage, so behaviour is unchanged.
-    function fastRedeemImpl(uint256 assetsOut, uint256 idleShare) public {
+    function fastRedeemImpl(uint256 assetsOut, uint256 idleShare, bool isFullRedeem) public returns (uint256 payout) {
         Layout storage $ = _layout();
+        payout = assetsOut;
         // Idle-first: draw at most the redeemer's `f×idle` share (also clamped to the live balance);
         // the strategy's payout transfer consumes it implicitly, leaving `(1-f)×idle` for stayers.
         uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, IERC20($.usdc).balanceOf(address(this)));
         // Idle alone covers it → no collateral touched, NO collateral/debt read at all. Keeping this
         // early-return ahead of `readCollateralDebtImpl` is what keeps an idle-funded redeem free of any
         // oracle dependency; moving it into `_fastGate` would silently add one.
-        if (fromCollateral == 0) return;
+        if (fromCollateral == 0) return payout;
 
         (uint256 collateralUsdc, uint256 debtUsdc) = LeveragedAeroManager.readCollateralDebtImpl();
         uint256 maxLtv = uint256($.maxLtvBps);
@@ -340,8 +341,55 @@ library LeveragedAeroVenue {
         // `MoonwellRedeemFailed(err)`. That is the pre-existing behaviour of this path and the reason
         // the revert selector for that state is unchanged by the gate extraction.
         if (!ok && debtUsdc > 0) revert FastRedeemExceedsLtv(postLtv, maxLtv);
-        _redeemUnderlying($.mUsdc, fromCollateral);
+
+        // THE FULL-REDEEM BURN, and why sizing in UNDERLYING strands value. `redeemUnderlying(amt)`
+        // ACCRUES first and then burns `amt / freshRate` cTokens, while `amt` was sized off `nav()`'s
+        // `exchangeRateStored` — the LAST-ACCRUED rate. Every full fast redeem therefore left
+        // `cBal x (1 - stored/fresh)` cTokens behind. With `supply` now 0 that residue is a fund with
+        // assets and no shares: `nav() > 0` at `totalSupply() == 0`, so the next depositor of 1 USDC
+        // mints against a book that already holds it. `_redeemCollateral` fixed exactly this on the
+        // ASYNC path (`shares == supply` burns the cTOKEN balance); the fast path never got it, and
+        // making the parked-flat-book fast full redeem reachable is what put it in reach.
+        //
+        // Burn the whole cToken balance instead, and hand the redeemer the fresh-rate surplus: on a full
+        // redeem there are no stayers to share it with, and leaving it behind is the bug.
+        //
+        // THE SURPLUS IS MEASURED AGAINST `collateralUsdc`, NOT `fromCollateral`, AND THAT CHOICE IS THE
+        // PROTOCOL FEE. `fromCollateral` is already NET OF `protocolFeeOwed`: on a full redeem
+        // `assetsOut == navNet == raw + C − owed` and the idle draw is the whole raw balance, so
+        // `fromCollateral == C − owed`. Baselining the surplus there would make it
+        // `(C_fresh − C) + owed` — the rate gap PLUS the accrued fee — and the redeemer would walk off
+        // with a liability that has nothing behind it, leaving `protocolFeeOwed` pointing at an empty
+        // book for the next depositor's capital to settle. `collateralUsdc` is the pre-burn collateral
+        // GROSS of the fee, so the difference is exactly the rate gap and the fee stays funded in raw
+        // USDC for its recipient. The two baselines coincide when `owed == 0`, which is why this is a
+        // no-op on the common path and why a test with no fee accrued cannot tell them apart.
+        //
+        // GATED ON A FLAT BOOK (`tokenId == 0`) AND ZERO DEBT: that is the state where mUSDC collateral
+        // is the whole non-idle book, so burning all of it is exactly "pay out everything". With a live
+        // LP or live debt a full fast redeem cannot be served at all (the gate above refuses it, or
+        // Moonwell does), so the branch would be dead weight there.
+        if (isFullRedeem && debtUsdc == 0 && $.tokenId == 0) {
+            uint256 before = IERC20($.usdc).balanceOf(address(this));
+            _redeemCTokens($.mUsdc, ICToken($.mUsdc).balanceOf(address(this)));
+            uint256 realised = IERC20($.usdc).balanceOf(address(this)) - before;
+            // `realised >= collateralUsdc` whenever the rate has not gone BACKWARDS (it cannot in
+            // Compound); the guard keeps the arithmetic total either way, and a shortfall simply pays
+            // the quote, which the payout transfer then fails closed on if the raw balance cannot cover.
+            if (realised > collateralUsdc) payout = assetsOut + (realised - collateralUsdc);
+        } else {
+            _redeemUnderlying($.mUsdc, fromCollateral);
+        }
         LeveragedAeroManager.assertHealthyImpl(); // authoritative post-op gate (belt over the prediction)
+    }
+
+    /// @dev `mUsdc.redeem(cTokens)` with the uniform error-check — the cTOKEN-denominated form, which is
+    ///      the only one that provably leaves NO dust: it burns a balance, not an amount derived from a
+    ///      rate the call itself is about to move. This library's copy of the manager's helper (same
+    ///      reason `_redeemUnderlying` is duplicated here).
+    function _redeemCTokens(address cToken, uint256 tokens) private {
+        uint256 err = ICToken(cToken).redeem(tokens);
+        if (err != 0) revert MoonwellRedeemFailed(err);
     }
 
     /// @dev The idle-first split, shared by `fastRedeemImpl` and `previewRedeemImpl`: how much of
