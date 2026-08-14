@@ -188,9 +188,14 @@ and the SAME per-leg USD values the contract computes (Chainlink `oracle0`/`orac
 - **`rebuildAfterSwap`** — the principal is already loose on the balancer, so `balanceOf(token0|1)`
   is the input directly.
 - **`rebalanceUsingAlt`** — the principal is still IN the positions at call time. Use the amounts the
-  teardown will return: `principalAmounts(mainTokenId, sqrtP) + principalAmounts(altTokenId, sqrtP)`
-  (derive from `positions()` liquidity + ticks at the current `sqrtPriceX96`) **plus** any loose
-  `balanceOf` already on the balancer. That sum is exactly what `_mainRange` will see post-`_exitAll`.
+  teardown will return: `LPValuationLib.principalAmounts(positionManager, mainTokenId, sqrtP)`
+  `+ principalAmounts(positionManager, altTokenId, sqrtP)` (it derives them from `positions()`
+  liquidity + ticks at the current `sqrtPriceX96`, and returns `(0, 0)` for tokenId 0, so an absent
+  alt needs no special case) **plus** any loose `balanceOf` already on the balancer. Simplest path
+  in practice: read `getDecisionSnapshot()`, which returns the ticks + liquidity for both legs.
+  That sum is what `_mainRange` sees post-`_exitAll`, modulo the pool's own round-down on the
+  decrease — within a wei of `MIN_MAIN_LEG_USD` the branch can therefore flip and produce an honest
+  `TickMismatch()`; treat it as the retry it is.
 
 ```
 floor = floorAlign(spotTick, tickSpacing)          // largest aligned tick <= spot, floors toward -inf
@@ -208,9 +213,31 @@ else:                                                           // token1-majori
 ```
 
 Because `width` must be a multiple of `2 × tickSpacing` (§5), `width/2` is a whole number of
-spacings and the balanced branch simplifies to `[floor - width/2, floor + width/2]`. That is not
-cosmetic: it is what makes the committed main bounds also pin the **alt** anchor (the alt is placed
-from `floorAlign(spot)`), so there is no residual one-spacing slide the commitment cannot see.
+spacings and the balanced branch simplifies to `[floor - width/2, floor + width/2]`.
+
+**The commitment pins the tick PAIR, not the branch that produced it.** Two known residuals follow,
+both Low and both closable off-chain:
+
+1. *Branch collision at `width == 2 × tickSpacing`.* The balanced pair `[F − w/2, F + w/2]` and the
+   token1-single-sided pair `[F' − w, F']` are the SAME pair whenever `F' = F + w/2` — i.e. one full
+   spacing of push, which the calm gate accepts (`dev == maxTickDeviation` passes). At the phase-1
+   config (`tickSpacing` 100, `width` 200, `maxTickDeviation` 100) that collision is reachable: push
+   spot to the old main's `tickUpper`, teardown returns 100% token1, `value0` falls under
+   `MIN_MAIN_LEG_USD`, and the single-sided branch mints the pair you committed to. The geometry is
+   correct so there is no mis-ranging loss, but the single-sided branch **zeroes the caller's token0
+   mint minimum**, an intended two-sided deployment becomes a single-sided deposit priced at
+   manipulated spot, and the cooldown is consumed. Config closes it with zero bytecode: ship
+   `minWidth > 2 × maxTickDeviation` (i.e. `MIN_WIDTH` 400 at the phase-1 deviation bound), which
+   makes the collision arithmetically unreachable. Otherwise the backend must not treat a committed
+   pair as proof of a balanced mint — check the realized `amount0Min`/`amount1Min` forwarding.
+2. *Residual MAGNITUDE inside one committed bucket.* For `spot ∈ [floor, floor + tickSpacing − 1]`
+   the main range is the same pair throughout, so `TickMismatch()` stays silent while the in-range
+   value split swings from 50/50 at `spot == floor` to ≈0.6/99.4 at `floor + 99`. Sandwiching a
+   rebuild with a +99-tick push against a 50/50 balance sheet leaves ~half the principal as surplus,
+   minted into a one-spacing out-of-range alt that earns nothing until the cooldown expires. The
+   value floor is blind to it (it prices the alt at the manipulated `sqrtP`). **The mint minima ARE
+   the control here** — the balanced branch keeps BOTH caller minima (it only zeroes one on the
+   single-sided branches), so sized minima revert this scenario. See the sizing rule in §5.
 
 **Failure mode is a revert, never a bad mint.** Spot moving one tickSpacing between your read and
 inclusion reverts `TickMismatch()` — recompute at fresh spot and resubmit. Treat it as a retry, not
@@ -224,7 +251,12 @@ guard before the teardown, purely to fail fast. It can therefore revert `StaleOr
 `SequencerGracePeriod`. This closes a teardown that provably could not be rebuilt: previously a feed
 stale at unwind burned both NFTs and only surfaced when `rebuildAfterSwap` reverted, leaving principal
 loose and unstaked with `exit()` (DEFAULT_ADMIN_ROLE, the timelocked Safe) as the only escape. Note the
-residual: a feed that goes stale BETWEEN the two calls still strands the rebuild until it recovers. Tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight` and `sellTokenInFlight = sellToken`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
+residual: the probe bounds the state at unwind, not at rebuild — a feed that goes stale BETWEEN the two
+calls, a sequencer restart between them (`checkSequencer` then rejects reads for the whole grace period),
+or a Safe `setOracles`/`setMaxOracleDelays` mid-flight all still strand the rebuild until they clear. That
+residual got MORE reachable with MOO-740: at the 3600s bound three consecutive missed rounds strand a
+rebuild, where the old 26h bound took ~76. Mitigations are operational — short `validTo`, and prefer the
+no-swap `rebalanceUsingAlt` while either feed is degraded (§8.2). Tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight` and `sellTokenInFlight = sellToken`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
 - `rebuildAfterSwap(RebuildParams)` — **takes `RebuildParams`, NOT `RebalanceParams`** (8 fields: no withdraw-mins, plus the two tick-commitment fields — a `RebalanceParams`-encoded call, or a pre-audit 6-field `RebuildParams`, hits a different selector and reverts). Requires in-flight; **no cooldown**; revokes approval; re-runs calm gate; checks `width` bounds and the `2 × tickSpacing` alignment; derives the main range and reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)`; mints main (+alt from surplus); enforces
 
   ```
@@ -327,6 +359,7 @@ The emissions-regime guard is the `marginalUsd > MARGINAL_MIN_USD_PER_H` term: w
 
 - **Withdraw mins (unwind + alt path).** For each leg: `amounts = getAmountsForLiquidity(sqrtP, tickLower, tickUpper, liquidity)`, then `min = amount × (1 − WITHDRAW_TOLERANCE_BPS/10000)` (default 50). **Never send 0 mins** — the calm gate (~1%) would be the only sandwich backstop. If `hasAlt == false`, alt mins are 0 (nothing to tear down).
 - **Mint mins (rebuild + alt path).** Predict the in-ratio consumption from planned post-swap balances at `spotTick` for the chosen range, haircut by `MINT_TOLERANCE_BPS` (default 50). Alt mint mins: apply the haircut to the predicted surplus leg (the contract zeroes the unfunded side itself).
+  **Send them, and size them — they are the only control for the in-bucket residual (§2.2).** On the balanced branch the contract forwards BOTH `amount0MinMain` and `amount1MinMain` to the position manager unchanged, so a min set at `predicted × (1 − MINT_TOLERANCE_BPS/10000)` reverts a sandwich that skews the in-range split inside a single committed tick bucket (where `TickMismatch()` is silent by construction). Zeros disable that protection entirely: `TickMismatch` pins WHERE liquidity lands, the minima pin HOW MUCH of each leg actually lands there, and neither substitutes for the other. The Tenderly reference harness passes zeros for rig convenience — do not copy it into a production caller.
 - **Width.** Default `WIDTH_TICKS` env (phase-1 default 200 = 2 × tickSpacing, the tightest allowed — the CL10 backtest's edge is tight ranges). Must satisfy `minWidth ≤ width ≤ maxWidth` **and `width % (2 × tickSpacing) == 0`** — at the phase-1 tickSpacing of 100 that is `width % 200 == 0`, so 200/400/600… are legal and 300/500/700… now revert `InvalidWidth()` even though they are multiples of 100. The even-multiple rule is load-bearing, not stylistic: it makes `width/2` a whole number of spacings, which is what lets the `RebuildParams` tick commitment pin the ALT placement as well as the main (§2.2). The same rule is validated on `minWidth`/`maxWidth` at config time, so a Safe config write with an odd-multiple bound reverts `InvalidWidth()` too. The phase-1 config (`minWidth` 200, `maxWidth` 20 000) and the default width all satisfy it unchanged. Any adaptive widening (realized-vol responsive) stays within the on-chain band AND on the even-multiple grid.
 - **Deadline.** `now + 300` seconds on every write.
 - **Order size ≠ approval.** After the unwind tx confirms, read actual loose balances and size the order: `sellAmountOrder = min(recomputed excess from actual balances, approval, balanceOf(sellToken))`. An order larger than the balance can never settle (fill-or-kill), it just wastes the cycle.

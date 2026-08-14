@@ -289,8 +289,68 @@ contract LPAutoBalancerV2SetupTest is Test {
         lab.setOracles(eth, btc);
     }
 
-    /// @dev Re-publish both price feeds at the CURRENT block timestamp, keeping their real answers,
-    ///      so a warped pinned fork models a live chain's continuously-updating feeds.
+    // ─── MOO-740: the setup proposal must ARM both staleness bounds, and arm them before it registers
+    //
+    // Same lens as the sequencer test above, and the same trap MOO-741 fell into. The values the
+    // proposal ships (3600/3600) are byte-identical to the balancer's constructor default
+    // (DEFAULT_MAX_ORACLE_DELAY == 1 hours == 3600), so `validate()`'s
+    // `assertEq(lab.maxOracleDelay0(), 3600)` passes whether `setMaxOracleDelays` actually ran or the
+    // default was silently inherited — deleting `_wireOracleDelays` from build() leaves the
+    // lifecycle test green. The two tests below arm NON-default values so the action is observable.
+
+    function test_proposal_armsNonDefaultMaxOracleDelays() public {
+        // Distinct from each other AND from the constructor default, so this also pins that the two
+        // bounds are wired per-feed rather than both taking delay0 (the flattening MOO-740 is about).
+        proposal.setMaxOracleDelays(1800, 2700);
+
+        proposal.deploy();
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+
+        // Pre-condition: a fresh balancer carries the constructor default on both legs. If this ever
+        // fails, the default moved and the "non-default" values below may no longer be non-default.
+        uint256 dflt = lab.DEFAULT_MAX_ORACLE_DELAY();
+        assertEq(lab.maxOracleDelay0(), dflt, "oracle0 bound is the ctor default before the proposal");
+        assertEq(lab.maxOracleDelay1(), dflt, "oracle1 bound is the ctor default before the proposal");
+        assertTrue(dflt != 1800 && dflt != 2700, "test values must differ from the default to be observable");
+
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        assertEq(lab.maxOracleDelay0(), 1800, "oracle0 bound armed by the proposal, not inherited");
+        assertEq(lab.maxOracleDelay1(), 2700, "oracle1 bound armed by the proposal, not inherited");
+    }
+
+    /// @dev ORDERING: the bounds must be armed BEFORE `registerPosition`, which probes both feeds.
+    ///      At the shipped values that ordering is unobservable for the same reason as above — armed
+    ///      == default makes the probe behave identically either way. So arm a bound TIGHTER than
+    ///      the pinned fork's actual feed age: if `_wireOracleDelays` runs first, the registration
+    ///      probe must fail StaleOracle; moved after `registerPosition`, the registration would pass
+    ///      under the looser default and build() would succeed.
+    ///
+    ///      The bound is derived from the feed's live `updatedAt` rather than hardcoded, so re-pinning
+    ///      PINNED_BLOCK cannot silently turn this into a vacuous test.
+    function test_proposal_armsMaxOracleDelaysBeforeRegisterPosition() public {
+        proposal.deploy();
+
+        (,,, uint256 updatedAt0,) = IPriceFeed(addresses.getAddress("CHAINLINK_ETH_USD")).latestRoundData();
+        uint256 age0 = block.timestamp - updatedAt0;
+        assertGt(age0, 1, "fork feed must be non-trivially old for this test to bite");
+
+        // Tighter than the feed's own age → the registration probe cannot pass under it.
+        proposal.setMaxOracleDelays(age0 - 1, 3600);
+
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        proposal.build();
+    }
+
+    /// @dev FREEZE both price feeds' `updatedAt` at the current block timestamp, keeping their real
+    ///      answers, so a pinned fork that warps forward still reads as fresh.
+    /// @dev Deliberately NOT a re-publish: `vm.mockCall` encodes its return data ONCE, when this
+    ///      runs, and never clears — `updatedAt` is frozen at call time, it does not track "now" at
+    ///      read time. That suffices here only because nothing warps between this call and the
+    ///      rebalance it enables; insert any `skip()` past the armed bound in between and the mock
+    ///      goes stale exactly as the real feed would.
     function _refreshPriceFeeds() internal {
         _refreshPriceFeed(addresses.getAddress("CHAINLINK_ETH_USD"));
         _refreshPriceFeed(addresses.getAddress("CHAINLINK_BTC_USD"));

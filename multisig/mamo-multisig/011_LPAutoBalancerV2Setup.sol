@@ -227,7 +227,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
 
         // 0. Arm the L2 sequencer guard and both per-feed staleness bounds first (own frame: keeps
-        //    build() under the via_ir stack limit). BOTH must precede registerPosition in (c): that
+        //    build() under the via_ir stack limit). BOTH must precede registerPosition in (d): that
         //    call probes oracle0/oracle1, and the probe is only meaningful once the bounds it checks
         //    against are the ones this deployment intends to run with.
         _wireSequencer(lab);

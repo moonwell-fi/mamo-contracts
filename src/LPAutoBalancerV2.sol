@@ -760,10 +760,24 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         unwind succeeds and the matching rebuild reverts SequencerGracePeriod.
     ///
     ///         RESIDUAL (unchanged, and not closable here): this bounds the state at unwind, not the
-    ///         state at rebuild. A feed that goes stale BETWEEN the two transactions still strands
-    ///         the rebuild until it recovers. Closing that would require an oracle-free rebuild path,
-    ///         which would mean minting and clearing the value floor with no price — strictly worse.
-    ///         The probe removes the case the contract can see coming; the rest is monitoring.
+    ///         state at rebuild. Three ways a rebuild is still blocked after a clean unwind:
+    ///         (i) a feed goes stale BETWEEN the two transactions; (ii) the sequencer restarts
+    ///         between them, after which `checkSequencer` rejects every read for the whole grace
+    ///         period — same class as (i), and the very case the paragraph above is built on, only
+    ///         arriving after the probe instead of before it; (iii) the Safe calls `setOracles` or
+    ///         `setMaxOracleDelays` mid-flight. Closing any of them would require an oracle-free
+    ///         rebuild path, which would mean minting and clearing the value floor with no price —
+    ///         strictly worse. The probe removes the case the contract can see coming; the rest is
+    ///         monitoring.
+    ///
+    ///         FREQUENCY (MOO-740 interaction, accepted): tightening the staleness bound from 26h to
+    ///         3600s makes case (i) ~26x more reachable. At the measured ~1232s worst-case heartbeat
+    ///         of the configured Base feeds, THREE consecutive missed rounds now strand a rebuild
+    ///         where it previously took ~76. Funds are never locked — `exit()` is oracle-free and the
+    ///         order can be retried — but the principal sits loose and unstaked with a live
+    ///         VAULT_RELAYER allowance until a feed publishes. Backend mitigations: a short CowSwap
+    ///         `validTo`, and preferring the no-swap `rebalanceUsingAlt` while either feed is
+    ///         degraded. See the backend spec's runbook.
     function unwindForSwap(UnwindParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -793,8 +807,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         // Probe both feeds (and, inside them, the sequencer guard) BEFORE `_exitAll` burns the NFTs.
         // Discarded return values: called for the revert, not for a price — see the ORACLE PRECHECK
-        // note above. Each leg is checked against ITS OWN bound, exactly as the rebuild will check
-        // it. Two direct `_readFeed` calls, deliberately: routing this through a single
+        // note above. Each leg is checked against ITS OWN bound, with the same reader and the same
+        // storage the rebuild uses — but STRICTLY MORE than the rebuild does: this probes both feeds
+        // unconditionally, while `valueInUsd` reads a leg's feed only when that leg's amount is
+        // non-zero. So a fully single-sided unwind can be blocked on a feed the rebuild would never
+        // have touched. Fail-closed and deliberate; the alternative is a conditional probe that
+        // duplicates the valuation's branch logic on the balancer's last 90 bytes.
+        // Two direct `_readFeed` calls, deliberately: routing this through a single
         // `LPValuationLib.probeFeeds(cfg)` helper reads better but measures WORSE (+34 bytes on the
         // balancer), because materialising the six-field OracleConfig in memory costs more than the
         // second external call it saves. The balancer is inside 100 bytes of EIP-170; that trade is

@@ -220,10 +220,24 @@ contract MockPositionManagerV2 {
             (0, address(0), pd.token0, pd.token1, pd.tickSpacing, pd.tickLower, pd.tickUpper, pd.liquidity, 0, 0, 0, 0);
     }
 
+    /// @notice Trip-wire for ORDERING assertions. When set, the FIRST teardown call the balancer
+    ///         makes (`decreaseLiquidity`, which `_exitAll` reaches before `collect`/`burn`) reverts
+    ///         with a sentinel string instead of doing anything.
+    /// @dev    Counters cannot pin ordering: any revert rolls back `burnCallCount`, so a guard moved
+    ///         BELOW the teardown still leaves `burnCallCount() == 0` for the test to read. The
+    ///         revert REASON survives, though — so arming this sentinel and asserting the tx reverts
+    ///         with the guard's selector rather than "TEARDOWN_REACHED" proves the guard ran first.
+    bool public revertOnTeardown;
+
+    function setRevertOnTeardown(bool v) external {
+        revertOnTeardown = v;
+    }
+
     function decreaseLiquidity(INonfungiblePositionManager.DecreaseLiquidityParams calldata params)
         external
         returns (uint256 amount0, uint256 amount1)
     {
+        require(!revertOnTeardown, "TEARDOWN_REACHED");
         lastDecreaseTokenId = params.tokenId;
         decreaseCallCount++;
         // Enforce the deadline exactly like the real position manager (so the threaded deadline,
@@ -242,6 +256,9 @@ contract MockPositionManagerV2 {
         external
         returns (uint256 amount0, uint256 amount1)
     {
+        // Same trip-wire as decreaseLiquidity: `_exitAll` skims fees through collect() BEFORE the
+        // decrease, so the sentinel has to sit on whichever teardown call comes first.
+        require(!revertOnTeardown, "TEARDOWN_REACHED");
         lastCollectTokenId = params.tokenId;
         lastCollectRecipient = params.recipient;
 
@@ -2767,8 +2784,9 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     function test_setOracles_revertsOnStaleFeedProbe() public {
         _register(false);
-        // Probe must fail in the admin tx, not on the next rebalance: a feed older than
-        // maxOracleDelay (26h default) reverts StaleOracle at set time.
+        // Probe must fail in the admin tx, not on the next rebalance: a feed older than the armed
+        // per-feed bound (DEFAULT_MAX_ORACLE_DELAY, 1 hour, since this fixture never calls the
+        // setter) reverts StaleOracle at set time. The 27h warp below clears it by a wide margin.
         address staleFeed = address(new MockPriceFeed(1e8, 8, block.timestamp));
         vm.warp(block.timestamp + 27 hours);
         vm.prank(admin);
@@ -3168,6 +3186,12 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         lab.rebalanceUsingAlt(_rebalanceParamsAt(0, 400));
         assertEq(lab.exposed_position().mainTokenId, NEW_TOKEN_ID, "rebalance succeeds on a matching commitment");
+        // "Did not revert" is the weaker half of not-over-strict. The stronger half is that the
+        // range actually minted is the committed one — otherwise this would still pass against a
+        // check that accepted the commitment and then placed liquidity somewhere else. Mint call 1
+        // is the main leg (call 2 is the alt).
+        assertEq(int256(mockPM.mintTickLowerByCall(1)), int256(0), "main minted at the committed lower");
+        assertEq(int256(mockPM.mintTickUpperByCall(1)), int256(400), "main minted at the committed upper");
     }
 
     /// @dev A wrong commitment is rejected even when spot never moved — the check compares against
@@ -3200,13 +3224,63 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
         lab.unwindForSwap(_defaultUnwindParams());
 
-        // The load-bearing assertions: nothing burned, no window opened, no relayer approval left
-        // live. A revert AFTER _exitAll would still revert the tx here, so what this really pins is
-        // that the guard sits ahead of the teardown and stays there.
+        // These assertions pin the OUTCOME, not the ordering: the revert rolls back
+        // `burnCallCount` regardless of where the guard sits, so a probe moved BELOW `_exitAll`
+        // would read identically here. Ordering is pinned separately, and rollback-immune, by
+        // test_unwindForSwap_oracleProbePrecedesTeardown below.
         assertEq(mockPM.burnCallCount(), 0, "no NFT burned");
         assertEq(lab.exposed_position().mainTokenId, TOKEN_ID, "position intact");
         assertFalse(lab.rebalanceInFlight(), "no window opened");
         assertEq(tok0.allowance(address(lab), lab.VAULT_RELAYER()), 0, "no relayer approval");
+    }
+
+    /// @dev PER-FEED, both legs. The probe is two independent `_readFeed` calls, each against its
+    ///      own bound; the test above ages oracle0 only, so deleting the `oracle1` line left it
+    ///      green. This is its mirror — oracle1 stale, oracle0 fresh — so dropping either leg of the
+    ///      probe now fails a test. Deliberately two tests rather than one parameterised body: a
+    ///      regression that drops a leg has to be visible as a NAMED failure.
+    function test_unwindForSwap_revertsOnStaleFeed1_beforeBurningAnything() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+
+        MockPriceFeed(oracle1).setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        assertEq(mockPM.burnCallCount(), 0, "no NFT burned");
+        assertFalse(lab.rebalanceInFlight(), "no window opened");
+    }
+
+    /// @dev ORDERING, pinned without relying on post-revert state. Counters cannot do this job:
+    ///      `vm.expectRevert` rolls `burnCallCount()` back to 0 whether the probe ran before or
+    ///      after `_exitAll`, so the two placements are indistinguishable to the tests above. The
+    ///      revert REASON is not rolled back, so the mock's teardown trip-wire discriminates them:
+    ///      with the wire armed AND oracle0 stale, the tx must fail with StaleOracle — if the probe
+    ///      were moved below `_exitAll` (or below `_window.open`, which is later still) the very
+    ///      same tx would fail with "TEARDOWN_REACHED" instead.
+    function test_unwindForSwap_oracleProbePrecedesTeardown() public {
+        _register(false);
+        _setRealModule();
+        _stagePrincipal(1e18, 1e18);
+
+        mockPM.setRevertOnTeardown(true);
+
+        // CONTROL (non-vacuity): with both feeds fresh, the probe passes and the trip-wire is
+        // genuinely reached. Without this the assertion below would also hold for a mock whose
+        // sentinel can never fire, which is exactly the failure mode being guarded against.
+        vm.prank(rebalancer);
+        vm.expectRevert("TEARDOWN_REACHED");
+        lab.unwindForSwap(_defaultUnwindParams());
+
+        // Now age a feed. The probe sits ahead of the teardown, so the ORACLE error wins the race.
+        MockPriceFeed(oracle0).setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        lab.unwindForSwap(_defaultUnwindParams());
     }
 
     /// @dev The same for the L2 sequencer guard, which is the trigger this PR ADDS. `checkSequencer`
@@ -3466,11 +3540,16 @@ contract LPAutoBalancerV2UnitTest is Test {
 
     // ---------- constant invariant ----------
 
-    /// @dev MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD keeps a sub-main-threshold minority also
-    ///      sub-alt-threshold, so _mintAlt returns 0 before an alt range could straddle spot on a
-    ///      single-sided main (see the MIN_ALT_VALUE_USD NatSpec). The two constants live 15 lines
-    ///      apart and are edited independently; this asserts the coupling so a future bump can't
-    ///      silently open the sandwichable in-range-alt path.
+    /// @dev CHANGE DETECTOR, not a safety property — the rationale it used to carry was retracted.
+    ///      An alt range can never straddle spot regardless of these constants: `floorAlign` gives
+    ///      `floor <= spot < floor + spacing` strictly, so a token0 alt opens at `floor + spacing`
+    ///      (> spot) and a token1 alt closes at `tickUpper = floor` (<= spot, and range activity is
+    ///      `tickLower <= tick < tickUpper`, which puts that boundary OUTSIDE the range). `mintAlt`
+    ///      is the only alt-creating path — `_store` force-zeroes `altTokenId` on registration — so
+    ///      there is no adoption route either. What this assertion still buys is the coupling: the
+    ///      two constants live 15 lines apart and are edited independently, and
+    ///      MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD is what keeps a sub-main-threshold minority also
+    ///      sub-alt-threshold, so an independent bump to one of them has to be deliberate.
     function test_invariant_minAltValueGeMinMainLeg() public view {
         assertGe(lab.MIN_ALT_VALUE_USD(), lab.MIN_MAIN_LEG_USD());
     }

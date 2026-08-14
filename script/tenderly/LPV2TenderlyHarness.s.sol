@@ -246,6 +246,19 @@ contract LPV2TenderlyHarness is Script {
         // (rebalancer vs admin) is verified independently by checkRoleGating() and the unit suite.
         LPAutoBalancerV2 lab = new LPAutoBalancerV2(dep, dep, dep, dep, NFPM, AERO);
 
+        // Widen both staleness bounds to the contract's own ceiling (MAX_ORACLE_DELAY, 1 day).
+        // MOO-740 tightened the CONSTRUCTOR default to 1 hour, which is right for a live chain whose
+        // feeds publish on a ~1200s heartbeat — and wrong for this harness, which drives the
+        // lifecycle by WARPING the vnet clock (`advance_time 7200` before doReset) against feeds
+        // that do not publish while it warps. Under the 1h default every warped phase would fail
+        // StaleOracle for a reason that has nothing to do with what the phase is testing. Feed
+        // repointing is deliberately not implemented for LPV2 (see lib/market.sh), so raising the
+        // bound is the available lever. This is a TEST-RIG concession, not the shipped config:
+        // proposal 011 arms 3600/3600 on chain and LPAutoBalancerV2SetupTest pins that.
+        // The matrix's stale-oracle scenario still fires — it warps 27h, past this 24h ceiling.
+        uint256 maxDelay = lab.MAX_ORACLE_DELAY();
+        lab.setMaxOracleDelays(maxDelay, maxDelay);
+
         IERC20(WETH).approve(NFPM, a0);
         if (a1 > 0) IERC20(CBBTC).approve(NFPM, a1);
 
