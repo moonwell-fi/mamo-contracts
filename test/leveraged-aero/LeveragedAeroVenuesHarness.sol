@@ -124,7 +124,8 @@ contract MockLendingMarket {
     ///      code and does nothing. The production code is written around exactly that (`MoonwellMintFailed`
     ///      / `MoonwellRedeemFailed` wrap the code), and the mock could not express it at all: `mint`
     ///      always returned 0 and a `redeemUnderlying` past the balance panicked on the `-=` underflow
-    ///      instead. Both matter now that `deposit` mints on every call and several ops redeem on demand.
+    ///      instead. Both matter now that the keeper's `supplyIdle` mints (deposits stay raw BY DESIGN —
+    ///      `testDepositLeavesTheUsdcRawAndTouchesNoMoonwellMarket`) and several ops redeem on demand.
     uint256 public mintError;
     uint256 public redeemError;
 

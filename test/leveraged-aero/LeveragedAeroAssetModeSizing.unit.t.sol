@@ -529,14 +529,16 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
      *
      *      THE INPUT IS THE WHOLE BOOK'S TARGET DEBT, NOT THE SPLIT'S OWN BORROW BUDGET — and that is
      *      the change "no idle USDC sits dead" makes to this identity, not a fudge to keep it passing.
-     *      `deposit` now supplies every incoming USDC to Moonwell, so a book holding `AMOUNT` holds it
-     *      ENTIRELY as collateral: `adjustLeverage` reads `collateral == AMOUNT`, sizes the naive delta
+     *      Deposits stay RAW by design (`deposit` never touches Moonwell); the state modelled here is
+     *      the keeper having run `supplyIdle` over the whole balance, after which a book holding
+     *      `AMOUNT` holds it ENTIRELY as collateral: `adjustLeverage` reads `collateral == AMOUNT`,
+     *      sizes the naive delta
      *      `AMOUNT × ltv / 1e4`, and `assetModeLeverUpPair` rescales it by `1/(1 + ltv·m)` because the
      *      pairing USDC has to be redeemed back out of that same collateral. The rescale is EXACTLY the
      *      split's `w/(w+x)`, so the corrected `(A, U′)` equals the split's `(A, U)` to the same
      *      tolerances as before. What this now asserts is the operator-visible statement:
-     *      **deposit → `adjustLeverage` lands the identical book to deposit → `deployIdle`.**
-     *      Asserted across both orderings and several range shapes.
+     *      **deposit → `supplyIdle` → `adjustLeverage` lands the identical book to
+     *      deposit → `deployIdle`.** Asserted across both orderings and several range shapes.
      *
      *      BOTH sides now match only to a RELATIVE tolerance. `A` used to match to the wei because the
      *      lever-up applied `_legABorrow` and stopped; it now applies one further `mulDiv` rescale, and
@@ -549,9 +551,13 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
      *      `A = floor(borrowUsd6·100·10^dA/pA)`. Each lost unit is magnified into `U′` by its own scale
      *      factor (`U/borrowUsd6` and `needU/needA` respectively), so the error is
      *      `O(1/borrowUsd6 + 1/A)` RELATIVE — ~1e-8 at the sizes here, and it shrinks with position size.
-     *      1e-6 is two orders above the worst observed case (measured: 933/3.3e11 = 2.8e-9 for the
-     *      expensive-leg ordering, 15/9.7e11 = 1.5e-11 for the cheap-leg one) and still orders of
-     *      magnitude below any mis-sizing a wrong formula would produce.
+     *      TOLERANCES ARE PER-SIDE AND SIT JUST ABOVE THE MEASURED DRIFT, deliberately. The `A` drift
+     *      is ONE UNIT in the last place (the two truncation orders differ by at most 1), so its
+     *      relative bound follows the SMALLEST `A` across the shapes here (~5e8 units → 2e-9): `A` at
+     *      1e-8 gives one-unit drift 5× headroom. `U` at 1e-7 covers its measured worst (2.8e-9 for
+     *      the expensive-leg ordering, 1.5e-11 for the cheap-leg one) ~35×. An earlier revision used
+     *      a single 1e-6 for both — wide enough to wave through a ppm-scale sizing regression; these
+     *      bounds keep the identity a real pin while staying above integer-floor noise.
      */
     function testLeverUpPairReproducesTheSplitPairAtTheSameLtv() public {
         _setPoolTick(TICK);
@@ -580,10 +586,10 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
                     pA
                 );
                 assertApproxEqRel(
-                    aUp, a, 1e12, "the two entrypoints must convert the borrow identically (to integer resolution)"
+                    aUp, a, 1e10, "the two entrypoints must convert the borrow identically (to integer resolution)"
                 );
                 assertApproxEqRel(
-                    uUp, u, 1e12, "the two entrypoints must pair at the same ratio (to integer resolution)"
+                    uUp, u, 1e11, "the two entrypoints must pair at the same ratio (to integer resolution)"
                 );
             }
         }

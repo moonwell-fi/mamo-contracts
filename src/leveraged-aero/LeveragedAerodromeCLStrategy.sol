@@ -1053,7 +1053,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         post-`settle` the book is terminal. It works on a FLAT but `Executed` book (post-
     ///         `flatten`), which is deliberate — that is the state holding the most dead USDC — and it
     ///         is exactly why `nav()`'s flat branch must count the collateral term.
-    /// @param amount USDC (6dp) to supply; must be ≤ the strategy's raw USDC balance.
+    /// @param amount USDC (6dp) to supply; must be ≤ the strategy's raw USDC balance. Zero is a
+    ///               DELIBERATE silent no-op (the impl returns before touching Moonwell) — unlike the
+    ///               louder venue ops, a keeper sweeping "whatever is raw" may legitimately pass 0.
     function supplyIdle(uint256 amount) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
         if (amount > IERC20(_layout().usdc).balanceOf(address(this))) revert InsufficientIdle();
@@ -1099,6 +1101,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `supplyIdle` (`onlyProposer`, `State.Executed`), and like it, works on a flat book —
     ///         where debt is zero, so the whole parked pot is withdrawable.
     /// @param amount USDC (6dp) to redeem back to the raw balance; must be ≤ un-levered collateral.
+    ///               Zero is a silent no-op, mirroring `supplyIdle`.
     function withdrawIdle(uint256 amount) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
         LeveragedAeroVenue.withdrawIdleImpl(amount);
