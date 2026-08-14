@@ -917,6 +917,137 @@ contract LeveragedAeroVaultUnitTest is Test {
         vm.expectRevert("LAV: renounce disabled");
         vault.renounceOwnership();
     }
+
+    // ==================== FUND CAPACITY CAP ====================
+
+    /// @dev The ceiling defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the
+    ///      owner acts. The freeze case is `setOpenDeposits(false)`, which is a separate switch.
+    function testMaxTotalAssetsDefaultsToUnlimited() public view {
+        assertEq(vault.maxTotalAssets(), 0, "0 == unlimited on a fresh deploy");
+    }
+
+    function testSetMaxTotalAssetsByOwner() public {
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LeveragedAeroVault.MaxTotalAssetsSet(5_000_000e6);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000_000e6);
+        assertEq(vault.maxTotalAssets(), 5_000_000e6, "capacity stored");
+
+        // Re-settable, including back to unlimited (the one-transaction rollback).
+        vm.prank(owner);
+        vault.setMaxTotalAssets(0);
+        assertEq(vault.maxTotalAssets(), 0, "capacity cleared");
+    }
+
+    function testSetMaxTotalAssetsRevertsForNonOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
+        vm.prank(thirdParty);
+        vault.setMaxTotalAssets(1);
+        assertEq(vault.maxTotalAssets(), 0, "unchanged");
+    }
+
+    /// @dev `remainingCapacity` is the number a depositor sizes against. `0` is ambiguous on its own
+    ///      (full vs unlimited), so an unlimited fund reports `type(uint256).max` rather than 0.
+    function testRemainingCapacityReportsMaxWhenUnlimited() public {
+        _bind();
+        assertEq(vault.remainingCapacity(), type(uint256).max, "unlimited reads as max, not 0");
+    }
+
+    function testRemainingCapacityShrinksAsTheFundFills() public {
+        _bindAndMint(alice, 1_000e12);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000e6);
+
+        strategy.setNav(1_000e6);
+        assertEq(vault.remainingCapacity(), 4_000e6, "room == cap - nav");
+
+        strategy.setNav(4_500e6);
+        assertEq(vault.remainingCapacity(), 500e6, "room shrinks as the book grows");
+    }
+
+    /// @dev At or ABOVE the ceiling the fund is full. Above matters: NAV moves on its own, so a fund
+    ///      can drift past the ceiling on gains alone with nobody having deposited — the subtraction
+    ///      must floor at 0 rather than underflow.
+    function testRemainingCapacityIsZeroAtAndAboveTheCeiling() public {
+        _bindAndMint(alice, 1_000e12);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000e6);
+
+        strategy.setNav(5_000e6);
+        assertEq(vault.remainingCapacity(), 0, "exactly full");
+
+        strategy.setNav(6_000e6); // drifted over on gains
+        assertEq(vault.remainingCapacity(), 0, "over the ceiling floors to 0, no underflow");
+    }
+
+    /// @dev The ops conversion: shares a given USDC amount would mint at current pricing. Advisory
+    ///      only since the cap became fund-NAV-denominated — nothing configures a limit from it any
+    ///      more — but still the sanctioned way to size a `minShares` floor, because shares are 12dp
+    ///      against a 6dp asset and hand-computing the conversion invites an off-by-1e6.
+    function testPreviewSharesForAssetsAtPar() public {
+        _bind();
+        // Empty book: supply 0, nav 0 -> shares = assets * 1e6, the 6-decimal step `decimals()` documents.
+        assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "par pricing on an empty book");
+    }
+
+    /// @dev The drift the design accepts: as the book earns, each dollar buys FEWER shares, so a fixed
+    ///      share cap admits MORE dollars over time. Pinned here so the behaviour is a decision on
+    ///      record rather than a surprise.
+    function testPreviewSharesForAssetsFallsAsNavGrows() public {
+        _bindAndMint(alice, 1_000e12);
+        strategy.setNav(1_000e6);
+        uint256 atPar = vault.previewSharesForAssets(1_000e6);
+
+        strategy.setNav(1_200e6); // +20% NAV, supply unchanged
+        uint256 afterGain = vault.previewSharesForAssets(1_000e6);
+
+        assertLt(afterGain, atPar, "a richer book mints fewer shares per dollar");
+    }
+
+    /// @dev Fail-closed, exactly like a real deposit: the preview is a preview OF a deposit, so a
+    ///      strategy that cannot price itself must not hand back a number an operator would act on.
+    function testPreviewSharesForAssetsRevertsWhenNavUnpriceable() public {
+        _bind();
+        strategy.setNavReverts(true);
+        vm.expectRevert("MockStrategy: nav unpriceable");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    function testPreviewSharesForAssetsRevertsBeforeStrategyIsBound() public {
+        vm.expectRevert("LAV: strategy unset");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    /**
+     * @dev REGRESSION — the preview over-reported by ~1e9-1e12x in a REACHABLE state. The real
+     *      `deposit` reverts `NavUnpriceable` on `navNet == 0 && supply > 0`, but `nav()` FLOORS to 0
+     *      rather than reverting, and the preview had no matching guard: it divided by
+     *      `nav() + 1 == 1`. Under the superseded per-account share cap this was the sharp edge —
+     *      the preview was the documented way to size the cap argument, so an operator following the
+     *      contract's own instruction would have set an effectively unlimited one. The cap is
+     *      fund-NAV-denominated now and no longer derived from this function, but the guard stays
+     *      load-bearing: the preview's surviving role is sizing a deposit's `minShares` floor, and a
+     *      figure a trillion times too large makes that floor unsatisfiable. The state is real:
+     *      after `settleStrategy` the book is flat so `nav()` is the strategy's USDC balance (0)
+     *      while supply is still outstanding, and likewise whenever `protocolFeeOwed >= gross`.
+     */
+    function testPreviewSharesForAssetsRevertsWhenNavIsZeroWithSupplyOutstanding() public {
+        _bindAndMint(alice, 1_000e12);
+        strategy.setNav(0); // flat/worthless book, holders still present
+
+        // Pre-fix this returned 1.0e24 against a 1e15 par figure.
+        vm.expectRevert("LAV: nav unpriceable");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    /// @dev The boundary that must stay OPEN: a genuinely empty book (supply 0) legitimately prices at
+    ///      nav 0 — that is the genesis deposit, which the real `deposit` also allows. The guard keys on
+    ///      supply, so it must not fire here.
+    function testPreviewSharesForAssetsStillPricesAnEmptyBookAtNavZero() public {
+        _bind();
+        strategy.setNav(0);
+        assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "genesis pricing unaffected");
+    }
 }
 
 /**

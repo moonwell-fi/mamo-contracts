@@ -276,7 +276,7 @@ await accountContract.write.deposit([assets, minShares]);
 the owner (or backend) sweeps it into the position:
 
 ```solidity
-function depositIdle(uint256 minShares) external returns (uint256 shares); // gated: owner OR registry backend
+function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // gated: owner OR registry backend
 ```
 
 Because idle USDC on an account is ambiguous (pending re-deposit vs. a fulfilled withdrawal awaiting
@@ -288,6 +288,29 @@ backend"` otherwise. Prefer the explicit `approve`+`deposit` flow in the UI.
 > Withdrawals are deliberately **not** gated on it and keep working. There is no depositor whitelist and
 > no pause — that one flag is the entire gate — so surface the revert as "deposits are temporarily closed",
 > not as a user error. Read it with `vault.depositsOpen()` to pre-disable the deposit CTA.
+
+> **The fund has a capacity ceiling.** `vault.maxTotalAssets()` caps the whole fund's NAV in USDC
+> (`0` == unlimited, the default). This is a limit on the FUND, not on the user: once it is reached,
+> **nobody** can deposit, however small their own position. It fires on the user-facing `deposit`, so
+> the UI must be able to explain it — the deposit reverts `FundAtCapacity(navAfter, cap)` and the whole
+> transaction unwinds (no shares minted, no USDC taken).
+>
+> Read the room before enabling the CTA:
+>
+> ```
+> room = vault.remainingCapacity()   // USDC (6dp)
+>                                    // type(uint256).max => no cap, show no limit UI
+>                                    // 0                 => fund is full, disable the CTA
+> ```
+>
+> Three things to get right:
+> - **Leave headroom.** `remainingCapacity()` is a point-in-time read and NAV moves between it and the
+>   user's transaction landing. Cap the input at ~95% of `room` and treat `FundAtCapacity` as
+>   retryable — it is a "fund is full right now" message, **not** a user error.
+> - **"Full" is not permanent.** NAV moves on its own, so the fund can close on gains alone and reopen
+>   on a drawdown or when someone withdraws. Don't cache the value or present the state as final.
+> - **Withdrawals are never gated on it.** A user can always exit, including while the fund is over its
+>   ceiling — never disable a withdraw CTA because of capacity.
 
 ---
 
@@ -454,8 +477,9 @@ Account (`require` strings):
 | Revert | Trigger | Suggested UX |
 |---|---|---|
 | `"Amount must be greater than 0"` | `deposit`/`withdraw`/`requestWithdraw` with 0 | Validate amount > 0 client-side |
-| `"No idle USDC to deposit"` | `depositIdle` with 0 idle balance | Nothing to sweep |
+| `"Insufficient idle USDC"` | `depositIdle` for more than the account holds | Cap the input at the idle balance |
 | `"Not owner or backend"` | `depositIdle` from a non-owner | Hide/disable for non-owner |
+| `FundAtCapacity(navAfter, cap)` (custom error) | `deposit`/`depositIdle` that would push the FUND past its capacity ceiling | Show remaining capacity and cap the input (see below); retryable, and not the user's fault |
 | `"No shares to withdraw"` | `withdrawAll` with 0 shares | Empty position |
 | `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle | Nothing claimable yet |
 | `OwnableUnauthorizedAccount(address)` (OZ custom error) | any `onlyOwner` call from non-owner | Wrong wallet connected |

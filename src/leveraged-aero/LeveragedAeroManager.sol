@@ -17,6 +17,25 @@ interface IWETH9 {
     function deposit() external payable;
 }
 
+/// @dev The strategy selectors this library calls back into, declared here rather than imported so the
+///      manager keeps no dependency on `LeveragedAerodromeCLStrategy` (which imports THIS file).
+///      `redeemUnwindImpl` runs under DELEGATECALL, so its own reads/reverts are INTERNAL and a Solidity
+///      `try` cannot catch them; routing through a call on `address(this)` gives them a catchable frame —
+///      the same idiom the strategy's own `_proportionalRedeem` uses for `try this.nav()`.
+interface IRedeemSweepFloors {
+    function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns (uint256, uint256);
+}
+
+/// @dev See `IRedeemSweepFloors` for why this is a local interface and not an import.
+///      `sellRedeemRewardSelf` is the strategy's `OnlySelf`-gated redeem-side reward sale: it sells the
+///      tranche this redeem's own `gauge.withdraw` auto-claimed (best-effort — it holds the `try/catch`
+///      itself) and returns the STAYERS' `(1−f)` share of the proceeds, which `redeemUnwindImpl` adds to
+///      its `stayersIdle` reservation. Body and rationale live on the strategy: the manager is at the
+///      EIP-170 cap, the same relocation `_settle`'s hedged-basis zeroing already makes.
+interface IRewardSaleSelf {
+    function sellRedeemRewardSelf(uint256 shares, uint256 supply) external returns (uint256 stayersShare);
+}
+
 /// @title  LeveragedAeroManager
 /// @notice DEPLOYED, delegatecalled venue library for `LeveragedAerodromeCLStrategy`. The clone is at
 ///         the EIP-170 margin, so the heavy on-venue sequences (supply / borrow / mint / stake /
@@ -90,6 +109,18 @@ library LeveragedAeroManager {
     // NOTE: `InsufficientIdleForLeverUp` (asset-mode lever-up, see `_leverUp`) is NOT declared here — it
     // is raised by `LeveragedAeroValuation.assetModeLeverUpPair`, alongside the arithmetic that sizes the
     // draw, exactly as `DegenerateRange` is. Same convention: valuation-raised errors are not mirrored.
+
+    // ── Events (emitted from the STRATEGY's address via delegatecall; mirrored in its ABI) ──
+    /// @notice `redeemUnwindImpl`'s closing leg sweeps ran with their Chainlink min-out floors at ZERO
+    ///         because the floor derivation reverted. Deliberately fail-open — `emergencyRedeem` is the
+    ///         deadman and must complete with the oracle down — but the `catch` cannot tell a stale feed
+    ///         / down sequencer from an out-of-gas, so the degradation is marked here instead of being
+    ///         silent. A monitor seeing this knows the redeem's swaps were UNBOUNDED for that call.
+    ///
+    ///         NAMING, shared by the three fail-opens this stack added: `…Degraded` means a GUARD fell
+    ///         back (the op ran, with less protection); `…Deferred` means an optional ACTION was skipped
+    ///         (`SettleRewardSaleDeferred`, `RedeemRewardSaleDeferred`, both on the strategy).
+    event RedeemSweepFloorsDegraded();
 
     // ── Constants (compile-time literals, duplicated from the strategy) ──
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
@@ -346,6 +377,39 @@ library LeveragedAeroManager {
         // A — partial CL unwind (pool-based mins, oracle-free).
         _unwindLiquidity(shares, supply);
 
+        // A2 — SELL THE REWARD TRANCHE THIS REDEEM'S OWN UNWIND JUST AUTO-CLAIMED, AND SPLIT IT.
+        //
+        // `_unwindLiquidity` above calls `gauge.withdraw`, which auto-claims the WHOLE accrued reward
+        // tranche into this wallet — on EVERY async redeem, because the redeem's own unwind is what
+        // creates the balance. Step E sweeps only the two LEG tokens, so before this the redeemer was
+        // paid `f × (assets − reward)` while 100% of the tranche stayed behind with the stayers. Since
+        // `nav()` prices that reward (held balance AND `gauge.earned()`), that was a live nav-vs-payout
+        // inconsistency on this path, not merely an unfairness.
+        //
+        // WHY THE SNAPSHOTS ABOVE DO NOT ALREADY HANDLE IT — this is the budget arithmetic, and it is
+        // the reason the call returns a number instead of just selling. `idleUsdcBefore`/`stayersIdle`
+        // are taken BEFORE the unwind, deliberately (see their comment: LP-shed USDC is 100% the
+        // redeemer's). The sale lands AFTER that snapshot, so left alone the WHOLE tranche would flow to
+        // the redeemer through `usdcFinal − stayersIdle` — over-correcting, not fixing. But the tranche
+        // is not this redeem's own product: `gauge.withdraw` is all-or-nothing per NFT, so it claims the
+        // reward the WHOLE book farmed, of which the redeemer owns exactly `f`. So the wrapper measures
+        // the proceeds and returns the stayers' `(1−f)`, in the same `x − f·x` form `stayersIdle` itself
+        // uses (dust rounds to the stayers), and it is ADDED to the reservation here. Net: redeemer
+        // `+f·proceeds`, stayers `+(1−f)·proceeds` — the split `nav()` already prices, with neither
+        // party double-credited. It also widens the redeemer's own cover budget below
+        // (`bal − stayersIdle`) by their `f` share and not a wei more.
+        //
+        // FAIL-OPEN, held INSIDE the wrapper (which is why there is no `try` here). The sale itself fails
+        // CLOSED in its own frame (stale reward feed → `StaleOracle`; a fill under the L9 oracle floor →
+        // `BelowOracleFloor`), so a swallowed revert rolls the swap back entirely — the tranche is never
+        // sold blind. Swallowing is what keeps `emergencyRedeem` — the deadman, built for the
+        // oracle-down-AND-backend-dead state — able to complete, exactly as the sweep floors below do.
+        // The residual when the sale fails is precisely today's behaviour: the tranche stays as reward
+        // token and the stayers keep it — the one documented residual, marked on chain by the wrapper's
+        // `RedeemRewardSaleDeferred`. STAYERS ARE NEVER WORSE OFF than before this change; the redeemer
+        // is, at worst, no better off.
+        stayersIdle += IRewardSaleSelf(address(this)).sellRedeemRewardSelf(shares, supply);
+
         // B — repay f of each debt from collected tokens; capture any IL shortfall. The repay is
         // capped at the REDEEMER's own per-leg budget (`legBal − stayersLeg`) so a severe IL
         // shortfall can never consume the stayers' reserved `(1-f)` idle-leg share to over-repay
@@ -400,12 +464,43 @@ library LeveragedAeroManager {
             }
         }
 
-        // E — sweep residual cbBTC/WETH → USDC, LEAVING the stayers' reserved leg share un-swept
-        // (min-out=0; aggregate guard applies). For a full redeem (f=1) or no rerange remainder,
-        // stayers* == 0 → sweep all (identical to the prior unconditional sweep). In the common
-        // partial case this hands the redeemer exactly f*(idleLeg + LP_leg − debt_leg).
-        _sweepLegToUsdc($.cbBTC, stayersCb, 0);
-        _sweepLegToUsdc($.weth, stayersWeth, 0);
+        // E — sweep residual cbBTC/WETH → USDC, LEAVING the stayers' reserved leg share un-swept. For a
+        // full redeem (f=1) or no rerange remainder, stayers* == 0 → sweep all (identical to the prior
+        // unconditional sweep). In the common partial case this hands the redeemer exactly
+        // f*(idleLeg + LP_leg − debt_leg).
+        //
+        // ORACLE-FLOORED, DEADMAN-PRESERVING. These were the last zero-min-out swaps in the system: a
+        // hostile router / sandwich could fill them at any price and the loss landed entirely on the
+        // REDEEMER (the stayers' `keep` is reserved BEFORE the sweep and stays behind as legs). Each
+        // floor is now `oracleValue(amount ACTUALLY SOLD) × (1 − maxSlippageBps)` — the `_rebalanceCover`
+        // / `_sweepAtOracleFloor` idiom, priced off the sold amount and NOT the raw balance, or an
+        // unreachable floor would revert every partial sweep.
+        //
+        // THE `try` IS THE LOAD-BEARING PART. `emergencyRedeem` routes through this exact path and
+        // exists for the oracle-down-AND-backend-dead state (see the strategy's `FULFILL_WINDOW`
+        // deadman note), so a fail-closed floor here would convert a value guard into a fund freeze.
+        // The derivation therefore lives behind an external hop the manager can catch, and an
+        // unreadable feed degrades to floor = 0 — exactly the pre-fix behaviour, in exactly the state
+        // that behaviour exists for. A sandwicher cannot MAKE a feed stale, so the floor binds whenever
+        // it can bind.
+        {
+            uint256 cbFloor;
+            uint256 wethFloor;
+            // `_sellable` mirrors `_sweepLegToUsdc`'s own gate (unit-of-account identity, `bal <= keep`)
+            // so the floor is always priced on the amount that swap will actually sell.
+            try IRedeemSweepFloors(address(this)).redeemSweepFloors(
+                _sellable($.cbBTC, stayersCb), _sellable($.weth, stayersWeth)
+            ) returns (uint256 f0, uint256 f1) {
+                (cbFloor, wethFloor) = (f0, f1);
+            } catch {
+                // Oracle down / sequencer down: floors stay 0 so the deadman exit still completes.
+                // MARKED, because this `catch` cannot distinguish a stale feed from an out-of-gas and
+                // the swaps below then run UNBOUNDED. Silent fail-open leaves no on-chain trace at all.
+                emit RedeemSweepFloorsDegraded();
+            }
+            _sweepLegToUsdc($.cbBTC, stayersCb, cbFloor);
+            _sweepLegToUsdc($.weth, stayersWeth, wethFloor);
+        }
 
         // assetsOut = total USDC minus the (1-f) idle-USDC portion that stays for stayers (the
         // stayers' idle-leg share already stayed un-swept above, as legs).
@@ -991,7 +1086,7 @@ library LeveragedAeroManager {
     ///      Returns `debtUsdc == 0` (skipping the price reads) when both borrows are clear.
     ///
     ///      STORED-INDEX STALENESS HERE IS A KNOWN, DELIBERATELY UNCHANGED RESIDUAL — do not "fix" it by
-    ///      analogy with `LeveragedAeroValuation._hedgeLeg` (which reads `borrowBalanceCurrent`). The two
+    ///      analogy with `LeveragedAeroValuation._measureLeg` (which reads `borrowBalanceCurrent`). The two
     ///      cases are not alike:
     ///
     ///        - The hedge MEASURES accrued interest, so a stale read makes its answer ~0 and the feature
@@ -1460,6 +1555,17 @@ library LeveragedAeroManager {
         if (bal <= keep) return;
         uint256 amt = bal - keep;
         LeveragedAeroValuation.swapExactIn($.swapRouter, tokenIn, $.usdc, _legSwapSpacing(tokenIn), amt, minOut);
+    }
+
+    /// @dev The amount `_sweepLegToUsdc(tokenIn, keep, …)` would ACTUALLY sell — the same two gates it
+    ///      applies, in the same order (unit-of-account identity ⇒ no swap at all; `bal <= keep` ⇒
+    ///      nothing above the stayers' reservation). Exists so the redeem-sweep oracle floor is priced
+    ///      on the sold amount rather than the raw balance; keeping it as ONE expression is what stops
+    ///      the floor and the swap from drifting apart.
+    function _sellable(address tokenIn, uint256 keep) private view returns (uint256) {
+        if (tokenIn == _layout().usdc) return 0;
+        uint256 bal = IERC20(tokenIn).balanceOf(address(this));
+        return bal > keep ? bal - keep : 0;
     }
 
     /// @dev (1-f) of the strategy's current `token` balance, f = shares/supply. Used by redeem to

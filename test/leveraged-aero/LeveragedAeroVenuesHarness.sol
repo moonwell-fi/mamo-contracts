@@ -74,7 +74,7 @@ contract MockChainlinkFeed {
 ///      contract carries a borrow index at all. The previous version stored a single
 ///      `borrowBalance[account]` scalar that every read and every setter touched directly, so
 ///      `borrowBalanceStored` and `borrowBalanceCurrent` were IDENTICAL BY CONSTRUCTION — and the one
-///      real-world condition that matters for `LeveragedAeroValuation._hedgeLeg` (interest that has
+///      real-world condition that matters for `LeveragedAeroValuation._measureLeg` (interest that has
 ///      accrued in wall-clock time but that no transaction has yet folded into the market's
 ///      `borrowIndex`) was simply not representable. A hedge that measured the stale index therefore
 ///      looked perfect in the suite and hedged ~0 on a live fork.
@@ -150,7 +150,7 @@ contract MockLendingMarket {
         return _balanceAt(account, borrowIndex);
     }
 
-    /// @notice Accrue, then return the balance — the production read `_hedgeLeg` now uses.
+    /// @notice Accrue, then return the balance — the production read `_measureLeg` now uses.
     function borrowBalanceCurrent(address account) external returns (uint256) {
         accrueInterest();
         return borrowBalanceStored(account);

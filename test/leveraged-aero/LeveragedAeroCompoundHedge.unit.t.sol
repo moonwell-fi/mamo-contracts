@@ -8,6 +8,8 @@ import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedA
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
+import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
+
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
 import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
@@ -21,7 +23,7 @@ import {
     MockNpm
 } from "./LeveragedAeroVenuesHarness.sol";
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -383,11 +385,15 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         );
 
         // THE COST IS NAV DRAG, NOT EXPOSURE. The buy-and-repay is itself equity-neutral (USDC out,
-        // an equal slug of debt cancelled), so NAV lands at `pre + proceeds`: the accrual's cost was
-        // already taken when the debt grew, and the harvest simply reinvested less.
-        assertApproxEqRel(
-            strategy.nav(), navBeforeHarvest + proceeds, 1e15, "harvest adds proceeds; hedge is NAV-neutral"
-        );
+        // an equal slug of debt cancelled), so NAV is UNCHANGED across the harvest: the accrual's cost
+        // was already taken when the debt grew, and the harvest simply reinvested less.
+        //
+        // `navBeforeHarvest` is snapshot AFTER `_armRewards`, and `nav()` now prices `gauge.earned()` —
+        // so the proceeds were ALREADY in the book when it was taken. `compound` converts them
+        // (AERO → USDC at the same `aeroUsdFeed` mark) rather than adding them, which is the stronger
+        // statement: there is no NAV step for a depositor to front-run. Before `earned()` was priced
+        // this assertion read `navBeforeHarvest + proceeds`, and that gap WAS the free option.
+        assertApproxEqRel(strategy.nav(), navBeforeHarvest, 1e15, "harvest CONVERTS priced yield; hedge is NAV-neutral");
         // The USDC that funded the hedge left the book through the leg-A buy, bounded by the oracle.
         uint256 hedgeSpend = usdc.balanceOf(address(router)) - routerUsdcBefore;
         assertApproxEqRel(hedgeSpend, interestValueUsdc, 1e15, "spend == the oracle value of the accrual");
@@ -721,46 +727,67 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     // ==================== 3. FEE TIMING (findings 3 + 4) ====================
 
     /**
-     * @dev THE FEE-TIMING CONTRACT, asserted rather than assumed. Gauge rewards are not in `nav()`, so
-     *      the pre-harvest crystallise cannot see the value the harvest is about to add: harvest #1
-     *      charges NO performance fee on its own yield, and harvest #2's crystallise charges it. That is
-     *      DEFERRAL, not leakage — and it is deliberate (see the `compound` header: every crystallisation
-     *      point precedes share issuance/burn, so the fee lands on exactly the holders who held while the
-     *      yield accrued, and adding a second harvest-timed crystallisation point would raise the
-     *      expected fee under an HWM rather than correct anything).
+     * @dev THE FEE-TIMING CONSEQUENCE OF PRICING `earned()`, asserted rather than left as prose — this is
+     *      the trade-off the round-2 change accepts DELIBERATELY, and it is the one behaviour a reader of
+     *      the fee schedule could be surprised by.
+     *
+     *      Round 1 (held balance only) left gauge rewards outside `nav()` until they were claimed, so the
+     *      pre-harvest crystallise could not see them and the performance fee was DEFERRED to the harvest
+     *      after. With `earned()` priced there is nothing to defer: the reward is in NAV from the moment
+     *      it accrues, so every crystallisation point — a harvest, a deposit, a redeem — charges the
+     *      performance fee against reward value that is still UNREALISED and UNCLAIMED, sitting in the
+     *      gauge.
+     *
+     *      The second half of this test is the sharp version: a tranche is armed, NEVER harvested, and a
+     *      plain deposit charges a fee on it. Accepted as the correct side to err on — the alternative
+     *      (rewards outside NAV) mis-prices every deposit, every block, in a front-runner's favour. See
+     *      `LeveragedAeroValuation._rewardUsdc`.
      */
-    function testHarvestYieldIsFeedAtTheNextCrystallisationPointNotItsOwn() public {
+    function testThePerformanceFeeAccruesAgainstUnclaimedGaugeRewards() public {
         _armBook();
 
         uint256 supply0 = vault.totalSupply();
         uint256 nav0 = strategy.nav();
         assertEq(strategy.layout().hwmPerShare, 0, "HWM unset before the first crystallise");
 
-        // ── Harvest #1: crystallise SEEDS the HWM at the PRE-harvest level and charges nothing ──
+        // ── A tranche accrues in the gauge. It is in NAV IMMEDIATELY — nothing was claimed. ──
         _armRewards(20_000e18);
+        uint256 navWithEarned = strategy.nav();
+        assertEq(navWithEarned, nav0 + _usdcFromAero(20_000e18), "unclaimed rewards are priced at once");
+        assertEq(aero.balanceOf(address(strategy)), 0, "...and none of it has been claimed");
+
+        // ── Harvest #1: the crystallise that precedes it SEES that value, so the HWM seeds INCLUSIVE
+        //    of the still-unclaimed tranche (round 1 seeded at `nav0`, exclusive). The seeding point
+        //    itself charges nothing — there is no prior HWM to have exceeded. ──
         _compound(1);
 
-        assertEq(vault.totalSupply(), supply0, "harvest #1 charged NO performance fee on its own yield");
+        assertEq(vault.totalSupply(), supply0, "the SEEDING crystallise charges nothing (no prior HWM)");
         assertEq(vault.balanceOf(feeRecipient), 0, "fee recipient paid nothing yet");
         uint256 hwm1 = strategy.layout().hwmPerShare;
-        assertEq(hwm1, Math.mulDiv(nav0, 1e18, supply0), "HWM seeded at the PRE-harvest NAV/share");
-        // The yield is in NAV, un-crystallised — carrying the fee liability, not escaping it.
-        uint256 nav1 = strategy.nav();
-        assertGt(Math.mulDiv(nav1, 1e18, supply0), hwm1, "the un-fee'd gain is sitting in NAV/share");
+        assertEq(hwm1, Math.mulDiv(navWithEarned, 1e18, supply0), "HWM seeded INCLUSIVE of the unclaimed tranche");
 
-        // ── Harvest #2: the SAME gain is now visible to the crystallise and IS charged ──
+        // ── THE CONSEQUENCE, PROVEN: a second tranche is charged a performance fee WITHOUT EVER BEING
+        //    CLAIMED. Arm it, never `compound`, and crystallise through an ordinary deposit. ──
         _armRewards(20_000e18);
-        _compound(1);
+        uint256 navPending = strategy.nav();
+        assertGt(Math.mulDiv(navPending, 1e18, supply0), hwm1, "the gain over the HWM is entirely unrealised");
 
-        assertGt(vault.totalSupply(), supply0, "harvest #2 crystallised harvest #1's gain");
-        assertGt(vault.balanceOf(feeRecipient), 0, "fee recipient paid, one point late");
-        assertGt(strategy.layout().hwmPerShare, hwm1, "HWM ratcheted at the crystallisation point");
+        address newLp = makeAddr("newLp");
+        usdc.mint(newLp, 1_000e6);
+        vm.prank(newLp);
+        usdc.approve(address(strategy), 1_000e6);
+        vm.prank(newLp);
+        strategy.deposit(1_000e6, 0);
 
-        // The charge is ~10% of harvest #1's gain, i.e. the fee schedule as quoted — nothing is lost to
-        // the lag, and nothing is double-charged.
-        uint256 gain = nav1 - nav0;
+        assertGt(vault.balanceOf(feeRecipient), 0, "fee charged against rewards STILL SITTING IN THE GAUGE");
+        assertEq(gauge.earnedAmount(), 20_000e18, "...which are demonstrably still unclaimed");
+        assertGt(strategy.layout().hwmPerShare, hwm1, "HWM ratcheted on an unrealised gain");
+
+        // The charge is ~10% of the unrealised gain — the fee schedule as quoted, applied one harvest
+        // earlier than it used to be. Nothing is double-charged: the HWM moved with it.
+        uint256 gain = navPending - navWithEarned;
         uint256 feeValue = Math.mulDiv(vault.balanceOf(feeRecipient), strategy.nav(), vault.totalSupply());
-        assertApproxEqRel(feeValue, (gain * PERF_FEE_BPS) / 10_000, 5e16, "fee ~= perfBps x the deferred gain");
+        assertApproxEqRel(feeValue, (gain * PERF_FEE_BPS) / 10_000, 5e16, "fee ~= perfBps x the unrealised gain");
     }
 
     /// @dev A DEPOSIT is also a crystallisation point, and it runs BEFORE the new shares are minted —
@@ -808,5 +835,619 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertEq(strategy.layout().hwmPerShare, hwm1, "HWM unmoved (fee deferred, not lost)");
         assertEq(strategy.layout().lastFeeAccrualTimestamp, lastAccrual1, "accrual clock unmoved");
         assertGt(_collateralUsdc(), collateralBefore, "...but the HARVEST itself went through");
+    }
+
+    // ====== 4. nav() PRICES THE GAUGE REWARD: HELD BALANCE **AND** earned() (review finding 3) ======
+    //
+    // Round 1 priced only the CLAIMED-but-unsold balance, which closes only the post-unwind window. A
+    // harvest spends most of its life sitting in the gauge as `earned()`, so the ORDINARY
+    // deposit-before-`compound` capture survived. Round 2 adds the `earned()` term, and the two tests
+    // named `...NoLongerCapturesTheHarvestStep` below are the two halves of the same proof: one arms the
+    // reward as a HELD tranche, the other leaves it where it actually lives — in the gauge.
+
+    /// @dev The reward tranche used by this block: $50k of AERO at the fixture's $1 mark.
+    uint256 internal constant TRANCHE = 50_000e18;
+
+    /// @dev Arm the gauge's `withdraw` auto-claim, which is what makes a held reward balance a NORMAL
+    ///      state: every `_unwindLiquidity` calls `gauge.withdraw`, and Aerodrome pays the accrued
+    ///      tranche out on that call whether or not anyone asked for it.
+    function _armWithdrawAutoClaim(uint256 amount) internal {
+        aero.mint(address(gauge), amount);
+        gauge.setAeroToPayOnWithdraw(amount);
+    }
+
+    /// @dev USDC face (6dp) `nav()` should credit for `aeroAmt` held AERO at the fixture's $1 mark:
+    ///      `_usdcValue(amt, 18, 1e8, 1e8)`.
+    function _heldAeroValueUsdc(uint256 aeroAmt) internal pure returns (uint256) {
+        return aeroAmt / 1e12;
+    }
+
+    /**
+     * @dev THE TERM ITSELF. A claimed-but-unsold reward balance is worth real USDC and `nav()` must say
+     *      so, to the unit. Priced on the same Chainlink basis (`aeroUsdFeed`, 8dp) the sale floor in
+     *      `compoundImpl` / `_sellRewardBalance` uses, so the mark and the realisation cannot drift.
+     */
+    function testNavPricesTheHeldRewardBalance() public {
+        _armBook();
+        uint256 navBefore = strategy.nav();
+
+        aero.mint(address(strategy), TRANCHE);
+
+        assertEq(strategy.nav(), navBefore + _heldAeroValueUsdc(TRANCHE), "nav credits the held tranche exactly");
+    }
+
+    /**
+     * @dev REACHABILITY, not a synthetic balance: `rerange` unwinds through `gauge.withdraw`, which
+     *      AUTO-CLAIMS the accrued tranche into the strategy wallet. The proposer asked for a reposition
+     *      and got a reward balance as a side effect — the window this finding is about.
+     */
+    function testNavPricesTheTrancheARerangeAutoClaims() public {
+        _armBook();
+        _armWithdrawAutoClaim(TRANCHE);
+        uint256 navBefore = strategy.nav();
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 5000, 0, 0);
+
+        assertEq(aero.balanceOf(address(strategy)), TRANCHE, "the unwind auto-claimed a tranche");
+        // The recenter itself is NAV-neutral at an unmoved tick (no swaps; any remainder stays idle and
+        // is NAV-counted), so the whole delta is the newly-held tranche.
+        assertApproxEqAbs(
+            strategy.nav(), navBefore + _heldAeroValueUsdc(TRANCHE), 2, "nav grew by the auto-claimed tranche"
+        );
+    }
+
+    /**
+     * @dev THE FINDING, HELD-TRANCHE HALF. A depositor who arrives in the window between an unwind's
+     *      auto-claim and the next `compound()` used to buy in at a NAV that EXCLUDED the held tranche,
+     *      then collect a pro-rata slice of it when `compound` stepped NAV up — a free option on someone
+     *      else's harvest, taken from the holders who actually farmed it.
+     *
+     *      With the tranche in NAV the step disappears: the depositor's shares are priced against the
+     *      inclusive book, `compound` merely converts AERO→USDC at the same mark, and they end up holding
+     *      exactly what they paid. The counterfactual is computed inline (not hardcoded) so the test also
+     *      documents the size of what was being captured.
+     *
+     *      THIS TEST ALONE DOES NOT CLOSE THE FINDING — it arms the reward as a balance the strategy
+     *      already holds, which is the narrow post-unwind state.
+     *      `testADepositBeforeCompoundNoLongerCapturesAnEARNEDHarvestStep` is the other half: the reward
+     *      left where it actually lives for most of its life, unclaimed inside the gauge.
+     */
+    function testADepositBeforeCompoundNoLongerCapturesAHELDTrancheHarvestStep() public {
+        _armBook();
+        _armWithdrawAutoClaim(TRANCHE);
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 5000, 0, 0); // auto-claims the tranche into the strategy
+        gauge.setAeroToPayOnWithdraw(0); // one tranche only — later unwinds claim nothing
+
+        uint256 navWithTranche = strategy.nav();
+        uint256 supplyBefore = vault.totalSupply();
+        uint256 trancheUsdc = _heldAeroValueUsdc(TRANCHE);
+
+        // What the PRE-FIX book would have done: price the deposit against `nav − tranche`, then hand the
+        // depositor their share of the step `compound` produces.
+        uint256 preFixShares = Math.mulDiv(100_000e6, supplyBefore, navWithTranche - trancheUsdc);
+        uint256 preFixCapture = Math.mulDiv(trancheUsdc, preFixShares, supplyBefore + preFixShares);
+        assertGt(preFixCapture, 100_000e6 / 100, "the captured slice was material (>1% of the deposit)");
+
+        address newLp = makeAddr("newLp");
+        usdc.mint(newLp, 100_000e6);
+        vm.prank(newLp);
+        usdc.approve(address(strategy), 100_000e6);
+        vm.prank(newLp);
+        uint256 minted = strategy.deposit(100_000e6, 0);
+
+        // The harvest that used to be a step for them. `earned() == 0`; the HELD balance is the proceeds.
+        _clearRewards();
+        _compound(1);
+        assertEq(aero.balanceOf(address(strategy)), 0, "the tranche was sold");
+
+        uint256 lpValue = Math.mulDiv(minted, strategy.nav(), vault.totalSupply());
+        assertApproxEqRel(lpValue, 100_000e6, 1e15, "the depositor holds what they paid - no harvest capture");
+        assertLt(lpValue, 100_000e6 + preFixCapture / 2, "...and nothing close to the pre-fix capture");
+    }
+
+    /**
+     * @dev THE REVIEWER'S PoC, WITH THE ASSERTION FLIPPED — the regression that actually closes the
+     *      finding. Their arming pattern verbatim: `_armRewards` and NO `_clearRewards`, so the harvest is
+     *      left exactly where a harvest normally sits — UNCLAIMED, inside the gauge, visible only through
+     *      `gauge.earned()`. Nothing is unwound, nothing is pre-claimed; this is the ordinary book, not a
+     *      post-unwind window.
+     *
+     *      Round 1 (held balance only) still lost this one: `nav()` excluded `earned()`, so the depositor
+     *      bought in below the true book and took a pro-rata slice of the harvest the moment `compound`
+     *      claimed and sold it. The reviewer measured 4.5% of a 100k deposit captured in a single block,
+     *      post-fee. With `earned()` in NAV the depositor is priced against the inclusive book and
+     *      `compound` becomes a pure conversion at the same mark, so they end up holding what they paid.
+     *
+     *      The pre-fix counterfactual is computed inline (same technique as the held-tranche twin) so the
+     *      test both pins the fix and records the size of what was being taken.
+     */
+    function testADepositBeforeCompoundNoLongerCapturesAnEARNEDHarvestStep() public {
+        _armBook();
+        _armRewards(TRANCHE); // claimable, NOT claimed: it lives in `gauge.earned()`
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing HELD - the whole tranche is still earned()");
+
+        uint256 navWithEarned = strategy.nav();
+        uint256 supplyBefore = vault.totalSupply();
+        uint256 trancheUsdc = _heldAeroValueUsdc(TRANCHE);
+
+        // What the ROUND-1 book (held balance only, `earned()` unpriced) would have done: price the
+        // deposit against `nav − earned`, then hand the depositor their share of the step `compound`
+        // produces when it claims and sells.
+        uint256 preFixShares = Math.mulDiv(100_000e6, supplyBefore, navWithEarned - trancheUsdc);
+        uint256 preFixCapture = Math.mulDiv(trancheUsdc, preFixShares, supplyBefore + preFixShares);
+        assertGt(preFixCapture, 100_000e6 / 100, "the captured slice was material (>1% of the deposit)");
+
+        address newLp = makeAddr("newLp");
+        usdc.mint(newLp, 100_000e6);
+        vm.prank(newLp);
+        usdc.approve(address(strategy), 100_000e6);
+        vm.prank(newLp);
+        uint256 minted = strategy.deposit(100_000e6, 0);
+
+        // The harvest that used to be a step for them. NO `_clearRewards()` — `compound` claims the
+        // `earned()` tranche itself, which is the whole point.
+        _compound(1);
+        assertEq(aero.balanceOf(address(strategy)), 0, "the tranche was claimed and sold");
+        assertEq(gauge.earnedAmount(), 0, "...and the gauge accrual it came from is consumed");
+
+        uint256 lpValue = Math.mulDiv(minted, strategy.nav(), vault.totalSupply());
+        assertApproxEqRel(lpValue, 100_000e6, 1e15, "the depositor holds what they paid - no harvest capture");
+        assertLt(lpValue, 100_000e6 + preFixCapture / 2, "...and nothing close to the pre-fix capture");
+    }
+
+    /**
+     * @dev THE `earned()` TERM ITSELF, to the unit — the half round 1 left out. Nothing is held; the whole
+     *      credit comes from the gauge accrual, priced on the same `aeroUsdFeed` mark as the held half.
+     */
+    function testNavPricesTheUnclaimedGaugeEarned() public {
+        _armBook();
+        uint256 navBefore = strategy.nav();
+
+        _armRewards(TRANCHE);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing held");
+        assertEq(strategy.nav(), navBefore + _heldAeroValueUsdc(TRANCHE), "nav credits the gauge accrual exactly");
+    }
+
+    /**
+     * @dev THE HAND-OFF, and why the `catch {}` is CORRECT rather than an understatement. Slipstream's
+     *      gauge reverts `"NA"` on `earned()` for a tokenId it does not have staked — and that is exactly
+     *      the state in which the accrual has already been auto-claimed into the held balance. Modelled
+     *      here by a gauge whose `earned()` reverts outright: nav is unchanged because the same value is
+     *      now sitting in the wallet, counted by the held term.
+     */
+    function testNavIsContinuousWhenEarnedRevertsBecauseTheTrancheWasClaimed() public {
+        _armBook();
+        _armRewards(TRANCHE);
+        uint256 navEarned = strategy.nav();
+
+        // The unstake moment: the gauge paid the tranche out and now reverts on `earned()`.
+        vm.prank(address(gauge));
+        aero.transfer(address(strategy), TRANCHE);
+        _clearRewards();
+        vm.mockCallRevert(address(gauge), abi.encodeWithSelector(gauge.earned.selector), bytes("NA"));
+
+        assertEq(strategy.nav(), navEarned, "nav is continuous across the claim - no double count, no gap");
+    }
+
+    /**
+     * @dev A FLAT BOOK MAKES NO `earned()` CALL AT ALL. `tokenId == 0` short-circuits the term, which is
+     *      what keeps `nav()`'s flat-book branch oracle-free and gas-cheap. Proven by making any `earned()`
+     *      call revert: the settle still prices, so the call never happened.
+     */
+    function testFlatBookNeverCallsEarned() public {
+        _armBook();
+        vm.mockCallRevert(address(gauge), abi.encodeWithSelector(gauge.earned.selector), bytes("NA"));
+
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(strategy.layout().tokenId, 0, "flat book");
+        strategy.nav(); // no revert: the `earned()` probe was never reached
+    }
+
+    /**
+     * @dev NO REWARD VALUE AT ALL ⇒ NO ORACLE DEPENDENCY. The feed read is gated on the SUM
+     *      (`heldBalance + earned() > 0`), not on the balance alone — `earned()` is routinely non-zero
+     *      while the balance is zero, so gating on the balance would have skipped the mark on the term
+     *      that matters. A book with neither still reads no feed. Proven the only way that means anything:
+     *      with the reward feed STALE, which would fail-close every priced path if it were read.
+     */
+    function testNavDoesNotReadTheRewardFeedWhenThereIsNoRewardValue() public {
+        _armBook();
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing held");
+        assertEq(gauge.earnedAmount(), 0, "...and nothing earned");
+        uint256 navFresh = strategy.nav();
+
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours); // well past maxDelay (1 hour)
+
+        assertEq(strategy.nav(), navFresh, "nav is byte-identical and never touched the reward feed");
+    }
+
+    /**
+     * @dev THE WIDENED SCOPE, pinned so it is never a surprise. With `earned()` priced, a LIVE GAUGE means
+     *      reward value is essentially always present — so a stale reward feed fail-closes `nav()` (and
+     *      the deposit it prices) even with nothing held, not merely inside a post-unwind window. That is
+     *      the accepted cost of closing the capture; `compound` is still the cure, and the ASYNC redeem
+     *      queue stays open throughout because `fulfillRedeem`'s unwind never reads `nav()`.
+     */
+    function testAStaleRewardFeedFailsClosedOnEarnedAloneWithNothingHeld() public {
+        _armBook();
+        _armRewards(TRANCHE);
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing held - the exposure is the earned() term");
+
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav();
+
+        // The async queue is unaffected: requesting and fulfilling never price through `nav()`.
+        uint256 shares = SHARES / 10;
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        vm.prank(lp);
+        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 lpBefore = usdc.balanceOf(lp);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the oracle-free exit still pays");
+    }
+
+    /**
+     * @dev FAIL-CLOSED, pinned. With a tranche actually held and the reward feed unreadable, `nav()`
+     *      REVERTS rather than valuing the tranche at 0 — the same posture every other term in
+     *      `LeveragedAeroValuation` takes. Valuing at 0 would re-create exactly the mis-pricing this term
+     *      closes and hand it to whoever can stale the feed.
+     *
+     *      THE ACCEPTED CONSEQUENCE, asserted so it is never a surprise: deposits and the priced fast
+     *      redeem are denied for the duration. The window is bounded (it exists only between an unwind
+     *      and the next `compound`, and `compound` is itself the cure) and the async queue stays open —
+     *      `fulfillRedeem`'s proportional unwind never reads `nav()`.
+     */
+    function testNavFailsClosedOnAStaleRewardFeedWhileATrancheIsHeld() public {
+        _armBook();
+        aero.mint(address(strategy), TRANCHE);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav();
+
+        address newLp = makeAddr("newLp");
+        usdc.mint(newLp, 10_000e6);
+        vm.prank(newLp);
+        usdc.approve(address(strategy), 10_000e6);
+        vm.prank(newLp);
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.deposit(10_000e6, 0);
+
+        // ...and the cure is one proposer call: sell the tranche and the dependency is gone.
+        _refreshFeeds();
+        _clearRewards();
+        _compound(1);
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+        strategy.nav(); // no revert: nothing held, so nothing reads the reward feed
+    }
+
+    // ====== 5. THE ASYNC REDEEM SELLS THE TRANCHE ITS OWN UNWIND CLAIMS (review round 2, item 2) ======
+    //
+    // `redeemUnwindImpl` → `_unwindLiquidity` → `gauge.withdraw` auto-claims a tranche DURING the redeem,
+    // on EVERY async redeem, because the redeem's own unwind is what creates the balance. Step E sweeps
+    // only the two LEG tokens, so the redeemer used to be paid `f × (assets − reward)` while 100% of the
+    // tranche landed with the stayers — and with `nav()` pricing the reward that is a nav-vs-payout
+    // inconsistency, not merely an unfairness. The redeem now runs the same best-effort, oracle-floored
+    // sale `settle` uses and splits the proceeds `f / (1−f)`.
+
+    /// @dev Model a gauge that genuinely OWES `amount`: `earned()` reports it (so `nav()` prices it before
+    ///      anything is claimed) AND either claim path delivers it. The withdraw arm is what makes it the
+    ///      redeem's own auto-claim; `MockCLGauge` zeroes `earnedAmount` when it pays, as the real gauge
+    ///      zeroes `rewards[tokenId]`.
+    function _armGaugeAccrual(uint256 amount) internal {
+        aero.mint(address(gauge), amount);
+        gauge.setEarnedAmount(amount);
+        gauge.setAeroToPayOnWithdraw(amount);
+        gauge.setAeroToPayOnGetReward(amount);
+    }
+
+    /// @dev Escrow + fulfil a proportional redeem of `shares` for `lp`; returns the USDC they were paid.
+    function _asyncRedeem(uint256 shares) internal returns (uint256 paid) {
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        vm.prank(lp);
+        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 before = usdc.balanceOf(lp);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        return usdc.balanceOf(lp) - before;
+    }
+
+    /**
+     * @dev THE FINDING. Same redeem, run twice from the same state — once against a gauge owing nothing,
+     *      once against a gauge owing a tranche the unwind auto-claims. The DIFFERENCE in what the
+     *      redeemer is paid is the test: it must be their pro-rata `f` slice of the tranche, not zero
+     *      (pre-fix) and not the whole of it (which would over-correct and rob the stayers).
+     */
+    function testAsyncRedeemPaysTheRedeemerTheirProRataShareOfItsOwnAutoClaim() public {
+        _armBook();
+        uint256 shares = SHARES / 4; // f = 25%
+        uint256 supply = vault.totalSupply();
+
+        uint256 snap = vm.snapshotState();
+        uint256 paidNoReward = _asyncRedeem(shares);
+        vm.revertToState(snap);
+
+        _armGaugeAccrual(TRANCHE);
+        uint256 paidWithReward = _asyncRedeem(shares);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "the auto-claimed tranche was SOLD, not left behind");
+        uint256 expected = Math.mulDiv(_heldAeroValueUsdc(TRANCHE), shares, supply);
+        assertApproxEqRel(
+            paidWithReward - paidNoReward, expected, 1e15, "redeemer paid exactly f x the tranche, no more"
+        );
+    }
+
+    /**
+     * @dev THE OTHER HALF: the stayers are not double-credited, and not robbed either. Their claim on the
+     *      book is NAV/share, so the invariant is CONTINUITY across the redeem — the sale converts
+     *      `(1−f)` of the tranche from reward token to USDC inside the strategy, which is a change of
+     *      form, not of value. Asserted against a `nav()` that already prices the accrual through
+     *      `earned()`, so a redeem that paid out too much or too little would show up here immediately.
+     */
+    function testAsyncRedeemLeavesStayerNavPerShareContinuous() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+        uint256 shares = SHARES / 4;
+
+        uint256 navPerShareBefore = Math.mulDiv(strategy.nav(), 1e18, vault.totalSupply());
+        _asyncRedeem(shares);
+        uint256 navPerShareAfter = Math.mulDiv(strategy.nav(), 1e18, vault.totalSupply());
+
+        assertApproxEqRel(navPerShareAfter, navPerShareBefore, 1e15, "stayers' NAV/share unchanged by the redeem");
+        // ...and the stayers' `(1-f)` really is sitting in the strategy as USDC, not as an unsold tranche.
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing left unsold");
+        assertGt(usdc.balanceOf(address(strategy)), 0, "the stayers' reserved slice stayed behind, in USDC");
+    }
+
+    /**
+     * @dev THE DEADMAN + THE RESIDUAL, pinned together. The sale is best-effort by contract: a stale
+     *      reward feed makes it fail CLOSED inside its own frame, the redeem swallows that and completes,
+     *      and the tranche is left untouched — never sold blind. This is the same posture (and the same
+     *      reason) as the redeem-sweep oracle floors: `emergencyRedeem` routes through this path for the
+     *      oracle-down-AND-backend-dead state, so a reward feed must never be able to block an exit.
+     *
+     *      The residual is the pre-fix behaviour, and it is the ONLY case in which it still applies: the
+     *      tranche stays with the stayers. Stayers are never worse off than before the change; the
+     *      redeemer is, at worst, no better off. It is MARKED on chain (`RedeemRewardSaleDeferred`)
+     *      rather than silent, because the `catch` cannot tell a stale feed from any other revert.
+     */
+    function testAStaleRewardFeedDefersTheRedeemSaleWithoutBlockingTheRedeem() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+        uint256 shares = SHARES / 4;
+
+        // Every feed but the reward feed stays fresh, so ONLY the reward sale is unpriceable.
+        aeroFeed.setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.recordLogs();
+        uint256 paid = _asyncRedeem(shares);
+
+        assertGt(paid, 0, "the redeem completed and paid - the deadman is intact");
+        assertEq(aero.balanceOf(address(strategy)), TRANCHE, "THE RESIDUAL: the tranche stayed, unsold");
+        assertTrue(
+            _sawFrom(address(strategy), LeveragedAerodromeCLStrategy.RedeemRewardSaleDeferred.selector),
+            "the deferral is MARKED on chain, from the strategy address"
+        );
+    }
+
+    /// @dev True if the recorded logs contain `topic` emitted by `emitter` (delegatecalled libraries emit
+    ///      from the strategy address, which is exactly what these markers must prove).
+    function _sawFrom(address emitter, bytes32 topic) internal returns (bool) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == emitter && logs[i].topics[0] == topic) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @dev THE OTHER DIRECTION — an event that always fires says nothing. A redeem whose reward sale
+     *      SUCCEEDS must mark no degradation, and neither must the sweep floors, which are derived
+     *      normally here. Together with the two stale-feed tests this brackets both markers.
+     */
+    function testAHealthyRedeemMarksNoDegradation() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+
+        vm.recordLogs();
+        _asyncRedeem(SHARES / 4);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.RedeemRewardSaleDeferred.selector,
+                "the sale succeeded - nothing was deferred"
+            );
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector,
+                "the floors were derived - nothing was degraded"
+            );
+        }
+        assertEq(aero.balanceOf(address(strategy)), 0, "sanity: the sale really did run");
+    }
+
+    /**
+     * @dev A FULL redeem (f = 1) takes the WHOLE tranche, because there are no stayers left to reserve
+     *      anything for — the `(1−f)` reservation collapses to 0 by construction rather than by a branch.
+     */
+    function testAFullAsyncRedeemTakesTheWholeAutoClaimedTranche() public {
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+        uint256 supply = vault.totalSupply();
+
+        uint256 snap = vm.snapshotState();
+        uint256 paidNoReward;
+        {
+            gauge.setEarnedAmount(0);
+            gauge.setAeroToPayOnWithdraw(0);
+            paidNoReward = _asyncRedeem(supply);
+        }
+        vm.revertToState(snap);
+
+        uint256 paidWithReward = _asyncRedeem(supply);
+
+        assertApproxEqRel(
+            paidWithReward - paidNoReward, _heldAeroValueUsdc(TRANCHE), 1e15, "the sole holder takes all of it"
+        );
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant still restored");
+    }
+
+    /**
+     * @dev A REWARD-FREE REDEEM IS BYTE-IDENTICAL. The sale is a no-op when the gauge owes nothing
+     *      (`_sellRewardBalance` early-returns on a zero balance), so the common redeem gains no
+     *      behaviour, no oracle dependency and no swap — only the two balance reads that establish it.
+     */
+    function testARewardFreeAsyncRedeemIsUnchanged() public {
+        _armBook();
+        uint256 shares = SHARES / 4;
+
+        uint256 routerBefore = usdc.balanceOf(AERO_V2_ROUTER);
+        uint256 stayersIdleBefore = usdc.balanceOf(address(strategy));
+        uint256 paid = _asyncRedeem(shares);
+
+        assertGt(paid, 0, "redeemer paid");
+        assertEq(usdc.balanceOf(AERO_V2_ROUTER), routerBefore, "no reward swap was routed");
+        assertLe(usdc.balanceOf(address(strategy)), stayersIdleBefore, "no extra USDC was reserved for stayers");
+    }
+
+    // ====== 6. `rewardReadOk()`: THE MARKER ON nav()'s ONE FAIL-OPEN (review round 3, items 1-2) ======
+    //
+    // `_rewardUsdc`'s `catch {}` is the only fail-open in this system with no instrumentation, and the
+    // only one that is not transaction-scoped: an `earned()` that starts reverting for a NON-`"NA"`
+    // reason (gauge upgrade, selector change, OOG in the subcall) drops the earned term to zero on every
+    // deposit and every block, silently restoring exactly the mis-pricing section 4 closed. `nav()` is a
+    // `view` and cannot emit, so the instrumentation is readable state. These tests pin BOTH halves: the
+    // marker reports the condition, and reading it changes nothing about `nav()`.
+
+    /// @dev Etch a code-less account over the gauge address: the venue is "gone" as far as the EVM is
+    ///      concerned, which is the state the `code.length` precheck exists to make distinguishable.
+    ///      Etching (not re-pointing `Layout.gauge`) is the only way to reach it — `applyVenue` validates
+    ///      the gauge at init and at every migration, so no reachable configuration path produces it.
+    function _emptyTheGauge() internal {
+        vm.etch(address(gauge), "");
+    }
+
+    /**
+     * @dev THE HEALTHY STAKED BOOK: a live gauge answering `earned()` over a staked tokenId reports `true`
+     *      — with an accrual outstanding AND with the accrual at zero, because "OK" is about whether the
+     *      READ ANSWERED, not about whether the answer was non-zero. A marker that went false on an idle
+     *      gauge would be noise a keeper learns to ignore.
+     */
+    function testRewardReadOkIsTrueOnAHealthyStakedBook() public {
+        _armBook();
+        assertGt(strategy.layout().tokenId, 0, "staked book - there is something to read");
+        assertEq(gauge.earnedAmount(), 0, "nothing accrued yet");
+        assertTrue(strategy.rewardReadOk(), "a zero accrual is still a successful read");
+
+        _armRewards(TRANCHE);
+        assertTrue(strategy.rewardReadOk(), "...and so is a non-zero one");
+    }
+
+    /**
+     * @dev THE FLAT BOOK reports `true`. `tokenId == 0` means there is NOTHING to read — `_rewardUsdc`
+     *      makes no `earned()` call at all in that state (see `testFlatBookNeverCallsEarned`), so there is
+     *      no failing read to report. Reporting `false` here would make the marker scream through every
+     *      `settle`→`execute` gap and bury the one signal it exists to carry.
+     */
+    function testRewardReadOkIsTrueOnAFlatBook() public {
+        _armBook();
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(strategy.layout().tokenId, 0, "flat book");
+        // Even with EVERY `earned()` call reverting, the flat book is OK: the call is never made.
+        vm.mockCallRevert(address(gauge), abi.encodeWithSelector(gauge.earned.selector), bytes("NA"));
+        assertTrue(strategy.rewardReadOk(), "nothing staked, nothing to read, nothing to report");
+    }
+
+    /**
+     * @dev THE FINDING, pinned: a staked tokenId whose `earned()` REVERTS reports `false`. This is the
+     *      state `nav()` silently absorbs — the earned term drops to zero and the book is understated
+     *      with nothing in any transaction to show for it. The marker is the only trace, so it must be
+     *      exact. Note the marker deliberately does NOT distinguish a benign `"NA"` (a just-unstaked
+     *      tokenId, transient by construction) from a real outage: the two are not reliably separable
+     *      onchain, and a keeper investigating a transient beats one missing an outage.
+     */
+    function testRewardReadOkIsFalseWhenEarnedRevertsOnAStakedTokenId() public {
+        _armBook();
+        assertTrue(strategy.rewardReadOk(), "healthy to begin with");
+
+        vm.mockCallRevert(address(gauge), abi.encodeWithSelector(gauge.earned.selector), bytes("NA"));
+        assertFalse(strategy.rewardReadOk(), "a staked tokenId whose earned() reverts is NOT ok");
+
+        // Not specific to `"NA"`: ANY revert reason lands in the same catch, which is the whole problem.
+        vm.mockCallRevert(
+            address(gauge), abi.encodeWithSelector(gauge.earned.selector), abi.encodeWithSignature("Boom()")
+        );
+        assertFalse(strategy.rewardReadOk(), "a non-NA revert - the case the catch was never written for");
+    }
+
+    /**
+     * @dev A GAUGE WITHOUT CODE reports `false` — and this is the test that makes the `code.length`
+     *      precheck LOAD-BEARING rather than cosmetic. The `try/catch` does NOT cover this state: solc
+     *      guards a high-level call to a typed contract with an `extcodesize` check emitted OUTSIDE the
+     *      try's protected region, so an empty-code target reverts UNCATCHABLY and the revert propagates
+     *      through `catch {}`. Delete the precheck and this test fails with `[Revert] call to non-contract
+     *      address` — i.e. without it the marker REVERTS exactly when the venue is gone, which is worse
+     *      than no marker: a monitor learns nothing precisely when something is badly wrong.
+     */
+    function testRewardReadOkIsFalseWhenTheGaugeHasNoCode() public {
+        _armBook();
+        assertTrue(strategy.rewardReadOk(), "healthy to begin with");
+
+        _emptyTheGauge();
+        assertEq(address(gauge).code.length, 0, "the venue is gone");
+        assertFalse(strategy.rewardReadOk(), "no code, no read, not ok");
+
+        // And the ORDER of the two reward reads, pinned so the precheck's scope is not overstated the
+        // other way: `nav()` is unaffected here, but NOT because anything absorbed the failure — it never
+        // reaches the `earned()` probe at all. `_rewardUsdc`'s `rewardToken()` read, two lines earlier,
+        // already fail-closes the whole call against an empty-code gauge (empty revert data). Both paths
+        // deny an answer; only the marker has a caller that must not revert, which is what the precheck
+        // is for.
+        vm.expectRevert(bytes(""));
+        strategy.nav();
+    }
+
+    /**
+     * @dev THE BEHAVIOUR-NEUTRALITY CONTRACT, both directions in one test. The marker is a marker: adding
+     *      it (and the `code.length` precheck feeding it) must not move `nav()` by a wei, must not add a
+     *      revert path to it, and must not gate anything.
+     *
+     *        - a REVERTING `earned()` still catches to 0: `nav()` prices the held balance alone and does
+     *          NOT revert (the deadman property — `nav()` is the pricing path a stuck fund exits on);
+     *        - a HEALTHY `earned()` is still priced in full.
+     *
+     *      The reverting leg is run with a tranche HELD as well, so the assertion is on a real number and
+     *      not on a `nav()` that happens to be reward-free either way.
+     */
+    function testTheMarkerDoesNotMoveNav() public {
+        _armBook();
+        uint256 navBare = strategy.nav();
+
+        // Healthy: the accrual is priced, exactly as before the marker existed.
+        _armRewards(TRANCHE);
+        assertEq(strategy.nav(), navBare + _heldAeroValueUsdc(TRANCHE), "a healthy earned() is still priced");
+
+        // Degraded: a non-`"NA"` revert. `nav()` does not revert; the earned term silently drops to 0 and
+        // only the HELD tranche is priced — the pre-fix mis-pricing, now at least reported by the marker.
+        _clearRewards();
+        aero.mint(address(strategy), TRANCHE);
+        vm.mockCallRevert(
+            address(gauge), abi.encodeWithSelector(gauge.earned.selector), abi.encodeWithSignature("Boom()")
+        );
+        gauge.setEarnedAmount(TRANCHE); // would be priced if the read answered
+
+        assertEq(strategy.nav(), navBare + _heldAeroValueUsdc(TRANCHE), "catch-to-0: held only, and no revert");
+        assertFalse(strategy.rewardReadOk(), "...and THAT is the state the marker exists to expose");
     }
 }

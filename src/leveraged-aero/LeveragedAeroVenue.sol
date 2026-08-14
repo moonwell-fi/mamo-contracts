@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
+import {LeveragedAerodromeCLStrategy} from "./LeveragedAerodromeCLStrategy.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
 import {ICToken, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
@@ -23,7 +24,18 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///
 ///         WHY A THIRD LIBRARY: the strategy and the manager both sit within ~350 bytes of the
 ///         EIP-170 cap, so neither can host new logic. Extracting the init venue block here is what
-///         frees the strategy bytes the three new entry-point stubs cost.
+///         frees the strategy bytes the three new entry-point stubs cost. Two later relocations ride
+///         the same rationale and sit at the bottom of this file — `layoutView` (the body of the
+///         strategy's `layout()`) and `applyVenueFromInit` (the strategy's `_venueParamsOf`
+///         marshalling). Neither is venue logic; both are here because this is where the bytes are.
+///
+///         IMPORT CYCLE, DELIBERATE AND TYPES-ONLY: those two carry `LeveragedAerodromeCLStrategy`'s
+///         `LayoutView` / `InitParams` in their signatures, so this file imports the strategy that
+///         imports it. Solidity permits import cycles (only inheritance cycles are illegal), and
+///         nothing here calls, inherits from, or links against the strategy — the import buys two
+///         struct declarations. Leaving those structs declared in the strategy is what keeps the
+///         relocations ABI- AND SOURCE-compatible: `layout()` still returns
+///         `LeveragedAerodromeCLStrategy.LayoutView`, so no caller and no test changed.
 ///
 ///         TRUST SPLIT (see the strategy's `stageVenue`/`migrateVenue` docs): the VAULT OWNER alone
 ///         picks the destination venue (hash-committed, byte-exact); the PROPOSER alone sequences
@@ -373,26 +385,34 @@ library LeveragedAeroVenue {
         emit Flattened(idle);
     }
 
-    /// @notice Sell the reward tranche the TERMINAL settle's unwind auto-claimed, floored by the L9
-    ///         oracle read ALONE — `BaseStrategy.settle()` takes no arguments, so there is no caller
-    ///         `minOut` to require and the oracle floor is the whole guard (post-checked against the
-    ///         measured fill, exactly as in `flattenImpl`).
-    /// @dev BEST-EFFORT BY CONTRACT — the strategy MUST reach this through its self-`try/catch`
-    ///      wrapper (`LeveragedAerodromeCLStrategy.sellSettleRewardSelf`), never directly. This
-    ///      function still FAILS CLOSED on its own (stale reward feed → `StaleOracle`; a fill under
-    ///      the floor → `BelowOracleFloor`), which is what makes the catch safe: the revert unwinds
-    ///      the whole sub-call including the swap, so the reward balance is left untouched and
-    ///      rescuable rather than sold blind.
+    /// @notice Sell a reward tranche an unwind auto-claimed, floored by the L9 oracle read ALONE — no
+    ///         caller `minOut` is required, so the oracle floor is the whole guard (post-checked against
+    ///         the measured fill, exactly as in `flattenImpl`).
+    /// @dev TWO CALLERS, ONE CONTRACT. Named neutrally (not `sellSettleReward…`) because both the
+    ///      TERMINAL settle and the ASYNC redeem reach it:
+    ///
+    ///        - `LeveragedAerodromeCLStrategy._settle` — the final tranche, which would otherwise strand
+    ///          on a `Settled` strategy instead of reaching the USDC pot `redeemSettled` pays from; and
+    ///        - `LeveragedAeroManager.redeemUnwindImpl` — the tranche the redeem's OWN `gauge.withdraw`
+    ///          auto-claims mid-flight, which would otherwise be excluded from the redeemer's payout
+    ///          while `nav()` prices it.
+    ///
+    ///      BEST-EFFORT BY CONTRACT — both callers MUST reach this through the self-`try/catch` wrapper
+    ///      (`LeveragedAerodromeCLStrategy.sellRewardSelf`), never directly. This function still FAILS
+    ///      CLOSED on its own (stale reward feed → `StaleOracle`; a fill under the floor →
+    ///      `BelowOracleFloor`), which is what makes the catch safe: the revert unwinds the whole
+    ///      sub-call including the swap, so the reward balance is left untouched rather than sold blind.
     ///
     ///      WHY THE ASYMMETRY WITH `flattenImpl`, which calls the same helper fail-closed: `flatten`
     ///      is RESUMABLE — a reverted flatten leaves an `Executed` book the proposer simply retries
     ///      once the feed recovers, so failing closed costs nothing and preserves the caller's floor.
-    ///      `settle` is TERMINAL and owner-driven (`Executed → Settled`, one-way, no retry, no
-    ///      argument to widen): a hard revert here would let a stale reward feed or a reverting router
-    ///      BLOCK the fund's only exit. Degrading to "leave the tranche rescuable via
-    ///      `rescueToVault` post-`Settled`" — the pre-fix behaviour for the whole tranche — is the
-    ///      strictly better failure mode.
-    function sellSettleRewardImpl() public {
+    ///      The two callers here have no such retry. `settle` is TERMINAL and owner-driven (`Executed →
+    ///      Settled`, one-way, no argument to widen): a hard revert would let a stale reward feed or a
+    ///      reverting router BLOCK the fund's only exit. The async redeem is the DEADMAN path
+    ///      (`emergencyRedeem` routes through it precisely for the oracle-down state): a hard revert
+    ///      there would convert a value guard into a fund freeze. Both degrade to "leave the tranche
+    ///      in place" — the pre-fix behaviour — which is the strictly better failure mode.
+    function sellRewardImpl() public {
         _sellRewardBalance(0, false);
     }
 
@@ -419,7 +439,7 @@ library LeveragedAeroVenue {
     /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
     /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error. TRUE for
     ///        `flatten`, whose proposer supplies one; FALSE for the terminal settle, which has no
-    ///        argument to supply and is bounded by the oracle floor alone (see `sellSettleRewardImpl`).
+    ///        argument to supply and is bounded by the oracle floor alone (see `sellRewardImpl`).
     function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired) private {
         Layout storage $ = _layout();
         address rewardTok = ICLGauge($.gauge).rewardToken();
@@ -704,5 +724,111 @@ library LeveragedAeroVenue {
         $.wethDecimals = wethDec;
         $.wethIsToken0 = wethIsToken0_;
         $.legBIsAsset = legBIsAsset_;
+    }
+
+    /// @notice The strategy's full `LayoutView` read out of diamond storage — the BODY of
+    ///         `LeveragedAerodromeCLStrategy.layout()`, hosted here.
+    /// @dev PURE RELOCATION, FOR THE STRATEGY'S EIP-170 BUDGET — the reason this library exists (see
+    ///      "WHY A THIRD LIBRARY" above), applied to the single biggest block of strategy bytecode that
+    ///      is not on a value path. Same field-by-field copy, same order, same `_layout()` (this
+    ///      library's copy is parity-tested byte-identical to the strategy's), same struct type — the
+    ///      strategy's `layout()` selector and ABI are untouched, it now just forwards.
+    ///
+    ///      Field-by-field, not a struct-literal, for the same Yul-IR reason the strategy's copy was:
+    ///      a 52-field literal overflows the 16-live-variable stack window under via_ir.
+    ///
+    ///      DIRECT-CALL NOTE: this is a `view`, and solc's library call-protection guard (the
+    ///      `address(this) == self` check that makes the state-mutating entrypoints here revert on a
+    ///      direct CALL) is not emitted for view/pure functions — so `layoutView()` IS callable on the
+    ///      deployed library address. It then reads the LIBRARY'S own all-zero diamond slot and returns
+    ///      a zeroed struct: meaningless, not the fund's state, and it can write nothing. Reach it via
+    ///      `strategy.layout()`.
+    function layoutView() public view returns (LeveragedAerodromeCLStrategy.LayoutView memory v) {
+        Layout storage $ = _layout();
+        v.usdc = $.usdc;
+        v.mUsdc = $.mUsdc;
+        v.mCbBTC = $.mCbBTC;
+        v.mWeth = $.mWeth;
+        v.cbBTC = $.cbBTC;
+        v.weth = $.weth;
+        v.pool = $.pool;
+        v.cbBTCFeed = $.cbBTCFeed;
+        v.wethFeed = $.wethFeed;
+        v.usdcFeed = $.usdcFeed;
+        v.sequencerFeed = $.sequencerFeed;
+        v.maxDelay = $.maxDelay;
+        v.gracePeriod = $.gracePeriod;
+        v.calmDeviationTicks = $.calmDeviationTicks;
+        v.twapWindow = $.twapWindow;
+        v.comptroller = $.comptroller;
+        v.npm = $.npm;
+        v.gauge = $.gauge;
+        v.swapRouter = $.swapRouter;
+        v.tickSpacing = $.tickSpacing;
+        v.targetLtvBps = $.targetLtvBps;
+        v.maxLtvBps = $.maxLtvBps;
+        v.minHealthBps = $.minHealthBps;
+        v.maxSlippageBps = $.maxSlippageBps;
+        v.usdcCollateralFactorBps = $.usdcCollateralFactorBps;
+        v.tokenId = $.tokenId;
+        v.posTickLower = $.posTickLower;
+        v.posTickUpper = $.posTickUpper;
+        v.managementFeeBps = $.managementFeeBps;
+        v.performanceFeeBps = $.performanceFeeBps;
+        v.feeRecipient = $.feeRecipient;
+        v.hwmPerShare = $.hwmPerShare;
+        v.lastFeeAccrualTimestamp = $.lastFeeAccrualTimestamp;
+        v.protocolFeeOwed = $.protocolFeeOwed;
+        v.aeroUsdFeed = $.aeroUsdFeed;
+        v.nextRedeemRequestId = $.nextRedeemRequestId;
+        v.cbBTCDecimals = $.cbBTCDecimals;
+        v.wethDecimals = $.wethDecimals;
+        v.wethIsToken0 = $.wethIsToken0;
+        v.wethDeliversNative = $.wethDeliversNative;
+        v.cbBTCSwapTickSpacing = $.cbBTCSwapTickSpacing;
+        v.wethSwapTickSpacing = $.wethSwapTickSpacing;
+        v.width = $.width;
+        v.minWidth = $.minWidth;
+        v.maxWidth = $.maxWidth;
+        v.legBIsAsset = $.legBIsAsset;
+        v.skewBps = $.skewBps;
+        v.minSkewBps = $.minSkewBps;
+        v.maxSkewBps = $.maxSkewBps;
+        v.hedgedDebtA = $.hedgedDebtA;
+        v.hedgedDebtB = $.hedgedDebtB;
+        v.stagedVenueHash = $.stagedVenueHash;
+    }
+
+    /// @notice `applyVenue` reached straight from the strategy's `InitParams` — the venue subset is
+    ///         marshalled HERE instead of in the strategy.
+    /// @dev PURE RELOCATION, FOR THE STRATEGY'S EIP-170 BUDGET, same as `layoutView` and the same reason
+    ///      this library exists. The 19 field copies are `_venueParamsOf`'s, verbatim and in order; the
+    ///      validation and the stores are `applyVenue`'s, untouched — this is an internal jump into it,
+    ///      not a second copy of the ladder. `migrateVenue` still calls `applyVenue` directly with its own
+    ///      calldata `VenueParams`, so the two entries share one validation path exactly as before.
+    ///
+    ///      Field-by-field, not a struct-literal, for the Yul-IR stack reason the strategy's copy carried.
+    function applyVenueFromInit(LeveragedAerodromeCLStrategy.InitParams memory p) public {
+        VenueParams memory v;
+        v.mCbBTC = p.mCbBTC;
+        v.mWeth = p.mWeth;
+        v.cbBTC = p.cbBTC;
+        v.weth = p.weth;
+        v.pool = p.pool;
+        v.gauge = p.gauge;
+        v.cbBTCFeed = p.cbBTCFeed;
+        v.wethFeed = p.wethFeed;
+        v.aeroUsdFeed = p.aeroUsdFeed;
+        v.tickSpacing = p.tickSpacing;
+        v.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
+        v.wethSwapTickSpacing = p.wethSwapTickSpacing;
+        v.wethDeliversNative = p.wethDeliversNative;
+        v.width = p.width;
+        v.minWidth = p.minWidth;
+        v.maxWidth = p.maxWidth;
+        v.targetLtvBps = p.targetLtvBps;
+        v.maxLtvBps = p.maxLtvBps;
+        v.minHealthBps = p.minHealthBps;
+        applyVenue(v);
     }
 }

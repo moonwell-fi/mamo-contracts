@@ -142,7 +142,18 @@ ok "pooled layer wired: strategy=$STRAT vault=$VAULT state=$(ccall "$STRAT" 'sta
 # (+ redeemSettled); the pre-PR-#66 Sherwood SyndicateVault exposed openDeposits(). The account
 # ABI is identical either way, so the smoke below is valid on both — but the getter name and the
 # emitted config must follow the live contract.
-if [ -n "$(ccall "$VAULT" 'depositsOpen()(bool)')" ]; then
+#
+# GEN 3 MUST BE PROBED FIRST AND SEPARATELY. The STRATEGY now makes a TYPED `maxTotalAssets()` call
+# on the vault inside its fund-capacity check, and the vault is NOT upgradeable — so a current
+# strategy bound to a gen-2 vault reverts on EVERY deposit with empty returndata (Solidity's
+# codesize+returndata guard, no decodable reason). `depositsOpen()` cannot distinguish the two
+# generations because gen 2 answers it too, which is exactly how that hazard would reach a live vnet
+# undetected. Probing the capacity selector is the only reliable discriminator.
+if [ -n "$(ccall "$VAULT" 'maxTotalAssets()(uint256)')" ]; then
+  VAULT_GEN=3
+  VAULT_GEN_NAME="leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())"
+  DEPOSITS_OPEN_SIG='depositsOpen()(bool)'
+elif [ -n "$(ccall "$VAULT" 'depositsOpen()(bool)')" ]; then
   VAULT_GEN=2
   VAULT_GEN_NAME="leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)"
   DEPOSITS_OPEN_SIG='depositsOpen()(bool)'
@@ -152,6 +163,12 @@ else
   DEPOSITS_OPEN_SIG='openDeposits()(bool)'
 fi
 info "vault generation: $VAULT_GEN — $VAULT_GEN_NAME"
+# Fail EARLY and loudly rather than at the first deposit with empty returndata.
+if [ "$VAULT_GEN" -lt 3 ]; then
+  die "vault at $VAULT predates maxTotalAssets() (generation $VAULT_GEN). The strategy's fund-capacity
+  check calls it on every deposit and the vault is not upgradeable, so every deposit here would revert
+  with empty returndata. Redeploy the pooled layer first: make tenderly-leveraged-aero-stack"
+fi
 
 # ── Phase 2: deploy impl + factory ────────────────────────────────────────────
 section "Phase 2 — deploy implementation + factory (DEPLOYER_EOA, unlocked)"
@@ -250,7 +267,11 @@ section "Phase 4 — depositIdle gate"
 csend "user transfers 100 USDC to account" "$USER" "$USDC" 'transfer(address,uint256)' "$ACCT" "$IDLE_XFER"
 THIRD=0x00000000000000000000000000000000DeaDBeef
 fund_eth "$THIRD" "$ETH_FUND_HEX"
-if cast send "$ACCT" 'depositIdle(uint256)' 0 --from "$THIRD" --unlocked --rpc-url "$RPC" >/dev/null 2>&1; then
+# REAL 2-arg signature and the REAL transferred amount. Against the old 1-arg form this "reverted"
+# on an unknown selector, i.e. it passed for the wrong reason and asserted no access control at all.
+# Passing a valid amount (not 0) also keeps `require(assets > 0)` from being the thing that fires, so
+# the ONLY remaining reason to revert is the caller identity.
+if cast send "$ACCT" 'depositIdle(uint256,uint256)' "$IDLE_XFER" 0 --from "$THIRD" --unlocked --rpc-url "$RPC" >/dev/null 2>&1; then
   die "depositIdle from a third party should have reverted"
 else
   ok "depositIdle reverts for a non-owner/non-backend third party (Not owner or backend)"
@@ -260,7 +281,10 @@ fi
 REGBACKEND="$(ccall "$REG" 'getBackendAddress()(address)' | field)"
 info "registry.getBackendAddress() = $REGBACKEND"
 fund_eth "$REGBACKEND" "$ETH_FUND_HEX"
-csend "depositIdle(0) [registry backend]" "$REGBACKEND" "$ACCT" 'depositIdle(uint256)' 0
+# Must pass the ACTUAL transferred idle amount: the caller now picks the amount (that is what makes
+# the fund capacity ceiling usable — it rejects rather than trims, so a partial deposit has to be
+# expressible), and `require(assets > 0)` rejects the old `0` sentinel outright.
+csend "depositIdle(IDLE_XFER, 0) [registry backend]" "$REGBACKEND" "$ACCT" 'depositIdle(uint256,uint256)' "$IDLE_XFER" 0
 IDLESH="$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)"
 [ "$IDLESH" -gt 0 ] 2>/dev/null && ok "depositIdle minted shares=$IDLESH" || die "depositIdle minted no shares"
 
