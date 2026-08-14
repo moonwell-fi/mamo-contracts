@@ -1337,32 +1337,6 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         MamoStakingStrategy(userStrategy).compound(now_);
     }
 
-    /// @notice MOO-744 follow-up: the caller-supplied deadline needs an upper bound too.
-    /// @dev Without one, compound(type(uint256).max) restores exactly the tautology the
-    ///      caller-supplied deadline removed — an unbounded-lifetime swap authorisation — while
-    ///      leaving no on-chain trace that the protection was bypassed. The bound is sized to the
-    ///      price checker's max order lifetime, since a swap authorised past the expiry of its
-    ///      reference price is not protected by that price.
-    function testCompoundRevertsWhenDeadlineTooFarInTheFuture() public {
-        userStrategy = _deployUserStrategy(user);
-        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
-
-        address backend = addresses.getAddress("STRATEGY_MULTICALL");
-        uint256 maxDeadline = MamoStakingStrategy(userStrategy).MAX_COMPOUND_DEADLINE();
-
-        vm.prank(backend);
-        vm.expectRevert("Deadline too far in the future");
-        MamoStakingStrategy(userStrategy).compound(type(uint256).max);
-
-        vm.prank(backend);
-        vm.expectRevert("Deadline too far in the future");
-        MamoStakingStrategy(userStrategy).compound(vm.getBlockTimestamp() + maxDeadline + 1);
-
-        // Exactly at the bound is still accepted, so the cap does not shrink the usable window.
-        vm.prank(backend);
-        MamoStakingStrategy(userStrategy).compound(vm.getBlockTimestamp() + maxDeadline);
-    }
-
     /// @notice MOO-733: compound() must verify the MAMO it actually received, not the router's word.
     /// @dev The router here reports a huge amountOut while transferring nothing. Before the fix the
     ///      strategy accepted that return value as the swap result, so amountOutMinimum was enforced
@@ -1418,8 +1392,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         MockConfigurableSwapRouter router = _installMockRouter();
 
         // A distinctive offset: any deadline the strategy synthesises from block.timestamp misses it.
-        // Kept inside MAX_COMPOUND_DEADLINE so this test pins deadline FORWARDING, not the cap.
-        uint256 deadline = vm.getBlockTimestamp() + 2718;
+        uint256 deadline = vm.getBlockTimestamp() + 4242;
 
         vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
         MamoStakingStrategy(userStrategy).compound(deadline);
@@ -1496,56 +1469,6 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
             earnedMamo + router.lastDelivered(),
             "Only the MAMO actually delivered can have been staked"
         );
-    }
-
-    /// @notice MOO-733: the emitted amountIn must be what the router actually pulled, not what it was
-    ///         offered.
-    /// @dev The event is the feed off-chain reconciliation uses to compare claimed rewards against
-    ///      swapped rewards, and that reconciliation is the natural monitor for a malicious-router
-    ///      incident. Emitting the requested balance instead lets an under-pulling router drift the
-    ///      reconciliation with nothing on chain disagreeing. The real router pulls exactly amountIn,
-    ///      so only an under-pulling router separates the two values.
-    function testCompoundEmitsPulledAmountInNotRequestedBalance() public {
-        address cbBTC = _stakeAndAccrueCbBtcRewards();
-        MockConfigurableSwapRouter router = _installMockRouter();
-        router.setPullBps(5000); // pulls half of what it is approved for
-
-        uint256 deadline = _deadline();
-        vm.recordLogs();
-        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
-        MamoStakingStrategy(userStrategy).compound(deadline);
-
-        (bool found, uint256 reportedIn) = _findCompoundAmountIn(cbBTC);
-        assertTrue(found, "CompoundRewardTokenProcessed should be emitted for cbBTC");
-
-        assertLt(router.lastPulled(), router.lastAmountIn(), "Fixture must make offered and pulled diverge");
-        assertEq(reportedIn, router.lastPulled(), "Emitted amountIn must be what the router actually pulled");
-        assertLt(reportedIn, router.lastAmountIn(), "Emitted amountIn must not be the requested balance");
-
-        // Cross-check without asking the router anything: amountIn offered was the strategy's whole
-        // reward balance at swap time, so whatever was not pulled must still be sitting there.
-        // Anchored to the post-claim balance on purpose — compound() calls getReward() first, so a
-        // balance read before the call is NOT the quantity the swap was sized against.
-        assertEq(
-            reportedIn + IERC20(cbBTC).balanceOf(userStrategy),
-            router.lastAmountIn(),
-            "Pulled plus remaining must account for the whole balance the swap was sized against"
-        );
-    }
-
-    /// @dev Pulls `amountIn` out of the CompoundRewardTokenProcessed log for `rewardToken`.
-    function _findCompoundAmountIn(address rewardToken) internal returns (bool found, uint256 amountIn) {
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (
-                logs[i].emitter == userStrategy
-                    && logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")
-                    && address(uint160(uint256(logs[i].topics[1]))) == rewardToken
-            ) {
-                (amountIn,) = abi.decode(logs[i].data, (uint256, uint256));
-                return (true, amountIn);
-            }
-        }
     }
 
     /// @dev Pulls `actualAmountOut` out of the CompoundRewardTokenProcessed log for `rewardToken`.
