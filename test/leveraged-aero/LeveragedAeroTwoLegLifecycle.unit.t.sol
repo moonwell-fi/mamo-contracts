@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
+import {LeveragedAeroVenue} from "@contracts/leveraged-aero/LeveragedAeroVenue.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
 import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
@@ -1457,6 +1458,97 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(out, pot, "the whole pot paid out: no debt, no LTV gate");
         assertEq(usdc.balanceOf(lp), pot, "delivered to the redeemer");
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "collateral fully drawn");
+    }
+
+    // ==================== previewRedeem MIRRORS THE EXECUTED redeem ====================
+    //
+    // `previewRedeem`'s natspec promises it mirrors `redeem` EXACTLY, and a frontend routes on its
+    // `fastOk`: false means "do not call redeem, go through requestRedeem + the fulfil window". Nothing
+    // pinned that promise, and it drifted — when `fastRedeemImpl` moved its `>= collateralUsdc` guard
+    // inside the debt branch, the preview's copy of the same guard stayed outside it, so the preview
+    // said `false` for a redeem the executed path pays in full. These three tests pin BOTH halves of
+    // the mirror (the routing flag AND the quoted number) on the states where they can disagree.
+
+    /**
+     * @dev THE DRIFT, pinned at its worst case: the last holder of a parked flat book. Zero debt, the
+     *      whole pot as collateral, a FULL redeem — so `fromCollateral == collateralUsdc` exactly. The
+     *      executed `redeem` pays the whole pot (asserted directly above, in
+     *      `testFastFullRedeemPaysOutAFlatBookHeldEntirelyAsCollateral`), so a preview answering
+     *      `fastOk == false` would route the only remaining holder into `requestRedeem` + the deadman
+     *      for no reason. Both halves are asserted, and the quote is checked against the payout the
+     *      SAME call actually delivers.
+     */
+    function testPreviewRedeemMatchesTheExecutedFastRedeemOfAParkedFlatBook() public {
+        uint256 pot = _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        (uint256 quoted, bool fastOk) = strategy.previewRedeem(supply);
+        assertTrue(fastOk, "zero debt means no LTV gate to breach - the fast path serves this redeem");
+        assertEq(quoted, pot, "and it quotes the whole pot");
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, 0);
+        vm.stopPrank();
+
+        assertEq(out, quoted, "quoted == executed: the preview is the mirror it claims to be");
+    }
+
+    /**
+     * @dev THE OTHER SIDE OF THE SAME GUARD — it must still fire where it means something. A LEVERED
+     *      book carries debt, so a full redeem's collateral draw genuinely would breach `maxLtvBps`
+     *      (the post-draw denominator collapses while the debt stays put). `fastOk == false` here is
+     *      correct advice, and the executed fast path agrees by reverting: the flag and the gate are
+     *      the same decision, which is the property the zero-debt test above could not show on its own.
+     */
+    function testPreviewRedeemAdvisesTheAsyncPathWhenTheDrawWouldBreachTheLtvGate() public {
+        _execute(SEED);
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        assertGt(mLegA.borrowBalance(address(strategy)), 0, "precondition: the book carries debt");
+
+        (uint256 quoted, bool fastOk) = strategy.previewRedeem(supply);
+        assertGt(quoted, 0, "the payout is still quoted - only the ROUTING is negative");
+        assertFalse(fastOk, "a full draw against a levered book breaches the LTV gate");
+
+        // ...and that is exactly what the executed path does, which is what makes the advice correct.
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        // Selector-only: the reverting LTV is whatever the post-draw book computes (here a real,
+        // finite number well over `maxLtvBps` — NOT the `uint256.max` sentinel, which is the
+        // collateral-exhausted arm). What is being pinned is that the gate fires at all, i.e. that the
+        // preview's `false` and the executed revert are the same decision.
+        vm.expectPartialRevert(LeveragedAeroVenue.FastRedeemExceedsLtv.selector);
+        strategy.redeem(supply, 0);
+        vm.stopPrank();
+    }
+
+    /**
+     * @dev THE EVERYDAY CASE, so the mirror is pinned where it is exercised most: a small partial
+     *      redeem of a levered book routes fast AND quotes the payout to the unit. This is the
+     *      assertion that would catch a future divergence in the SHARE-PRICING half of the preview
+     *      (fee simulation, idle-first split), which the two guard tests above do not touch.
+     */
+    function testPreviewRedeemQuotesTheExecutedPayoutOnAPartialFastRedeem() public {
+        _execute(SEED);
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        uint256 shares = supply / 20; // 5% - small enough to clear the LTV gate comfortably
+        (uint256 quoted, bool fastOk) = strategy.previewRedeem(shares);
+        assertTrue(fastOk, "a 5% draw leaves the book well inside maxLtv");
+        assertGt(quoted, 0, "and quotes a real payout");
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares);
+        uint256 out = strategy.redeem(shares, 0);
+        vm.stopPrank();
+
+        assertEq(out, quoted, "quoted == executed on the everyday path");
     }
 
     /// @dev A FULL async redeem burns the cTOKEN balance (`redeem(cBal)`, `settleImpl`'s form), so no

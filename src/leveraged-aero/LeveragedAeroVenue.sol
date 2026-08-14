@@ -397,11 +397,24 @@ library LeveragedAeroVenue {
         uint256 idleShare = Math.mulDiv(IERC20(_layout().usdc).balanceOf(address(this)), shares, supplyPost);
         uint256 fromCollateral = assetsOut > idleShare ? assetsOut - idleShare : 0;
         if (fromCollateral == 0) return (assetsOut, true); // idle alone covers it — no LTV constraint
-        // Predict the LTV gate on the same pre-withdraw basis as `fastRedeemImpl`.
+        // Predict the LTV gate on the same pre-withdraw basis as `fastRedeemImpl` — INCLUDING WHERE ITS
+        // GUARD SITS. The `>= collateralUsdc` check protects a division that only exists when there is
+        // debt, so it lives INSIDE the debt branch, exactly as it does in `fastRedeemImpl` (which moved
+        // it there in `416d9b4`; this copy did not follow, and the two are now one shape again). On a
+        // ZERO-DEBT book `fromCollateral == collateralUsdc` is a legitimate state, not an error: a full
+        // redeem of a flat book the keeper parked with `supplyIdle` funds the whole payout from
+        // collateral, and the executed `redeem` pays it. Answering `false` here would send the LAST
+        // HOLDER of a parked flat book down `requestRedeem` + the deadman for a redeem the fast path
+        // serves — the preview contradicting the path it exists to predict.
         try self.previewCollateralDebt() returns (uint256 collateralUsdc, uint256 debtUsdc) {
+            // Second-order, unchanged by this and deliberately left alone: on a zero-debt book with a
+            // LIVE LP position, an oversized collateral draw surfaces from Moonwell as
+            // `MoonwellRedeemFailed` rather than the typed `FastRedeemExceedsLtv`. Reaching it needs a
+            // book whose collateral cannot cover a payout `nav()` has already priced.
+            if (debtUsdc == 0) return (assetsOut, true); // no debt ⇒ no LTV constraint (mirrors the manager)
             if (fromCollateral >= collateralUsdc) return (assetsOut, false);
             uint256 maxLtv = uint256(_layout().maxLtvBps);
-            fastOk = debtUsdc == 0 || (debtUsdc * 10_000) / (collateralUsdc - fromCollateral) <= maxLtv;
+            fastOk = (debtUsdc * 10_000) / (collateralUsdc - fromCollateral) <= maxLtv;
         } catch {
             return (assetsOut, false); // collateral/debt oracle read failed → advise the async path
         }
