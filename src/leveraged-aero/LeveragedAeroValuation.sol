@@ -8,7 +8,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {ICToken} from "./sherwood/interfaces/ICToken.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
+import {ICLGauge, ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
 import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
 import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "./sherwood/libraries/TickMath.sol";
@@ -50,7 +50,7 @@ interface IAeroV2Factory {
 ///         manipulated price can only *deny* a deposit, never mint cheap shares.
 ///
 ///         ```
-///         NAV = idleStrategy + collateral + clLegs + idleLegs − debt  (USDC, 6dp)
+///         NAV = idleStrategy + collateral + clLegs + idleLegs + reward − debt  (USDC, 6dp)
 ///         ```
 ///
 ///         The strategy prices/redeems against strategy-controlled value only; any vault float
@@ -74,6 +74,12 @@ interface IAeroV2Factory {
 ///                             remainder a no-swap `rerange` recenter leaves), each priced via
 ///                             Chainlink on the SAME basis as `debt` — so a borrowed leg is
 ///                             never uncounted and a single-position recenter is NAV-neutral.
+///         - `reward`        = the WHOLE gauge-reward claim: the reward token ALREADY CLAIMED into
+///                             the strategy wallet (every `_unwindLiquidity` auto-claims one via
+///                             `gauge.withdraw`) PLUS the still-unclaimed `gauge.earned()` on the
+///                             staked tokenId, both priced via the venue's reward feed. See
+///                             `_rewardUsdc` for the try/catch, the gating and the fee-timing
+///                             consequence.
 ///
 ///         The CL-leg split uses the oracle sqrtP (the Gamma/Arrakis technique) so the
 ///         mint mark cannot be tick-shoved; the same two feeds price the debt, so the
@@ -144,6 +150,24 @@ library LeveragedAeroValuation {
     ///         Selector shared with the strategy.
     error ComptrollerCallFailed();
 
+    // ── Events (this library's `public` functions are DELEGATECALLED, so they log from the STRATEGY's
+    //    address and the declaration is mirrored in `LeveragedAerodromeCLStrategy`'s ABI) ──
+
+    /// @notice `_measureLeg` could not read `market`'s accrued debt — the Moonwell accrual reverted — so
+    ///         that leg's drift was taken as ZERO for this harvest and the leg went UNHEDGED.
+    /// @dev The fourth of this stack's deliberate fail-opens, and it follows the same naming: `…Degraded`
+    ///      means a GUARD fell back and the op ran on with less protection (the interest hedge is the
+    ///      guard against accumulating short exposure; `compound` itself completes). Exactly like
+    ///      `RedeemSweepFloorsDegraded`, a degraded INPUT (here the measured debt, there the min-out
+    ///      floors) is substituted with a zero and the surrounding code path runs unchanged — which is
+    ///      why this is not a `…Deferred`, even though the effect on that one leg is a skipped buy.
+    ///
+    ///      WHY A LOG IS MANDATORY HERE. The unhedged remainder stays in `debt − hedged` and the next
+    ///      healthy harvest closes it, so nothing is lost — but a leg whose market never recovers accrues
+    ///      an unbounded, unintended SHORT with a perfectly successful `compound` in every block, i.e. the
+    ///      precise failure the hedge exists to prevent, returning invisibly. `market` identifies the leg.
+    event HedgeLegMeasureDegraded(address market);
+
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
 
@@ -174,9 +198,12 @@ library LeveragedAeroValuation {
         uint8 cbBTCDecimals; // cbBTC decimals (8 on Base)
         uint8 wethDecimals; // WETH decimals (18)
         address pool; // Aerodrome Slipstream CL pool (cbBTC/WETH)
+        address gauge; // Slipstream CL gauge — read for `rewardToken()` + `earned()` (the reward term)
+        uint256 tokenId; // `Layout.tokenId` — the staked CL NFT `earned()` is asked about; 0 ⇒ flat book
         address cbBTCFeed; // Chainlink BTC/USD feed (8dp)
         address wethFeed; // Chainlink ETH/USD feed (8dp)
         address usdcFeed; // Chainlink USDC/USD feed (8dp)
+        address rewardFeed; // Chainlink reward/USD feed (8dp) — `Layout.aeroUsdFeed`, the venue-migrated one
         address sequencerFeed; // Chainlink L2 sequencer-uptime feed
         uint256 maxDelay; // per-feed max staleness (seconds)
         uint256 gracePeriod; // sequencer grace period (seconds)
@@ -190,10 +217,12 @@ library LeveragedAeroValuation {
     /// @param tickLower  Lower tick of the CL position (from `NPM.positions`).
     /// @param tickUpper  Upper tick of the CL position.
     /// @param liquidity  CL liquidity (from `NPM.positions`); 0 ⇒ no CL legs.
-    /// @return navUsdc   USDC value of `idle + collateral + clLegs + idleLegs − debt` (vault float
-    ///                   excluded — M2 deposit/redeem symmetry; strategy-controlled terms only).
+    /// @return navUsdc   USDC value of `idle + collateral + clLegs + idleLegs + reward − debt`
+    ///                   (vault float excluded — M2 deposit/redeem symmetry; strategy-controlled
+    ///                   terms only).
     /// @dev Fail-closed: reverts on any oracle/calm failure (via `ChainlinkReader` and the
-    ///      calm-gate) and on non-positive equity. Used to price deposits only.
+    ///      calm-gate) and on non-positive equity. Used to price deposits only. The reward feed is
+    ///      read ONLY when there is reward value (held balance OR `earned()`) — see `_rewardUsdc`.
     function netEquityUsdc(Config memory c, address strategy, int24 tickLower, int24 tickUpper, uint128 liquidity)
         public
         view
@@ -233,6 +262,9 @@ library LeveragedAeroValuation {
             assets += _usdcValue(IERC20(c.cbBTC).balanceOf(strategy), c.cbBTCDecimals, pCbBTC, pUsdc);
         }
         assets += _usdcValue(IERC20(c.weth).balanceOf(strategy), c.wethDecimals, pWeth, pUsdc);
+
+        // --- gauge reward: claimed-but-unsold balance + still-unclaimed `earned()` ---
+        assets += _rewardUsdc(c, strategy, pUsdc);
 
         // --- debt (same Chainlink basis) ---
         uint256 debt = _debtUsdc(c, strategy, pCbBTC, pWeth, pUsdc);
@@ -683,7 +715,7 @@ library LeveragedAeroValuation {
     /// @dev VENUE PLUMBING ONLY — every decision stays with the caller: which token, how much (and the
     ///      caps that bound it), and what `minOut` bound applies. `LeveragedAeroManager` calls this from
     ///      `_swapUsdcExactIn` and `_sweepLegToUsdc` AFTER their identity guards / balance caps, and
-    ///      `_hedgeLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
+    ///      `_spendLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
     ///      construction exists once instead of three times. Relocated out of the manager for EIP-170
     ///      headroom; a 6-argument flat surface is why it is a net saving there.
     /// @param router      Slipstream CL SwapRouter.
@@ -863,7 +895,7 @@ library LeveragedAeroValuation {
     ///      track — making `debt − hedged` the market's own "interest accrued since our last touch",
     ///      obtained with no `borrowIndex()` read and no extra Layout field per leg beyond the basis
     ///      itself. The `debt` side of that subtraction is read with `borrowBalanceCurrent`, i.e. AFTER
-    ///      accruing the market — see `_hedgeLeg` for why the stored index is not good enough here.
+    ///      accruing the market — see `_measureLeg` for why the stored index is not good enough here.
     ///
     ///      WHY REPAY RATHER THAN BUY-AND-ADD. Adding the interest amount into the LP would keep leverage
     ///      constant, but a CL add needs PAIRED USDC at the live range ratio, so it re-levers the book and
@@ -884,25 +916,82 @@ library LeveragedAeroValuation {
     ///      ASSET-MODE. The manager calls this for leg A only when `legBIsAsset` (leg B is the unit of
     ///      account there and structurally carries no debt), so `h.leg != h.usdc` always holds and the
     ///      identity swap that `_swapUsdcExactIn` guards against is unreachable from here.
+    ///      PRO-RATA ACROSS THE LEGS — MEASURE BOTH, *THEN* SPEND. The budget is one shared ceiling over
+    ///      two independent drifts, so how it is divided is a real decision and it used to be made
+    ///      implicitly: leg A was handed the WHOLE budget and leg B got `budget − spentA`. Whenever leg A's
+    ///      drift priced at or above the harvest — the normal state for the larger/faster-accruing leg on a
+    ///      thin harvest — leg B received exactly 0 and was never even MEASURED (the spend path returned on
+    ///      `budget == 0` before reading the market), so every harvest in that band closed leg A and left
+    ///      leg B's short untouched. Nothing was LOST (the remainder persists in `debt − hedged` and is
+    ///      hedged once the budget allows), but the residual short CONCENTRATED 100% on one leg, which is
+    ///      the opposite of what a leg-neutral book wants: a partial hedge should shrink the book's net
+    ///      exposure evenly, not rotate it onto whichever leg the code happens to serve second.
+    ///
+    ///      So both drifts are measured first, then the budget is split `budget × costᵢ / (costA + costB)`.
+    ///      Leg A takes its allocation and leg B takes the EXACT COMPLEMENT (`budget − allocationA`), so
+    ///      integer division strands no dust. When the budget covers everything the split is a no-op — each
+    ///      leg's spend is capped at its own cost, so both are neutralised exactly as before.
+    ///
+    ///      THE ACCRUE-THEN-MEASURE DISCIPLINE IS PRESERVED, and it is the thing this refactor most had to
+    ///      not break: `borrowBalanceCurrent` is still called exactly ONCE per leg, in the measure phase,
+    ///      and the number it returns is what BOTH the allocation and the spend are computed from. There is
+    ///      no second read that could see a different (post-repay, re-capitalised) index. The one behaviour
+    ///      change is that leg B is now accrued even when it will receive no budget — that is inherent to
+    ///      measuring before allocating, it costs one market touch, and it leaves the leg market fresh for
+    ///      the rest of the transaction (the same benefit the accrual note above already claims). Because
+    ///      that touch would otherwise make a sick leg market able to revert the WHOLE harvest, the measure
+    ///      is fail-open per leg and marks itself — see `_measureLeg` and `HedgeLegMeasureDegraded`.
     /// @param b       The whole book's inputs; see `HedgeBook`.
-    /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget).
+    /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget); never
+    ///                more than `b.budgetUsdc`.
     function hedgeBorrowInterest(HedgeBook memory b) public returns (uint256 spent) {
         if (b.budgetUsdc == 0) return 0;
         uint256 pUsdc = readUsd8(b.usdcFeed, b.sequencerFeed, b.maxDelay, b.gracePeriod);
-        spent = _hedgeLeg(b, b.marketA, b.legA, b.feedA, b.spacingA, b.decimalsA, b.hedgedA, b.budgetUsdc, pUsdc);
+
+        // ── MEASURE (both legs, before a single USDC is committed) ──
+        LegDrift memory dA = _measureLeg(b, b.marketA, b.feedA, b.decimalsA, b.hedgedA, pUsdc);
         // Leg B drifts too whenever it is BORROWED — the two-borrowed-legs shape LPs both borrows against
         // each other, so both accrue interest the LP never grows to match. `marketB == 0` is the
-        // asset-mode book, where leg B IS the unit of account, is never borrowed, and cannot drift.
+        // asset-mode book, where leg B IS the unit of account, is never borrowed, and cannot drift: the
+        // gate keeps that shape on exactly its old single-leg path (`dB` stays zero ⇒ leg A is allocated
+        // the whole budget ⇒ byte-identical behaviour).
+        LegDrift memory dB;
         if (b.marketB != address(0)) {
-            // `budgetUsdc - spent`: leg A already committed its share of the one shared ceiling.
-            spent += _hedgeLeg(
-                b, b.marketB, b.legB, b.feedB, b.spacingB, b.decimalsB, b.hedgedB, b.budgetUsdc - spent, pUsdc
-            );
+            dB = _measureLeg(b, b.marketB, b.feedB, b.decimalsB, b.hedgedB, pUsdc);
+        }
+
+        uint256 total = dA.costUsdc + dB.costUsdc;
+        if (total == 0) return 0; // no drift on either leg, or both priced below 1 USDC unit
+
+        // ── ALLOCATE (pro-rata by USD cost) ──
+        // No branch for the "budget covers everything" case: each leg's spend is capped at its own cost
+        // inside `_spendLeg`, so an over-allocation simply goes unused and both legs neutralise fully.
+        uint256 budgetA = Math.mulDiv(b.budgetUsdc, dA.costUsdc, total);
+
+        // ── SPEND ──
+        spent = _spendLeg(b, b.marketA, b.legA, b.spacingA, dA, budgetA);
+        if (b.marketB != address(0)) {
+            // The EXACT complement, not a second `mulDiv`: whatever leg A's share rounded away lands here
+            // rather than being stranded by the division.
+            spent += _spendLeg(b, b.marketB, b.legB, b.spacingB, dB, b.budgetUsdc - budgetA);
         }
     }
 
-    /// @dev One leg of `hedgeBorrowInterest`. See that function's header for the measure, the
-    ///      repay-vs-add decision, the budget bound and the graceful-degradation contract.
+    /// @dev One leg's MEASURED state, carried from the measure phase of `hedgeBorrowInterest` into its
+    ///      spend phase. Exists so `borrowBalanceCurrent` is read once per leg and that single accrued
+    ///      number feeds both the pro-rata allocation and the buy/repay — the accrue-then-measure
+    ///      discipline the whole interest hedge was built around (see `_measureLeg`).
+    struct LegDrift {
+        uint256 amount; // unhedged accrued interest in LEG units (`debt − hedged`); the repay cap
+        uint256 costUsdc; // what closing ALL of `amount` would cost (USDC 6dp); the allocation weight
+        uint256 num; // `price8 × 1e6` — the `_tokenToUsdc` numerator, kept as a factor
+        uint256 den; // `10^decimals × pUsdc` — ...and its denominator, so the INVERSE is the same numbers
+    }
+
+    /// @dev THE MEASURE PHASE for one leg of `hedgeBorrowInterest` — no USDC is committed here, nothing
+    ///      is swapped, and the result is the ONLY view of this leg the spend phase gets. See that
+    ///      function's header for the measure itself, the repay-vs-add decision, the budget bound, the
+    ///      pro-rata allocation and the graceful-degradation contract.
     ///
     ///      ACCRUE, *THEN* MEASURE — `borrowBalanceCurrent`, never `borrowBalanceStored`.
     ///      `borrowBalanceStored` is `principal × borrowIndex / interestIndex` on the market's LAST-ACCRUED
@@ -934,48 +1023,96 @@ library LeveragedAeroValuation {
     ///      fixed. Moonwell wraps it in `require(... == NO_ERROR)`, so using their wrapper makes the
     ///      fail-closed behaviour structural and un-droppable (see `IMoonwellMarket`).
     ///
-    ///      `budgetUsdc == 0` is checked BEFORE the call so a leg whose share of the shared ceiling was
-    ///      already spent by the other leg does not pay for an accrual it cannot act on.
-    function _hedgeLeg(
+    ///      NO EARLY BUDGET GATE HERE ANY MORE. The previous shape returned on `budgetUsdc == 0` BEFORE
+    ///      touching the market, which is precisely what let a budget-starved leg go unmeasured and
+    ///      therefore unhedged for as long as the other leg's drift exceeded the harvest. Measuring is
+    ///      unconditional now; the budget only decides how much of what was measured gets SPENT.
+    ///
+    ///      A leg with no drift still reads no feed: the `debt <= hedged` return happens before the
+    ///      `readUsd8`, so a quiet book adds no oracle-liveness dependency to the harvest.
+    ///
+    ///      ...AND THE MARKET TOUCH IS THEREFORE FAIL-OPEN (`HedgeLegMeasureDegraded`). Unconditional
+    ///      measuring is what makes the pro-rata split correct, but it also makes `borrowBalanceCurrent`
+    ///      — a STATE-CHANGING Moonwell call that reverts whenever `accrueInterest` fails, e.g. a paused
+    ///      or arithmetically-broken market — a hard liveness dependency of `compound` on BOTH legs. In
+    ///      the two-borrowed-legs shape with fee + hedge consuming the whole harvest, `deployIdleImpl` is
+    ///      skipped and this is the ONLY touch of the leg's market in the transaction, so one sick market
+    ///      would revert the entire harvest: the AERO sale, the fee crystallisation and the OTHER leg's
+    ///      hedge included. That contradicts this hedge's founding contract — a hedge that cannot be
+    ///      completed carries its remainder to the next harvest, it never reverts the harvest.
+    ///
+    ///      So the read is `try`/`catch`ed and a failure degrades THIS leg's drift to zero: the leg goes
+    ///      unhedged for this harvest, the other leg still gets the whole budget (its `costUsdc` is then
+    ///      the whole of `total`), and `compound` completes. BOTH legs are wrapped, not just leg B: the
+    ///      invariant is about the harvest surviving a hedge problem, not about which leg had it, and
+    ///      `_measureLeg` is one function serving both — a leg-B-only fail-open would need an extra
+    ///      parameter to make the behaviour WORSE. Degrading is never silent (see the event) and never
+    ///      loses value: the unmeasured interest stays in `debt − hedged` for the next harvest, exactly
+    ///      as a budget shortfall does.
+    ///
+    ///      The `catch` cannot distinguish the expected causes from an out-of-gas — the same caveat the
+    ///      stack's other fail-opens carry, and the same reason the degradation is marked on-chain.
+    function _measureLeg(
         HedgeBook memory b,
         address market,
-        address leg,
         address feed,
-        int24 spacing,
         uint8 legDecimals,
         uint256 hedged,
-        uint256 budgetUsdc,
         uint256 pUsdc
-    ) private returns (uint256 spentUsdc) {
-        if (budgetUsdc == 0) return 0;
-        uint256 debt = IMoonwellMarket(market).borrowBalanceCurrent(address(this));
-        if (debt <= hedged) return 0;
-        uint256 drift = debt - hedged;
+    ) private returns (LegDrift memory d) {
+        uint256 debt;
+        try IMoonwellMarket(market).borrowBalanceCurrent(address(this)) returns (uint256 accrued) {
+            debt = accrued;
+        } catch {
+            emit HedgeLegMeasureDegraded(market);
+            return d; // zero drift ⇒ zero allocation ⇒ `_spendLeg` no-ops on this leg
+        }
+        if (debt <= hedged) return d;
+        d.amount = debt - hedged;
 
         // `num/den` is the manager's `_tokenToUsdc` basis, kept as its two factors so the INVERSE
         // (USDC→leg, for the min-out) is the same numbers read the other way and the two cannot drift.
-        uint256 num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
-        uint256 den = (10 ** uint256(legDecimals)) * pUsdc;
-        uint256 spend = Math.mulDiv(drift, num, den);
-        if (spend > budgetUsdc) spend = budgetUsdc; // graceful: partial hedge, remainder carries
-        if (spend == 0) return 0; // drift priced below 1 USDC unit — leave it to accumulate
+        d.num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
+        d.den = (10 ** uint256(legDecimals)) * pUsdc;
+        d.costUsdc = Math.mulDiv(d.amount, d.num, d.den);
+    }
+
+    /// @dev THE SPEND PHASE for one leg: buy `min(cost, budget)` USDC worth of the leg and repay it.
+    ///      Consumes ONLY the `LegDrift` the measure phase produced — it never re-reads the market, so
+    ///      the accrued balance the allocation was computed from is the same one the repay is capped
+    ///      against.
+    ///
+    ///      GRACEFUL BY CONTRACT, per leg: a budget short of this leg's cost buys and repays what it can
+    ///      and the remainder STAYS in `debt − hedged`, so the next harvest resumes exactly here. It never
+    ///      reverts the harvest for insufficiency, and that is now true of BOTH legs rather than only of
+    ///      whichever leg the budget happened to reach.
+    function _spendLeg(
+        HedgeBook memory b,
+        address market,
+        address leg,
+        int24 spacing,
+        LegDrift memory d,
+        uint256 budgetUsdc
+    ) private returns (uint256 spentUsdc) {
+        uint256 spend = d.costUsdc > budgetUsdc ? budgetUsdc : d.costUsdc;
+        if (spend == 0) return 0; // no drift, no allocation, or drift priced below 1 USDC unit
 
         // Oracle-floored exact-IN buy (the `_settleShortfall` posture, not the exact-OUT one): exact-out
         // would REVERT the whole harvest the moment `budgetUsdc` could not cover the drift, and this path
         // must degrade instead. The min-out is the oracle-implied leg amount for `spend`, haircut by
         // `maxSlippageBps`, so a sandwiched buy reverts rather than overpaying.
-        uint256 minOut = (Math.mulDiv(spend, den, num) * (10000 - b.maxSlippageBps)) / 10000;
+        uint256 minOut = (Math.mulDiv(spend, d.den, d.num) * (10000 - b.maxSlippageBps)) / 10000;
         uint256 legBefore = IERC20(leg).balanceOf(address(this));
         swapExactIn(b.swapRouter, b.usdc, leg, spacing, spend, minOut);
         spentUsdc = spend;
 
-        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `drift` is what
+        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `d.amount` is what
         // keeps `Layout.hedgedDebtA/B` untouched by this repay: post-repay debt is `hedged + (drift −
         // repaid) >= hedged`, so the manager's `_repay` clamp is provably a no-op here and the basis
         // discipline stays single-sited. Any tiny overshoot of the buy stays as an idle leg balance,
         // which is NAV-counted and redeployable.
         uint256 got = IERC20(leg).balanceOf(address(this)) - legBefore;
-        uint256 repaid = got < drift ? got : drift;
+        uint256 repaid = got < d.amount ? got : d.amount;
         if (repaid > 0) {
             IERC20(leg).forceApprove(market, repaid);
             uint256 err = IMoonwellMarket(market).repayBorrow(repaid);
@@ -1027,6 +1164,191 @@ library LeveragedAeroValuation {
         if (cBal == 0) return 0;
         uint256 rate = ICToken(c.mUsdc).exchangeRateStored();
         return (cBal * rate) / 1e18;
+    }
+
+    /// @dev THE WHOLE GAUGE-REWARD CLAIM, in USDC face (6dp) — BOTH halves of it:
+    ///
+    ///        1. the balance ALREADY CLAIMED into the strategy wallet. Every `_unwindLiquidity` calls
+    ///           `gauge.withdraw`, which auto-claims the accrued tranche whether or not anyone asked, so a
+    ///           non-zero reward balance is a normal, reachable state (post-`rerange`, post-partial-redeem,
+    ///           post-`adjustLeverage`), not an anomaly; and
+    ///        2. `gauge.earned(strategy, tokenId)` — the still-UNCLAIMED accrual on the staked NFT.
+    ///
+    ///      BOTH ARE LOAD-BEARING, and (2) is the bigger one. The held balance only closes the narrow
+    ///      post-unwind window; a harvest spends MOST of its life sitting in the gauge as `earned()`, so
+    ///      pricing (1) alone still left the ordinary deposit-before-`compound` capture wide open — a
+    ///      depositor buys in at a NAV that excludes the pending harvest and then takes a pro-rata slice of
+    ///      it the moment `compound` claims and sells (measured at ~4.5% of a 100k deposit, post-fee, in a
+    ///      single block). Pricing the reward wherever it currently sits is what actually closes it.
+    ///
+    ///      THE `try/catch` IS THE MECHANISM, AND THE CATCH-TO-0 IS CORRECT **FOR THE ONE STATE IT WAS
+    ///      WRITTEN FOR** — not, in general, an understatement. Slipstream's gauge reverts `"NA"` on
+    ///      `earned()` for a tokenId it does not have staked. The gauge is a DIFFERENT contract, so that
+    ///      revert is a plain external failure a Solidity `try` catches (the same idiom `LPAutoBalancerV2`
+    ///      already uses for its `earned()` reads) — `nav()` gains no revert path. And the state where
+    ///      `earned()` reverts `"NA"` is EXACTLY the state where the tokenId is unstaked, which is exactly
+    ///      when the gauge has just auto-claimed the tranche into the held balance that (1) prices. So the
+    ///      two terms hand off cleanly: whatever leaves `earned()` arrives in the balance in the same
+    ///      transaction, and the sum is continuous across the unstake. `c.tokenId == 0` (flat book /
+    ///      pre-genesis) skips the call entirely.
+    ///
+    ///      WHAT THE CATCH DOES **NOT** COVER — STATED PLAINLY, BECAUSE THE CONTINUITY ARGUMENT ABOVE IS
+    ///      ABOUT `"NA"` AND ONLY ABOUT `"NA"`. `catch {}` is indiscriminate: it equally swallows an
+    ///      out-of-gas in the subcall (63/64 forwarding), a selector/ABI change across a gauge upgrade or
+    ///      a venue migration onto a non-Slipstream gauge, and any future Aerodrome revert. In every one
+    ///      of those states the earned term silently drops to zero — and a zero there is NOT "the accrual
+    ///      is zero, priced correctly"; it is the PRE-FIX MIS-PRICING this term exists to close, restored
+    ///      in full and running on every deposit, every block, with nothing in any transaction to show
+    ///      for it. The trade is deliberate and it is NOT revisited here: `nav()` must stay revert-free on
+    ///      this read (see the deadman rationale on `sweepFloors` — a hard revert on a reward probe would
+    ///      brick pricing over a term that is a small fraction of a levered book). What is added is
+    ///      OBSERVABILITY, not a revert: `_earnedRead` reports whether the read answered, and
+    ///      `rewardReadOk` publishes exactly that for a keeper to poll. Silent stays silent onchain;
+    ///      it does not stay invisible. The read itself — including the `code.length` precheck, which a
+    ///      `try` cannot substitute for because solc's `extcodesize` guard on the call target reverts
+    ///      UNCATCHABLY — now lives in `_earnedRead`, as ONE definition shared by the priced term and the
+    ///      marker; its three states are documented there.
+    ///
+    ///      GATED ON THE SUM, NOT ON THE BALANCE: `earned()` can be non-zero while the balance is zero
+    ///      (the steady state, in fact — emissions accrue every second between harvests), so the feed read
+    ///      must happen when EITHER is non-zero. The genuinely reward-free book (no emissions, nothing
+    ///      held) still reads no feed at all and pays only the two staticcalls that establish that.
+    ///
+    ///      FAIL-CLOSED on a stale reward feed while there IS reward value, matching the posture the held
+    ///      term shipped with: the read goes through the same hardened `_readUsd8` every other term uses,
+    ///      so an unreadable feed reverts `nav()` rather than valuing the reward at 0. That is this file's
+    ///      whole stance — a NAV that cannot be computed honestly must deny deposits, not mint against an
+    ///      understated book (valuing at 0 would RE-CREATE the very mis-pricing this term closes, and hand
+    ///      it to whoever can stale the feed). NOTE the scope change this widens: with `earned()` priced,
+    ///      a live gauge means reward value is essentially ALWAYS present, so a stale reward feed now
+    ///      fail-closes `nav()` — deposits and the priced fast redeem — for as long as it is stale, not
+    ///      just inside a post-unwind window. `compound` is still the cure (it zeroes both halves), and
+    ///      the async redeem queue is unaffected: `fulfillRedeem`'s proportional unwind never reads
+    ///      `nav()`. Accepted deliberately; documented in the rebalancer guide.
+    ///
+    ///      FEE-TIMING CONSEQUENCE, ACCEPTED DELIBERATELY — this is the real trade-off. Fee
+    ///      crystallisation reads NAV, so the performance fee now accrues against UNREALISED, UNCLAIMED
+    ///      reward value continuously, instead of only against harvest proceeds at `compound`. A fee can
+    ///      therefore be crystallised on reward value that a later adverse event (a gauge killed by
+    ///      governance, a reward-route failure, a sale under the mark) means the fund never fully
+    ///      realises. That is the price of removing the free option above, and it is the correct side to
+    ///      err on: the alternative mis-prices every deposit, every block, in an attacker's favour.
+    ///
+    ///      THE MARK IS TICK-INFLUENCED, second-order and accepted. Slipstream accrues emissions on
+    ///      `rewardGrowthInside`, so `earned()` depends on where the tick has been relative to the
+    ///      position's range — a pool shove can nudge it. It cannot be shoved far: `netEquityUsdc` runs
+    ///      `_calmGate` before pricing anything, so a spot/TWAP deviation beyond `calmDeviationTicks`
+    ///      fail-closes the whole NAV first, and the term is a small fraction of a levered book.
+    ///
+    ///      DECIMALS are pinned at 18, matching the reward-token scaling already hardcoded in
+    ///      `LeveragedAeroManager.compoundImpl` / `LeveragedAeroVenue._sellRewardBalance` (the `1e20`
+    ///      divisor). `LeveragedAeroVenue.applyVenue` enforces it (`IERC20Metadata(rewardTok).decimals()
+    ///      != 18 → UnexpectedFeedDecimals`) at init AND at every venue migration, and likewise rejects a
+    ///      reward token equal to either leg (`UnsupportedLeg`), so this term can never double-count an
+    ///      idle-leg balance.
+    ///
+    ///      `c.rewardFeed` is `Layout.aeroUsdFeed` — the SAME field `_sellRewardBalance` derives its sale
+    ///      floor from and the SAME field `applyVenue` rewrites on a migration, so the mark and the
+    ///      realisation basis cannot drift and a venue migration can never orphan a second pinned copy.
+    function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
+        uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
+        (uint256 e,) = _earnedRead(c.gauge, strategy, c.tokenId);
+        amt += e;
+        if (amt == 0) return 0;
+        return _usdcValue(amt, 18, _readUsd8(c, c.rewardFeed), pUsdc);
+    }
+
+    /// @dev THE gauge-side `earned()` read — the amount AND whether the read actually answered. ONE
+    ///      definition, deliberately: `_rewardUsdc` takes the amount and ignores the flag, `rewardReadOk`
+    ///      takes the flag and ignores the amount, so the monitoring signal and the priced term CANNOT
+    ///      drift apart the way two hand-kept copies of the same predicate would.
+    ///
+    ///      THE THREE STATES, and why each maps where it does:
+    ///
+    ///        - `tokenId == 0` → `(0, true)`. A flat / pre-genesis book has NOTHING to read, and the call
+    ///          is never made (that is what keeps `nav()`'s flat-book branch call-free). "OK" is the
+    ///          honest answer: there is no failing read to report, and reporting `false` here would make
+    ///          the marker scream through every `settle`→`execute` gap.
+    ///
+    ///        - `gauge.code.length == 0` → `(0, false)`, WITHOUT making the call. THIS BRANCH IS
+    ///          LOAD-BEARING, NOT COSMETIC — a `try` DOES NOT CATCH THIS. Solidity guards a high-level
+    ///          call to a typed contract with an `extcodesize` check emitted OUTSIDE the try's protected
+    ///          region, so against an empty-code gauge the `try` reverts uncatchably ("call to
+    ///          non-contract address") and the revert propagates straight through `catch {}` to the
+    ///          caller. Verified by deleting this line: `testRewardReadOkIsFalseWhenTheGaugeHasNoCode`
+    ///          fails with exactly that revert. So the precheck is the ONLY thing standing between
+    ///          `rewardReadOk` and a revert path, and a marker that reverts precisely when the venue is
+    ///          gone is worse than no marker. It also, secondarily, keeps "the venue is gone" from being
+    ///          reported as OK — it is not an "accrual is zero" state.
+    ///
+    ///          FOR `nav()` this changes nothing OBSERVABLE, but not for the tempting reason: the bare
+    ///          `try` would have REVERTED here, not caught to 0. `nav()` is unaffected because it cannot
+    ///          reach this probe in that state at all — `_rewardUsdc`'s `rewardToken()` read, two lines
+    ///          before the call to this function, already fail-closes the whole of `nav()` against an
+    ///          empty-code gauge (empty revert data; asserted in the same test). Both paths deny an
+    ///          answer; only this one has a caller that must not revert.
+    ///
+    ///        - otherwise → the `try`. Success is `(e, true)`; any revert is `(0, false)` — `"NA"`
+    ///          (benign, the hand-off documented on `_rewardUsdc`) and every non-`"NA"` failure alike.
+    ///          The flag does not distinguish them: a caller CANNOT reliably tell them apart onchain
+    ///          (`"NA"` is a plain string revert any upgrade could also emit), and conflating them errs
+    ///          the safe way — a keeper investigates a benign unstake instead of missing a real outage.
+    ///          A benign `"NA"` is transient by construction (it lasts from the unstake to the next
+    ///          `_execute`), so a marker that STAYS false is the actionable signal.
+    function _earnedRead(address gauge, address strategy, uint256 tokenId) private view returns (uint256 e, bool ok) {
+        if (tokenId == 0) return (0, true);
+        if (gauge.code.length == 0) return (0, false);
+        try ICLGauge(gauge).earned(strategy, tokenId) returns (uint256 e_) {
+            return (e_, true);
+        } catch {
+            return (0, false);
+        }
+    }
+
+    /// @notice MONITORING MARKER for the single fail-open on the NAV path: `false` while the gauge-side
+    ///         `earned()` read that `nav()` prices is FAILING, `true` when it answers or when there is
+    ///         nothing to read. Poll it; `false` means `nav()` is understating the book by the unclaimed
+    ///         reward accrual.
+    ///
+    /// @dev WHY STATE AND NOT AN EVENT. Every other fail-open in this system is transaction-scoped and
+    ///      instruments itself with an event from the transaction that took it (`FeeCrystallizeDeferred`,
+    ///      the redeem-floor and reward-sale degradation events). This one is not: `nav()` is `view`, it
+    ///      cannot emit, and its fail-open is not an incident but a CONDITION — once `earned()` starts
+    ///      reverting for a non-`"NA"` reason it reverts on every deposit and every block until someone
+    ///      intervenes, understating NAV identically each time and leaving no trace anywhere. Readable
+    ///      state is the only instrumentation a `view` admits, so this is it.
+    ///
+    ///      STRICTLY BEHAVIOUR-NEUTRAL. Nothing in the pricing path reads this: it does not change
+    ///      `nav()`'s result, does not add a revert path to it, and is not itself allowed to revert (a
+    ///      marker a monitor cannot read is not a marker). It is a marker, not a gate — the deliberate
+    ///      choice is that a failing reward read degrades NAV and is REPORTED, rather than blocking
+    ///      deposits and the priced redeem.
+    ///
+    ///      LEAN SIGNATURE, on purpose — the same reason `calmGate` exists alongside `_calmGate` and
+    ///      `readUsd8` alongside `_readUsd8`. Two scalars, not a `Config`: the caller
+    ///      (`LeveragedAerodromeCLStrategy.rewardReadOk`) has ~230 BYTES of EIP-170 headroom in total, and
+    ///      building + ABI-encoding a 21-field `Config` to deliver two fields this predicate actually
+    ///      touches would not fit. Both inputs come from the SAME `Layout` slots `_config()` reads
+    ///      (`$.gauge`, `$.tokenId`), so the marker and the priced term cannot be pointed at different
+    ///      venues.
+    ///
+    ///      DELEGATECALL CONTEXT REQUIRED — the ONE way this differs from the pricing functions, which
+    ///      all take `strategy` explicitly. The subject is `address(this)`, which under the strategy's
+    ///      (or the delegatecalled manager's) call into this linked library IS the strategy clone — the
+    ///      same identity `netEquityUsdc` is passed. That drops the third calldata word, and at this
+    ///      caller's headroom those bytes are the difference between fitting and not. Consequence, stated
+    ///      so nobody is surprised: called on the DEPLOYED LIBRARY ADDRESS directly, the subject is the
+    ///      LIBRARY, which stakes nothing — so the answer is about the wrong account. It is `false` for
+    ///      any non-zero `tokenId` (the library has none staked) and a meaningless `true` for
+    ///      `tokenId == 0`, which is the arm that never reads anything. Neither is an answer about the
+    ///      fund. Reach it through `strategy.rewardReadOk()` — the only call site, and the only entry a
+    ///      keeper should use.
+    /// @param gauge    Slipstream CL gauge (`Layout.gauge` — the venue-migrated one).
+    /// @param tokenId  `Layout.tokenId`; 0 ⇒ flat book, nothing to read ⇒ `true`.
+    /// @return ok      `false` iff there IS a staked tokenId and the `earned()` read cannot be made or
+    ///                 reverts (gauge without code, `"NA"`, or any other failure).
+    function rewardReadOk(address gauge, uint256 tokenId) public view returns (bool ok) {
+        (, ok) = _earnedRead(gauge, address(this), tokenId);
     }
 
     /// @dev cbBTC + WETH debt at the same Chainlink basis, converted to USDC face.
@@ -1168,6 +1490,63 @@ library LeveragedAeroValuation {
             Math.mulDiv(buyMax * 10000 / (10000 - slipBps), (10 ** uint256(surplusDec)) * pUsdc, pSurplus * 1e6);
         sellAmt = surplusBal > needed ? needed : surplusBal;
         sellFloor = _usdcValue(sellAmt, surplusDec, pSurplus, pUsdc) * (10000 - slipBps) / 10000;
+    }
+
+    /// @notice The Chainlink min-out floors for the two residual leg sweeps at the END of a proportional
+    ///         redeem (`LeveragedAeroManager.redeemUnwindImpl` step E) — the same
+    ///         `oracleValue(amountSold) × (1 − maxSlippageBps)` idiom `settleImpl`'s `_sweepAtOracleFloor`
+    ///         and `_rebalanceCover`'s `sellFloor` already use, applied to the last two zero-floor swaps
+    ///         in the system.
+    ///
+    /// @dev FAIL-CLOSED HERE, DEADMAN-SAFE AT THE CALL SITE. This function reverts on a stale feed / down
+    ///      sequencer exactly like every other priced path (it goes through `readUsd8`, so there is ONE
+    ///      hardened ladder, not a second non-reverting copy of it). The caller reaches it through a
+    ///      try-able EXTERNAL hop — `LeveragedAerodromeCLStrategy.redeemSweepFloors`, invoked as
+    ///      `this.`-style call from the delegatecalled manager, the same idiom `_proportionalRedeem`
+    ///      already uses for `try this.nav()` — and treats a revert as "floors = 0".
+    ///
+    ///      WHY THAT SPLIT IS THE WHOLE POINT. `emergencyRedeem` routes through step E and exists
+    ///      precisely for the ORACLE-DOWN-AND-BACKEND-DEAD state (see `FULFILL_WINDOW`): a hard revert
+    ///      here would brick the trustless exit — turning a value-protection guard into a fund-freeze.
+    ///      Conversely a sandwicher cannot MAKE a feed stale, so whenever the feeds are readable the
+    ///      floor binds and the hostile fill reverts. Fail-open only in the state where there is nothing
+    ///      to price against and the alternative is no exit at all.
+    ///
+    ///      COARSE BY DESIGN: one unreadable feed drops BOTH floors, not just its own leg's. The
+    ///      direction is safe (it can only ever fall back to the pre-existing behaviour, never block the
+    ///      deadman) and the alternative — two independently try-able hops — costs the manager bytes it
+    ///      does not have. Each leg's feed is only read when that leg has something to sell, so a book
+    ///      with a single residual leg is unaffected by the other feed's health.
+    ///
+    ///      LOSS INCIDENCE, unchanged: slippage on these sweeps is borne by the REDEEMER (the stayers'
+    ///      reservation `keep` is snapshot BEFORE the sweep and stays behind as legs). The floor protects
+    ///      the redeemer from a hostile fill; it does not move value between the two parties.
+    ///
+    ///      TAKES THE EXISTING `Config` rather than a bespoke input struct: every field it needs
+    ///      (leg decimals, the two leg feeds, the USDC feed, and the whole sequencer/staleness triple)
+    ///      is already there, and the strategy already builds exactly one `Config` for `nav()`. Reusing
+    ///      it means no second config builder to keep in sync — and none of the strategy's precious
+    ///      EIP-170 headroom spent on one. Only `slipBps` is passed separately (it is not a valuation
+    ///      input, so it is not, and should not be, a `Config` member).
+    /// @param c         The valuation config (`LeveragedAerodromeCLStrategy._config()`).
+    /// @param cbAmt     Leg-B units ACTUALLY being sold (0 in asset-mode — that sweep is the identity).
+    /// @param wethAmt   Leg-A units ACTUALLY being sold.
+    /// @param slipBps   `maxSlippageBps`; bounded to (0, 1000] at init so `10000 - slipBps` can't underflow.
+    /// @return cbFloor   Min USDC out for the leg-B sweep (0 when nothing is being sold).
+    /// @return wethFloor Min USDC out for the leg-A sweep (0 when nothing is being sold).
+    function sweepFloors(Config memory c, uint256 cbAmt, uint256 wethAmt, uint256 slipBps)
+        public
+        view
+        returns (uint256 cbFloor, uint256 wethFloor)
+    {
+        if (cbAmt == 0 && wethAmt == 0) return (0, 0);
+        uint256 pUsdc = _readUsd8(c, c.usdcFeed);
+        if (cbAmt > 0) {
+            cbFloor = _usdcValue(cbAmt, c.cbBTCDecimals, _readUsd8(c, c.cbBTCFeed), pUsdc) * (10000 - slipBps) / 10000;
+        }
+        if (wethAmt > 0) {
+            wethFloor = _usdcValue(wethAmt, c.wethDecimals, _readUsd8(c, c.wethFeed), pUsdc) * (10000 - slipBps) / 10000;
+        }
     }
 
     /// @dev Spot-vs-TWAP calm-gate (fail-closed). Reverts `CalmGateBreached` when the pool

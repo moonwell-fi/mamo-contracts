@@ -192,11 +192,46 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint8 private constant OP_FULFILL = 2; // proportional redeem (fulfill / emergency)
     uint8 private constant OP_COMPOUND = 3; // harvest / redeploy
 
+    // ── Degradation markers for the three DELIBERATE fail-opens in this stack ──
+    //
+    // Each of these sits behind a `catch {}` that exists for a good reason (a terminal exit or the
+    // async-redeem deadman must not be blockable) but that CANNOT distinguish the expected cause — a
+    // stale feed, a paused aggregator, a broken route — from an out-of-gas or any other revert. Without
+    // a log the degradation leaves no on-chain trace whatsoever, so a monitor cannot tell a healthy op
+    // from one that ran with a guard switched off.
+    //
+    // NAMING, applied consistently across the four: `…Deferred` = an optional ACTION was skipped (the
+    // reward sales); `…Degraded` = a GUARD fell back and the op ran with less protection (the redeem
+    // sweep floors, declared on `LeveragedAeroManager`, and the interest-hedge measure, declared on
+    // `LeveragedAeroValuation` — both emitted from this address via delegatecall).
+
     /// @dev The terminal settle's best-effort sale of the final reward tranche reverted and was
     ///      skipped; the settle completed. Expect it on a stale/paused reward feed or a reward-route
     ///      failure — the tranche is left on the strategy and, now that the strategy is `Settled`, is
     ///      recoverable with `rescueToVault(rewardToken)` → the vault's `rescueERC20`.
     event SettleRewardSaleDeferred();
+
+    /// @dev An async redeem's best-effort sale of the tranche its OWN unwind auto-claimed reverted and
+    ///      was skipped; the redeem completed and paid. Same causes as above. Consequence to monitor:
+    ///      the redeemer was paid `f × (assets − reward)` for that call and the tranche stayed with the
+    ///      stayers — the one residual case of the pre-fix behaviour (see `sellRedeemRewardSelf`). Clear
+    ///      it with `compound` once the feed/route recovers.
+    event RedeemRewardSaleDeferred();
+
+    /// @dev Mirror of `LeveragedAeroManager.RedeemSweepFloorsDegraded` — the manager is delegatecalled,
+    ///      so it emits from THIS address and belongs in this ABI. Declared in both, exactly as the
+    ///      venue-migration events above are. Means an async redeem's closing leg sweeps ran with their
+    ///      Chainlink min-out floors at ZERO: the swaps were unbounded for that call.
+    event RedeemSweepFloorsDegraded();
+
+    /// @dev Mirror of `LeveragedAeroValuation.HedgeLegMeasureDegraded` — that library's `public`
+    ///      functions are delegatecalled too, so it logs from THIS address and belongs in this ABI.
+    ///      Means a `compound` could not read one leg's accrued Moonwell debt (the accrual reverted), so
+    ///      that leg's borrow-interest hedge was SKIPPED for that harvest while the rest of the compound
+    ///      — reward sale, fee crystallisation, the other leg's hedge, the redeploy — completed. The
+    ///      remainder carries to the next harvest; a leg that keeps emitting this is accumulating an
+    ///      unintended short and needs its market looked at. `market` is the leg's Moonwell market.
+    event HedgeLegMeasureDegraded(address market);
 
     // ── Access control ──
 
@@ -444,63 +479,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     }
 
     /// @notice Full strategy storage layout (single accessor for tests / off-chain reads), minus the
-    ///         `redeemRequests` mapping (queried via `redeemRequest(id)`). Field-by-field (not a
-    ///         struct-literal) so the Yul IR emits one sload→mstore per field — avoids the
-    ///         >16-live-variable overflow a struct-literal trips under via_ir.
+    ///         `redeemRequests` mapping (queried via `redeemRequest(id)`).
+    /// @dev THE 51-FIELD READ ITSELF LIVES IN `LeveragedAeroVenue.layoutView()` — see the relocation note
+    ///      there. It is the same field-by-field copy off the same ERC-7201 slot (the venue library's
+    ///      `Layout`/`STORAGE_SLOT` copy is parity-tested byte-identical to this one, and it is
+    ///      delegatecalled, so it reads THIS contract's storage); this selector, its ABI and its
+    ///      semantics are unchanged. It moved because it was the largest block of bytecode on this
+    ///      contract that is not on a value path, and this contract is at the EIP-170 margin.
     function layout() external view returns (LayoutView memory v) {
-        Layout storage $ = _layout();
-        v.usdc = $.usdc;
-        v.mUsdc = $.mUsdc;
-        v.mCbBTC = $.mCbBTC;
-        v.mWeth = $.mWeth;
-        v.cbBTC = $.cbBTC;
-        v.weth = $.weth;
-        v.pool = $.pool;
-        v.cbBTCFeed = $.cbBTCFeed;
-        v.wethFeed = $.wethFeed;
-        v.usdcFeed = $.usdcFeed;
-        v.sequencerFeed = $.sequencerFeed;
-        v.maxDelay = $.maxDelay;
-        v.gracePeriod = $.gracePeriod;
-        v.calmDeviationTicks = $.calmDeviationTicks;
-        v.twapWindow = $.twapWindow;
-        v.comptroller = $.comptroller;
-        v.npm = $.npm;
-        v.gauge = $.gauge;
-        v.swapRouter = $.swapRouter;
-        v.tickSpacing = $.tickSpacing;
-        v.targetLtvBps = $.targetLtvBps;
-        v.maxLtvBps = $.maxLtvBps;
-        v.minHealthBps = $.minHealthBps;
-        v.maxSlippageBps = $.maxSlippageBps;
-        v.usdcCollateralFactorBps = $.usdcCollateralFactorBps;
-        v.tokenId = $.tokenId;
-        v.posTickLower = $.posTickLower;
-        v.posTickUpper = $.posTickUpper;
-        v.managementFeeBps = $.managementFeeBps;
-        v.performanceFeeBps = $.performanceFeeBps;
-        v.feeRecipient = $.feeRecipient;
-        v.hwmPerShare = $.hwmPerShare;
-        v.lastFeeAccrualTimestamp = $.lastFeeAccrualTimestamp;
-        v.protocolFeeOwed = $.protocolFeeOwed;
-        v.aeroUsdFeed = $.aeroUsdFeed;
-        v.nextRedeemRequestId = $.nextRedeemRequestId;
-        v.cbBTCDecimals = $.cbBTCDecimals;
-        v.wethDecimals = $.wethDecimals;
-        v.wethIsToken0 = $.wethIsToken0;
-        v.wethDeliversNative = $.wethDeliversNative;
-        v.cbBTCSwapTickSpacing = $.cbBTCSwapTickSpacing;
-        v.wethSwapTickSpacing = $.wethSwapTickSpacing;
-        v.width = $.width;
-        v.minWidth = $.minWidth;
-        v.maxWidth = $.maxWidth;
-        v.legBIsAsset = $.legBIsAsset;
-        v.skewBps = $.skewBps;
-        v.minSkewBps = $.minSkewBps;
-        v.maxSkewBps = $.maxSkewBps;
-        v.hedgedDebtA = $.hedgedDebtA;
-        v.hedgedDebtB = $.hedgedDebtB;
-        v.stagedVenueHash = $.stagedVenueHash;
+        return LeveragedAeroVenue.layoutView();
     }
 
     /// @notice The borrowed PRINCIPAL each leg's LP side currently hedges, and therefore the
@@ -515,6 +502,38 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     function hedgedDebt() external view returns (uint128 legA, uint128 legB) {
         Layout storage $ = _layout();
         return ($.hedgedDebtA, $.hedgedDebtB);
+    }
+
+    /// @notice The Chainlink min-out floors for the two residual leg sweeps that END a proportional
+    ///         redeem, for `cbAmt` leg-B units and `wethAmt` leg-A units actually being sold:
+    ///         `oracleValue(amount) × (1 − maxSlippageBps)` per leg, on the same hardened 8dp reads
+    ///         every other priced path uses. Reverts (fail-closed) on a stale feed / down sequencer.
+    ///
+    /// @dev EXISTS TO BE `try`-ABLE. `LeveragedAeroManager.redeemUnwindImpl` runs under DELEGATECALL, so
+    ///      its own price reads are INTERNAL and a Solidity `try` cannot catch them. Routing the
+    ///      derivation through this external entry point — reached from the manager as a call on
+    ///      `address(this)`, the same idiom `_proportionalRedeem` already uses for `try this.nav()` —
+    ///      gives it a catchable frame, which is what lets the sweeps carry a real oracle floor while
+    ///      `emergencyRedeem` (the deadman, built for exactly the oracle-down-AND-backend-dead state)
+    ///      still completes with the floors falling back to 0. See `LeveragedAeroValuation.sweepFloors`
+    ///      for the full rationale; the math and the hardened reads live THERE, this is marshalling only.
+    ///
+    ///      NOT `OnlySelf`-gated, unlike `crystallizeFeesSelf` / `sellRewardSelf`: those MUTATE
+    ///      state, this is a `view` over public storage and public feeds. Ungated it doubles as a keeper
+    ///      read — "what floor would a sweep of this size have to clear right now" — and a gate would
+    ///      cost bytes on a contract with well under 1 KB of EIP-170 headroom for no security gain.
+    ///
+    ///      Reuses `_config()` (the SAME builder `nav()` uses) rather than marshalling a second config
+    ///      struct: every field the floor needs is already in it, so this wrapper costs one extra sload
+    ///      and one call, not a duplicate builder.
+    /// @param cbAmt   Leg-B units being sold (pass 0 in asset-mode: that sweep is the identity).
+    /// @param wethAmt Leg-A units being sold.
+    function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt)
+        external
+        view
+        returns (uint256 cbFloor, uint256 wethFloor)
+    {
+        return LeveragedAeroValuation.sweepFloors(_config(), cbAmt, wethAmt, _layout().maxSlippageBps);
     }
 
     /// @notice A single escrowed async-redeem request by id (queue introspection for tests / UI).
@@ -605,7 +624,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.skewBps = p.skewBps;
         $.minSkewBps = p.minSkewBps;
         $.maxSkewBps = p.maxSkewBps;
-        LeveragedAeroVenue.applyVenue(_venueParamsOf(p));
+        // `applyVenueFromInit` = the venue subset of `InitParams` marshalled into `VenueParams`, then
+        // `applyVenue`. Both halves live in the venue library now: the marshalling was this contract's
+        // `_venueParamsOf`, moved verbatim for EIP-170 headroom (`migrateVenue` still calls `applyVenue`
+        // directly with its own calldata `VenueParams`, so init and migration keep sharing ONE
+        // validation + store path — that is unchanged, only the marshalling moved).
+        LeveragedAeroVenue.applyVenueFromInit(p);
 
         // Risk / oracle / fee ladder — relocated whole (rung for rung, same order, same selectors) into
         // `LeveragedAeroValuation`, for EIP-170 headroom. What is NOT here any more: the four RISK
@@ -651,31 +675,6 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // The venue subset — decimals / ordering / shape / width band / LTV band / spacings — was
         // persisted by `applyVenue`; the skew triple was written ahead of it (see the note there).
         // tokenId / posTickLower / posTickUpper / hwmPerShare default to 0 (set in _execute / on first deposit).
-    }
-
-    /// @dev The venue subset of `InitParams`, marshalled for `LeveragedAeroVenue.applyVenue` (one
-    ///      shared validation + store path for init and `migrateVenue`). Field-by-field so the Yul
-    ///      IR streams memory copies instead of holding a wide struct-literal live.
-    function _venueParamsOf(InitParams memory p) private pure returns (LeveragedAeroVenue.VenueParams memory v) {
-        v.mCbBTC = p.mCbBTC;
-        v.mWeth = p.mWeth;
-        v.cbBTC = p.cbBTC;
-        v.weth = p.weth;
-        v.pool = p.pool;
-        v.gauge = p.gauge;
-        v.cbBTCFeed = p.cbBTCFeed;
-        v.wethFeed = p.wethFeed;
-        v.aeroUsdFeed = p.aeroUsdFeed;
-        v.tickSpacing = p.tickSpacing;
-        v.cbBTCSwapTickSpacing = p.cbBTCSwapTickSpacing;
-        v.wethSwapTickSpacing = p.wethSwapTickSpacing;
-        v.wethDeliversNative = p.wethDeliversNative;
-        v.width = p.width;
-        v.minWidth = p.minWidth;
-        v.maxWidth = p.maxWidth;
-        v.targetLtvBps = p.targetLtvBps;
-        v.maxLtvBps = p.maxLtvBps;
-        v.minHealthBps = p.minHealthBps;
     }
 
     // ── NAV ──
@@ -726,6 +725,28 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
             tickUpper := mload(add(ret, 0xE0))
             liquidity := mload(add(ret, 0x100))
         }
+    }
+
+    /// @notice HEALTH MARKER FOR `nav()`'s ONE FAIL-OPEN: `false` while the gauge-side `earned()` read
+    ///         that `nav()` prices is failing, `true` when it answers or when there is nothing to read
+    ///         (`tokenId == 0`). A sustained `false` means `nav()` is UNDERSTATING the book by the
+    ///         unclaimed reward accrual on every deposit and every block — poll it.
+    ///
+    /// @dev A `view` cannot emit, and unlike every other fail-open in this system (which are
+    ///      transaction-scoped and carry an event — `FeeCrystallizeDeferred`, the redeem-floor and
+    ///      reward-sale degradation events) this one is a standing CONDITION, so readable state is the
+    ///      only instrumentation available. Behaviour-neutral: `nav()` does not read this, it gains no
+    ///      revert path from it, and this function cannot itself revert. See
+    ///      `LeveragedAeroValuation.rewardReadOk` / `_earnedRead` for the exact predicate and why a
+    ///      code-less gauge reports `false` rather than being lumped in with a benign `"NA"`.
+    ///
+    ///      Ungated for the same reason `redeemSweepFloors` is: a `view` over public storage and a public
+    ///      venue read, whose whole purpose is off-chain polling. Reads `Layout` directly instead of
+    ///      building a `_config()` — this contract has well under 1 KB of EIP-170 headroom and the
+    ///      predicate needs exactly two of that struct's fields, from the SAME slots `_config()` reads.
+    function rewardReadOk() external view returns (bool) {
+        Layout storage $ = _layout();
+        return LeveragedAeroValuation.rewardReadOk($.gauge, $.tokenId);
     }
 
     // ── Positions (Lane A reporting for the PriceRouter) ──
@@ -788,7 +809,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // floor post-checked against the measured fill), so a caught revert rolls the swap back
         // entirely and degrades to exactly the pre-fix behaviour: the tranche is left in place,
         // rescuable now that the state is `Settled`. It is never sold blind.
-        try this.sellSettleRewardSelf() {}
+        try this.sellRewardSelf() {}
         catch {
             emit SettleRewardSaleDeferred();
         }
@@ -818,15 +839,62 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         _pushAllToVault($.usdc);
     }
 
-    /// @dev Self-only external wrapper so `_settle` can sell the final reward tranche best-effort via
-    ///      `try/catch` (H3 pattern, as `crystallizeFeesSelf`). Isolating the sale in its own call
+    /// @dev Self-only external wrapper so a caller can sell an auto-claimed reward tranche best-effort
+    ///      via `try/catch` (H3 pattern, as `crystallizeFeesSelf`). Isolating the sale in its own call
     ///      frame is what lets a stale reward feed / reverting reward route roll back ONLY the sale
-    ///      (tranche untouched, still rescuable) while the TERMINAL settle completes — see the
-    ///      flatten-vs-settle note at the call site and on `LeveragedAeroVenue.sellSettleRewardImpl`.
-    ///      Gated to `address(this)`; runs inside settle's own frame, so it adds no reentrancy surface.
-    function sellSettleRewardSelf() external {
+    ///      (tranche untouched) while the caller completes — see the flatten-vs-settle-vs-redeem note on
+    ///      `LeveragedAeroVenue.sellRewardImpl`.
+    ///
+    ///      TWO CALLERS, hence the neutral name: the TERMINAL `_settle` below, and
+    ///      `LeveragedAeroManager.redeemUnwindImpl`, which reaches it through the local `IRewardSaleSelf`
+    ///      interface because it runs under DELEGATECALL and cannot `try` its own internal reverts.
+    ///      Gated to `address(this)`; runs inside the caller's own frame, so it adds no reentrancy
+    ///      surface (and is deliberately NOT `nonReentrant` — the entry points already hold that guard).
+    function sellRewardSelf() external {
         if (msg.sender != address(this)) revert OnlySelf();
-        LeveragedAeroVenue.sellSettleRewardImpl();
+        LeveragedAeroVenue.sellRewardImpl();
+    }
+
+    /// @dev THE ASYNC-REDEEM SIDE OF THE SAME SALE, plus the one piece of accounting it needs.
+    ///      `LeveragedAeroManager.redeemUnwindImpl` calls this (through its local `IRewardSaleSelf`)
+    ///      immediately after its `_unwindLiquidity`, whose `gauge.withdraw` auto-claims a reward tranche
+    ///      on EVERY async redeem. Without it the redeemer is paid `f × (assets − reward)` while 100% of
+    ///      the tranche stays with the stayers — and since `nav()` prices that reward, that was a
+    ///      nav-vs-payout inconsistency, not just an unfairness.
+    ///
+    ///      RETURNS THE STAYERS' RESERVATION, which is the whole reason this is not a bare sale. The
+    ///      manager's `idleUsdcBefore`/`stayersIdle` snapshots are taken BEFORE the unwind (deliberately
+    ///      — LP-shed USDC is 100% the redeemer's), so proceeds landing after them would otherwise flow
+    ///      ENTIRELY to the redeemer. But `gauge.withdraw` is all-or-nothing per NFT: it claims what the
+    ///      WHOLE book farmed, of which the redeemer owns `f`. So `(1−f)·proceeds` is returned for the
+    ///      manager to add to `stayersIdle` — the same `x − f·x` form `stayersIdle` itself uses, dust
+    ///      rounding to the stayers.
+    ///
+    ///      BEST-EFFORT, WITH THE `try` HELD HERE rather than in the manager: the manager is at the
+    ///      EIP-170 cap (the same relocation `_settle`'s hedged-basis zeroing makes), and the sale still
+    ///      fails CLOSED inside `sellRewardSelf`'s own frame, so a swallowed revert rolls the swap back
+    ///      whole — the tranche is left in place, never sold blind. Swallowing is REQUIRED here:
+    ///      `emergencyRedeem` routes through this path and exists for the oracle-down-AND-backend-dead
+    ///      state, so a stale reward feed must not be able to block the exit (same posture, same reason,
+    ///      as the redeem-sweep floors). Residual on failure = exactly the pre-fix behaviour, marked by
+    ///      `RedeemRewardSaleDeferred` so it is not a silent degradation.
+    ///
+    ///      Nested self-call (`this.sellRewardSelf()` from a frame whose `msg.sender` is already
+    ///      `address(this)`) — the `OnlySelf` gate passes, and neither hop is `nonReentrant` because the
+    ///      redeem entry points already hold that guard.
+    /// @param shares Redeeming shares (the manager's `f` numerator).
+    /// @param supply Total supply at redeem time (the `f` denominator).
+    /// @return stayersShare `(1−f)` of the realised USDC proceeds; 0 when nothing sold.
+    function sellRedeemRewardSelf(uint256 shares, uint256 supply) external returns (uint256 stayersShare) {
+        if (msg.sender != address(this)) revert OnlySelf();
+        IERC20 usdc_ = IERC20(_layout().usdc);
+        uint256 sold = usdc_.balanceOf(address(this));
+        try this.sellRewardSelf() {}
+        catch {
+            emit RedeemRewardSaleDeferred();
+        }
+        sold = usdc_.balanceOf(address(this)) - sold;
+        return sold - Math.mulDiv(sold, shares, supply);
     }
 
     /// @dev Crystallise management + HWM performance fees on the PRE-ACTION vault state. The caller
@@ -1719,9 +1787,17 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         c.cbBTCDecimals = $.cbBTCDecimals;
         c.wethDecimals = $.wethDecimals;
         c.pool = $.pool;
+        // Gauge + tokenId + reward feed: the gauge-reward NAV term (`LeveragedAeroValuation._rewardUsdc`),
+        // which prices BOTH the claimed-but-unsold balance and the still-unclaimed `gauge.earned()` on the
+        // staked NFT. Threaded from the SAME storage `LeveragedAeroVenue.applyVenue` rewrites on a
+        // migration and `_sellRewardBalance` prices its sale floor against — never a second pinned copy a
+        // migration could orphan. `tokenId` is the flat-book signal too: 0 ⇒ no `earned()` call at all.
+        c.gauge = $.gauge;
+        c.tokenId = $.tokenId;
         c.cbBTCFeed = $.cbBTCFeed;
         c.wethFeed = $.wethFeed;
         c.usdcFeed = $.usdcFeed;
+        c.rewardFeed = $.aeroUsdFeed;
         c.sequencerFeed = $.sequencerFeed;
         c.maxDelay = $.maxDelay;
         c.gracePeriod = $.gracePeriod;

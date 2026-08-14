@@ -5,6 +5,7 @@ import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
+import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
 import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
@@ -21,7 +22,7 @@ import {
     MockNpm
 } from "./LeveragedAeroVenuesHarness.sol";
 
-import {Test} from "@forge-std/Test.sol";
+import {Test, Vm} from "@forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -1048,5 +1049,518 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(legB.balanceOf(address(router)), legBInRouter, "no leg-B hedge buy on a pure price move");
         assertGt(mLegA.borrowBalance(address(strategy)), debtA, "leg-A debt only grew (redeploy borrow)");
         assertGt(mLegB.borrowBalance(address(strategy)), debtB, "leg-B debt only grew (redeploy borrow)");
+    }
+
+    // ========= REDEEM-SWEEP ORACLE FLOORS, DEADMAN-PRESERVING (review finding 4) =========
+    //
+    // `redeemUnwindImpl` step E sweeps the two residual legs to USDC. Those were the LAST zero-min-out
+    // swaps in the system: a hostile router / sandwich could fill them at any price, and the loss landed
+    // entirely on the REDEEMER (the stayers' `(1-f)` share is reserved BEFORE the sweep and stays behind
+    // as legs). They now carry the same Chainlink floor every sibling sweep does —
+    // `oracleValue(amount ACTUALLY SOLD) x (1 - maxSlippageBps)` — derived behind a try-able external hop
+    // so `emergencyRedeem`, the deadman for the oracle-down-AND-backend-dead state, still completes with
+    // the floors falling back to 0.
+
+    /// @dev A rerange-remainder-shaped idle balance on BOTH legs: $100k of leg B, $30k of leg A. Big
+    ///      enough that step E genuinely sells something (without it the unwind's collect is consumed by
+    ///      the pro-rata repay and the sweep is ~dust).
+    uint256 internal constant IDLE_LEG_B = 1e8;
+    uint256 internal constant IDLE_LEG_A = 10e18;
+
+    uint256 internal constant SUPPLY = 1_000_000e12;
+
+    /// @dev Live position + `SUPPLY` shares outstanding + an idle remainder on both legs, then a request
+    ///      for `shares`. Returns the request id.
+    function _armRedeemWithIdleLegs(uint256 shares) internal returns (uint256 id) {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+        legB.mint(address(strategy), IDLE_LEG_B);
+        legA.mint(address(strategy), IDLE_LEG_A);
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        vm.prank(lp);
+        id = strategy.requestRedeem(shares, 0);
+    }
+
+    /// @dev Re-price the leg->USDC SELL direction at `bps` of the oracle mark (10000 == the fair rate
+    ///      `setUp` installs). The buy direction is untouched, so only the step-E sweeps are affected.
+    function _setLegSellRate(uint256 bps) internal {
+        router.setRate(address(legB), address(usdc), (P_LEG_B * 1e18 * bps) / (100 * 1e8 * 10000));
+        router.setRate(address(legA), address(usdc), (P_LEG_A * 1e18 * bps) / (100 * 1e18 * 10000));
+    }
+
+    /// @dev The stayers' reserved leg share: `(1-f)` of the leg balance MEASURED just before the unwind,
+    ///      which is exactly what step E must leave behind on that leg. Measured, not assumed off
+    ///      `IDLE_LEG_*`: a genesis mint at a skewed/oracle-inconsistent tick already strands a real leg
+    ///      remainder (the documented per-borrow ratchet), so the pre-unwind balance is that PLUS the
+    ///      idle mint above.
+    function _stayerLegOf(uint256 preBal, uint256 shares) internal pure returns (uint256) {
+        return preBal - Math.mulDiv(preBal, shares, SUPPLY);
+    }
+
+    /**
+     * @dev (a) THE FINDING. A fill 2% under the oracle mark — outside the clone's `maxSlippageBps` band
+     *      of 100bps — is now REFUSED. Before the floor this filled silently and the redeemer simply got
+     *      less USDC, with nothing on-chain to say so.
+     */
+    function testRedeemLegSweepRefusesAFillBelowTheOracleFloor() public {
+        uint256 id = _armRedeemWithIdleLegs(SUPPLY / 4);
+        _setLegSellRate(9800); // 200bps under oracle vs. a 100bps floor
+
+        vm.prank(proposer);
+        vm.expectRevert(MockClSwapRouter.MockRouterMinOut.selector);
+        strategy.fulfillRedeem(id);
+    }
+
+    /**
+     * @dev (b) BINDING BUT NOT TRIPPING. A fill 50bps under the mark is inside the 100bps band and must
+     *      go through — the floor is a slippage bound, not a demand for a perfect fill. Together with (a)
+     *      this brackets the floor at `maxSlippageBps`, so the test pins the actual band and not merely
+     *      "some floor exists".
+     */
+    function testRedeemLegSweepAcceptsAFairFillWithTheFloorBinding() public {
+        uint256 shares = SUPPLY / 4;
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        _setLegSellRate(9950); // 50bps under oracle: inside the band
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 preB = legB.balanceOf(address(strategy));
+        uint256 preA = legA.balanceOf(address(strategy));
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeem completed and paid out");
+        // The sold slice really did clear a floor priced off the SOLD amount, not the raw balance: the
+        // stayers' reservation is untouched on both legs (see (d)).
+        assertEq(legB.balanceOf(address(strategy)), _stayerLegOf(preB, shares), "leg-B reservation intact");
+        assertEq(legA.balanceOf(address(strategy)), _stayerLegOf(preA, shares), "leg-A reservation intact");
+    }
+
+    /**
+     * @dev (c) THE DEADMAN TEST — the one that matters most. `emergencyRedeem` is the trustless exit for
+     *      the state where the ORACLE IS DOWN **and** the backend is dead, and it routes through this
+     *      exact sweep. If the floor were derived fail-closed, adding it would have converted a
+     *      value-protection guard into a fund freeze in precisely the state the deadman exists for.
+     *
+     *      Armed as hostilely as the state allows: every feed stale (the 2-day `FULFILL_WINDOW` warp does
+     *      that on its own, with `maxDelay` at 1 hour) AND the router filling 200bps under the mark — the
+     *      exact combination that reverts in (a). It must complete, at floor 0, paying the redeemer.
+     */
+    function testEmergencyRedeemStillCompletesWithStaleFeedsAndAHostileFill() public {
+        uint256 shares = SUPPLY / 4;
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        _setLegSellRate(9800);
+
+        vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed; every feed now stale
+        // Sanity: the oracle really is down for this book — and down for THAT reason. The specific
+        // selector matters: a bare `expectRevert()` would also pass if `nav()` broke for an unrelated
+        // reason, quietly turning the premise of this test into a tautology. `nav()` prices its legs
+        // through `LeveragedAeroValuation.readUsd8` → `ChainlinkReader.readUsd`, whose `age > maxDelay`
+        // branch (the 1-hour `maxDelay` against a 2-day warp) raises `StaleOracle`.
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav();
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 preB = legB.balanceOf(address(strategy));
+        uint256 preA = legA.balanceOf(address(strategy));
+        vm.prank(lp);
+        uint256 assetsOut = strategy.emergencyRedeem(id, 0);
+
+        assertGt(assetsOut, 0, "the deadman exit completed with the oracle down");
+        assertEq(usdc.balanceOf(lp) - lpBefore, assetsOut, "...and the redeemer was paid");
+        // Floor 0 is the PRE-FIX behaviour, reached only here: the swaps ran despite the hostile rate.
+        assertEq(legB.balanceOf(address(strategy)), _stayerLegOf(preB, shares), "leg-B swept at floor 0");
+        assertEq(legA.balanceOf(address(strategy)), _stayerLegOf(preA, shares), "leg-A swept at floor 0");
+    }
+
+    /**
+     * @dev (d) INSULATION REGRESSION. The floors must not move the stayer/redeemer boundary: stayers keep
+     *      exactly `(1-f)` of every leg and of the idle USDC, whatever the fill was. Asserted in closed
+     *      form against the pre-unwind snapshot, and asserted to be the SAME number under a fair fill and
+     *      under a hostile-but-floor-0 deadman fill — the floor changes whether a swap is allowed, never
+     *      who owns what.
+     */
+    function testStayerReservationIsIdenticalWithAndWithoutABindingFloor() public {
+        uint256 shares = SUPPLY / 4;
+        uint256 idleUsdc = 200_000e6;
+
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        usdc.mint(address(strategy), idleUsdc);
+        uint256 idlePre = usdc.balanceOf(address(strategy));
+        uint256 preB = legB.balanceOf(address(strategy));
+        uint256 preA = legA.balanceOf(address(strategy));
+
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id); // fair fill: the floor binds and is cleared
+
+        uint256 legBKept = legB.balanceOf(address(strategy));
+        uint256 legAKept = legA.balanceOf(address(strategy));
+        assertEq(legBKept, _stayerLegOf(preB, shares), "stayers keep (1-f) of leg B");
+        assertEq(legAKept, _stayerLegOf(preA, shares), "stayers keep (1-f) of leg A");
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            idlePre - Math.mulDiv(idlePre, shares, SUPPLY),
+            "stayers keep (1-f) of the idle USDC"
+        );
+
+        // Same book, same f, but reached through the floor-0 deadman path under a hostile fill: the
+        // reservation is byte-identical, so the floor moved no value between the two parties.
+        setUp();
+        id = _armRedeemWithIdleLegs(shares);
+        usdc.mint(address(strategy), idleUsdc);
+        _setLegSellRate(9800);
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.prank(lp);
+        strategy.emergencyRedeem(id, 0);
+
+        assertEq(legB.balanceOf(address(strategy)), legBKept, "leg-B reservation byte-identical");
+        assertEq(legA.balanceOf(address(strategy)), legAKept, "leg-A reservation byte-identical");
+    }
+
+    /**
+     * @dev (e) THE FALLBACK IS MARKED ON CHAIN (review round 2, item 3). The `catch {}` that drops the
+     *      floors to 0 is deliberate — the deadman in (c) depends on it — but it cannot distinguish a
+     *      stale feed / down sequencer from an out-of-gas, and before this it left NO on-chain trace at
+     *      all. A monitor could not tell a healthy fulfill from one whose swaps ran unbounded.
+     *
+     *      Both directions asserted, because an event that always fires says nothing: the healthy fulfill
+     *      of (b) must emit NOTHING, and the deadman of (c) must emit `RedeemSweepFloorsDegraded` — FROM
+     *      THE STRATEGY ADDRESS, since the manager that raises it is delegatecalled.
+     */
+    function testTheRedeemFloorFallbackIsMarkedOnChain() public {
+        uint256 shares = SUPPLY / 4;
+
+        // HEALTHY: floors derived and cleared — no marker.
+        uint256 snap = vm.snapshotState();
+        uint256 id = _armRedeemWithIdleLegs(shares);
+        _setLegSellRate(9950);
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector,
+                "a healthy fulfill must not mark a degradation"
+            );
+        }
+        vm.revertToState(snap);
+
+        // DEGRADED: the deadman warp staled every feed, so the derivation reverts and the floors fall
+        // back to 0 — the one state that fail-open exists for, now visible.
+        id = _armRedeemWithIdleLegs(shares);
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.recordLogs();
+        vm.prank(lp);
+        strategy.emergencyRedeem(id, 0);
+
+        bool marked;
+        logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (
+                logs[i].emitter == address(strategy)
+                    && logs[i].topics[0] == LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector
+            ) marked = true;
+        }
+        assertTrue(marked, "the floor fallback is marked, from the STRATEGY address (manager is delegatecalled)");
+    }
+
+    // ============ PRO-RATA INTEREST-HEDGE ALLOCATION (review finding 7) ============
+
+    /// @dev Etch + fund the Aerodrome-v2 router the AERO->USDC harvest leg hardcodes.
+    function _armAeroRouter() internal {
+        MockAeroV2Router impl = new MockAeroV2Router(address(aero), address(usdc), 1e6);
+        vm.etch(AERO_V2_ROUTER, address(impl).code);
+        usdc.mint(AERO_V2_ROUTER, 100_000_000e6);
+    }
+
+    /// @dev Make `usdcWorth` (6dp) of harvest proceeds claimable at the fixture's $1/AERO mark.
+    function _armHarvest(uint256 usdcWorth) internal {
+        uint256 aeroAmt = usdcWorth * 1e12;
+        aero.mint(address(gauge), aeroAmt);
+        gauge.setAeroToPayOnGetReward(aeroAmt);
+        gauge.setEarnedAmount(aeroAmt);
+    }
+
+    /// @dev THE DRIFT MEASURE the production code uses, per leg: live debt minus the hedged principal.
+    function _driftLegA() internal view returns (uint256) {
+        (uint128 h,) = strategy.hedgedDebt();
+        uint256 d = mLegA.borrowBalance(address(strategy));
+        return d > h ? d - h : 0;
+    }
+
+    function _driftLegB() internal view returns (uint256) {
+        (, uint128 h) = strategy.hedgedDebt();
+        uint256 d = mLegB.borrowBalance(address(strategy));
+        return d > h ? d - h : 0;
+    }
+
+    /**
+     * @dev THE FINDING. The harvest budget is ONE ceiling over TWO independent drifts. It used to be
+     *      handed to leg A whole, with leg B getting `budget - spentA` — and the spend path returned on
+     *      `budget == 0` BEFORE reading its market, so whenever leg A's drift priced at or above the
+     *      harvest (the normal state for the larger/faster leg on a thin harvest) leg B was never even
+     *      MEASURED. Every harvest in that band closed leg A and left leg B's short untouched, so a
+     *      partial hedge ROTATED the residual short onto one leg instead of shrinking it evenly.
+     *
+     *      Armed exactly in that band: leg A's drift alone costs more than the whole harvest, so the old
+     *      allocation gives leg B precisely zero. Both legs must now be hedged, and by the SAME FRACTION
+     *      of their own drift — which is what pro-rata means and what keeps a partial hedge leg-neutral.
+     */
+    function testPartialBudgetHedgesBothLegsProRataInsteadOfStarvingLegB() public {
+        _armAeroRouter();
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        // ASYMMETRIC drift on purpose — leg A at 100bps of its debt, leg B at 25bps. A 4:1 cost ratio
+        // makes a pro-rata split visibly different from any equal split as well as from "leg A first".
+        uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
+        uint256 iB = mLegB.borrowBalance(address(strategy)) / 400;
+        assertGt(iA, 0, "fixture must produce a measurable leg-A accrual");
+        assertGt(iB, 0, "fixture must produce a measurable leg-B accrual");
+        mLegA.accrueBorrowInterest(address(strategy), iA);
+        mLegB.accrueBorrowInterest(address(strategy), iB);
+
+        uint256 costA = _valueUsdc(iA, P_LEG_A, 18);
+        uint256 costB = _valueUsdc(iB, P_LEG_B, 8);
+        uint256 budget = (costA + costB) / 4; // covers a quarter of the total drift...
+        assertLt(budget, costA, "...and less than leg A ALONE: the band where leg B used to be starved");
+        _armHarvest(budget);
+
+        uint256 driftA0 = _driftLegA();
+        uint256 driftB0 = _driftLegB();
+        uint256 routerUsdc0 = usdc.balanceOf(address(router));
+
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        // THE BOUND: the shared ceiling still holds, and the whole of it was put to work.
+        uint256 spent = usdc.balanceOf(address(router)) - routerUsdc0;
+        assertLe(spent, budget, "total spend never exceeds the harvest budget");
+        assertApproxEqRel(spent, budget, 1e15, "...and no allocation dust was stranded by the division");
+
+        // THE ASSERTION: both legs hedged, at the SAME coverage ratio.
+        uint256 closedA = driftA0 - _driftLegA();
+        uint256 closedB = driftB0 - _driftLegB();
+        assertGt(closedB, 0, "leg B was hedged AT ALL - the finding (pre-fix this is exactly 0)");
+        uint256 fracA = Math.mulDiv(closedA, 1e18, driftA0);
+        uint256 fracB = Math.mulDiv(closedB, 1e18, driftB0);
+        assertApproxEqRel(fracA, fracB, 1e15, "the same FRACTION of each leg's drift was closed");
+        assertApproxEqRel(
+            fracA, Math.mulDiv(budget, 1e18, costA + costB), 1e15, "...and that fraction is the budget's coverage"
+        );
+
+        // GRACEFUL DEGRADATION, both legs: the unfunded remainder stays measured and carries.
+        assertGt(_driftLegA(), 0, "leg-A remainder carries");
+        assertGt(_driftLegB(), 0, "leg-B remainder carries");
+    }
+
+    /**
+     * @dev REGRESSION on the full-budget case, stated separately from
+     *      `testCompoundRehedgesBorrowInterestOnBOTHLegs` because the pro-rata split is a NO-OP there and
+     *      that has to stay true: each leg's spend is capped at its own cost, so an ample budget
+     *      neutralises both legs exactly as before and leaves the surplus for the redeploy.
+     */
+    function testFullBudgetStillNeutralisesBothLegsExactlyAndLeavesTheSurplusToRedeploy() public {
+        _armAeroRouter();
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
+        uint256 iB = mLegB.borrowBalance(address(strategy)) / 400;
+        mLegA.accrueBorrowInterest(address(strategy), iA);
+        mLegB.accrueBorrowInterest(address(strategy), iB);
+
+        uint256 total = _valueUsdc(iA, P_LEG_A, 18) + _valueUsdc(iB, P_LEG_B, 8);
+        uint256 budget = total * 5; // 5x the whole drift
+        _armHarvest(budget);
+
+        uint256 driftA0 = _driftLegA();
+        uint256 driftB0 = _driftLegB();
+        uint256 collateralBefore = (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18;
+        uint256 routerUsdc0 = usdc.balanceOf(address(router));
+
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        // >99.99% of each leg's drift closed. The residue is integer-division dust on the two-way oracle
+        // conversion (the spend is floored in 6dp USDC, then the min-out re-derived from it) and is the
+        // SAME dust the pre-refactor single-leg-at-a-time path left.
+        assertLt(_driftLegA() * 10_000, driftA0, "leg-A drift fully neutralised (to rounding dust)");
+        assertLt(_driftLegB() * 10_000, driftB0, "leg-B drift fully neutralised (to rounding dust)");
+        assertApproxEqRel(
+            usdc.balanceOf(address(router)) - routerUsdc0, total, 1e15, "spent ~the drift and not the budget"
+        );
+        assertGt(collateralBefore, 0, "sanity");
+        assertGt(
+            (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18,
+            collateralBefore,
+            "the surplus was redeployed"
+        );
+    }
+
+    // ====== A SICK LEG MARKET DEGRADES ITS OWN HEDGE, NOT THE HARVEST (review finding: liveness) ======
+    //
+    // Measuring both legs unconditionally is what makes the pro-rata split above correct, but it turned
+    // `borrowBalanceCurrent` — a STATE-CHANGING Moonwell call that reverts whenever `accrueInterest`
+    // fails (a paused / arithmetically-broken market) — into a hard liveness dependency of `compound` on
+    // BOTH legs. The old shape returned on a per-leg `budget == 0` BEFORE touching the market, so a
+    // budget-starved leg never reached it. In the band armed below (fee + hedge consume the whole
+    // harvest, so `deployIdleImpl` is skipped) the hedge measure is the ONLY touch of that leg's market
+    // in the call, and one sick market would therefore have reverted the WHOLE harvest — the AERO sale,
+    // the fee crystallisation and the OTHER leg's hedge included.
+    //
+    // `_measureLeg` now degrades that leg's drift to zero instead, marking it with
+    // `HedgeLegMeasureDegraded`. Both legs are wrapped, not just leg B: the invariant is that the harvest
+    // survives a hedge problem, not that leg B is special — the (b) test below is the leg-A mirror.
+
+    /// @dev Break `market`'s accrual the way Moonwell does — `borrowBalanceCurrent` is
+    ///      `require(accrueInterest() == NO_ERROR, "accrue interest failed")`, so the failure surfaces as
+    ///      a plain string revert. `borrowBalanceStored` (used by `nav()`, `_assertHealthy` and this
+    ///      suite's own helpers) is deliberately left working: the point is a market that cannot ACCRUE,
+    ///      not a market that has vanished.
+    function _breakAccrual(address market) internal {
+        vm.mockCallRevert(
+            market,
+            abi.encodeWithSelector(MockLendingMarket.borrowBalanceCurrent.selector),
+            abi.encodeWithSignature("Error(string)", "accrue interest failed")
+        );
+    }
+
+    /// @dev Count the degradation markers raised from the STRATEGY's address (both the manager and the
+    ///      valuation library are delegatecalled), and return the market named by the last one.
+    function _degradations(Vm.Log[] memory logs) internal view returns (uint256 n, address market) {
+        for (uint256 i; i < logs.length; i++) {
+            if (
+                logs[i].emitter == address(strategy)
+                    && logs[i].topics[0] == LeveragedAerodromeCLStrategy.HedgeLegMeasureDegraded.selector
+            ) {
+                n++;
+                market = abi.decode(logs[i].data, (address));
+            }
+        }
+    }
+
+    /// @dev Arm the two-leg book with drift on BOTH legs and a harvest budget SHORT of leg A's drift
+    ///      alone — the band where the whole harvest is consumed by the hedge, `deployIdleImpl` is
+    ///      skipped, and the measure is consequently the only touch of either leg's market.
+    /// @return driftA0 leg-A drift, `driftB0` leg-B drift, `budget` the armed harvest (6dp).
+    function _armTwoLegDriftAndAThinHarvest() internal returns (uint256 driftA0, uint256 driftB0, uint256 budget) {
+        _armAeroRouter();
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
+        uint256 iB = mLegB.borrowBalance(address(strategy)) / 100;
+        mLegA.accrueBorrowInterest(address(strategy), iA);
+        mLegB.accrueBorrowInterest(address(strategy), iB);
+
+        driftA0 = _driftLegA();
+        driftB0 = _driftLegB();
+        assertGt(driftA0, 0, "fixture must arm a leg-A drift");
+        assertGt(driftB0, 0, "fixture must arm a leg-B drift");
+
+        // 99% of the SMALLER leg's cost: strictly below either leg's own cost, so whichever leg survives
+        // takes the whole budget, spends all of it, and leaves `redeploy == 0`.
+        uint256 costA = _valueUsdc(driftA0, P_LEG_A, 18);
+        uint256 costB = _valueUsdc(driftB0, P_LEG_B, 8);
+        budget = ((costA < costB ? costA : costB) * 99) / 100;
+        _armHarvest(budget);
+    }
+
+    /**
+     * @dev (a) THE REGRESSION, on the leg it bites. Leg B's market cannot accrue; the harvest must still
+     *      complete in full and only leg B's hedge may be lost.
+     */
+    function testABrokenLegBMarketDegradesThatLegAndTheHarvestStillCompletes() public {
+        (uint256 driftA0, uint256 driftB0, uint256 budget) = _armTwoLegDriftAndAThinHarvest();
+        _breakAccrual(address(mLegB));
+
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
+        uint256 usdcInSwapRouter0 = usdc.balanceOf(address(router));
+        uint256 collateral0 = mUsdc.balanceOf(address(strategy));
+        assertEq(strategy.layout().hwmPerShare, 0, "no crystallisation has happened on this book yet");
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.compound(1, 0); // pre-fix: reverts here, taking the whole harvest with it
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        // 1. THE DEGRADATION IS MARKED, once, naming leg B's market, from the strategy's own address.
+        (uint256 marks, address named) = _degradations(logs);
+        assertEq(marks, 1, "exactly one leg degraded");
+        assertEq(named, address(mLegB), "...and it is leg B's market that is named");
+
+        // 2. THE REWARD SALE HAPPENED — the AERO left the strategy and reached the v2 router.
+        assertEq(aero.balanceOf(address(strategy)), 0, "the whole claim was sold");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, budget * 1e12, "...to the AERO->USDC router");
+
+        // 3. THE FEE CRYSTALLISATION HAPPENED and its state stuck (it precedes the hedge, so a reverting
+        //    hedge would have rolled it back with everything else). No deferral marker either.
+        assertGt(strategy.layout().hwmPerShare, 0, "the pre-compound crystallise ran and persisted");
+        for (uint256 i; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.FeeCrystallizeDeferred.selector,
+                "the crystallise was not deferred either"
+            );
+        }
+
+        // 4. LEG A'S HEDGE HAPPENED, and took the WHOLE budget: with leg B's cost degraded to 0 the
+        //    pro-rata split allocates everything to the surviving leg.
+        assertEq(usdc.balanceOf(address(router)) - usdcInSwapRouter0, budget, "the whole budget bought leg A");
+        assertApproxEqRel(driftA0 - _driftLegA(), (driftA0 * 99) / 100, 1e15, "leg A hedged by ~the budget's coverage");
+
+        // 5. LEG B PAID FOR ITS OWN BROKEN MARKET, AND ONLY THAT: its drift is untouched and carries
+        //    whole to the next harvest, exactly as an unfunded remainder does.
+        assertEq(_driftLegB(), driftB0, "leg B's drift carries in full");
+
+        // 6. ...and this really WAS the only touch of leg B's market: the hedge consumed the whole
+        //    harvest, so `deployIdleImpl` never ran. Nothing else in the call could have covered it.
+        assertEq(mUsdc.balanceOf(address(strategy)), collateral0, "redeploy skipped (redeploy == 0)");
+    }
+
+    /**
+     * @dev (b) THE SYMMETRY, and the reason the fail-open is not leg-B-only. Nothing about the argument
+     *      is specific to leg B — it is "the harvest survives a hedge problem", and leg A's market can be
+     *      paused just as leg B's can. Same book, same budget, the OTHER market broken: the harvest still
+     *      completes and leg B is now the one hedged with the whole budget.
+     */
+    function testABrokenLegAMarketDegradesThatLegInstead() public {
+        (uint256 driftA0, uint256 driftB0, uint256 budget) = _armTwoLegDriftAndAThinHarvest();
+        _breakAccrual(address(mLegA));
+
+        uint256 usdcInSwapRouter0 = usdc.balanceOf(address(router));
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        (uint256 marks, address named) = _degradations(vm.getRecordedLogs());
+        assertEq(marks, 1, "exactly one leg degraded");
+        assertEq(named, address(mLegA), "...and it is leg A's market that is named");
+
+        assertEq(usdc.balanceOf(address(router)) - usdcInSwapRouter0, budget, "the whole budget bought leg B");
+        assertApproxEqRel(driftB0 - _driftLegB(), (driftB0 * 99) / 100, 1e15, "leg B hedged by ~the budget's coverage");
+        assertEq(_driftLegA(), driftA0, "leg A's drift carries in full");
+    }
+
+    /**
+     * @dev (c) THE MARKER IS NOT FREE-RUNNING. A healthy two-leg harvest must emit NOTHING — an event
+     *      that always fires tells a monitor nothing about a leg that has stopped being hedged.
+     */
+    function testAHealthyTwoLegHarvestMarksNoDegradation() public {
+        _armTwoLegDriftAndAThinHarvest();
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.compound(1, 0);
+
+        (uint256 marks,) = _degradations(vm.getRecordedLogs());
+        assertEq(marks, 0, "a healthy harvest degrades nothing");
     }
 }

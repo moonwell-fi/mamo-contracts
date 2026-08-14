@@ -185,12 +185,13 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 | `minLiquidity` | Minimum CL liquidity on the redeploy of the net yield. |
 | Position effect | claim AERO from the gauge → swap **all** AERO → USDC via the Aerodrome v2 volatile pool → skim the protocol-fee slice → **re-hedge accrued borrow interest out of what's left** (below) → redeploy the remainder at `targetLtvBps` (same path as `deployIdle`, so asset-mode redeploys through `assetModeSplit`). No-op if flat book (`tokenId == 0`) or no AERO accrued/held. |
 | **Redeploy size — read this before predicting it** | The redeploy is **not** `usdcOut − protocolFeeSkim`. In order: `pay = min(skimCap, usdcOut)`; `redeploy = usdcOut − pay`; then `redeploy -= _hedgeInterestDrift(redeploy)`. The hedge step spends part of the harvest **buying back and repaying accrued borrow interest** before anything is redeployed, so the CL add is smaller than the gross yield by that amount. |
-| Interest re-hedge (what it spends) | Per borrowed leg, drift = `borrowBalanceCurrent(market) − hedgedDebt*` — the market is **accrued first** (`borrowBalanceCurrent`, not `…Stored`), so it sees interest that has not yet been capitalised. That drift is priced to USDC on the hardened leg + USDC feeds, bought on the Slipstream leg↔USDC pool with an oracle-floored min-out, and repaid to Moonwell. Leg A is served first; in the two-borrowed-legs shape leg B then gets `budget − spentA` (asset-mode has one drifting leg — leg B is the unit of account and never borrows, so its drift is structurally 0). |
-| Interest re-hedge (bounds) | Hard-bounded by the harvest's own proceeds: it **never** touches stayers' idle USDC or the collateral. A budget too small for the whole drift hedges what it can and carries the remainder to the next harvest — it does **not** revert for insufficiency. Drift priced below 1 USDC unit is left to accumulate. Effect on the book: financing cost lands as **NAV drag** (less yield reinvested) instead of accumulating as unintended short leg exposure, and leverage dips slightly (the safe direction). |
+| Interest re-hedge (what it spends) | Per borrowed leg, drift = `borrowBalanceCurrent(market) − hedgedDebt*` — the market is **accrued first** (`borrowBalanceCurrent`, not `…Stored`), so it sees interest that has not yet been capitalised. That drift is priced to USDC on the hardened leg + USDC feeds, bought on the Slipstream leg↔USDC pool with an oracle-floored min-out, and repaid to Moonwell. |
+| Interest re-hedge (how the budget is split) | **Measure both legs, then allocate pro-rata by USD cost**: each leg gets `budget × costᵢ / (costA + costB)`, with leg B taking the exact complement of leg A's allocation so division strands no dust. A budget that covers everything neutralises both legs fully (each leg's spend is capped at its own cost). Asset-mode has one drifting leg — leg B is the unit of account and never borrows, so its drift is structurally 0 and leg A takes the whole budget, unchanged. **What to expect when the harvest is thin:** both legs' drifts shrink by the *same fraction*, so a partial hedge keeps the residual short spread across the book instead of concentrating it on one leg. (Previously leg A was served the whole budget first and leg B got the leftover — so whenever leg A's drift alone exceeded the harvest, leg B was hedged by exactly 0 harvest after harvest.) |
+| Interest re-hedge (bounds) | Hard-bounded by the harvest's own proceeds: it **never** touches stayers' idle USDC or the collateral. A budget too small for the whole drift hedges what it can — **on both legs** — and carries the remainder to the next harvest; it does **not** revert for insufficiency. Drift priced below 1 USDC unit is left to accumulate. Effect on the book: financing cost lands as **NAV drag** (less yield reinvested) instead of accumulating as unintended short leg exposure, and leverage dips slightly (the safe direction). |
 | Fee interaction | Crystallizes management + HWM **performance** fees on the **pre-compound** NAV first (fail-closed on the price — a stale oracle reverts, so the harvest defers rather than mis-prices), so realized yield can't escape the performance fee. Then discharges `protocolFeeOwed` out of the swapped USDC before the hedge and the redeploy. |
 | Guards | Effective swap floor = `max(minUsdcOut, oracleFloor)` where `oracleFloor = aeroBal × AERO/USD(8dp) / 1e20 × (1 − maxSlippageBps)`, post-checked on the measured fill → `BelowOracleFloor()`. The hedge's USDC→leg buy is separately floored at the oracle-implied leg amount haircut by `maxSlippageBps`. Redeploy runs `_assertHealthy()`. |
 | Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`; **`MoonwellRepayFailed(errCode)` from the interest re-hedge**; `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `InsufficientLiquidity` and (asset-mode) `DegenerateRange()` from the redeploy. A stale/mismatched feed fail-closes the whole call — the AERO feed at the swap floor, and the leg + USDC feeds at the hedge (`compound` already fail-closes on those via the pre-compound `nav()`, so the hedge widens no oracle exposure). |
-| When to call | On a yield/gas cadence. A stale AERO feed intentionally blocks it — defer and retry. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
+| When to call | On a yield/gas cadence. NAV no longer *steps* at `compound` (§E — `nav()` prices the held tranche **and** `gauge.earned()`), so harvesting is a conversion, not a re-pricing event, and there is no front-run window to close by harvesting promptly. A stale AERO feed intentionally blocks it — defer and retry; that same stale feed also fail-closes `nav()` whenever the gauge has reward value, which with live emissions is essentially always. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
 
 ### `rerange` — reposition the CL range: re-width, re-skew, re-anchor (no swap)
 
@@ -378,7 +379,8 @@ stored `minAssetsOut`, then burning the escrowed shares. See §C for the full lo
 | | |
 |---|---|
 | Preconditions | `state() == Executed`; request not `settled` (else `RequestSettled()`). |
-| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. |
+| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). The reward tranche the unwind auto-claims is sold on the same L9 oracle floor (best-effort — see §C) and split `f / (1−f)`. |
+| Oracle posture | Still **oracle-free in the sense that matters**: the floor is derived behind a catchable call and falls back to **0** when the feeds are unreadable, so a down oracle/sequencer never blocks a fulfill or the `emergencyRedeem` deadman — it only removes the floor. A sandwicher cannot *make* a feed stale, so the floor binds whenever it can bind. Consequence for the agent: a fulfill that reverts on the sweep's min-out is a **venue-liquidity/pricing** signal (thin leg↔USDC pool, or someone shoving it), not an oracle problem — retry, or lever down first to shrink the residual being sold. |
 | Fee interaction | Best-effort crystallize (never blocks the exit): on an oracle outage `navPre = 0`, so the price-free **management** fee still accrues while the **performance** fee defers; a fee-mint revert emits `FeeCrystallizeDeferred(2, navPre)` and proceeds. |
 | Events | `RedeemFulfilled(id, owner, assetsOut)`. |
 | When to call | On every `RedeemRequested`, after ensuring the unwind self-funds (deleverage first if needed). |
@@ -524,6 +526,27 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
   **redeemer's own** budget (`balance − stayersIdle`), recomputed before each cover buy. A shortfall
   needing more than the redeemer's slice reverts the whole redeem (fail-safe — never touches stayers'
   reserved `(1-f)` share of idle USDC/legs).
+- **The closing leg sweeps are oracle-floored.** Whatever leg balance survives the repays (minus the
+  stayers' reserved `(1-f)`) is sold to USDC at `oracleValue(amount sold) × (1 − maxSlippageBps)`. The
+  loss on a bad fill there was always the **redeemer's** (stayers are insulated by the pre-unwind
+  snapshot), and it is now bounded. **The floor never blocks the deadman**: it is derived behind a
+  catchable call, so an unreadable feed drops it to 0 and `emergencyRedeem` still completes — the whole
+  point being that the deadman exists for the oracle-down-and-backend-dead state. Not *silently*, though:
+  the fallback emits **`RedeemSweepFloorsDegraded`** (§E), because the `catch` cannot tell a stale feed
+  from an out-of-gas and those swaps then run unbounded.
+- **The redeem sells the reward tranche its own unwind claims, and splits it `f / (1−f)`.** The unwind's
+  `gauge.withdraw` auto-claims the whole accrued AERO tranche — on *every* async redeem, because the
+  redeem's own unwind is what creates the balance. The leg sweeps above only touch the two leg tokens, so
+  before this the redeemer was paid `f × (assets − reward)` while 100% of the tranche stayed with the
+  stayers; with `nav()` pricing that reward, that was a payout that did not match the NAV the shares were
+  measured against. The redeem now runs the **same best-effort, oracle-floored sale** the terminal
+  `settle` uses, right after the unwind, and reserves `(1−f)` of the proceeds for the stayers — so the
+  redeemer receives their pro-rata slice and no more. **Best-effort, for the same deadman reason as the
+  sweep floors:** a stale AERO/USD feed or a broken AERO→USDC route makes the sale fail *closed inside its
+  own frame* (the swap rolls back whole — never sold blind), the redeem swallows it and completes, and the
+  tranche simply stays with the stayers. That residual is the only case in which the old behaviour still
+  applies, and it emits **`RedeemRewardSaleDeferred`** (§E) so it is never silent. Stayers are never worse
+  off than before; the redeemer is, at worst, no better off.
 
 Because a levered position tends to run a debt/IL shortfall against the collected legs, levering
 **down** first shrinks the debt the unwind must repay, so the proportional unwind self-funds cleanly
@@ -618,6 +641,12 @@ function vault() external view returns (address);
 // so a rebalancer can read them without decoding the whole LayoutView.
 function targetLtvBps() external view returns (uint16);                         // the STANDING target
 function hedgedDebt() external view returns (uint128 legA, uint128 legB);       // hedged borrow PRINCIPAL
+
+// The Chainlink min-out floors the proportional unwind's two residual leg sweeps must clear, for the
+// given leg-B / leg-A amounts being sold. Reverts (fail-closed) when a feed is stale — inside the
+// unwind that revert is CAUGHT and the floors fall back to 0, which is what keeps `emergencyRedeem`
+// alive with the oracle down. Pass 0 for leg B in asset-mode (that sweep is the identity).
+function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns (uint256, uint256);
 ```
 
 - **`targetLtvBps()`** is the fund's **standing** target — set at init, re-set in either direction by the
@@ -641,6 +670,40 @@ function hedgedDebt() external view returns (uint128 legA, uint128 legB);       
   a panic signal — it means the fast/priced paths (deposit, fast `redeem`, `previewRedeem`) degrade to the
   async queue. The agent can **still fulfill** requests: `fulfillRedeem`'s proportional unwind is
   oracle-free (best-effort crystallize with `navPre = 0`). Don't gate the fulfill loop on `nav()`.
+- **`nav()` prices the WHOLE gauge-reward claim — held balance *and* `gauge.earned()`.** Two places reward
+  value can sit, and both are in NAV:
+  1. the **claimed-but-unsold balance**. Every unwind (`rerange`, `adjustLeverage`, a proportional
+     `fulfillRedeem`, `flatten`, `settle`) goes through `gauge.withdraw`, which **auto-claims** the accrued
+     AERO tranche into the strategy whether or not anyone asked for it; and
+  2. the **still-unclaimed `gauge.earned(strategy, tokenId)`** on the staked NFT — where a harvest spends
+     most of its life, and therefore the larger of the two.
+
+  Both are marked on the same `aeroUsdFeed` (8dp) the sale floor uses. `earned()` is read through a
+  `try/catch`: the gauge reverts `"NA"` for a tokenId it does not have staked, and that state is exactly
+  the state where the tranche has just been auto-claimed into (1) — so the catch-to-0 is correct, not an
+  understatement, and the sum is continuous across the unstake. A flat book (`tokenId == 0`) skips the call.
+  Three operator consequences:
+  - **NAV no longer steps at `compound`.** Reward value is priced where it sits, so a `compound` is a
+    conversion (AERO → USDC at the same mark), not a jump. There is no longer a window in which a deposit
+    buys in below the true book and collects a slice of someone else's harvest — that was worth ~4.5% of a
+    100k deposit, post-fee, in a single block before this change.
+  - **The reward feed is now a standing `nav()` dependency whenever the gauge is live.** The feed read is
+    gated on `heldBalance + earned() > 0`, and with live emissions that sum is essentially always positive —
+    so a stale `aeroUsdFeed` **fail-closes `nav()`**: deposits and the priced fast redeem are denied until
+    the feed recovers. (Before this change the dependency only existed inside a post-unwind window.) This is
+    intentional — a NAV that cannot be computed honestly must not price a deposit — and the async queue is
+    unaffected: `fulfillRedeem` never reads `nav()`, so the exit stays open throughout. `compound` clears
+    the held half; the `earned()` half returns as soon as the feed does.
+  - **Fee crystallisation reads NAV, so the performance fee now accrues against UNREALISED, UNCLAIMED
+    rewards, continuously.** This is the deliberate trade-off of pricing `earned()`: a fee can be
+    crystallised on reward value the fund has not yet realised, and a later adverse event (a gauge killed by
+    governance, a broken reward route, a sale under the mark) means some of it never is. Accepted as the
+    correct side to err on — the alternative mis-prices every deposit, every block, in an attacker's favour.
+    Accounting should expect fee accrual to track emissions rather than harvest events.
+  - **Second-order, accepted:** Slipstream accrues emissions on `rewardGrowthInside`, so the marked
+    `earned()` is mildly **tick-influenced**. It is bounded by the calm gate — `nav()` runs the
+    spot-vs-TWAP check before pricing anything, so a shove beyond `calmDeviationTicks` fail-closes the whole
+    NAV first.
 - **`previewRedeem(shares)`** returns `(assetsOut, fastOk)`; `assetsOut` is the advisory oracle-priced
   fast-path payout and `fastOk` whether the fast path would currently price **and** clear the LTV gate.
   Both are advisory — the manager's on-chain gate is authoritative. Returns `(0, false)` on an oracle
@@ -689,6 +752,16 @@ Strategy events that exist today:
 |---|---|
 | `RedeemRequested / RedeemFulfilled / RedeemCancelled / RedeemEmergency` | withdraw-queue tracking (§C) |
 | `FeeCrystallizeDeferred(uint8 op, uint256 navPre)` | a best-effort crystallize deferred (`op`: 0=deposit, 1=fast redeem, 2=proportional redeem). The fee-share mint failed — on the vanilla vault the realistic cause is `depositsOpen == false` (`"LAV: deposits closed"`); investigate. |
+| `SettleRewardSaleDeferred()` | the **terminal settle**'s best-effort reward-tranche sale was skipped (stale/paused AERO feed, broken AERO→USDC route, or a fill under the L9 floor). The settle completed; the tranche is left on the now-`Settled` strategy and needs the owner's `rescueToVault(rewardToken)` → `vault.rescueERC20`. **Check the strategy's AERO balance after any settle.** |
+| `RedeemRewardSaleDeferred()` | an **async redeem**'s sale of the tranche its own unwind auto-claimed was skipped, same causes. The redeem completed and paid, but that redeemer got `f × (assets − reward)` and the tranche stayed with the stayers — the one residual of the pre-fix behaviour (§C). Clear it with `compound` once the feed/route recovers; a *recurring* one means every redeemer is being short-paid, so treat it as a feed/route incident, not noise. |
+| `RedeemSweepFloorsDegraded()` | an **async redeem**'s closing leg→USDC sweeps ran with their Chainlink min-out floors at **zero** — the derivation reverted (stale feed / down sequencer, or an out-of-gas: the `catch` cannot tell them apart). Deliberately fail-open so the `emergencyRedeem` deadman still completes, but those swaps were **unbounded** for that call. Expect it only alongside a real oracle outage; seeing it while feeds are healthy is a gas/venue problem worth investigating before the next fulfill. |
+
+> **The naming rule for the three fail-opens above.** `…Deferred` = an optional **action** was skipped;
+> `…Degraded` = a **guard** fell back and the op ran with less protection. All three are emitted from the
+> strategy address (`RedeemSweepFloorsDegraded` is declared on `LeveragedAeroManager` and reaches the
+> strategy's ABI through delegatecall). None of them reverts anything — they exist because the `catch`
+> blocks they mark cannot distinguish their expected cause from any other revert, and a silent fail-open
+> leaves no on-chain trace at all.
 
 ---
 
