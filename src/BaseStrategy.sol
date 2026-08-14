@@ -123,6 +123,26 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     {
         mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
         strategyTypeId = _strategyTypeId;
+
+        // {BACKEND_ROLE} is re-derived locally rather than read from the registry, so that
+        // {_isBackend} stays a constant lookup. That leaves the two definitions free to disagree,
+        // and a disagreement is not a graceful failure — `hasRole` against an id nobody holds makes
+        // every backend gate permanently unsatisfiable. Assert the two agree once, at init, where it
+        // is a deployment-time revert rather than a discovery. Same rule the factory applies to its
+        // own copy; see {IMamoStrategyRegistry.BACKEND_ROLE}.
+        //
+        // Raw staticcall, and DELIBERATELY fail-open when the read is unavailable. This is a
+        // typo-catcher for a real registry, not an access-control gate: a `_mamoStrategyRegistry`
+        // with no code (or no such selector) is a broken strategy either way, and
+        // `MamoStrategyRegistry.addStrategy` already refuses it with "Strategy registry not set
+        // correctly". A typed call here would instead revert inside initialize() with empty
+        // returndata, replacing that specific diagnosis with an undecodable one.
+        (bool ok, bytes memory ret) =
+            _mamoStrategyRegistry.staticcall(abi.encodeWithSelector(IMamoStrategyRegistry.BACKEND_ROLE.selector));
+        if (ok && ret.length == 32) {
+            require(abi.decode(ret, (bytes32)) == BACKEND_ROLE, "Registry BACKEND_ROLE mismatch");
+        }
+
         __Ownable_init(initialOwner);
     }
 

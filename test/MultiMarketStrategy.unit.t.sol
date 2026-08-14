@@ -72,14 +72,31 @@ contract MockMToken {
 contract MockERC4626Vault {
     MockERC20 public immutable token;
     uint256 public withdrawalFeeBps;
+    uint256 public strandedAssets;
+    bool public roundTripMaxRedeem;
     mapping(address => uint256) public balanceOf;
 
     constructor(MockERC20 _token) {
         token = _token;
     }
 
+    /// @dev Models MetaMorpho's `maxRedeem`, which is `convertToShares(maxWithdraw(owner))` — a
+    ///      shares -> assets -> shares round trip that loses value at each conversion. On the live
+    ///      vault the loss is one unit of rounding; here the withdrawal fee stands in for it, which
+    ///      is the same shape (redeem(maxRedeem) delivers strictly less than maxWithdraw) at a
+    ///      magnitude a unit test can see. Off by default, because with it off the mock's maxRedeem
+    ///      is exactly `balanceOf` — self-consistent, and therefore structurally incapable of
+    ///      expressing this bug class at all.
+    function setRoundTripMaxRedeem(bool enabled) external {
+        roundTripMaxRedeem = enabled;
+    }
+
     function setWithdrawalFeeBps(uint256 feeBps) external {
         withdrawalFeeBps = feeBps;
+    }
+
+    function setStrandedAssets(uint256 amount) external {
+        strandedAssets = amount;
     }
 
     function asset() external view returns (address) {
@@ -102,12 +119,35 @@ contract MockERC4626Vault {
         return shares - (shares * withdrawalFeeBps) / 10000;
     }
 
-    function maxWithdraw(address owner) external view returns (uint256) {
-        return previewRedeem(balanceOf[owner]);
+    /// @dev Assets the vault holds but cannot pay out — the liquidity limit a real 4626 has and
+    ///      this mock otherwise lacks. Without it every `maxWithdraw` is honourable and the
+    ///      liquidity-constrained branch of `_withdrawUpTo` is unreachable from a unit test.
+    function _available() internal view returns (uint256) {
+        uint256 held = token.balanceOf(address(this));
+        return held > strandedAssets ? held - strandedAssets : 0;
+    }
+
+    /// @dev Ceil-inverse of previewRedeem: the shares an asset amount costs to withdraw.
+    function _sharesFor(uint256 assets) internal view returns (uint256) {
+        uint256 denominator = 10000 - withdrawalFeeBps;
+        return (assets * 10000 + denominator - 1) / denominator;
+    }
+
+    function maxWithdraw(address owner) public view returns (uint256) {
+        uint256 held = previewRedeem(balanceOf[owner]);
+        uint256 avail = _available();
+        return held > avail ? avail : held;
     }
 
     function maxRedeem(address owner) external view returns (uint256) {
-        return balanceOf[owner];
+        if (roundTripMaxRedeem) {
+            // convertToShares(maxWithdraw(owner)). convertToShares is the identity here, so the fee
+            // is what makes the round trip lossy — previewRedeem of this is strictly below
+            // maxWithdraw, exactly as on MetaMorpho (where the same gap is one unit of rounding).
+            return maxWithdraw(owner);
+        }
+        uint256 shares = _sharesFor(maxWithdraw(owner));
+        return shares > balanceOf[owner] ? balanceOf[owner] : shares;
     }
 
     function deposit(uint256 assets, address receiver) external returns (uint256) {
@@ -117,9 +157,9 @@ contract MockERC4626Vault {
     }
 
     function withdraw(uint256 assets, address receiver, address owner) external returns (uint256) {
-        uint256 denominator = 10000 - withdrawalFeeBps;
-        uint256 shares = (assets * 10000 + denominator - 1) / denominator;
+        uint256 shares = _sharesFor(assets);
         require(balanceOf[owner] >= shares, "vault: insufficient shares");
+        require(assets <= _available(), "vault: insufficient liquidity");
         balanceOf[owner] -= shares;
         token.transfer(receiver, assets);
         return shares;
@@ -128,6 +168,7 @@ contract MockERC4626Vault {
     function redeem(uint256 shares, address receiver, address owner) external returns (uint256) {
         require(balanceOf[owner] >= shares, "vault: insufficient shares");
         uint256 assets = previewRedeem(shares);
+        require(assets <= _available(), "vault: insufficient liquidity");
         balanceOf[owner] -= shares;
         token.transfer(receiver, assets);
         return assets;
@@ -192,6 +233,15 @@ contract MockSlippagePriceChecker {
     }
 }
 
+/// @dev A registry whose BACKEND_ROLE id does not match BaseStrategy's locally derived constant.
+contract MockDivergentRoleRegistry {
+    bytes32 public constant BACKEND_ROLE = keccak256("SOME_OTHER_ROLE");
+
+    function hasRole(bytes32, address) external pure returns (bool) {
+        return false;
+    }
+}
+
 /// @dev Stateless on purpose so it can be vm.etch'd at the hardcoded distributor address.
 contract MockMerkleDistributor {
     function claim(
@@ -252,14 +302,27 @@ contract MultiMarketStrategyUnitTest is Test {
     }
 
     function _deployStrategy(uint256[] memory splits) internal returns (MamoMultiMarketStrategy) {
+        return _deployStrategyWithRegistry(splits, address(registry));
+    }
+
+    function _deployStrategyWithRegistry(uint256[] memory splits, address strategyRegistry)
+        internal
+        returns (MamoMultiMarketStrategy)
+    {
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        bytes memory data = _initCalldata(splits, strategyRegistry);
+
+        return MamoMultiMarketStrategy(payable(address(new ERC1967Proxy(address(implementation), data))));
+    }
+
+    function _initCalldata(uint256[] memory splits, address strategyRegistry) internal view returns (bytes memory) {
         address[] memory rewardTokens = new address[](1);
         rewardTokens[0] = address(rewardToken);
 
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
-        bytes memory data = abi.encodeWithSelector(
+        return abi.encodeWithSelector(
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
-                mamoStrategyRegistry: address(registry),
+                mamoStrategyRegistry: strategyRegistry,
                 token: address(underlying),
                 slippagePriceChecker: address(priceChecker),
                 feeRecipient: feeRecipient,
@@ -273,8 +336,39 @@ contract MultiMarketStrategyUnitTest is Test {
                 defaultSplitBps: splits
             })
         );
+    }
 
-        return MamoMultiMarketStrategy(payable(address(new ERC1967Proxy(address(implementation), data))));
+    /// @notice `BaseStrategy` re-derives BACKEND_ROLE locally so `_isBackend` stays a constant
+    ///         lookup, which leaves it free to disagree with the registry's id. A disagreement is
+    ///         not graceful: `hasRole` against an id nobody holds makes every backend gate
+    ///         permanently unsatisfiable. Init asserts the two agree.
+    function test_initialize_rejectsARegistryWithADifferentBackendRole() public {
+        MockDivergentRoleRegistry wrongRegistry = new MockDivergentRoleRegistry();
+
+        uint256[] memory splits = new uint256[](2);
+        splits[0] = 5000;
+        splits[1] = 5000;
+
+        // Hoisted: `new MamoMultiMarketStrategy()` inside the helper would consume the one-shot
+        // expectRevert before the proxy is ever constructed.
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        bytes memory data = _initCalldata(splits, address(wrongRegistry));
+
+        vm.expectRevert("Registry BACKEND_ROLE mismatch");
+        new ERC1967Proxy(address(implementation), data);
+    }
+
+    /// @notice The same check must NOT harden into a gate. A registry address with no code is a
+    ///         broken strategy either way, and MamoStrategyRegistry.addStrategy diagnoses it
+    ///         precisely ("Strategy registry not set correctly"); reverting here with empty
+    ///         returndata would replace that diagnosis with an undecodable one.
+    function test_initialize_toleratesARegistryThatCannotAnswer() public {
+        uint256[] memory splits = new uint256[](2);
+        splits[0] = 5000;
+        splits[1] = 5000;
+
+        MamoMultiMarketStrategy deployed = _deployStrategyWithRegistry(splits, makeAddr("codelessRegistry"));
+        assertEq(address(deployed.mamoStrategyRegistry()), makeAddr("codelessRegistry"));
     }
 
     function _deposit(uint256 amount) internal {
@@ -512,6 +606,41 @@ contract MultiMarketStrategyUnitTest is Test {
         );
     }
 
+    /// @notice Sherlock #49 through the retirement door. SlippagePriceChecker.clearRewardToken makes
+    ///         isRewardToken() go false, which used to take BOTH settles off recoverERC20 — so a
+    ///         swept token could be recovered untaxed while its anchor stayed stale-high, and the
+    ///         next batch after a re-configuration was masked by that stale anchor. Settling on the
+    ///         anchor rather than on the current price-checker answer closes both halves.
+    function test_recoverERC20_settlesAfterTheRewardTokenIsRetired() public {
+        uint256 arrived = 1000e18;
+        uint256 firstFee = (arrived * COMPOUND_FEE) / 10000;
+        rewardToken.mint(address(strategy), arrived);
+
+        // A normal sweep: the fee is charged and the anchor is armed at the post-fee balance.
+        strategy.sweepRewardFees(address(rewardToken));
+        uint256 remaining = arrived - firstFee;
+        assertEq(strategy.rewardFeeCharged(address(rewardToken)), remaining, "anchor armed at the post-fee balance");
+
+        // The campaign is retired: the multisig clears the price-checker entry.
+        priceChecker.setNotRewardToken(address(rewardToken), true);
+
+        vm.prank(owner);
+        strategy.recoverERC20(address(rewardToken), owner, remaining);
+
+        assertEq(rewardToken.balanceOf(owner), remaining, "the already-settled remainder is still fully recoverable");
+        assertEq(strategy.rewardFeeCharged(address(rewardToken)), 0, "the trailing settle drops the stale anchor");
+
+        // Re-configured later: the next batch owes its fee in full, with no stale credit.
+        priceChecker.setNotRewardToken(address(rewardToken), false);
+        uint256 secondBatch = 950e18;
+        rewardToken.mint(address(strategy), secondBatch);
+        assertEq(
+            strategy.pendingRewardFee(address(rewardToken)),
+            (secondBatch * COMPOUND_FEE) / 10000,
+            "a batch arriving after a retirement still owes its fee"
+        );
+    }
+
     function test_sweepRewardFees_rejectsTheStrategyToken() public {
         // Approving the CoW relayer on the underlying would put every user deposit in reach of an
         // order, so the strategy's own asset can never be settled as a reward.
@@ -596,15 +725,64 @@ contract MultiMarketStrategyUnitTest is Test {
     ///         The pro-rata loop must cap at capacity and carry the shortfall, not revert.
     function test_withdraw_withErc4626ExitFee() public {
         vault.setWithdrawalFeeBps(100); // 1%
-        _deposit(1000e18);
+        // Deliberately NOT a round number. On a round balance the ceil-inverse inside the mock's
+        // withdraw() is exact, so `withdraw(capacity)` and the redeem() branch agree and the test
+        // cannot tell them apart — reverting the capacity branch to `withdraw(capacity)` used to
+        // leave the whole suite green.
+        _deposit(1000e18 + 2);
 
-        // 500 in the mToken, 500 of shares in the vault worth 495 after the exit fee.
-        uint256 deliverable = 500e18 + 495e18;
+        // Half of the odd deposit lands in each market; the vault leg is worth its shares less 1%.
+        uint256 mTokenLeg = (1000e18 + 2) / 2;
+        uint256 vaultShares = (1000e18 + 2) - mTokenLeg;
+        uint256 deliverable = mTokenLeg + (vaultShares - (vaultShares * 100) / 10000);
 
         vm.prank(owner);
         strategy.withdraw(deliverable);
 
         assertEq(underlying.balanceOf(owner), deliverable, "owner receives the full requested amount");
+    }
+
+    /// @notice A MAX withdrawal — asking for exactly what {_getTotalBalance} advertises — must not
+    ///         revert. The capacity branch of `_withdrawUpTo` decides in ASSET terms and then exits
+    ///         with the full SHARE balance, because a vault whose `maxRedeem` round-trips through
+    ///         assets (MetaMorpho does) comes back short: `redeem(maxRedeem)` delivers strictly less
+    ///         than `maxWithdraw`, the withdrawal lands under the requested amount, and the
+    ///         `remaining == 0` require at the end of `_withdrawFromMarkets` takes the whole call
+    ///         down. Pre-fix this reverted; 50/50 is the case that matters, because pass 1 leaves
+    ///         the mToken leg with no slack to absorb the shortfall.
+    function test_withdraw_maxAgainstRoundTrippingMaxRedeem() public {
+        vault.setWithdrawalFeeBps(100); // 1%
+        vault.setRoundTripMaxRedeem(true);
+        _deposit(1000e18);
+
+        // What _getTotalBalance() advertises: the mToken leg in full plus previewRedeem of the whole
+        // share balance. maxRedeem now comes back below that, which is the entire point.
+        uint256 advertised = 500e18 + 495e18;
+
+        vm.prank(owner);
+        strategy.withdraw(advertised);
+
+        assertEq(underlying.balanceOf(owner), advertised, "a max withdrawal delivers the full advertised total");
+    }
+
+    /// @notice The other half of the same guard: when the vault is GENUINELY liquidity-constrained,
+    ///         the capacity branch must still fall back to `maxRedeem` rather than trying to redeem
+    ///         a share balance the vault cannot honour.
+    function test_withdraw_capacityBranchFallsBackWhenLiquidityConstrained() public {
+        _deposit(1000e18);
+
+        // Strand 200 of the vault's 500 assets, so maxWithdraw (300) is below previewRedeem of the
+        // full share balance (500). Redeeming the whole share balance here would ask the vault for
+        // more than it can pay; only the maxRedeem fallback is honourable.
+        vault.setStrandedAssets(200e18);
+
+        // Pass 1 targets 400 at each leg. 400 >= the vault's capacity of 300, so the vault goes down
+        // the capacity branch; the 100 it cannot cover is swept from the mToken in pass 2.
+        vm.prank(owner);
+        strategy.withdraw(800e18);
+
+        assertEq(underlying.balanceOf(owner), 800e18, "the shortfall is covered from the other market");
+        assertEq(vault.balanceOf(address(strategy)), 200e18, "only the redeemable shares left the vault");
     }
 
     /// @notice MOO-739: the total must be the amount the shares can actually deliver. With

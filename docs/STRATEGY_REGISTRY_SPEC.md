@@ -105,7 +105,7 @@ latestImplementationById(4) = 0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7   (occu
 A future registry deployment should fix this in code (advance the counter past an explicit id, or
 reject ids that do not already exist). That is a migration project, out of scope here.
 
-### BACKEND_ROLE: membership, not index 0 (Sherlock #41 — FIXED in the strategies)
+### BACKEND_ROLE: membership, not index 0 (Sherlock #41 — fixed in the new implementation; live on each proxy until its owner upgrades)
 
 `getBackendAddress()` returns `getRoleMember(BACKEND_ROLE, 0)`. `EnumerableSet` has no ordering
 guarantee and removes by swap-and-pop, so revoking the member at index 0 moves the **last** member
@@ -122,10 +122,29 @@ sites, all of them deployed fresh by this change:
 - `MamoMultiMarketStrategy.migrateV1ToMarketRegistry`
 - `MamoLeveragedAeroStrategy.depositIdle`
 
+**Scope, precisely.** The fix lives in the implementation, not in the deployed proxies. Verified
+against live type-1 strategy `0xc2f496d5…2938`: `updatePosition` succeeds only from
+`STRATEGY_MULTICALL` (index 0) and reverts `"Not backend"` for both another role member and
+`MAMO_BACKEND`. Since `MamoStrategyRegistry.upgradeStrategy` requires
+`isUserStrategy(msg.sender, strategy)`, upgrades are **owner-initiated**: #41 remains live on every
+un-upgraded proxy for as long as its owner declines to upgrade, with no admin override. Everything
+below about index 0 is therefore an operational constraint on the *current* fleet, not legacy trivia.
+
 Consequence to be explicit about: the authorized set is now **every BACKEND_ROLE holder**, which
 today includes the per-asset factories as well as the operator. This is deliberate — it is the same
 principal set the factory half of every operation already accepted, so the two halves of a repair
 (factory `setDefaultSplitBps` + strategy `updatePosition`) finally agree on who may perform it.
+
+The half of that widening worth naming is not the factories. All six current holders were checked:
+none is a proxy (ERC-1967 slots zero, so no upgrade route to an arbitrary-call surface) and no
+factory takes a caller-chosen target or calldata — their only calls are `new ERC1967Proxy` /
+`Create2.deploy`, `initialize` on the fresh proxy, and `registry.addStrategy`. `STRATEGY_MULTICALL`
+*is* an arbitrary-call surface but already occupied index 0, so it gains nothing. The material new
+principal is **`MAMO_BACKEND` (`0x2Ab0…5e73`, an EOA)**, granted in this same proposal: before the
+change that key could reach nothing on a strategy; after it, it can call `setFeeRecipient`
+fleet-wide (re-pointing the compound-fee stream), plus `updatePosition` and
+`migrateV1ToMarketRegistry`. Net: the strategy-side backend surface goes from one hot EOA (the
+compounder, via the multicall) to two. Accepted deliberately, but it is the risk being accepted.
 
 #### Live topology, and what actually triggers this
 
@@ -144,12 +163,20 @@ Operating rules:
 - `011_DeployMultiMarketSystem` now grants `BACKEND_ROLE` to `MAMO_BACKEND` explicitly. Without it
   the new `hasRole`-gated factories would take operator-driven onboarding offline, since the pinned
   address the old factories relied on is gone.
-- Grant before revoke, always — `011` was doing the reverse and was safe only by accident.
+- **Never revoke the index-0 member without re-establishing index 0 deliberately.** This, not the
+  call ordering, is the invariant. `EnumerableSet.remove` moves the **last** element into the
+  **removed** element's slot, so index 0 changes if and only if the revoked member *is* index 0 —
+  grant-before-revoke does not protect it, it only decides which address lands there. (Grant before
+  revoke is still the house style, and `011` follows it, but it buys nothing here: the members `011`
+  revokes sit at indices 1, 2 and 5.)
+- Recovery, if index 0 does move or must move: grant the desired principal first — a fresh grant
+  appends, so it is last — then revoke the index-0 occupant, and the freshly granted member swaps
+  into slot 0. Re-grant anything revoked along the way.
 - Every proposal that mutates `BACKEND_ROLE` must assert `getBackendAddress()` in **both**
   `preBuildMock` and `validate`, so a change of identity is a test failure rather than a discovery.
-  `011` carries the pair.
-- Recovery, if index 0 does move: grant the desired principal, revoke the index-0 occupant (the
-  desired principal or the last member swaps in), and re-grant anything revoked in the process.
+  `011` carries the pair. Note what that pair does and does not buy: both are **simulation-time**
+  asserts, so they catch a mistake while the proposal is being written, not at execution — a batch
+  signed today executes later against whatever state exists then, with no re-check.
 - `MamoLeveragedAeroStrategyFactory` grants `BACKEND_ROLE` **on itself**, while the accounts it
   creates authorize against the *registry's* role. Two different principal sets from two different
   sources: a rotation has to touch both.
@@ -206,6 +233,8 @@ pre-fix implementation is claimable and must be redeployed.
 - `function removeTokenConfiguration(address fromToken, address toToken) external`: Removes the feed chain for a pair. Owner only. Deliberately does **not** clear `maxTimePriceValid`, which is keyed by `fromToken` alone and shared with the token's other pairs.
 - `function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external`: Sets the staleness window; rejects zero. Owner only.
 - `function clearRewardToken(address fromToken) external`: Retires the token entirely by zeroing `maxTimePriceValid`. Owner only. Added because `isRewardToken` was otherwise a **one-way latch** — nothing could unset it, so a mistakenly configured token remained permanently eligible for the permissionless compound-fee sweep and relayer approval in `MamoMultiMarketStrategy`.
+
+  Note the interaction with the compound fee, which is why `MamoMultiMarketStrategy.recoverERC20` settles on the **anchor** (`rewardFeeCharged[token] > 0`) and not on the current `isRewardToken` answer. Clearing a token makes `isRewardToken` go false while an unsettled fee position may still exist on the strategy; before that change, recovery of a cleared token skipped both settles, took the balance untaxed, and left the anchor stale-high, so the next batch after a re-configuration computed `pendingRewardFee == 0`. A cleared token also cannot be swept — `sweepRewardFees` reverts `"Token not allowed"` — so the fee would have been stranded rather than deferred. Operationally: clearing is still safe at any time, but the settlement now rides on recovery rather than on the configuration.
 - `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks a swap against the feed price with the provided slippage.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Expected output amount for a swap.
 - `function isRewardToken(address token) external view returns (bool)`: Whether the token has a staleness window configured.

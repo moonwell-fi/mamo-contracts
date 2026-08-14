@@ -121,6 +121,11 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         registry.whitelistImplementation(implementation, strategyTypeId);
 
         // 2. Grant the factory BACKEND_ROLE so it can register user accounts with the registry.
+        //    ORDERING DEPENDENCY: this grants the FACTORY only. `MamoLeveragedAeroStrategy.depositIdle`
+        //    now gates on the registry's BACKEND_ROLE (Sherlock #41), and the OPERATOR's grant
+        //    (`MAMO_BACKEND`) lives in 011, not here. If 012 ships without 011 having executed,
+        //    depositIdle is operator-inaccessible — the account owner can still call it, so this is a
+        //    liveness gap and not a lockout, but 011 must land first.
         registry.grantRole(registry.BACKEND_ROLE(), factory);
 
         // 3. Open deposits on the SyndicateVault so the accounts can deposit USDC.

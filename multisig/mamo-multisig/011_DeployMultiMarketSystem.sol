@@ -225,12 +225,18 @@ contract DeployMultiMarketSystem is MultisigProposal {
             }
 
             // 3. Grant BACKEND_ROLE to the new factory BEFORE revoking the old one.
-            //    Order is load-bearing, not cosmetic: BACKEND_ROLE is an EnumerableSet, and a
-            //    revocation swaps the LAST member into the vacated slot. Revoking first therefore
-            //    re-points `getRoleMember(BACKEND_ROLE, 0)` — the value `getBackendAddress()`
-            //    returns — at whatever happened to be last, in the middle of the proposal. Granting
-            //    first also means there is no instant in which this asset has no factory able to
-            //    onboard users.
+            //    The invariant that matters here is NOT the ordering. BACKEND_ROLE is an
+            //    EnumerableSet, and `remove` swaps the LAST member into the REMOVED member's slot —
+            //    so `getRoleMember(BACKEND_ROLE, 0)`, the value `getBackendAddress()` returns, moves
+            //    if and only if the member being revoked is itself at index 0, in either ordering.
+            //    The real rule is: NEVER revoke the index-0 member without re-establishing index 0
+            //    deliberately. (Recovery, if that is ever needed: grant the intended address first —
+            //    a fresh grant appends, so it is last — then revoke the index-0 member, and the
+            //    newly granted member swaps into slot 0.)
+            //
+            //    This proposal revokes only old factories, which sit at indices 1, 2 and 5, so
+            //    index 0 is untouched in either ordering. Grant-first is kept because it reads
+            //    naturally and costs nothing, not because it protects index 0.
             registry.grantRole(registry.BACKEND_ROLE(), addresses.getAddress(keys.factoryKey));
 
             // 4. Revoke BACKEND_ROLE from the old factory
@@ -331,8 +337,13 @@ contract DeployMultiMarketSystem is MultisigProposal {
 
         // Paired with the preBuildMock assertion: this proposal grants four members and revokes
         // three, and none of that may move index 0. `getBackendAddress()` is no longer an
-        // authorization primitive anywhere in src/ (see Sherlock #41), but it remains a live
-        // off-chain read, and a silent change of identity here is exactly the failure mode.
+        // authorization primitive anywhere in src/ (see Sherlock #41) — but that is only true of
+        // the NEW implementation. Every strategy proxy already deployed still gates updatePosition,
+        // claimRewards and setFeeRecipient on being index 0, and `upgradeStrategy` is
+        // owner-initiated, so those proxies stay that way until each owner chooses to upgrade.
+        // Moving index 0 today would therefore silently take the backend offline across the whole
+        // un-upgraded fleet. Keep this assertion — and the equivalent in every future proposal that
+        // mutates BACKEND_ROLE — until the fleet has migrated.
         assertEq(
             registry.getBackendAddress(),
             addresses.getAddress("STRATEGY_MULTICALL"),

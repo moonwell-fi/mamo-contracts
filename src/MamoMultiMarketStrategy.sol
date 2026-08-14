@@ -300,16 +300,27 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      *      recovery proceed when the fee cannot be paid, is exactly the bypass #49 is about.
      */
     function recoverERC20(address tokenAddress, address to, uint256 amount) public override onlyOwner {
-        bool isReward = _isSettleableRewardToken(tokenAddress);
+        // Settle on the ANCHOR, not only on the current price-checker answer. A token that has been
+        // swept at least once carries an unsettled-fee position (`rewardFeeCharged`) that outlives
+        // its configuration: SlippagePriceChecker.clearRewardToken makes isRewardToken() go false,
+        // after which the old code took both settles off and the anchor stayed stale-high. That is a
+        // second #49 escape by a different door — recover the whole balance untaxed, re-configure,
+        // and the next batch is masked by the stale anchor because {_unchargedRewards} clamps to it.
+        // The trailing settle is the half that actually closes it: it re-anchors to the remaining
+        // balance, so a retired token cannot carry a stale credit back into a future configuration.
+        // The principal exclusions are re-asserted here because they are the only thing standing
+        // between this branch and the strategy's own assets.
+        bool settle = _isSettleableRewardToken(tokenAddress)
+            || (rewardFeeCharged[tokenAddress] > 0 && tokenAddress != address(token) && !_isMarketTarget(tokenAddress));
 
-        if (isReward) {
-            sweepRewardFees(tokenAddress);
+        if (settle) {
+            _settleRewardFees(tokenAddress);
         }
 
         super.recoverERC20(tokenAddress, to, amount);
 
-        if (isReward) {
-            sweepRewardFees(tokenAddress);
+        if (settle) {
+            _settleRewardFees(tokenAddress);
         }
     }
 
@@ -469,6 +480,16 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     function sweepRewardFees(address rewardToken) public returns (uint256 fee) {
         _requireRewardToken(rewardToken);
 
+        return _settleRewardFees(rewardToken);
+    }
+
+    /// @dev The settlement itself, with the eligibility check factored out. {recoverERC20} needs to
+    ///      settle a token whose price-checker entry has since been RETIRED
+    ///      (SlippagePriceChecker.clearRewardToken), which {_requireRewardToken} would reject — see
+    ///      the escape documented on {recoverERC20}. Every caller is responsible for proving the
+    ///      token is not principal before getting here; there is no path that reaches this with the
+    ///      strategy's own asset or a market share.
+    function _settleRewardFees(address rewardToken) internal returns (uint256 fee) {
         uint256 balance = IERC20(rewardToken).balanceOf(address(this));
         fee = (_unchargedRewards(rewardToken, balance) * compoundFee) / SPLIT_TOTAL;
 
@@ -741,15 +762,28 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
             if (capacity == 0) return 0;
 
             if (amount >= capacity) {
-                // Taking the whole capacity goes through redeem(maxRedeem), not withdraw(maxWithdraw).
-                // The two are only equivalent when the vault's asset<->share conversions are exactly
-                // self-inverse; a vault whose maxWithdraw floors while previewWithdraw ceils reports
-                // a capacity that costs one more share than it holds, and withdraw() reverts at
-                // precisely the boundary this branch always sits on. Share-denominated exit has no
-                // such boundary — maxRedeem is by definition redeemable.
-                uint256 shares = IERC4626(market.target).maxRedeem(address(this));
-                if (shares == 0) return 0;
-                IERC4626(market.target).redeem(shares, address(this), address(this));
+                // Taking the whole capacity goes through redeem(), not withdraw(maxWithdraw): the two
+                // are only equivalent when the vault's asset<->share conversions are exactly
+                // self-inverse, and a vault whose maxWithdraw floors while previewWithdraw ceils
+                // reports a capacity that costs one more share than it holds, so withdraw() reverts at
+                // precisely the boundary this branch always sits on.
+                //
+                // WHICH share count to redeem is the same asset-terms decision {_withdrawFromMarket}
+                // makes, and for the same reason: MetaMorpho's maxRedeem round-trips
+                // shares -> assets -> shares flooring at each step, so redeem(maxRedeem) delivers
+                // maxWithdraw - 1 while {_getTotalBalance} advertised previewRedeem(shareBalance) ==
+                // maxWithdraw. Being one unit short is enough to fail the `remaining == 0` require at
+                // the end of {_withdrawFromMarkets} — i.e. a max withdrawal reverts — so the full share
+                // balance has to go out whenever the vault can honour it, and maxRedeem is only the
+                // right answer when the vault is genuinely liquidity-constrained.
+                uint256 shareBalance = IERC4626(market.target).balanceOf(address(this));
+                if (capacity >= IERC4626(market.target).previewRedeem(shareBalance)) {
+                    IERC4626(market.target).redeem(shareBalance, address(this), address(this));
+                } else {
+                    uint256 shares = IERC4626(market.target).maxRedeem(address(this));
+                    if (shares == 0) return 0;
+                    IERC4626(market.target).redeem(shares, address(this), address(this));
+                }
             } else {
                 IERC4626(market.target).withdraw(amount, address(this), address(this));
             }

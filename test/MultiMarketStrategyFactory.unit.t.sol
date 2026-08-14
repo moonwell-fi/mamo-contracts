@@ -578,6 +578,47 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
         factory.setDefaultSplitBps(_defaultSplits());
     }
 
+    /// @notice The set-time half of the inactive-market rule. Without it a nonzero allocation on a
+    ///         deactivated market is accepted here — it passes the sum check — and only surfaces
+    ///         much later, as a revert inside the strategy's initialize() that bricks creation for
+    ///         the whole asset. The pre-existing coverage of `"Inactive market must have zero
+    ///         split"` goes through createStrategyForUser, i.e. the STRATEGY's check, not this one:
+    ///         deleting the setter's loop entirely used to leave the suite green.
+    function testRevertSetDefaultSplitBpsInactiveMarketWithNonZeroSplit() public {
+        MultiMarketStrategyFactory factory = _createDefaultFactory();
+
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(token, vaultMarket);
+
+        uint256[] memory splits = new uint256[](2);
+        splits[0] = 4000;
+        splits[1] = 6000; // the deactivated market
+
+        vm.prank(backend);
+        vm.expectRevert("Inactive market must have zero split");
+        factory.setDefaultSplitBps(splits);
+    }
+
+    /// @notice Deactivating a market does not remove its slot — the array is still market-count
+    ///         long, with a zero in the deactivated position.
+    function testSetDefaultSplitBpsAcceptsZeroOnAnInactiveMarket() public {
+        MultiMarketStrategyFactory factory = _createDefaultFactory();
+
+        vm.prank(backend);
+        marketRegistry.deactivateMarket(token, vaultMarket);
+
+        uint256[] memory splits = new uint256[](2);
+        splits[0] = 10000;
+        splits[1] = 0;
+
+        vm.prank(backend);
+        factory.setDefaultSplitBps(splits);
+
+        uint256[] memory stored = factory.getDefaultSplitBps();
+        assertEq(stored.length, 2, "the deactivated market keeps its slot");
+        assertEq(stored[1], 0);
+    }
+
     function testRevertSetDefaultSplitBpsBadTotal() public {
         MultiMarketStrategyFactory factory = _createDefaultFactory();
 
