@@ -878,8 +878,8 @@ Strategy events that exist today:
   floored by the AERO/USD oracle (`BelowOracleFloor`). Pass **tight, freshly-quoted** floors; `0` is not
   legal for `compound.minUsdcOut` (`ZeroMinOut`).
 - **Swap-route `tickSpacing` is now configured, not hardcoded (was audit item 10).** The three
-  `int24(100)` literals are gone: the auxiliary USDC↔leg swap helpers (`_swapUsdcExactIn`,
-  `_sweepLegToUsdc`, `_redeemCoverShortfall`) resolve the route spacing per leg from the init params
+  `int24(100)` literals are gone: the auxiliary USDC↔leg swap helpers
+  (`_sweepLegToUsdc`, `_redeemCoverShortfall`) resolve the route spacing per leg from the init params
   `cbBTCSwapTickSpacing` / `wethSwapTickSpacing` (non-zero enforced at init; readable via `layout()`),
   independently of the LP pool's `tickSpacing`. The single-venue-at-spacing-100 assumption is **gone** —
   but the route is still **one pool per leg**, fixed at init and not switchable at runtime, so keep an eye

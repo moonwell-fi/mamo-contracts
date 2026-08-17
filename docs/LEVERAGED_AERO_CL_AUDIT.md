@@ -222,13 +222,14 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
    after every share has exited — this replaces the upstream "rescue dormant under `redemptionsLocked`"
    residual).
 10. **Swap-route `tickSpacing`** — the three hardcoded `int24(100)` literals in the auxiliary
-    leg↔USDC swap helpers (`_swapUsdcExactIn`, `_sweepLegToUsdc`, `_redeemCoverShortfall`) are gone;
+    leg↔USDC swap helpers (`_sweepLegToUsdc`, `_redeemCoverShortfall`) are gone;
     the spacing is now per-leg config (`$.cbBTCSwapTickSpacing` / `$.wethSwapTickSpacing`, read through
     `_legSwapSpacing`). **The init check is only `!= 0`** — nothing verifies the named swap pool exists,
     is the right pair, or is liquid, so the wrong-or-illiquid-venue concern is narrowed to a
     configuration risk rather than eliminated. Slippage protection remains uneven across call sites:
-    `_settleShortfall`'s `_swapUsdcExactIn` calls pass an oracle-derived
-    `minAmtOut = debtRem × (10000 − maxSlippageBps)/10000`; `_redeemCoverShortfall` is exact-output and
+    `_settleShortfall` now routes both legs through `_redeemCoverShortfall` too, so its budget and its
+    bound are the same number (`oracleCost × (10000 + maxSlippageBps)/10000`, audit F08);
+    `_redeemCoverShortfall` is exact-output and
     bounded by `amountInMax` (`type(uint256).max`/idle-USDC cap on full redeem, the redeemer's own
     budget on partial redeem, an oracle+slippage ceiling on the permissionless deleverage path); but the
     two redeem-path residual-leg sweeps (`redeemUnwindImpl` → `_sweepLegToUsdc($.cbBTC/$.weth, …, 0)`)

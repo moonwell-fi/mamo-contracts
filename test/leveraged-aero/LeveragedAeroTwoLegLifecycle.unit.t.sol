@@ -1581,7 +1581,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
         pool.setTick(newTick);
         pool.setTwapTick(newTick);
-        uint256 newPB = (P_LEG_B * 1_061_837) / 1_000_000; // 1.0001^600
+        uint256 newPB = _legBMovedPrice();
         legBFeed.setAnswer(int256(newPB));
         router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
         router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
@@ -1604,6 +1604,76 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     function _legBBuyCost(uint256 legBOut) internal view returns (uint256) {
         uint256 rate = router.rateE18(address(usdc), address(legB));
         return (legBOut * 1e18 + rate - 1) / rate;
+    }
+
+    /// @dev Leg B's post-move mark — the feed answer `_armLegBIlShortfall` installs, and therefore the
+    ///      price `_settleShortfall` sizes its budget against.
+    function _legBMovedPrice() internal pure returns (uint256) {
+        return (P_LEG_B * 1_061_837) / 1_000_000; // 1.0001^600
+    }
+
+    /// @dev Re-price the USDC→leg B BUY side `worseBps` worse than the mark `_armLegBIlShortfall` left,
+    ///      i.e. the cover now costs `(1 + worseBps/10000)×` the oracle value of what it buys. Only the
+    ///      buy direction moves, so the leg sweeps are untouched.
+    function _worsenLegBBuy(uint256 worseBps) internal {
+        uint256 fair = (100 * 1e8 * 1e18) / _legBMovedPrice();
+        router.setRate(address(usdc), address(legB), (fair * 10000) / (10000 + worseBps));
+    }
+
+    /**
+     * @dev F08 (a). THE SETTLE COVER'S BUDGET IS `maxSlippageBps`, NOT A HARDCODED 10%. The old
+     *      `_settleShortfall` redeemed `oracleCost × 110%` of collateral and pushed all of it through an
+     *      exact-INPUT swap floored only at `debtRem × (1 − maxSlippageBps)`. Those two bounds were
+     *      INDEPENDENT, so any router filling between them simply kept the difference — up to ~11% of the
+     *      shortfall on this 100bps clone, taken out of the collateral backing every other holder.
+     *
+     *      A fill 500bps worse than the mark is the witness: comfortably inside the old 10% budget (so it
+     *      used to go through and quietly overpay) and outside the configured 100bps band. Now that the
+     *      budget IS the bound — one exact-output buy of `debtRem` capped at `oracleCost × (1 + slip)` —
+     *      it is refused, and refused FAIL-CLOSED, because a half-cleared debt would only reappear as
+     *      dust Moonwell refuses to release the collateral against.
+     *
+     *      Reached through the full-redeem Phase 2: the keeper parked everything, so Phase 1 has a zero
+     *      budget and early-returns, leaving `_settleShortfall` to own the whole cover.
+     */
+    function testSettleShortfallCoverCannotOverpayPastMaxSlippage() public {
+        uint256 shares = _armLegBIlShortfall();
+        assertEq(usdc.balanceOf(address(strategy)), 0, "premise: Phase 1 has nothing to spend, so Phase 2 covers");
+        _worsenLegBBuy(500);
+
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        vm.expectRevert(MockClSwapRouter.MockRouterMaxIn.selector);
+        strategy.fulfillRedeem(id);
+    }
+
+    /**
+     * @dev F08 (b). THE BAND, NOT A DEMAND FOR A PERFECT FILL — the companion that stops (a) from passing
+     *      on a cover that simply never works. 50bps worse than the mark is inside the clone's 100bps
+     *      band and must complete, and the USDC it spent must be inside `oracleValue(bought) × 1.01`.
+     *      Together the two tests bracket the settle cover at exactly `maxSlippageBps`.
+     */
+    function testSettleShortfallCoverAcceptsAFillInsideTheBand() public {
+        uint256 shares = _armLegBIlShortfall();
+        _worsenLegBBuy(50);
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 boughtBefore = router.boughtOf(address(legB));
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        uint256 bought = router.boughtOf(address(legB)) - boughtBefore;
+        assertGt(bought, 0, "the settle cover really ran");
+        assertLe(
+            _legBBuyCost(bought),
+            (_valueUsdc(bought, _legBMovedPrice(), 8) * 10100) / 10000,
+            "spend stayed inside oracle cost x (1 + maxSlippageBps)"
+        );
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared");
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid");
     }
 
     /**

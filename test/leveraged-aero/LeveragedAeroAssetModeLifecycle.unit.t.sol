@@ -1122,7 +1122,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
     /**
      * @dev Companion to the crux: every leg-B (== USDC) swap must be the IDENTITY, i.e. never routed.
-     *      Without the early-returns in `_sweepLegToUsdc` / `_swapUsdcExactIn` / `_redeemCoverShortfall`
+     *      Without the early-returns in `_sweepLegToUsdc` / `_redeemCoverShortfall`
      *      the redeem would look up a USDC/USDC swap pool — which does not exist — and either revert or
      *      route at an unrelated venue.
      *

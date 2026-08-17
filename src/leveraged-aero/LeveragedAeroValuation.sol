@@ -804,9 +804,9 @@ library LeveragedAeroValuation {
     /// @notice Slipstream `exactInputSingle` (plus the approval), as ONE definition.
     /// @dev VENUE PLUMBING ONLY — every decision stays with the caller: which token, how much (and the
     ///      caps that bound it), and what `minOut` bound applies. `LeveragedAeroManager` calls this from
-    ///      `_swapUsdcExactIn` and `_sweepLegToUsdc` AFTER their identity guards / balance caps, and
-    ///      `_spendLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
-    ///      construction exists once instead of three times. Relocated out of the manager for EIP-170
+    ///      `_sweepLegToUsdc` AFTER its identity guard / balance cap, and `_spendLeg` below calls it for
+    ///      the interest-drift buy, so the `ExactInputSingleParams`
+    ///      construction exists once instead of twice. Relocated out of the manager for EIP-170
     ///      headroom; a 6-argument flat surface is why it is a net saving there.
     /// @param router      Slipstream CL SwapRouter.
     /// @param tokenIn     Token sold. Never equal to `tokenOut` — callers guard the identity case.
@@ -1031,7 +1031,7 @@ library LeveragedAeroValuation {
     ///
     ///      ASSET-MODE. The manager calls this for leg A only when `legBIsAsset` (leg B is the unit of
     ///      account there and structurally carries no debt), so `h.leg != h.usdc` always holds and the
-    ///      identity swap that `_swapUsdcExactIn` guards against is unreachable from here.
+    ///      identity swap that `_sweepLegToUsdc` guards against is unreachable from here.
     ///      PRO-RATA ACROSS THE LEGS — MEASURE BOTH, *THEN* SPEND. The budget is one shared ceiling over
     ///      two independent drifts, so how it is divided is a real decision and it used to be made
     ///      implicitly: leg A was handed the WHOLE budget and leg B got `budget − spentA`. Whenever leg A's

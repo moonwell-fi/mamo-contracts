@@ -73,7 +73,7 @@ interface IRewardSaleSelf {
 ///           `mCbBTC == mUsdc`, so every `borrowBalanceStored($.mCbBTC)` read is structurally 0. The
 ///           debt / health / repay / shortfall paths therefore need NO branch — they naturally see a
 ///           single-leg book.
-///         - Every "swap leg B ↔ USDC" is the IDENTITY: `_sweepLegToUsdc`, `_swapUsdcExactIn` and
+///         - Every "swap leg B ↔ USDC" is the IDENTITY: `_sweepLegToUsdc` and
 ///           `_redeemCoverShortfall` early-return on the unit of account, so no zero-address swap-pool
 ///           lookup, no pointless router call, and no double-counted balance.
 ///         - `$.cbBTCFeed == $.usdcFeed` (init-enforced), so `_tokenToUsdc(x, 6, pUsdc, pUsdc) == x`:
@@ -1423,55 +1423,54 @@ library LeveragedAeroManager {
         _settleShortfall();
     }
 
-    /// @dev If any borrow balance remains after the direct repay attempt, redeem USDC from
-    ///      mUSDC collateral and swap to cover it. Chainlink prices + 10% buffer; dust floor,
-    ///      sized off the ACCRUED debt (see the reads).
+    /// @dev If any borrow balance remains after the direct repay attempt, fund the residue out of mUSDC
+    ///      collateral and BUY EXACTLY THE DEBT to clear it. Chainlink-priced budget; dust floor.
+    ///
+    ///      EXACT-OUTPUT, AND THE BUDGET IS THE CONFIGURED SLIPPAGE — not a hardcoded 10%. This used to
+    ///      redeem `oracleCost × 110%` and spend all of it through an exact-INPUT swap floored at
+    ///      `debtRem × (1 − maxSlippageBps)`. Those two bounds were INDEPENDENT, so a router filling
+    ///      anywhere between them kept the whole gap: on a 100 bps clone the position could overpay by
+    ///      ~11% of the shortfall with nothing on chain objecting, and the overpayment came out of the
+    ///      collateral backing every other holder. Routing both legs through `_redeemCoverShortfall`
+    ///      makes ONE number — `maxSlippageBps` — both the budget and the bound: the swap buys exactly
+    ///      `debtRem` and reverts rather than spending past `oracleCost × (1 + maxSlippageBps)`.
+    ///
+    ///      FAIL-CLOSED (`bestEffort == false`) AT BOTH SITES, deliberately. This is the LAST thing
+    ///      standing between a full unwind and `_redeemCollateral`'s `redeem(cBal)` / `settleImpl`'s
+    ///      step-4 burn, and Moonwell refuses to release collateral while ANY debt is live. An
+    ///      unaffordable cover must roll the whole op back, not leave dust for that burn to trip over.
+    ///
+    ///      ACCRUE, *THEN* MEASURE, for the reason `_settleRepayDebts` states and one more of its own:
+    ///      `debtRem` is now the exact-OUTPUT amount, so a stale-low read under-buys by construction and
+    ///      strands exactly the dust described above. `_settleRepayDebts` does accrue both markets ahead
+    ///      of its call, but `redeemUnwindImpl`'s Phase-2 call site does NOT go through it — the old
+    ///      "no fresh read is needed" note was only ever true for one of the two callers.
     function _settleShortfall() private {
         Layout storage $ = _layout();
-        // ACCRUE, *THEN* MEASURE — `redeemUnwindImpl`'s Phase 2 reaches here WITHOUT `_settleRepayDebts`'s
-        // prior accrual (see that caller), so a stored read under-sizes the cover by the pending interest.
         uint256 cbDebtRem = IMoonwellMarket($.mCbBTC).borrowBalanceCurrent(address(this));
         uint256 wethDebtRem = IMoonwellMarket($.mWeth).borrowBalanceCurrent(address(this));
         if (cbDebtRem == 0 && wethDebtRem == 0) return;
-        // Read Chainlink prices (8dp each)
+        // Read Chainlink prices (8dp each) — reached ONLY on a book that still owes after the direct
+        // repays, i.e. genuine deep IL. See `redeemUnwindImpl`'s Phase-2 note for what that costs the
+        // deadman, and why the phases above it exist to keep this unreached.
         (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
-        // USDC needed for each shortfall leg (+10% buffer)
-        uint256 cbUsdcNeed = _tokenToUsdc(cbDebtRem, $.cbBTCDecimals, pBTC, pUsdc) * 11000 / 10000;
-        uint256 wethUsdcNeed = _tokenToUsdc(wethDebtRem, $.wethDecimals, pETH, pUsdc) * 11000 / 10000;
-        // Dust floor: nonzero debt but oracle cost rounds to 0 (e.g. 1 wei WETH) → redeem enough
+        uint256 slip = uint256($.maxSlippageBps);
+        // Per-leg USDC budget: the oracle cost grossed up by the CONFIGURED slippage. This same number
+        // is the exact-output swap's `amountInMax` below, which is what collapses the two old bounds
+        // into one.
+        uint256 cbUsdcNeed = _tokenToUsdc(cbDebtRem, $.cbBTCDecimals, pBTC, pUsdc) * (10000 + slip) / 10000;
+        uint256 wethUsdcNeed = _tokenToUsdc(wethDebtRem, $.wethDecimals, pETH, pUsdc) * (10000 + slip) / 10000;
+        // Dust floor: nonzero debt but oracle cost rounds to 0 (e.g. 1 wei WETH) → fund enough
         // to acquire at least 1 unit of that token.
         if (cbDebtRem > 0 && cbUsdcNeed == 0) cbUsdcNeed = 1e5;
         if (wethDebtRem > 0 && wethUsdcNeed == 0) wethUsdcNeed = 1e5;
-        uint256 totalNeed = cbUsdcNeed + wethUsdcNeed;
-        // Redeem USDC collateral to fund the swaps (health elevated after partial repays)
-        if (totalNeed > 0) _redeemUnderlying($.mUsdc, totalNeed);
-        uint256 slip = uint256($.maxSlippageBps);
-        // Cover cbBTC shortfall
-        if (cbDebtRem > 0) {
-            _swapUsdcExactIn($.cbBTC, cbUsdcNeed, cbDebtRem * (10000 - slip) / 10000);
-            uint256 cbBal2 = IERC20($.cbBTC).balanceOf(address(this));
-            if (cbBal2 > 0) {
-                IERC20($.cbBTC).forceApprove($.mCbBTC, cbBal2);
-                // SAME SHAPE `_settleRepayDebts` closes above: `max` pulls the FULL accrued debt
-                // while the approve is sized off the BALANCE, and the funding swap only guarantees
-                // `debtRem * (1 - maxSlippageBps)` — so a min-fill leaves balance < debt and reverts
-                // the whole unwind (and therefore `flatten`, and therefore `migrateVenue`). Repay the
-                // balance in that case. No fresh market read is needed: `_settleRepayDebts` ran
-                // `borrowBalanceCurrent` on this market in this tx and no time has passed since, so
-                // `cbDebtRem` IS the accrued debt.
-                _repay($.mCbBTC, cbBal2 >= cbDebtRem ? type(uint256).max : cbBal2);
-            }
-        }
-        // Cover WETH shortfall (bounded by its own oracle budget, not the full idle balance — M1;
-        // `_swapUsdcExactIn` still caps at the live USDC balance).
-        if (wethDebtRem > 0) {
-            _swapUsdcExactIn($.weth, wethUsdcNeed, wethDebtRem * (10000 - slip) / 10000);
-            uint256 wBal2 = IERC20($.weth).balanceOf(address(this));
-            if (wBal2 > 0) {
-                IERC20($.weth).forceApprove($.mWeth, wBal2);
-                _repay($.mWeth, wBal2 >= wethDebtRem ? type(uint256).max : wBal2); // see the cbBTC leg
-            }
-        }
+        // Fund the buys out of collateral, but only the part the raw balance does not already cover.
+        _materialiseUsdc(cbUsdcNeed + wethUsdcNeed);
+        // Cover each leg by buying EXACTLY the remaining debt, capped at its own oracle budget, and
+        // repaying it. Asset-mode is a structural no-op on the leg-B line (leg B is the unit of account
+        // and carries no debt, so `cbDebtRem` is 0 and `_redeemCoverShortfall` guards the identity too).
+        if (cbDebtRem > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbDebtRem, cbUsdcNeed, false);
+        if (wethDebtRem > 0) _redeemCoverShortfall($.weth, $.mWeth, wethDebtRem, wethUsdcNeed, false);
     }
 
     /// @dev tickSpacing of the `leg`↔USDC SWAP pool — a different venue from the LP pool, so it
@@ -1483,22 +1482,6 @@ library LeveragedAeroManager {
         if (leg == $.cbBTC) return $.cbBTCSwapTickSpacing;
         if (leg == $.weth) return $.wethSwapTickSpacing;
         revert UnsupportedLeg();
-    }
-
-    /// @dev Swap a fixed USDC amount in for `tokenOut` via Slipstream exactInputSingle.
-    ///      Caps actualIn at the current USDC balance.
-    ///      ASSET-MODE IDENTITY: buying the unit of account WITH the unit of account is a no-op — return
-    ///      before touching the router. Defence-in-depth: leg B carries no debt in asset-mode, so
-    ///      `_settleShortfall`'s leg-B branch is already unreachable.
-    function _swapUsdcExactIn(address tokenOut, uint256 amountIn, uint256 minAmtOut) private {
-        Layout storage $ = _layout();
-        if (tokenOut == $.usdc) return;
-        uint256 usdcBal = IERC20($.usdc).balanceOf(address(this));
-        uint256 actualIn = usdcBal < amountIn ? usdcBal : amountIn;
-        if (actualIn == 0) return;
-        LeveragedAeroValuation.swapExactIn(
-            $.swapRouter, $.usdc, tokenOut, _legSwapSpacing(tokenOut), actualIn, minAmtOut
-        );
     }
 
     /// @dev Sweep the WHOLE `tokenIn` balance → USDC at a Chainlink-derived floor
