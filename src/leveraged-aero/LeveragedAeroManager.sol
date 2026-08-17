@@ -905,6 +905,15 @@ library LeveragedAeroManager {
         uint256 healthBefore = (collateralBefore * 10000) / debtBefore;
         uint256 minHealth = uint256($.minHealthBps);
         if (healthBefore >= minHealth) revert HealthyNoDeleverage();
+        // ERR DELIBERATELY DISCARDED HERE — it is checked on the AFTER read below, and that is strictly
+        // stronger. Compound's `getAccountLiquidity` returns `(err, 0, 0)` on EVERY error branch, so a
+        // failed read here leaves `shortfallBefore == 0` and the gate below becomes
+        // `shortfallAfter >= 0` — always true — i.e. ANY residual shortfall reverts. Tighter, not looser.
+        // And the conditions that raise `err` (a zero oracle price, a snapshot failure on an entered
+        // market) cannot be cleared by this op — nothing here exits a market — so the after read errs
+        // too and the call reverts anyway. Capturing it here could therefore only convert a
+        // provably-healthy success into a revert of the PERMISSIONLESS health valve, at a cost in bytes
+        // this library does not have.
         (,, uint256 shortfallBefore) = IComptroller($.comptroller).getAccountLiquidity(address(this));
 
         // Target debt that lands health at minHealthBps + the re-trigger buffer (collateral is

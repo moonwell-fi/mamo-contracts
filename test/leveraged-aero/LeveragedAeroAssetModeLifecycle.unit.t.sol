@@ -1159,6 +1159,48 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         );
     }
 
+    // ============ THE DELEVERAGE RECOVERY GATE'S COMPTROLLER READS (F27) ============
+    //
+    // `deleverageImpl` discards the error code on the BEFORE `getAccountLiquidity` and checks it only on
+    // the AFTER read. That is deliberate and strictly tighter — see the comment at the before-read — and
+    // these two tests are what make the claim checkable rather than asserted.
+
+    /// @dev Reach the unhealthy state the permissionless valve exists for, without touching prices (so
+    ///      the LP stays two-sided and the unwind's collected leg A can cover the repay).
+    function _armAnUnhealthyBook() internal {
+        _execute(SEED);
+        mUsdc.setExchangeRateStored(0.5e18);
+        (uint256 c, uint256 d) = _collateralAndDebt();
+        assertLt((c * 10_000) / d, 12_000, "fixture must actually be unhealthy, or the valve refuses");
+    }
+
+    /// @dev A comptroller that ERRS is caught on the AFTER read and reverts the whole op. The conditions
+    ///      that raise `err` (zero oracle price, snapshot failure on an entered market) cannot be cleared
+    ///      by this op — nothing here exits a market — so the before read would have erred too, which is
+    ///      exactly why capturing it there buys nothing. Mutation: drop the `err != 0` clause and this
+    ///      succeeds, because an errored read reports `shortfallAfter == 0`.
+    function testDeleverageRevertsWhenTheComptrollerErrsOnTheAfterRead() public {
+        _armAnUnhealthyBook();
+        comptroller.setAccountLiquidityError(3);
+
+        vm.prank(makeAddr("keeper"));
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.deleverage(0);
+    }
+
+    /// @dev The other half of the recovery gate: the Moonwell shortfall must have been cleared or
+    ///      REDUCED. Held constant across the op, the repay is rolled back even though the strategy's own
+    ///      health measure improved. Mutation: delete the `shortfallAfter >= shortfallBefore` clause and
+    ///      this succeeds.
+    function testDeleverageRejectsANonReducedShortfall() public {
+        _armAnUnhealthyBook();
+        comptroller.setShortfall(1e18); // same value on both reads
+
+        vm.prank(makeAddr("keeper"));
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.deleverage(0);
+    }
+
     // ==================== THE CRUX INVARIANT ====================
 
     /**
