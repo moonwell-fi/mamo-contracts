@@ -26,8 +26,9 @@
 # FE/BE/keeper work points at, so this harness ALWAYS reuses TENDERLY_VNET_RPC_URL
 # (the vnet's ADMIN RPC — it accepts eth_sendTransaction from any unlocked sender AND
 # serves reads). It never creates or tears down a vnet: an ephemeral fork would be
-# deleted with the stack on it. Create the vnet per runbook Phase A (chainId 8453
-# MANDATORY, state sync DISABLED, persistent).
+# deleted with the stack on it. Create the vnet per runbook Phase A (persistent, state sync
+# DISABLED; a CUSTOM chain id is supported and preferred — the live instance reports 73578453,
+# which needs EXPECTED_CHAIN=73578453 and an addresses/73578453.json copy of 8453.json).
 #
 # ── NO TIME WARPING ───────────────────────────────────────────────────────────
 # This script never calls evm_increaseTime. FreshFeed makes warping SAFE, but the

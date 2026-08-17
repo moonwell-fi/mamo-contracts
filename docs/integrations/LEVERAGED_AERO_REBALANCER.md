@@ -1344,11 +1344,14 @@ Three things to keep straight:
 
 ## Staging
 
-> **The live staging instance runs the current in-repo stack** (vault generation 2): a
-> `LeveragedAerodromeCLStrategy` clone bound to `LeveragedAeroVault`, deployed by
-> `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue / fee-config surface documented
-> above (`activateStrategy`, `settleStrategy`, `redeemSettled`, `setFeeConfig`) and the any-pool init +
-> per-leg swap spacings. Sherwood is gone — no `SyndicateVault`, no governor, no proposal lifecycle.
+> **The live staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-17 from
+> the audit-remediation branch: a `LeveragedAerodromeCLStrategy` clone bound to `LeveragedAeroVault`,
+> deployed by `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue / fee-config surface
+> documented above (`activateStrategy`, `settleStrategy`, `redeemSettled`, `setFeeConfig`), the fund
+> capacity cap (`maxTotalAssets` / `remainingCapacity`), the per-cycle rerange skew and the any-pool init
+> + per-leg swap spacings. Everything on this page — the `fulfillRedeem(uint256,uint256)` signature, the
+> `OutOfBounds` / `NothingToRerange` selectors, `setProposer` rotation — matches the code that is live
+> here. Sherwood is gone: no `SyndicateVault`, no governor, no proposal lifecycle.
 >
 > ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table — a harness
 > redeploy changes these addresses. Re-read it and
@@ -1357,12 +1360,12 @@ Three things to keep straight:
 
 | Field | Value | Config key |
 |---|---|---|
-| Network | Base fork (Tenderly Virtual TestNet), chainId `8453` | `chainId` |
-| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Network | Base fork (Tenderly Virtual TestNet), **custom** chainId `73578453` (parent Base `8453`) | `chainId` |
+| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
-| Strategy clone (the operator target) | `0xA26557fA6823881327fca5b8C4eD5857997A49da` — width 4000 / band [200, 20000] | `pooled.strategyClone` |
-| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
-| Strategy template (clone source) | `0xafcA85Df8e058A7a755889884d87026e8e118943` | `pooled.template` |
+| Strategy clone (the operator target) | `0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c` — width 4000 / band [200, 20000], skew 5000 / band [1000, 9000] | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1` | `pooled.vault` |
+| Strategy template (clone source) | `0x5B33a96509C32b523eaE1b778173e735Fc4fcdA0` | `pooled.template` |
 | **Proposer / agent** (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
 | LP pool (Slipstream, tickSpacing 100) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
 | Seed (USDC, 6dp) | `100000000000` = 100,000 USDC | `pooled.seed` |

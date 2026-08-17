@@ -50,10 +50,12 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
 
 ## Contracts & chain (staging)
 
-> **The staging instance now runs the current in-repo stack** (vault generation 2): the vault beneath the
-> accounts is `LeveragedAeroVault`, so `depositsOpen()` and the permissionless `redeemSettled` Settled
-> flow below are both live and exercisable. Sherwood is gone — no `SyndicateVault`, no governor, no
-> propose→vote→execute.
+> **The staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-17: the vault
+> beneath the accounts is `LeveragedAeroVault` with the fund capacity cap (`maxTotalAssets()` /
+> `remainingCapacity()`), so `depositsOpen()`, the capacity UI below and the permissionless
+> `redeemSettled` Settled flow are all live and exercisable. Every error string on this page — including
+> `"Unclaimed withdrawal proceeds"` and `FundAtCapacity` — is the behaviour of the code deployed here.
+> Sherwood is gone: no `SyndicateVault`, no governor, no propose→vote→execute.
 >
 > ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table. Addresses
 > change whenever a harness redeploys; read the config file (and
@@ -61,16 +63,21 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
 
 | Field | Value | Config key |
 |---|---|---|
-| Network | Base fork (Tenderly Virtual TestNet), chainId `8453` | `chainId` |
-| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Network | Base fork (Tenderly Virtual TestNet), **custom** chainId `73578453` (parent Base `8453`) | `chainId` |
+| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
-| Factory | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
-| Account implementation | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
+| Factory | `0x46108914a8c2EFadF7Ab69e45B5C1cb657A9003E` | `mamo.accountFactory` |
+| Account implementation | `0x9703a770FF62280Cf6220421D83A245dA7B60E24` | `mamo.accountImplementation` |
 | Registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
-| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
-| Strategy clone | `0xA26557fA6823881327fca5b8C4eD5857997A49da` | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1` | `pooled.vault` |
+| Strategy clone | `0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c` | `pooled.strategyClone` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
+
+> **The chain id is deliberately not `8453`.** Wallets and RPC configs must use `73578453` (Tenderly's
+> `7357` prefix + the parent network) — it keeps the staging instance disambiguated from real Base and
+> makes replayed transactions impossible. Fork *state* is still Base, so every venue address (USDC,
+> Aerodrome, Moonwell, the Chainlink feeds) resolves exactly as it does on mainnet.
 
 > Production addresses are published separately at deploy.
 

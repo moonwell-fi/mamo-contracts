@@ -519,10 +519,14 @@ cast call "$VAULT" 'balanceOf(address)(uint256)' "$MULTISIG" --rpc-url "$PUB"   
 
 On success the harness merge-writes `script/tenderly/leveraged-aero-vnet.json` — the machine-consumable
 address book downstream consumers read. It owns the `pooled` (`vault`, `strategyClone`, `template`,
-`proposer`, `seed`, `lpPool`) and `feeds` objects plus `vaultGeneration: 2`, and **nulls the account
+`proposer`, `seed`, `lpPool`) and `feeds` objects plus `vaultGeneration: 3`, and **nulls the account
 addresses**: a new pooled layer invalidates the account factory (it binds the strategy clone at
 construction), so Phase C must run again. The account harness merge-writes the `mamo` object back in,
 so the two never clobber each other.
+
+The merge also `del(.STALE)`s: a hand-added "this recorded layer is out of date, redeploy before use"
+marker describes the layer being *replaced*, and a plain `$prev * {…}` would carry it forward onto the
+fresh one. A successful run of Phase B is precisely the event that retires such a marker.
 
 ---
 
@@ -817,9 +821,10 @@ tighten the proposer bound onto the live quote rather than relying on the 1 % or
 
 ### Live results — 2026-07-29 on clone `0x7A5A…01Fd` / vault `0x8BcA…B0F5` (since superseded)
 
-> **Historical record, kept for the measurements.** That clone/vault pair has since been replaced on the
-> same instance; the current pair is `0xA265…49da` / `0x8343…22D7` (see *Current live instance* below and
-> `script/tenderly/leveraged-aero-vnet.json`). The mechanics below still hold — only the addresses moved.
+> **Historical record, kept for the measurements.** That clone/vault pair has been replaced twice since;
+> the current pair is `0x3393…9c3c` / `0x0B0E…d6f1` (see *Current live instance* below, and
+> `script/tenderly/leveraged-aero-vnet.json`, which is authoritative). The mechanics below still hold —
+> only the addresses moved.
 
 Asset-mode cbBTC/USDC clone, `state() == 1`, proposer `0x73f6…8FAf`, tokenId `73341624`, fee config
 `managementFeeBps 100` / `performanceFeeBps 1000`, `targetLtvBps 5000`, `maxSlippageBps 100`.
@@ -909,12 +914,21 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 
 ---
 
-## Current live instance — vault generation 2 (in-repo stack)
+## Current live instance — vault generation 3 (audited build)
 
-> **This instance carries the post-de-Sherwood stack**, deployed by Phase B + Phase C above:
-> `LeveragedAeroVault` + a `LeveragedAerodromeCLStrategy` clone, plus the account layer. No
-> `SyndicateVault`, no governor, no proposal lifecycle — the getter is `depositsOpen()` and the
-> post-settlement exit is the permissionless `redeemSettled(shares)`.
+> **This instance carries the AUDITED build**, redeployed 2026-08-17 by Phase B + Phase C above from
+> branch `aero-audit-findings` (head `05412af` plus the `059cbbb` vnet-tooling merge): the strategy
+> template, `LeveragedAeroVault` and the `LeveragedAerodromeCLStrategy` clone all carry the audit
+> remediations, and the account layer was redeployed on top of them. Both harnesses finished green end
+> to end. No `SyndicateVault`, no governor, no proposal lifecycle — the getter is `depositsOpen()` and
+> the post-settlement exit is the permissionless `redeemSettled(shares)`.
+>
+> **Generation 3 is what "audited" means here, mechanically.** The vault now exposes
+> `maxTotalAssets()` / `remainingCapacity()`, and the strategy makes a **typed** call to
+> `maxTotalAssets()` inside its fund-capacity check on every deposit. The vault is not upgradeable, so a
+> current strategy bound to a generation-2 vault would revert on every deposit with empty returndata —
+> which is why the account harness probes that selector and refuses to run below generation 3, and why a
+> pooled redeploy always forces an account redeploy.
 >
 > **`script/tenderly/leveraged-aero-vnet.json` is authoritative**; this table is the human copy and can
 > lag it. Re-run both harnesses after any refresh and re-read the config before wiring anything.
@@ -929,19 +943,19 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 | vnet id | `769bfec9-e868-4f87-b6f7-ad3584e86eb3` (slug `mamo-leveraged-aero-pr66-1786640530`) | `vnetSlug` |
 | chainId | `73578453` — **custom** (`7357` prefix + parent 8453); harness runs need `EXPECTED_CHAIN=73578453`, forge needs `addresses/73578453.json` | `chainId` |
 | parent network | Base (`8453`) — fork state is Base; all venue addresses resolve unchanged | `parentNetworkId` |
-| fork block | `49,925,592` (deployed from PR #66 head `d347b68`, 2026-08-13) | — |
+| fork block | `49,925,592` (instance created 2026-08-13; stack redeployed 2026-08-17 from the audited build) | — |
 | **Admin RPC** (writes) | **1Password** — write-capable, never committed | `adminRpc` |
 | Public RPC (reads) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | State sync | `false` — deliberate (constraint 3), not an API limit | `stateSync` |
-| Vault generation | `2` — `leveraged-aero-vault` (`depositsOpen()`, `cloneAndBind`, `redeemSettled`) | `vaultGeneration` |
-| Vault (`LeveragedAeroVault`) | `0xC0e7a3fF623fD17D6a15367ADA6584e6BB09727e` | `pooled.vault` |
-| Strategy clone (operator target) | `0x0039e4357E83395fA8cB09E3C1657574dBDf41E2` — width `4000` raw ticks, band `[200, 20000]` | `pooled.strategyClone` |
-| Strategy template (clone source) | `0xEA05B89CA6045f65E5040519354aBca93b695425` | `pooled.template` |
+| Vault generation | `3` — `leveraged-aero-vault` (`depositsOpen()`, `cloneAndBind`, `redeemSettled`, **`maxTotalAssets()` / `remainingCapacity()`**) | `vaultGeneration` |
+| Vault (`LeveragedAeroVault`) | `0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1` | `pooled.vault` |
+| Strategy clone (operator target) | `0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c` — width `4000` raw ticks, band `[200, 20000]`; skew `5000` (centered), band `[1000, 9000]` | `pooled.strategyClone` |
+| Strategy template (clone source) | `0x5B33a96509C32b523eaE1b778173e735Fc4fcdA0` | `pooled.template` |
 | Strategy `proposer` (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
 | LP pool (Slipstream, tickSpacing 100; asset-mode cbBTC/USDC) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
 | Seed | `100000000000` = 100,000 USDC (6dp) | `pooled.seed` |
-| Mamo account impl | `0xd9Fc69ff1DF465Fd5c83F03B6504b84Fc064CaD1` | `mamo.accountImplementation` |
-| Mamo account factory (typeId 5, latest) | `0x00247273857a1e0337A7Ce2822a72aE09DA44523` | `mamo.accountFactory` |
+| Mamo account impl | `0x9703a770FF62280Cf6220421D83A245dA7B60E24` | `mamo.accountImplementation` |
+| Mamo account factory (typeId 5, latest) | `0x46108914a8c2EFadF7Ab69e45B5C1cb657A9003E` | `mamo.accountFactory` |
 | Mamo strategy registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
@@ -983,11 +997,13 @@ the balance back after each set.
 
 ### Deliberate history — retired, do not target
 
-Kept only so old logs and links resolve. None of these is part of the current stack; all are Sherwood-era
-(vault generation 1: `openDeposits()`, no `redeemSettled`, governor-driven lifecycle).
+Kept only so old logs and links resolve. **None of these is part of the current stack** — the live one is
+the generation-3 table above. The last three rows are Sherwood-era (vault generation 1: `openDeposits()`,
+no `redeemSettled`, governor-driven lifecycle).
 
 | Retired | Address | Note |
 |---|---|---|
+| Generation-2 stack on the CURRENT instance | vault `0xC0e7a3fF…727e`, clone `0x0039e435…41E2`, template `0xEA05B89C…5425`, impl `0xd9Fc69ff…CaD1`, factory `0x00247273…4523` | the 2026-08-13 deploy from PR #66 head `d347b68`, superseded 2026-08-17 by the audited generation-3 stack. Its vault predates `maxTotalAssets()`, so a current strategy bound to it reverts on every deposit with empty returndata — the account harness's generation probe exists to catch exactly this. Per the redeploy-hygiene note in Phase C the retired impl is **still whitelisted** and the retired factory **still holds `BACKEND_ROLE`**; `latestImplementationById(5)` routes to the new pair, so this is cosmetic on a vnet |
 | Previous vnet instance (chainId `8453`) | vnet `8975a20b-5cf0-4399-9165-08e2b19229db`, public RPC `…/70a4990f-6686-4536-8237-ad9103acd11b` | superseded 2026-08-13 by the `73578453` custom-chain-id instance; still running, not deleted. Its stack: vault `0x8343b356…22D7`, clone `0xA26557fA…49da`, template `0xafcA85Df…8943`, impl `0xC68F1419…8bf9`, factory `0x3E130404…F20b` |
 | Attempt-1 pair on the CURRENT instance | impl `0x30fA6E5648bDa78c905dad6f0F5394148aD171DA`, factory `0xbad3b205893F8D729C54A79EB0421232950D27a0` | a failed first account-harness attempt left the impl **still whitelisted** (type 5) and the factory **still holding `BACKEND_ROLE`** — `latestImplementationById(5)` routes correctly, so harmless here, but do not target them |
 | Sherwood `SyndicateVault` | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` | replaced by `LeveragedAeroVault` |

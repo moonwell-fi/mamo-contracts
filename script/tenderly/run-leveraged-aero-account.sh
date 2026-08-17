@@ -70,10 +70,11 @@ source "$SCRIPT_DIR/lib/common.sh"
 FQ="script/tenderly/LeveragedAeroAccountHarness.s.sol:LeveragedAeroAccountHarness"
 
 # ── documented vnet defaults (overridable via env) ────────────────────────────
-# Pooled layer on the current persistent vnet (block ~48.9M Base fork). NOTE: that
-# instance is Sherwood-era — its vault is Sherwood's SyndicateVault, so it exposes
-# openDeposits() rather than depositsOpen() and has no redeemSettled(). The account ABI is
-# unchanged, so the smoke below is still valid; see the runbook's "Current live instance".
+# Pooled layer on the current persistent vnet. The hardcoded fallbacks at the bottom of this
+# block are Sherwood-era leftovers and are the LAST resort only — the live instance runs the
+# in-repo LeveragedAeroVault (generation 3: depositsOpen(), redeemSettled, maxTotalAssets()),
+# and the generation probe further down refuses anything below 3. See the runbook's
+# "Current live instance".
 # These are env-var DEFAULTS, not hardcoded logic: pass your own to point elsewhere.
 #
 # Resolution order: env var → the pooled addresses recorded in leveraged-aero-vnet.json by
