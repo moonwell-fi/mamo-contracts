@@ -159,7 +159,17 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev Position `kind` tag for the PriceRouter adapter registry.
     bytes32 public constant POSITION_KIND = keccak256("LEVERAGED_AERO_CL");
 
-    /// @dev ERC-4626 virtual share offset matching the vault's `_decimalsOffset()` (USDC 6dp → 1e6).
+    /// @dev The ERC-4626-STYLE virtual share offset. `LeveragedAeroVault` is a plain ERC20 share ledger,
+    ///      not an ERC-4626 vault — it has no `_decimalsOffset()`, no `convertTo*`, no `preview*`; all
+    ///      pricing lives here. `1e6` is what makes the offset consistent with the two things that do
+    ///      exist: the vault's `decimals() == asset.decimals() + 6`, and the genesis rate
+    ///      `activateStrategy` seeds at (against zero supply and zero NAV the formula collapses to
+    ///      `assets × 1e6`, exactly that step-up).
+    ///
+    ///      APPLIED ON ISSUANCE ONLY. `deposit` prices at `assets × (supply + 1e6) / (navNet + 1)`; the
+    ///      whole redemption surface — `redeem`, `previewRedeem`, `_proportionalRedeem`, `redeemSettled`
+    ///      — is exact pro-rata `shares × navNet / supply`, with no offset anywhere. The asymmetry is
+    ///      deliberate; see the "WHY REDEEM CARRIES NO VIRTUAL OFFSET" note on `redeem`.
     uint256 private constant SHARES_VIRTUAL_OFFSET = 1e6;
 
     /// @dev Deadman window: after this elapses on an unfulfilled `requestRedeem`, its owner can
@@ -1550,6 +1560,28 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         LTV on the pre-withdraw prices and reverts `FastRedeemExceedsLtv` if it breaches
     ///         `maxLtvBps`, plus a belt `_assertHealthy()`); a breach means the collateral can't fund
     ///         this size without a deleverage → the frontend routes to `requestRedeem`.
+    ///
+    ///         ## WHY REDEEM CARRIES NO VIRTUAL OFFSET (deliberate, and asymmetric with `deposit`)
+    ///         `deposit` prices at `assets × (supply + SHARES_VIRTUAL_OFFSET) / (navNet + 1)`; every exit
+    ///         — here, `previewRedeem`, `_proportionalRedeem`, `redeemSettled` — is exact pro-rata
+    ///         `shares × navNet / supply`. The offset is an ISSUANCE-SIDE inflation guard, and the attack
+    ///         it exists for is already closed structurally here: deposits are `Executed`-only, the owner's
+    ///         `activateStrategy` seed mints first (so no depositor ever faces an empty book), and a
+    ///         deposit that would round to zero shares reverts `ZeroShares`. Adding it on the exit side
+    ///         would buy nothing and cost real things:
+    ///
+    ///         - **Round-trip bias is already bounded.** With `G = supply/navNet` the round trip loses at
+    ///           most `(G − 1)` micro-USDC at ANY size — a constant, not a fraction — and below the
+    ///           genesis rate it is negative, i.e. in the user's favour.
+    ///         - **A symmetric offset would ratchet the performance HWM on rounding crumbs.** Every exit
+    ///           would leave a wei of value behind, lifting `navPerShare` fractionally, and the HWM
+    ///           samples exactly that.
+    ///         - **It cannot be applied consistently across the exits.** The async path unwinds PHYSICAL
+    ///           liquidity and has no price to apply an offset to, and `redeemSettled` pays from a
+    ///           realised USDC pot — so a fast-path-only offset would make the two exits pay differently
+    ///           for the same shares.
+    ///         - **It would strand NAV behind the last redeemer**, who by construction cannot be
+    ///           compensated by a later one.
     /// @param shares       Vault shares to redeem (12dp).
     /// @param minAssetsOut Minimum USDC out (slippage guard on the payout).
     function redeem(uint256 shares, uint256 minAssetsOut) external nonReentrant returns (uint256 assetsOut) {
