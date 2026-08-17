@@ -40,6 +40,36 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///         the strategy (Tasks 3.6 / 3.7).  `test_noPhantomFee_whenIdleJustLanded`
 ///         anchors the regression: given the correct pre-deposit input, this library
 ///         produces zero performance fee.
+///
+///         ## Sampling — the HWM is sampled, not continuous (KNOWN AND ACCEPTED)
+///         The HWM only ever moves at a `crystallize` call, so the total performance fee a
+///         cohort pays telescopes to `perfBps × (max SAMPLED navPerShare − seed navPerShare)`,
+///         not `perfBps × (max ATTAINED navPerShare − seed)`. Denser sampling therefore weakly
+///         increases the fee, and the strategy crystallises before every deposit / redeem /
+///         compound — so while `LeveragedAeroVault.openDeposits` is on, an outsider can add a
+///         sampling point at a peak with a dust deposit. That is deliberate, on four grounds:
+///
+///         - **Crystallising before every issuance and burn is the fairness invariant.** Fees
+///           must settle against the state that produced them before the share count moves, or
+///           an entering LP buys into an unaccrued liability and an exiting one escapes it. Any
+///           scheme that skips a crystallise to deny a sampling point breaks that first.
+///         - **Interval-gating the perf leg does not work here.** The only clock available is
+///           `lastFeeAccrualTimestamp`, and EVERY op advances it for the price-free management
+///           leg (D6). A perf-leg gate measured off it would be reset by ordinary traffic and so
+///           would disable the performance fee outright rather than smooth it; a second,
+///           perf-only clock is a new storage slot plus a second dormancy-reset problem.
+///         - **A window that suppresses sampling is a real fee escape.** Redemptions inside an
+///           un-sampled window exit above an un-ratcheted HWM, paying nothing on the gain they
+///           realise. That loss is certain; the sampling over-charge is bounded.
+///         - **The caller profits nothing and cannot manufacture the peak.** Fee shares dilute to
+///           `feeRecipient`, never to the caller, and the dust depositor is diluted along with
+///           everyone else. `navPre` is Chainlink-priced behind the calm / TWAP-deviation gate, so
+///           a peak can be SELECTED but not MANUFACTURED, and each peak is charged once — the HWM
+///           ratchets, so the effect is one-shot per new high, not repeatable.
+///
+///         The operational lever, if a fund ever wants sampling closed to outsiders, is
+///         `LeveragedAeroVault.setOpenDeposits(false)`: deposits become whitelist-only and every
+///         sampling point is fund-controlled again.
 library LeveragedAeroFees {
     /// @dev 1e18 fixed-point scale for per-share HWM and the management fee rate.
     uint256 private constant WAD = 1e18;

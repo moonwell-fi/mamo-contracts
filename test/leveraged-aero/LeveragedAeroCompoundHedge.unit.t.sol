@@ -814,6 +814,45 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertApproxEqRel(lpValue, 100_000e6, 1e15, "depositor did not pay a fee on a pre-arrival gain");
     }
 
+    /// @dev The two properties that make the accepted sampling posture (F09, see the "Sampling" block
+    ///      in `LeveragedAeroFees`) acceptable: a dust depositor CAN sample a peak, but the fee goes to
+    ///      `feeRecipient` and the sampler's own shares are worth no more than it paid; and the HWM
+    ///      ratchets with the sample, so the same peak cannot be charged twice.
+    function testAnOutsiderCanSampleThePeakButPaysForItAndOnlyOnce() public {
+        _armBook();
+        _armRewards(20_000e18);
+        _compound(1); // seeds the HWM
+        uint256 hwm1 = strategy.layout().hwmPerShare;
+
+        // A peak forms: unrealised reward value carries `navPerShare` above the mark.
+        _armRewards(20_000e18);
+
+        address sampler = makeAddr("sampler");
+        uint256 dust = 1e6; // 1 USDC against a $1M book
+        usdc.mint(sampler, dust);
+        vm.startPrank(sampler);
+        usdc.approve(address(strategy), dust);
+        uint256 minted = strategy.deposit(dust, 0);
+        vm.stopPrank();
+
+        // The sampling point WAS added, and it charged the fee.
+        assertGt(strategy.layout().hwmPerShare, hwm1, "the dust deposit sampled the peak");
+        uint256 feeSharesAfterSample = vault.balanceOf(feeRecipient);
+        assertGt(feeSharesAfterSample, 0, "...and the fee it triggered went to the fee RECIPIENT");
+
+        // The sampler holds nothing but the shares it bought, and they are worth no more than it paid.
+        assertEq(vault.balanceOf(sampler), minted, "the sampler received no fee shares");
+        assertLe(Math.mulDiv(minted, strategy.nav(), vault.totalSupply()), dust, "the sampler pays, never profits");
+
+        // ONE-SHOT: the HWM ratcheted with the sample, so the same peak is not chargeable again.
+        usdc.mint(sampler, dust);
+        vm.startPrank(sampler);
+        usdc.approve(address(strategy), dust);
+        strategy.deposit(dust, 0);
+        vm.stopPrank();
+        assertEq(vault.balanceOf(feeRecipient), feeSharesAfterSample, "the same peak cannot be charged twice");
+    }
+
     /// @dev `compound` still defers the fee (rather than bricking the harvest) when share issuance is
     ///      closed — the H3 best-effort path, now proven on a REAL harvest instead of a flat book.
     function testCompoundDefersFeeCrystalliseWhenIssuanceIsClosed() public {
