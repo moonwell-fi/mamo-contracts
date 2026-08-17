@@ -1470,6 +1470,44 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     /**
+     * @dev F15. A PARTIAL ASYNC REDEEM BURNS `f` OF THE cTOKENS, not a stored-rate underlying estimate.
+     *      `redeemUnderlying(amt)` accrues and THEN burns `amt / rateFresh`, while `amt` was sized off
+     *      `exchangeRateStored` — the last-accrued rate — so the two disagree by the whole rate gap and
+     *      the redeemer's own slice of the accrued-but-uncapitalised supply interest stayed with the
+     *      stayers. The old note defended that as "the payout was priced off the same stored rate", which
+     *      is true of the FAST path but not of this one: `redeemUnwindImpl` is a PHYSICAL proportional
+     *      unwind with no price stamped anywhere, so `f` of the cTokens is simply what `f` of the
+     *      collateral means.
+     *
+     *      Armed with the supply-side gap the mock exists to express: views keep reporting 1.37e18 while
+     *      the redeem's own mUSDC call accrues to 1.40e18 before it burns. The assertion is exact — a
+     *      quarter redeem burns exactly a quarter of the cToken balance — and it is the fix's whole
+     *      content: the old form burned `cBal × 1.37/1.40 / 4`, ~2.1% less than the redeemer's share.
+     */
+    function testPartialRedeemPaysTheRedeemerTheCollateralAccrual() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18);
+
+        uint256 shares = SUPPLY / 4;
+        uint256 cBefore = mUsdc.balanceOf(address(strategy));
+        assertGt(cBefore, 0, "premise: the book holds collateral to split");
+
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        assertEq(
+            cBefore - mUsdc.balanceOf(address(strategy)),
+            Math.mulDiv(cBefore, shares, SUPPLY),
+            "the redeemer burned exactly f of the cTokens, accrual included"
+        );
+    }
+
+    /**
      * @dev THE FAST PATH WITH NOTHING RAW. `fastRedeemImpl` draws idle first, then collateral; on a
      *      book the keeper has fully parked there is no idle, so it always draws collateral and the
      *      LTV gate — which a fully idle-funded redeem used to skip entirely — is always live. That is

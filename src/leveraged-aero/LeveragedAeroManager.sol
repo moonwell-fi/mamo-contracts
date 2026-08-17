@@ -1729,28 +1729,30 @@ library LeveragedAeroManager {
         }
     }
 
-    /// @dev Redeem f = shares/supply of the mUSDC underlying collateral.
+    /// @dev Redeem f = shares/supply of the mUSDC collateral, BY BURNING f OF THE cTOKEN BALANCE.
     ///
-    ///      FULL REDEEM BURNS THE cTOKEN BALANCE (`redeem(cBal)`, `settleImpl`'s form), not the
-    ///      stored-rate underlying estimate. `redeemUnderlying(cBal·rateStored/1e18)` burns at the
-    ///      FRESH rate, so a "full" redeem sized off the stale one always left rate-gap dust behind —
-    ///      previously invisible, but `nav()`'s flat branch now counts collateral, so that dust priced
-    ///      a zero-share fund above zero and gifted itself to the next depositor as a share-price
-    ///      discontinuity. Partial redeems keep the underlying-exact form: the payout was priced off
-    ///      the same stored rate, so redeeming that exact face amount is the correct match.
+    ///      cTOKENS, NOT A STORED-RATE UNDERLYING ESTIMATE, IN BOTH BRANCHES. `redeemUnderlying(amt)`
+    ///      accrues and THEN burns `amt / rateFresh`, while `amt` would have been sized off
+    ///      `exchangeRateStored` — the last-accrued rate — so the two disagree by the rate gap every
+    ///      time. At `f == 1` that gap was cTokens left behind on a zero-share fund, which `nav()`'s
+    ///      flat branch prices above zero and gifts to the next depositor (fixed first here, then on the
+    ///      fast path in `LeveragedAeroVenue.fastRedeemImpl`). At `f < 1` it is the redeemer's own slice
+    ///      of the accrued-but-uncapitalised supply interest, silently retained by the stayers.
+    ///
+    ///      The old note justified the partial branch as "the payout was priced off the same stored
+    ///      rate". That is true of the FAST path, whose draw really is `nav()`-derived — and it is the
+    ///      reason `fastRedeemImpl` keeps `redeemUnderlying` for its non-full case. It is NOT true here:
+    ///      `redeemUnwindImpl` is a PHYSICAL proportional unwind with no price stamped anywhere, so the
+    ///      redeemer's fair share of the collateral is `f` of the cTOKENS, full stop. This form is also
+    ///      strictly smaller bytecode — one balance read and one `mulDiv` instead of a rate read, a
+    ///      multiply and a second division — which matters at this library's EIP-170 headroom.
     function _redeemCollateral(uint256 shares, uint256 supply) private {
         address mUsdc_ = _layout().mUsdc;
         uint256 cBal = ICToken(mUsdc_).balanceOf(address(this));
         if (cBal == 0) return;
-        if (shares == supply) {
-            _redeemCTokens(mUsdc_, cBal);
-            return;
-        }
-        uint256 rate = ICToken(mUsdc_).exchangeRateStored();
-        uint256 totalUnderlying = (cBal * rate) / 1e18;
-        uint256 toRedeem = Math.mulDiv(totalUnderlying, shares, supply);
-        if (toRedeem == 0) return;
-        _redeemUnderlying(mUsdc_, toRedeem);
+        uint256 toBurn = shares == supply ? cBal : Math.mulDiv(cBal, shares, supply);
+        if (toBurn == 0) return;
+        _redeemCTokens(mUsdc_, toBurn);
     }
 
     // ── Shared helpers (health, NPM read, config build) ──
