@@ -1010,7 +1010,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
             uint256($.performanceFeeBps),
             _protocolFeeBps()
         );
-        navNet = navPre - freshSlice; // freshSlice ≤ navPre (lib caps at navPre) → no underflow
+        navNet = navPre - freshSlice; // freshSlice ≤ navPre (lib caps at the gain, ≤ navPre) → no underflow
         supplyPost = supply + feeShares;
     }
 

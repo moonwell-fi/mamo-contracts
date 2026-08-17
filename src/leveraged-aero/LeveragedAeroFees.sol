@@ -148,10 +148,20 @@ library LeveragedAeroFees {
         uint256 gainPerShareX = navPerShareX - hwmPerShareX;
         uint256 totalGainUsdc = Math.mulDiv(gainPerShareX, totalSupply, WAD);
 
-        // Protocol slice off the GROSS gain FIRST (rounds down, LP-favourable). USDC liability,
-        // never minted; `min(., navPre)` is defensive against a malformed bps.
+        // Protocol slice off the GROSS gain FIRST (rounds down, LP-favourable). USDC liability, never
+        // minted.
+        //
+        // CLAMP AT THE GAIN, not at `navPre`. `protocolFeeBps` is read LIVE from an owner-pointed
+        // ProtocolConfig this library cannot validate and nothing else bounds, so a `> 10_000`
+        // value is representable. Clamping only at `navPre` let such a value produce
+        // `protocolUsdc > totalGainUsdc`, and the `totalGainUsdc - protocolUsdc` subtraction below
+        // then panics 0x11 — swallowed by every best-effort crystallise caller, i.e. fees stop
+        // permanently and silently. `min(., totalGainUsdc)` keeps that subtraction total, bounds the
+        // liability accrued on the `performanceFeeBps == 0` early return by the gain rather than by
+        // the whole NAV, and subsumes the old `navPre` ceiling (the gain is a slice of `navPre` by
+        // construction, so `totalGainUsdc ≤ navPre`).
         protocolUsdc = Math.mulDiv(totalGainUsdc, protocolFeeBps, 10_000);
-        if (protocolUsdc > navPre) protocolUsdc = navPre;
+        if (protocolUsdc > totalGainUsdc) protocolUsdc = totalGainUsdc;
 
         // HWM advances to the gross peak regardless of the perf rate.
         if (performanceFeeBps == 0) return (0, navPerShareX, protocolUsdc);
