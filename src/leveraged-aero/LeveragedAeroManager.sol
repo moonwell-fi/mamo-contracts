@@ -1424,11 +1424,14 @@ library LeveragedAeroManager {
     }
 
     /// @dev If any borrow balance remains after the direct repay attempt, redeem USDC from
-    ///      mUSDC collateral and swap to cover it. Chainlink prices + 10% buffer; dust floor.
+    ///      mUSDC collateral and swap to cover it. Chainlink prices + 10% buffer; dust floor,
+    ///      sized off the ACCRUED debt (see the reads).
     function _settleShortfall() private {
         Layout storage $ = _layout();
-        uint256 cbDebtRem = IMoonwellMarket($.mCbBTC).borrowBalanceStored(address(this));
-        uint256 wethDebtRem = IMoonwellMarket($.mWeth).borrowBalanceStored(address(this));
+        // ACCRUE, *THEN* MEASURE — `redeemUnwindImpl`'s Phase 2 reaches here WITHOUT `_settleRepayDebts`'s
+        // prior accrual (see that caller), so a stored read under-sizes the cover by the pending interest.
+        uint256 cbDebtRem = IMoonwellMarket($.mCbBTC).borrowBalanceCurrent(address(this));
+        uint256 wethDebtRem = IMoonwellMarket($.mWeth).borrowBalanceCurrent(address(this));
         if (cbDebtRem == 0 && wethDebtRem == 0) return;
         // Read Chainlink prices (8dp each)
         (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
