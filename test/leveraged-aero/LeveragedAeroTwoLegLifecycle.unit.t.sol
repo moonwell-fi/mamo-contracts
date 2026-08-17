@@ -1750,6 +1750,139 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id);
     }
 
+    /**
+     * @dev F23 (a). THE DEADMAN IS ORACLE-FREE IN THE ORDINARY CASE, and one word in step B is what made
+     *      it so. `_repay` accrues the market BEFORE it applies the payment, so a repay sized off
+     *      `borrowBalanceStored` always left `current − stored` of interest standing. On a FULL redeem
+     *      that dust was the only thing keeping the borrow balance nonzero, so `_settleShortfall` never
+     *      took its `debtRem == 0` early return, every full redeem fell through into Phase 2 and read
+     *      Chainlink — `emergencyRedeem` included, the one exit built for the state where Chainlink is
+     *      exactly what is unavailable.
+     *
+     *      Armed with interest that has accrued in wall-clock time but that no transaction has folded in
+     *      (invisible to `borrowBalanceStored`, which is the whole condition), on a book with surplus on
+     *      both legs so the pro-rata repay can genuinely reach the accrued number. Then every feed is
+     *      staled by the deadman warp and the exit must still complete.
+     *
+     *      MUTATION-CHECKED: put `borrowBalanceStored` back in `_redeemRepayFromCollected` and this
+     *      reverts `StaleOracle` — from Phase 2's `_readAllPrices`, reached on the interest dust alone.
+     */
+    function testFullEmergencyRedeemIsOracleFreeOnABalancedBook() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+        // Surplus on both legs: the repay has to be able to reach the ACCRUED debt out of held tokens,
+        // or the shortfall would send the redeem to Phase 2 for a legitimate reason and the test would
+        // be measuring the wrong thing.
+        legB.mint(address(strategy), IDLE_LEG_B);
+        legA.mint(address(strategy), IDLE_LEG_A);
+
+        mLegB.accruePendingBorrowInterest(address(strategy), 1e6); // 0.01 leg B
+        mLegA.accruePendingBorrowInterest(address(strategy), 1e16); // 0.01 leg A
+        assertGt(
+            mLegB.borrowBalanceAccrued(address(strategy)),
+            mLegB.borrowBalanceStored(address(strategy)),
+            "premise: leg B's stored read is stale-low"
+        );
+        assertGt(
+            mLegA.borrowBalanceAccrued(address(strategy)),
+            mLegA.borrowBalanceStored(address(strategy)),
+            "premise: leg A's stored read is stale-low"
+        );
+
+        uint256 id = _requestRedeem(SUPPLY);
+        vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed; every feed now stale
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav(); // premise: the oracle really is down, and down for THAT reason
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        vm.prank(lp);
+        uint256 assetsOut = strategy.emergencyRedeem(id, 0);
+
+        assertGt(assetsOut, 0, "the deadman exit completed with every feed stale");
+        assertEq(usdc.balanceOf(lp) - lpBefore, assetsOut, "...and the redeemer was paid");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared, accrued interest and all");
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared, accrued interest and all");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "collateral fully redeemed: no cToken dust");
+    }
+
+    /**
+     * @dev F23 (b). DEEP IL, ORACLE DOWN, AND THE SURPLUS LEG FINISHES THE JOB. An IL shortfall is
+     *      ASYMMETRIC by construction: one leg over-collects while the other comes up short. The leg sweep
+     *      used to run at the very END of the unwind, so that surplus was still sitting there as leg
+     *      tokens while Phase 1 hunted for USDC and handed whatever it could not buy to Phase 2's
+     *      Chainlink reads. Hoisted above the covers, the surplus leg becomes funding for the deficit
+     *      leg's buy and the whole exchange stays oracle-free.
+     *
+     *      What the surplus leg CANNOT do is close the gap on its own, and that is not a fixture
+     *      artifact: the LP sold its leg B into the move at prices below the new mark, so the surplus
+     *      leg A is worth strictly LESS than the leg B it stopped holding. That difference IS the
+     *      impermanent loss, and something un-levered has to absorb it — raw float here, collateral (and
+     *      therefore Chainlink) in Phase 2. So the book is armed with HALF the cover's cost as float: too
+     *      little to finish alone, enough once the swept surplus is added to it.
+     *
+     *      Every feed is staled by the deadman warp, so the sweep floors degrade to 0 and Phase 2 would
+     *      revert `StaleOracle` the moment it were reached.
+     *
+     *      MUTATION-CHECKED: move the step-C sweep block back below the branch and this reverts
+     *      `StaleOracle` — the float alone cannot finish the buy.
+     */
+    function testDeepILFullRedeemSelfFundsFromTheSurplusLeg() public {
+        // (i) Reference run: size the cover the same way `testFullRedeemSurvivesPartialIdleUsdc` does.
+        uint256 shares = _armLegBIlShortfall();
+        uint256 boughtBefore = router.boughtOf(address(legB));
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        uint256 needed = _legBBuyCost(router.boughtOf(address(legB)) - boughtBefore);
+        assertGt(needed, 0, "premise: the armed book carries a leg-B shortfall");
+
+        // (ii) Same book, half the cover's cost as float, and the oracle down.
+        setUp();
+        shares = _armLegBIlShortfall();
+        usdc.mint(address(strategy), needed / 2);
+
+        id = _requestRedeem(shares);
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav(); // premise: Phase 2 would revert if it were reached at all
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        boughtBefore = router.boughtOf(address(legB));
+        vm.prank(lp);
+        uint256 assetsOut = strategy.emergencyRedeem(id, 0);
+
+        assertGt(
+            router.boughtOf(address(legB)) - boughtBefore,
+            0,
+            "the deficit leg really was bought, out of float plus the swept surplus leg, with no feed read"
+        );
+        assertGt(assetsOut, 0, "the deep-IL deadman exit completed");
+        assertEq(usdc.balanceOf(lp) - lpBefore, assetsOut, "...and the redeemer was paid");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared");
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
+    }
+
+    /**
+     * @dev F23 (c). THE HOIST STRANDS NOTHING. Sweeping before the covers is only safe because Phase 2
+     *      now buys EXACTLY the debt (F08): the old exact-INPUT settle over-bought by its 10% buffer and
+     *      relied on the sweep running LAST to turn that excess back into USDC. Above the sweep, the
+     *      excess would have stranded as leg tokens on a book that is about to go flat — value left
+     *      behind on a fund with zero shares outstanding.
+     */
+    function testHoistedSweepStrandsNoLegTokens() public {
+        uint256 shares = _armLegBIlShortfall();
+        uint256 id = _requestRedeem(shares);
+        uint256 boughtBefore = router.boughtOf(address(legB));
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        assertGt(router.boughtOf(address(legB)) - boughtBefore, 0, "premise: a cover really ran on this redeem");
+        assertEq(legB.balanceOf(address(strategy)), 0, "no leg B stranded above the hoisted sweep");
+        assertEq(legA.balanceOf(address(strategy)), 0, "no leg A stranded above the hoisted sweep");
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
+    }
+
     /// @dev Full redeem clears the book with BOTH debts repaid and the flat-book invariant restored.
     function testFullRedeemClearsBothLegs() public {
         _execute(SEED);

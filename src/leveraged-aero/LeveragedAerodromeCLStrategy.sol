@@ -163,7 +163,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint256 private constant SHARES_VIRTUAL_OFFSET = 1e6;
 
     /// @dev Deadman window: after this elapses on an unfulfilled `requestRedeem`, its owner can
-    ///      `emergencyRedeem` trustlessly (oracle-free). The backend fulfills in minutes; 2 days
+    ///      `emergencyRedeem` trustlessly (Chainlink-free except the deep-IL Phase-2 draw — see
+    ///      `emergencyRedeem`). The backend fulfills in minutes; 2 days
     ///      tolerates a weekend outage while keeping the trustless exit reachable.
     uint256 private constant FULFILL_WINDOW = 2 days;
 
@@ -1689,6 +1690,22 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         alive" resolves via normal `fulfillRedeem`; the only stuck case (oracle down AND backend
     ///         dead) self-resolves here. `minAssetsOut` is a FRESH arg (the stored one may be stale
     ///         after 2 days).
+    ///
+    /// @dev ORACLE-FREE, WITH ONE NAMED RESIDUAL. Every priced read on this path is caught and degrades
+    ///      rather than reverting: `_proportionalRedeem`'s `try this.nav()` falls back to `navPre = 0`,
+    ///      the crystallise defers on that, the auto-claimed reward tranche's sale defers and marks
+    ///      `RedeemRewardSaleDeferred`, and `redeemUnwindImpl`'s leg-sweep floors degrade to 0 and mark
+    ///      `RedeemSweepFloorsDegraded`. The unwind, the pro-rata repays and the share burn are pure
+    ///      arithmetic against pool state.
+    ///
+    ///      THE SINGLE EXCEPTION IS `redeemUnwindImpl`'s Phase 2 (`_settleShortfall`), which reads
+    ///      Chainlink to price a deficit buy — and it is reached only when a FULL redeem still owes after
+    ///      its own swept legs (step C) and raw float could not cover the shortfall, i.e. on genuine deep
+    ///      IL. It fails CLOSED there, deliberately: the alternative is paying out against a book nobody
+    ///      can price. Two things keep it unreached in the ordinary case — step B repays the CURRENT
+    ///      accrued debt (a stored read used to leave interest dust that sent EVERY full redeem through
+    ///      Phase 2), and step C sells the surplus leg into USDC before Phase 1 spends it. Sizing the raw
+    ///      float with `supplyIdle` is how an operator manages what is left of the residual.
     /// @param id           Request id (owner-gated).
     /// @param minAssetsOut Fresh slippage floor on the net payout.
     function emergencyRedeem(uint256 id, uint256 minAssetsOut) external nonReentrant returns (uint256 assetsOut) {

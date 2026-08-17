@@ -350,7 +350,7 @@ library LeveragedAeroManager {
         uint256 stayersIdle = idleUsdcBefore - Math.mulDiv(idleUsdcBefore, shares, supply);
         // Snapshot the stayers' (1-f) share of any PRE-EXISTING idle leg. A `rerange` recenter
         // leaves a remainder of one borrowed leg (cbBTC or WETH) idle in the strategy — the leg
-        // sweep at step E would otherwise hand a partial redeemer 100% of it, skimming the stayers'
+        // sweep at step C would otherwise hand a partial redeemer 100% of it, skimming the stayers'
         // share. Reserving (1-f) of it keeps redeem oracle-free (stayers' share stays as LEGS, not
         // oracle-valued). Both are ~0 (clean no-op) outside a post-rerange partial redeem.
         //
@@ -380,7 +380,7 @@ library LeveragedAeroManager {
         //
         // `_unwindLiquidity` above calls `gauge.withdraw`, which auto-claims the WHOLE accrued reward
         // tranche into this wallet — on EVERY async redeem, because the redeem's own unwind is what
-        // creates the balance. Step E sweeps only the two LEG tokens, so before this the redeemer was
+        // creates the balance. Step C sweeps only the two LEG tokens, so before this the redeemer was
         // paid `f × (assets − reward)` while 100% of the tranche stayed behind with the stayers. Since
         // `nav()` prices that reward (held balance AND `gauge.earned()`), that was a live nav-vs-payout
         // inconsistency on this path, not merely an unfairness.
@@ -413,62 +413,25 @@ library LeveragedAeroManager {
         // capped at the REDEEMER's own per-leg budget (`legBal − stayersLeg`) so a severe IL
         // shortfall can never consume the stayers' reserved `(1-f)` idle-leg share to over-repay
         // the redeemer's debt. Passing `stayersCb`/`stayersWeth` keeps the genuine shortfall flowing
-        // to `cbShort`/`wethShort` → covered from the redeemer's OWN collateral (step C), upholding
+        // to `cbShort`/`wethShort` → covered from the redeemer's OWN collateral (step D), upholding
         // the §7 invariant ("stayers keep (1-f) of every leg, regardless of price").
         (uint256 cbShort, uint256 wethShort) = _redeemRepayFromCollected(shares, supply, stayersCb, stayersWeth);
 
-        if (shares == supply) {
-            // Full redemption — two-phase debt clearance before 100 % collateral redeem.
-            //
-            // Phase 1 (oracle-free): cover IL shortfall from the on-hand USDC via exact-output swap.
-            //   BEST-EFFORT (`bestEffort == true`), and that is the whole point of the phase. With
-            //   `usdcBal == 0` the call early-returns; with `0 < usdcBal < needed` the exact-output swap
-            //   CANNOT partially fill and reverts in its own frame, so `swapExactOut` swallows it and
-            //   reports `filled == false`. Without that, the whole band `0 < idle < needed` reverted the
-            //   redeem — `emergencyRedeem` included. (The old comment here claimed the no-op came from
-            //   `amountInMaximum = 0`; it never did — the guard is on the BALANCE.)
-            //
-            //   THE RAW FLOAT IS AN OPERATOR DIAL, AND THIS IS WHAT IT BUYS. Phase 1 spends the RAW
-            //   USDC balance and reads no feed; Phase 2 below redeems collateral and prices the
-            //   deficit off Chainlink. So the size of the raw float decides how much of a full
-            //   redeem's IL shortfall can be covered WITHOUT an oracle — which matters most for the
-            //   trustless `emergencyRedeem` deadman, the one exit that must not depend on our feeds.
-            //   `supplyIdle` is deliberately a KEEPER op rather than something `deposit` does on
-            //   arrival for exactly this reason: supplying every deposit as it landed would have
-            //   driven this budget structurally to 0 and made every shortfall-carrying full redeem
-            //   oracle-dependent. Leaving float un-supplied costs the supply APY on that slice; the
-            //   keeper sizes the trade-off, the code does not make it for them.
-            if (cbShort > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, type(uint256).max, true);
-            if (wethShort > 0) _redeemCoverShortfall($.weth, $.mWeth, wethShort, type(uint256).max, true);
-            // Phase 2 (self-fund fallback): if residual debt remains after Phase 1 (idle == 0 case),
-            //   redeem mUSDC collateral → swap to deficit token → repay (settle-shortfall pattern).
-            //   _settleShortfall reads the oracle only when borrowBalance > 0, so it is a no-op
-            //   (oracle-free) when Phase 1 fully covered the shortfall.
-            _settleShortfall();
-            // Phase 3: all debt cleared — Moonwell now permits 100 % collateral redemption.
-            _redeemCollateral(shares, supply);
-            // Clear position state (flat-book invariant: no stayers remain after a full redeem).
-            $.tokenId = 0;
-            $.posTickLower = 0;
-            $.posTickUpper = 0;
-        } else {
-            // Partial redemption: redeem f*collateral first (Finding 1 fix). Each cover buy is
-            // capped at the redeemer's OWN budget (`balance − stayersIdle`), recomputed before each
-            // call since the first spends USDC. A shortfall (or sandwiched buy) that would need more
-            // than the redeemer's slice reverts the whole redeem — fail-safe, never touches stayer idle.
-            _redeemCollateral(shares, supply);
-            IERC20 usdc = IERC20($.usdc);
-            if (cbShort > 0) {
-                uint256 bal = usdc.balanceOf(address(this));
-                _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, bal > stayersIdle ? bal - stayersIdle : 0, false);
-            }
-            if (wethShort > 0) {
-                uint256 bal = usdc.balanceOf(address(this));
-                _redeemCoverShortfall($.weth, $.mWeth, wethShort, bal > stayersIdle ? bal - stayersIdle : 0, false);
-            }
-        }
-
-        // E — sweep residual cbBTC/WETH → USDC, LEAVING the stayers' reserved leg share un-swept. For a
+        // C — SWEEP THE SURPLUS LEGS FIRST, SO THE DEFICIT BUY IS ORACLE-FREE. This block used to sit at
+        // the very END of the function. Hoisting it here is what makes the covers below self-funding: an
+        // IL shortfall is by construction ASYMMETRIC (one leg over-collected, the other short), so the
+        // surplus leg is the natural funding source for the deficit leg's buy — and turning it into USDC
+        // BEFORE Phase 1 lets Phase 1's exact-output cover spend it WITHOUT reaching Phase 2's Chainlink
+        // reads. Ordering constraints, both satisfied: it must come AFTER the pro-rata repays above (or
+        // it would sell the legs those repays need) and BEFORE the covers (that is the point).
+        //
+        // THIS HOIST REQUIRES the best-effort Phase 1 and the exact-output Phase 2. Best-effort, because
+        // funding the covers from a swept balance puts them squarely in the `0 < budget < needed` band
+        // that used to revert. Exact-output, because the old exact-INPUT Phase 2 over-bought by its 10%
+        // buffer and relied on THIS sweep, running last, to convert the excess back to USDC — hoisted
+        // above it, that excess would strand as leg tokens on a book that is about to go flat.
+        //
+        // Sweep residual cbBTC/WETH → USDC, LEAVING the stayers' reserved leg share un-swept. For a
         // full redeem (f=1) or no rerange remainder, stayers* == 0 → sweep all (identical to the prior
         // unconditional sweep). In the common partial case this hands the redeemer exactly
         // f*(idleLeg + LP_leg − debt_leg).
@@ -504,6 +467,66 @@ library LeveragedAeroManager {
             }
             _sweepLegToUsdc($.cbBTC, stayersCb, cbFloor);
             _sweepLegToUsdc($.weth, stayersWeth, wethFloor);
+        }
+
+        // D — clear whatever debt the pro-rata repay could not, then free the collateral.
+        if (shares == supply) {
+            // Full redemption — two-phase debt clearance before 100 % collateral redeem.
+            //
+            // Phase 1 (oracle-free): cover IL shortfall from the on-hand USDC via exact-output swap.
+            //   BEST-EFFORT (`bestEffort == true`), and that is the whole point of the phase. With
+            //   `usdcBal == 0` the call early-returns; with `0 < usdcBal < needed` the exact-output swap
+            //   CANNOT partially fill and reverts in its own frame, so `swapExactOut` swallows it and
+            //   reports `filled == false`. Without that, the whole band `0 < idle < needed` reverted the
+            //   redeem — `emergencyRedeem` included. (The old comment here claimed the no-op came from
+            //   `amountInMaximum = 0`; it never did — the guard is on the BALANCE.)
+            //
+            //   THE RAW FLOAT IS AN OPERATOR DIAL, AND THIS IS WHAT IT BUYS. Phase 1 spends the RAW
+            //   USDC balance and reads no feed; Phase 2 below redeems collateral and prices the
+            //   deficit off Chainlink. So the size of the raw float decides how much of a full
+            //   redeem's IL shortfall can be covered WITHOUT an oracle — which matters most for the
+            //   trustless `emergencyRedeem` deadman, the one exit that must not depend on our feeds.
+            //   `supplyIdle` is deliberately a KEEPER op rather than something `deposit` does on
+            //   arrival for exactly this reason: supplying every deposit as it landed would have
+            //   driven this budget structurally to 0 and made every shortfall-carrying full redeem
+            //   oracle-dependent. Leaving float un-supplied costs the supply APY on that slice; the
+            //   keeper sizes the trade-off, the code does not make it for them.
+            if (cbShort > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, type(uint256).max, true);
+            if (wethShort > 0) _redeemCoverShortfall($.weth, $.mWeth, wethShort, type(uint256).max, true);
+            // Phase 2 (self-fund fallback): if residual debt remains after step C's sweep and Phase 1,
+            //   fund the buy out of mUSDC collateral, buy the deficit token at the Chainlink-priced
+            //   budget, and repay. `_settleShortfall` returns immediately on a zero borrow balance, so
+            //   it reads NO feed when the phases above it already cleared the book.
+            //
+            //   THAT EARLY RETURN IS ONLY NOW GENUINELY REACHABLE, and the fix is one word up in step B.
+            //   `_repay` accrues the market before applying the payment, so a repay sized off the STORED
+            //   index left `current − stored` of interest standing every single time. On a full redeem
+            //   that dust was the ONLY thing keeping the balance nonzero — so every full redeem fell
+            //   through to here and read Chainlink, `emergencyRedeem` included, which is precisely the
+            //   exit that exists for the state where Chainlink is unavailable. Step B now reads CURRENT,
+            //   so the ordinary full redeem lands on zero debt and stops here.
+            _settleShortfall();
+            // Phase 3: all debt cleared — Moonwell now permits 100 % collateral redemption.
+            _redeemCollateral(shares, supply);
+            // Clear position state (flat-book invariant: no stayers remain after a full redeem).
+            $.tokenId = 0;
+            $.posTickLower = 0;
+            $.posTickUpper = 0;
+        } else {
+            // Partial redemption: redeem f*collateral first (Finding 1 fix). Each cover buy is
+            // capped at the redeemer's OWN budget (`balance − stayersIdle`), recomputed before each
+            // call since the first spends USDC. A shortfall (or sandwiched buy) that would need more
+            // than the redeemer's slice reverts the whole redeem — fail-safe, never touches stayer idle.
+            _redeemCollateral(shares, supply);
+            IERC20 usdc = IERC20($.usdc);
+            if (cbShort > 0) {
+                uint256 bal = usdc.balanceOf(address(this));
+                _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, bal > stayersIdle ? bal - stayersIdle : 0, false);
+            }
+            if (wethShort > 0) {
+                uint256 bal = usdc.balanceOf(address(this));
+                _redeemCoverShortfall($.weth, $.mWeth, wethShort, bal > stayersIdle ? bal - stayersIdle : 0, false);
+            }
         }
 
         // assetsOut = total USDC minus the (1-f) idle-USDC portion that stays for stayers (the
@@ -1631,8 +1654,17 @@ library LeveragedAeroManager {
         address cbBTC_ = $.cbBTC;
         address weth_ = $.weth;
 
-        uint256 cbDebtRepay = Math.mulDiv(IMoonwellMarket(mCbBTC_).borrowBalanceStored(address(this)), shares, supply);
-        uint256 wethDebtRepay = Math.mulDiv(IMoonwellMarket(mWeth_).borrowBalanceStored(address(this)), shares, supply);
+        // ACCRUE, *THEN* MEASURE — and here that is what keeps the DEADMAN ORACLE-FREE, not merely what
+        // makes the arithmetic exact. `_repay` → `repayBorrow` accrues the market BEFORE it applies the
+        // payment, so a repay sized off the STORED index always leaves `current − stored` of interest
+        // behind. On a full redeem (`shares == supply`) that dust is the only thing separating
+        // `_settleShortfall` from its `cbDebtRem == 0 && wethDebtRem == 0` early return — so every full
+        // redeem fell through into Phase 2 and read Chainlink, including `emergencyRedeem`, the exit
+        // built for the state where Chainlink is exactly what is unavailable. Reading CURRENT makes the
+        // full-redeem repay land on zero and Phase 2 a genuine no-op unless there is real IL.
+        // It also fixes the partial case, where the redeemer was repaying `f` of a stale debt.
+        uint256 cbDebtRepay = Math.mulDiv(IMoonwellMarket(mCbBTC_).borrowBalanceCurrent(address(this)), shares, supply);
+        uint256 wethDebtRepay = Math.mulDiv(IMoonwellMarket(mWeth_).borrowBalanceCurrent(address(this)), shares, supply);
 
         // ── cbBTC leg ── (budget = balance minus the stayers' reserved idle-leg share)
         if (cbDebtRepay > 0) {
