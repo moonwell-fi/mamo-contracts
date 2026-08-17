@@ -319,6 +319,27 @@ library LeveragedAeroManager {
         uint256 mBal = ICToken($.mUsdc).balanceOf(address(this));
         if (mBal > 0) _redeemCTokens($.mUsdc, mBal);
         // 5. Sweep residual WETH + cbBTC → USDC (Chainlink-bounded min-out)
+        //
+        //    THE READ IS UNCONDITIONAL, deliberately. A both-legs-empty short-circuit would be sound —
+        //    `_sweepAtOracleFloor` no-ops on a zero balance either way — but it buys exactly ONE state
+        //    and costs bytes this library does not have. Reaching here with both legs empty ALSO requires
+        //    zero residual debt (`_settleRepayDebts`'s shortfall path prices independently, so a settle
+        //    with debt outstanding has already read the feeds), and any real unwind of a levered book
+        //    leaves one leg or the other behind — the CL position is two-sided or one-sided, never
+        //    neither.
+        //
+        //    And the guard would only ever fire on an ALREADY-FLAT book, where nothing else needs an
+        //    oracle either: `nav()` takes its `tokenId == 0` branch (face value of idle USDC, oracle-free),
+        //    `fastRedeem` returns before pricing when idle covers the payout, the proportional-redeem
+        //    valves are oracle-free by construction, a deferred owner `settle` is simply retried, and the
+        //    migration gates read no feed — so there is no flatten to unblock. A stale feed here blocks a
+        //    settle of a book that has nothing left to sell, which is a retry, not a lockout.
+        //
+        //    IF IT IS EVER REVISITED, THE GUARD MUST BE ASSET-MODE-AWARE. There `$.cbBTC == $.usdc`, so a
+        //    naive `IERC20($.cbBTC).balanceOf(address(this)) == 0` tests the idle USDC step 4 has just
+        //    created and can never be true — the guard would be dead code in exactly one of the two
+        //    shapes. The correct predicate is
+        //    `$.legBIsAsset ? 0 : IERC20($.cbBTC).balanceOf(address(this))`.
         {
             (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
             _sweepAtOracleFloor($.weth, $.wethDecimals, pETH, pUsdc);
