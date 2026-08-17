@@ -1562,6 +1562,124 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid despite the shortfall");
     }
 
+    /// @dev The IL shortfall of `testAsyncFullRedeemCoversAnIlShortfallWithZeroRawIdle`, factored out: a
+    ///      live book minted at the oracle-consistent tick, a `deposit` the keeper parks in full (so the
+    ///      raw float starts at exactly 0 and the tests below own the whole Phase-1 budget), then the pool
+    ///      moved 600 ticks up in lockstep across spot, TWAP, leg B's feed and its swap rate. Leg B is
+    ///      token0, so the LP now holds LESS leg B than the leg-B debt and the proportional repay comes up
+    ///      short. Returns the depositor's share balance, which IS the whole supply here.
+    function _armLegBIlShortfall() internal returns (uint256 shares) {
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK_ORACLE_CONSISTENT));
+        pool.setTick(TICK_ORACLE_CONSISTENT);
+        _execute(SEED);
+
+        shares = _deposit(250_000e6);
+        vm.prank(proposer);
+        strategy.supplyIdle(250_000e6);
+
+        int24 newTick = TICK_ORACLE_CONSISTENT + 600;
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
+        pool.setTick(newTick);
+        pool.setTwapTick(newTick);
+        uint256 newPB = (P_LEG_B * 1_061_837) / 1_000_000; // 1.0001^600
+        legBFeed.setAnswer(int256(newPB));
+        router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
+        router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
+        // FIXTURE ONLY (see the sibling test): `MockNpm` custodies exactly what it was minted, so a
+        // post-move `collect` owes amounts re-priced at the new sqrtP that it never received.
+        legB.mint(address(npm), 100e8);
+        legA.mint(address(npm), 100e18);
+    }
+
+    /// @dev Request a redeem of `shares` from `lp` and return the request id.
+    function _requestRedeem(uint256 shares) internal returns (uint256 id) {
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares);
+        id = strategy.requestRedeem(shares, 0);
+        vm.stopPrank();
+    }
+
+    /// @dev What an exact-OUTPUT buy of `legBOut` costs in USDC at the router's current rate, rounded up
+    ///      exactly as `MockClSwapRouter.exactOutputSingle` rounds it.
+    function _legBBuyCost(uint256 legBOut) internal view returns (uint256) {
+        uint256 rate = router.rateE18(address(usdc), address(legB));
+        return (legBOut * 1e18 + rate - 1) / rate;
+    }
+
+    /**
+     * @dev F04. AN EXACT-OUTPUT SWAP HAS NO PARTIAL FILL, so a Phase-1 cover budget anywhere in the band
+     *      `0 < idle < needed` used to REVERT the whole redeem — `emergencyRedeem` deadman included. The
+     *      `usdcBal == 0` guard covered only the endpoint; every keeper float too small to finish the buy
+     *      bricked the exit outright, which is the opposite of what a partial float should do.
+     *
+     *      Driven in two runs off the SAME armed book. The first has no float at all and exists only to
+     *      MEASURE the cover — sizing the budget off a hardcoded guess would let the fixture drift out of
+     *      the band and pass vacuously. The second hands the redeem exactly half that, i.e. squarely
+     *      inside the band, and must complete: Phase 1's buy reverts in the router's own frame,
+     *      `swapExactOut` swallows it as `filled == false`, and the redeem falls through to Phase 2 —
+     *      which is precisely the next phase the fall-through exists for.
+     *
+     *      MUTATION-CHECKED: pass `false` for `bestEffort` at the two Phase-1 call sites and run (ii)
+     *      reverts `MockRouterMaxIn`.
+     */
+    function testFullRedeemSurvivesPartialIdleUsdc() public {
+        // (i) Reference run: no float, Phase 2 does all the covering, and the leg B it had to buy tells
+        //     us what the buy costs.
+        uint256 shares = _armLegBIlShortfall();
+        uint256 boughtBefore = router.boughtOf(address(legB));
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        uint256 needed = _legBBuyCost(router.boughtOf(address(legB)) - boughtBefore);
+        assertGt(needed, 0, "premise: the armed book really does carry a leg-B shortfall to cover");
+
+        // (ii) Same book, but the keeper left HALF the cover's cost raw: inside the band, and the exact
+        //      band the old code could not survive.
+        setUp();
+        shares = _armLegBIlShortfall();
+        usdc.mint(address(strategy), needed / 2);
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        boughtBefore = router.boughtOf(address(legB));
+        id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+
+        assertGt(router.boughtOf(address(legB)) - boughtBefore, 0, "the cover still ran and bought leg B");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared despite the partial budget");
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid");
+    }
+
+    /**
+     * @dev F04, THE OTHER HALF. Best-effort is scoped to the FULL-redeem Phase 1 — the only cover with a
+     *      documented next phase. A PARTIAL redeem's cover is the last word: its budget is deliberately
+     *      bounded at `balance − stayersIdle` so a shortfall can never be covered out of the stayers'
+     *      reserve, and an unaffordable buy must roll the whole redeem back rather than silently leave
+     *      the redeemer's debt slice behind on the stayers' book. Modelled with an illiquid buy side
+     *      (1000× worse than the mark) so the budget genuinely cannot reach, and bracketed against the
+     *      same redeem at the fair rate so the revert is provably the BUY and not the arming.
+     */
+    function testPartialRedeemCoverStillFailsClosedOnAnUnaffordableBuy() public {
+        uint256 shares = _armLegBIlShortfall();
+        uint256 snap = vm.snapshotState();
+
+        // Control: at the fair rate this exact quarter redeem goes through.
+        uint256 id = _requestRedeem(shares / 4);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id);
+        assertGt(usdc.balanceOf(lp), 0, "control: the quarter redeem completes at the fair buy rate");
+
+        vm.revertToState(snap);
+        router.setRate(address(usdc), address(legB), router.rateE18(address(usdc), address(legB)) / 1000);
+
+        id = _requestRedeem(shares / 4);
+        vm.prank(proposer);
+        vm.expectRevert(MockClSwapRouter.MockRouterMaxIn.selector);
+        strategy.fulfillRedeem(id);
+    }
+
     /// @dev Full redeem clears the book with BOTH debts repaid and the flat-book invariant restored.
     function testFullRedeemClearsBothLegs() public {
         _execute(SEED);

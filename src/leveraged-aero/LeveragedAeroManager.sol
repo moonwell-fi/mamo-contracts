@@ -420,8 +420,13 @@ library LeveragedAeroManager {
         if (shares == supply) {
             // Full redemption — two-phase debt clearance before 100 % collateral redeem.
             //
-            // Phase 1 (oracle-free): cover IL shortfall from idle USDC via exact-output swap.
-            //   When idle == 0 the calls are safe no-ops (amountInMaximum = 0 → early return).
+            // Phase 1 (oracle-free): cover IL shortfall from the on-hand USDC via exact-output swap.
+            //   BEST-EFFORT (`bestEffort == true`), and that is the whole point of the phase. With
+            //   `usdcBal == 0` the call early-returns; with `0 < usdcBal < needed` the exact-output swap
+            //   CANNOT partially fill and reverts in its own frame, so `swapExactOut` swallows it and
+            //   reports `filled == false`. Without that, the whole band `0 < idle < needed` reverted the
+            //   redeem — `emergencyRedeem` included. (The old comment here claimed the no-op came from
+            //   `amountInMaximum = 0`; it never did — the guard is on the BALANCE.)
             //
             //   THE RAW FLOAT IS AN OPERATOR DIAL, AND THIS IS WHAT IT BUYS. Phase 1 spends the RAW
             //   USDC balance and reads no feed; Phase 2 below redeems collateral and prices the
@@ -433,8 +438,8 @@ library LeveragedAeroManager {
             //   driven this budget structurally to 0 and made every shortfall-carrying full redeem
             //   oracle-dependent. Leaving float un-supplied costs the supply APY on that slice; the
             //   keeper sizes the trade-off, the code does not make it for them.
-            if (cbShort > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, type(uint256).max);
-            if (wethShort > 0) _redeemCoverShortfall($.weth, $.mWeth, wethShort, type(uint256).max);
+            if (cbShort > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, type(uint256).max, true);
+            if (wethShort > 0) _redeemCoverShortfall($.weth, $.mWeth, wethShort, type(uint256).max, true);
             // Phase 2 (self-fund fallback): if residual debt remains after Phase 1 (idle == 0 case),
             //   redeem mUSDC collateral → swap to deficit token → repay (settle-shortfall pattern).
             //   _settleShortfall reads the oracle only when borrowBalance > 0, so it is a no-op
@@ -455,11 +460,11 @@ library LeveragedAeroManager {
             IERC20 usdc = IERC20($.usdc);
             if (cbShort > 0) {
                 uint256 bal = usdc.balanceOf(address(this));
-                _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, bal > stayersIdle ? bal - stayersIdle : 0);
+                _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbShort, bal > stayersIdle ? bal - stayersIdle : 0, false);
             }
             if (wethShort > 0) {
                 uint256 bal = usdc.balanceOf(address(this));
-                _redeemCoverShortfall($.weth, $.mWeth, wethShort, bal > stayersIdle ? bal - stayersIdle : 0);
+                _redeemCoverShortfall($.weth, $.mWeth, wethShort, bal > stayersIdle ? bal - stayersIdle : 0, false);
             }
         }
 
@@ -1040,7 +1045,7 @@ library LeveragedAeroManager {
         );
         if (sellFloor > minUsdcOut) minUsdcOut = sellFloor;
         _sweepLegToUsdc(surplusTok, surplusBal - sellAmt, minUsdcOut);
-        _redeemCoverShortfall(deficitTok, deficitMkt, shortAmt, buyMax);
+        _redeemCoverShortfall(deficitTok, deficitMkt, shortAmt, buyMax, false);
     }
 
     /// @dev Collateral + debt in USDC face (6dp) on the SAME hardened-Chainlink basis as
@@ -1678,13 +1683,27 @@ library LeveragedAeroManager {
     ///      ASSET-MODE IDENTITY: the unit of account is never bought with itself, and (leg B carrying no
     ///      debt there) never repaid either — return before the router AND before the repay, so a
     ///      would-be `mUsdc.repayBorrow` on the collateral market can never be reached.
-    function _redeemCoverShortfall(address tokenOut, address market, uint256 amountOut, uint256 amountInMax) private {
+    ///      `bestEffort` is the OPPORTUNISTIC-vs-MANDATORY switch (see `LeveragedAeroValuation.swapExactOut`):
+    ///      only the full-redeem Phase 1 passes `true`, because only it has a documented next phase.
+    function _redeemCoverShortfall(
+        address tokenOut,
+        address market,
+        uint256 amountOut,
+        uint256 amountInMax,
+        bool bestEffort
+    ) private {
         Layout storage $ = _layout();
         if (tokenOut == $.usdc) return;
         uint256 usdcBal = IERC20($.usdc).balanceOf(address(this));
         if (usdcBal == 0 || amountOut == 0) return;
         uint256 maxIn = usdcBal < amountInMax ? usdcBal : amountInMax;
-        LeveragedAeroValuation.swapExactOut($.swapRouter, $.usdc, tokenOut, _legSwapSpacing(tokenOut), amountOut, maxIn);
+        bool filled = LeveragedAeroValuation.swapExactOut(
+            $.swapRouter, $.usdc, tokenOut, _legSwapSpacing(tokenOut), amountOut, maxIn, bestEffort
+        );
+        // An unfilled BEST-EFFORT cover moved nothing (the swap reverted in its own frame and rolled
+        // back), so there is nothing bought to repay. Fall through and leave `amountOut` outstanding —
+        // that is precisely what the caller's next phase is for.
+        if (!filled) return;
         uint256 tokenBal = IERC20(tokenOut).balanceOf(address(this));
         if (tokenBal > 0) {
             IERC20(tokenOut).forceApprove(market, tokenBal);

@@ -843,34 +843,60 @@ library LeveragedAeroValuation {
     ///      redeemer's own budget, an oracle+slippage ceiling, or unbounded on a full redeem) and does the
     ///      repay. The trailing `forceApprove(router, 0)` is load-bearing and part of the primitive: an
     ///      exact-output swap generally spends LESS than `amountInMax`, so the residue would otherwise be
-    ///      left standing as an allowance to the router.
+    ///      left standing as an allowance to the router — and it must run on BOTH branches below, or a
+    ///      swallowed failure would leave the whole `amountInMax` standing as an allowance.
+    ///
+    ///      `bestEffort` EXISTS BECAUSE AN EXACT-OUTPUT SWAP HAS NO PARTIAL FILL. When the budget
+    ///      (`amountInMax`, already clamped to the live balance by the caller) cannot buy `amountOut` the
+    ///      router REVERTS — it does not buy what it can. On the covers that are OPPORTUNISTIC —
+    ///      `redeemUnwindImpl`'s full-redeem Phase 1, which spends whatever oracle-free USDC happens to be
+    ///      on hand and hands the residue to the oracle-priced Phase 2 — that revert bricked the entire
+    ///      redeem, `emergencyRedeem` deadman included, across the whole band `0 < budget < needed`. That
+    ///      band is NOT covered by the caller's `usdcBal == 0` guard, which is why the bug was invisible.
+    ///      `bestEffort` turns the revert into `filled == false` and the caller falls through. Callers
+    ///      whose cover is MANDATORY — a partial redeem's stayer-bounded budget, `_rebalanceCover`'s
+    ///      oracle ceiling, `_settleShortfall`'s fail-closed cover — pass `false` and keep the revert.
+    ///
+    ///      THE `try` LIVES HERE, NOT AT THE CALL SITE. `LeveragedAeroManager` runs under DELEGATECALL, so
+    ///      a `try` there cannot catch this library's internal frames; the ROUTER call is external from
+    ///      THIS frame and is catchable. Hosting it here also keeps the bytes off the manager, which has
+    ///      under 400 B of EIP-170 headroom. Same relocation rationale as `sweepFloors` / `coverBounds`.
     /// @param router      Slipstream CL SwapRouter.
     /// @param tokenIn     Token sold (the unit of account, at every current call site).
     /// @param tokenOut    Token bought. Never equal to `tokenIn` — callers guard the identity case.
     /// @param tickSpacing tickSpacing of the `tokenIn`↔`tokenOut` SWAP pool.
     /// @param amountOut   Exact output required.
     /// @param amountInMax Ceiling on the input; the swap reverts rather than exceeding it.
+    /// @param bestEffort  When true an unfillable swap returns `false` instead of reverting.
+    /// @return filled     True iff `amountOut` was bought (always true when `bestEffort` is false).
     function swapExactOut(
         address router,
         address tokenIn,
         address tokenOut,
         int24 tickSpacing,
         uint256 amountOut,
-        uint256 amountInMax
-    ) public {
+        uint256 amountInMax,
+        bool bestEffort
+    ) public returns (bool filled) {
         IERC20(tokenIn).forceApprove(router, amountInMax);
-        ICLSwapRouter(router).exactOutputSingle(
-            ICLSwapRouter.ExactOutputSingleParams({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                tickSpacing: tickSpacing,
-                recipient: address(this),
-                deadline: block.timestamp + 600,
-                amountOut: amountOut,
-                amountInMaximum: amountInMax,
-                sqrtPriceLimitX96: 0
-            })
-        );
+        ICLSwapRouter.ExactOutputSingleParams memory p = ICLSwapRouter.ExactOutputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            tickSpacing: tickSpacing,
+            recipient: address(this),
+            deadline: block.timestamp + 600,
+            amountOut: amountOut,
+            amountInMaximum: amountInMax,
+            sqrtPriceLimitX96: 0
+        });
+        if (bestEffort) {
+            try ICLSwapRouter(router).exactOutputSingle(p) returns (uint256) {
+                filled = true;
+            } catch {}
+        } else {
+            ICLSwapRouter(router).exactOutputSingle(p);
+            filled = true;
+        }
         IERC20(tokenIn).forceApprove(router, 0);
     }
 
