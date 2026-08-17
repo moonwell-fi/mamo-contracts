@@ -20,6 +20,7 @@ import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {Surl} from "@surl/Surl.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
@@ -1557,6 +1558,9 @@ contract MoonwellMorphoStrategyTest is Test {
     function testSlippageAffectsPriceCheck() public {
         uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
+        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the slippage logic
+        // under test. Real prices are preserved -- see freshenRewardTokenPriceFeeds.
+        freshenRewardTokenPriceFeeds();
 
         // First check with default slippage (1%)
         uint256 defaultSlippage = 100; // 1%
@@ -1647,6 +1651,9 @@ contract MoonwellMorphoStrategyTest is Test {
     function testRevertIfPriceCheckFails() public {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
+        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the price check
+        // under test. Real prices are preserved -- see freshenRewardTokenPriceFeeds.
+        freshenRewardTokenPriceFeeds();
 
         vm.prank(owner);
         strategy.approveCowSwap(address(well), type(uint256).max);
@@ -2410,6 +2417,39 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
 
         return metaMorphoBalance + mTokenBalance + tokenBalance;
+    }
+
+    /**
+     * @notice Neutralize fork-time Chainlink staleness for every configured reward-token price feed.
+     * @dev These tests fork Base at `latest`, so the age of a feed's last update is whatever the
+     *      forked block happened to carry. SlippagePriceChecker gates on
+     *      `block.timestamp <= updatedAt + heartbeat` ("Price feed update time exceeds heartbeat"),
+     *      and the WETH config prices xWELL/MORPHO through CHAINLINK_ETH_USD with a 1200s heartbeat.
+     *      Whenever the fork lands in the tail of that feed's update cycle -- made ~60s more likely
+     *      by the `vm.warp(block.timestamp + 1 minutes)` in setUp -- the staleness gate fires before
+     *      the slippage logic under test, and the price-check tests fail on the wrong revert string.
+     *
+     *      This re-mocks `latestRoundData()` with the feed's REAL roundId and REAL answer, changing
+     *      only the timestamps to `block.timestamp`. The price math -- and therefore what the
+     *      "price check failed" assertions actually prove -- is unchanged; only the staleness clock
+     *      is pinned. Call it immediately before exercising the price-check path.
+     */
+    function freshenRewardTokenPriceFeeds() internal {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                address feed = addresses.getAddress(rewardToken.priceFeeds[j].priceFeed);
+
+                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+
+                vm.mockCall(
+                    feed,
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+                );
+            }
+        }
     }
 
     /**
