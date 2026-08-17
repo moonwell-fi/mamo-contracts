@@ -857,6 +857,72 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.rescueERC20(address(usdc), thirdParty, 1);
     }
 
+    // ---- F24: a donated share must not disable the asset rescue permanently ----
+    //
+    // Shares that reach this contract are permanent dead weight — `rescueERC20` refuses to move them,
+    // nothing burns them, and no other path touches them. On a `totalSupply() == 0` gate that made one
+    // wei of donated shares a permanent lock on the post-settlement dust. The gate is now
+    // `totalSupply() == balanceOf(address(this))`: EXTERNAL supply, which a donation cannot change.
+
+    /// @dev THE FINDING. Everyone exits, one wei was donated to the vault along the way, and the
+    ///      leftover dust is still rescuable. Mutation: restore `totalSupply() == 0` and this reverts.
+    function testRescueAssetSucceedsAfterAllExitsDespiteADonatedShare() public {
+        _settledBook();
+
+        // A donation, from anyone, at any time. (`alice` here; a griefer works identically.)
+        vm.prank(alice);
+        vault.transfer(address(vault), 1);
+
+        vm.prank(alice);
+        vault.redeemSettled(1e12 - 1);
+        vm.prank(bob);
+        vault.redeemSettled(2e12);
+
+        assertEq(vault.totalSupply(), 1, "the donated wei is all that is left, and nothing can burn it");
+        assertEq(vault.balanceOf(address(vault)), 1, "...and it is held right here");
+
+        uint256 dust = usdc.balanceOf(address(vault));
+        assertGt(dust, 0, "there IS a rounding remainder to rescue");
+
+        vm.prank(owner);
+        vault.rescueERC20(address(usdc), thirdParty, dust);
+        assertEq(usdc.balanceOf(thirdParty), dust, "recovered, not stranded forever");
+    }
+
+    /// @dev THE OTHER DIRECTION: a donation must not open the gate EARLY. A transfer-in raises
+    ///      `balanceOf(address(this))` and leaves `totalSupply()` alone, so external supply — the
+    ///      quantity actually compared — is untouched, and a real holder still blocks the rescue.
+    function testADonationDoesNotOpenTheRescueGateEarly() public {
+        _settledBook();
+
+        vm.prank(alice);
+        vault.transfer(address(vault), 5e11);
+
+        assertGt(vault.totalSupply(), vault.balanceOf(address(vault)), "bob and alice's remainder are external");
+        vm.prank(owner);
+        vm.expectRevert("LAV: asset reserved for redemptions");
+        vault.rescueERC20(address(usdc), thirdParty, 1);
+    }
+
+    /// @dev Shares escrowed on the STRATEGY are external claims, not dead weight, and hold the gate shut
+    ///      exactly as they did before. Modelled with a plain transfer to the strategy address, which is
+    ///      the same ledger shape `requestRedeem`'s escrow produces.
+    function testStrategyHeldSharesStillBlockTheAssetRescue() public {
+        _settledBook();
+
+        vm.prank(alice);
+        vault.transfer(address(strategy), 1e12);
+        vm.prank(bob);
+        vault.redeemSettled(2e12);
+
+        assertEq(vault.balanceOf(address(vault)), 0, "nothing was donated to the vault itself");
+        assertEq(vault.balanceOf(address(strategy)), 1e12, "the escrow-shaped balance is still outstanding");
+
+        vm.prank(owner);
+        vm.expectRevert("LAV: asset reserved for redemptions");
+        vault.rescueERC20(address(usdc), thirdParty, 1);
+    }
+
     // ==================== OWNERSHIP ====================
 
     /// @dev Ownable2Step: the strategy's `rescueToVault` reads `Ownable(vault).owner()`, so a

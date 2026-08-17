@@ -427,19 +427,35 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
      * @dev Any third-party token, any time — the vault is a plain transfer target for the strategy's
      *      `rescueToVault` sweeps, and those airdrops/strays back no shares. Two exclusions:
      *
-     *      - The ASSET is claimable only once `totalSupply() == 0`: pre-settlement any asset balance
-     *        is dust/donations, and post-settlement it is the {redeemSettled} pot, so the owner may
-     *        not touch it while a single share is outstanding.
+     *      - The ASSET is claimable only once every EXTERNAL share is gone. Pre-settlement any asset
+     *        balance is dust/donations, and post-settlement it is the {redeemSettled} pot, so the owner
+     *        may not touch it while a single outstanding claim on that pot remains.
+     *
+     *        The test is `totalSupply() == balanceOf(address(this))`, deliberately NOT
+     *        `totalSupply() == 0`. Shares that reach this contract are permanent dead weight: the
+     *        bullet below refuses to rescue them, {redeemSettled} would have to be called BY the vault
+     *        to burn them, and nothing else moves them — so a plain `totalSupply() == 0` lets anyone
+     *        transfer one wei of shares here and disable the asset rescue FOREVER, stranding the last
+     *        redeemers' dust and every post-settlement stray.
+     *
+     *        DONATION-INVARIANT: a transfer-in raises `balanceOf(address(this))` and leaves
+     *        `totalSupply()` untouched, so the quantity this compares — external supply — is unchanged
+     *        by any donation. A donation therefore cannot open the gate EARLY either, and it cannot
+     *        dilute anyone: the donor is the only party who loses the shares.
+     *
+     *        STRATEGY-ESCROWED SHARES ARE STILL EXTERNAL and hold the gate shut, exactly as before —
+     *        they sit on the strategy, not here, and they are live depositor claims.
      *      - The vault's OWN share token is never rescuable. The strategy custodies live shares
      *        (`requestRedeem` escrows, and the shares it pulls mid-`redeem`); a share balance that
-     *        reaches this contract is someone's un-burned claim on the pot, not a stray, so
-     *        forwarding it to an owner-chosen address would be an exfiltration of depositor value.
-     *        Escrowed shares are recovered by their owner through the strategy's `cancelRedeem`.
+     *        reaches this contract is someone's un-burned claim on the pot, or an init-configured
+     *        fee-share mint, not a stray — so forwarding it to an owner-chosen address would be an
+     *        exfiltration of depositor value. Escrowed shares are recovered by their owner through the
+     *        strategy's `cancelRedeem`.
      */
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "LAV: invalid recipient");
         require(token != address(this), "LAV: cannot rescue shares");
-        require(token != asset || totalSupply() == 0, "LAV: asset reserved for redemptions");
+        require(token != asset || totalSupply() == balanceOf(address(this)), "LAV: asset reserved for redemptions");
         IERC20(token).safeTransfer(to, amount);
         emit Rescued(token, to, amount);
     }

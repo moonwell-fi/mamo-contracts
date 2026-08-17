@@ -518,8 +518,13 @@ position NFT is never swept (no ERC-721 path), and **native ETH is not sweepable
 
 This is a two-hop recovery: the strategy can only push to the vault, and the vault owner then moves it out
 with the vault's own `rescueERC20(token, to, amount)` — which can take any non-asset token at any time, but
-refuses the **asset** (USDC) while `totalSupply() > 0` (`"LAV: asset reserved for redemptions"`), so a
-settled redemption pot can never be pulled out from under holders.
+refuses the **asset** (USDC) while any **external** share is outstanding
+(`"LAV: asset reserved for redemptions"`), so a settled redemption pot can never be pulled out from under
+holders. The test is `totalSupply() == balanceOf(vault)`, not `totalSupply() == 0`: shares donated to the
+vault itself are permanent dead weight (nothing burns or moves them, and `rescueERC20` refuses the share
+token), so counting them would let one wei disable the asset rescue forever. A donation cannot open the
+gate early either — it raises the vault's own balance and leaves `totalSupply()` alone, so external supply
+is unchanged. Shares escrowed on the STRATEGY are external and still hold the gate shut.
 
 ### Fee surface (proposer-relevant summary)
 

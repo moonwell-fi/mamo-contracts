@@ -222,10 +222,12 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
    all, so there is nothing for a lying strategy to double-charge against); **open-ended position
    duration** (the 3650-day governance ceiling is gone — the position runs until the owner calls
    `settleStrategy`, so the owner key IS the duration bound); **vault rescue policy** (`rescueERC20` is
-   owner-only and refuses the vault asset while `totalSupply() > 0`, so the strategy's `rescueToVault`
-   sweeps of stray non-position tokens are recoverable at any time, and the asset pot is claimable only
-   after every share has exited — this replaces the upstream "rescue dormant under `redemptionsLocked`"
-   residual).
+   owner-only and refuses the vault asset while any **external** share is outstanding, so the strategy's
+   `rescueToVault` sweeps of stray non-position tokens are recoverable at any time, and the asset pot is
+   claimable only after every external share has exited — this replaces the upstream "rescue dormant
+   under `redemptionsLocked`" residual). The gate is `totalSupply() == balanceOf(vault)` rather than
+   `== 0`, because shares donated to the vault are unburnable dead weight and a `== 0` test would let one
+   wei strand the post-settlement dust permanently.
 10. **Swap-route `tickSpacing`** — the three hardcoded `int24(100)` literals in the auxiliary
     leg↔USDC swap helpers (`_sweepLegToUsdc`, `_redeemCoverShortfall`) are gone;
     the spacing is now per-leg config (`$.cbBTCSwapTickSpacing` / `$.wethSwapTickSpacing`, read through
