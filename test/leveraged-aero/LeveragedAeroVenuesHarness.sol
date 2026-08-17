@@ -6,6 +6,7 @@ import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/Liq
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
 import {MockCLPool} from "../mocks/MockCLPool.sol";
+import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -100,6 +101,19 @@ contract MockLendingMarket {
     address public immutable underlying;
     uint256 public exchangeRateStored = 1e18;
 
+    /// @dev The exchange rate the next accrual will adopt; 0 means "nothing pending". The SUPPLY-side
+    ///      twin of `_pendingBorrowIndex`, and modelled for the same reason: real Compound/Moonwell
+    ///      accrues inside every MUTATING entry point (`mint`, `redeem`, `redeemUnderlying`) but not
+    ///      inside a view, so a caller that SIZES a draw off `exchangeRateStored` and then executes it
+    ///      is sizing at the stale rate and burning at the fresh one. That gap is exactly what
+    ///      `_redeemCollateral`'s full-redeem branch exists to avoid — sizing a "redeem everything" as
+    ///      an UNDERLYING amount at the stored rate strands `cBal x (1 - stored/fresh)` cTokens — and
+    ///      with one settable rate serving both roles it was not representable at all: the mock burned
+    ///      at the same rate the caller sized with, so the dust could never appear and a test could
+    ///      "pin" the branch while passing with it deleted.
+    /// @dev 0 by default ⇒ every existing suite behaves exactly as before; this is opt-in.
+    uint256 internal _pendingExchangeRate;
+
     mapping(address => uint256) public balanceOf; // cToken balance
 
     // ── Compound borrow book ──
@@ -118,12 +132,70 @@ contract MockLendingMarket {
 
     error MockLendingMarketNoDebt();
 
+    /// @notice Compound error codes the supply side should return INSTEAD of acting (0 == act normally).
+    /// @dev Moonwell/Compound v2 signal failure by RETURN CODE, not by reverting — a market that is
+    ///      paused, at its supply cap, or short of cash answers `mint`/`redeemUnderlying` with a nonzero
+    ///      code and does nothing. The production code is written around exactly that (`MoonwellMintFailed`
+    ///      / `MoonwellRedeemFailed` wrap the code), and the mock could not express it at all: `mint`
+    ///      always returned 0 and a `redeemUnderlying` past the balance panicked on the `-=` underflow
+    ///      instead. Both matter now that the keeper's `supplyIdle` mints (deposits stay raw BY DESIGN —
+    ///      `testDepositLeavesTheUsdcRawAndTouchesNoMoonwellMarket`) and several ops redeem on demand.
+    uint256 public mintError;
+    uint256 public redeemError;
+
     constructor(address underlying_) {
         underlying = underlying_;
     }
 
     function setExchangeRateStored(uint256 rate) external {
         exchangeRateStored = rate;
+    }
+
+    /// @notice Arm supply-side interest that has accrued in wall-clock time but that no transaction has
+    ///         folded in yet: views keep reporting `exchangeRateStored`, and the next mutating call
+    ///         adopts `rate` before it moves anything. Real Moonwell derives this from the supply rate
+    ///         and elapsed blocks; a test double sets it directly so a suite can arm an exact gap.
+    function setPendingExchangeRate(uint256 rate) external {
+        _pendingExchangeRate = rate;
+    }
+
+    /// @notice The rate a mutating call would adopt right now (== `exchangeRateStored` when nothing is
+    ///         pending). The supply-side twin of `pendingBorrowIndex()`.
+    function pendingExchangeRate() external view returns (uint256) {
+        return _pendingExchangeRate == 0 ? exchangeRateStored : _pendingExchangeRate;
+    }
+
+    /// @dev `accrueInterest()`'s supply half: fold the pending rate in and disarm. Called at the top of
+    ///      every mutating entry point, as Compound does, and NOT by any view.
+    function _accrueExchangeRate() internal {
+        if (_pendingExchangeRate != 0) {
+            exchangeRateStored = _pendingExchangeRate;
+            _pendingExchangeRate = 0;
+        }
+    }
+
+    /// @notice Arm the supply-side failure codes (test-only). `0` restores normal behaviour.
+    function setSupplyErrors(uint256 mintErr, uint256 redeemErr) external {
+        mintError = mintErr;
+        redeemError = redeemErr;
+    }
+
+    /// @notice The comptroller consulted on every redeem (0 = ungated, the legacy shape). Wiring this
+    ///         makes Moonwell's free-collateral belt REPRESENTABLE: an over-draw against live debt
+    ///         answers with a rejection code instead of the mock-artifact balance underflow.
+    address public comptroller;
+
+    function setComptroller(address comptroller_) external {
+        comptroller = comptroller_;
+    }
+
+    /// @dev Compound's `redeemAllowed` hop, code-shaped (never reverts) — real `MToken.redeemFresh`
+    ///      consults the comptroller's hypothetical liquidity and returns a failure CODE on rejection,
+    ///      which is the contract every production caller (`MoonwellRedeemFailed(err)`) is written
+    ///      around and the one thing the old mock could not express.
+    function _redeemAllowed(uint256 cTokens) internal view returns (uint256) {
+        if (comptroller == address(0)) return 0;
+        return MockComptroller(comptroller).redeemAllowed(address(this), msg.sender, cTokens);
     }
 
     // ── Borrow-balance reads ──
@@ -206,19 +278,30 @@ contract MockLendingMarket {
     }
 
     function mint(uint256 amount) external returns (uint256) {
+        if (mintError != 0) return mintError; // paused / at supply cap: answer with the code, move nothing
+        _accrueExchangeRate();
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
         balanceOf[msg.sender] += (amount * 1e18) / exchangeRateStored;
         return 0;
     }
 
     function redeem(uint256 cAmount) external returns (uint256) {
-        balanceOf[msg.sender] -= cAmount; // under-collateralised redeem reverts, as Moonwell would
+        if (redeemError != 0) return redeemError;
+        _accrueExchangeRate();
+        uint256 rejection = _redeemAllowed(cAmount);
+        if (rejection != 0) return rejection;
+        balanceOf[msg.sender] -= cAmount; // an over-the-balance redeem still underflows, as a belt
         IERC20(underlying).safeTransfer(msg.sender, (cAmount * exchangeRateStored) / 1e18);
         return 0;
     }
 
     function redeemUnderlying(uint256 amount) external returns (uint256) {
-        balanceOf[msg.sender] -= (amount * 1e18) / exchangeRateStored;
+        if (redeemError != 0) return redeemError; // insufficient cash / paused
+        _accrueExchangeRate();
+        uint256 cTokens = (amount * 1e18) / exchangeRateStored;
+        uint256 rejection = _redeemAllowed(cTokens);
+        if (rejection != 0) return rejection;
+        balanceOf[msg.sender] -= cTokens;
         IERC20(underlying).safeTransfer(msg.sender, amount);
         return 0;
     }
@@ -519,6 +602,11 @@ contract MockClSwapRouter {
 
     mapping(address => mapping(address => uint256)) public rateE18;
 
+    /// @notice How much of `tokenOut` this router has been asked to BUY, per token, across both
+    ///         entrypoints. Lets a test prove a cover/shortfall swap actually happened rather than
+    ///         inferring it from net balances (which the sweeps move in the opposite direction).
+    mapping(address => uint256) public boughtOf;
+
     error MockRouterNoRate();
     error MockRouterMinOut();
     error MockRouterMaxIn();
@@ -556,6 +644,7 @@ contract MockClSwapRouter {
         if (amountOut < p.amountOutMinimum) revert MockRouterMinOut();
         IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), p.amountIn);
         IERC20(p.tokenOut).safeTransfer(p.recipient, amountOut);
+        boughtOf[p.tokenOut] += amountOut;
     }
 
     function exactOutputSingle(ExactOutputSingleParams calldata p) external payable returns (uint256 amountIn) {
@@ -565,5 +654,6 @@ contract MockClSwapRouter {
         if (amountIn > p.amountInMaximum) revert MockRouterMaxIn();
         IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(p.tokenOut).safeTransfer(p.recipient, p.amountOut);
+        boughtOf[p.tokenOut] += p.amountOut;
     }
 }

@@ -678,35 +678,125 @@ library LeveragedAeroValuation {
     ///      pairing must be idle-funded rather than funded by swapping part of the borrow, and for the
     ///      operator consequence (idle moves into the LP, shrinking the redeem cover budget).
     ///      Deliberately NOT a partial fill and NOT a silent cap — a quietly under-levered position is
-    ///      worse for a rebalancer than a loud, diagnosable `(needed, available)` refusal.
+    ///      worse for a rebalancer than a loud, diagnosable `(needed, available)` refusal. (Through the
+    ///      manager the corrected draw is provably < raw + collateral, so this bound is defence in
+    ///      depth for DIRECT library callers; the manager's realistic funding failure is Moonwell
+    ///      refusing the mid-op redeem — see `_leverUp`.)
     ///
     ///      Ratio basis / overflow / one-sided-range behaviour are exactly `assetModeSplit`'s (shared
     ///      `_rangeRatio`): the pool's live `sqrtP` (calm-gate is the caller's job), `Math.mulDiv` for
     ///      the 512-bit intermediate, and `DegenerateRange` when the stored range is one-sided.
-    /// @param pool         The Slipstream CL pool (read for the live `sqrtP`).
-    /// @param tickLower    Lower tick of the STORED range the add will target.
-    /// @param tickUpper    Upper tick of that range.
-    /// @param borrowUsd6   The debt delta to add, USDC face (6dp).
-    /// @param idleUsdc     The strategy's live idle USDC balance — the only funding source for `U′`.
-    /// @param legADecimals Leg-A token decimals.
-    /// @param legAIsToken0 True when leg A sorts as the pool's token0 (`Layout.wethIsToken0`).
-    /// @param legAPrice8   Leg-A USD price, 8dp, from a hardened Chainlink read.
-    /// @return legABorrow  `A` — leg-A units to borrow.
-    /// @return lpUsdc      `U′` — USDC that must pair with `A` in the range (≤ `idleUsdc`).
+    ///      ── THE COLLATERAL-FUNDED CORRECTION (`targetLtvBps`) ──
+    ///
+    ///      The relation above is exact only while `U′` comes from a NAV component that is NOT
+    ///      collateral. That was true when idle USDC could only sit as a raw ERC-20 balance. It is no
+    ///      longer: the proposer's `supplyIdle` parks idle USDC in Moonwell, so on a book the keeper
+    ///      has swept there is no raw balance and the ONLY place `U′` can come from is a
+    ///      `redeemUnderlying` off the mUSDC collateral — and that SHRINKS the
+    ///      collateral the LTV is measured against. Sizing the naive `Δ = ltv·C − D` and then pulling
+    ///      `U′` out of `C` lands the book at `Δ / (C − U′) > ltv` — for a roughly centred range
+    ///      `U′ ≈ Δ`, so the overshoot is order `ltv·Δ/C`, big enough to trip `_assertHealthy`'s
+    ///      `maxLtvBps` on an aggressive target. So the delta is solved as a FIXED POINT instead.
+    ///
+    ///      Write `U′ = m·Δ` (both legs of the pairing are linear in `Δ`, so `m` is the constant
+    ///      `u0/borrowUsd6` read off the naive probe). Requiring the POST-op book to sit at target,
+    ///
+    ///        Δ + D = ltv · (C − U′)  with  D = ltv·C − borrowUsd6   ⇒   Δ = borrowUsd6 / (1 + ltv·m)
+    ///
+    ///      (stated here for a book with no raw USDC; the general form credits whatever raw balance is
+    ///      there and is derived in the next paragraph — it is what the code actually computes)
+    ///
+    ///      which is what the two `mulDiv`s below compute (`1e4` carries the bps scale). Both `A` and
+    ///      `U′` are scaled by the same factor, so the range ratio `A : U′` is untouched — the
+    ///      correction only decides HOW MUCH to lever, never the shape of the pair.
+    ///
+    ///      IT AGREES WITH GENESIS, EXACTLY. Substituting a flat book (`D = 0`, `borrowUsd6 = ltv·C`)
+    ///      gives post-op collateral `C − m·Δ = C/(1 + ltv·m)` and debt `ltv·C/(1 + ltv·m)` — i.e. the
+    ///      SAME split point `assetModeSplit` produces for `amount = C`, and post-op LTV exactly `ltv`.
+    ///      So `deposit` + `adjustLeverage` and `deposit` + `deployIdle` land the same book, and
+    ///      `_assertHealthy` sees a book at target rather than one the sizing overshot.
+    ///
+    ///      RAW IDLE IS CREDITED, so the correction is EXACT IN BOTH REGIMES rather than a blanket
+    ///      pessimism. Only the part of `U′` the raw balance cannot cover comes out of collateral, so
+    ///      with a raw balance `R` the requirement is `Δ + D = ltv·(C − (U′ − R))`, whose solution
+    ///      carries `ltv·R` in the numerator: `Δ = (borrowUsd6 + ltv·R) / (1 + ltv·m)`. Two consequences
+    ///      worth stating, because they are what makes this a pure EXTENSION of the old contract:
+    ///        - `R ≥ U′` (the pre-supply world, and any book still holding a rerange remainder or an
+    ///          IL-cover leftover) drives the scale factor to ≥ 1, where it is CLAMPED to 1 — the
+    ///          uncorrected `Δ = borrowUsd6`, collateral untouched, post-op LTV exactly `ltv`. Byte-for-
+    ///          byte the behaviour this function had before the correction existed.
+    ///        - `R = 0` (a book the keeper has fully swept into mUSDC) is the pure collateral-funded
+    ///          case above.
+    ///      The clamp is not a safety valve, it is the boundary of the piecewise solution: past `R = U′`
+    ///      the collateral draw is zero and cannot go negative, so scaling UP would over-pair.
+    /// @param pool           The Slipstream CL pool (read for the live `sqrtP`).
+    /// @param tickLower      Lower tick of the STORED range the add will target.
+    /// @param tickUpper      Upper tick of that range.
+    /// @param borrowUsd6     The NAIVE debt delta (`ltv·C − D`, USDC face 6dp) the caller wants to add;
+    ///                       corrected below for the collateral `U′` will consume.
+    /// @param availableUsdc  USDC the strategy can fund `U′` from — raw balance PLUS the mUSDC
+    ///                       collateral it can redeem (`usdcAvailable`). The caller materialises the
+    ///                       raw shortfall AFTER this returns and BEFORE the borrow.
+    /// @param rawUsdc        The raw ERC-20 USDC balance alone — the part of `U′` that costs no
+    ///                       collateral. `≤ availableUsdc` by construction.
+    /// @param targetLtvBps   The fund's standing target LTV (bps) — the fixed-point coefficient above.
+    /// @param legADecimals   Leg-A token decimals.
+    /// @param legAIsToken0   True when leg A sorts as the pool's token0 (`Layout.wethIsToken0`).
+    /// @param legAPrice8     Leg-A USD price, 8dp, from a hardened Chainlink read.
+    /// @return legABorrow    `A` — leg-A units to borrow.
+    /// @return lpUsdc        `U′` — USDC that must pair with `A` in the range (≤ `availableUsdc`).
     function assetModeLeverUpPair(
         address pool,
         int24 tickLower,
         int24 tickUpper,
         uint256 borrowUsd6,
-        uint256 idleUsdc,
+        uint256 availableUsdc,
+        uint256 rawUsdc,
+        uint256 targetLtvBps,
         uint8 legADecimals,
         bool legAIsToken0,
         uint256 legAPrice8
     ) public view returns (uint256 legABorrow, uint256 lpUsdc) {
         (uint256 needA, uint256 needU) = _rangeRatio(pool, tickLower, tickUpper, legAIsToken0);
-        legABorrow = _legABorrow(borrowUsd6, 10 ** uint256(legADecimals), legAPrice8);
-        lpUsdc = Math.mulDiv(legABorrow, needU, needA);
-        if (lpUsdc > idleUsdc) revert InsufficientIdleForLeverUp(lpUsdc, idleUsdc);
+        // The naive probe: `A0` for the un-corrected delta, and the `U′0` the range demands beside it.
+        uint256 a0 = _legABorrow(borrowUsd6, 10 ** uint256(legADecimals), legAPrice8);
+        uint256 u0 = Math.mulDiv(a0, needU, needA);
+        // Fixed-point rescale by `(b + ltv·R) / (b + ltv·u0)` (see the @dev derivation; `10_000` carries
+        // the bps scale on both sides). `den > 0`: the manager only levers UP when the delta is strictly
+        // positive, so `borrowUsd6 > 0`. The clamp is the `R ≥ U′` branch of the piecewise solution.
+        uint256 den = 10_000 * borrowUsd6 + targetLtvBps * u0;
+        uint256 num = 10_000 * borrowUsd6 + targetLtvBps * rawUsdc;
+        if (num > den) num = den;
+        legABorrow = Math.mulDiv(a0, num, den);
+        lpUsdc = Math.mulDiv(u0, num, den);
+        if (lpUsdc > availableUsdc) revert InsufficientIdleForLeverUp(lpUsdc, availableUsdc);
+    }
+
+    /// @notice USDC the strategy can spend RIGHT NOW without touching the LP: its raw ERC-20 balance
+    ///         PLUS what its Moonwell mUSDC collateral is worth (both 6dp face).
+    /// @dev THE FUNDING BASIS FOR "NO IDLE USDC SITS DEAD". The proposer's `supplyIdle` can put any
+    ///      or all of the raw balance into Moonwell, so the raw balance is no longer a reliable measure
+    ///      of what the book can spend, and every site that used to bound itself by
+    ///      `IERC20(usdc).balanceOf(this)` — `deployIdle`'s `InsufficientIdle`,
+    ///      `execute`/`redeploy`'s `ExecuteZeroBalance`, the asset-mode lever-up
+    ///      pairing — must bound itself by THIS instead, then materialise the raw shortfall via
+    ///      `redeemUnderlying`. Oracle-free by construction: USDC is the unit of account and the
+    ///      collateral term is the same `balanceOf × exchangeRateStored / 1e18` the NAV and the health
+    ///      basis already use, so nothing here can fail closed on a down feed.
+    ///
+    ///      ALSO THE FLAT-BOOK NAV TERM. `LeveragedAerodromeCLStrategy.nav()` prices a `tokenId == 0`
+    ///      book off this function rather than off the raw balance alone. That is not an enhancement,
+    ///      it is REQUIRED: `supplyIdle` works on a flat book (post-`flatten`, post-full-redeem) — the
+    ///      state holding the most dead USDC — and the old raw-balance branch would then have priced
+    ///      the whole fund at 0, minting the next depositor an unbacked claim and reverting every
+    ///      one after that on `NavUnpriceable`. Debt is deliberately NOT subtracted here: it is not
+    ///      subtracted by the branch this replaces either, and a flat book has none (both `flatten`
+    ///      and `settleImpl` clear every borrow before releasing the collateral).
+    /// @param usdc  The unit of account.
+    /// @param mUsdc Moonwell USDC market.
+    /// @param who   Account to read (always the strategy clone).
+    function usdcAvailable(address usdc, address mUsdc, address who) public view returns (uint256) {
+        return IERC20(usdc).balanceOf(who) + _collateralUnderlying(mUsdc, who);
     }
 
     // ── Slipstream swap plumbing ──
@@ -1160,10 +1250,15 @@ library LeveragedAeroValuation {
     ///      `exchangeRateStored` (last-accrued, view) is used — never the mutating
     ///      `balanceOfUnderlying`. USDC is the unit, so the result is already face-valued.
     function _collateralUsdc(Config memory c, address strategy) private view returns (uint256) {
-        uint256 cBal = ICToken(c.mUsdc).balanceOf(strategy);
+        return _collateralUnderlying(c.mUsdc, strategy);
+    }
+
+    /// @dev The `Config`-free form of the above, so the NAV term and the `usdcAvailable` funding basis
+    ///      are ONE expression rather than two copies that agree only by inspection.
+    function _collateralUnderlying(address mUsdc, address who) private view returns (uint256) {
+        uint256 cBal = ICToken(mUsdc).balanceOf(who);
         if (cBal == 0) return 0;
-        uint256 rate = ICToken(c.mUsdc).exchangeRateStored();
-        return (cBal * rate) / 1e18;
+        return (cBal * ICToken(mUsdc).exchangeRateStored()) / 1e18;
     }
 
     /// @dev THE WHOLE GAUGE-REWARD CLAIM, in USDC face (6dp) — BOTH halves of it:

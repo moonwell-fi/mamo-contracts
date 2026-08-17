@@ -524,21 +524,40 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
     /**
      * @dev THE "CANNOT DRIFT" IDENTITY. `assetModeSplit` and `assetModeLeverUpPair` solve the SAME
      *      pairing relation `A / U = needA / needU` with different unknowns: the split is handed a total
-     *      and solves for the split point `C`, the lever-up is handed the debt delta outright. So feeding
-     *      the split's OWN borrow budget (`C × targetLtv / 1e4`) into the lever-up must reproduce the
-     *      split's `(A, U)` — the algebraic statement that a lever-up to `targetLtvBps` lands the same
-     *      leg ratio genesis does. Asserted across both orderings and several range shapes.
+     *      and solves for the split point `C`, the lever-up is handed a debt delta and solves the fixed
+     *      point that accounts for the collateral its `U′` will consume.
      *
-     *      `A` must match TO THE WEI — both go through the same `_legABorrow`. `U` matches only to a
-     *      RELATIVE tolerance, and that floor is physical, not slack: the split derives `U` by
+     *      THE INPUT IS THE WHOLE BOOK'S TARGET DEBT, NOT THE SPLIT'S OWN BORROW BUDGET — and that is
+     *      the change "no idle USDC sits dead" makes to this identity, not a fudge to keep it passing.
+     *      Deposits stay RAW by design (`deposit` never touches Moonwell); the state modelled here is
+     *      the keeper having run `supplyIdle` over the whole balance, after which a book holding
+     *      `AMOUNT` holds it ENTIRELY as collateral: `adjustLeverage` reads `collateral == AMOUNT`,
+     *      sizes the naive delta
+     *      `AMOUNT × ltv / 1e4`, and `assetModeLeverUpPair` rescales it by `1/(1 + ltv·m)` because the
+     *      pairing USDC has to be redeemed back out of that same collateral. The rescale is EXACTLY the
+     *      split's `w/(w+x)`, so the corrected `(A, U′)` equals the split's `(A, U)` to the same
+     *      tolerances as before. What this now asserts is the operator-visible statement:
+     *      **deposit → `supplyIdle` → `adjustLeverage` lands the identical book to
+     *      deposit → `deployIdle`.** Asserted across both orderings and several range shapes.
+     *
+     *      BOTH sides now match only to a RELATIVE tolerance. `A` used to match to the wei because the
+     *      lever-up applied `_legABorrow` and stopped; it now applies one further `mulDiv` rescale, and
+     *      that floor is exactly the split's `mulDiv(amount, w, w+x)` reached from the other direction —
+     *      algebraically identical, but the two orders of truncation differ in the last unit (measured:
+     *      220/3.3e14 = 6.7e-13 relative). `U` matched relatively before and for the same reason: the
+     *      floor is physical, not slack. The split derives `U` by
      *      SUBTRACTION from an exact-arithmetic `C` (`amount − C`), whereas the lever-up derives it by
      *      MULTIPLICATION off two already-FLOORED integers — `borrowUsd6 = floor(C·ltv/1e4)` and
      *      `A = floor(borrowUsd6·100·10^dA/pA)`. Each lost unit is magnified into `U′` by its own scale
      *      factor (`U/borrowUsd6` and `needU/needA` respectively), so the error is
      *      `O(1/borrowUsd6 + 1/A)` RELATIVE — ~1e-8 at the sizes here, and it shrinks with position size.
-     *      1e-6 is two orders above the worst observed case (measured: 933/3.3e11 = 2.8e-9 for the
-     *      expensive-leg ordering, 15/9.7e11 = 1.5e-11 for the cheap-leg one) and still orders of
-     *      magnitude below any mis-sizing a wrong formula would produce.
+     *      TOLERANCES ARE PER-SIDE AND SIT JUST ABOVE THE MEASURED DRIFT, deliberately. The `A` drift
+     *      is ONE UNIT in the last place (the two truncation orders differ by at most 1), so its
+     *      relative bound follows the SMALLEST `A` across the shapes here (~5e8 units → 2e-9): `A` at
+     *      1e-8 gives one-unit drift 5× headroom. `U` at 1e-7 covers its measured worst (2.8e-9 for
+     *      the expensive-leg ordering, 1.5e-11 for the cheap-leg one) ~35×. An earlier revision used
+     *      a single 1e-6 for both — wide enough to wave through a ppm-scale sizing regression; these
+     *      bounds keep the identity a real pin while staying above integer-floor noise.
      */
     function testLeverUpPairReproducesTheSplitPairAtTheSameLtv() public {
         _setPoolTick(TICK);
@@ -558,15 +577,19 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
                     address(pool),
                     lower,
                     upper,
-                    (c * ltv) / 10_000, // the split's OWN borrow budget
+                    (AMOUNT * ltv) / 10_000, // the WHOLE book's target debt (see @dev)
                     type(uint256).max, // funding bound not under test here
+                    0, // no raw USDC: the deposit is entirely collateral (see @dev)
+                    uint256(ltv),
                     LEG_A_DECIMALS,
                     legAIsToken0,
                     pA
                 );
-                assertEq(aUp, a, "the two entrypoints must convert the borrow identically (to the wei)");
                 assertApproxEqRel(
-                    uUp, u, 1e12, "the two entrypoints must pair at the same ratio (to integer resolution)"
+                    aUp, a, 1e10, "the two entrypoints must convert the borrow identically (to integer resolution)"
+                );
+                assertApproxEqRel(
+                    uUp, u, 1e11, "the two entrypoints must pair at the same ratio (to integer resolution)"
                 );
             }
         }
@@ -582,13 +605,19 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         int24 upper = TICK + 2000;
 
         (uint256 a1, uint256 u1) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, borrowUsd6, type(uint256).max, LEG_A_DECIMALS, legAIsToken0, pA
+            address(pool), lower, upper, borrowUsd6, type(uint256).max, 0, 5000, LEG_A_DECIMALS, legAIsToken0, pA
         );
         (uint256 a2, uint256 u2) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, borrowUsd6 * 3, type(uint256).max, LEG_A_DECIMALS, legAIsToken0, pA
+            address(pool), lower, upper, borrowUsd6 * 3, type(uint256).max, 0, 5000, LEG_A_DECIMALS, legAIsToken0, pA
         );
-        assertApproxEqRel(a2, a1 * 3, 1e12, "borrow scales linearly in the delta");
-        assertApproxEqRel(u2, u1 * 3, 1e12, "the pairing USDC scales linearly in the delta");
+        // Tolerance is INTEGER RESOLUTION, derived: each output passes through at most three floor
+        // divisions (`a0`, the fixed-point rescale, the pairing mulDiv), so `a1`/`a2` each sit within
+        // ~2 units of the real line and the ×3 comparison within ~8 — on the smallest bound-permitted
+        // delta (`a1 ≈ 2e6` units) that is ~4e-6 relative. 1e13 (1e-5) covers it with 2.5× headroom;
+        // the previous 1e12 sat BELOW the floor noise and flaked on fuzz seeds hitting small deltas
+        // (observed: `borrowUsd6 = 1022244657` → 3 units = 1.46e-6 relative).
+        assertApproxEqRel(a2, a1 * 3, 1e13, "borrow scales linearly in the delta");
+        assertApproxEqRel(u2, u1 * 3, 1e13, "the pairing USDC scales linearly in the delta");
 
         // The pair is balanced at the tick — the same property the split has, so the LP consumes both.
         (uint256 amt0, uint256 amt1) = legAIsToken0 ? (a1, u1) : (u1, a1);
@@ -611,7 +640,7 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         uint256 delta = 250_000e6;
 
         (, uint256 needed) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, delta, type(uint256).max, LEG_A_DECIMALS, false, pA
+            address(pool), lower, upper, delta, type(uint256).max, 0, 5000, LEG_A_DECIMALS, false, pA
         );
         assertGt(needed, 0, "the pairing draw must be nonzero, or the bound is vacuous");
 
@@ -619,11 +648,11 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
             abi.encodeWithSelector(LeveragedAeroValuation.InsufficientIdleForLeverUp.selector, needed, needed - 1)
         );
         LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, delta, needed - 1, LEG_A_DECIMALS, false, pA
+            address(pool), lower, upper, delta, needed - 1, 0, 5000, LEG_A_DECIMALS, false, pA
         );
 
         (, uint256 u) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, delta, needed, LEG_A_DECIMALS, false, pA
+            address(pool), lower, upper, delta, needed, 0, 5000, LEG_A_DECIMALS, false, pA
         );
         assertEq(u, needed, "exactly U' of idle clears the bound");
     }
@@ -636,11 +665,11 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
 
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), TICK + 2000, TICK + 6000, 250_000e6, type(uint256).max, LEG_A_DECIMALS, false, pA
+            address(pool), TICK + 2000, TICK + 6000, 250_000e6, type(uint256).max, 0, 5000, LEG_A_DECIMALS, false, pA
         );
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), TICK - 6000, TICK - 2000, 250_000e6, type(uint256).max, LEG_A_DECIMALS, false, pA
+            address(pool), TICK - 6000, TICK - 2000, 250_000e6, type(uint256).max, 0, 5000, LEG_A_DECIMALS, false, pA
         );
     }
 }
