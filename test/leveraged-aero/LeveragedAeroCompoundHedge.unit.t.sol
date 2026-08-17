@@ -333,6 +333,11 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         strategy.compound(minUsdcOut, 0);
     }
 
+    /// @dev Override the etched AERO->USDC router's fill rate (USDC-out per AERO-in, 1e18-scaled).
+    function _setAeroRouterRate(uint256 rateE18) internal {
+        MockAeroV2Router(AERO_V2_ROUTER).setRateOverrideE18(rateE18);
+    }
+
     // ==================== 1. THE RE-HEDGE ====================
 
     /**
@@ -1488,5 +1493,54 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
 
         assertEq(strategy.nav(), navBare + _heldAeroValueUsdc(TRANCHE), "catch-to-0: held only, and no revert");
         assertFalse(strategy.rewardReadOk(), "...and THAT is the state the marker exists to expose");
+    }
+
+    // ====== 7. THE REWARD-SALE FLOOR PRICES THROUGH THE USDC PEG (F21) ======
+    //
+    // The floor is post-checked against `usdcOut`, a USDC-FACE fill, so the AERO/USD value has to be
+    // divided by the USDC/USD price. The old `/1e20` compared a USD-6dp quantity against a face amount,
+    // which breaks in BOTH directions — lax below peg, unclearable above it.
+
+    /// @dev BELOW PEG, the lax direction. At $0.90/USDC a face-rate fill is ~10% under fair value; the
+    ///      peg-aware floor catches it. Mutation: `/1e20` prices the floor at 0.99 x face and clears it.
+    function testTheRewardFloorCatchesAnUnderFillWhenUsdcIsBelowPeg() public {
+        _armBook();
+        _armRewards(20_000e18);
+        usdcFeed.setAnswer(0.9e8);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroManager.BelowOracleFloor.selector);
+        strategy.compound(1, 0);
+    }
+
+    /// @dev BELOW PEG, the control: a fill at the peg-aware fair rate clears. Without this the fix could
+    ///      be an unconditional tightening rather than a re-basing.
+    function testAPegAwareFairFillClearsTheFloorBelowPeg() public {
+        _armBook();
+        _armRewards(20_000e18);
+        usdcFeed.setAnswer(0.9e8);
+        _setAeroRouterRate((1e6 * 1e8) / uint256(0.9e8));
+
+        uint256 collateralBefore = _collateralUsdc();
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "the fair fill cleared the floor");
+        assertGt(_collateralUsdc(), collateralBefore, "...and the harvest redeployed");
+    }
+
+    /// @dev ABOVE PEG, the bricking direction. At $1.02/USDC an honest market pays FEWER USDC per AERO,
+    ///      which the old floor read as an under-fill — `BelowOracleFloor` on every attempt, i.e.
+    ///      `compound` (and, at the twin site, `flatten`) stuck. Mutation: `/1e20` reverts here.
+    function testAnHonestFillIsNotBrickedWhenUsdcIsAbovePeg() public {
+        _armBook();
+        _armRewards(20_000e18);
+        usdcFeed.setAnswer(1.02e8);
+        _setAeroRouterRate((1e6 * 1e8) / uint256(1.02e8));
+
+        uint256 collateralBefore = _collateralUsdc();
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "the honest fill was accepted");
+        assertGt(_collateralUsdc(), collateralBefore, "...and the harvest redeployed");
     }
 }

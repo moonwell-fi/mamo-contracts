@@ -768,8 +768,11 @@ library LeveragedAeroVenue {
         // own precondition, so a feed outage plus one wei of donated dust stalls a migration.
         // `bal * price8 < 1e20` is what makes the floor round to 0; `REWARD_PRICE_CEILING_USD8`
         // substitutes a price so absurd (`$10,000` against a ~$1 token) that no live read could
-        // exceed it, which makes this branch strictly narrower than the priced one — it can only
-        // skip balances the priced check would also have skipped.
+        // exceed it, so this branch only skips balances the priced check would also have skipped.
+        // The priced floor now carries a USDC/USD peg divisor as well, which widens its own dust band
+        // whenever USDC reads above peg and narrows it below — the $10,000 ceiling is ~10,000x the
+        // live AERO price, which absorbs any peg factor a Chainlink USDC/USD read could plausibly
+        // produce, so the containment holds with room to spare rather than exactly.
         //
         // PARTIAL BY CONSTRUCTION, deliberately: this covers only the band that is dust at the
         // CEILING price, so the priced `floor == 0` skip below still carries the rest of the band and
@@ -777,8 +780,20 @@ library LeveragedAeroVenue {
         // non-reverting `tryReadUsd8` variant — a rewrite of a safety-critical oracle path, which is
         // not worth it for a sub-micro-USD balance.
         if (bal < 1e20 / REWARD_PRICE_CEILING_USD8) return;
+        // PEG LEG, not `/1e20` — see the identical fix in `LeveragedAeroManager.compoundImpl`. The floor
+        // is post-checked against `usdcOut`, a USDC-FACE fill, so the USD value must be divided by the
+        // USDC/USD price rather than by an assumed 1.00. Bidirectional: USDC below peg = a lax floor;
+        // USDC above peg = an UNCLEARABLE floor, which reverts `BelowOracleFloor` on every attempt and so
+        // bricks `flatten` — and `flatten` is `migrateVenue`'s own precondition. The nested `mulDiv`
+        // mirrors `LeveragedAeroValuation._usdcValue` (18dp token → 8dp USD → 6dp USDC face); it is
+        // written out rather than reused because that helper is `private` to the valuation library.
+        uint256 pUsdc8 = LeveragedAeroValuation.readUsd8($.usdcFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod);
         uint256 floor = Math.mulDiv(
-            bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e20
+            Math.mulDiv(
+                bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e18
+            ),
+            1e6,
+            pUsdc8
         ) * (10000 - uint256($.maxSlippageBps)) / 10000;
         if (floor == 0) return; // dust: unsellable, and worth strictly less than one NAV unit
         if (callerFloorRequired && minRewardUsdcOut == 0) revert ZeroMinOut();
@@ -865,7 +880,8 @@ library LeveragedAeroVenue {
         if (p.cbBTCFeed == address(0)) revert ZeroAddress();
         if (p.wethFeed == address(0)) revert ZeroAddress();
         if (p.aeroUsdFeed == address(0)) revert ZeroAddress();
-        // L9: the reward-token floor scales an 8dp price (`mulDiv(bal, price8, 1e20)`); a non-8dp
+        // L9: the reward-token floor scales an 8dp price (`bal x price8 / 1e18`, then the USDC peg
+        // divisor takes it to a 6dp face amount); a non-8dp
         // aggregator would silently mis-scale it by orders of magnitude. Checked here (not at read
         // time like the leg feeds) because the floor consumes the raw answer.
         if (IAggregatorV3(p.aeroUsdFeed).decimals() != 8) revert UnexpectedFeedDecimals();

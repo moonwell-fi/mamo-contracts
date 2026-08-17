@@ -547,8 +547,7 @@ contract MockAeroV2Factory {
 /// @dev The manager routes that one swap through a HARDCODED mainnet address (`AERO_V2_ROUTER`), so a
 ///      fork-free test has to place code there. All state is in `immutable`s precisely so the contract
 ///      survives `vm.etch(AERO_V2_ROUTER, address(m).code)` — immutables live in the deployed runtime
-///      bytecode, whereas storage-based config would be left behind at the original address. To change
-///      the rate, deploy a second instance and etch again.
+///      bytecode, whereas storage-based config would be left behind at the original address.
 ///      Fund it with `tokenOut` before use; it pays fills out of its own balance.
 contract MockAeroV2Router {
     using SafeERC20 for IERC20;
@@ -557,6 +556,9 @@ contract MockAeroV2Router {
     address public immutable tokenOut;
     /// @dev `out per in`, 1e18-scaled, spanning the decimal gap between the two tokens.
     uint256 public immutable rateE18;
+    /// @dev Post-etch rate override, written at the ETCHED address (so it survives what the immutables
+    ///      cannot be given). Zero means "use {rateE18}", which keeps every existing etch unchanged.
+    uint256 public rateOverrideE18;
 
     error MockAeroRouterBadRoute();
     error MockAeroRouterMinOut();
@@ -574,6 +576,10 @@ contract MockAeroV2Router {
         rateE18 = rateE18_;
     }
 
+    function setRateOverrideE18(uint256 r) external {
+        rateOverrideE18 = r;
+    }
+
     function swapExactTokensForTokens(
         uint256 amountIn,
         uint256 amountOutMin,
@@ -584,7 +590,8 @@ contract MockAeroV2Router {
         if (routes.length != 1 || routes[0].from != tokenIn || routes[0].to != tokenOut) {
             revert MockAeroRouterBadRoute();
         }
-        uint256 out = (amountIn * rateE18) / 1e18;
+        uint256 r = rateOverrideE18 == 0 ? rateE18 : rateOverrideE18;
+        uint256 out = (amountIn * r) / 1e18;
         if (out < amountOutMin) revert MockAeroRouterMinOut();
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(tokenOut).safeTransfer(to, out);

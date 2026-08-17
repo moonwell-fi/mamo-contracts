@@ -615,9 +615,15 @@ library LeveragedAeroManager {
 
         // 2. Derive the on-chain oracle floor from a hardened AERO/USD read (8dp, fail-closed): a
         //    stale/broken feed reverts the whole compound (defer the harvest, intended posture).
-        //    fair6 = aeroBal(18dp) × price(8dp) / 1e20 → USDC 6dp; floor haircuts by maxSlippageBps.
-        uint256 floor =
-            Math.mulDiv(aeroBal, _readUsd8($.aeroUsdFeed), 1e20) * (10000 - uint256($.maxSlippageBps)) / 10000;
+        //    THE PEG LEG IS PART OF THE FLOOR, not an assumed 1.00. The floor is post-checked against
+        //    `usdcOut`, a USDC-FACE amount, so the USD value has to be divided by the USDC/USD price the
+        //    same way `_sweepAtOracleFloor` and `nav()`'s own reward term already do. A bare `/1e20` is a
+        //    USD-6dp quantity compared against a USDC-face fill: USDC BELOW peg makes the floor lax (the
+        //    harvest can fill under fair value and still clear), USDC ABOVE peg makes it unclearable and
+        //    bricks `compound` on `BelowOracleFloor`. `_tokenToUsdc` is the same conversion the debt,
+        //    health and settle-sweep paths use, so all four now price on one basis.
+        uint256 floor = _tokenToUsdc(aeroBal, 18, _readUsd8($.aeroUsdFeed), _readUsd8($.usdcFeed))
+            * (10000 - uint256($.maxSlippageBps)) / 10000;
         //    DUST NO-OP, same branch (and same rationale) as `LeveragedAeroVenue._sellRewardBalance`: a
         //    balance worth under one micro-USD floors to 0 and the router fills it at 0, so the nonzero
         //    `minUsdcOut` this function already demands would revert every call. Without it a donation

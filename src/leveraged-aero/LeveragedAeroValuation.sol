@@ -1362,8 +1362,9 @@ library LeveragedAeroValuation {
     ///      fail-closes the whole NAV first, and the term is a small fraction of a levered book.
     ///
     ///      DECIMALS are pinned at 18, matching the reward-token scaling already hardcoded in
-    ///      `LeveragedAeroManager.compoundImpl` / `LeveragedAeroVenue._sellRewardBalance` (the `1e20`
-    ///      divisor). `LeveragedAeroVenue.applyVenue` enforces it (`IERC20Metadata(rewardTok).decimals()
+    ///      `LeveragedAeroManager.compoundImpl` / `LeveragedAeroVenue._sellRewardBalance` (the `1e18`
+    ///      divisor those two apply before the USDC peg divisor, matching this term exactly).
+    ///      `LeveragedAeroVenue.applyVenue` enforces it (`IERC20Metadata(rewardTok).decimals()
     ///      != 18 → UnexpectedFeedDecimals`) at init AND at every venue migration, and likewise rejects a
     ///      reward token equal to either leg (`UnsupportedLeg`), so this term can never double-count an
     ///      idle-leg balance.

@@ -713,6 +713,36 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.flatten(1, 0);
     }
 
+    /// @dev F21, the lax direction at the flatten twin of `compoundImpl`'s floor. The floor is checked
+    ///      against a USDC-FACE fill, so it must divide by the USDC/USD price: at $0.90/USDC a face-rate
+    ///      fill is ~10% under fair value. Mutation: `/1e20` clears it.
+    function testFlattenRewardFloorPricesThroughTheUsdcPeg() public {
+        _execute(SEED);
+        aero.mint(address(gauge), 1000e18);
+        gauge.setAeroToPayOnWithdraw(1000e18);
+        usdcFeed.setAnswer(0.9e8);
+
+        vm.expectRevert(LeveragedAeroVenue.BelowOracleFloor.selector);
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
+    }
+
+    /// @dev F21, the bricking direction. At $1.02/USDC an honest market pays FEWER USDC per AERO, which
+    ///      the old floor read as an under-fill — and since `flatten` is `migrateVenue`'s precondition,
+    ///      that stalls a migration outright. Mutation: `/1e20` reverts `BelowOracleFloor` here.
+    function testFlattenIsNotBrickedByAnHonestFillWhenUsdcIsAbovePeg() public {
+        _execute(SEED);
+        aero.mint(address(gauge), 1000e18);
+        gauge.setAeroToPayOnWithdraw(1000e18);
+        usdcFeed.setAnswer(1.02e8);
+        MockAeroV2Router(AERO_V2_ROUTER).setRateOverrideE18((1e6 * 1e8) / uint256(1.02e8));
+
+        _flatten();
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "the honest fill was accepted, not floored out");
+        assertEq(strategy.layout().tokenId, 0, "...and the flatten completed");
+    }
+
     /// @dev A reward balance with no caller floor is rejected (mirrors `compound`'s `ZeroMinOut`
     ///      belt); with NO reward balance the same call is a clean no-op, which is what keeps
     ///      `flatten` idempotent.
