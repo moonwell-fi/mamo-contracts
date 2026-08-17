@@ -1150,7 +1150,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         run (there is no position to add into; both revert downstream) — `redeploy` is the op
     ///         that re-enters a flat book, swept or not. The inverse is `withdrawIdle`: parked USDC
     ///         can be pulled back to a raw balance without levering or flattening, bounded to the
-    ///         un-levered collateral so the pair of ops can never move LTV above target.
+    ///         un-levered collateral so the pair of ops can never move LTV above target (during a
+    ///         feed outage that bound is re-derived at the venue's own oracle — held there, not
+    ///         dropped; see `withdrawIdle`).
     ///
     ///         `State.Executed` gate matches `deployIdle` / `compound` / `adjustLeverage` (every venue
     ///         op is gated the same way): pre-`execute` the seed is the owner's to activate with, and
@@ -1199,12 +1201,20 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         BOUNDED TO UN-LEVERED COLLATERAL (`C − ceil(D·1e4/targetLtvBps)`, 0 when the book is at
     ///         or above target): withdrawing collateral raises LTV, and this bound is exactly what
     ///         keeps the post-op book at or under the standing target — the mirror of `deployIdle`'s
-    ///         funding bound. Exceeding it reverts `InsufficientIdle`; a redeem Moonwell's cash cannot
+    ///         funding bound. THE BOUND ALWAYS RUNS; what varies is the ORACLE PRICING IT. Normally
+    ///         the hardened Chainlink reader; when that reader refuses (staleness, sequencer grace)
+    ///         the SAME line is re-derived from Moonwell's own account snapshot and the call emits
+    ///         `WithdrawIdleBoundDegraded` — held at the venue's (possibly stale) prices rather than
+    ///         at truth, never dropped (`LeveragedAeroVenue.withdrawIdleImpl`). Exceeding it reverts
+    ///         `InsufficientIdle` either way; if even the venue cannot answer, `ComptrollerCallFailed`
+    ///         — fail closed. A redeem Moonwell's cash cannot
     ///         cover fails closed as `MoonwellRedeemFailed(err)` with nothing moved. Same gates as
     ///         `supplyIdle` (`onlyProposer`, `State.Executed`), and like it, works on a flat book —
-    ///         where debt is zero, so the whole parked pot is withdrawable.
-    /// @param amount USDC (6dp) to redeem back to the raw balance; must be ≤ un-levered collateral.
-    ///               Zero is a silent no-op, mirroring `supplyIdle`.
+    ///         where debt is zero, so the whole parked pot is withdrawable and the bound reads no
+    ///         oracle at all (the degrade path is unreachable there).
+    /// @param amount USDC (6dp) to redeem back to the raw balance; must be ≤ un-levered collateral
+    ///               (priced at the hardened reader, or re-derived at the venue's oracle when that
+    ///               read degrades). Zero is a silent no-op, mirroring `supplyIdle`.
     function withdrawIdle(uint256 amount) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
         LeveragedAeroVenue.withdrawIdleImpl(amount);

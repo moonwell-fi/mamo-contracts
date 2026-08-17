@@ -205,11 +205,12 @@ function withdrawIdle(uint256 amount) external onlyProposer nonReentrant;
 
 | | |
 |---|---|
-| `amount` | USDC (6dp) to redeem out of mUSDC back to the raw balance. Bounded by the **un-levered** collateral — `C − ceil(D·1e4 / targetLtvBps)`, i.e. collateral not already backing debt at the standing target — `InsufficientIdle()` above it. On a flat book (no debt) the whole parked pot is withdrawable. |
+| `amount` | USDC (6dp) to redeem out of mUSDC back to the raw balance. Bounded by the **un-levered** collateral — `C − ceil(D·1e4 / targetLtvBps)`, i.e. collateral not already backing debt at the standing target — `InsufficientIdle()` above it. On a flat book (no debt) the whole parked pot is withdrawable, oracle-free. |
 | Position effect | `mUsdc.redeemUnderlying(amount)`. No borrow, no repay, no LP touch. |
 | Effect on NAV | **Zero** (collateral at `exchangeRateStored` becomes raw USDC at face; the same 1–2 unit rounding budget as `supplyIdle`). |
 | Effect on LTV | LTV **rises** (collateral shrinks, debt does not) — which is exactly why the bound stops at the un-levered slice: post-op LTV can never exceed `targetLtvBps`. Withdrawing levered collateral is not a float adjustment, it is a de-risk — use `adjustLeverage` down or `flatten`. |
-| Errors | `InsufficientIdle` (asked past the un-levered slice), `MoonwellRedeemFailed(errCode)` (market short of cash — a retry), `NotProposer`, `NotExecuted`. |
+| **Feed outage** | The op **does not jam** — this is the deliberate exception to §F's fail-closed rule, because restoring the oracle-free Phase-1 float is most needed *during* an outage. When the hardened reader refuses, the **same** un-levered bound is re-derived from Moonwell's own account snapshot (`getAccountLiquidity` + live CF, the venue's un-gated oracle) and the call emits **`WithdrawIdleBoundDegraded`**. The line is held at the venue's (possibly stale) prices, never dropped; expect `InsufficientIdle` at the same place. If even the comptroller cannot answer: `ComptrollerCallFailed`, fail-closed. |
+| Errors | `InsufficientIdle` (asked past the un-levered slice — under EITHER oracle basis), `MoonwellRedeemFailed(errCode)` (market short of cash — a retry), `ComptrollerCallFailed` (degraded path and even the venue can't answer), `NotProposer`, `NotExecuted`. |
 | When to call | Whenever the raw float has drifted below the redemption cover you want to hold oracle-free — after over-parking, after Phase-1 covers spent the float, or on a flat book you parked and now expect exits from. |
 
 ### `deployIdle` — put idle USDC to work
@@ -837,13 +838,14 @@ Strategy events that exist today:
 | `SettleRewardSaleDeferred()` | the **terminal settle**'s best-effort reward-tranche sale was skipped (stale/paused AERO feed, broken AERO→USDC route, or a fill under the L9 floor). The settle completed; the tranche is left on the now-`Settled` strategy and needs the owner's `rescueToVault(rewardToken)` → `vault.rescueERC20`. **Check the strategy's AERO balance after any settle.** |
 | `RedeemRewardSaleDeferred()` | an **async redeem**'s sale of the tranche its own unwind auto-claimed was skipped, same causes. The redeem completed and paid, but that redeemer got `f × (assets − reward)` and the tranche stayed with the stayers — the one residual of the pre-fix behaviour (§C). Clear it with `compound` once the feed/route recovers; a *recurring* one means every redeemer is being short-paid, so treat it as a feed/route incident, not noise. |
 | `RedeemSweepFloorsDegraded()` | an **async redeem**'s closing leg→USDC sweeps ran with their Chainlink min-out floors at **zero** — the derivation reverted (stale feed / down sequencer, or an out-of-gas: the `catch` cannot tell them apart). Deliberately fail-open so the `emergencyRedeem` deadman still completes, but those swaps were **unbounded** for that call. Expect it only alongside a real oracle outage; seeing it while feeds are healthy is a gas/venue problem worth investigating before the next fulfill. |
+| `WithdrawIdleBoundDegraded()` | a `withdrawIdle` could not price its un-levered bound at the hardened reader and **re-derived the same line from Moonwell's own account snapshot** for that call (see the `withdrawIdle` entry's Feed-outage row). The withdraw happened, **inside the bound** — what degraded is the price basis, not the line. Reconcile LTV against the hardened feeds once they recover; seeing it while feeds are healthy is a gas problem worth investigating. |
+| `HedgeLegMeasureDegraded(address market)` | a `compound` could not accrue-and-read one leg's live Moonwell debt, so that leg's interest-drift hedge was skipped for the harvest (the other leg proceeds). The drift stays open and compounds until a later harvest reads it; a *recurring* one on the same market is a venue incident. |
 
-> **The naming rule for the three fail-opens above.** `…Deferred` = an optional **action** was skipped;
-> `…Degraded` = a **guard** fell back and the op ran with less protection. All three are emitted from the
-> strategy address (`RedeemSweepFloorsDegraded` is declared on `LeveragedAeroManager` and reaches the
-> strategy's ABI through delegatecall). None of them reverts anything — they exist because the `catch`
-> blocks they mark cannot distinguish their expected cause from any other revert, and a silent fail-open
-> leaves no on-chain trace at all.
+> **The naming rule for the fail-opens above.** `…Deferred` = an optional **action** was skipped;
+> `…Degraded` = a **guard or measure** fell back and the op ran with less protection. All are emitted from
+> the strategy address (the library-declared ones reach the strategy's ABI through delegatecall). None of
+> them reverts anything — they exist because the `catch` blocks they mark cannot distinguish their
+> expected cause from any other revert, and a silent fail-open leaves no on-chain trace at all.
 
 ---
 
@@ -853,6 +855,9 @@ Strategy events that exist today:
   `deleverage`) read hardened Chainlink with `maxDelay` staleness, `gracePeriod` sequencer-restart grace,
   and a calm-gate. A stale feed or a down sequencer **fail-closes** — the op reverts. This is intended
   posture: defer the harvest / re-range / deleverage and rely on the oracle-free async queue for exits.
+  **One deliberate exception:** `withdrawIdle` does not jam — its bound is re-derived at Moonwell's own
+  oracle and the call is marked `WithdrawIdleBoundDegraded` (see its entry) — because restoring the
+  oracle-free redemption float is most needed during exactly this state.
 - **Calm gate.** Every mint/add path runs the calm-gate (`|spotTick − twapTick| ≤ calmDeviationTicks` over
   `twapWindow`) before the pool is touched, as does NAV pricing — so the agent can never reposition, add or
   price at a manipulated tick. A shoved pool blocks `rerange`, `deployIdle`, `compound`'s redeploy and a
