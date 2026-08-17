@@ -379,6 +379,7 @@ contract MockNpm {
     MockCLPool public pool;
 
     error MockNpmSlippage();
+    error MockNpmZeroLiquidity();
     error MockNpmNotAuthorised();
     error MockNpmNotOwner();
 
@@ -509,6 +510,10 @@ contract MockNpm {
         uint160 sqrtLower = TickMath.getSqrtRatioAtTick(tickLower);
         uint160 sqrtUpper = TickMath.getSqrtRatioAtTick(tickUpper);
         liquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, desired0, desired1);
+        // `CLPool.mint` opens with a bare `require(amount > 0)`, so an add that computes zero liquidity
+        // reverts inside the pool rather than silently minting an empty position. Mirrored here (mint AND
+        // increaseLiquidity both route through this) so a fixture cannot pass a shape the real venue rejects.
+        if (liquidity == 0) revert MockNpmZeroLiquidity();
         (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liquidity);
     }
 

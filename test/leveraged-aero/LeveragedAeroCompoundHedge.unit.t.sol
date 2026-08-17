@@ -714,19 +714,23 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     }
 
     /// @dev The skip must NOT widen the guard for a real tranche: the smallest balance whose HAIRCUT
-    ///      floor is nonzero still swaps and redeploys. The threshold is the post-`maxSlippageBps`
-    ///      floor, not the raw one — at `1e12` the raw floor is 1 unit and the 100bps haircut rounds
-    ///      it back to 0 (still skipped); `2e12` gives raw 2, haircut floor 1, the first that sells.
+    ///      floor is nonzero still gets SOLD. The threshold is the post-`maxSlippageBps` floor, not the
+    ///      raw one — at `1e12` the raw floor is 1 unit and the 100bps haircut rounds it back to 0
+    ///      (still skipped); `2e12` gives raw 2, haircut floor 1, the first that sells.
+    ///
+    ///      A borrow-interest drift is armed so the whole 2-micro-USDC proceeds go into the re-hedge and
+    ///      the redeploy is skipped. That is not incidental: `CLPool.mint` requires nonzero liquidity, so
+    ///      an LP add of 2 micro-USDC reverts at the venue (`MockNpm` mirrors that). The SALE floor and
+    ///      the LP-add minimum are different thresholds, and this test is about the first.
     function testCompoundStillHarvestsTheSmallestNonDustBalance() public {
         _armBook();
         _clearRewards();
+        mLegA.accrueBorrowInterest(address(strategy), _debtLegA() / 100);
         aero.mint(address(strategy), 2e12);
 
-        uint256 collateralBefore = _collateralUsdc();
         _compound(1);
 
         assertEq(aero.balanceOf(address(strategy)), 0, "above-dust balance is sold, not skipped");
-        assertGt(_collateralUsdc(), collateralBefore, "the tranche was harvested and redeployed");
     }
 
     // ==================== 3. FEE TIMING (findings 3 + 4) ====================

@@ -551,8 +551,10 @@ library LeveragedAeroManager {
     ///         (body of the strategy's `deployIdle`): supply + borrow + increaseLiquidity.
     /// @dev Asset-mode sizes against the STORED range (`posTickLower`/`posTickUpper`) — the range
     ///      `_addLiquidity` will actually add into, NOT a freshly centred one. A stored range the price
-    ///      has since left is one-sided, so the split fails closed (`DegenerateRange`); `rerange`
-    ///      recentres and unblocks it.
+    ///      has since left is one-sided, so the split fails closed (`DegenerateRange`). A `rerange`
+    ///      unblocks it only while spot is still INSIDE the stored band (there it recentres); once spot
+    ///      has left, the rerange reopens WHOLLY ON THE POPULATED SIDE and this path stays closed until
+    ///      price enters the new band. The unconditional cure is `flatten` + `redeploy`.
     ///
     ///      NO UP-FRONT CALM-GATE HERE — the gate lives inside `_addLiquidity`, so it runs AFTER the
     ///      supply/borrow below and before the pool is touched. See the ordering note on `executeImpl`
@@ -703,9 +705,18 @@ library LeveragedAeroManager {
         return LeveragedAeroValuation.hedgeBorrowInterest(b);
     }
 
-    /// @notice Re-range the CL position around the current tick WITHOUT swapping (body of the strategy's
-    ///         `rerange`): calm-gate → remove 100% liquidity + collect → new tickSpacing-aligned range
-    ///         → re-add the collected legs → restake → assert health. Debt + collateral untouched.
+    /// @notice Re-range the CL position WITHOUT swapping (body of the strategy's `rerange`): calm-gate →
+    ///         remove 100% liquidity + collect → size the collected legs → derive the new
+    ///         tickSpacing-aligned range from them → re-add → restake → assert health. Debt + collateral
+    ///         untouched.
+    ///
+    ///         TWO OUTCOMES, depending on where spot sits relative to the OLD band. Spot still INSIDE it
+    ///         → the unwind collects both legs and the new range is the skewed band around spot: a true
+    ///         recentre. Spot has LEFT it → the position was 100% one leg, and the new range is placed
+    ///         WHOLLY ON THAT SIDE, abutting spot. That reopen is not a recentre: it starts out of range
+    ///         and becomes two-sided only if price comes back. It is still the right op — the alternative
+    ///         was reverting inside the pool, which made `rerange` unusable in the one state it exists
+    ///         for. A true recentre of a departed book needs a swap, i.e. `flatten` + `redeploy`.
     ///
     ///         No swap → principal conserved; the collected ratio can't match the new range, so a
     ///         remainder of ONE borrowed leg is left idle (NAV-counted, stays redeployable). A new
@@ -713,13 +724,19 @@ library LeveragedAeroManager {
     ///         No-op on a flat book.
     /// @dev TAKES NO RANGE PARAMS — which is exactly WHY the persist must precede this delegatecall. The
     ///      proposer's `width` / `skewBps` for this cycle were validated AND PERSISTED by the strategy
-    ///      entrypoint (see the ordering note on `LeveragedAerodromeCLStrategy.rerange`), and step 3
+    ///      entrypoint (see the ordering note on `LeveragedAerodromeCLStrategy.rerange`), and step 4
     ///      below reads both straight out of storage: write after, and the re-range would land at the OLD
     ///      pair. The frame the two `sstore`s live in is a bytecode relocation for EIP-170 headroom, not a
     ///      semantic choice. The persists also sit ahead of the flat-book bail-out below — see the
     ///      entrypoint's note for what that does and does NOT buy on a terminal (fully-redeemed) book.
-    /// @param minLiq0 Minimum token0 the re-add must consume (two-sided slippage guard).
-    /// @param minLiq1 Minimum token1 the re-add must consume (two-sided slippage guard).
+    ///
+    ///      ASSET-MODE DEPLOY PATHS STAY CLOSED AFTER A ONE-SIDED REOPEN. `deployIdle`, an asset-mode
+    ///      lever-up and `compound` all size through `_rangeRatio`, which needs a two-sided range against
+    ///      spot; a band that abuts spot from one side is not one, so they keep reverting
+    ///      `DegenerateRange` until price enters it. That is unchanged by this op and deliberate.
+    /// @param minLiq0 Minimum token0 the re-add must consume. On a one-sided reopen the caller floors the
+    ///        populated side and passes 0 for the other.
+    /// @param minLiq1 Minimum token1 the re-add must consume (see `minLiq0`).
     function rerangeImpl(uint256 minLiq0, uint256 minLiq1) public {
         Layout storage $ = _layout();
         if ($.tokenId == 0) return; // flat book — nothing to re-range (width/skew already stored)
@@ -740,26 +757,33 @@ library LeveragedAeroManager {
         uint256 legBBefore = $.legBIsAsset ? IERC20($.cbBTC).balanceOf(address(this)) : 0;
         _unwindLiquidity(1, 1);
 
-        // 3. Derive the tickSpacing-aligned range around the current (calm) tick from the width/skew
-        //    the entrypoint stored. Every later mint (deployIdle / compound) reuses that same pair.
-        (int24 tickLower, int24 tickUpper) =
-            LeveragedAeroValuation.skewedTickRange($.pool, $.tickSpacing, $.width, $.skewBps);
-
-        // 4. Re-add the legs THIS op collected into the new range — the full leg-A balance, and leg B
-        //    net of the pre-unwind snapshot (0 outside asset-mode, so this is the full balance there).
-        //    No swap → principal conserved. `_mintPosition` enforces the two-sided `maxSlippageBps` mins
-        //    (the §8 always-on floor) and approves the NPM; the caller's `minLiq0/minLiq1` add an
-        //    explicit two-sided guard on the consumed amounts (proposer-tightenable, like
-        //    compound's `minUsdcOut`).
+        // 3. SIZE FIRST. The legs THIS op collected — the full leg-A balance, and leg B net of the
+        //    pre-unwind snapshot (0 outside asset-mode, so this is the full balance there). The range
+        //    predicate below must read the POST-SNAPSHOT amounts: reading the raw balances instead would
+        //    let unlevered idle USDC count as a populated side in asset-mode, i.e. reopen F05.
         (uint256 amt0, uint256 amt1) =
             _amounts01(IERC20($.cbBTC).balanceOf(address(this)) - legBBefore, IERC20($.weth).balanceOf(address(this)));
+
+        // 4. Derive the range from the width/skew the entrypoint stored AND from what the unwind
+        //    actually collected. Two-sided → the ordinary skewed band around spot (a recentre). ONE-SIDED
+        //    → a band placed wholly on the populated side, which is the only range a swap-free re-add can
+        //    fill once spot has left the old one; `skewedTickRange`'s straddling band would compute zero
+        //    liquidity for the missing leg and revert inside the pool. Every later mint (deployIdle /
+        //    compound) reuses whichever pair this produced.
+        //
+        //    No swap → principal conserved. `_mintPosition` enforces the two-sided `maxSlippageBps` mins
+        //    (the §8 always-on floor) and approves the NPM; the caller's `minLiq0/minLiq1` add an
+        //    explicit guard on the consumed amounts (proposer-tightenable, like compound's `minUsdcOut`)
+        //    — on a one-sided reopen the caller floors the populated side and passes 0 for the other.
+        (int24 tickLower, int24 tickUpper) =
+            LeveragedAeroValuation.rerangeTickRange($.pool, $.tickSpacing, $.width, $.skewBps, amt0, amt1);
         (uint256 newTokenId,, uint256 used0, uint256 used1) = _mintPosition(amt0, amt1, tickLower, tickUpper);
         if (used0 < minLiq0 || used1 < minLiq1) revert InsufficientLiquidity();
 
         // 5. Restake the new NFT to resume AERO gauge rewards (mirrors _mintAndStake).
         _approveAndStake($.gauge, newTokenId);
 
-        // 6. Persist the recentered position (nav()/positions() now read the new NFT).
+        // 6. Persist the new position (nav()/positions() now read the new NFT).
         $.tokenId = newTokenId;
         $.posTickLower = tickLower;
         $.posTickUpper = tickUpper;
@@ -925,7 +949,9 @@ library LeveragedAeroManager {
     ///      value-conserving — a NAV component moving from collateral into the LP — and the sizing
     ///      accounts for the collateral it consumes (see the fixed point above), so the op lands AT
     ///      target rather than past it. A stored range the price has since left is one-sided and fails
-    ///      closed (`DegenerateRange`), same as `deployIdle`; `rerange` recentres and unblocks it. Near
+    ///      closed (`DegenerateRange`), same as `deployIdle` — and with the same caveat: a `rerange`
+    ///      unblocks it only while spot is still inside the stored band; once spot has left, the rerange
+    ///      reopens one-sided and only `flatten` + `redeploy` restores a two-sided range. Near
     ///      (but inside) an edge the op still succeeds and the draw grows without bound relative to the
     ///      new debt — see the OPERATOR NOTE on `adjustLeverageImpl`: rerange first near edges.
     function _leverUp(uint256 borrowDeltaUsd, uint256 targetLtvBps_, uint256 minLiq) private {

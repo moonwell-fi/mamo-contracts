@@ -108,6 +108,10 @@ library LeveragedAeroValuation {
     ///         to 0 / the whole deposit. Fail-closed — opening an unhedged or unlevered leg would
     ///         silently break the delta-hedge premise.
     error DegenerateRange();
+    /// @notice `rerangeTickRange` was asked to place a range for a position holding NEITHER leg. There is
+    ///         no populated side to anchor a one-sided band on and nothing to mint, so the caller has
+    ///         nothing to re-range — fail-closed rather than return an arbitrary range.
+    error NothingToRerange();
     /// @notice ASSET-MODE lever-up needs `needed` USDC from idle to pair with the borrowed leg A, but the
     ///         book only holds `available` (see `assetModeLeverUpPair`). Fail-closed and LOUD: a partial
     ///         fill or a silent cap would leave the position under-levered and, worse, mis-hedged. The
@@ -525,6 +529,64 @@ library LeveragedAeroValuation {
         if (tickLower < -maxAligned) tickLower = -maxAligned;
         if (tickUpper > maxAligned) tickUpper = maxAligned;
         if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing;
+    }
+
+    /// @notice The range a RE-RANGE should open, given the legs the unwind actually collected.
+    ///         Two-sided input → exactly `skewedTickRange`. One-sided input → a band placed wholly on
+    ///         the side the surviving leg can fill.
+    ///
+    /// @dev WHY THIS EXISTS. A rerange swaps nothing, so it can only re-add what the unwind collected.
+    ///      Once spot has left the old band the position is 100% one leg, and `skewedTickRange` returns
+    ///      a band that STRADDLES spot — which needs both legs. The mint then computes zero liquidity
+    ///      for the leg it does not have and reverts inside the pool, so the one op that exists to chase
+    ///      a departed price was unusable in exactly the state it is for.
+    ///
+    ///      GEOMETRY. A CL position holds only token0 while its whole range is ABOVE spot, and only
+    ///      token1 while its whole range is AT/BELOW spot. So a token0-only book gets `[anchor +
+    ///      spacing, anchor + spacing + width]` (strictly above; the `+ spacing` is what keeps spot out
+    ///      of the band after the align-down) and a token1-only book gets `[anchor - width, anchor]`.
+    ///
+    ///      `skewBps` IS NOT CONSULTED on the one-sided branch. Skew apportions `width` either side of
+    ///      spot, and there is no "either side" here — the whole width is on one side by construction.
+    ///      `width` is still honoured exactly.
+    ///
+    ///      THIS IS NOT A RECENTRE. The new band abuts spot from one side; it starts fully out of range
+    ///      and only becomes two-sided if price moves back into it. A true recentre of a departed book
+    ///      needs a swap, i.e. `flatten` + `redeploy`.
+    ///
+    ///      THE CALLER STILL FLOORS THE POPULATED SIDE. `minLiq0`/`minLiq1` are checked against the
+    ///      amounts actually consumed, so a one-sided reopen is guarded on the leg it does have and the
+    ///      caller passes 0 for the leg it does not.
+    ///
+    ///      Reads the manipulable spot tick — the caller calm-gates first, exactly as for
+    ///      `skewedTickRange`.
+    /// @param amt0 Token0 the caller has to re-add.
+    /// @param amt1 Token1 the caller has to re-add.
+    function rerangeTickRange(address pool, int24 tickSpacing, uint24 width, uint16 skewBps, uint256 amt0, uint256 amt1)
+        public
+        view
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        if (amt0 != 0 && amt1 != 0) return skewedTickRange(pool, tickSpacing, width, skewBps);
+        if (amt0 == 0 && amt1 == 0) revert NothingToRerange();
+        (, int24 currentTick,,,,) = ICLPool(pool).slot0();
+        int24 anchor = _alignTick(currentTick, tickSpacing);
+        int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing);
+        if (amt1 == 0) {
+            // token0 only → strictly ABOVE spot.
+            tickLower = anchor + tickSpacing;
+            if (tickLower > maxAligned) tickLower = maxAligned;
+            tickUpper = tickLower + int24(uint24(width));
+            if (tickUpper > maxAligned) tickUpper = maxAligned;
+            if (tickUpper <= tickLower) tickLower = tickUpper - tickSpacing;
+        } else {
+            // token1 only → AT/BELOW spot.
+            tickUpper = anchor;
+            if (tickUpper < -maxAligned) tickUpper = -maxAligned;
+            tickLower = tickUpper - int24(uint24(width));
+            if (tickLower < -maxAligned) tickLower = -maxAligned;
+            if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing;
+        }
     }
 
     /// @dev Align `tick` down to the nearest multiple of `spacing` (handles negatives).
@@ -1243,8 +1305,13 @@ library LeveragedAeroValuation {
     ///
     ///      One-sided range (`sqrtP` at or outside a bound) ⇒ one required amount is 0 and the ratio
     ///      degenerates: a 0 `needU` would demand a borrow with no USDC to pair, a 0 `needA` would demand
-    ///      no borrow at all (an unhedged USDC-only add). Both fail closed — `rerange` recentres on the
-    ///      current tick, which is always two-sided.
+    ///      no borrow at all (an unhedged USDC-only add). Both fail closed.
+    ///
+    ///      A RERANGE DOES NOT NECESSARILY UNBLOCK THIS. While spot is still INSIDE the stored band the
+    ///      rerange recentres and the new range is two-sided, so the ratio resolves. Once spot has LEFT
+    ///      the band the position holds one leg only, and `rerangeTickRange` reopens WHOLLY ON THAT SIDE
+    ///      — still one-sided against spot, so these paths stay closed until price enters the new band.
+    ///      The unconditional cure is `flatten` + `redeploy`, which swaps and re-opens around spot.
     function _rangeRatio(address pool, int24 tickLower, int24 tickUpper, bool legAIsToken0)
         private
         view

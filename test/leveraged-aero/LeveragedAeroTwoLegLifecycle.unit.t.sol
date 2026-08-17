@@ -702,6 +702,49 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.layout().skewBps, SKEW_CENTERED, "...and so did the skew write");
     }
 
+    /**
+     * @dev F06, the OTHER one-sided branch. Walk spot clear BELOW the stored band: a CL position priced
+     *      under its range holds token0 only (leg B here), so the reopen must place the band STRICTLY
+     *      ABOVE spot. The asset-mode suite covers the mirror (token1 only → at/below spot).
+     *
+     *      Before the fix this reverted inside the pool: `skewedTickRange` returned a band straddling
+     *      spot, the mint computed zero liquidity for the leg the book did not hold, and `rerange` was
+     *      unusable in exactly the state it exists for.
+     */
+    function testRerangeReopensAboveSpotWhenPriceHasFallenOutOfTheBand() public {
+        _execute(SEED);
+        uint256 oldTokenId = strategy.layout().tokenId;
+        uint256 stakedBefore = gauge.depositCallCount();
+
+        // Clear the genesis idle remainder on both legs, so the only tokens the re-add sees are the ones
+        // THIS unwind collects. The two-leg shape borrows 50/50 by USD — range-blind — so genesis always
+        // strands some of one leg, and a book holding both legs is two-sided and takes the recentre
+        // branch regardless of where spot is.
+        vm.startPrank(address(strategy));
+        legB.transfer(address(0xdead), legB.balanceOf(address(strategy)));
+        legA.transfer(address(0xdead), legA.balanceOf(address(strategy)));
+        vm.stopPrank();
+
+        int24 farTick = strategy.layout().posTickLower - 5000;
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(farTick));
+        pool.setTick(farTick);
+        // `MockNpm` custodies only what it was minted, so after a price move `collect` owes amounts
+        // re-priced at the new sqrtP that it never received. Float it, as a real pool's other LPs do.
+        legB.mint(address(npm), 1_000_000e8);
+        legA.mint(address(npm), 1_000_000e18);
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        int24 lower = strategy.layout().posTickLower;
+        int24 upper = strategy.layout().posTickUpper;
+        assertGt(lower, pool.tick(), "the new band sits STRICTLY above spot");
+        assertEq(upper - lower, int24(uint24(WIDTH)), "width honoured exactly (skew is not consulted)");
+        assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "real liquidity, not an empty position");
+        assertEq(gauge.depositCallCount(), stakedBefore + 1, "the new NFT was restaked");
+    }
+
     /// @dev USDC face value of whatever borrowed-leg balance a re-range left sitting idle on the
     ///      strategy — the utilisation drag the skew test compares.
     function _idleLegValueUsdc() internal view returns (uint256) {

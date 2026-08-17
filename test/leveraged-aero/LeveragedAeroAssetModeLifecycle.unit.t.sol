@@ -570,6 +570,114 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the recenter still minted real liquidity");
     }
 
+    // ============ RERANGE WITH SPOT OUTSIDE THE BAND: THE ONE-SIDED REOPEN (F06) ============
+    //
+    // A rerange swaps nothing, so it can only re-add what its own unwind collected. Once spot has left
+    // the old band the position is 100% one leg, and the straddling `skewedTickRange` band needs both —
+    // the mint computed zero liquidity and reverted inside the pool, so the one op that exists to chase
+    // a departed price was unusable in exactly that state. `rerangeTickRange` now places the band wholly
+    // on the populated side.
+
+    /// @dev Move spot AND the TWAP to `newTick` (calm-gate stays open), re-derive the leg-A oracle mark,
+    ///      and float the NPM both tokens — `MockNpm` custodies only what it was minted, so after a price
+    ///      move its `collect` owes an amount re-priced at the new `sqrtP` that it never received.
+    function _moveSpotTo(int24 newTick) internal {
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
+        pool.setTick(newTick);
+        legAPrice8 = _legAPriceFromSqrtP(pool.sqrtPriceX96());
+        legAFeed.setAnswer(int256(legAPrice8));
+        legA.mint(address(npm), 1_000_000e8);
+        usdc.mint(address(npm), 100_000_000e6);
+    }
+
+    /// @dev Walk spot clear ABOVE the stored band. A CL position priced above its range holds token1
+    ///      only — leg A here — so this is the branch that must reopen AT/BELOW spot.
+    function _departTheBandUpwards() internal {
+        _execute(SEED);
+        _moveSpotTo(strategy.layout().posTickUpper + 5000);
+    }
+
+    function testRerangeReopensOneSidedWhenSpotHasLeftTheBand() public {
+        _departTheBandUpwards();
+        uint256 oldTokenId = strategy.layout().tokenId;
+        uint256 navBefore = strategy.nav();
+        uint256 idleSeed = 250_000e6;
+        usdc.mint(address(strategy), idleSeed);
+
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        int24 lower = strategy.layout().posTickLower;
+        int24 upper = strategy.layout().posTickUpper;
+        assertLe(upper, pool.tick(), "the new band sits wholly at/below spot, not around it");
+        assertLt(lower, upper, "...and is a real band");
+        assertEq(upper - lower, int24(uint24(WIDTH)), "width honoured exactly (skew is not consulted)");
+        assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId was minted");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "real liquidity, not an empty position");
+        assertEq(gauge.depositCallCount(), 2, "the new NFT was restaked");
+        assertApproxEqRel(strategy.nav(), navBefore + idleSeed, 1e16, "a no-swap reopen is NAV-neutral");
+        assertGe(usdc.balanceOf(address(strategy)), idleSeed, "pre-existing idle USDC was not drawn in");
+    }
+
+    /// @dev The caller's floor still binds on the side that HAS a balance, and a nonzero floor on the
+    ///      empty side is unsatisfiable by construction — the operator trap the one-sided reopen creates.
+    function testRerangeStillFloorsTheOneSidedReopen() public {
+        _departTheBandUpwards();
+
+        // Populated side (token1 == leg A), floored absurdly high.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientLiquidity.selector);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 1_000_000_000e8);
+
+        // Empty side: the reopen consumes zero token0, so ANY nonzero floor there fails closed.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientLiquidity.selector);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 1, 0);
+    }
+
+    /// @dev Neither leg collected ⇒ no populated side to anchor on. Asserted at the library, which is the
+    ///      only place the state is constructible without an empty position.
+    function testRerangeTickRangeRejectsATwoSidedZero() public {
+        vm.expectRevert(LeveragedAeroValuation.NothingToRerange.selector);
+        LeveragedAeroValuation.rerangeTickRange(address(pool), SPACING, WIDTH, SKEW_CENTERED, 0, 0);
+    }
+
+    /// @dev The one-sided branch is CONDITIONAL, not the new default: once price is back inside the
+    ///      position's band the unwind collects both legs and the rerange recentres exactly as before.
+    function testRerangeRecentresOnceSpotIsInsideTheBandAgain() public {
+        _departTheBandUpwards();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        // Walk spot into the middle of the band the reopen just opened.
+        int24 lower = strategy.layout().posTickLower;
+        int24 upper = strategy.layout().posTickUpper;
+        _moveSpotTo(lower + (upper - lower) / 2);
+
+        (int24 expLower, int24 expUpper) = _skewedRange(SKEW_CENTERED);
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        assertEq(strategy.layout().posTickLower, expLower, "back to the ordinary skewed band");
+        assertEq(strategy.layout().posTickUpper, expUpper, "back to the ordinary skewed band");
+        assertLt(strategy.layout().posTickLower, pool.tick(), "...which brackets spot");
+        assertGt(strategy.layout().posTickUpper, pool.tick(), "...which brackets spot");
+    }
+
+    /// @dev WHAT THE REOPEN DOES NOT BUY. The asset-mode deploy paths size through `_rangeRatio`, which
+    ///      needs a range two-sided against spot; a band abutting spot from one side is not one. They stay
+    ///      closed until price enters the new band — `flatten` + `redeploy` is the unconditional cure.
+    function testDeployIdleStaysClosedAfterAOneSidedReopen() public {
+        _departTheBandUpwards();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+
+        usdc.mint(address(strategy), 100_000e6);
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
+        strategy.deployIdle(100_000e6, 0);
+    }
+
     // ==================== ASSET-MODE LEVER UP (idle-funded) ====================
 
     /**
