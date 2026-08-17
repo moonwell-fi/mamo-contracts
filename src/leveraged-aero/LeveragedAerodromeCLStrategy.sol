@@ -934,7 +934,28 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     function _crystallizeFees(uint256 navPre) private {
         Layout storage $ = _layout();
         uint256 supply = IERC20(vault()).totalSupply();
-        if (supply == 0) return;
+        if (supply == 0) {
+            // EMPTY BOOK — advance the clock AND reset the HWM, then return. Both writes matter.
+            //
+            // THE CLOCK: `LeveragedAeroFees.crystallize`'s own `totalSupply == 0` branch sets
+            // `newLastAccrual = nowTs` precisely so a dormant window accrues no management fee.
+            // Returning early without that write leaves `lastFeeAccrualTimestamp` frozen at the last
+            // populated op, so the whole dormancy is billed to whoever reopens the fund.
+            //
+            // THE HWM: a per-share mark taken against the OLD supply is incommensurable with the
+            // basis the reopening deposit sets — on the ordinary drained book (`navNet == 0`,
+            // `supply == 0` ⇒ `shares == assets × SHARES_VIRTUAL_OFFSET`) that basis is
+            // `WAD / SHARES_VIRTUAL_OFFSET` no matter what the dead cycle traded at. A stale mark
+            // BELOW it charges the reopening depositor a phantom performance fee on capital that
+            // never gained; a stale mark ABOVE it hands the reopened fund a fee-free run back up to
+            // the dead cycle's peak. Zeroing re-seeds on the next crystallise via
+            // `performanceFeeShares`'s `hwmPerShareX == 0` branch (record the level, charge nothing)
+            // — the same first-cycle treatment a freshly deployed clone gets, which is exactly what
+            // a reopened fund is.
+            $.lastFeeAccrualTimestamp = block.timestamp;
+            $.hwmPerShare = 0;
+            return;
+        }
         if ($.lastFeeAccrualTimestamp == 0) {
             $.lastFeeAccrualTimestamp = block.timestamp;
             return;

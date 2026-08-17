@@ -3069,4 +3069,90 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         (uint256 marks,) = _degradations(vm.getRecordedLogs());
         assertEq(marks, 0, "a healthy harvest degrades nothing");
     }
+
+    // ============ THE EMPTY BOOK: DORMANCY AND THE HWM ACROSS A supply == 0 CYCLE (F03) ============
+    //
+    // `_crystallizeFees` used to `return` outright on `totalSupply() == 0`, writing NEITHER the fee
+    // clock nor the HWM. Both omissions bill the reopening depositor for a cycle they were not in.
+    // The two tests below pin the two writes independently.
+    //
+    // FIXTURE NOTE: this suite runs with `managementFeeBps == performanceFeeBps == 0` (see `_params`),
+    // so neither leg can be observed as MINTED SHARES here. That does not weaken the assertions — the
+    // fee clock and the HWM are written unconditionally by `_crystallizeFees`, regardless of the rates,
+    // and they are precisely the state a later non-zero rate would bill against. The assertions are on
+    // that state directly, which is also what makes them exact rather than approximate.
+
+    /**
+     * @dev THE CLOCK. Drain the book to zero shares, let a YEAR pass, and reopen it. The reopening
+     *      deposit's own crystallise must move `lastFeeAccrualTimestamp` to now, so the dormancy is
+     *      simply not part of any `dt`. Leaving it frozen at the draining redeem hands the next
+     *      crystallise a 365-day window on a fund that held nothing for all of it — a management fee
+     *      the reopening depositor pays in full and earned none of.
+     */
+    function testDormancyIsNotBilledToTheReopeningDepositor() public {
+        _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        // Drain: the last redeem burns every share and pays the whole pot out.
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        strategy.redeem(supply, 0);
+        vm.stopPrank();
+        assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
+        uint256 clockAtDrain = strategy.layout().lastFeeAccrualTimestamp;
+        assertEq(clockAtDrain, block.timestamp, "precondition: the draining redeem left the clock at now");
+
+        // ── A YEAR OF DORMANCY. Nobody holds a share; nothing is being managed. ──
+        vm.warp(block.timestamp + 365 days);
+        _deposit(100_000e6);
+
+        assertEq(
+            strategy.layout().lastFeeAccrualTimestamp,
+            block.timestamp,
+            "the empty-book crystallise advanced the clock past the dormancy"
+        );
+        assertEq(block.timestamp - clockAtDrain, 365 days, "...and the window skipped really was a full year");
+    }
+
+    /**
+     * @dev THE HWM. A mark taken against the OLD supply is incommensurable with the basis the reopening
+     *      deposit sets: a drained book reopens at `WAD / SHARES_VIRTUAL_OFFSET` (1e12) whatever the dead
+     *      cycle traded at. Carrying the dead cycle's peak forward would hand the reopened fund a
+     *      fee-free run back up to it. The empty-book branch zeroes the mark, so the next crystallise
+     *      re-seeds at the reopened fund's OWN level via the `hwmPerShareX == 0` first-cycle branch.
+     */
+    function testTheHwmResetsAcrossASupplyZeroCycle() public {
+        _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        // Two crystallisation points are needed to MARK the HWM: the first only seeds the clock
+        // (`lastFeeAccrualTimestamp == 0` short-circuits ahead of the library), the second marks.
+        // A gain lands between them so the mark sits strictly above the unit-rate basis.
+        _deposit(1_000e6);
+        usdc.mint(address(strategy), 500_000e6); // raw idle is in `nav()` — a 50% gain on the book
+        _deposit(1_000e6);
+        uint256 hwmHigh = strategy.layout().hwmPerShare;
+        assertGt(hwmHigh, 1e12, "precondition: the dead cycle's peak is ABOVE the reopening basis");
+
+        // Drain every share, including the two deposits' (both minted to `lp`).
+        uint256 all = vault.totalSupply();
+        vm.startPrank(lp);
+        vault.approve(address(strategy), all);
+        strategy.redeem(all, 0);
+        vm.stopPrank();
+        assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
+
+        // ── REOPEN. `navNet == 0` and `supply == 0`, so the depositor mints at
+        //    `assets x SHARES_VIRTUAL_OFFSET` — a per-share level of exactly 1e12. ──
+        _deposit(100_000e6);
+        assertEq(strategy.layout().hwmPerShare, 0, "the dead cycle's mark did not survive the empty book");
+
+        // The next crystallise re-seeds at the REOPENED fund's basis, charging nothing (first cycle).
+        _deposit(1_000e6);
+        assertEq(strategy.layout().hwmPerShare, 1e12, "re-seeded at the new basis, not the dead cycle's peak");
+    }
 }
