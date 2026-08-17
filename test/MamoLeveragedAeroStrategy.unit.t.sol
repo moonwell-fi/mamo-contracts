@@ -486,7 +486,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
         // Backend/keeper fulfills off-band; the withdrawal USDC lands idle on the wrapper.
-        sherwood.fulfillRedeem(id);
+        sherwood.fulfillRedeem(id, 0);
         assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "fulfilled USDC idle on wrapper");
 
         // Attacker front-runs the owner's claim to re-lock the funds — must revert.
@@ -675,7 +675,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
         // Backend/keeper fulfills off-band; USDC lands on the wrapper with no callback.
-        sherwood.fulfillRedeem(id);
+        sherwood.fulfillRedeem(id, 0);
         assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "USDC on wrapper");
 
         vm.expectEmit(false, false, false, true, address(strategy));

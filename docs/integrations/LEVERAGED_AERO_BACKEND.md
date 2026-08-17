@@ -63,7 +63,7 @@ against the code rather than assumed:
 |---|---|---|
 | `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
 | `depositIdle(assets, minShares)` | No | USDC in, shares out. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
-| `fulfillRedeem(id)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
+| `fulfillRedeem(id, minAssetsOut)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
 | `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
 
 So: **do not add a `legBIsAsset` branch to the account keeper.** Read it only if you are surfacing the
@@ -168,7 +168,7 @@ members; index ≠ 0 members do **not** pass the `depositIdle` gate). This is **
 |---|---|---|---|
 | `createStrategyForUser(user)` on the factory | factory BACKEND_ROLE = `MAMO_BACKEND` | `0x2Ab03887829EA8632D972cf3816b825Fe7FC5e73` | backend |
 | `depositIdle(assets, minShares)` on an account | registry BACKEND_ROLE **member 0** | `0x7cb24EFA3fe76650388145b9B0823De6600f1f4c` | backend |
-| `fulfillRedeem(id)` on the strategy | strategy **proposer** = `MAMO_REBALANCER` | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | **rebalancer — NOT the backend** |
+| `fulfillRedeem(id, minAssetsOut)` on the strategy | strategy **proposer** = `MAMO_REBALANCER` | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | **rebalancer — NOT the backend** |
 
 Signing `depositIdle` with a non-index-0 backend key reverts `"Not owner or backend"`. Wire the keys
 explicitly, and note that the two backend keys above are **different addresses**.
@@ -246,7 +246,7 @@ the **rebalancer** (`MAMO_REBALANCER`), so the fulfil loop belongs to the fund-o
 
 ```solidity
 // LeveragedAerodromeCLStrategy (ERC-1167 clone) — onlyProposer (rebalancer), requires state == Executed
-function fulfillRedeem(uint256 id) external;
+function fulfillRedeem(uint256 id, uint256 minAssetsOut) external;
 ```
 
 The account's `ILeveragedAeroCLStrategy` interface **deliberately omits** `fulfillRedeem` for exactly this
@@ -277,7 +277,7 @@ sequenceDiagram
     A-->>BE: WithdrawRequested(id, shares, minAssetsOut)   (account event — backend indexes it)
     A-->>RB: RedeemRequested(id, account, shares)          (strategy event — the keeper trigger)
     Note over RB: if the unwind needs it, RB lowers policy ITSELF (lowerTargetLtv, down only) and runs adjustLeverage down — no multisig
-    RB->>S: fulfillRedeem(id)                              (PROPOSER key = rebalancer)
+    RB->>S: fulfillRedeem(id, minAssetsOut)                              (PROPOSER key = rebalancer)
     S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
     Note over A: owner then sweeps via claimWithdrawnUsdc() → UsdcClaimed(amount)
     Note over BE: backend observes RedeemFulfilled / UsdcClaimed and updates product state
@@ -288,7 +288,7 @@ sequenceDiagram
 2. The book is optionally levered **down** first so the oracle-free proportional unwind self-funds its IL
    — a **single-actor** step: the rebalancer lowers the standing target itself with
    `lowerTargetLtv(newTargetBps)` (proposer-only, strictly-lower) and runs `adjustLeverage(minLiq, minOut)`,
-   then calls `fulfillRedeem(id)` — all three with the **proposer** key, no multisig on the path.
+   then calls `fulfillRedeem(id, minAssetsOut)` — all three with the **proposer** key, no multisig on the path.
 3. USDC lands on the account; the **owner** claims it with `claimWithdrawnUsdc()`.
 4. Confirm downstream via the account's `UsdcClaimed(amount)` (owner-initiated) or the strategy's
    `RedeemFulfilled`.
@@ -333,7 +333,7 @@ would silently re-lock users' fulfilled withdrawals.
 | `createStrategyForUser(user)` | Factory | factory BACKEND_ROLE or `user` | provisioning; deterministic address |
 | `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent; **you pick `assets`** |
 
-That is the whole backend write surface. `fulfillRedeem(id)` on the strategy clone is **not** on it —
+That is the whole backend write surface. `fulfillRedeem(id, minAssetsOut)` on the strategy clone is **not** on it —
 `onlyProposer`, i.e. the **rebalancer** (`MAMO_REBALANCER`), never `MAMO_BACKEND`.
 
 Account entrypoints the backend does **not** call (owner-only, for reference): `deposit` (permissionless,

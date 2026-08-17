@@ -234,7 +234,7 @@ cast rpc tenderly_setBalance        '["<addr>","0x56BC75E2D63100000"]'          
 cast rpc tenderly_setErc20Balance   '["<usdc>","<addr>","0x2540BE400"]'                   --rpc-url "$ADMIN"   # 10,000 USDC
 
 # act as any actor — e.g. fulfill an async withdrawal as the backend/proposer
-cast send <strategyClone> 'fulfillRedeem(uint256)' <id> --from <MAMO_BACKEND> --unlocked --rpc-url "$ADMIN"
+cast send <strategyClone> 'fulfillRedeem(uint256,uint256)' <id> 0 --from <MAMO_BACKEND> --unlocked --rpc-url "$ADMIN"
 
 # read anything via the public RPC (share this one freely)
 cast call <account> 'sharesBalance()(uint256)' --rpc-url <public-rpc>

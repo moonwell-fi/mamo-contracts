@@ -1090,7 +1090,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         uint256 paid = usdc.balanceOf(lp) - lpUsdcBefore;
 
         // 1. EXACT reservation off the PRE-unwind snapshot.
@@ -1164,7 +1164,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(lp);
         uint256 id = strategy.requestRedeem(shares, 0);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id); // completes ⇒ no USDC->USDC leg was ever requested
+        strategy.fulfillRedeem(id, 0); // completes ⇒ no USDC->USDC leg was ever requested
 
         // The router WAS exercised on the leg-A side, so the pass above is not vacuous.
         assertTrue(legA.balanceOf(address(router)) != routerLegABefore, "the leg-A swap leg really executed");
@@ -1185,7 +1185,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(lp);
         uint256 id = strategy.requestRedeem(supply, 0);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "collateral fully redeemed");

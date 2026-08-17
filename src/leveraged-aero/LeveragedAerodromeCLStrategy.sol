@@ -1659,13 +1659,26 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `request.owner` — all three are proposer-callable, so the 2-day `FULFILL_WINDOW` never
     ///         depends on a multisig signature. NOT owner-callable — an owner-callable fulfill would
     ///         resurrect the demoted oracle-free path through the side door.
-    /// @param id Request id to fulfill.
-    function fulfillRedeem(uint256 id) external onlyProposer nonReentrant {
+    ///
+    /// @dev THE FLOOR IS `max(stored, fresh)`, NEVER `min`. The requester's own `minAssetsOut` is their
+    ///      guarantee and the proposer must not be able to lower it — that direction would let whoever
+    ///      fulfils choose a worse payout than the redeemer signed up for. `minAssetsOut` here is the
+    ///      PROPOSER's guarantee, layered on top: the stored floor was fixed at `requestRedeem` and may
+    ///      be up to `FULFILL_WINDOW` (2 days) stale by the time this runs, which is a long time for a
+    ///      levered book to move. Nothing else on the path covers that gap — `redeemUnwindImpl`'s
+    ///      per-swap sweep floors bound individual SWAPS, not the net payout, and a full redeem's covers
+    ///      lean on this number alone. Passing 0 keeps the previous behaviour exactly (the stored floor
+    ///      wins), so an integrator with nothing fresher to say is not forced to invent one.
+    /// @param id            Request id to fulfill.
+    /// @param minAssetsOut  Fresh floor on the net payout; the effective floor is the larger of this and
+    ///                      the one stored at request time. 0 to defer entirely to the stored floor.
+    function fulfillRedeem(uint256 id, uint256 minAssetsOut) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
         Layout storage $ = _layout();
         RedeemRequest storage r = $.redeemRequests[id];
         if (r.settled) revert RequestSettled();
-        uint256 assetsOut = _proportionalRedeem(r.owner, r.shares, r.minAssetsOut);
+        uint256 stored = r.minAssetsOut;
+        uint256 assetsOut = _proportionalRedeem(r.owner, r.shares, minAssetsOut > stored ? minAssetsOut : stored);
         r.settled = true;
         emit RedeemFulfilled(id, r.owner, assetsOut);
     }

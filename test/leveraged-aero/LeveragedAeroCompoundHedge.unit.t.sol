@@ -577,7 +577,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         vm.prank(lp);
         uint256 id = strategy.requestRedeem(shares, 0);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         // Three quarters of the drift survived, and all of it is still measured.
         assertApproxEqRel(_driftLegA(), (interest * 3) / 4, 1e16, "surviving drift == (1-f) x drift, still measured");
@@ -1090,7 +1090,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         uint256 id = strategy.requestRedeem(shares, 0);
         uint256 lpBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the oracle-free exit still pays");
     }
 
@@ -1157,7 +1157,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         uint256 id = strategy.requestRedeem(shares, 0);
         uint256 before = usdc.balanceOf(lp);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         return usdc.balanceOf(lp) - before;
     }
 

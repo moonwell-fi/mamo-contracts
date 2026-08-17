@@ -256,7 +256,7 @@ assert_eq "account sharesBalance escrowed" "$(ccall "$ACCT" 'sharesBalance()(uin
 
 PROPOSER="$(ccall "$STRAT" 'proposer()(address)' | field)"
 fund_eth "$PROPOSER" "$ETH_FUND_HEX"
-csend "fulfillRedeem(id) [proposer]" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256)' "$ID"
+csend "fulfillRedeem(id) [proposer]" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256,uint256)' "$ID" 0
 FA="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)"
 [ "$FA" -gt 0 ] 2>/dev/null && ok "fulfill landed USDC on ACCOUNT (+$FA)" || die "fulfill did not land USDC on account"
 csend "claimWithdrawnUsdc() [user]" "$USER" "$ACCT" 'claimWithdrawnUsdc()'

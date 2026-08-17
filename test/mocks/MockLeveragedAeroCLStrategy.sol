@@ -180,15 +180,18 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     // ==================== TEST-ONLY HELPER ====================
 
     /**
-     * @notice Fulfills an escrowed async request: burns the escrowed shares, enforces the stored
-     *         `minAssetsOut`, and pays USDC to the request owner. No proposer gate (test helper).
+     * @notice Fulfills an escrowed async request: burns the escrowed shares, enforces the LARGER of the
+     *         stored `minAssetsOut` and the fresh `minAssetsOut` argument, and pays USDC to the request
+     *         owner. No proposer gate (test helper). Mirrors the real strategy's `max(stored, fresh)`
+     *         rule — the requester's floor is never lowerable by whoever fulfils.
      */
-    function fulfillRedeem(uint256 id) external returns (uint256 assetsOut) {
+    function fulfillRedeem(uint256 id, uint256 minAssetsOut) external returns (uint256 assetsOut) {
         RedeemRequest storage req = requests[id];
         require(!req.settled, "MockSherwood: already settled");
 
         assetsOut = _assetsForShares(req.shares);
-        require(assetsOut >= req.minAssetsOut, "MockSherwood: min assets out");
+        uint256 floor = minAssetsOut > req.minAssetsOut ? minAssetsOut : req.minAssetsOut;
+        require(assetsOut >= floor, "MockSherwood: min assets out");
 
         req.settled = true;
         vaultToken.strategyBurn(req.shares);

@@ -442,17 +442,25 @@ function adjustLeverage(uint256 minLiq, uint256 minOut)
 ### `fulfillRedeem` — drain the withdraw queue
 
 ```solidity
-function fulfillRedeem(uint256 id) external onlyProposer nonReentrant;
+function fulfillRedeem(uint256 id, uint256 minAssetsOut) external onlyProposer nonReentrant;
 ```
 
 Runs the **oracle-free proportional unwind** for request `id`, paying `request.owner` (the Mamo
-account that escrowed the shares) net of its pro-rata protocol-fee skim, enforcing the **requester's**
-stored `minAssetsOut`, then burning the escrowed shares. See §C for the full loop.
+account that escrowed the shares) net of its pro-rata protocol-fee skim, enforcing
+**`max(stored, fresh)`** on the net payout, then burning the escrowed shares. See §C for the full loop.
+
+**The `minAssetsOut` argument is YOUR floor, layered on top of the requester's — never instead of it.**
+The stored floor was fixed at `requestRedeem` and can be up to the 2-day `FULFILL_WINDOW` stale by the
+time you fulfil, which is a long time for a levered book to move; nothing else on the path covers that
+gap (the per-swap sweep floors below bound individual **swaps**, not the payout). Quote it fresh off
+`previewRedeem` / `redeemRequest(id)` at send time. Passing `0` defers entirely to the stored floor —
+the previous behaviour, byte for byte. You cannot go the other way: a value **below** the stored floor
+is ignored, so the requester's guarantee is not lowerable by whoever fulfils.
 
 | | |
 |---|---|
 | Preconditions | `state() == Executed`; request not `settled` (else `RequestSettled()`). |
-| Guards | Enforces the requester's `minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). The reward tranche the unwind auto-claims is sold on the same L9 oracle floor (best-effort — see §C) and split `f / (1−f)`. |
+| Guards | Enforces `max(stored, fresh) minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). The reward tranche the unwind auto-claims is sold on the same L9 oracle floor (best-effort — see §C) and split `f / (1−f)`. |
 | Oracle posture | Still **oracle-free in the sense that matters**: the floor is derived behind a catchable call and falls back to **0** when the feeds are unreadable, so a down oracle/sequencer never blocks a fulfill or the `emergencyRedeem` deadman — it only removes the floor. A sandwicher cannot *make* a feed stale, so the floor binds whenever it can bind. Consequence for the agent: a fulfill that reverts on the sweep's min-out is a **venue-liquidity/pricing** signal (thin leg↔USDC pool, or someone shoving it), not an oracle problem — retry, or lever down first to shrink the residual being sold. |
 | Fee interaction | Best-effort crystallize (never blocks the exit): on an oracle outage `navPre = 0`, so the price-free **management** fee still accrues while the **performance** fee defers; a fee-mint revert emits `FeeCrystallizeDeferred(2, navPre)` and proceeds. |
 | Events | `RedeemFulfilled(id, owner, assetsOut)`. |
@@ -654,7 +662,7 @@ sequenceDiagram
         K->>S: lowerTargetLtv(lowerTarget)                   (PROPOSER, down only — no multisig)
         K->>S: adjustLeverage(minLiq, minOut)                (lever DOWN to it)
     end
-    K->>S: fulfillRedeem(id)
+    K->>S: fulfillRedeem(id, minAssetsOut)
     alt payout ≥ requester minAssetsOut
         S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
     else InsufficientAssetsOut
@@ -1357,7 +1365,7 @@ Production addresses are published separately at deploy.
 - [ ] Size `(width, skewBps)` for the **realised** geometry, not the requested one: down-alignment preserves width exactly but always moves up to `tickSpacing − 1` ticks from the upper span into the lower one, so keep `upperSpan ≥ 2 × tickSpacing`; and remember skew is inert at `width == 2 × tickSpacing` (needs `≥ 3 × tickSpacing` to do anything) (§B).
 - [ ] In the two-borrowed-legs shape, budget for the **per-borrow ratchet** a skewed range creates against the range-blind 50/50 borrow: each `deployIdle`/`compound` strands a fresh, debt-funded slice of its own borrow (≈19 % at `skewBps` 3500, ≈33.5 % at 2000 *or* 8000) and the idle fraction grows with every compound until an op that resizes the book folds it back in (§B). Utilisation drag and borrow carry — not a hedge or health change.
 - [ ] `adjustLeverage(minLiq, minOut)` — **selector `0x4be1cadd`, no target argument** — to hold near `targetLtvBps()`. To lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds, call `lowerTargetLtv(newTargetBps)` first (**selector `0xbd41b78c`, proposer-only, strictly-lower**) — no multisig step. Raising the target back is the admin's `setTargetLtv`.
-- [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
+- [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id, minAssetsOut)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
 - [ ] Treat `FULFILL_WINDOW = 2 days` as the hard SLA; alert before it; every `RedeemEmergency` is a missed SLA.
 - [ ] Alert on **supply reaching zero**: a full redeem burns the position NFT (`tokenId == 0` while still `Executed`) and the book cannot be rebuilt — `rerange` silently mints nothing, `deployIdle` fails closed, `compound` no-ops, and the only way forward is `settleStrategy()` plus a **new vault** (§F).
 - [ ] Run `deleverage(minOut)` proactively as health nears `minHealthBps`; remember it is permissionless (others will trigger it too).

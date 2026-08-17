@@ -1819,7 +1819,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         assertGt(usdc.balanceOf(lp) - lpUsdcBefore, 0, "request fulfilled post-migration for the same shares");
         assertTrue(strategy.redeemRequest(id).settled, "request settled");
     }

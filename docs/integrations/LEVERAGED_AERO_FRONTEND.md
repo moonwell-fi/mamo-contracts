@@ -383,7 +383,7 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 > ultimately receives is priced at fulfill time, not request time. Surface this clearly (e.g. "amount
 > finalizes when processed") and do not display the request-time preview as a locked payout.
 
-> **The rebalancer cannot redirect a fulfillment.** `fulfillRedeem(id)` takes no recipient argument — the
+> **The rebalancer cannot redirect a fulfillment.** `fulfillRedeem(id, minAssetsOut)` takes no recipient argument — the
 > payee is `redeemRequests[id].owner`, fixed to the user's account at `requestRedeem` and immutable
 > thereafter. The floor is the user's own stored `minAssetsOut`. The rebalancer chooses *when* a request
 > settles, never *to whom* or *for how much*.
@@ -400,7 +400,7 @@ sequenceDiagram
     S-->>A: id
     A-->>U: WithdrawRequested(id, shares, minAssetsOut)
     Note over U: state = PENDING — show request + offer cancelWithdraw(id)
-    B->>S: fulfillRedeem(id)  (rebalancer, off-frontend)
+    B->>S: fulfillRedeem(id, minAssetsOut)  (rebalancer, off-frontend)
     S-->>A: USDC lands ON the account (idle)
     Note over U,A: poll usdc.balanceOf(account) → claimable
     U->>A: claimWithdrawnUsdc()

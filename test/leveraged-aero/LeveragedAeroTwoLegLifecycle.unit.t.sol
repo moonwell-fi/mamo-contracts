@@ -663,7 +663,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         uint256 id = strategy.requestRedeem(supply, 0);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         assertEq(strategy.layout().tokenId, 0, "flat book");
 
         uint256 stakedBefore = gauge.depositCallCount();
@@ -1459,7 +1459,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         uint256 lpBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertEq(
             usdc.balanceOf(address(strategy)),
@@ -1498,7 +1498,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         uint256 id = _requestRedeem(shares);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertEq(
             cBefore - mUsdc.balanceOf(address(strategy)),
@@ -1585,7 +1585,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 id = strategy.requestRedeem(shares, 0);
         vm.stopPrank();
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         // The cover really ran — without this the test would pass vacuously on a book that had no
         // shortfall to cover in the first place.
@@ -1682,7 +1682,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 id = _requestRedeem(shares);
         vm.prank(proposer);
         vm.expectRevert(MockClSwapRouter.MockRouterMaxIn.selector);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
     }
 
     /**
@@ -1699,7 +1699,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 boughtBefore = router.boughtOf(address(legB));
         uint256 id = _requestRedeem(shares);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         uint256 bought = router.boughtOf(address(legB)) - boughtBefore;
         assertGt(bought, 0, "the settle cover really ran");
@@ -1737,7 +1737,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 boughtBefore = router.boughtOf(address(legB));
         uint256 id = _requestRedeem(shares);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         uint256 needed = _legBBuyCost(router.boughtOf(address(legB)) - boughtBefore);
         assertGt(needed, 0, "premise: the armed book really does carry a leg-B shortfall to cover");
 
@@ -1751,7 +1751,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         boughtBefore = router.boughtOf(address(legB));
         id = _requestRedeem(shares);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertGt(router.boughtOf(address(legB)) - boughtBefore, 0, "the cover still ran and bought leg B");
         assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared despite the partial budget");
@@ -1776,7 +1776,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         // Control: at the fair rate this exact quarter redeem goes through.
         uint256 id = _requestRedeem(shares / 4);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         assertGt(usdc.balanceOf(lp), 0, "control: the quarter redeem completes at the fair buy rate");
 
         vm.revertToState(snap);
@@ -1785,7 +1785,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         id = _requestRedeem(shares / 4);
         vm.prank(proposer);
         vm.expectRevert(MockClSwapRouter.MockRouterMaxIn.selector);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
     }
 
     /**
@@ -1871,7 +1871,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 boughtBefore = router.boughtOf(address(legB));
         uint256 id = _requestRedeem(shares);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         uint256 needed = _legBBuyCost(router.boughtOf(address(legB)) - boughtBefore);
         assertGt(needed, 0, "premise: the armed book carries a leg-B shortfall");
 
@@ -1913,12 +1913,68 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 id = _requestRedeem(shares);
         uint256 boughtBefore = router.boughtOf(address(legB));
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertGt(router.boughtOf(address(legB)) - boughtBefore, 0, "premise: a cover really ran on this redeem");
         assertEq(legB.balanceOf(address(strategy)), 0, "no leg B stranded above the hoisted sweep");
         assertEq(legA.balanceOf(address(strategy)), 0, "no leg A stranded above the hoisted sweep");
         assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
+    }
+
+    /**
+     * @dev F14 (a). THE PROPOSER GETS TO STATE A FRESH FLOOR. The only bound on the net payout used to be
+     *      the `minAssetsOut` the requester fixed at `requestRedeem`, and the 2-day `FULFILL_WINDOW`
+     *      means that number can be two days old when the fulfil lands — a long time for a levered book.
+     *      Nothing else on the path covers the gap: `redeemUnwindImpl`'s sweep floors bound individual
+     *      SWAPS, not the payout, and a full redeem's covers lean on this number alone.
+     */
+    function testFulfillRedeemEnforcesTheFreshProposerFloor() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 id = _requestRedeem(SUPPLY / 4); // stored floor 0, as `_requestRedeem` passes
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientAssetsOut.selector);
+        strategy.fulfillRedeem(id, type(uint128).max); // an unreachable fresh floor
+    }
+
+    /**
+     * @dev F14 (b). THE FLOOR IS `max(stored, fresh)`, NEVER `min`. The requester's own guarantee must not
+     *      be lowerable by whoever fulfils — that direction would let the proposer choose a worse payout
+     *      than the redeemer signed up for. A huge stored floor still binds when the proposer passes 0.
+     */
+    function testFulfillRedeemCannotLowerTheRequestersFloor() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 shares = SUPPLY / 4;
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares);
+        uint256 id = strategy.requestRedeem(shares, type(uint128).max); // the requester's own huge floor
+        vm.stopPrank();
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientAssetsOut.selector);
+        strategy.fulfillRedeem(id, 0); // "no fresh opinion" must not mean "drop the requester's floor"
+    }
+
+    /// @dev F14 (c). `0` is the identity: an integrator with nothing fresher to say gets exactly the old
+    ///      behaviour, with the stored floor doing all the work.
+    function testFulfillRedeemWithZeroFreshFloorIsUnchanged() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 shares = SUPPLY / 4;
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeem completed and paid out");
+        assertTrue(strategy.redeemRequest(id).settled, "the request is settled");
     }
 
     /// @dev Full redeem clears the book with BOTH debts repaid and the flat-book invariant restored.
@@ -1933,7 +1989,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         uint256 id = strategy.requestRedeem(supply, 0);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared");
         assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
@@ -2364,7 +2420,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         uint256 id = strategy.requestRedeem(supply, 0);
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "no rate-gap cToken dust after a full redeem");
         assertEq(strategy.nav(), 0, "a fund with zero shares outstanding prices at exactly zero");
@@ -2560,7 +2616,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         vm.prank(proposer);
         vm.expectRevert(MockClSwapRouter.MockRouterMinOut.selector);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
     }
 
     /**
@@ -2578,7 +2634,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 preB = legB.balanceOf(address(strategy));
         uint256 preA = legA.balanceOf(address(strategy));
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
 
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeem completed and paid out");
         // The sold slice really did clear a floor priced off the SOLD amount, not the raw balance: the
@@ -2642,7 +2698,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 preA = legA.balanceOf(address(strategy));
 
         vm.prank(proposer);
-        strategy.fulfillRedeem(id); // fair fill: the floor binds and is cleared
+        strategy.fulfillRedeem(id, 0); // fair fill: the floor binds and is cleared
 
         uint256 legBKept = legB.balanceOf(address(strategy));
         uint256 legAKept = legA.balanceOf(address(strategy));
@@ -2687,7 +2743,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         _setLegSellRate(9950);
         vm.recordLogs();
         vm.prank(proposer);
-        strategy.fulfillRedeem(id);
+        strategy.fulfillRedeem(id, 0);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; i++) {
             assertTrue(
