@@ -37,8 +37,10 @@ Audience: Mamo engineers with a checkout of **this repo only**.
 
 ## Actors & canonical addresses (Base mainnet / fork-native)
 
-These resolve identically on real Base and on any correctly-forked vnet (chainId 8453). Mamo values
-come from `addresses/8453.json`.
+These resolve identically on real Base and on any correctly-forked vnet — fork-nativeness comes from
+the forked **state** (`fork_config.network_id=8453`), not from the reported chain id. Mamo values come
+from `addresses/<block.chainid>.json`: `addresses/8453.json` on an 8453-chain-id vnet, or a verbatim
+copy named for the custom id (e.g. `addresses/73578453.json`) when the vnet reports one (constraint 1).
 
 | Role | Key | Address |
 |---|---|---|
@@ -70,9 +72,16 @@ Two keys are **created by this runbook** and are deliberately **not** committed 
 
 ## Hard constraints (read before every run)
 
-> 1. **chainId 8453 only.** Mamo's FPS `Addresses` book keys off `block.chainid`, and a matching chain
->    id keeps real Base addresses (USDC, Moonwell, Aerodrome, Chainlink feeds) fork-native. A different
->    chain id breaks address resolution and the whole harness.
+> 1. **The chain id needs a matching address book + `EXPECTED_CHAIN` — custom ids are supported and
+>    now preferred.** Venue addresses (USDC, Moonwell, Aerodrome, Chainlink feeds) resolve from forked
+>    **state**, so any reported chain id keeps them fork-native. Exactly two things key off the id:
+>    Mamo's FPS `Addresses` book reads `addresses/<block.chainid>.json` (make a verbatim copy of
+>    `addresses/8453.json` named for the custom id), and `chain_sanity` asserts
+>    `EXPECTED_CHAIN` (export it before every harness run). A custom id (Tenderly's `7357`-prefix
+>    convention, e.g. `73578453` — proven live 2026-08-13, both harnesses green) buys replay-attack
+>    protection, wallet disambiguation from real Base, and a forge fork cache that can't mix vnet and
+>    real-Base slots. Keep `--no-storage-caching` regardless: `tenderly_setCode` mutates state without
+>    mining a block, so a same-height cache entry can serve pre-override code either way.
 > 2. **Feed freshness is solved by the FreshFeed pattern.** On a raw Base fork the forked Chainlink
 >    answers are frozen, so `updatedAt` recedes as the clock advances and every priced path bricks with
 >    `StaleOracle` in ~1 day (`maxDelay` is an init param, bounded to `(0, 7 days]`). The fix is
@@ -124,22 +133,27 @@ Two keys are **created by this runbook** and are deliberately **not** committed 
 Create a **fresh, persistent** Virtual TestNet forking Base:
 
 - Fork network: **Base (8453)**.
-- Virtual network chain id: **8453 — MANDATORY** (constraint 1).
+- Virtual network chain id: **custom, `7357`-prefix convention preferred** (e.g. `73578453` — the
+  current instance). Constraint 1 lists the two accommodations a custom id needs
+  (`addresses/<id>.json` copy + `EXPECTED_CHAIN=<id>`); `8453` also still works.
 - **State sync: DISABLED** (constraint 3 — creation-time-only, unnecessary, and it would undo the
-  FreshFeed overrides).
+  FreshFeed overrides). This is a deliberate choice, **not** an API limitation: Tenderly supports
+  sync with custom chain ids; it is the FreshFeed overrides and the pool TWAP ring buffer that
+  cannot survive a syncing parent.
 - Explorer: optional.
 - Persistence: **no auto-delete** (the pooled layer must survive across the multi-step deploy and all
   downstream FE/BE work).
 
 Two ways to create it:
 
-**(a) Tenderly dashboard** — New Virtual TestNet → fork Base → set the virtual chain id to `8453` →
-persistent. Copy the **Admin RPC**, **Public RPC**, vnet id, and fork block.
+**(a) Tenderly dashboard** — New Virtual TestNet → fork Base → set the virtual chain id (custom
+preferred, e.g. `73578453`) → persistent. Copy the **Admin RPC**, **Public RPC**, vnet id, and fork
+block.
 
 **(b) Reuse the harness creation mechanism.** `script/tenderly/lib/common.sh` `resolve_vnet()` already
 codifies the exact API call this repo uses (`POST …/vnets` with
-`fork_config.network_id=8453` + `virtual_network_config.chain_config.chain_id=8453`,
-`sync_state_config.enabled=false`). It reads creds from `.env`:
+`fork_config.network_id=8453` + `virtual_network_config.chain_config.chain_id=${VNET_CHAIN_ID:-8453}`,
+`sync_state_config.enabled=false`). Export `VNET_CHAIN_ID` for a custom id. It reads creds from `.env`:
 
 ```
 TENDERLY_ACCESS_KEY=...
@@ -562,6 +576,15 @@ Phase B run they normally need no override; pass them to target a different vnet
 > (BACKEND_ROLE member index 0), **not** the address-book `MAMO_BACKEND`. On the fork these differ; the
 > harness reads the live value.
 
+> **Redeploy hygiene — the registry never revokes a superseded pair (observed live 2026-08-13).**
+> `whitelistImplementation(newImpl, 5)` only *adds*: the previous impl stays
+> `whitelistedImplementations == true`, and the previous factory keeps `BACKEND_ROLE` (nothing pairs
+> `grantRole` with a revoke). `latestImplementationById(5)` does move to the new impl, so nothing
+> *routes* to the stale pair — but the old factory can still call `addStrategy`. On a vnet this is
+> cosmetic; **a mainnet redeploy must pair the proposal with
+> `registry.revokeRole(BACKEND_ROLE, oldFactory)`** (and treat the stale whitelist entry as an
+> accepted, documented risk).
+
 > **Verified note — proposal 012 vs the harness.** The FPS proposal is committed at
 > `multisig/mamo-multisig/012_DeployLeveragedAeroAccountSystem.sol` (deploy + `preBuildMock` typeId-5
 > guard + `build()` + `validate()`), and now types the vault as `LeveragedAeroVault` under the
@@ -629,7 +652,7 @@ USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 **Pooled layer live (Phase B):**
 
 ```bash
-cast chain-id --rpc-url "$PUB"                                   # 8453
+cast chain-id --rpc-url "$PUB"     # == chainId in leveraged-aero-vnet.json (73578453 on the current instance)
 cast call "$STRAT" 'state()(uint8)'      --rpc-url "$PUB"        # 1  (Executed)
 cast call "$STRAT" 'nav()(uint256)'      --rpc-url "$PUB"        # > 0
 cast call "$STRAT" 'vault()(address)'    --rpc-url "$PUB"        # == $VAULT
@@ -903,20 +926,22 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 
 | Field | Value | Config key |
 |---|---|---|
-| vnet id | `8975a20b-5cf0-4399-9165-08e2b19229db` | — |
-| chainId | `8453` | `chainId` |
-| fork block | `48,901,646` | — |
+| vnet id | `769bfec9-e868-4f87-b6f7-ad3584e86eb3` (slug `mamo-leveraged-aero-pr66-1786640530`) | `vnetSlug` |
+| chainId | `73578453` — **custom** (`7357` prefix + parent 8453); harness runs need `EXPECTED_CHAIN=73578453`, forge needs `addresses/73578453.json` | `chainId` |
+| parent network | Base (`8453`) — fork state is Base; all venue addresses resolve unchanged | `parentNetworkId` |
+| fork block | `49,925,592` (deployed from PR #66 head `d347b68`, 2026-08-13) | — |
 | **Admin RPC** (writes) | **1Password** — write-capable, never committed | `adminRpc` |
-| Public RPC (reads) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Public RPC (reads) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
+| State sync | `false` — deliberate (constraint 3), not an API limit | `stateSync` |
 | Vault generation | `2` — `leveraged-aero-vault` (`depositsOpen()`, `cloneAndBind`, `redeemSettled`) | `vaultGeneration` |
-| Vault (`LeveragedAeroVault`) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
-| Strategy clone (operator target) | `0xA26557fA6823881327fca5b8C4eD5857997A49da` — width `4000` raw ticks, band `[200, 20000]` | `pooled.strategyClone` |
-| Strategy template (clone source) | `0xafcA85Df8e058A7a755889884d87026e8e118943` | `pooled.template` |
+| Vault (`LeveragedAeroVault`) | `0xC0e7a3fF623fD17D6a15367ADA6584e6BB09727e` | `pooled.vault` |
+| Strategy clone (operator target) | `0x0039e4357E83395fA8cB09E3C1657574dBDf41E2` — width `4000` raw ticks, band `[200, 20000]` | `pooled.strategyClone` |
+| Strategy template (clone source) | `0xEA05B89CA6045f65E5040519354aBca93b695425` | `pooled.template` |
 | Strategy `proposer` (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
 | LP pool (Slipstream, tickSpacing 100; asset-mode cbBTC/USDC) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
 | Seed | `100000000000` = 100,000 USDC (6dp) | `pooled.seed` |
-| Mamo account impl | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
-| Mamo account factory (typeId 5, latest) | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
+| Mamo account impl | `0xd9Fc69ff1DF465Fd5c83F03B6504b84Fc064CaD1` | `mamo.accountImplementation` |
+| Mamo account factory (typeId 5, latest) | `0x00247273857a1e0337A7Ce2822a72aE09DA44523` | `mamo.accountFactory` |
 | Mamo strategy registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
@@ -932,6 +957,30 @@ FreshFeed-overridden venue feeds (mainnet addresses, code-replaced per B.0 — `
 | AERO / USD | `0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0` | `feeds.aeroUsd` |
 | L2 sequencer uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` | `feeds.sequencerUptime` |
 
+### Funding test wallets (FE/BE/QA)
+
+`script/tenderly/fund-address.sh` sets balances via the **Admin RPC** cheat methods
+(`tenderly_setBalance` / `tenderly_setErc20Balance` — they SET, not add; no whale needed; any ERC20
+works). One wallet per invocation; amounts are human units and decimals are read from the token:
+
+```bash
+# one wallet: gas + spending USDC
+./script/tenderly/fund-address.sh 0xWALLET --eth 10 --usdc 25000 --rpc-url "$ADMIN_RPC"
+
+# a batch
+for w in 0xWALLET1 0xWALLET2 0xWALLET3; do
+  ./script/tenderly/fund-address.sh "$w" --eth 10 --usdc 25000 --rpc-url "$ADMIN_RPC"
+done
+
+# any other token (e.g. cbBTC)
+./script/tenderly/fund-address.sh 0xWALLET --erc20 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf 0.5 --rpc-url "$ADMIN_RPC"
+```
+
+Two rules: **always pass `--rpc-url` with this instance's Admin RPC** (the script's `.env` fallback
+resolves `TENDERLY_VNET_RPC_URL`, which points at the unrelated LPV2 vnet), and the Admin RPC lives in
+1Password — the public RPC cannot fund (cheat methods are admin-only). The script verifies by reading
+the balance back after each set.
+
 ### Deliberate history — retired, do not target
 
 Kept only so old logs and links resolve. None of these is part of the current stack; all are Sherwood-era
@@ -939,6 +988,8 @@ Kept only so old logs and links resolve. None of these is part of the current st
 
 | Retired | Address | Note |
 |---|---|---|
+| Previous vnet instance (chainId `8453`) | vnet `8975a20b-5cf0-4399-9165-08e2b19229db`, public RPC `…/70a4990f-6686-4536-8237-ad9103acd11b` | superseded 2026-08-13 by the `73578453` custom-chain-id instance; still running, not deleted. Its stack: vault `0x8343b356…22D7`, clone `0xA26557fA…49da`, template `0xafcA85Df…8943`, impl `0xC68F1419…8bf9`, factory `0x3E130404…F20b` |
+| Attempt-1 pair on the CURRENT instance | impl `0x30fA6E5648bDa78c905dad6f0F5394148aD171DA`, factory `0xbad3b205893F8D729C54A79EB0421232950D27a0` | a failed first account-harness attempt left the impl **still whitelisted** (type 5) and the factory **still holding `BACKEND_ROLE`** — `latestImplementationById(5)` routes correctly, so harmless here, but do not target them |
 | Sherwood `SyndicateVault` | `0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9` | replaced by `LeveragedAeroVault` |
 | `SyndicateGovernor` | `0x430FA5659cCf6E9c1586007a0A2B7760fb75e105` | no longer part of the stack (PR #66) |
 | Sherwood-era clone | `0x168ac730AB0DA6FCDE8aA26e33eac4aE6c8CfB4B` | `Settled` — historical `Settled`-state reference only |

@@ -481,6 +481,7 @@ PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(cat "$CONFIG_JSON")"
 jq -n \
   --argjson prev "$PREV" \
   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg chainId "$(cast chain-id --rpc-url "$RPC" 2>/dev/null || echo 8453)" \
   --arg publicRpc "$TENDERLY_VNET_PUBLIC_RPC_URL" \
   --arg vault "$VAULT" --arg clone "$CLONE" --arg template "$TEMPLATE" \
   --arg proposer "$MAMO_REBALANCER" --arg seed "$SEED" \
@@ -490,7 +491,15 @@ jq -n \
   --arg aeroFeed "$AERO_FEED" --arg seqFeed "$SEQ_FEED" \
   '$prev * {
     generatedAt: $ts,
-    chainId: 8453,
+    # chainId is READ FROM THE RPC, never hardcoded: a vnet may report a custom chain id
+    # (e.g. 73578453) and downstream consumers wire wallets/networks from this field.
+    # A custom-chain-id run needs EXPECTED_CHAIN=<id> and addresses/<id>.json (copy of
+    # 8453.json — the fork STATE is still Base, so the address book is identical).
+    chainId: ($chainId | tonumber),
+    parentNetworkId: 8453,
+    # Phase B.-1 refuses to run against a synced instance, so this is always truthful here.
+    stateSync: false,
+    stateSyncDisabledReason: "Deliberate, not a Tenderly limitation (sync is API-compatible with custom chain ids): sync re-hydrates the canonical mainnet feed addresses this instance code-overrides with FreshFeed, and it corrupts the Slipstream pool TWAP ring buffer (observe reverts OLD, observed live 2026-07-29), fail-closing every priced path. Creation-time-only flag — a synced instance cannot be repaired, only replaced.",
     publicRpc: (if $publicRpc == "" then ($prev.publicRpc // null) else $publicRpc end),
     adminRpc: "1Password (write-capable — never committed)",
     strategyTypeId: 5,
