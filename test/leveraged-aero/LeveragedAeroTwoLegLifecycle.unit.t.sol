@@ -150,6 +150,16 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         legAFeed = new MockChainlinkFeed(int256(P_LEG_A), 8, 1, block.timestamp);
         aeroFeed = new MockChainlinkFeed(1e8, 8, 1, block.timestamp);
 
+        // Wire the comptroller's hypothetical-liquidity model — priced at its OWN oracle (the raw
+        // feed answers, NO staleness gate, exactly the real Moonwell ChainlinkOracle asymmetry the
+        // degraded `withdrawIdle` bound leans on) — and put the `redeemAllowed` belt on the
+        // collateral market, so both halves of "Moonwell's own check" are representable in this
+        // suite rather than assumed.
+        comptroller.registerMarket(address(mUsdc), address(usdcFeed), 6, 0.88e18);
+        comptroller.registerMarket(address(mLegB), address(legBFeed), 8, 0);
+        comptroller.registerMarket(address(mLegA), address(legAFeed), 18, 0);
+        mUsdc.setComptroller(address(comptroller));
+
         usdc.mint(address(mUsdc), 100_000_000e6);
         legB.mint(address(mLegB), 1_000_000e8);
         legA.mint(address(mLegA), 1_000_000e18);
@@ -1254,14 +1264,102 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(_collateralUsdc(), collateralBefore - top, "...and it really came out of the collateral");
     }
 
-    /// @dev THE OTHER HALF: readable feeds still enforce the policy bound EXACTLY as before. The
-    ///      degrade is scoped to "cannot price", not "levered collateral is now withdrawable" — the
-    ///      typed `InsufficientIdle` refusal is unchanged whenever the oracle answers.
-    function testWithdrawIdleStillEnforcesThePolicyBoundWhenFeedsAreReadable() public {
-        _execute(SEED); // at target: no un-levered collateral at all
+    /**
+     * @dev THE DEGRADED PATH STILL HOLDS THE TARGET-LTV LINE — at the venue's oracle. An earlier
+     *      revision dropped the policy bound entirely on the catch path, leaving Moonwell's
+     *      collateral factor (8800 bps, ABOVE `maxLtvBps`) as the only limit: during an outage the
+     *      `onlyProposer` key could walk the book to the CF edge in one call — zero price cushion,
+     *      the permissionless `deleverage` valve armed — the exact risk-escalation capability the
+     *      admin-only target split denies that key. The bound is now re-derived from
+     *      `getAccountLiquidity`, so the SAME un-levered slice is withdrawable during the outage and
+     *      anything past it is the same typed refusal, feeds or no feeds.
+     */
+    function testDegradedWithdrawIdleStillHoldsTheTargetLtvLine() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+        vm.warp(block.timestamp + 2 days + 1); // every hardened feed refuses
+
+        // Past the venue-derived un-levered slice: refused, typed, even mid-outage. This is the
+        // assertion the pre-fix degrade could not make — it let this call through, and 90% of the
+        // collateral after it.
         vm.prank(proposer);
         vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);
-        strategy.withdrawIdle(20_000e6);
+        strategy.withdrawIdle(top + 20_000e6);
+
+        // The blast radius, pinned: after the largest permitted degraded withdraw the book sits at
+        // the standing target — nowhere near the CF line.
+        vm.prank(proposer);
+        strategy.withdrawIdle(top - 10); // a few units inside the venue-oracle bound (integer slack)
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 3, "post-degrade LTV pinned at the standing target");
+    }
+
+    /// @dev If even the VENUE cannot answer (a comptroller error code), the degraded path fails
+    ///      closed — the pre-degrade posture, and the right one when nothing at all can price the book.
+    function testDegradedWithdrawIdleFailsClosedWhenTheComptrollerErrors() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+        vm.warp(block.timestamp + 2 days + 1);
+        comptroller.setAccountLiquidityError(2);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.ComptrollerCallFailed.selector);
+        strategy.withdrawIdle(1e6);
+    }
+
+    /// @dev MOONWELL'S OWN BELT, representable at last (james-saint review): the mock market now
+    ///      consults the comptroller's hypothetical liquidity on the way out, so an over-draw against
+    ///      live debt answers with the Compound rejection CODE — the shape every production caller
+    ///      (`MoonwellRedeemFailed(err)`) is written around — instead of a mock-artifact balance
+    ///      underflow.
+    function testMoonwellRefusesARedeemPastTheFreeCollateralLine() public {
+        _execute(SEED); // levered at target 5000 with CF 8800: ~43% of collateral is free, no more
+        uint256 collateral = _collateralUsdc();
+        vm.prank(address(strategy));
+        uint256 err = mUsdc.redeemUnderlying((collateral * 6) / 10); // 60%: past the free line
+        assertEq(err, 4, "refused with the INSUFFICIENT_LIQUIDITY-shaped code, nothing moved");
+        assertEq(_collateralUsdc(), collateral, "the refusal is a code, not a partial fill");
+    }
+
+    /// @dev THE OTHER HALF, both properties the name claims (an earlier revision duplicated
+    ///      `testWithdrawIdleRefusesLeveredCollateral` byte for byte and controlled nothing): with
+    ///      READABLE feeds the policy bound refuses past the un-levered slice through the PRIMARY
+    ///      read, and a healthy in-bound withdraw emits NO degradation marker — pinned the same way
+    ///      the sibling markers pin their no-degradation halves, so the marker cannot become
+    ///      free-running.
+    function testWithdrawIdleStillEnforcesThePolicyBoundWhenFeedsAreReadable() public {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);
+        strategy.withdrawIdle(top + 20_000e6);
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.withdrawIdle(top / 2);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.WithdrawIdleBoundDegraded.selector,
+                "a healthy withdrawIdle must not mark degradation"
+            );
+        }
+        assertEq(usdc.balanceOf(address(strategy)), top / 2, "...and the in-bound withdraw went through");
     }
 
     /// @dev Same gates as `supplyIdle`: proposer-only, `Executed`-only, fail-closed on the redeem.

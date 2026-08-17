@@ -6,6 +6,7 @@ import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/Liq
 import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
 
 import {MockCLPool} from "../mocks/MockCLPool.sol";
+import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -179,6 +180,24 @@ contract MockLendingMarket {
         redeemError = redeemErr;
     }
 
+    /// @notice The comptroller consulted on every redeem (0 = ungated, the legacy shape). Wiring this
+    ///         makes Moonwell's free-collateral belt REPRESENTABLE: an over-draw against live debt
+    ///         answers with a rejection code instead of the mock-artifact balance underflow.
+    address public comptroller;
+
+    function setComptroller(address comptroller_) external {
+        comptroller = comptroller_;
+    }
+
+    /// @dev Compound's `redeemAllowed` hop, code-shaped (never reverts) — real `MToken.redeemFresh`
+    ///      consults the comptroller's hypothetical liquidity and returns a failure CODE on rejection,
+    ///      which is the contract every production caller (`MoonwellRedeemFailed(err)`) is written
+    ///      around and the one thing the old mock could not express.
+    function _redeemAllowed(uint256 cTokens) internal view returns (uint256) {
+        if (comptroller == address(0)) return 0;
+        return MockComptroller(comptroller).redeemAllowed(address(this), msg.sender, cTokens);
+    }
+
     // ── Borrow-balance reads ──
 
     /// @notice Last-accrued borrow balance. STALE whenever a pending accrual is armed.
@@ -269,7 +288,9 @@ contract MockLendingMarket {
     function redeem(uint256 cAmount) external returns (uint256) {
         if (redeemError != 0) return redeemError;
         _accrueExchangeRate();
-        balanceOf[msg.sender] -= cAmount; // under-collateralised redeem reverts, as Moonwell would
+        uint256 rejection = _redeemAllowed(cAmount);
+        if (rejection != 0) return rejection;
+        balanceOf[msg.sender] -= cAmount; // an over-the-balance redeem still underflows, as a belt
         IERC20(underlying).safeTransfer(msg.sender, (cAmount * exchangeRateStored) / 1e18);
         return 0;
     }
@@ -277,7 +298,10 @@ contract MockLendingMarket {
     function redeemUnderlying(uint256 amount) external returns (uint256) {
         if (redeemError != 0) return redeemError; // insufficient cash / paused
         _accrueExchangeRate();
-        balanceOf[msg.sender] -= (amount * 1e18) / exchangeRateStored;
+        uint256 cTokens = (amount * 1e18) / exchangeRateStored;
+        uint256 rejection = _redeemAllowed(cTokens);
+        if (rejection != 0) return rejection;
+        balanceOf[msg.sender] -= cTokens;
         IERC20(underlying).safeTransfer(msg.sender, amount);
         return 0;
     }

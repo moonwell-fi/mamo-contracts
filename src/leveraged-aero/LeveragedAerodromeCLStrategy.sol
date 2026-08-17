@@ -226,10 +226,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @dev Mirror of `LeveragedAeroVenue.WithdrawIdleBoundDegraded` — the venue library is
     ///      delegatecalled, so it logs from THIS address and belongs in this ABI. Means a `withdrawIdle`
-    ///      could not price its POLICY bound (the un-levered-collateral line, Chainlink-priced) and fell
-    ///      through to Moonwell's own collateral check for that call. The withdraw still happened and
-    ///      NAV is unaffected — raw and mUSDC-parked USDC price alike — but post-op LTV may sit above
-    ///      the standing target until a keeper reconciles it.
+    ///      could not price its POLICY bound at the hardened Chainlink reader and re-derived the SAME
+    ///      un-levered-collateral line from Moonwell's own account snapshot for that call. The withdraw
+    ///      still happened, inside that bound, and NAV is unaffected — raw and mUSDC-parked USDC price
+    ///      alike; the residual is only that the line was held at the venue's (possibly stale) prices
+    ///      until the feeds recover.
     event WithdrawIdleBoundDegraded();
 
     /// @dev Mirror of `LeveragedAeroValuation.HedgeLegMeasureDegraded` — that library's `public`

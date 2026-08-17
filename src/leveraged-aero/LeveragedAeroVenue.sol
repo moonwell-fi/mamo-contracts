@@ -5,7 +5,7 @@ import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "./LeveragedAerodromeCLStrategy.sol";
 import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
-import {ICToken, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
+import {ICToken, IComptroller, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -76,6 +76,7 @@ library LeveragedAeroVenue {
     error MoonwellRedeemFailed(uint256 errCode); // selector mirrors the manager's
     error InsufficientIdle(); // selector mirrors the strategy's / the manager's
     error FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps); // selector mirrors the strategy's
+    error ComptrollerCallFailed(); // selector mirrors the strategy's / the valuation's
 
     // ── Events (emitted from the strategy's address via delegatecall) ──
     /// @notice A destination venue hash was staged (or cleared, when `venueHash == 0`) by the vault owner.
@@ -103,12 +104,14 @@ library LeveragedAeroVenue {
     ///      `lowerTargetLtv`'s "every step emits `TargetLtvUpdated`" contract.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
-    /// @notice `withdrawIdle` could not read the oracle its POLICY bound needs, so it fell through to
-    ///         Moonwell's own collateral check for that call. The op still happened — the bound that did
-    ///         not run is the strategy's tighter target-LTV one, not the venue's solvency one. A monitor
-    ///         should treat a burst of these as "the proposer moved collateral while the feeds were
-    ///         down" and reconcile LTV once they recover. Same posture, and the same marker discipline,
-    ///         as `RedeemSweepFloorsDegraded`.
+    /// @notice `withdrawIdle` could not read the hardened oracle its POLICY bound is normally priced
+    ///         in, so the SAME target-LTV bound was re-derived from Moonwell's own account snapshot
+    ///         (`_unleveredAtVenueOracle`) for that call. The op still happened, inside a bound — what
+    ///         degraded is the PRICE BASIS (the venue's un-gated oracle rather than our
+    ///         staleness/sequencer-hardened reader), not the line itself. A monitor should treat a
+    ///         burst of these as "the proposer moved collateral while the feeds were down" and
+    ///         reconcile LTV once they recover. Same posture, and the same marker discipline, as
+    ///         `RedeemSweepFloorsDegraded`.
     event WithdrawIdleBoundDegraded();
 
     /// @notice The venue subset of the strategy's config — everything a pool/pair change touches.
@@ -326,15 +329,24 @@ library LeveragedAeroVenue {
     ///      feeds enforce the policy bound exactly as before; an unreadable one emits
     ///      `WithdrawIdleBoundDegraded` and leans on Moonwell's own check for that call.
     ///
-    ///      WHAT THE DEGRADED PATH GIVES UP, stated plainly: during the outage the proposer can move
-    ///      collateral to raw beyond the un-levered slice, up to Moonwell's collateral-factor line. Both
-    ///      sides of that move stay inside the strategy (NAV is unchanged — `nav()` prices raw and
-    ///      mUSDC-parked USDC alike), so it cannot remove value; it can only raise LTV toward a line
-    ///      Moonwell itself enforces. The marker is what makes it reconcilable after the fact.
+    ///      WHAT THE DEGRADED PATH GIVES UP — the ORACLE BASIS, not the bound. An earlier revision
+    ///      dropped the policy bound entirely on the catch path and leaned on Moonwell's collateral
+    ///      factor alone; that line (CF, live 8800 bps) sits ABOVE `maxLtvBps`, so during an outage the
+    ///      `onlyProposer` key could walk the book from target to the CF edge in one call — a book with
+    ///      ZERO price cushion (the first adverse leg tick is a Moonwell shortfall, and liquidation at
+    ///      the 10% incentive is the loss vector), sitting where it also ARMS the permissionless
+    ///      `deleverage` valve — exactly the risk-escalation capability the admin-only target split
+    ///      denies that key, and the reason `checkDeployableIdle` is not degraded. The catch path now
+    ///      re-derives THE SAME target-LTV bound from the venue's own books instead
+    ///      (`_unleveredAtVenueOracle`): Moonwell's plain ChainlinkOracle carries no heartbeat or
+    ///      sequencer gate, so it keeps answering through exactly the staleness outages that make our
+    ///      hardened reader refuse. The residual is honest and small: during the outage the line is
+    ///      held at the venue's (possibly stale) prices — the same prices its liquidation engine uses —
+    ///      rather than at truth.
     ///
     ///      NOT APPLIED TO `checkDeployableIdle`, deliberately: that bound gates `deployIdle`, which
     ///      LEVERS UP. Degrading a lever-up bound during an oracle outage would let the keeper add debt
-    ///      blind. Availability is only the right trade on the direction that REMOVES leverage.
+    ///      blind. Availability is only the right trade on the direction that cannot add debt.
     function withdrawIdleImpl(uint256 amount) public {
         if (amount == 0) return;
         try LeveragedAerodromeCLStrategy(payable(address(this))).previewCollateralDebt() returns (
@@ -342,11 +354,42 @@ library LeveragedAeroVenue {
         ) {
             if (amount > _unleveredFrom(collateralUsdc, debtUsdc)) revert InsufficientIdle();
         } catch {
-            // Policy unpriceable → Moonwell's collateral check is the belt for this call. Marked, not
-            // silent: a `view` cannot emit, but this op is a transaction and can.
+            // Policy unpriceable at OUR oracle → hold the SAME line at the venue's. Marked, not
+            // silent: a `view` cannot emit, but this op is a transaction and can. (The marker fires
+            // only when the degraded call PROCEEDS — a refusal rolls the log back with the state.)
+            if (amount > _unleveredAtVenueOracle()) revert InsufficientIdle();
             emit WithdrawIdleBoundDegraded();
         }
         _redeemUnderlying(_layout().mUsdc, amount);
+    }
+
+    /// @dev THE DEGRADED BOUND'S BASIS: the un-levered collateral re-derived from Moonwell's own
+    ///      account snapshot, no hardened-Chainlink read anywhere on the path.
+    ///
+    ///      With USDC the sole collateral, `getAccountLiquidity` returns (18dp USD, venue oracle)
+    ///        liquidity = C·CF − D   (or shortfall = D − C·CF when negative)
+    ///      so the venue-priced debt is `D = C·CF − liquidity + shortfall`, with `C` read oracle-free
+    ///      off the cToken books (`balanceOf × exchangeRateStored`, the same stored basis the
+    ///      comptroller snapshot uses) and USDC taken at face. The USDC term is the one approximation:
+    ///      Moonwell prices USDC at its real feed (≈ $1), so a DEpeg overstates `D` here — a TIGHTER
+    ///      bound, the safe direction; the loose direction needs USDC > $1, bounded by bps of drift.
+    ///
+    ///      CF IS READ LIVE (`readCollateralFactor`), NOT from `Layout.usdcCollateralFactorBps`: the
+    ///      stored copy is written once at init and consumed nowhere at runtime, and a governance CF
+    ///      RAISE after init would make a stored-CF bound quietly looser than policy. Both reads fail
+    ///      closed (`ComptrollerCallFailed`) — if even the venue cannot answer, the op reverts, which
+    ///      is the pre-degrade behaviour and the right answer when nothing can price the book.
+    function _unleveredAtVenueOracle() private view returns (uint256) {
+        Layout storage $ = _layout();
+        uint256 c = (ICToken($.mUsdc).balanceOf(address(this)) * ICToken($.mUsdc).exchangeRateStored()) / 1e18;
+        uint256 cf = uint256(LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc));
+        (uint256 err, uint256 liquidity, uint256 shortfall) =
+            IComptroller($.comptroller).getAccountLiquidity(address(this));
+        if (err != 0) revert ComptrollerCallFailed();
+        uint256 dVenue = (c * cf) / 10_000 + shortfall / 1e12;
+        uint256 liqFace = liquidity / 1e12; // 18dp USD → 6dp USDC face at $1
+        dVenue = dVenue > liqFace ? dVenue - liqFace : 0;
+        return _unleveredFrom(c, dVenue);
     }
 
     /// @notice Oracle-priced fast-redeem funding (body of the strategy's `redeem`): source `assetsOut`

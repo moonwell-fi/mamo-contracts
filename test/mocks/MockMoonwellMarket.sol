@@ -88,12 +88,44 @@ contract MockMoonwellMarket {
  * @notice Minimal Moonwell Comptroller stand-in: the `markets(address)` tuple the vendored
  *         strategy reads its USDC collateral factor from, plus the two calls the venue path makes.
  */
+/// @dev The market reads the comptroller's hypothetical-liquidity model needs — matched by both
+///      `MockMoonwellMarket` (init suites) and the custodial `MockLendingMarket` (venue harness).
+interface IMockMarketReads {
+    function balanceOf(address account) external view returns (uint256);
+    function exchangeRateStored() external view returns (uint256);
+    function borrowBalanceStored(address account) external view returns (uint256);
+}
+
+/// @dev Raw Chainlink read for the comptroller's OWN oracle. DELIBERATELY no staleness/sequencer
+///      gate: the real Moonwell ChainlinkOracle serves the latest answer un-gated, which is exactly
+///      the asymmetry the degraded `withdrawIdle` bound leans on (our hardened reader refuses, the
+///      venue's oracle keeps answering).
+interface IMockFeedRead {
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80);
+}
+
 contract MockComptroller {
     /// @notice Collateral-factor mantissa (1e18-scaled) returned by `markets`; 0.88e18 == 8800 bps.
     uint256 public collateralFactorMantissa = 0.88e18;
     bool public isListed = true;
 
     uint256 public shortfall;
+    uint256 public accountLiquidityError; // nonzero → getAccountLiquidity answers (err, 0, 0)
+
+    // ── Hypothetical-liquidity model (opt-in per fixture) ──
+    //
+    // Un-registered fixtures keep the legacy inert shape: `getAccountLiquidity` → (0, 0, shortfall)
+    // and `redeemAllowed` → 0 (always allow). Fixtures that register their markets get the real
+    // Compound shape: Σ collateral×CF×price − Σ debt×price at the comptroller's OWN (un-gated)
+    // oracle, feeding BOTH `getAccountLiquidity` and the market-side `redeemAllowed` belt.
+    struct RegisteredMarket {
+        address feed; // 8dp USD answer, read raw — see IMockFeedRead
+        uint8 underlyingDecimals;
+        uint256 cfMantissa; // this market's collateral weight (0 for borrow-only legs)
+    }
+
+    address[] public marketList;
+    mapping(address => RegisteredMarket) public registered;
 
     function setCollateralFactorMantissa(uint256 mantissa) external {
         collateralFactorMantissa = mantissa;
@@ -107,6 +139,19 @@ contract MockComptroller {
         shortfall = shortfall_;
     }
 
+    function setAccountLiquidityError(uint256 err) external {
+        accountLiquidityError = err;
+    }
+
+    /// @notice Register `market` in the liquidity model. `cfMantissa` weighs its cToken balance as
+    ///         collateral; pass 0 for markets the account only borrows from. For the mUSDC market
+    ///         pass THE SAME factor `markets()` reports, or the model and `readCollateralFactor`
+    ///         will disagree in ways real Moonwell cannot.
+    function registerMarket(address market, address feed, uint8 underlyingDecimals, uint256 cfMantissa) external {
+        if (registered[market].feed == address(0)) marketList.push(market);
+        registered[market] = RegisteredMarket(feed, underlyingDecimals, cfMantissa);
+    }
+
     /// @dev The strategy staticcalls this and reads the SECOND return word as the mantissa.
     function markets(address) external view returns (bool, uint256) {
         return (isListed, collateralFactorMantissa);
@@ -116,7 +161,49 @@ contract MockComptroller {
         errs = new uint256[](mTokens.length);
     }
 
-    function getAccountLiquidity(address) external view returns (uint256, uint256, uint256) {
-        return (0, 0, shortfall);
+    function getAccountLiquidity(address account) external view returns (uint256, uint256, uint256) {
+        if (accountLiquidityError != 0) return (accountLiquidityError, 0, 0);
+        if (shortfall != 0 || marketList.length == 0) return (0, 0, shortfall); // legacy inert shape
+        (uint256 liq, uint256 sf) = hypotheticalLiquidity(account, address(0), 0);
+        return (0, liq, sf);
+    }
+
+    /// @notice Compound's `redeemAllowed`: refuse (with an INSUFFICIENT_LIQUIDITY-shaped code, never
+    ///         a revert) any redeem whose hypothetical post-state is in shortfall.
+    function redeemAllowed(address market, address redeemer, uint256 redeemTokens) external view returns (uint256) {
+        if (marketList.length == 0) return 0; // un-wired fixtures keep the legacy always-allow
+        (, uint256 sf) = hypotheticalLiquidity(redeemer, market, redeemTokens);
+        return sf > 0 ? 4 : 0;
+    }
+
+    /// @notice `getHypotheticalAccountLiquidity`'s shape: account liquidity with `redeemTokens` of
+    ///         `hypoMarket`'s cTokens removed first. 18dp USD, comptroller-oracle priced.
+    function hypotheticalLiquidity(address account, address hypoMarket, uint256 redeemTokens)
+        public
+        view
+        returns (uint256 liquidity, uint256 shortfallOut)
+    {
+        uint256 sumCollateral;
+        uint256 sumBorrow;
+        for (uint256 i = 0; i < marketList.length; i++) {
+            address market = marketList[i];
+            RegisteredMarket memory m = registered[market];
+            uint256 cBal = IMockMarketReads(market).balanceOf(account);
+            if (market == hypoMarket) cBal = cBal > redeemTokens ? cBal - redeemTokens : 0;
+            if (cBal > 0 && m.cfMantissa > 0) {
+                uint256 underlyingBal = (cBal * IMockMarketReads(market).exchangeRateStored()) / 1e18;
+                sumCollateral += (_usd18(m, underlyingBal) * m.cfMantissa) / 1e18;
+            }
+            uint256 debt = IMockMarketReads(market).borrowBalanceStored(account);
+            if (debt > 0) sumBorrow += _usd18(m, debt);
+        }
+        if (sumCollateral >= sumBorrow) return (sumCollateral - sumBorrow, 0);
+        return (0, sumBorrow - sumCollateral);
+    }
+
+    /// @dev token units (10^d) × raw 8dp answer × 1e10 / 10^d = 18dp USD.
+    function _usd18(RegisteredMarket memory m, uint256 tokenAmount) internal view returns (uint256) {
+        (, int256 answer,,,) = IMockFeedRead(m.feed).latestRoundData();
+        return (tokenAmount * uint256(answer) * 1e10) / (10 ** m.underlyingDecimals);
     }
 }
