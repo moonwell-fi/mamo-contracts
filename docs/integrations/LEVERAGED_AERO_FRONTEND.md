@@ -376,6 +376,11 @@ the **rebalancer** fulfils it; the USDC lands **on the account** as idle balance
 function requestWithdraw(uint256 shares, uint256 minAssetsOut) external returns (uint256 id); // onlyOwner
 function cancelWithdraw(uint256 id) external;                                                 // onlyOwner
 function claimWithdrawnUsdc() external returns (uint256 amount);                              // onlyOwner
+
+// Request tracking — read these instead of scraping logs.
+function openRequestIds() external view returns (uint256[] memory);   // ids the account is tracking
+function hasUnclaimedWithdrawal() external view returns (bool);       // any of them fulfilled + unswept
+function syncRedeemRequests() external;                               // onlyOwner escape hatch
 ```
 
 > **Value floats until fulfill.** `requestWithdraw` escrows the shares but does **not** freeze a price —
@@ -412,9 +417,16 @@ the account's idle USDC balance:
 
 1. `WithdrawRequested(id, shares, minAssetsOut)` → mark request `id` pending; offer **Cancel**
    (`cancelWithdraw(id)` returns the escrowed shares to the account, emits `WithdrawCancelled(id)`).
-2. Detect fulfillment by polling `IERC20(usdc).balanceOf(account)` becoming non-zero (there is no
-   fulfill callback/event on the account). Surface it as **claimable**.
+2. Detect fulfillment with `hasUnclaimedWithdrawal()` — there is no fulfill callback or event on the
+   account, and this is the same on-chain state the backend's `depositIdle` gate reads, so it cannot
+   disagree with it. Prefer it to polling the raw USDC balance, which cannot tell proceeds apart from a
+   plain transfer. `openRequestIds()` gives the live set without replaying logs.
 3. `claimWithdrawnUsdc()` sweeps the idle USDC to the owner and emits `UsdcClaimed(amount)`.
+
+> **The backend cannot re-lock a fulfilled withdrawal.** While `hasUnclaimedWithdrawal()` is true a
+> backend `depositIdle` reverts, so a pending claim cannot be pushed back into the position. The
+> **owner** is not gated (re-depositing your own proceeds is a choice), and doing so clears the flag.
+> `MAX_OPEN_REQUESTS` (16) bounds how many requests can be tracked at once.
 
 ---
 
@@ -479,6 +491,8 @@ Account (`require` strings):
 | `"Amount must be greater than 0"` | `deposit`/`withdraw`/`requestWithdraw` with 0 | Validate amount > 0 client-side |
 | `"Insufficient idle USDC"` | `depositIdle` for more than the account holds | Cap the input at the idle balance |
 | `"Not owner or backend"` | `depositIdle` from a non-owner | Hide/disable for non-owner |
+| `"Unclaimed withdrawal proceeds"` | BACKEND `depositIdle` while a fulfilled withdrawal is unswept | Not a user error — prompt the owner to `claimWithdrawnUsdc()` first (or deposit as the owner) |
+| `"Too many open requests"` | `requestWithdraw` with `MAX_OPEN_REQUESTS` (16) already tracked | Claim or cancel an existing request first |
 | `FundAtCapacity(navAfter, cap)` (custom error) | `deposit`/`depositIdle` that would push the FUND past its capacity ceiling | Show remaining capacity and cap the input (see below); retryable, and not the user's fault |
 | `"No shares to withdraw"` | `withdrawAll` with 0 shares | Empty position |
 | `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle | Nothing claimable yet |
@@ -520,6 +534,6 @@ Settled exit:
 - [ ] Show position value from `previewWithdraw(sharesBalance())`; never cache the quote across blocks.
 - [ ] Derive position copy from the clone (`layout().legBIsAsset` + the leg-slot addresses) rather than hardcoding "cbBTC + ETH"; both shapes are USDC-in / USDC-out and every flow below is shape-invariant.
 - [ ] Fast withdraw: preflight `previewWithdraw`, default to async when `fastOk == false`, and catch `FastRedeemExceedsLtv` / oracle reverts as an async fallback.
-- [ ] Async withdraw: surface pending requests from `WithdrawRequested`/`WithdrawCancelled`, offer `cancelWithdraw`, poll idle USDC for fulfillment, and expose `claimWithdrawnUsdc`.
+- [ ] Async withdraw: surface pending requests from `openRequestIds()` (not log scraping), offer `cancelWithdraw`, detect fulfillment with `hasUnclaimedWithdrawal()`, and expose `claimWithdrawnUsdc`.
 - [ ] Warn that async payout value floats until fulfill (no price freeze at request time).
 - [ ] Enable `emergencyWithdraw` only after `requestedAt + 2 days`.

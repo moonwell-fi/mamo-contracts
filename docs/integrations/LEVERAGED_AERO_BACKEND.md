@@ -62,7 +62,7 @@ against the code rather than assumed:
 | Backend call | Shape-dependent? | Why |
 |---|---|---|
 | `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
-| `depositIdle(assets, minShares)` | No | USDC in, shares out. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
+| `depositIdle(assets, minShares)` | No | USDC in, shares out. Reverts `"Unclaimed withdrawal proceeds"` when called by the BACKEND while a fulfilled async withdrawal is unswept — pre-check `hasUnclaimedWithdrawal()`. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
 | `fulfillRedeem(id, minAssetsOut)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
 | `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
 
@@ -309,22 +309,43 @@ the operator from the loop.
 
 ---
 
-## `depositIdle` — coordination footgun (documented in the contract)
+## `depositIdle` — the unclaimed-withdrawal gate (ENFORCED on-chain)
 
 ```solidity
 function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
+function hasUnclaimedWithdrawal() external view returns (bool);   // the gate — check this FIRST
+function openRequestIds()        external view returns (uint256[] memory);
+function syncRedeemRequests()    external;                        // owner-only escape hatch
 ```
 
 Idle USDC on an account is **ambiguous**: it may be funds a user plain-transferred for re-deposit, **or**
-the payout of a fulfilled async withdrawal that is waiting for the owner's `claimWithdrawnUsdc()`. A
-permissionless `depositIdle` would let anyone front-run the owner's claim and force a fulfilled
-withdrawal back into the leveraged position (repeatable re-lock griefing) — which is why the call is
-gated to the owner or registry backend member 0.
+the payout of a fulfilled async withdrawal waiting for the owner's `claimWithdrawnUsdc()`. That used to
+be a coordination rule between the two trusted actors. **It is now enforced:** a BACKEND `depositIdle`
+reverts `"Unclaimed withdrawal proceeds"` while any of the account's tracked async requests reads
+`settled` on the strategy. Without it the backend could re-lock an exit the user had already asked for,
+repeatably, and the user's withdrawal would never complete.
 
-**Rule:** the backend calls `depositIdle` **only on explicit user/product intent to re-deposit** — never
-as an automatic idle-USDC sweep. There is no on-chain flag distinguishing "re-deposit" from "awaiting
-claim" idle USDC; the owner and backend coordinate off-chain which idle balance is which. Auto-sweeping
-would silently re-lock users' fulfilled withdrawals.
+**Pre-check, do not discover the revert:** call `hasUnclaimedWithdrawal()` before every nudge. It reads
+`settled` **live** off `sherwoodStrategy.redeemRequest(id)` for each id in `openRequestIds()`, so it
+cannot report stale. Prefer both views to scraping `WithdrawRequested` / `UsdcClaimed` logs.
+
+What the gate does and does not do:
+
+- **An OUTSTANDING (unfulfilled) request does not block you.** It holds shares, not USDC, so there is
+  nothing unclaimed to re-lock. Only a *fulfilled-and-unswept* request gates.
+- **It is all-or-nothing on mixed idle.** If fresh re-deposit money is sitting alongside unclaimed
+  proceeds, the whole call is refused — the contract cannot tell the two apart and will not guess. The
+  owner resolves it by claiming (or by depositing themselves).
+- **The OWNER is never gated**, and an owner `depositIdle` prunes. An owner re-depositing their own
+  proceeds is a choice, not a grief; that call is also the manual unblock.
+- **It re-opens on `claimWithdrawnUsdc()`**, which prunes every settled id as the proceeds leave.
+- **`recoverERC20` does NOT prune** — it can drain the proceeds and leave the gate shut on money that is
+  no longer there. `syncRedeemRequests()` (owner-only) is the hatch for exactly that.
+- **`requestWithdraw` is capped** at `MAX_OPEN_REQUESTS` (16) simultaneously-tracked requests, so the
+  gate's scan stays bounded; a 17th reverts `"Too many open requests"` until one is disposed of.
+
+**Rule (unchanged, now backed by code):** the backend calls `depositIdle` **only on explicit
+user/product intent to re-deposit** — never as an automatic idle-USDC sweep.
 
 ---
 
@@ -333,7 +354,7 @@ would silently re-lock users' fulfilled withdrawals.
 | Call | Contract | Gate | Notes |
 |---|---|---|---|
 | `createStrategyForUser(user)` | Factory | factory BACKEND_ROLE or `user` | provisioning; deterministic address |
-| `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent; **you pick `assets`** |
+| `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0, **and** `!hasUnclaimedWithdrawal()` for the backend | only on explicit re-deposit intent; **you pick `assets`**; pre-check the gate |
 
 That is the whole backend write surface. `fulfillRedeem(id, minAssetsOut)` on the strategy clone is **not** on it —
 `onlyProposer`, i.e. the **rebalancer** (`MAMO_REBALANCER`), never `MAMO_BACKEND`.

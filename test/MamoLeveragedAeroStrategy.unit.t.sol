@@ -842,4 +842,226 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         assertEq(address(strategy), predicted);
     }
+
+    // ============ THE BACKEND CANNOT RE-LOCK UNCLAIMED WITHDRAWAL PROCEEDS (F11) ============
+    //
+    // Idle USDC is ambiguous: money waiting to be re-deposited, or a fulfilled async withdrawal the
+    // owner has not swept yet. Restricting `depositIdle` to owner-or-backend closed the anonymous
+    // griefer but left the BACKEND able to re-lock an exit the owner had already asked for, repeatably.
+    // The gate is now enforced, not a convention — and it must not over-block.
+
+    /// @dev Request + fulfil, leaving the proceeds unclaimed on the account.
+    function _fulfilledRequest(MamoLeveragedAeroStrategy strategy) internal returns (uint256 id) {
+        vm.prank(user);
+        id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        sherwood.fulfillRedeem(id, 0);
+    }
+
+    /// @dev (1) THE FINDING. The backend cannot push a fulfilled withdrawal back into the position.
+    function testBackendCannotRedepositUnclaimedProceeds() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        _fulfilledRequest(strategy);
+
+        assertTrue(strategy.hasUnclaimedWithdrawal(), "the gate reports the state before the revert");
+        vm.prank(backend);
+        vm.expectRevert("Unclaimed withdrawal proceeds");
+        strategy.depositIdle(DEPOSIT, 0);
+    }
+
+    /// @dev (2) ANTI-OVER-BLOCKING, the other half. An OUTSTANDING (unfulfilled) request must not gate
+    ///      the backend — it holds shares, not USDC, so there is nothing unclaimed to re-lock. Without
+    ///      this a single pending request would freeze the backend's ordinary re-deposit duty.
+    function testAnOutstandingRequestDoesNotBlockTheBackend() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        vm.prank(user);
+        strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        // Fresh USDC arrives for re-deposit while the request is still pending.
+        usdc.mint(address(strategy), DEPOSIT);
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing is unclaimed yet");
+
+        vm.prank(backend);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
+        assertEq(shares, EXPECTED_SHARES, "the backend's ordinary duty still works");
+    }
+
+    /// @dev (3) The owner's claim is what re-opens the gate.
+    function testClaimingUnblocksTheBackend() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        _fulfilledRequest(strategy);
+
+        vm.prank(user);
+        strategy.claimWithdrawnUsdc();
+
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "claim pruned the settled id");
+        assertEq(strategy.openRequestIds().length, 0, "...and untracked it");
+
+        usdc.mint(address(strategy), DEPOSIT);
+        vm.prank(backend);
+        strategy.depositIdle(DEPOSIT, 0);
+    }
+
+    /// @dev (4) OWNER INTENT IS UNAMBIGUOUS. The owner re-depositing their own proceeds is a choice, not
+    ///      a grief — so the owner is not gated, and the call prunes instead. That is also the manual
+    ///      unblock when a fulfilment is deliberately being left in place.
+    function testTheOwnerMayRedepositTheirOwnProceedsAndThatUnblocks() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        _fulfilledRequest(strategy);
+
+        vm.prank(user);
+        strategy.depositIdle(DEPOSIT, 0);
+
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "the owner's call pruned the settled id");
+        vm.prank(backend);
+        vm.expectRevert("Amount must be greater than 0"); // past the gate, stopped by the amount check
+        strategy.depositIdle(0, 0);
+    }
+
+    /// @dev (5) A cancel returns SHARES, not USDC, so its id must stop being tracked — by id only.
+    function testCancelUntracksItsOwnRequest() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        vm.prank(user);
+        strategy.cancelWithdraw(id);
+
+        assertEq(strategy.openRequestIds().length, 0, "cancelled id untracked");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "and it never counted as unclaimed");
+    }
+
+    /// @dev (6) The emergency path pays the owner straight through, so its id is disposed of too.
+    function testEmergencyWithdrawUntracksItsOwnRequest() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        vm.warp(block.timestamp + 2 days + 1);
+
+        vm.prank(user);
+        strategy.emergencyWithdraw(id, DEPOSIT);
+
+        assertEq(strategy.openRequestIds().length, 0, "emergency-redeemed id untracked");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing unclaimed: the owner was paid directly");
+    }
+
+    /// @dev (7) THE DEADLOCK THE HATCH EXISTS FOR. `recoverERC20` drains the proceeds without pruning,
+    ///      so the gate would stay shut on USDC that is no longer here. `syncRedeemRequests` clears it.
+    function testRecoverERC20DeadlockIsClearedBySync() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        _fulfilledRequest(strategy);
+
+        vm.prank(user);
+        strategy.recoverERC20(address(usdc), user, DEPOSIT);
+        assertEq(usdc.balanceOf(address(strategy)), 0, "proceeds gone, gate still shut");
+        assertTrue(strategy.hasUnclaimedWithdrawal(), "...precisely the deadlock");
+
+        vm.prank(user);
+        strategy.syncRedeemRequests();
+
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "the hatch cleared it");
+        usdc.mint(address(strategy), DEPOSIT);
+        vm.prank(backend);
+        strategy.depositIdle(DEPOSIT, 0);
+    }
+
+    /// @dev (8) THE GATE IS ALL-OR-NOTHING ON MIXED IDLE, deliberately. It cannot tell an unclaimed
+    ///      fulfilment apart from fresh re-deposit money sitting beside it, so it refuses the whole
+    ///      call rather than guessing. The owner resolves it by claiming (or depositing themselves).
+    function testMixedIdleBlocksTheBackendEntirely() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        _fulfilledRequest(strategy);
+
+        usdc.mint(address(strategy), DEPOSIT); // fresh money for re-deposit, alongside the proceeds
+
+        vm.prank(backend);
+        vm.expectRevert("Unclaimed withdrawal proceeds");
+        strategy.depositIdle(DEPOSIT, 0);
+    }
+
+    /// @dev (9) The prune must handle several tracked ids, settled and not, without dropping the wrong
+    ///      one — the tail-iteration swap-pop is what makes that true.
+    function testPruneKeepsUnsettledIdsAndDropsSettledOnes() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT * 3);
+
+        vm.startPrank(user);
+        uint256 a = strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        uint256 b = strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        uint256 c = strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        vm.stopPrank();
+        assertEq(strategy.openRequestIds().length, 3, "three tracked");
+
+        sherwood.fulfillRedeem(a, 0);
+        sherwood.fulfillRedeem(c, 0);
+
+        vm.prank(user);
+        strategy.syncRedeemRequests();
+
+        uint256[] memory left = strategy.openRequestIds();
+        assertEq(left.length, 1, "only the unsettled one survives");
+        assertEq(left[0], b, "...and it is the right one");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing settled is tracked any more");
+    }
+
+    /// @dev (10) The view surface over one request's whole lifecycle — this is what the backend and the
+    ///      frontend read instead of scraping logs.
+    function testOpenRequestIdsTracksTheLifecycle() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        assertEq(strategy.openRequestIds().length, 0, "nothing tracked at rest");
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        uint256[] memory open = strategy.openRequestIds();
+        assertEq(open.length, 1, "tracked on request");
+        assertEq(open[0], id, "the id it returned");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "outstanding != unclaimed");
+
+        sherwood.fulfillRedeem(id, 0);
+        assertTrue(strategy.hasUnclaimedWithdrawal(), "fulfilled and unswept == unclaimed");
+        assertEq(strategy.openRequestIds().length, 1, "still tracked until disposed of");
+
+        vm.prank(user);
+        strategy.claimWithdrawnUsdc();
+        assertEq(strategy.openRequestIds().length, 0, "disposed of");
+    }
+
+    /// @dev (11) The hatch is OWNER-only — a backend-callable prune would clear the backend's own gate.
+    function testSyncRedeemRequestsIsOwnerOnly() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+
+        vm.prank(backend);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", backend));
+        strategy.syncRedeemRequests();
+
+        vm.prank(thirdParty);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", thirdParty));
+        strategy.syncRedeemRequests();
+    }
+
+    /// @dev (12) The tracked set is bounded, so the gate's scan cannot be griefed into unbounded gas.
+    function testTooManyOpenRequestsIsRefused() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        uint256 max = strategy.MAX_OPEN_REQUESTS();
+        _deposit(strategy, user, DEPOSIT * (max + 1));
+
+        vm.startPrank(user);
+        for (uint256 i; i < max; ++i) {
+            strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        }
+        vm.expectRevert("Too many open requests");
+        strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        vm.stopPrank();
+
+        assertEq(strategy.openRequestIds().length, max, "capped at the ceiling");
+    }
 }
