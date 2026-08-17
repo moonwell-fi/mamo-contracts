@@ -189,26 +189,25 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
 
     // ==================== OWNER: WIRING ====================
 
-    /**
-     * @notice Bind an ALREADY-initialized strategy clone. Set-once: the share ledger's integrity
-     *         rests entirely on `msg.sender == strategy`, so a rotatable pointer would let a future
-     *         owner mint freely against existing holders.
-     * @dev The clone must already point back here (`strategy_.vault() == address(this)`). Binding a
-     *      clone initialized against a DIFFERENT vault would hand this ledger's mint/burn hooks to a
-     *      contract pricing another book — the only way to catch that is to ask the clone.
-     */
-    function setStrategy(address strategy_) external onlyOwner {
-        _bind(strategy_);
-    }
+    // NOTE: there is deliberately no `setStrategy`. It used to exist as the bind half of a
+    // deploy-then-initialize-then-bind flow, and that flow is now unreachable: `BaseStrategy.initialize`
+    // requires `msg.sender == vault_`, so nothing but this vault can initialize a clone naming it, and
+    // an UNinitialized clone cannot be bound either (`_bind` asks it for `vault()`, which reads
+    // `address(0)`). {cloneAndBind} is therefore the only path a strategy pointer is ever set by, which
+    // is exactly what closes the front-run window the two-transaction flow left open.
 
     /**
      * @notice Deploy an ERC-1167 clone of `template`, initialize it against THIS vault, and bind it
-     *         — atomically, in one owner transaction.
-     * @dev Closes the init/bind race the two-transaction flow leaves open: a clone deployed and left
-     *      uninitialized can be `initialize`d by anyone (the template's constructor only locks the
-     *      TEMPLATE), so between a bare `Clones.clone` and the owner's `initialize` a front-runner
-     *      can seize the proposer role. Cloning + initializing + binding in one call removes the gap;
-     *      `_bind` re-checks the binding, so this cannot bind a foreign-vault clone either.
+     *         — atomically, in one owner transaction. Set-once: the share ledger's integrity rests
+     *         entirely on `msg.sender == strategy`, so a rotatable pointer would let a future owner
+     *         mint freely against existing holders.
+     * @dev The gap this used to close by construction is now closed structurally as well. A clone
+     *      deployed and left uninitialized could once be `initialize`d by anyone — the template's
+     *      constructor only locks the TEMPLATE — so a front-runner could seize the proposer role, and
+     *      with it the `initData` that writes `targetLtvBps` / `maxLtvBps`. `BaseStrategy.initialize`
+     *      now gates on `msg.sender == vault_`, so this call is the only thing that can initialize a
+     *      clone pointed at this vault. `_bind` still re-checks the binding, so a foreign-vault clone
+     *      cannot be bound either.
      * @param template  The strategy template to clone (its constructor locked its own `initialize`).
      * @param proposer_ The proposer role for the new clone.
      * @param initData  ABI-encoded strategy-specific init params.
@@ -219,15 +218,16 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         onlyOwner
         returns (address clone)
     {
-        require(strategy == address(0), "LAV: strategy already set");
         clone = Clones.clone(template);
         IStrategy(clone).initialize(address(this), proposer_, initData);
         _bind(clone);
     }
 
-    /// @dev Shared set-once bind. Both entrypoints route here so the checks can never drift apart.
+    /// @dev The set-once bind. Sole caller is {cloneAndBind}; kept as its own frame so the invariant
+    ///      reads in one place.
     function _bind(address strategy_) private {
         require(strategy == address(0), "LAV: strategy already set");
+        // DEAD BELT: `Clones.clone` never returns the zero address, so the only caller cannot reach this.
         require(strategy_ != address(0), "LAV: invalid strategy");
         require(IStrategy(strategy_).vault() == address(this), "LAV: strategy not bound to this vault");
         strategy = strategy_;

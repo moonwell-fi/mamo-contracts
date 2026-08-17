@@ -74,8 +74,16 @@ abstract contract BaseStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
+    /// @dev VAULT-ONLY, gated against the ARGUMENT — nothing is stored yet, so `_vault` cannot be the
+    ///      reference and `onlyVault` cannot be used. That makes `LeveragedAeroVault.cloneAndBind` the
+    ///      only way a clone ever gets initialized, which closes BOTH front-run variants on the
+    ///      deploy-then-initialize flow: a rogue PROPOSER (the attacker names the operator key) and a
+    ///      rogue INITDATA — `initData` writes `targetLtvBps` / `maxLtvBps`, i.e. the policy the
+    ///      admin/proposer split deliberately keeps out of the operator's hands. The `vault_ == 0` belt
+    ///      below is kept: it is now unreachable through this check, and costs nothing.
     function initialize(address vault_, address proposer_, bytes calldata data) external {
         if (_initialized) revert AlreadyInitialized();
+        if (msg.sender != vault_) revert NotVault();
         if (vault_ == address(0)) revert ZeroAddress();
         if (proposer_ == address(0)) revert ZeroAddress();
         _initialized = true;

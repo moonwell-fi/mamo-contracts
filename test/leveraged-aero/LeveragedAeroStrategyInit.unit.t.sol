@@ -44,6 +44,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     address public proposer = makeAddr("proposer");
     address public feeRecipient = makeAddr("feeRecipient");
     address public lp = makeAddr("lp");
+    address public attacker = makeAddr("attacker");
     address public npm = makeAddr("npm");
     address public swapRouter = makeAddr("swapRouter");
 
@@ -180,16 +181,32 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         return LeveragedAerodromeCLStrategy(payable(Clones.clone(address(template))));
     }
 
+    /// @dev The UNBOUND init path: a clone initialized against `vault` but never bound to it. Kept
+    ///      separate from {_initBound} because `cloneAndBind` is set-once and most of this suite
+    ///      initializes many clones against the one vault. `initialize` is vault-only, so the vault is
+    ///      impersonated rather than called.
     function _init(LeveragedAerodromeCLStrategy.InitParams memory p)
         internal
         returns (LeveragedAerodromeCLStrategy s)
     {
         s = _clone();
+        vm.prank(address(vault));
         s.initialize(address(vault), proposer, abi.encode(p));
+    }
+
+    /// @dev The PRODUCTION path — clone + initialize + bind, atomically, as the owner. Used by the
+    ///      handful of tests that need the vault's share hooks to actually work against the clone.
+    function _initBound(LeveragedAerodromeCLStrategy.InitParams memory p)
+        internal
+        returns (LeveragedAerodromeCLStrategy s)
+    {
+        vm.prank(owner);
+        s = LeveragedAerodromeCLStrategy(payable(vault.cloneAndBind(address(template), proposer, abi.encode(p))));
     }
 
     function _expectInitRevert(LeveragedAerodromeCLStrategy.InitParams memory p, bytes4 err) internal {
         LeveragedAerodromeCLStrategy s = _clone();
+        vm.prank(address(vault));
         vm.expectRevert(err);
         s.initialize(address(vault), proposer, abi.encode(p));
     }
@@ -247,6 +264,57 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         else if (i == 14) p.sequencerFeed = address(0);
         else if (i == 15) p.aeroUsdFeed = address(0);
         else revert("index out of range");
+    }
+
+    // ==================== INITIALIZE IS VAULT-ONLY (F13) ====================
+
+    /**
+     * @dev A clone deployed and left uninitialized could once be `initialize`d by ANYONE — the
+     *      template's constructor only locks the TEMPLATE — so between a bare `Clones.clone` and the
+     *      owner's `initialize` a front-runner could seize the clone. Two distinct powers, not one: the
+     *      `proposer_` argument names the operator key, and `data` carries `targetLtvBps` / `maxLtvBps`,
+     *      i.e. the leverage policy the admin/proposer split deliberately keeps out of operator hands.
+     *
+     *      `initialize` is now gated on `msg.sender == vault_`. Gated against the ARGUMENT, because
+     *      nothing is stored yet — `_vault` is still zero, so `onlyVault` cannot be used.
+     */
+    function testInitializeRejectsANonVaultCaller() public {
+        LeveragedAerodromeCLStrategy s = _clone();
+
+        // The attacker: names themselves proposer and picks their own leverage policy.
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.targetLtvBps = 6400;
+        vm.prank(attacker);
+        vm.expectRevert(BaseStrategy.NotVault.selector);
+        s.initialize(address(vault), attacker, abi.encode(p));
+
+        // Not even the vault's OWNER: the vault itself is the only caller, which makes `cloneAndBind`
+        // the only path.
+        vm.prank(owner);
+        vm.expectRevert(BaseStrategy.NotVault.selector);
+        s.initialize(address(vault), proposer, abi.encode(_baseParams()));
+
+        assertEq(s.vault(), address(0), "nothing was written");
+    }
+
+    /// @dev The positive control, so the gate is not just "initialize always reverts".
+    function testInitializeAcceptsTheVault() public {
+        LeveragedAerodromeCLStrategy s = _clone();
+
+        vm.prank(address(vault));
+        s.initialize(address(vault), proposer, abi.encode(_baseParams()));
+
+        assertEq(s.vault(), address(vault), "bound to the caller it names");
+        assertEq(s.proposer(), proposer, "proposer wired");
+    }
+
+    /// @dev And the production path works end to end: `cloneAndBind` calls `initialize` AS the vault.
+    function testCloneAndBindSatisfiesTheVaultOnlyGate() public {
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
+
+        assertEq(vault.strategy(), address(s), "bound");
+        assertEq(s.vault(), address(vault), "and pointed back");
+        assertEq(s.proposer(), proposer, "proposer wired atomically");
     }
 
     // ==================== HAPPY PATH ====================
@@ -366,6 +434,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.usdc = address(eightDp);
 
         LeveragedAerodromeCLStrategy s = _clone();
+        vm.prank(address(oddVault));
         vm.expectRevert(LeveragedAerodromeCLStrategy.UnexpectedAssetDecimals.selector);
         s.initialize(address(oddVault), proposer, abi.encode(p));
     }
@@ -444,6 +513,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         pool.setMaxObservationAge(p.twapWindow);
         LeveragedAerodromeCLStrategy s = _clone();
+        vm.prank(address(vault));
         s.initialize(address(vault), proposer, abi.encode(p));
         assertEq(s.layout().twapWindow, p.twapWindow, "twapWindow stored");
     }
@@ -1393,13 +1463,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(uint256(s.state()), uint256(st), "forced state");
     }
 
-    /// @dev Bind `s` to the vault, mint `shares` of supply through the vault hook, and leave the
-    ///      strategy Executed with `idleUsdc` on hand and `dt` elapsed since init.
+    /// @dev Mint `shares` of supply through the vault hook and leave the strategy Executed with
+    ///      `idleUsdc` on hand and `dt` elapsed since init. `s` must already be BOUND ({_initBound}).
     function _armForCompound(LeveragedAerodromeCLStrategy s, uint256 shares, uint256 idleUsdc, uint256 dt) internal {
-        vm.startPrank(owner);
-        vault.setStrategy(address(s));
+        vm.prank(owner);
         vault.setOpenDeposits(true);
-        vm.stopPrank();
 
         vm.prank(address(s));
         vault.strategyMint(lp, shares);
@@ -1423,7 +1491,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
      *      and drives the whole claim → swap → re-hedge → redeploy sequence.)
      */
     function testCompoundOnAFlatBookIsATrueNoOp() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         _armForCompound(s, 1_000e12, 1_000e6, 30 days);
         assertEq(s.layout().tokenId, 0, "flat book");
 
@@ -1452,7 +1520,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      the call does not revert. (With a live book the fee genuinely defers — see the H3 test in
     ///      `LeveragedAeroCompoundHedge.unit.t.sol`.)
     function testCompoundOnAFlatBookIsANoOpEvenWithIssuanceClosed() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         _armForCompound(s, 1_000e12, 1_000e6, 30 days);
 
         uint256 lastAccrualBefore = s.layout().lastFeeAccrualTimestamp;
@@ -1468,7 +1536,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     function testCompoundRevertsForNonProposer() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         _armForCompound(s, 1_000e12, 1_000e6, 30 days);
 
         vm.prank(owner);
@@ -1494,9 +1562,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
      *      braces on both sides.)
      */
     function testRescueToVaultRefusesTheShareToken() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        vm.prank(owner);
-        vault.setStrategy(address(s));
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
 
         vm.prank(owner);
         vm.expectRevert(LeveragedAerodromeCLStrategy.CannotRescuePositionToken.selector);
@@ -1511,9 +1577,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     /// @dev Every position / accounting token stays denied in ALL states.
     function testRescueToVaultRefusesPositionTokens() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        vm.prank(owner);
-        vault.setStrategy(address(s));
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
 
         address[6] memory denied =
             [address(usdc), address(legB), address(legA), address(mUsdc), address(mLegB), address(mLegA)];
@@ -1527,9 +1591,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev While Executed the gauge reward token is denied — a sweep would bypass `compound()`,
     ///      which is the only path that prices the AERO -> USDC leg against its oracle floor.
     function testRescueToVaultRefusesRewardTokenWhileExecuted() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        vm.prank(owner);
-        vault.setStrategy(address(s));
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         _forceState(s, BaseStrategy.State.Executed);
 
         vm.prank(owner);
@@ -1545,9 +1607,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
      *      `rescueERC20` can recover it.
      */
     function testRescueToVaultAllowsRewardTokenOnceSettled() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        vm.prank(owner);
-        vault.setStrategy(address(s));
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
 
         aero.mint(address(s), 7e18); // the settle-claimed tranche
         _forceState(s, BaseStrategy.State.Settled);
@@ -1565,9 +1625,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     function testRescueToVaultRejectsStrangers() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        vm.prank(owner);
-        vault.setStrategy(address(s));
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
 
         vm.prank(lp);
         vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
@@ -1581,9 +1639,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
      *      so nothing is stranded — the sweep just costs a multisig signature.
      */
     function testRescueToVaultIsAdminOnlyAndRejectsTheProposer() public {
-        LeveragedAerodromeCLStrategy s = _init(_baseParams());
-        vm.prank(owner);
-        vault.setStrategy(address(s));
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         aero.mint(address(s), 3e18);
         _forceState(s, BaseStrategy.State.Settled); // post-settle AERO is a genuine stray
 

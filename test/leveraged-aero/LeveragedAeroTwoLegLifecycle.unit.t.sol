@@ -173,11 +173,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         router.setRate(address(usdc), address(legA), (100 * 1e18 * 1e18) / P_LEG_A);
 
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
-        strategy = LeveragedAerodromeCLStrategy(payable(Clones.clone(address(new LeveragedAerodromeCLStrategy()))));
-        strategy.initialize(address(vault), proposer, abi.encode(_params()));
-
+        // `cloneAndBind` is the only path a clone is ever initialized by: `BaseStrategy.initialize`
+        // requires `msg.sender == vault_`.
         vm.startPrank(owner);
-        vault.setStrategy(address(strategy));
+        strategy = LeveragedAerodromeCLStrategy(
+            payable(vault.cloneAndBind(address(new LeveragedAerodromeCLStrategy()), proposer, abi.encode(_params())))
+        );
         vault.setOpenDeposits(true);
         vm.stopPrank();
     }

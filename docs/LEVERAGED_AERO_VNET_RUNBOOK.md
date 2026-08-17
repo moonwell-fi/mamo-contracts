@@ -317,8 +317,9 @@ cast call "$VAULT" 'strategy()(address)' --rpc-url "$PUB"     # the clone
 > **anyone** (the template's constructor only locks the *template*), so between a two-step
 > clone-then-initialize a front-runner could seize the `proposer` role. `cloneAndBind` removes the gap
 > entirely, and `_bind` still re-checks `clone.vault() == address(this)` — a clone initialized against
-> a different vault can never be bound here. `setStrategy(address)` remains as the manual path for an
-> already-initialized clone; both route through the same set-once `_bind`.
+> a different vault can never be bound here. It is also the ONLY wiring path: `BaseStrategy.initialize`
+> requires `msg.sender == vault_`, so nothing outside the vault can initialize a clone naming it, and the
+> old manual `setStrategy(address)` was removed.
 
 The proposer passed here is **`MAMO_REBALANCER`**, not `MAMO_BACKEND` (see the note at the top of this
 phase).

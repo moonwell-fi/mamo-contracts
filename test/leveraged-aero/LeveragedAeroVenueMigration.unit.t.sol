@@ -248,11 +248,12 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
     function deployStack() external {
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
-        strategy = LeveragedAerodromeCLStrategy(payable(Clones.clone(address(new LeveragedAerodromeCLStrategy()))));
-        strategy.initialize(address(vault), proposer, abi.encode(_paramsA()));
-
+        // `cloneAndBind` is the only path a clone is ever initialized by: `BaseStrategy.initialize`
+        // requires `msg.sender == vault_`.
         vm.startPrank(owner);
-        vault.setStrategy(address(strategy));
+        strategy = LeveragedAerodromeCLStrategy(
+            payable(vault.cloneAndBind(address(new LeveragedAerodromeCLStrategy()), proposer, abi.encode(_paramsA())))
+        );
         vault.setOpenDeposits(true);
         vm.stopPrank();
     }

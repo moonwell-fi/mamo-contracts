@@ -407,7 +407,7 @@ ok "initData = ${#INITDATA} hex chars"
 # ── Phase B.3: clone + initialize + bind, atomically, as the owner ────────────
 section "Phase B.3 — vault.cloneAndBind(template, MAMO_REBALANCER, initData) [MAMO_MULTISIG]"
 # cloneAndBind is onlyOwner and atomic (clone -> initialize -> bind). It replaces the old
-# Clones.clone + initialize + setStrategy flow, which left the fresh clone initializable by
+# Clones.clone + initialize + setStrategy flow (both halves now gone), which left the fresh clone initializable by
 # ANYONE in between (a front-runner could seize the proposer role). _bind re-checks
 # clone.vault() == this vault, so a foreign-vault clone can never be bound here either.
 # A wrong venue value fails HERE, loudly: VenueMismatch (pool spacing / token set / Moonwell

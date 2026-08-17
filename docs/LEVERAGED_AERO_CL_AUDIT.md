@@ -107,10 +107,12 @@ from the owner straight to the strategy and calls `execute()`. Two corrections t
 this paragraph: the proposer is the dedicated **`MAMO_REBALANCER`** operator key, deliberately **not**
 `MAMO_BACKEND` (which drives the account layer); and the clone+init **is** atomic now, closing the window
 where a fresh clone was initializable by anyone between `clone` and `initialize` and a front-runner could
-seize the `proposer` role. `setStrategy(address)` survives as the manual path for an already-initialized
-clone; both route through the same **set-once** `_bind`, which re-checks `clone.vault() == address(this)`,
-so a clone someone else initialized against a different vault can never be bound — and a wrong clone means
-a new vault, since there is no rotation. There is still no template allowlist.
+seize the `proposer` role (and with it `initData`, which carries the `targetLtvBps` / `maxLtvBps` policy).
+`cloneAndBind` is now the **only** wiring path: `BaseStrategy.initialize` requires
+`msg.sender == vault_`, so an externally-initialized clone cannot exist, and `setStrategy(address)` was
+removed with it. `_bind` stays **set-once** and still re-checks `clone.vault() == address(this)`, so a
+foreign-vault clone can never be bound — and a wrong clone means a new vault, since there is no rotation.
+There is still no template allowlist.
 
 ## The corruption-critical invariant
 
@@ -270,7 +272,7 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
     tightened on-chain.
     Note also that an extreme (still-valid) skew can leave the range far enough off spot to trip the
     pre-existing `DegenerateRange()` in `assetModeSplit` — a new path to an old guard, not a new failure
-    mode. On the vault: `setStrategy` set-once, `redeemSettled` rounding and the pre-burn/pre-transfer
+    mode. On the vault: set-once `cloneAndBind`, `redeemSettled` rounding and the pre-burn/pre-transfer
     ordering, the `decimals() = asset.decimals() + 6` coupling to the strategy's `SHARES_VIRTUAL_OFFSET = 1e6` genesis
     pricing, `activateStrategy`'s owner-funded seed path, and the `rescueERC20` asset carve-out.
 
@@ -390,7 +392,7 @@ Last verified locally 2026-07-27: **459 passed / 0 failed / 0 skipped**. Relevan
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `test/LeveragedAeroVault.unit.t.sol` | 45 | The vault end-to-end against a mock strategy: `strategyMint`/`strategyBurn` gating, set-once `setStrategy`, `depositsOpen`, decimals coupling, `activateStrategy`/`settleStrategy`, `redeemSettled` pro-rata + rounding, `rescueERC20` asset carve-out, fee-config hops |
+| `test/LeveragedAeroVault.unit.t.sol` | 45 | The vault end-to-end against a mock strategy: `strategyMint`/`strategyBurn` gating, set-once `cloneAndBind` (the only wiring path), `depositsOpen`, decimals coupling, `activateStrategy`/`settleStrategy`, `redeemSettled` pro-rata + rounding, `rescueERC20` asset carve-out, fee-config hops |
 | `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 31 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band, `skewBps` bounds) and `rerange` width/skew/auth — **including both pool orderings at init** |
 | `test/MamoLeveragedAeroStrategy.unit.t.sol` | 51 | The per-user account wrapper (adjacent, not in this package's scope) |
 | `test/leveraged-aero/LayoutParity.t.sol` | 4 | The `Layout` / `RedeemRequest` / `STORAGE_SLOT` tripwire. **Not part of the 459** — it is not a `*.unit.t.sol` file; it runs under `make test` and under the `test/leveraged-aero/*` match-path above. 4/4 green. |

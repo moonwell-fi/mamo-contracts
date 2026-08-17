@@ -35,6 +35,9 @@ contract LeveragedAeroVaultUnitTest is Test {
     MockToken public usdc;
     MockToken public stray;
     LeveragedAeroVault public vault;
+    /// @dev Deployed with `new`, never bound — the {LeveragedAeroVault.cloneAndBind} source.
+    MockVaultStrategy public template;
+    /// @dev The BOUND clone. Only valid after {_bind} (or {_bindAndMint}) has run.
     MockVaultStrategy public strategy;
 
     uint256 internal constant SEED = 10_000e6; // 10k USDC
@@ -43,14 +46,18 @@ contract LeveragedAeroVaultUnitTest is Test {
         usdc = new MockToken("USD Coin", "USDC", 6);
         stray = new MockToken("Stray", "STRAY", 18);
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
-        strategy = new MockVaultStrategy(address(vault), address(usdc));
+        template = new MockVaultStrategy(address(vault), address(usdc));
     }
 
     // ==================== HELPERS ====================
 
+    /// @dev `cloneAndBind` is the ONLY way a strategy pointer is ever set: `BaseStrategy.initialize` is
+    ///      vault-only, so the deploy-then-bind flow — and `setStrategy` with it — no longer exists.
+    ///      `MockVaultStrategy.assetToken` is immutable and survives the clone; its storage starts fresh
+    ///      and `initialize` writes the vault + proposer.
     function _bind() internal {
         vm.prank(owner);
-        vault.setStrategy(address(strategy));
+        strategy = MockVaultStrategy(vault.cloneAndBind(address(template), thirdParty, ""));
     }
 
     function _openDeposits() internal {
@@ -107,69 +114,30 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(wethVault.decimals(), 24, "18dp asset -> 24dp shares");
     }
 
-    // ==================== SET STRATEGY ====================
-
-    function testSetStrategy() public {
-        vm.expectEmit(true, false, false, false, address(vault));
-        emit StrategySet(address(strategy));
-
-        vm.prank(owner);
-        vault.setStrategy(address(strategy));
-
-        assertEq(vault.strategy(), address(strategy), "strategy");
-    }
-
-    function testSetStrategyOnlyOwner() public {
-        vm.prank(thirdParty);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
-        vault.setStrategy(address(strategy));
-    }
-
-    function testSetStrategyIsSetOnce() public {
-        _bind();
-
-        vm.prank(owner);
-        vm.expectRevert("LAV: strategy already set");
-        vault.setStrategy(makeAddr("otherStrategy"));
-    }
-
-    function testSetStrategyZeroReverts() public {
-        vm.prank(owner);
-        vm.expectRevert("LAV: invalid strategy");
-        vault.setStrategy(address(0));
-    }
-
-    /// @dev A clone initialized against ANOTHER vault must not be bindable here: it would hand this
-    ///      ledger's mint/burn hooks to a contract pricing a different book.
-    function testSetStrategyRejectsForeignVaultBinding() public {
-        LeveragedAeroVault otherVault = new LeveragedAeroVault(address(usdc), owner, "other", "OTH");
-        MockVaultStrategy foreign = new MockVaultStrategy(address(otherVault), address(usdc));
-
-        vm.prank(owner);
-        vm.expectRevert("LAV: strategy not bound to this vault");
-        vault.setStrategy(address(foreign));
-    }
-
     // ==================== CLONE AND BIND ====================
+    //
+    // The only wiring path there is. `setStrategy` was deleted with F13: `BaseStrategy.initialize`
+    // requires `msg.sender == vault_`, so an externally-initialized clone cannot exist, and an
+    // UNinitialized one cannot be bound either (`_bind` asks it for `vault()`, which reads zero).
 
     function testCloneAndBindHappyPath() public {
         vm.expectEmit(false, false, false, false, address(vault));
         emit StrategySet(address(0)); // topic-only check; the clone address is asserted below
 
         vm.prank(owner);
-        address clone = vault.cloneAndBind(address(strategy), thirdParty, "");
+        address clone = vault.cloneAndBind(address(template), thirdParty, "");
 
         assertEq(vault.strategy(), clone, "bound to the fresh clone");
         assertEq(MockVaultStrategy(clone).vault(), address(vault), "clone initialized against this vault");
         assertEq(MockVaultStrategy(clone).proposer(), thirdParty, "proposer wired atomically");
-        assertTrue(clone != address(strategy), "a clone, not the template");
+        assertTrue(clone != address(template), "a clone, not the template");
     }
 
     /// @dev The bound clone is immediately usable — no second wiring transaction, no window in which
     ///      the vault points at an un-initialized strategy.
     function testCloneAndBindProducesAUsableStrategy() public {
         vm.startPrank(owner);
-        address clone = vault.cloneAndBind(address(strategy), thirdParty, "");
+        address clone = vault.cloneAndBind(address(template), thirdParty, "");
         vault.setOpenDeposits(true);
         vm.stopPrank();
 
@@ -180,11 +148,11 @@ contract LeveragedAeroVaultUnitTest is Test {
     function testCloneAndBindOnlyOwner() public {
         vm.prank(thirdParty);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
-        vault.cloneAndBind(address(strategy), thirdParty, "");
+        vault.cloneAndBind(address(template), thirdParty, "");
     }
 
-    /// @dev `_bind` guards BOTH entrypoints: a template whose `initialize` ignores the vault argument
-    ///      still cannot slip a foreign binding through the atomic path.
+    /// @dev `_bind` re-checks the binding: a template whose `initialize` ignores the vault argument
+    ///      still cannot slip a foreign binding through.
     function testCloneAndBindRejectsForeignVaultBinding() public {
         MisboundStrategyStub stub = new MisboundStrategyStub(makeAddr("someOtherVault"));
 
@@ -193,25 +161,16 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.cloneAndBind(address(stub), thirdParty, "");
     }
 
-    /// @dev Set-once holds across the two paths in both orders.
-    function testBindIsSetOnceAcrossBothPaths() public {
+    /// @dev Set-once, on the only path there is. The share ledger's integrity rests entirely on
+    ///      `msg.sender == strategy`, so a rotatable pointer would let a future owner mint freely
+    ///      against existing holders.
+    function testBindIsSetOnce() public {
         vm.startPrank(owner);
-        vault.cloneAndBind(address(strategy), thirdParty, "");
+        vault.cloneAndBind(address(template), thirdParty, "");
 
         vm.expectRevert("LAV: strategy already set");
-        vault.cloneAndBind(address(strategy), thirdParty, "");
-
-        vm.expectRevert("LAV: strategy already set");
-        vault.setStrategy(address(strategy));
+        vault.cloneAndBind(address(template), thirdParty, "");
         vm.stopPrank();
-    }
-
-    function testSetStrategyThenCloneAndBindReverts() public {
-        _bind();
-
-        vm.prank(owner);
-        vm.expectRevert("LAV: strategy already set");
-        vault.cloneAndBind(address(strategy), thirdParty, "");
     }
 
     // ==================== STRATEGY MINT ====================
@@ -385,12 +344,12 @@ contract LeveragedAeroVaultUnitTest is Test {
     function testActivateStrategyMintsAtTheDecimalsOffset() public {
         MockToken weth = new MockToken("Wrapped Ether", "WETH", 18);
         LeveragedAeroVault wethVault = new LeveragedAeroVault(address(weth), owner, "n", "s");
-        MockVaultStrategy wethStrategy = new MockVaultStrategy(address(wethVault), address(weth));
+        MockVaultStrategy wethTemplate = new MockVaultStrategy(address(wethVault), address(weth));
 
         weth.mint(owner, 5e18);
         vm.startPrank(owner);
         weth.approve(address(wethVault), 5e18);
-        wethVault.setStrategy(address(wethStrategy));
+        wethVault.cloneAndBind(address(wethTemplate), thirdParty, "");
         wethVault.activateStrategy(5e18);
         vm.stopPrank();
 
@@ -1053,8 +1012,10 @@ contract LeveragedAeroVaultUnitTest is Test {
 /**
  * @title MisboundStrategyStub
  * @notice A deliberately misbehaving strategy template: its `initialize` IGNORES the vault argument
- *         and it keeps reporting a foreign vault. Proves `LeveragedAeroVault._bind` guards the
- *         atomic {LeveragedAeroVault.cloneAndBind} path too, not just {setStrategy}.
+ *         and it keeps reporting a foreign vault. Proves `LeveragedAeroVault._bind` still asks the
+ *         clone where it points, rather than trusting the atomic {LeveragedAeroVault.cloneAndBind}
+ *         path to have wired it. Its `initialize` is deliberately ungated — it is reached only
+ *         through `cloneAndBind`, i.e. as the vault.
  */
 contract MisboundStrategyStub {
     address public immutable vault;

@@ -32,7 +32,9 @@ WHY THE CLONE+INIT IS NOT DONE HERE
 -----------------------------------
 `LeveragedAeroVault.cloneAndBind` (added in PR #66 review remediation) is
 `onlyOwner` and atomically clones + initializes + binds, closing the front-run window
-the old two-step `Clones.clone` → `initialize` → `setStrategy` flow left open. The owner
+the old two-step `Clones.clone` → `initialize` → `setStrategy` flow left open. Both halves of
+that flow are now gone: `BaseStrategy.initialize` is vault-only and `setStrategy` was removed,
+so `cloneAndBind` is the only wiring path there is. The owner
 is `MAMO_MULTISIG`, which on a vnet is driven by UNLOCKED IMPERSONATION (no key), so the
 call belongs in bash (`cast send --from $MULTISIG --unlocked`), not in a broadcast script.
 This script only builds the calldata.

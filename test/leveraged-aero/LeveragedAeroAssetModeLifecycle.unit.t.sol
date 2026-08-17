@@ -150,11 +150,12 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
         template = new LeveragedAerodromeCLStrategy();
-        strategy = LeveragedAerodromeCLStrategy(payable(Clones.clone(address(template))));
-        strategy.initialize(address(vault), proposer, abi.encode(_params()));
-
+        // `cloneAndBind` is the only path a clone is ever initialized by: `BaseStrategy.initialize`
+        // requires `msg.sender == vault_`.
         vm.startPrank(owner);
-        vault.setStrategy(address(strategy));
+        strategy = LeveragedAerodromeCLStrategy(
+            payable(vault.cloneAndBind(address(template), proposer, abi.encode(_params())))
+        );
         vault.setOpenDeposits(true);
         vm.stopPrank();
     }
