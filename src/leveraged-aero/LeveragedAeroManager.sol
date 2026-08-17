@@ -596,6 +596,9 @@ library LeveragedAeroManager {
     ///         redeploy the remainder at target leverage via `deployIdleImpl`. No-op when there's no
     ///         position or no AERO. Fee crystallisation + the external skim transfer live in the
     ///         strategy entrypoint, NOT here — this only sets aside `pay` so it isn't redeployed.
+    /// @dev The redeploy is ATOMIC with the harvest: anything that fails the deploy path reverts the
+    ///      whole call, claim and sale included. That is deliberate and it costs nothing — see the block
+    ///      on step 6 for why, and for the recovery.
     /// @param minUsdcOut   Minimum USDC out of the AERO→USDC swap (slippage guard, on GROSS usdcOut).
     /// @param minLiquidity Minimum CL liquidity on the redeploy (slippage guard).
     /// @param skimCap      Max USDC to withhold from redeploy for the protocol fee (owed, or 0).
@@ -661,6 +664,31 @@ library LeveragedAeroManager {
         // 6. Redeploy the net yield into the position at target leverage (supply → borrow →
         //    increaseLiquidity → restake → _assertHealthy). Any pre-existing idle USDC is left
         //    untouched — compound deploys the AERO yield, nothing else. Skip if all was skimmed.
+        //
+        //    THE REDEPLOY IS ATOMIC WITH THE HARVEST, DELIBERATELY. This call fails closed on everything
+        //    the deploy path fails on — `DegenerateRange` (asset-mode, spot outside the stored range),
+        //    the calm gate, `minLiquidity`, a Moonwell error code, the closing health assert — and ANY of
+        //    them unwinds the WHOLE `compound`, including the `getReward` claim, the AERO sale and the
+        //    interest hedge. That is the same resumable-op posture `flattenImpl` takes, and the opposite
+        //    of the terminal `sellSettleRewardImpl`, which swallows because `settle()` must not be
+        //    blockable.
+        //
+        //    IT COSTS NOTHING TO WAIT. An unclaimed tranche does not decay — it keeps accruing in the
+        //    gauge — and an out-of-range position accrues NO new emissions anyway, so a blocked
+        //    `compound` on the range-related failures forgoes nothing. The hedge measure is cumulative
+        //    (`borrowBalanceStored − hedgedDebtA/B`), so the drift it did not buy back is simply carried
+        //    to the next harvest. RECOVERY is `rerange` onto spot, or `flatten` + `redeploy` — which
+        //    claims and sells the tranche and repays the legs on its way through.
+        //
+        //    DO NOT best-effort-catch this, and do not pre-check it. A catch would silently skip
+        //    `minLiquidity`, the calm gate and the health assert — turning three real guards into
+        //    no-ops on the one path that adds leverage. A pre-check could only relieve the least likely
+        //    member of that set while leaving the rest to revert anyway.
+        //
+        //    RESIDUAL: none of substance for NAV. While the harvest is blocked the tranche stays
+        //    unclaimed in the gauge, and `nav()`'s reward term prices `gauge.earned()` as well as the
+        //    held balance (`LeveragedAeroValuation._rewardUsdc`), so it is still marked — the position
+        //    is staked throughout, because the revert rolled the unstake back with everything else.
         if (redeploy > 0) deployIdleImpl(redeploy, minLiquidity);
     }
 

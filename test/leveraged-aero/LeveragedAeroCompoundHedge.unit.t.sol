@@ -1631,4 +1631,59 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertGt(payout, 0, "and the exit paid out");
         assertLt(payout, rawPrice, "priced on the real POST-crystallise book, not the pre-fee one");
     }
+
+    // ====== 9. THE REDEPLOY IS ATOMIC WITH THE HARVEST (F20) ======
+
+    /**
+     * @dev A blocked redeploy unwinds the WHOLE `compound` — claim, sale and interest hedge included.
+     *      That is deliberate: a best-effort catch would silently turn `minLiquidity`, the calm gate and
+     *      the closing health assert into no-ops on the one path that adds leverage. It costs nothing —
+     *      the tranche keeps accruing in the gauge rather than decaying, an out-of-range position earns
+     *      no new emissions anyway, and the hedge measure is cumulative — and it is recoverable.
+     *
+     *      RECOVERY, as it actually works after F06: a `rerange` with spot outside the band reopens
+     *      ONE-SIDED, which does not by itself reopen the asset-mode deploy path. Price entering the new
+     *      band is what does. This test walks that whole sequence rather than asserting the shortcut.
+     */
+    function testCompoundIsAtomicWithTheRedeployAndRerangeRestoresIt() public {
+        _armBook();
+        mLegA.accrueBorrowInterest(address(strategy), _debtLegA() / 100);
+        _armRewards(20_000e18);
+        uint256 driftBefore = _driftLegA();
+        assertGt(driftBefore, 0, "fixture: there is a drift for the harvest to hedge");
+
+        // `MockNpm` custodies only what it was minted, so a price move leaves it owing amounts re-priced
+        // at the new sqrtP that it never received. Float it, as a real pool's other LPs do.
+        legA.mint(address(npm), 1_000_000e8);
+        usdc.mint(address(npm), 100_000_000e6);
+        _movePriceTo(strategy.layout().posTickUpper + 5000);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
+        strategy.compound(1, 0);
+
+        // NOTHING happened. Not a partial harvest — the claim and the sale rolled back with the redeploy.
+        assertEq(gauge.earnedAmount(), 20_000e18, "the tranche is untouched, still accruing in the gauge");
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing was claimed");
+        assertEq(_driftLegA(), driftBefore, "and the hedge did not happen either");
+
+        // Recovery: reopen the range, then let price come into it. The rerange's unwind calls
+        // `gauge.withdraw`, which auto-claims the accrued tranche as a HELD balance (arm that, then
+        // clear the gauge — once paid, there is nothing left for a later claim to pay again).
+        gauge.setAeroToPayOnWithdraw(20_000e18);
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, 5000, 0, 0);
+        gauge.setAeroToPayOnWithdraw(0);
+        _clearRewards();
+        assertEq(aero.balanceOf(address(strategy)), 20_000e18, "the tranche survived as a held balance");
+
+        int24 lower = strategy.layout().posTickLower;
+        int24 upper = strategy.layout().posTickUpper;
+        _movePriceTo(lower + (upper - lower) / 2);
+
+        _compound(1);
+
+        assertEq(aero.balanceOf(address(strategy)), 0, "the harvest went through this time");
+        assertLt(_driftLegA(), driftBefore, "...and the carried drift was hedged");
+    }
 }
