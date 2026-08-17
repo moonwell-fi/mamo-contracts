@@ -368,13 +368,33 @@ library LeveragedAeroVenue {
     function fastRedeemImpl(uint256 assetsOut, uint256 idleShare, bool isFullRedeem) public returns (uint256 payout) {
         Layout storage $ = _layout();
         payout = assetsOut;
+        // A FULL fast redeem is ONLY served on a FLAT book, and the refusal is explicit rather than a
+        // property hoped for from the gates below. With live DEBT the LTV gate refuses anyway (the
+        // draw is the whole book, the denominator collapses). But with a live LP and ZERO debt —
+        // reachable under our feet, since `repayBorrowBehalf` is permissionless — a large enough
+        // `protocolFeeOwed` shrinks `fromCollateral` back inside the collateral and the gate PASSES,
+        // burning the last shares while the LP NFT stays live: a fund with assets and no shares, a
+        // state no exit may create. The async path (`requestRedeem` → full unwind) is the exit that
+        // disposes of the position; the sentinel error is the documented "route to requestRedeem"
+        // signal the frontend already handles.
+        if (isFullRedeem && $.tokenId != 0) revert FastRedeemExceedsLtv(type(uint256).max, uint256($.maxLtvBps));
         // Idle-first: draw at most the redeemer's `f×idle` share (also clamped to the live balance);
         // the strategy's payout transfer consumes it implicitly, leaving `(1-f)×idle` for stayers.
         uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, IERC20($.usdc).balanceOf(address(this)));
         // Idle alone covers it → no collateral touched, NO collateral/debt read at all. Keeping this
-        // early-return ahead of `readCollateralDebtImpl` is what keeps an idle-funded redeem free of any
-        // oracle dependency; moving it into `_fastGate` would silently add one.
-        if (fromCollateral == 0) return payout;
+        // early-return ahead of `readCollateralDebtImpl` is what keeps an idle-funded redeem free of
+        // any oracle dependency; moving it into `_fastGate` would silently add one.
+        //
+        // EXCEPT for a FULL redeem while parked cTokens remain. `fromCollateral == 0` on a full
+        // redeem means the raw balance covers the whole FEE-NETTED payout — i.e. `owed ≥ collateral`
+        // — and returning here would burn the last shares with 100% of the cToken balance stranded,
+        // a strictly larger residue than the rate-gap dust the burn branch below exists to close.
+        // Falling through costs no oracle read: the book is flat (guard above) so
+        // `readCollateralDebtImpl` short-circuits before any feed. Full redeems of a book with
+        // NOTHING parked keep the early out — there is nothing to strand.
+        if (fromCollateral == 0 && !(isFullRedeem && ICToken($.mUsdc).balanceOf(address(this)) > 0)) {
+            return payout;
+        }
 
         (uint256 collateralUsdc, uint256 debtUsdc) = LeveragedAeroManager.readCollateralDebtImpl();
         uint256 maxLtv = uint256($.maxLtvBps);
@@ -410,9 +430,10 @@ library LeveragedAeroVenue {
         // no-op on the common path and why a test with no fee accrued cannot tell them apart.
         //
         // GATED ON A FLAT BOOK (`tokenId == 0`) AND ZERO DEBT: that is the state where mUSDC collateral
-        // is the whole non-idle book, so burning all of it is exactly "pay out everything". With a live
-        // LP or live debt a full fast redeem cannot be served at all (the gate above refuses it, or
-        // Moonwell does), so the branch would be dead weight there.
+        // is the whole non-idle book, so burning all of it is exactly "pay out everything". A full
+        // redeem of a NON-flat book was refused at the top of this function; with live debt the LTV
+        // gate refuses. (The `tokenId` conjunct is therefore a belt over the top guard, kept because
+        // this branch moves the whole collateral and cheap redundancy is the right posture there.)
         if (isFullRedeem && debtUsdc == 0 && $.tokenId == 0) {
             uint256 before = IERC20($.usdc).balanceOf(address(this));
             _redeemCTokens($.mUsdc, ICToken($.mUsdc).balanceOf(address(this)));
@@ -526,6 +547,11 @@ library LeveragedAeroVenue {
         assetsOut = Math.mulDiv(shares, navNet, supplyPost);
         // Mirror `redeem`'s `ZeroAssetsOut` guard: never quote a payout the executed path would revert on.
         if (assetsOut == 0) return (0, false);
+        // Mirror the executed path's full-redeem flat-book guard: a FULL fast redeem of a book with a
+        // live LP position is always refused (see `fastRedeemImpl`'s top guard), so advise async.
+        // `shares == supplyPost` is the same full-redeem predicate the strategy computes post-
+        // crystallise — a simulated fee mint makes both sides non-full together.
+        if (shares == supplyPost && _layout().tokenId != 0) return (assetsOut, false);
         // Idle-first (mirror `fastRedeemImpl`): the redeemer's `f×idle` share funds part of `assetsOut`,
         // so the LTV gate only sees the collateral-funded remainder.
         uint256 idle = IERC20(_layout().usdc).balanceOf(address(this));

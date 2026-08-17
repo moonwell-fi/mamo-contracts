@@ -1605,6 +1605,104 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), 0, "book net of the fee is exactly zero");
     }
 
+    /**
+     * @dev THE EARLY-RETURN HOLE, closed: `owed >= collateral`. When the accrued fee exceeds the
+     *      parked slice, the raw balance covers the whole FEE-NETTED payout, `fromCollateral == 0`,
+     *      and the old early return skipped the burn branch entirely — burning the last shares with
+     *      100% of the cToken balance stranded (a strictly LARGER residue than the rate-gap dust the
+     *      branch exists to close). A small park under a larger accrued fee is an ordinary operating
+     *      state, not a corner: `supplyIdle` is a dial, not a sweep.
+     */
+    function testFastFullRedeemSweepsTheParkedResidueWhenOwedExceedsTheCollateral() public {
+        _execute(SEED);
+        vm.prank(proposer);
+        strategy.flatten(0, 1);
+        uint256 pot = usdc.balanceOf(address(strategy));
+        uint256 parked = 10_000e6;
+        vm.prank(proposer);
+        strategy.supplyIdle(parked); // small park; the rest stays raw
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        mUsdc.setExchangeRateStored(1.37e18); // C = 13,700e6 at the stored rate
+        mUsdc.setPendingExchangeRate(1.4e18); // C_fresh = 14,000e6
+        uint256 owed = 20_000e6; // owed > C: the early-return state
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 22), bytes32(owed));
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, 0);
+        vm.stopPrank();
+
+        uint256 raw = pot - parked;
+        assertEq(out, raw + (parked * 140) / 100 - owed, "paid the raw float + the FRESH-rate park, minus the fee");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "the parked residue was swept, not stranded");
+        assertEq(usdc.balanceOf(address(strategy)), owed, "the fee liability stays funded to the wei");
+        assertEq(vault.totalSupply(), 0, "the last shares are burnt");
+        assertEq(strategy.nav(), 0, "no assets-with-no-shares fund survives, even after the accrual lands");
+    }
+
+    /**
+     * @dev THE `isFullRedeem` CONJUNCT, mutation-pinned. A PARTIAL redeem at a non-unit rate must pay
+     *      the stored-rate quote and NOTHING more: the fresh-rate surplus on the whole collateral
+     *      belongs to ALL holders, and a partial redeemer who triggered the burn-everything branch
+     *      would pocket it outright. Deleting the full-redeem condition on the burn branch passed the
+     *      entire suite before this test existed — no partial redeem ever ran at a non-unit rate.
+     */
+    function testPartialFastRedeemAtANonUnitRatePaysTheStoredRateQuoteOnly() public {
+        uint256 pot = _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18);
+
+        uint256 quoted = strategy.nav() / 4; // f = 1/4 of the stored-rate book
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply / 4);
+        uint256 out = strategy.redeem(supply / 4, 0);
+        vm.stopPrank();
+
+        assertEq(out, quoted, "a partial redeemer is paid the stored-rate quote, NOT the rate gap");
+        // The stayers keep the accrual: the remaining collateral revalues at the fresh rate the
+        // redeem's own accrual just landed, so post-op nav is the fresh book minus the quote paid.
+        assertApproxEqAbs(
+            strategy.nav(), (pot * 140) / 100 - quoted, 2, "the fresh-rate surplus stays with the stayers"
+        );
+    }
+
+    /// @dev MIXED FUNDING on the burn branch — the realistic operating shape (a keeper float PLUS a
+    ///      parked slice), which both siblings above run with zero raw. Pins that the idle draw, the
+    ///      collateral burn and the fee retention compose: retained == owed to the wei, no dust.
+    function testFastFullRedeemWithMixedFundingRetainsExactlyTheFee() public {
+        _execute(SEED);
+        vm.prank(proposer);
+        strategy.flatten(0, 1);
+        uint256 pot = usdc.balanceOf(address(strategy));
+        uint256 parked = (pot * 3) / 4;
+        vm.prank(proposer);
+        strategy.supplyIdle(parked);
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18);
+        uint256 owed = 50_000e6;
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 22), bytes32(owed));
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, 0);
+        vm.stopPrank();
+
+        assertEq(out, (pot - parked) + (parked * 140) / 100 - owed, "raw float + fresh-rate park - fee");
+        assertEq(usdc.balanceOf(address(strategy)), owed, "retained == the fee liability, to the wei");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "no cToken dust");
+        assertEq(strategy.nav(), 0, "zero-share fund prices at zero");
+    }
+
     // ==================== previewRedeem MIRRORS THE EXECUTED redeem ====================
     //
     // `previewRedeem`'s natspec promises it mirrors `redeem` EXACTLY, and a frontend routes on its
@@ -1638,7 +1736,39 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 out = strategy.redeem(supply, 0);
         vm.stopPrank();
 
+        // NOTE the exactness of this mirror is scoped to a book with NO pending accrual: at a unit
+        // stored/fresh rate the full-redeem burn realises exactly the quote. With un-accrued interest
+        // outstanding the executed payout is LARGER than the quote — the carve-out pinned by
+        // `testPreviewUnderQuotesTheFullFlatBookFastRedeem` below.
         assertEq(out, quoted, "quoted == executed: the preview is the mirror it claims to be");
+    }
+
+    /**
+     * @dev THE DOCUMENTED CARVE-OUT, pinned with its own figures. A full redeem of a flat, zero-debt
+     *      book burns the whole cToken balance and pays the FRESH-rate proceeds, while `previewRedeem`
+     *      prices the same collateral at `nav()`'s stored (last-accrued) rate. The divergence is in the
+     *      SAFE direction only — the preview under-quotes, so a preview-derived `minAssetsOut` cannot
+     *      bounce — and `fastOk` stays true. These are the exact numbers the natspec cites.
+     */
+    function testPreviewUnderQuotesTheFullFlatBookFastRedeem() public {
+        uint256 pot = _flatBookHeldEntirelyAsCollateral();
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18);
+
+        (uint256 quoted, bool fastOk) = strategy.previewRedeem(supply);
+        assertTrue(fastOk, "the fast path serves it");
+        assertEq(quoted, (pot * 137) / 100, "quoted at the STORED rate");
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, quoted); // the under-quote must clear as minAssetsOut
+        vm.stopPrank();
+
+        assertEq(out, (pot * 140) / 100, "paid at the FRESH rate");
+        assertGe(out, quoted, "the divergence is one-directional: the preview only ever UNDER-quotes");
     }
 
     /**
@@ -1699,12 +1829,15 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(quoted, _collateralUsdc(), "precondition: the payout exceeds the collateral that funds it");
         assertFalse(fastOk, "zero debt is not a free pass - the collateral must still COVER the draw");
 
-        // ...and the executed path agrees. Production surfaces Moonwell's refusal as
-        // `MoonwellRedeemFailed(err)`; `MockLendingMarket` models an over-draw as the cToken-balance
-        // underflow, so the revert here is the arithmetic one. Either way: the fast path does not serve it.
+        // ...and the executed path agrees — with the TYPED refusal now: a full fast redeem of any
+        // non-flat book is refused up front (`fastRedeemImpl`'s top guard, the route-to-requestRedeem
+        // sentinel), rather than falling through to whatever Moonwell (or the mock's underflow) makes
+        // of the over-draw.
         vm.startPrank(lp);
         vault.approve(address(strategy), supply);
-        vm.expectRevert(stdError.arithmeticError);
+        vm.expectRevert(
+            abi.encodeWithSelector(LeveragedAeroVenue.FastRedeemExceedsLtv.selector, type(uint256).max, uint256(6500))
+        );
         strategy.redeem(supply, 0);
         vm.stopPrank();
     }
