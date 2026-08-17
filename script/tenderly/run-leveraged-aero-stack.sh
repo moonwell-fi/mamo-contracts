@@ -477,7 +477,12 @@ info "  SHERWOOD_SYNDICATE_VAULT=$VAULT make tenderly-leveraged-aero-account"
 # harnesses can run in either order without erasing each other's fields. A NEW pooled layer
 # does invalidate the account layer (the factory binds the strategy clone at construction),
 # so the account addresses are reset to null here and the account harness refills them.
-PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(cat "$CONFIG_JSON")"
+#
+# `del(.STALE)` is part of the merge for the same reason the merge exists: a manually-added
+# "this recorded layer is out of date, redeploy before use" marker describes the PREVIOUS
+# pooled layer, and `$prev * {…}` would carry it forward onto the layer that just replaced it.
+# A successful run of THIS script is exactly the event that retires the marker, so it clears it.
+PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(jq 'del(.STALE)' "$CONFIG_JSON")"
 jq -n \
   --argjson prev "$PREV" \
   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

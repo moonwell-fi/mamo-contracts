@@ -1,36 +1,35 @@
 {
-  "generatedAt": "2026-08-13T17:23:13Z",
+  "generatedAt": "2026-08-17T20:53:36Z",
   "chainId": 73578453,
   "parentNetworkId": 8453,
   "vnetSlug": "mamo-leveraged-aero-pr66-1786640530",
   "publicRpc": "https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282",
   "adminRpc": "1Password (write-capable — never committed)",
   "stateSync": false,
-  "stateSyncDisabledReason": "Deliberate, not a Tenderly limitation (sync is API-compatible with custom chain ids): sync re-hydrates the canonical mainnet feed addresses this instance code-overrides with FreshFeed, and it corrupts the Slipstream pool's TWAP ring buffer (observe reverts 'OLD', observed live 2026-07-29), fail-closing every priced path. The stack harness refuses synced instances (Phase B.-1).",
+  "stateSyncDisabledReason": "Deliberate, not a Tenderly limitation (sync is API-compatible with custom chain ids): sync re-hydrates the canonical mainnet feed addresses this instance code-overrides with FreshFeed, and it corrupts the Slipstream pool TWAP ring buffer (observe reverts OLD, observed live 2026-07-29), fail-closing every priced path. Creation-time-only flag — a synced instance cannot be repaired, only replaced.",
   "strategyTypeId": 5,
   "mamo": {
-    "accountImplementation": "0xd9Fc69ff1DF465Fd5c83F03B6504b84Fc064CaD1",
-    "accountFactory": "0x00247273857a1e0337A7Ce2822a72aE09DA44523",
+    "accountImplementation": "0x9703a770FF62280Cf6220421D83A245dA7B60E24",
+    "accountFactory": "0x46108914a8c2EFadF7Ab69e45B5C1cb657A9003E",
     "strategyRegistry": "0x46a5624C2ba92c08aBA4B206297052EDf14baa92"
   },
   "pooled": {
-    "strategyClone": "0x0039e4357E83395fA8cB09E3C1657574dBDf41E2",
-    "vault": "0xC0e7a3fF623fD17D6a15367ADA6584e6BB09727e",
-    "template": "0xEA05B89CA6045f65E5040519354aBca93b695425",
+    "strategyClone": "0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c",
+    "vault": "0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1",
+    "template": "0x5B33a96509C32b523eaE1b778173e735Fc4fcdA0",
     "proposer": "0x73f6B456d063F78129113D42DBC315b9eEee8FAf",
     "seed": "100000000000",
     "lpPool": "0x4e962BB3889Bf030368F56810A9c96B83CB3E778"
   },
   "sherwood": {
-    "strategyClone": "0x0039e4357E83395fA8cB09E3C1657574dBDf41E2",
-    "syndicateVault": "0xC0e7a3fF623fD17D6a15367ADA6584e6BB09727e"
+    "strategyClone": "0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c",
+    "syndicateVault": "0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1"
   },
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  "note": "Deployed from PR #66 head d347b68 on 2026-08-13. This instance reports CUSTOM chain id 73578453 (Tenderly 7357-'TEST' prefix + parent 8453) — wallets/FE/BE must use chainId from THIS file, and forge/cast address books need addresses/73578453.json (a copy of 8453.json; fork STATE is still Base, so all venue addresses resolve unchanged). Harness runs against it need EXPECTED_CHAIN=73578453. Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on this instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
-  "vaultGeneration": 2,
-  "vaultGenerationName": "leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)",
+  "note": "Deployed 2026-08-17 from the AUDITED build (branch aero-audit-findings, head 05412af + the 059cbbb vnet-tooling merge) — both harnesses green end to end. This instance reports CUSTOM chain id 73578453 (Tenderly 7357-'TEST' prefix + parent 8453) — wallets/FE/BE must use chainId from THIS file, and forge/cast address books need addresses/73578453.json (a copy of 8453.json; fork STATE is still Base, so all venue addresses resolve unchanged). Harness runs against it need EXPECTED_CHAIN=73578453. Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on this instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
+  "vaultGeneration": 3,
+  "vaultGenerationName": "leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())",
   "vaultGenerationRequired": 3,
-  "STALE": "THIS RECORDED POOLED LAYER IS OUT OF DATE — REDEPLOY BEFORE USE. The recorded vault predates maxTotalAssets(), and the STRATEGY's fund-capacity check makes a TYPED call to it on every deposit. The vault is NOT upgradeable, so a current strategy bound to this vault reverts on every deposit with empty returndata. Run `make tenderly-leveraged-aero-stack` (which now records generation 3) BEFORE `make tenderly-leveraged-aero-account`; the account harness also probes maxTotalAssets() and refuses to run against generation < 3.",
   "feeds": {
     "pattern": "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
     "legAUsd": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
