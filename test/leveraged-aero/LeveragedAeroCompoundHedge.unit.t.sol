@@ -1547,4 +1547,87 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertEq(aero.balanceOf(address(strategy)), 0, "the honest fill was accepted");
         assertGt(_collateralUsdc(), collateralBefore, "...and the harvest redeployed");
     }
+
+    // ====== 8. A DEFERRED CRYSTALLISE CANNOT LET AN EXIT ESCAPE THE PENDING FEE (F16) ======
+    //
+    // `strategyMint` is gated on the vault's issuance switch; `strategyBurn` is not. So with issuance
+    // shut the crystallise defers but the exit proceeds, and the redeemer used to pay the raw
+    // `navPre / supply` — walking with their whole share of the pending fee. Stayers' per-share is
+    // unaffected either way (fee dilution is supply-independent), so the leak landed entirely on the fee
+    // recipient. `redeem` now re-prices on the SIMULATED post-crystallise book.
+
+    /// @dev Fast-path exit of `shares` for `lp`; returns the USDC they were paid.
+    function _fastRedeem(uint256 shares) internal returns (uint256 paid) {
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        uint256 before = usdc.balanceOf(lp);
+        vm.prank(lp);
+        strategy.redeem(shares, 0);
+        return usdc.balanceOf(lp) - before;
+    }
+
+    /// @dev Arm a REAL pending performance fee: seed the HWM, then let a second tranche carry
+    ///      `navPerShare` above it without crystallising.
+    function _armAPendingPerformanceFee() internal {
+        _armBook();
+        _armRewards(20_000e18);
+        _compound(1);
+        _armRewards(20_000e18);
+    }
+
+    function testADeferredCrystalliseCannotLetAnExitEscapeThePendingFee() public {
+        _armAPendingPerformanceFee();
+        uint256 exitShares = SHARES / 100;
+
+        // Baseline: the same exit with issuance OPEN, i.e. the crystallise succeeds.
+        uint256 snap = vm.snapshotState();
+        uint256 openPayout = _fastRedeem(exitShares);
+        assertGt(vault.balanceOf(feeRecipient), 0, "control: the open-issuance exit really did crystallise");
+        vm.revertToState(snap);
+
+        // The un-fee'd price the exiter used to be paid — the mutant's answer.
+        uint256 rawPrice = Math.mulDiv(exitShares, strategy.nav(), vault.totalSupply());
+
+        vm.prank(owner);
+        vault.setOpenDeposits(false);
+        uint256 hwmBefore = strategy.layout().hwmPerShare;
+        uint256 accrualBefore = strategy.layout().lastFeeAccrualTimestamp;
+        (uint256 quoted,) = strategy.previewRedeem(exitShares);
+
+        vm.recordLogs();
+        uint256 closedPayout = _fastRedeem(exitShares);
+
+        assertEq(closedPayout, openPayout, "a deferred crystallise pays exactly what a successful one pays");
+        assertEq(closedPayout, quoted, "...and the preview still matches execution to the wei");
+        assertLt(closedPayout, rawPrice, "...and it is STRICTLY less than the un-fee'd price");
+
+        // The fee is deferred, not charged: no shares minted, and the HWM did not ratchet, so the next
+        // successful crystallise still measures the same gain.
+        assertEq(vault.balanceOf(feeRecipient), 0, "no fee shares could be minted (issuance shut)");
+        assertEq(strategy.layout().hwmPerShare, hwmBefore, "HWM unmoved");
+        assertEq(strategy.layout().lastFeeAccrualTimestamp, accrualBefore, "accrual clock unmoved");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool deferred;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics[0] == LeveragedAerodromeCLStrategy.FeeCrystallizeDeferred.selector) deferred = true;
+        }
+        assertTrue(deferred, "...and the deferral was marked, not silent");
+    }
+
+    /// @dev The re-pricing is CONDITIONAL on the deferral. With issuance open the crystallise lands, the
+    ///      simulation branch never runs, and the exit prices against the real post-mint book.
+    function testAHappyPathExitIsUnaffectedByTheDeferredRePricing() public {
+        _armAPendingPerformanceFee();
+        uint256 exitShares = SHARES / 100;
+        uint256 hwmBefore = strategy.layout().hwmPerShare;
+        uint256 rawPrice = Math.mulDiv(exitShares, strategy.nav(), vault.totalSupply());
+
+        uint256 payout = _fastRedeem(exitShares);
+
+        assertGt(vault.balanceOf(feeRecipient), 0, "the fee was actually charged, not deferred");
+        assertGt(strategy.layout().hwmPerShare, hwmBefore, "the HWM ratcheted");
+        assertGt(payout, 0, "and the exit paid out");
+        assertLt(payout, rawPrice, "priced on the real POST-crystallise book, not the pre-fee one");
+    }
 }

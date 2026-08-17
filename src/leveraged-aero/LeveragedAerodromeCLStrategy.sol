@@ -1066,9 +1066,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      op proceeds. `navPre` stays computed by the CALLER so fail-closed pricing (a down oracle) reverts
     ///      there, outside this try. Not narrowed by selector; the asymmetric un-try'd config reads
     ///      (compound/settle/skim) hard-revert on the same failure.
-    function _crystallizeBestEffort(uint256 navPre, uint8 op) private {
-        try this.crystallizeFeesSelf(navPre) {}
-        catch {
+    /// @return ok False when the crystallise was caught and the fee deferred.
+    function _crystallizeBestEffort(uint256 navPre, uint8 op) private returns (bool ok) {
+        try this.crystallizeFeesSelf(navPre) {
+            ok = true;
+        } catch {
             emit FeeCrystallizeDeferred(op, navPre);
         }
     }
@@ -1078,9 +1080,12 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      — the fees lib caps the slice at navPre. On a caught crystallise owed is unchanged → `navNet ==
     ///      navPre` (self-consistent). Shared by `deposit` and the fast `redeem` (both price at `f × navNet`
     ///      against a POST-crystallise `supply` read by the caller).
-    function _crystallizeAndNet(uint256 navPre, uint8 op) private returns (uint256 navNet) {
+    ///
+    ///      `ok` is false on a caught crystallise — the fast `redeem` uses it to re-price on the simulated
+    ///      post-crystallise book so an exit cannot walk with the pending fee.
+    function _crystallizeAndNet(uint256 navPre, uint8 op) private returns (uint256 navNet, bool ok) {
         uint256 owedBefore = _layout().protocolFeeOwed;
-        _crystallizeBestEffort(navPre, op);
+        ok = _crystallizeBestEffort(navPre, op);
         navNet = navPre - (_layout().protocolFeeOwed - owedBefore);
     }
 
@@ -1110,7 +1115,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // Crystallize on pre-deposit NAV. `nav()` OUTSIDE try/catch → a down oracle reverts the deposit
         // (fail-closed pricing is load-bearing). Only the fee-MINT failure is swallowed (fee defers).
         uint256 navPre = nav();
-        uint256 navNet = _crystallizeAndNet(navPre, OP_DEPOSIT);
+        (uint256 navNet,) = _crystallizeAndNet(navPre, OP_DEPOSIT);
         address vault_ = vault();
         // FUND CAPACITY CEILING (`vault.maxTotalAssets`, USDC 6dp; `0` == unlimited). Enforced HERE
         // because this is the one path every share-minting deposit takes — per-user accounts and
@@ -1557,7 +1562,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         //    sees a 0 fresh slice) and the exit still proceeds. Not narrowed by selector; the asymmetric
         //    un-try'd config reads (compound/settle/skim) hard-revert on that same failure.
         uint256 navPre = nav();
-        uint256 navNet = _crystallizeAndNet(navPre, OP_REDEEM);
+        (uint256 navNet, bool crystallized) = _crystallizeAndNet(navPre, OP_REDEEM);
 
         // 2. Price against the POST-crystallize book, both effects consistently: `supply` is read
         //    after the crystallize (includes the perf-fee mint dilution) and the FRESH protocol slice
@@ -1565,6 +1570,31 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         //    the redeemer would capture f×slice from stayers.
         address vault_ = vault();
         uint256 supply = IERC20(vault_).totalSupply();
+        //    The full-redeem flag is taken HERE, against the REAL supply, before the adjustment below can
+        //    overwrite it — it selects the whole-cToken-burn funding path, which is a fact about the share
+        //    ledger, not about pricing.
+        bool fullRedeem = shares == supply;
+
+        // 2b. DEFERRED crystallise (H3): price on the book it WOULD have produced, not the raw pre-fee
+        //     one. `strategyMint` is gated on the vault's issuance switch but `strategyBurn` is not, so
+        //     an exit taken while issuance is shut would otherwise pay the FULL `navPre/supply` and walk
+        //     with the whole pending fee. Stayers' per-share is unaffected either way (fee dilution is
+        //     supply-independent), so that leak lands entirely on the fee recipient — charging the exiter
+        //     here leaves the value in the book, and since the HWM did NOT ratchet the next successful
+        //     crystallise still measures it. The other, near-unreachable defer cause (a reverting
+        //     ProtocolConfig read) makes the simulation revert too → un-adjusted pair, i.e. the old
+        //     behaviour. Same pair `previewRedeem` quotes, so quote and execution agree to the wei on
+        //     the deferred path as well. RESIDUAL: a FULL redeem funds via the whole-cToken burn (the
+        //     flag above is computed on the REAL supply), which pays the fresh-rate surplus to the
+        //     redeemer regardless — on a sole-holder full exit during a freeze the pending fee still
+        //     escapes; value cannot be meaningfully retained on a book with zero shares left.
+        if (!crystallized) {
+            try this.simulateCrystallizeSelf(navNet, supply) returns (uint256 nn, uint256 sp) {
+                navNet = nn;
+                supply = sp;
+            } catch {}
+        }
+
         assetsOut = Math.mulDiv(shares, navNet, supply); // rounds down, LP-favourable
         if (assetsOut < minAssetsOut) revert InsufficientAssetsOut();
         // Reject a burn-for-zero: at navNet==0 (owed ≥ gross book) or a dust-share redeem that floors to
@@ -1584,7 +1614,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         //    strands collateral in a fund that no longer has shares). It returns the payout it actually
         //    funded: identical to `assetsOut` on every other path, and `assetsOut` PLUS the fresh-rate
         //    surplus on that one — never less, so the `minAssetsOut` floor checked above still holds.
-        assetsOut = LeveragedAeroVenue.fastRedeemImpl(assetsOut, idleShare, shares == supply);
+        assetsOut = LeveragedAeroVenue.fastRedeemImpl(assetsOut, idleShare, fullRedeem);
 
         // 5. Pay out + burn.
         IERC20(_layout().usdc).safeTransfer(msg.sender, assetsOut);
@@ -1611,15 +1641,14 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         suite's fixture: quotes 1,370,000e6, pays 1,400,000e6). It only ever under-quotes, so a
     ///         preview-derived `minAssetsOut` cannot bounce on it.
     ///
-    ///         Safe-direction edge for the PAYOUT (opposite sign): if the executed crystallise DEFERS
-    ///         (fee-mint reverts on a paused / un-whitelisted vault, H3), the actual pays MORE than this
-    ///         fee-adjusted quote (no dilution, no slice) — that case never bounces a preview-derived
-    ///         `minAssetsOut`. NOTE `fastOk` is the OPPOSITE sign: on a deferred crystallise the executed
-    ///         `assetsOut = shares × navPre / supply` is LARGER than this fee-adjusted quote (`strategyBurn`
-    ///         is not `whenNotPaused`, so redeem proceeds while the crystallise defers), so its larger
-    ///         `fromCollateral` yields a higher `postLtv` — the on-chain `fastRedeemImpl` gate can revert
-    ///         `FastRedeemExceedsLtv` even though this preview optimistically returned `fastOk == true`.
-    ///         `fastOk` is ADVISORY; the manager's LTV gate is authoritative.
+    ///         A DEFERRED CRYSTALLISE NO LONGER MOVES THE PAYOUT AWAY FROM THIS QUOTE. When the executed
+    ///         crystallise defers (fee-mint reverts on a paused / un-whitelisted vault, H3), `redeem`
+    ///         re-prices on the SAME simulated post-crystallise `(navNet, supply)` pair this preview
+    ///         quotes, so quote and execution still agree to the wei — `strategyBurn` is not gated on the
+    ///         issuance switch, and paying the raw `navPre/supply` would have let the exiter walk with the
+    ///         whole pending fee. The one carve-out is the FULL redeem, which funds via the whole-cToken
+    ///         burn and so still pays the fresh-rate surplus (the over-delivery documented just above).
+    ///         `fastOk` stays ADVISORY either way; the manager's LTV gate is authoritative.
     ///
     ///         Returns `(0, false)` instead of reverting when the oracle is down (try/catch on the nav +
     ///         collateral/debt reads), when the fee simulation's config read reverts (try/catch on
