@@ -388,9 +388,22 @@ vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — 
 the script just asserts both directions (`vault.strategy() == clone`, `clone.vault() == vault`) plus
 `clone.proposer() == MAMO_REBALANCER` and `clone.state() == 0` (Pending).
 
-The bind is **set-once** (`onlyOwner`, reverts `LAV: strategy already set`, and `cloneAndBind` re-checks
-it before cloning). `msg.sender == strategy` is the sole protection against arbitrary share inflation,
-so there is no rotation path: a wrong clone means a new vault.
+The bind is **set-once** (`onlyOwner`, reverts `LAV: strategy already set`). `msg.sender == strategy` is
+the sole protection against arbitrary share inflation, so the STRATEGY pointer has no rotation path: a
+wrong clone means a new vault.
+
+> **The OPERATOR does rotate.** `vault.setProposer(newProposer)` (`onlyOwner`) drives the strategy's
+> `onlyVault` `setProposer` — not set-once, not state-gated, zero rejected, emits
+> `ProposerUpdated(old, new)`. That is the incident response for a compromised `MAMO_REBALANCER` key;
+> without it the only answer was `settleStrategy()`, a terminal unwind of the whole fund.
+>
+> ```bash
+> cast send "$VAULT" 'setProposer(address)' "$NEW_REBALANCER" --from "$MAMO_MULTISIG" --unlocked
+> cast call "$STRAT" 'proposer()(address)'   # assert it moved
+> ```
+>
+> It does **not** move `layout().feeRecipient` (init-only) and it is not a fund-moving power — the
+> incoming key inherits exactly the `onlyProposer` surface.
 
 ### B.5 — activate: `Pending → Executed`
 

@@ -111,8 +111,11 @@ seize the `proposer` role (and with it `initData`, which carries the `targetLtvB
 `cloneAndBind` is now the **only** wiring path: `BaseStrategy.initialize` requires
 `msg.sender == vault_`, so an externally-initialized clone cannot exist, and `setStrategy(address)` was
 removed with it. `_bind` stays **set-once** and still re-checks `clone.vault() == address(this)`, so a
-foreign-vault clone can never be bound — and a wrong clone means a new vault, since there is no rotation.
-There is still no template allowlist.
+foreign-vault clone can never be bound — and a wrong clone means a new vault, since the STRATEGY pointer
+does not rotate. The **operator** does: `LeveragedAeroVault.setProposer` (`onlyOwner`) drives the
+strategy's `onlyVault` `setProposer`, so a compromised keeper key no longer forces `settleStrategy` as the
+only response. It is not a fund-moving power — the incoming key inherits exactly the `onlyProposer`
+surface — and it does not move the init-only `Layout.feeRecipient`. There is still no template allowlist.
 
 ## The corruption-critical invariant
 

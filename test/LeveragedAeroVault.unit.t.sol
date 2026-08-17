@@ -285,6 +285,60 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.balanceOf(alice), 1_000e12, "alice untouched");
     }
 
+    // ==================== SET PROPOSER (F26) ====================
+    //
+    // Without rotation the only answer to a compromised keeper key is `settleStrategy` — a terminal
+    // unwind of the whole fund. The strategy pointer stays set-once; only the OPERATOR rotates.
+
+    function testSetProposerRotatesTheOperator() public {
+        _bind();
+        address newProposer = makeAddr("newProposer");
+
+        vm.prank(owner);
+        vault.setProposer(newProposer);
+
+        assertEq(strategy.proposer(), newProposer, "operator rotated on the bound strategy");
+        assertEq(vault.strategy(), address(strategy), "the STRATEGY pointer did not move");
+    }
+
+    function testSetProposerIsOwnerOnly() public {
+        _bind();
+
+        vm.prank(thirdParty);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
+        vault.setProposer(makeAddr("newProposer"));
+    }
+
+    function testSetProposerBeforeBindReverts() public {
+        vm.prank(owner);
+        vm.expectRevert("LAV: strategy not set");
+        vault.setProposer(makeAddr("newProposer"));
+    }
+
+    /// @dev Clearing the role would disable every keeper op with no way back short of settlement, so
+    ///      the strategy refuses it and the vault does not paper over that.
+    function testSetProposerRejectsZero() public {
+        _bind();
+
+        vm.prank(owner);
+        vm.expectRevert("MockStrategy: zero proposer");
+        vault.setProposer(address(0));
+    }
+
+    /// @dev NOT set-once, unlike the strategy pointer: an operator key can be lost more than once.
+    function testSetProposerCanRotateRepeatedly() public {
+        _bind();
+        address second = makeAddr("second");
+        address third = makeAddr("third");
+
+        vm.startPrank(owner);
+        vault.setProposer(second);
+        vault.setProposer(third);
+        vm.stopPrank();
+
+        assertEq(strategy.proposer(), third, "the latest rotation wins");
+    }
+
     // ==================== FEE CONFIG ====================
 
     function testFeeConfigUnsetShortCircuits() public view {

@@ -99,6 +99,12 @@ contract MockVaultStrategy is IStrategy {
 
     function updateParams(bytes calldata) external {}
 
+    /// @notice Mirrors `BaseStrategy.setProposer`: vault-only operator rotation, zero rejected.
+    function setProposer(address newProposer) external onlyVault {
+        require(newProposer != address(0), "MockStrategy: zero proposer");
+        _proposer = newProposer;
+    }
+
     function vault() external view returns (address) {
         return _vault;
     }

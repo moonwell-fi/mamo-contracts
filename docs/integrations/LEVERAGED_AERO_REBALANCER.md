@@ -53,14 +53,28 @@ strategy to be in state `Executed`.
 
 ## A. Role & authorization
 
-The strategy inherits `BaseStrategy`, which stores an immutable-per-clone `_proposer` set at
-`initialize(vault_, proposer_, data)` and never changed thereafter. The gate is a single modifier:
+The strategy inherits `BaseStrategy`, which stores a per-clone `_proposer` set at
+`initialize(vault_, proposer_, data)`. The gate is a single modifier:
 
 ```solidity
 // BaseStrategy
 function proposer() public view returns (address);          // read the operator address
 modifier onlyProposer() { if (msg.sender != _proposer) revert NotProposer(); _; }
+function setProposer(address newProposer) external onlyVault;  // rotation — see below
 ```
+
+> ### The operator key is **rotatable**
+>
+> `BaseStrategy.setProposer` is `onlyVault`, reached by the vault owner (the MAMO multisig) through
+> `LeveragedAeroVault.setProposer(newProposer)` — `onlyOwner`, not set-once, not state-gated, zero
+> rejected, and it emits `ProposerUpdated(old, new)`. Read the live value off `proposer()`; do not
+> cache it across an incident.
+>
+> Rotation is **not** a fund-moving power: the incoming key inherits exactly the `onlyProposer`
+> surface, which can neither raise leverage (that is `setTargetLtv`, admin-only) nor move tokens. It
+> exists so a compromised keeper key does not force `settleStrategy` — a terminal unwind of the whole
+> fund — as the only response. Note it does **not** move `layout().feeRecipient`, which is an
+> init-only field: check that separately before treating rotation as a complete response.
 
 > ### ⚠️ The `proposer` is `MAMO_REBALANCER` — **not** `MAMO_BACKEND`
 >

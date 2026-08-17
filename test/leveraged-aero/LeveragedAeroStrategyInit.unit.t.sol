@@ -36,6 +36,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev Mirrored from {LeveragedAerodromeCLStrategy} for `vm.expectEmit` / topic matching.
     event FeeCrystallizeDeferred(uint8 op, uint256 navPre);
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
+    event ProposerUpdated(address indexed oldProposer, address indexed newProposer);
 
     /// @dev The strategy's `OP_COMPOUND` deferral code (private there).
     uint8 internal constant OP_COMPOUND = 3;
@@ -315,6 +316,63 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(vault.strategy(), address(s), "bound");
         assertEq(s.vault(), address(vault), "and pointed back");
         assertEq(s.proposer(), proposer, "proposer wired atomically");
+    }
+
+    // ==================== PROPOSER ROTATION (F26) ====================
+
+    /// @dev VAULT-ONLY, and the vault is not the owner: the owner reaches it through
+    ///      `LeveragedAeroVault.setProposer`, which is `onlyOwner`. Direct calls — from the owner, from
+    ///      the incumbent proposer, from anyone — are refused.
+    function testSetProposerIsVaultOnly() public {
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
+        address newProposer = makeAddr("newProposer");
+
+        vm.prank(owner);
+        vm.expectRevert(BaseStrategy.NotVault.selector);
+        s.setProposer(newProposer);
+
+        vm.prank(proposer);
+        vm.expectRevert(BaseStrategy.NotVault.selector);
+        s.setProposer(newProposer);
+
+        vm.prank(attacker);
+        vm.expectRevert(BaseStrategy.NotVault.selector);
+        s.setProposer(newProposer);
+    }
+
+    /// @dev The rotation is real on the `onlyProposer` surface: the old key loses `rerange`, the new
+    ///      one gets it. `rerange` is used because on a flat book it still reaches its authorisation
+    ///      check and the impl then bails on `tokenId == 0` — no venues needed.
+    function testRotationMovesTheOnlyProposerSurface() public {
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
+        _forceState(s, BaseStrategy.State.Executed);
+        address newProposer = makeAddr("newProposer");
+
+        vm.expectEmit(true, true, false, false, address(s));
+        emit ProposerUpdated(proposer, newProposer);
+        vm.prank(owner);
+        vault.setProposer(newProposer);
+        assertEq(s.proposer(), newProposer, "the role moved");
+
+        vm.prank(proposer);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        s.rerange(4000, 5000, 0, 0);
+
+        vm.prank(newProposer);
+        s.rerange(4000, 5000, 0, 0);
+        assertEq(s.layout().width, 4000, "the new key drives the strategy");
+    }
+
+    /// @dev NOT state-gated: a key can be lost in `Pending`, before `execute`, just as easily.
+    function testRotationWorksBeforeExecute() public {
+        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
+        assertEq(uint256(s.state()), uint256(BaseStrategy.State.Pending), "precondition: still Pending");
+
+        address newProposer = makeAddr("newProposer");
+        vm.prank(owner);
+        vault.setProposer(newProposer);
+
+        assertEq(s.proposer(), newProposer, "rotated while Pending");
     }
 
     // ==================== HAPPY PATH ====================

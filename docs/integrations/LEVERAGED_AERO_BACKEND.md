@@ -176,8 +176,10 @@ explicitly, and note that the two backend keys above are **different addresses**
 > ### ⚠️ The strategy `proposer` is the REBALANCER, not `MAMO_BACKEND`
 >
 > Earlier revisions of this guide claimed the backend was the strategy's proposer. **That was wrong.** The
-> strategy has exactly one operator role (`proposer`, a per-clone immutable set at
-> `initialize(vault_, proposer_, data)`), and it is held by a **dedicated rebalancer address**
+> strategy has exactly one operator role (`proposer`, set per clone at
+> `initialize(vault_, proposer_, data)` and rotatable thereafter by the vault owner via
+> `LeveragedAeroVault.setProposer` — read `proposer()` live, do not cache it), and it is held by a
+> **dedicated rebalancer address**
 > (`MAMO_REBALANCER`, `pooled.proposer` in `script/tenderly/leveraged-aero-vnet.json`) — deliberately
 > **not** `MAMO_BACKEND`. The split is the point: account-layer keys must not reach the levered book's
 > operator surface.

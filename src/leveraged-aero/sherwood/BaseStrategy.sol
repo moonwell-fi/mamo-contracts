@@ -33,6 +33,9 @@ abstract contract BaseStrategy is IStrategy {
     error AlreadySettled();
     error ZeroAddress();
 
+    // ── Events ──
+    event ProposerUpdated(address indexed oldProposer, address indexed newProposer);
+
     // ── State ──
     enum State {
         Pending,
@@ -122,6 +125,24 @@ abstract contract BaseStrategy is IStrategy {
     /// @inheritdoc IStrategy
     function proposer() public view returns (address) {
         return _proposer;
+    }
+
+    /// @notice Rotate the operator role. VAULT-ONLY, which on this deployment resolves to the vault
+    ///         OWNER (`LeveragedAeroVault.setProposer` is `onlyOwner`) — i.e. the same MAMO multisig
+    ///         the admin/policy split assigns policy to.
+    /// @dev Without this, a compromised keeper key can only be answered with `settleStrategy` — a
+    ///      terminal unwind of the whole fund. Rotation is not itself a fund-moving power: the new
+    ///      proposer inherits exactly the `onlyProposer` surface, which can neither raise leverage
+    ///      nor move tokens.
+    ///
+    ///      NOT state-gated, deliberately: a key can be lost in `Pending` (before `execute`) just as
+    ///      easily as while `Executed`, and a post-`Settled` rotation is a harmless no-op.
+    /// @param newProposer The replacement operator. Zero is rejected — clearing the role would
+    ///                    disable every keeper op with no way back short of settlement.
+    function setProposer(address newProposer) external onlyVault {
+        if (newProposer == address(0)) revert ZeroAddress();
+        emit ProposerUpdated(_proposer, newProposer);
+        _proposer = newProposer;
     }
 
     /// @notice Current lifecycle state

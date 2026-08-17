@@ -19,6 +19,12 @@ interface IStrategyNav {
     function nav() external view returns (uint256);
 }
 
+/// @dev The vendored strategy's operator-rotation hook. Declared locally for the same reason
+///      {IStrategyNav} is: adding it to `IStrategy` would force every stand-in to grow the selector.
+interface IStrategyProposer {
+    function setProposer(address newProposer) external;
+}
+
 /**
  * @title LeveragedAeroVault
  * @notice Minimal share token + lifecycle driver for ONE vendored
@@ -232,6 +238,29 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         require(IStrategy(strategy_).vault() == address(this), "LAV: strategy not bound to this vault");
         strategy = strategy_;
         emit StrategySet(strategy_);
+    }
+
+    /**
+     * @notice Rotate the bound strategy's operator (proposer) key.
+     * @dev Authority is identical to the derived admin the strategy already answers to — the strategy's
+     *      `setProposer` is `onlyVault`, and this is the only thing that calls it, behind `onlyOwner`.
+     *      NOT a fund-moving power: the new proposer inherits exactly the `onlyProposer` surface, which
+     *      can neither raise leverage (that is `setTargetLtv`, admin-only) nor move tokens.
+     *
+     *      Deliberately NOT set-once, unlike {cloneAndBind}. The share ledger's integrity rests on the
+     *      STRATEGY pointer, not on the operator, so rotating the operator cannot mint or burn anything.
+     *      Without rotation the only answer to a compromised keeper key is `settleStrategy` — a terminal
+     *      unwind of the whole fund.
+     *
+     *      DOES NOT MOVE THE FEE RECIPIENT. `Layout.feeRecipient` is a separate, init-only field on the
+     *      strategy; check `layout().feeRecipient` before treating rotation as a complete response to a
+     *      key compromise.
+     * @param newProposer The replacement operator. The strategy rejects zero.
+     */
+    function setProposer(address newProposer) external onlyOwner {
+        address strategy_ = strategy;
+        require(strategy_ != address(0), "LAV: strategy not set");
+        IStrategyProposer(strategy_).setProposer(newProposer);
     }
 
     /// @notice Open / close new share issuance. Redemptions are unaffected (see {strategyBurn}).
