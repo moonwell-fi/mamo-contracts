@@ -434,7 +434,7 @@ in the path any more. Operationally for the backend:
 
 ## Staging
 
-> **The staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-17:
+> **The staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-18:
 > `LeveragedAeroVault` replaces Sherwood's `SyndicateVault`, so `depositsOpen()` / `setOpenDeposits` /
 > `activateStrategy` / `settleStrategy` / `redeemSettled` are all the in-repo ones, and the vault carries
 > the fund capacity cap (`maxTotalAssets()` / `remainingCapacity()`) the strategy's deposit path checks.
@@ -452,12 +452,12 @@ in the path any more. Operationally for the backend:
 | Network | Base fork (Tenderly Virtual TestNet), **custom** chainId `73578453` (parent Base `8453`) | `chainId` |
 | RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
-| Factory | `0x46108914a8c2EFadF7Ab69e45B5C1cb657A9003E` | `mamo.accountFactory` |
-| Account implementation | `0x9703a770FF62280Cf6220421D83A245dA7B60E24` | `mamo.accountImplementation` |
+| Factory | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
+| Account implementation | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
 | Registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
-| Vault (`LeveragedAeroVault`, shares 12dp) | `0x0B0ECF22087a7FD9b333b46E3AF860591343d6f1` | `pooled.vault` |
-| Strategy clone | `0x339373E847dDd78DFd24a2ce62604Ee3bBE49c3c` | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8D2F111794992AEF0bD4733E2af3c0F800A11E59` | `pooled.vault` |
+| Strategy clone | `0x01BF606144a56AB2e992bd96E5E4BaFdf09287F1` | `pooled.strategyClone` |
 | Strategy `proposer` (rebalancer — fulfils redeems) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
 
