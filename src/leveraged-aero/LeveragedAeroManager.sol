@@ -1065,8 +1065,10 @@ library LeveragedAeroManager {
     ///      collateral and BUY EXACTLY THE DEBT to clear it. Chainlink-priced budget; dust floor.
     ///      EXACT-OUTPUT, with `maxSlippageBps` as both budget and bound: the old form's two INDEPENDENT
     ///      bounds let a router keep the whole gap out of the collateral backing every other holder.
-    ///      FAIL-CLOSED at both sites, since Moonwell releases no collateral while ANY debt is live, and it
-    ///      accrues before measuring, since a stale-low `debtRem` under-buys and strands dust.
+    ///      FAIL-CLOSED at both sites, since Moonwell releases no collateral while ANY debt is live. The
+    ///      accruing reads are belt, not the fix: both reachable callers already accrued both markets this
+    ///      tx (`_settleRepayDebts`, and Phase 2 via `_redeemRepayFromCollected`), so F23 is what closed
+    ///      F12. Kept so a future caller that has not accrued cannot under-buy off a stale-low `debtRem`.
     function _settleShortfall() private {
         Layout storage $ = _layout();
         uint256 cbDebtRem = IMoonwellMarket($.mCbBTC).borrowBalanceCurrent(address(this));

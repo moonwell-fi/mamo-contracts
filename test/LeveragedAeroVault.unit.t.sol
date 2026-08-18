@@ -847,7 +847,8 @@ contract LeveragedAeroVaultUnitTest is Test {
 
     // ---- F24: a donated share must not disable the asset rescue permanently ----
     // Shares reaching this contract are dead weight nothing can burn, so the gate compares EXTERNAL supply
-    // (`totalSupply() == balanceOf(address(this))`), which a donation cannot change.
+    // (`totalSupply() == balanceOf(address(this))`). A donation LOWERS that quantity, but only by the donor's
+    // own shares — every other holder's claim stays external and holds the gate shut.
 
     /// @dev Everyone exits, one wei was donated along the way, and the leftover dust is still rescuable.
     /// MUTATION: restore `totalSupply() == 0` and this reverts.
@@ -873,7 +874,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(usdc.balanceOf(thirdParty), dust, "recovered, not stranded forever");
     }
 
-    /// @dev The other direction: a donation leaves EXTERNAL supply untouched, so a real holder still blocks.
+    /// @dev The other direction: a donor sheds only their own claim, so a real holder still blocks.
     function testADonationDoesNotOpenTheRescueGateEarly() public {
         _settledBook();
 
