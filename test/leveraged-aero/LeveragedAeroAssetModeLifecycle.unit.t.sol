@@ -89,14 +89,10 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     /// @dev Leg-A price (8dp) implied by the pool's sqrtP, for THIS fixture's ordering (legA = token1).
     uint256 internal legAPrice8;
 
-    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
-    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation`, etched below for the probe.
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
-    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
-    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
-    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
-    ///      `setPool` below writes to the etched address's own storage.
+    /// @dev `applyVenue` pins the canonical Slipstream CLFactory, so the mock registry is etched HERE.
     address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
 
     function setUp() public {
@@ -122,15 +118,13 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
         pool.setGauge(address(gauge));
-        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
-        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        // The reward-route probe reads a HARDCODED v2 factory address; place code there.
         vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegA = new MockLendingMarket(address(legA));
         npm = new MockNpm(pool);
-        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
-        // that forgets to unstake first reverts here exactly as it would on chain.
+        // Real ERC-721 custody: a liquidity call that forgets to unstake first reverts, as on chain.
         gauge.setNpm(address(npm));
         router = new MockClSwapRouter();
 
@@ -150,8 +144,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
         template = new LeveragedAerodromeCLStrategy();
-        // `cloneAndBind` is the only path a clone is ever initialized by: `BaseStrategy.initialize`
-        // requires `msg.sender == vault_`.
+        // `cloneAndBind` is the only init path: `BaseStrategy.initialize` requires `msg.sender == vault_`.
         vm.startPrank(owner);
         strategy = LeveragedAerodromeCLStrategy(
             payable(vault.cloneAndBind(address(template), proposer, abi.encode(_params())))
@@ -222,10 +215,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         strategy.execute();
     }
 
-    /// @dev The ADMIN/PROPOSER two-step that replaced the old one-shot `adjustLeverage(target, ...)`:
-    ///      the vault owner (multisig) sets POLICY with `setTargetLtv`, then the proposer (rebalancer)
-    ///      moves the book to it with `adjustLeverage`. Both roles are required — neither can do the
-    ///      other's half — which is exactly what these lifecycle tests exercise implicitly.
+    /// @dev The two-step retarget: the owner sets policy, the proposer moves the book to it. Both bind.
     function _retarget(uint16 target) internal {
         vm.prank(owner);
         strategy.setTargetLtv(target);
@@ -417,14 +407,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         return LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, WIDTH, skewBps_);
     }
 
-    /**
-     * @dev A skewed re-range in asset-mode must land on the SKEWED range and leave a book that is still
-     *      SIZEABLE against it. The second half is the one that matters here: asset-mode's whole deploy
-     *      path goes through `assetModeSplit`, which fails closed on a one-sided range, so a skew that
-     *      produced a range not bracketing spot would not merely be suboptimal — it would brick every
-     *      subsequent `deployIdle` / lever-up. The split is therefore run against the realised range and
-     *      asserted to solve.
-     */
+    /// @dev A skewed re-range lands on the SKEWED range and leaves it SIZEABLE (else deploys would brick).
     function testRerangeSkewedAssetModeSizesAgainstTheSkewedRange() public {
         _execute(SEED);
         uint256 oldTokenId = strategy.layout().tokenId;
@@ -443,20 +426,14 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId");
         assertApproxEqRel(strategy.nav(), navBefore, 1e16, "a no-swap re-range is NAV-neutral");
 
-        // The realised range still brackets spot, so `assetModeSplit` can size against it — asserted by
-        // running the real thing rather than by re-deriving the geometry.
+        // The realised range still brackets spot, asserted by running the real split against it.
         (uint256 c, uint256 u, uint256 a) = _expectedSplit(100_000e6, expLower, expUpper);
         assertEq(c + u, 100_000e6, "the skewed range is still two-sided and sizeable");
         assertGt(a, 0, "...with a real leg-A borrow behind it");
     }
 
-    /**
-     * @dev THE PERSISTENCE THAT MATTERS ECONOMICALLY: the next `deployIdle` sizes its collateral / borrow
-     *      split against the STORED SKEWED range, not against a centred one. The two candidate sizings are
-     *      computed and asserted to DIFFER first, so the test discriminates — an implementation that
-     *      dropped `skewBps` on the way to storage (or re-derived a centred range at mint time) would size
-     *      at `expCCentered` and fail here, not pass on a loose tolerance.
-     */
+    /// @dev The next `deployIdle` sizes against the STORED SKEWED range, not a centred one (the two
+    ///      candidate sizings are asserted to DIFFER first, so a dropped `skewBps` fails here).
     function testDeployIdleAfterSkewedRerangeUsesStoredSkewedRange() public {
         _execute(SEED);
 
@@ -485,27 +462,10 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     }
 
     // ==================== RERANGE MUST NOT DRAW IDLE USDC (asset-mode) ====================
-    //
-    // THE ASSET-MODE HAZARD: `rerangeImpl` re-adds "the collected legs" by reading its two leg BALANCES
-    // after the unwind. In this shape leg B IS the unit of account, so that balance is not just what the
-    // unwind collected — it is also every undeployed deposit and the whole redeem cover budget. Offering
-    // it to the mint would let a re-range silently pull UNLEVERED idle USDC into the LP: value-conserving
-    // but a capability no entrypoint declares (`deployIdle` is THE path that adds idle, and it levers it
-    // first), and it shrinks the cover budget a redeem depends on. The fix snapshots leg B BEFORE the
-    // unwind and offers only the delta — exactly the distinction `redeemUnwindImpl`'s `idleUsdcBefore`
-    // snapshot draws.
-    //
-    // Both tests measure against a BASELINE re-range run from the same post-genesis snapshot with no
-    // extra idle, so the assertion is an exact identity (`idle_after == baseline + seed`) rather than an
-    // inequality: the seeded USDC must be neither consumed nor otherwise moved, to the wei.
+    // Leg B IS the unit of account here, so the post-unwind balance also holds undeployed deposits and the
+    // cover budget; `rerangeImpl` snapshots it BEFORE the unwind. Both tests use a no-extra-idle BASELINE.
 
-    /// @dev Re-range at an EXTREME (but legal) skew with a large idle USDC balance present. THE
-    ///      DIRECTION MATTERS: leg A is token1 here, so pushing the range ABOVE spot (skew 2000: 800
-    ///      ticks below, 3200 above) is what makes the new range hungriest for token0 — the unit of
-    ///      account — while the unwind hands it a mix sized for the OLD range. That is precisely the
-    ///      shape where an implementation reading the raw leg-B balance tops the mint up out of idle.
-    ///      (The mirror skew is not a regression test at all: its range wants MORE leg A and less USDC,
-    ///      so the collected USDC already covers it and no idle is drawn either way.)
+    /// @dev Skew 2000 makes the new range hungriest for token0 (the unit of account) — the leaking shape.
     function testSkewedRerangeDoesNotDrawIdleUsdcIntoTheLp() public {
         _execute(SEED);
 
@@ -532,23 +492,16 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertEq(strategy.layout().skewBps, 2000, "...at the requested skew");
     }
 
-    /// @dev The CENTRED case, after a price drift — the pre-existing leak this fix also closes. Skew is
-    ///      not the cause: any re-range that leaves the collected pair short of the new range's desired
-    ///      ratio would have topped it up out of idle. The drift is what makes the collected ratio wrong
-    ///      at an unchanged `skewBps`.
+    /// @dev The CENTRED case after a drift: any collected pair short of the new ratio would top up too.
     function testCenteredRerangeAfterAPriceDriftDoesNotDrawIdleUsdc() public {
         _execute(SEED);
 
-        // Drift the pool (spot AND TWAP together, so the calm-gate stays open) and keep the leg-A oracle
-        // on the same mark, or the fixture would be testing an oracle/pool divergence instead.
+        // Drift spot AND TWAP together (calm-gate stays open), keeping the leg-A oracle on the same mark.
         int24 newTick = TICK + 300;
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
         pool.setTick(newTick);
         legAFeed.setAnswer(int256(_legAPriceFromSqrtP(pool.sqrtPriceX96())));
-        // FIXTURE ONLY: `MockNpm` custodies exactly what it was minted, so after a price move its
-        // `collect` owes a leg-A amount re-priced at the NEW sqrtP that it never received. Float it, the
-        // way a real pool's other LPs do. Nothing here touches the strategy's USDC, which is what the
-        // assertion below is about.
+        // FIXTURE ONLY: float the leg A the post-move `collect` owes but `MockNpm` never received.
         legA.mint(address(npm), 1_000e8);
 
         uint256 snap = vm.snapshotState();
@@ -572,16 +525,10 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     }
 
     // ============ RERANGE WITH SPOT OUTSIDE THE BAND: THE ONE-SIDED REOPEN (F06) ============
-    //
-    // A rerange swaps nothing, so it can only re-add what its own unwind collected. Once spot has left
-    // the old band the position is 100% one leg, and the straddling `skewedTickRange` band needs both —
-    // the mint computed zero liquidity and reverted inside the pool, so the one op that exists to chase
-    // a departed price was unusable in exactly that state. `rerangeTickRange` now places the band wholly
-    // on the populated side.
+    // A rerange swaps nothing, so once spot leaves the old band the position is 100% one leg and the
+    // straddling band's mint reverted on zero liquidity. `rerangeTickRange` now anchors the populated side.
 
-    /// @dev Move spot AND the TWAP to `newTick` (calm-gate stays open), re-derive the leg-A oracle mark,
-    ///      and float the NPM both tokens — `MockNpm` custodies only what it was minted, so after a price
-    ///      move its `collect` owes an amount re-priced at the new `sqrtP` that it never received.
+    /// @dev Move spot AND TWAP to `newTick`, re-derive the leg-A mark, and float the NPM both tokens.
     function _moveSpotTo(int24 newTick) internal {
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
         pool.setTick(newTick);
@@ -591,8 +538,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         usdc.mint(address(npm), 100_000_000e6);
     }
 
-    /// @dev Walk spot clear ABOVE the stored band. A CL position priced above its range holds token1
-    ///      only — leg A here — so this is the branch that must reopen AT/BELOW spot.
+    /// @dev Walk spot clear ABOVE the stored band: token1 (leg A) only, so the reopen must land at/below.
     function _departTheBandUpwards() internal {
         _execute(SEED);
         _moveSpotTo(strategy.layout().posTickUpper + 5000);
@@ -620,8 +566,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGe(usdc.balanceOf(address(strategy)), idleSeed, "pre-existing idle USDC was not drawn in");
     }
 
-    /// @dev The caller's floor still binds on the side that HAS a balance, and a nonzero floor on the
-    ///      empty side is unsatisfiable by construction — the operator trap the one-sided reopen creates.
+    /// @dev The floor still binds on the populated side; on the empty side any nonzero floor is impossible.
     function testRerangeStillFloorsTheOneSidedReopen() public {
         _departTheBandUpwards();
 
@@ -636,21 +581,18 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         strategy.rerange(WIDTH, SKEW_CENTERED, 1, 0);
     }
 
-    /// @dev Neither leg collected ⇒ no populated side to anchor on. Asserted at the library, which is the
-    ///      only place the state is constructible without an empty position.
+    /// @dev Neither leg collected ⇒ no populated side to anchor on; asserted at the library.
     function testRerangeTickRangeRejectsATwoSidedZero() public {
         vm.expectRevert(LeveragedAeroValuation.NothingToRerange.selector);
         LeveragedAeroValuation.rerangeTickRange(address(pool), SPACING, WIDTH, SKEW_CENTERED, 0, 0);
     }
 
-    /// @dev The one-sided branch is CONDITIONAL, not the new default: once price is back inside the
-    ///      position's band the unwind collects both legs and the rerange recentres exactly as before.
+    /// @dev The one-sided branch is CONDITIONAL: back inside the band, the rerange recentres as before.
     function testRerangeRecentresOnceSpotIsInsideTheBandAgain() public {
         _departTheBandUpwards();
         vm.prank(proposer);
         strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
 
-        // Walk spot into the middle of the band the reopen just opened.
         int24 lower = strategy.layout().posTickLower;
         int24 upper = strategy.layout().posTickUpper;
         _moveSpotTo(lower + (upper - lower) / 2);
@@ -665,9 +607,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGt(strategy.layout().posTickUpper, pool.tick(), "...which brackets spot");
     }
 
-    /// @dev WHAT THE REOPEN DOES NOT BUY. The asset-mode deploy paths size through `_rangeRatio`, which
-    ///      needs a range two-sided against spot; a band abutting spot from one side is not one. They stay
-    ///      closed until price enters the new band — `flatten` + `redeploy` is the unconditional cure.
+    /// @dev Deploys stay closed until price enters the new band: `_rangeRatio` needs a two-sided range.
     function testDeployIdleStaysClosedAfterAOneSidedReopen() public {
         _departTheBandUpwards();
         vm.prank(proposer);
@@ -706,11 +646,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         );
 
         uint16 newTarget = 6000;
-        // FUND FIRST, THEN PROBE. The sizing credits the raw balance (`assetModeLeverUpPair`'s
-        // fixed point), so a probe taken before the mint would describe a different funding regime
-        // than the one the op runs in. With raw idle generously above the draw, the fixed point
-        // clamps to the naive delta — the RAW-FUNDED regime, i.e. this op's behaviour before idle
-        // USDC started being supplied on deposit. The zero-raw regime has its own test below.
+        // FUND FIRST, THEN PROBE: the sizing credits the raw balance. This is the RAW-FUNDED regime.
         usdc.mint(address(strategy), 500_000e6);
         (uint256 expBorrow, uint256 expLpUsdc) = _expectedLeverUpPair(newTarget);
         assertGt(expLpUsdc, 0, "the op must actually need pairing USDC, or the test proves nothing");
@@ -765,49 +701,12 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved: value moved from idle into the LP");
     }
 
-    /**
-     * @dev THE ZERO-RAW-IDLE REGIME — the one "no idle USDC sits dead" makes the normal case. With
-     *      every USDC supplied to Moonwell there is no raw balance for the pairing to draw on, and the
-     *      pre-change contract refused the whole op with `InsufficientIdleForLeverUp`. It must now
-     *      fund `U′` out of the collateral instead, and — this is the part that is not automatic —
-     *      still land ON target: the redeem shrinks the very collateral base the LTV is measured
-     *      against, so a naively-sized delta would overshoot (`ltv·C / (C − U′)`), which on an
-     *      aggressive target trips `_assertHealthy`'s `maxLtvBps` and reverts the op outright.
-     *
-     *      Asserted here: the op succeeds from a genuinely zero raw balance, the collateral REALLY
-     *      shrank (so the funding came from where we claim), the post-op LTV is the requested target
-     *      and not the overshoot, and NAV is conserved across the whole move.
-     */
-    /**
-     * @dev THE ROLLBACK PIN for the funding path above — successor to the deleted
-     *      `testAssetModeLeverUpRevertsWhenIdleIsInsufficientAndLeavesStateUntouched`, which went away
-     *      with the bound it exercised (`InsufficientIdleForLeverUp` is provably unreachable from
-     *      `adjustLeverage` now) and left NOTHING pinning the failure mode that replaced it.
-     *
-     *      WHAT REPLACED IT: with the pairing funded out of collateral, the binding constraint is
-     *      MOONWELL's — a mid-op `redeemUnderlying` refused because the market is cash-short or the draw
-     *      crosses the free-collateral line. The contract for that is `MoonwellRedeemFailed(err)` with
-     *      the WHOLE op rolled back and nothing moved: deliberately not a partial fill and not a silent
-     *      cap.
-     *
-     *      WHAT THIS TEST ACTUALLY PINS, stated precisely because the obvious claim is wrong: it does
-     *      NOT pin `_leverUp`'s internal ordering (size, then materialise, then borrow). Every assertion
-     *      below runs AFTER a reverted call, so it observes rolled-back state — inverting the
-     *      materialise/borrow order still passes, because the EVM undoes both either way. What it does
-     *      pin is the contract a caller can actually observe: the refusal surfaces as the TYPED
-     *      `MoonwellRedeemFailed(err)` rather than an untyped failure downstream, the op is atomic
-     *      (nothing partially applied), the POLICY half is not rolled back with it, and the whole thing
-     *      is retry-able once the market recovers.
-     *
-     *      Pinning the ordering itself would need a mock that observes intermediate state mid-call
-     *      (a reentrant hook on `redeemUnderlying`); that is a separate piece of machinery, noted as a
-     *      follow-up rather than faked here.
-     */
+    /// @dev A refused mid-op `redeemUnderlying` surfaces as the TYPED `MoonwellRedeemFailed(err)`, rolls the
+    ///      op back whole, leaves the POLICY half standing and stays retry-able. Not an ordering pin.
     function testAssetModeLeverUpRollsBackWhenMoonwellRefusesTheMidOpRedeem() public {
         _execute(SEED);
 
-        // Same zero-raw steady state as the success test above: the pairing MUST come from collateral,
-        // so the mid-op redeem is on the critical path and its refusal is reachable.
+        // Zero-raw steady state, so the mid-op redeem is on the critical path and its refusal reachable.
         uint256 dust = usdc.balanceOf(address(strategy));
         if (dust > 0) {
             vm.prank(address(strategy));
@@ -826,8 +725,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         uint128 liqBefore = npm.liquidityOf(tokenIdBefore);
         uint16 targetBefore = strategy.targetLtvBps();
 
-        // Moonwell refuses the redeem (cash-short / free-collateral line), the way a live market does:
-        // a nonzero return code, nothing moved.
+        // Moonwell refuses the redeem the way a live market does: a nonzero return code, nothing moved.
         mUsdc.setSupplyErrors(0, 9);
 
         vm.prank(owner);
@@ -836,8 +734,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.expectRevert(abi.encodeWithSelector(LeveragedAeroManager.MoonwellRedeemFailed.selector, uint256(9)));
         strategy.adjustLeverage(0, 0);
 
-        // NOTHING MOVED. Debt is the assertion that matters most: the refusal must land before the
-        // borrow, or the fund is left levered with no pairing USDC.
+        // NOTHING MOVED — above all no debt: the refusal must land before the borrow.
         (uint256 collateralAfter, uint256 debtAfter) = _collateralAndDebt();
         assertEq(mLegA.borrowBalance(address(strategy)), debtLegABefore, "no leg-A debt was taken on");
         assertEq(debtAfter, debtBefore, "debt unchanged");
@@ -846,8 +743,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertEq(strategy.layout().tokenId, tokenIdBefore, "same position");
         assertEq(npm.liquidityOf(tokenIdBefore), liqBefore, "no liquidity was added");
         assertEq(strategy.nav(), navBefore, "NAV unchanged");
-        // The standing target IS updated - `setTargetLtv` is a separate admin op that never touched a
-        // market. The BOOK simply did not move to it, which is the retry-able state.
+        // The standing target IS updated; only the BOOK did not move — the retry-able state.
         assertEq(strategy.targetLtvBps(), newTarget, "policy stands; the book is just not there yet");
         assertTrue(targetBefore != newTarget, "precondition: the retarget was a real change");
 
@@ -859,11 +755,12 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertApproxEqAbs((debtFinal * 10_000) / collateralFinal, uint256(newTarget), 2, "the retry lands on target");
     }
 
+    /// @dev THE ZERO-RAW-IDLE REGIME: the pairing comes out of the collateral and must STILL land on target
+    ///      — the redeem shrinks the base the LTV is measured against, so a naive delta overshoots.
     function testAssetModeLeverUpFundsThePairFromCollateralWhenRawIdleIsZero() public {
         _execute(SEED);
 
-        // Sweep the genesis dust so the raw balance is EXACTLY zero — the steady state under
-        // `supplyIdleImpl`, and the state the old bound could not lever out of at all.
+        // Sweep the genesis dust so the raw balance is EXACTLY zero — the `supplyIdleImpl` steady state.
         uint256 dust = usdc.balanceOf(address(strategy));
         if (dust > 0) {
             vm.prank(address(strategy));
@@ -886,17 +783,14 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         // 1. The funding really came out of the collateral, by exactly the derived `U′`.
         assertLt(collateralAfter, collateralBefore, "the pairing USDC was redeemed from the collateral");
         assertApproxEqRel(collateralBefore - collateralAfter, expLpUsdc, 1e15, "the collateral draw IS the derived U'");
-        // Essentially all of it went into the LP: what stays raw is the CL add's own geometry
-        // truncation (`getLiquidityForAmounts` takes the MIN over the two sides), ~1e-3 USDC here.
+        // Essentially all of it went into the LP; what stays raw is CL add-truncation dust (~1e-3 USDC).
         assertLt(usdc.balanceOf(address(strategy)), 1e4, "the redeemed USDC went into the LP, bar add-truncation dust");
 
-        // 2. ON TARGET, not past it. The naive (uncorrected) sizing would land at
-        //    `ltv·C / (C − U′)` — ~625 bps high here — so this is the assertion that discriminates.
+        // 2. ON TARGET, not the ~625 bps overshoot the uncorrected `ltv·C / (C − U′)` sizing would land.
         assertApproxEqAbs(
             (debtUsdcAfter * 10_000) / collateralAfter, uint256(newTarget), 2, "LTV == new target, not the overshoot"
         );
 
-        // 3. Exactly the sized borrow, leg B still never borrowed, and the hedge still holds.
         assertEq(mLegA.borrowBalance(address(strategy)) - debtLegABefore, expBorrow, "leg-A debt grew by exactly A");
         assertEq(mUsdc.borrowBalance(address(strategy)), 0, "leg B (the asset) is still never borrowed");
         assertApproxEqRel(
@@ -906,27 +800,14 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
             "post-lever-up: LP leg-A == leg-A debt (hedge preserved on the collateral-funded path too)"
         );
 
-        // 4. Value MOVED (collateral → LP), it was not created or destroyed.
         assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved across the collateral-funded lever-up");
     }
 
-    /**
-     * @dev THE INTERMEDIATE FUNDING REGIME — `0 < raw < U′`, the state a real book lives in most of
-     *      the time (a keeper float, a rerange remainder, an IL-cover leftover). This is the ONLY
-     *      regime where both terms of the fixed point are load-bearing at once: the `ltv·R` credit in
-     *      the numerator vanishes at `raw == 0`, and the clamp discards the whole correction when
-     *      `raw ≥ U′` — so a sign or scale error in that term is invisible to both endpoint tests and
-     *      shows up only here.
-     *
-     *      Asserted: the raw float is consumed FIRST and in full, only the shortfall `U′ − R` comes
-     *      out of the collateral, the post-op LTV is the requested target (not the overshoot, not the
-     *      over-corrected undershoot), and NAV is conserved.
-     */
+    /// @dev THE INTERMEDIATE REGIME `0 < raw < U′` — the only one where both terms of the fixed point bind,
+    ///      so the float is consumed first and only the shortfall `U′ − R` comes out of the collateral.
     function testAssetModeLeverUpLandsOnTargetWithAPartialRawFloat() public {
         _execute(SEED);
-        // Sweep the genesis dust, then leave a float sized strictly inside (0, U′): half the U′ the
-        // zero-raw probe reports (the real U′ at this raw is slightly LARGER — the credit scales the
-        // whole pair up — so the float stays strictly short of it).
+        // A float strictly inside (0, U′): half the zero-raw probe's U′, and the real U′ here is LARGER.
         uint256 dust = usdc.balanceOf(address(strategy));
         if (dust > 0) {
             vm.prank(address(strategy));
@@ -957,11 +838,9 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
             "the collateral draw is exactly the shortfall U' - R, not the whole U'"
         );
 
-        // 2. ON target — the independent pin. An `ltv·R` term with the wrong sign or scale lands the
-        //    book off-target in exactly this regime.
+        // 2. ON target — an `ltv·R` term with the wrong sign or scale lands off-target in this regime.
         assertApproxEqAbs((debtUsdcAfter * 10_000) / collateralAfter, uint256(newTarget), 2, "LTV == new target");
 
-        // 3. Exactly the sized borrow, and value only moved.
         assertEq(mLegA.borrowBalance(address(strategy)) - debtLegABefore, expBorrow, "leg-A debt grew by exactly A");
         assertApproxEqRel(strategy.nav(), navBefore, 1e15, "NAV conserved across the mixed-funded lever-up");
     }
@@ -987,11 +866,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
     // ==================== TARGET-LTV PERSISTENCE (asset-mode) ====================
 
-    /// @dev The ADMIN's `setTargetLtv` is what sets the fund's STANDING target — the same contract
-    ///      `rerange`'s `width` has, except the write is policy and lives behind `onlyAdmin`.
-    ///      `adjustLeverage` CONSUMES it (both directions) and never writes it. The dedicated getter and
-    ///      `layout()` are the same storage read, so they are asserted together at every step: they can
-    ///      never legitimately disagree.
+    /// @dev `setTargetLtv` is the only writer of the STANDING target; `adjustLeverage` only consumes it.
     function testSetTargetLtvPersistsTheStandingTargetAndAdjustLeverageConsumesIt() public {
         _execute(SEED);
         assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "genesis: the init target IS the standing target");
@@ -1062,9 +937,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertLt(staleLtv, 5900, "the stale-target sizing really would have dragged realized LTV down");
     }
 
-    /// @dev An out-of-band target is refused at the ADMIN entrypoint and stores NOTHING — the persist
-    ///      sits behind the `targetLtvBps_ <= maxLtvBps` gate, so a rejected value can never become the
-    ///      standing target that later redeploys size at.
+    /// @dev An out-of-band target is refused and stores NOTHING, so redeploys keep sizing at the old one.
     function testSetTargetLtvAboveMaxRevertsAndLeavesTheStoredTargetUntouched() public {
         _execute(SEED);
         usdc.mint(address(strategy), 500_000e6); // idle is NOT what blocks it
@@ -1126,18 +999,10 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGe(healthAfter, 12_000, "health restored above the minimum");
     }
 
-    /// @dev THE CLAMP, in the collateral≈0 tail it exists for. `deleverageImpl` targets
-    ///      `targetDebt = collateral × 1e4 / targetHealth`; once collateral is dust that floors to 0, so
-    ///      the requested `repayUsd == debtBefore` and `_leverDown`'s orphaned-NFT guard
-    ///      (`repayUsd >= debtUsd → FullUnwindNotSupported`) would fire — turning the PERMISSIONLESS
-    ///      health valve OFF in exactly the distressed state it exists for. The clamp
-    ///      (`repayUsd = debtBefore - 1`) keeps `num < den` so ≥1 liquidity and the re-stake survive.
-    ///
-    ///      Construction: after execute, set the mUSDC exchange rate to `1e18 / mBal + 1`, which drives
-    ///      the collateral read to EXACTLY 1 unit — `collateral = mBal × rate / 1e18 ∈ [1e18, 1e18+mBal)`
-    ///      / 1e18 = 1. That is the only collateral value (with 0) for which `targetDebt` floors to 0
-    ///      while health can still strictly improve. Against the clamp deletion this reverts
-    ///      `FullUnwindNotSupported`.
+    /// @dev In the collateral-dust tail `targetDebt` floors to 0, so `repayUsd == debtBefore` would trip
+    ///      `_leverDown`'s orphaned-NFT guard and switch the PERMISSIONLESS valve off exactly where it is
+    ///      needed; the `repayUsd = debtBefore - 1` clamp keeps ≥1 liquidity and the re-stake alive.
+    ///      MUTATION: without the clamp this reverts `FullUnwindNotSupported`.
     function testDeleverageClampKeepsTheValveAliveWhenCollateralIsDust() public {
         _execute(SEED);
         uint256 mBal = mUsdc.balanceOf(address(strategy));
@@ -1160,13 +1025,9 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     }
 
     // ============ THE DELEVERAGE RECOVERY GATE'S COMPTROLLER READS (F27) ============
-    //
-    // `deleverageImpl` discards the error code on the BEFORE `getAccountLiquidity` and checks it only on
-    // the AFTER read. That is deliberate and strictly tighter — see the comment at the before-read — and
-    // these two tests are what make the claim checkable rather than asserted.
+    // `deleverageImpl` checks the `getAccountLiquidity` error code only on the AFTER read, deliberately.
 
-    /// @dev Reach the unhealthy state the permissionless valve exists for, without touching prices (so
-    ///      the LP stays two-sided and the unwind's collected leg A can cover the repay).
+    /// @dev Reach the unhealthy state without touching prices, so the LP stays two-sided and can repay.
     function _armAnUnhealthyBook() internal {
         _execute(SEED);
         mUsdc.setExchangeRateStored(0.5e18);
@@ -1174,11 +1035,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertLt((c * 10_000) / d, 12_000, "fixture must actually be unhealthy, or the valve refuses");
     }
 
-    /// @dev A comptroller that ERRS is caught on the AFTER read and reverts the whole op. The conditions
-    ///      that raise `err` (zero oracle price, snapshot failure on an entered market) cannot be cleared
-    ///      by this op — nothing here exits a market — so the before read would have erred too, which is
-    ///      exactly why capturing it there buys nothing. Mutation: drop the `err != 0` clause and this
-    ///      succeeds, because an errored read reports `shortfallAfter == 0`.
+    /// @dev A comptroller that ERRS is caught on the AFTER read and reverts the whole op.
+    ///      MUTATION: drop the `err != 0` clause and this succeeds — an errored read reports zero shortfall.
     function testDeleverageRevertsWhenTheComptrollerErrsOnTheAfterRead() public {
         _armAnUnhealthyBook();
         comptroller.setAccountLiquidityError(3);
@@ -1188,10 +1046,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         strategy.deleverage(0);
     }
 
-    /// @dev The other half of the recovery gate: the Moonwell shortfall must have been cleared or
-    ///      REDUCED. Held constant across the op, the repay is rolled back even though the strategy's own
-    ///      health measure improved. Mutation: delete the `shortfallAfter >= shortfallBefore` clause and
-    ///      this succeeds.
+    /// @dev The other half of the gate: a Moonwell shortfall held constant rolls the repay back, even
+    ///      though the strategy's own health improved. MUTATION: delete the `>= shortfallBefore` clause.
     function testDeleverageRejectsANonReducedShortfall() public {
         _armAnUnhealthyBook();
         comptroller.setShortfall(1e18); // same value on both reads
@@ -1271,18 +1127,8 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         );
     }
 
-    /**
-     * @dev Companion to the crux: every leg-B (== USDC) swap must be the IDENTITY, i.e. never routed.
-     *      Without the early-returns in `_sweepLegToUsdc` / `_redeemCoverShortfall`
-     *      the redeem would look up a USDC/USDC swap pool — which does not exist — and either revert or
-     *      route at an unrelated venue.
-     *
-     *      The proof is airtight by CONSTRUCTION rather than by balance-watching: no USDC→USDC rate is
-     *      ever registered on the router, and an unregistered pair REVERTS (`MockRouterNoRate`, asserted
-     *      directly below). A full partial-redeem cycle therefore completing is proof that no USDC→USDC
-     *      leg was attempted. The leg-A legs are separately shown to have really happened, so the test
-     *      cannot pass by the router simply going unused.
-     */
+    /// @dev Every leg-B (== USDC) swap must be the IDENTITY, never routed: no USDC→USDC rate is registered
+    ///      and an unregistered pair REVERTS, so a completing redeem cycle (with real leg-A legs) is proof.
     function testAssetLegSwapsAreTheIdentityAndNeverRouted() public {
         // The router rejects the pair the guards must never request.
         assertEq(router.rateE18(address(usdc), address(usdc)), 0, "no USDC->USDC rate is configured");

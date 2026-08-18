@@ -77,13 +77,8 @@ abstract contract BaseStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev VAULT-ONLY, gated against the ARGUMENT — nothing is stored yet, so `_vault` cannot be the
-    ///      reference and `onlyVault` cannot be used. That makes `LeveragedAeroVault.cloneAndBind` the
-    ///      only way a clone ever gets initialized, which closes BOTH front-run variants on the
-    ///      deploy-then-initialize flow: a rogue PROPOSER (the attacker names the operator key) and a
-    ///      rogue INITDATA — `initData` writes `targetLtvBps` / `maxLtvBps`, i.e. the policy the
-    ///      admin/proposer split deliberately keeps out of the operator's hands. The `vault_ == 0` belt
-    ///      below is kept: it is now unreachable through this check, and costs nothing.
+    /// @dev VAULT-ONLY against the ARGUMENT (`_vault` is not stored yet), so
+    ///      `LeveragedAeroVault.cloneAndBind` is the only initializer: no PROPOSER or `initData` front-run.
     function initialize(address vault_, address proposer_, bytes calldata data) external {
         if (_initialized) revert AlreadyInitialized();
         if (msg.sender != vault_) revert NotVault();
@@ -127,18 +122,10 @@ abstract contract BaseStrategy is IStrategy {
         return _proposer;
     }
 
-    /// @notice Rotate the operator role. VAULT-ONLY, which on this deployment resolves to the vault
-    ///         OWNER (`LeveragedAeroVault.setProposer` is `onlyOwner`) — i.e. the same MAMO multisig
-    ///         the admin/policy split assigns policy to.
-    /// @dev Without this, a compromised keeper key can only be answered with `settleStrategy` — a
-    ///      terminal unwind of the whole fund. Rotation is not itself a fund-moving power: the new
-    ///      proposer inherits exactly the `onlyProposer` surface, which can neither raise leverage
-    ///      nor move tokens.
-    ///
-    ///      NOT state-gated, deliberately: a key can be lost in `Pending` (before `execute`) just as
-    ///      easily as while `Executed`, and a post-`Settled` rotation is a harmless no-op.
-    /// @param newProposer The replacement operator. Zero is rejected — clearing the role would
-    ///                    disable every keeper op with no way back short of settlement.
+    /// @notice Rotate the operator role, rejecting zero. VAULT-ONLY, which here resolves to the vault
+    ///         OWNER (`LeveragedAeroVault.setProposer` is `onlyOwner`).
+    /// @dev Not fund-moving: `onlyProposer` can neither raise leverage nor move tokens. Deliberately NOT
+    ///      state-gated — a key can be lost in `Pending` too, and a post-`Settled` rotation is a no-op.
     function setProposer(address newProposer) external onlyVault {
         if (newProposer == address(0)) revert ZeroAddress();
         emit ProposerUpdated(_proposer, newProposer);

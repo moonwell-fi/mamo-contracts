@@ -4,7 +4,6 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @dev The slice of the position manager this gauge needs for custody.
 interface IMockNpmCustody {
     function transferFrom(address from, address to, uint256 tokenId) external;
 }
@@ -18,12 +17,8 @@ contract MockCLGauge {
     // Pool this gauge is bound to (read by _validateAndStore's gauge->pool binding check).
     address public pool;
 
-    /// @notice The position manager to take real ERC-721 custody through. OPT-IN: when unset the gauge
-    ///         only tracks the stake set, preserving the behaviour older suites rely on.
-    /// @dev Wired by the leveraged-aero suites so a staked NFT is actually OWNED by the gauge, the way
-    ///      the real CLGauge holds it. Without custody, `MockNpm` would still authorise the strategy to
-    ///      touch a staked position — so a liquidity-touch-before-unstake bug passes the suite and
-    ///      reverts on chain.
+    /// @notice Position manager for real ERC-721 custody. OPT-IN: unset ⇒ the gauge only tracks the stake set.
+    /// @dev Without custody a liquidity-touch-before-unstake bug passes the suite and reverts on chain.
     address public npm;
 
     // Amount of AERO to pay out when withdraw() is called
@@ -48,7 +43,6 @@ contract MockCLGauge {
         pool = pool_;
     }
 
-    /// @notice Enable real ERC-721 custody through `npm_` (see the `npm` field).
     function setNpm(address npm_) external {
         npm = npm_;
     }
@@ -58,10 +52,7 @@ contract MockCLGauge {
         aeroToPayOnWithdraw = amount;
     }
 
-    /// @dev Per-depositor stake set, mirroring the real Slipstream `CLGauge._stakes`. Modelled on
-    ///      purpose: the previous stub let `withdraw` succeed on an NFT the gauge never held, which
-    ///      made an unstaked-but-still-referenced position indistinguishable from a staked one and
-    ///      hid a permanent-DoS class of bug from the whole suite.
+    /// @dev Per-depositor stake set, mirroring the real Slipstream `CLGauge._stakes`.
     mapping(address => mapping(uint256 => bool)) internal _staked;
 
     error MockCLGaugeNotStaked();
@@ -71,13 +62,11 @@ contract MockCLGauge {
         lastDepositor = msg.sender;
         depositCallCount++;
         _staked[msg.sender][tokenId] = true;
-        // Real custody when wired: the gauge pulls the NFT using the approval the depositor just gave.
         if (npm != address(0)) IMockNpmCustody(npm).transferFrom(msg.sender, address(this), tokenId);
     }
 
     function withdraw(uint256 tokenId) external {
-        // The real CLGauge reverts when the caller is not the staked depositor (it transfers the NFT
-        // out of the gauge's own custody). Enforced here so a test can observe the orphaned-NFT state.
+        // The real CLGauge reverts when the caller is not the staked depositor.
         if (!_staked[msg.sender][tokenId]) revert MockCLGaugeNotStaked();
         _staked[msg.sender][tokenId] = false;
 
@@ -90,9 +79,7 @@ contract MockCLGauge {
         if (aeroToPayOnWithdraw > 0) {
             IERC20(aeroToken).safeTransfer(msg.sender, aeroToPayOnWithdraw);
         }
-        // The auto-claim CONSUMES the accrual: the real gauge zeroes `rewards[tokenId]` when it pays.
-        // Modelled because `nav()` now prices `earned()` AND the held balance — a mock whose `earned()`
-        // survived its own claim would let a double-count in that term pass the suite.
+        // The auto-claim CONSUMES the accrual, as the real gauge does (`nav()` prices earned + balance).
         earnedAmount = 0;
     }
 
@@ -116,7 +103,7 @@ contract MockCLGauge {
         if (aeroToPayOnGetReward > 0) {
             IERC20(aeroToken).safeTransfer(msg.sender, aeroToPayOnGetReward);
         }
-        // ...and the claim CONSUMES the accrual — see the note in `withdraw`.
+        // ...and the claim consumes the accrual — see `withdraw`.
         earnedAmount = 0;
     }
 
@@ -128,12 +115,7 @@ contract MockCLGauge {
         earnedAmount = amount;
     }
 
-    /// @dev `"NA"` FOR A PAIR THIS GAUGE DOES NOT HAVE STAKED — the real Slipstream behaviour, and the
-    ///      reason `LeveragedAeroValuation._earnedRead` wraps the call in a `try` at all. Modelled on
-    ///      purpose: the earlier stub ignored `account` entirely and handed `earnedAmount` to ANY caller,
-    ///      so nothing in the suite pinned WHO the accrual is read for. A read that asked about the wrong
-    ///      subject (the caller instead of the strategy, say) returned the right number for the wrong
-    ///      reason and passed — the same class of hole the `_staked` set already closed for `withdraw`.
+    /// @dev Reverts `"NA"` for an unstaked pair, as real Slipstream does — why `_earnedRead` uses `try`.
     function earned(address account, uint256 tokenId) external view returns (uint256) {
         require(_staked[account][tokenId], "NA");
         return earnedAmount;

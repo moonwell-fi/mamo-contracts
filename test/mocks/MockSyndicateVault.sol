@@ -19,10 +19,8 @@ contract MockSyndicateVault is ERC20 {
     /// @notice When true, {strategyMint} reverts (deposits blocked); burns are unaffected.
     bool public paused;
 
-    /// @notice FUND CAPACITY ceiling (USDC 6dp) read by `LeveragedAerodromeCLStrategy.deposit`.
-    ///         `0` == unlimited, matching the real {LeveragedAeroVault}. The selector MUST exist here
-    ///         even when unused: the strategy makes a TYPED call, which reverts with no returndata
-    ///         against a stand-in that lacks it.
+    /// @notice Capacity ceiling (USDC 6dp), `0` == unlimited; the selector must exist even when unused,
+    ///         since the strategy calls it typed.
     uint256 public maxTotalAssets;
 
     constructor() ERC20("Mock Syndicate Vault", "svUSDC") {}

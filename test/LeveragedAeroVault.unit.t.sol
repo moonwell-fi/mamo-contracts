@@ -51,10 +51,6 @@ contract LeveragedAeroVaultUnitTest is Test {
 
     // ==================== HELPERS ====================
 
-    /// @dev `cloneAndBind` is the ONLY way a strategy pointer is ever set: `BaseStrategy.initialize` is
-    ///      vault-only, so the deploy-then-bind flow — and `setStrategy` with it — no longer exists.
-    ///      `MockVaultStrategy.assetToken` is immutable and survives the clone; its storage starts fresh
-    ///      and `initialize` writes the vault + proposer.
     function _bind() internal {
         vm.prank(owner);
         strategy = MockVaultStrategy(vault.cloneAndBind(address(template), thirdParty, ""));
@@ -115,10 +111,7 @@ contract LeveragedAeroVaultUnitTest is Test {
     }
 
     // ==================== CLONE AND BIND ====================
-    //
-    // The only wiring path there is. `setStrategy` was deleted with F13: `BaseStrategy.initialize`
-    // requires `msg.sender == vault_`, so an externally-initialized clone cannot exist, and an
-    // UNinitialized one cannot be bound either (`_bind` asks it for `vault()`, which reads zero).
+    // `setStrategy` is gone (F13): `initialize` requires `msg.sender == vault_`, so only this path binds.
 
     function testCloneAndBindHappyPath() public {
         vm.expectEmit(false, false, false, false, address(vault));
@@ -151,8 +144,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.cloneAndBind(address(template), thirdParty, "");
     }
 
-    /// @dev `_bind` re-checks the binding: a template whose `initialize` ignores the vault argument
-    ///      still cannot slip a foreign binding through.
+    /// @dev `_bind` re-checks: a template whose `initialize` ignores the vault cannot slip a foreign binding.
     function testCloneAndBindRejectsForeignVaultBinding() public {
         MisboundStrategyStub stub = new MisboundStrategyStub(makeAddr("someOtherVault"));
 
@@ -161,9 +153,8 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.cloneAndBind(address(stub), thirdParty, "");
     }
 
-    /// @dev Set-once, on the only path there is. The share ledger's integrity rests entirely on
-    ///      `msg.sender == strategy`, so a rotatable pointer would let a future owner mint freely
-    ///      against existing holders.
+    /// @dev Set-once: the ledger rests on `msg.sender == strategy`, so a rotatable pointer would let a
+    ///      future owner mint freely against existing holders.
     function testBindIsSetOnce() public {
         vm.startPrank(owner);
         vault.cloneAndBind(address(template), thirdParty, "");
@@ -286,9 +277,7 @@ contract LeveragedAeroVaultUnitTest is Test {
     }
 
     // ==================== SET PROPOSER (F26) ====================
-    //
-    // Without rotation the only answer to a compromised keeper key is `settleStrategy` — a terminal
-    // unwind of the whole fund. The strategy pointer stays set-once; only the OPERATOR rotates.
+    // Without rotation a compromised keeper key forces `settleStrategy`; only the OPERATOR rotates.
 
     function testSetProposerRotatesTheOperator() public {
         _bind();
@@ -315,8 +304,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.setProposer(makeAddr("newProposer"));
     }
 
-    /// @dev Clearing the role would disable every keeper op with no way back short of settlement, so
-    ///      the strategy refuses it and the vault does not paper over that.
+    /// @dev Clearing the role would disable every keeper op short of settlement, so the strategy refuses it.
     function testSetProposerRejectsZero() public {
         _bind();
 
@@ -858,18 +846,14 @@ contract LeveragedAeroVaultUnitTest is Test {
     }
 
     // ---- F24: a donated share must not disable the asset rescue permanently ----
-    //
-    // Shares that reach this contract are permanent dead weight — `rescueERC20` refuses to move them,
-    // nothing burns them, and no other path touches them. On a `totalSupply() == 0` gate that made one
-    // wei of donated shares a permanent lock on the post-settlement dust. The gate is now
-    // `totalSupply() == balanceOf(address(this))`: EXTERNAL supply, which a donation cannot change.
+    // Shares reaching this contract are dead weight nothing can burn, so the gate compares EXTERNAL supply
+    // (`totalSupply() == balanceOf(address(this))`), which a donation cannot change.
 
-    /// @dev THE FINDING. Everyone exits, one wei was donated to the vault along the way, and the
-    ///      leftover dust is still rescuable. Mutation: restore `totalSupply() == 0` and this reverts.
+    /// @dev Everyone exits, one wei was donated along the way, and the leftover dust is still rescuable.
+    /// MUTATION: restore `totalSupply() == 0` and this reverts.
     function testRescueAssetSucceedsAfterAllExitsDespiteADonatedShare() public {
         _settledBook();
 
-        // A donation, from anyone, at any time. (`alice` here; a griefer works identically.)
         vm.prank(alice);
         vault.transfer(address(vault), 1);
 
@@ -889,9 +873,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(usdc.balanceOf(thirdParty), dust, "recovered, not stranded forever");
     }
 
-    /// @dev THE OTHER DIRECTION: a donation must not open the gate EARLY. A transfer-in raises
-    ///      `balanceOf(address(this))` and leaves `totalSupply()` alone, so external supply — the
-    ///      quantity actually compared — is untouched, and a real holder still blocks the rescue.
+    /// @dev The other direction: a donation leaves EXTERNAL supply untouched, so a real holder still blocks.
     function testADonationDoesNotOpenTheRescueGateEarly() public {
         _settledBook();
 
@@ -904,9 +886,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.rescueERC20(address(usdc), thirdParty, 1);
     }
 
-    /// @dev Shares escrowed on the STRATEGY are external claims, not dead weight, and hold the gate shut
-    ///      exactly as they did before. Modelled with a plain transfer to the strategy address, which is
-    ///      the same ledger shape `requestRedeem`'s escrow produces.
+    /// @dev Shares escrowed on the STRATEGY are external claims, not dead weight, and hold the gate shut.
     function testStrategyHeldSharesStillBlockTheAssetRescue() public {
         _settledBook();
 
@@ -999,8 +979,7 @@ contract LeveragedAeroVaultUnitTest is Test {
 
     // ==================== FUND CAPACITY CAP ====================
 
-    /// @dev The ceiling defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the
-    ///      owner acts. The freeze case is `setOpenDeposits(false)`, which is a separate switch.
+    /// @dev The ceiling defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the owner acts.
     function testMaxTotalAssetsDefaultsToUnlimited() public view {
         assertEq(vault.maxTotalAssets(), 0, "0 == unlimited on a fresh deploy");
     }
@@ -1012,7 +991,6 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.setMaxTotalAssets(5_000_000e6);
         assertEq(vault.maxTotalAssets(), 5_000_000e6, "capacity stored");
 
-        // Re-settable, including back to unlimited (the one-transaction rollback).
         vm.prank(owner);
         vault.setMaxTotalAssets(0);
         assertEq(vault.maxTotalAssets(), 0, "capacity cleared");
@@ -1025,8 +1003,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.maxTotalAssets(), 0, "unchanged");
     }
 
-    /// @dev `remainingCapacity` is the number a depositor sizes against. `0` is ambiguous on its own
-    ///      (full vs unlimited), so an unlimited fund reports `type(uint256).max` rather than 0.
+    /// @dev `0` would be ambiguous (full vs unlimited), so an unlimited fund reports `type(uint256).max`.
     function testRemainingCapacityReportsMaxWhenUnlimited() public {
         _bind();
         assertEq(vault.remainingCapacity(), type(uint256).max, "unlimited reads as max, not 0");
@@ -1044,9 +1021,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.remainingCapacity(), 500e6, "room shrinks as the book grows");
     }
 
-    /// @dev At or ABOVE the ceiling the fund is full. Above matters: NAV moves on its own, so a fund
-    ///      can drift past the ceiling on gains alone with nobody having deposited — the subtraction
-    ///      must floor at 0 rather than underflow.
+    /// @dev NAV can drift ABOVE the ceiling on gains alone, so the subtraction must floor at 0, not underflow.
     function testRemainingCapacityIsZeroAtAndAboveTheCeiling() public {
         _bindAndMint(alice, 1_000e12);
         vm.prank(owner);
@@ -1059,19 +1034,13 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.remainingCapacity(), 0, "over the ceiling floors to 0, no underflow");
     }
 
-    /// @dev The ops conversion: shares a given USDC amount would mint at current pricing. Advisory
-    ///      only since the cap became fund-NAV-denominated — nothing configures a limit from it any
-    ///      more — but still the sanctioned way to size a `minShares` floor, because shares are 12dp
-    ///      against a 6dp asset and hand-computing the conversion invites an off-by-1e6.
+    /// @dev Advisory only, but the sanctioned way to size a `minShares` floor across the 6dp/12dp gap.
     function testPreviewSharesForAssetsAtPar() public {
         _bind();
-        // Empty book: supply 0, nav 0 -> shares = assets * 1e6, the 6-decimal step `decimals()` documents.
         assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "par pricing on an empty book");
     }
 
-    /// @dev The drift the design accepts: as the book earns, each dollar buys FEWER shares, so a fixed
-    ///      share cap admits MORE dollars over time. Pinned here so the behaviour is a decision on
-    ///      record rather than a surprise.
+    /// @dev Accepted drift: as the book earns, each dollar buys FEWER shares, so a fixed share cap admits more.
     function testPreviewSharesForAssetsFallsAsNavGrows() public {
         _bindAndMint(alice, 1_000e12);
         strategy.setNav(1_000e6);
@@ -1083,8 +1052,7 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertLt(afterGain, atPar, "a richer book mints fewer shares per dollar");
     }
 
-    /// @dev Fail-closed, exactly like a real deposit: the preview is a preview OF a deposit, so a
-    ///      strategy that cannot price itself must not hand back a number an operator would act on.
+    /// @dev Fail-closed like a real deposit: an unpriceable strategy must not hand back an actionable number.
     function testPreviewSharesForAssetsRevertsWhenNavUnpriceable() public {
         _bind();
         strategy.setNavReverts(true);
@@ -1097,31 +1065,18 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.previewSharesForAssets(1_000e6);
     }
 
-    /**
-     * @dev REGRESSION — the preview over-reported by ~1e9-1e12x in a REACHABLE state. The real
-     *      `deposit` reverts `NavUnpriceable` on `navNet == 0 && supply > 0`, but `nav()` FLOORS to 0
-     *      rather than reverting, and the preview had no matching guard: it divided by
-     *      `nav() + 1 == 1`. Under the superseded per-account share cap this was the sharp edge —
-     *      the preview was the documented way to size the cap argument, so an operator following the
-     *      contract's own instruction would have set an effectively unlimited one. The cap is
-     *      fund-NAV-denominated now and no longer derived from this function, but the guard stays
-     *      load-bearing: the preview's surviving role is sizing a deposit's `minShares` floor, and a
-     *      figure a trillion times too large makes that floor unsatisfiable. The state is real:
-     *      after `settleStrategy` the book is flat so `nav()` is the strategy's USDC balance (0)
-     *      while supply is still outstanding, and likewise whenever `protocolFeeOwed >= gross`.
-     */
+    /// @dev REGRESSION — `nav()` FLOORS to 0 instead of reverting and the preview had no matching guard, so
+    ///      it divided by `nav() + 1 == 1` and over-reported by ~1e12x, making a `minShares` floor sized off
+    ///      it unsatisfiable. Reachable: post-`settleStrategy`, or whenever `protocolFeeOwed >= gross`.
     function testPreviewSharesForAssetsRevertsWhenNavIsZeroWithSupplyOutstanding() public {
         _bindAndMint(alice, 1_000e12);
         strategy.setNav(0); // flat/worthless book, holders still present
 
-        // Pre-fix this returned 1.0e24 against a 1e15 par figure.
         vm.expectRevert("LAV: nav unpriceable");
         vault.previewSharesForAssets(1_000e6);
     }
 
-    /// @dev The boundary that must stay OPEN: a genuinely empty book (supply 0) legitimately prices at
-    ///      nav 0 — that is the genesis deposit, which the real `deposit` also allows. The guard keys on
-    ///      supply, so it must not fire here.
+    /// @dev The guard keys on SUPPLY, so a genuinely empty book still prices at nav 0 (the genesis deposit).
     function testPreviewSharesForAssetsStillPricesAnEmptyBookAtNavZero() public {
         _bind();
         strategy.setNav(0);
@@ -1132,10 +1087,8 @@ contract LeveragedAeroVaultUnitTest is Test {
 /**
  * @title MisboundStrategyStub
  * @notice A deliberately misbehaving strategy template: its `initialize` IGNORES the vault argument
- *         and it keeps reporting a foreign vault. Proves `LeveragedAeroVault._bind` still asks the
- *         clone where it points, rather than trusting the atomic {LeveragedAeroVault.cloneAndBind}
- *         path to have wired it. Its `initialize` is deliberately ungated — it is reached only
- *         through `cloneAndBind`, i.e. as the vault.
+ *         and keeps reporting a foreign vault, proving `LeveragedAeroVault._bind` asks the clone where it
+ *         points. Its `initialize` is ungated: it is only ever reached through `cloneAndBind`, as the vault.
  */
 contract MisboundStrategyStub {
     address public immutable vault;

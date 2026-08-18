@@ -101,17 +101,9 @@ contract MockLendingMarket {
     address public immutable underlying;
     uint256 public exchangeRateStored = 1e18;
 
-    /// @dev The exchange rate the next accrual will adopt; 0 means "nothing pending". The SUPPLY-side
-    ///      twin of `_pendingBorrowIndex`, and modelled for the same reason: real Compound/Moonwell
-    ///      accrues inside every MUTATING entry point (`mint`, `redeem`, `redeemUnderlying`) but not
-    ///      inside a view, so a caller that SIZES a draw off `exchangeRateStored` and then executes it
-    ///      is sizing at the stale rate and burning at the fresh one. That gap is exactly what
-    ///      `_redeemCollateral`'s full-redeem branch exists to avoid — sizing a "redeem everything" as
-    ///      an UNDERLYING amount at the stored rate strands `cBal x (1 - stored/fresh)` cTokens — and
-    ///      with one settable rate serving both roles it was not representable at all: the mock burned
-    ///      at the same rate the caller sized with, so the dust could never appear and a test could
-    ///      "pin" the branch while passing with it deleted.
-    /// @dev 0 by default ⇒ every existing suite behaves exactly as before; this is opt-in.
+    /// @dev The exchange rate the next MUTATING call adopts; 0 ⇒ nothing pending (opt-in, existing suites
+    ///      unchanged). Supply-side twin of `_pendingBorrowIndex`: with one rate serving both roles a caller
+    ///      sized a draw and burned at the same rate, so `_redeemCollateral`'s full-redeem branch was untestable.
     uint256 internal _pendingExchangeRate;
 
     mapping(address => uint256) public balanceOf; // cToken balance
@@ -133,13 +125,7 @@ contract MockLendingMarket {
     error MockLendingMarketNoDebt();
 
     /// @notice Compound error codes the supply side should return INSTEAD of acting (0 == act normally).
-    /// @dev Moonwell/Compound v2 signal failure by RETURN CODE, not by reverting — a market that is
-    ///      paused, at its supply cap, or short of cash answers `mint`/`redeemUnderlying` with a nonzero
-    ///      code and does nothing. The production code is written around exactly that (`MoonwellMintFailed`
-    ///      / `MoonwellRedeemFailed` wrap the code), and the mock could not express it at all: `mint`
-    ///      always returned 0 and a `redeemUnderlying` past the balance panicked on the `-=` underflow
-    ///      instead. Both matter now that the keeper's `supplyIdle` mints (deposits stay raw BY DESIGN —
-    ///      `testDepositLeavesTheUsdcRawAndTouchesNoMoonwellMarket`) and several ops redeem on demand.
+    /// @dev Moonwell/Compound signal a paused/capped/cash-short market by RETURN CODE, never by reverting.
     uint256 public mintError;
     uint256 public redeemError;
 
@@ -151,22 +137,17 @@ contract MockLendingMarket {
         exchangeRateStored = rate;
     }
 
-    /// @notice Arm supply-side interest that has accrued in wall-clock time but that no transaction has
-    ///         folded in yet: views keep reporting `exchangeRateStored`, and the next mutating call
-    ///         adopts `rate` before it moves anything. Real Moonwell derives this from the supply rate
-    ///         and elapsed blocks; a test double sets it directly so a suite can arm an exact gap.
+    /// @notice Arm accrued-but-unfolded supply interest: views stay stale, the next mutating call adopts `rate`.
     function setPendingExchangeRate(uint256 rate) external {
         _pendingExchangeRate = rate;
     }
 
-    /// @notice The rate a mutating call would adopt right now (== `exchangeRateStored` when nothing is
-    ///         pending). The supply-side twin of `pendingBorrowIndex()`.
+    /// @notice The rate a mutating call would adopt right now (== `exchangeRateStored` when nothing is pending).
     function pendingExchangeRate() external view returns (uint256) {
         return _pendingExchangeRate == 0 ? exchangeRateStored : _pendingExchangeRate;
     }
 
-    /// @dev `accrueInterest()`'s supply half: fold the pending rate in and disarm. Called at the top of
-    ///      every mutating entry point, as Compound does, and NOT by any view.
+    /// @dev `accrueInterest()`'s supply half, called at the top of every mutating entry point and NO view.
     function _accrueExchangeRate() internal {
         if (_pendingExchangeRate != 0) {
             exchangeRateStored = _pendingExchangeRate;
@@ -174,25 +155,19 @@ contract MockLendingMarket {
         }
     }
 
-    /// @notice Arm the supply-side failure codes (test-only). `0` restores normal behaviour.
     function setSupplyErrors(uint256 mintErr, uint256 redeemErr) external {
         mintError = mintErr;
         redeemError = redeemErr;
     }
 
-    /// @notice The comptroller consulted on every redeem (0 = ungated, the legacy shape). Wiring this
-    ///         makes Moonwell's free-collateral belt REPRESENTABLE: an over-draw against live debt
-    ///         answers with a rejection code instead of the mock-artifact balance underflow.
+    /// @notice Comptroller consulted on every redeem (0 = ungated), so a rejection CODE replaces a mock underflow.
     address public comptroller;
 
     function setComptroller(address comptroller_) external {
         comptroller = comptroller_;
     }
 
-    /// @dev Compound's `redeemAllowed` hop, code-shaped (never reverts) — real `MToken.redeemFresh`
-    ///      consults the comptroller's hypothetical liquidity and returns a failure CODE on rejection,
-    ///      which is the contract every production caller (`MoonwellRedeemFailed(err)`) is written
-    ///      around and the one thing the old mock could not express.
+    /// @dev Compound's `redeemAllowed` hop, code-shaped: real `redeemFresh` returns a CODE, never reverts.
     function _redeemAllowed(uint256 cTokens) internal view returns (uint256) {
         if (comptroller == address(0)) return 0;
         return MockComptroller(comptroller).redeemAllowed(address(this), msg.sender, cTokens);
@@ -365,17 +340,12 @@ contract MockNpm {
 
     mapping(uint256 => Pos) internal _pos;
     /// @notice ERC-721 owner of each minted position.
-    /// @dev MODELLED ON PURPOSE. The previous stub had a no-op `approve` and no owner at all, so every
-    ///      liquidity call succeeded regardless of who held the NFT — which makes a
-    ///      touch-the-position-before-unstaking bug invisible to the suite and a revert on chain (the
-    ///      real NPM authorises `increaseLiquidity`/`decreaseLiquidity`/`collect` against the owner or
-    ///      an approved operator, and a staked NFT is owned by the GAUGE). Same fidelity-gap class as
-    ///      the `MockCLGauge._stakes` set.
+    /// @dev Modelled on purpose: the real NPM authorises liquidity calls against the owner (a STAKED NFT is
+    ///      owned by the GAUGE), so without an owner a touch-before-unstaking bug is invisible to the suite.
     mapping(uint256 => address) public ownerOf;
     mapping(uint256 => address) public getApproved;
     uint256 public nextId = 1;
-    /// @dev Settable (not immutable): the real NPM is pool-agnostic, so a venue-migration test
-    ///      re-points the mock at the destination pool before driving `redeploy`.
+    /// @dev Settable (not immutable): the real NPM is pool-agnostic, so a migration test can re-point it.
     MockCLPool public pool;
 
     error MockNpmSlippage();
@@ -387,7 +357,6 @@ contract MockNpm {
         pool = pool_;
     }
 
-    /// @notice Re-point the geometry source at a different pool (venue-migration tests).
     function setPool(MockCLPool pool_) external {
         pool = pool_;
     }
@@ -429,14 +398,12 @@ contract MockNpm {
         ownerOf[tokenId] = mp.recipient;
     }
 
-    /// @dev Authorised == owner or the single approved operator, mirroring the real NPM's
-    ///      `isAuthorizedForToken`.
+    /// @dev Authorised == owner or the single approved operator, mirroring NPM's `isAuthorizedForToken`.
     modifier onlyAuthorised(uint256 tokenId) {
         if (msg.sender != ownerOf[tokenId] && msg.sender != getApproved[tokenId]) revert MockNpmNotAuthorised();
         _;
     }
 
-    /// @notice ERC-721 transfer, as the gauge performs on stake/unstake.
     function transferFrom(address from, address to, uint256 tokenId) public onlyAuthorised(tokenId) {
         if (ownerOf[tokenId] != from) revert MockNpmNotOwner();
         ownerOf[tokenId] = to;
@@ -494,8 +461,7 @@ contract MockNpm {
         if (amount1 > 0) IERC20(p.token1).safeTransfer(cp.recipient, amount1);
     }
 
-    /// @dev ERC-721 approve — the manager calls this raw before staking. Records the operator (and
-    ///      rejects a non-owner) so the gauge's pull is authorised the way the real one is.
+    /// @dev ERC-721 approve — the manager calls this raw before staking, so the gauge's pull is authorised.
     function approve(address to, uint256 tokenId) external {
         if (msg.sender != ownerOf[tokenId]) revert MockNpmNotOwner();
         getApproved[tokenId] = to;
@@ -510,9 +476,7 @@ contract MockNpm {
         uint160 sqrtLower = TickMath.getSqrtRatioAtTick(tickLower);
         uint160 sqrtUpper = TickMath.getSqrtRatioAtTick(tickUpper);
         liquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, desired0, desired1);
-        // `CLPool.mint` opens with a bare `require(amount > 0)`, so an add that computes zero liquidity
-        // reverts inside the pool rather than silently minting an empty position. Mirrored here (mint AND
-        // increaseLiquidity both route through this) so a fixture cannot pass a shape the real venue rejects.
+        // `CLPool.mint` opens with `require(amount > 0)`: a zero-liquidity add reverts, never silently mints.
         if (liquidity == 0) revert MockNpmZeroLiquidity();
         (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liquidity);
     }
@@ -524,12 +488,8 @@ contract MockNpm {
 }
 
 /// @notice Aerodrome **v2 (AMM)** PoolFactory stand-in for venue validation's reward-route probe.
-/// @dev Same etch-at-a-hardcoded-address constraint as {MockAeroV2Router} below, and the same
-///      immutables-only rule for the same reason: `applyVenue` probes `AERO_V2_FACTORY.getPool(reward,
-///      usdc, false)` to prove the reward leg has a route BEFORE adopting a venue, and that address has
-///      no code in a fork-free test. Answers with `pool` for the configured volatile pair (either
-///      ordering, as the real factory sorts) and `address(0)` for everything else — so a test can model
-///      "reward token with no USDC route" by etching an instance configured for a different pair.
+/// @dev Etched at a hardcoded address, hence immutables only (same rule as {MockAeroV2Router}): `applyVenue`
+///      probes `getPool(reward, usdc, false)`; configure a different pair to model "no USDC route".
 contract MockAeroV2Factory {
     address public immutable tokenA;
     address public immutable tokenB;
@@ -561,8 +521,7 @@ contract MockAeroV2Router {
     address public immutable tokenOut;
     /// @dev `out per in`, 1e18-scaled, spanning the decimal gap between the two tokens.
     uint256 public immutable rateE18;
-    /// @dev Post-etch rate override, written at the ETCHED address (so it survives what the immutables
-    ///      cannot be given). Zero means "use {rateE18}", which keeps every existing etch unchanged.
+    /// @dev Post-etch rate override (an immutable cannot be given one). Zero ⇒ use {rateE18}.
     uint256 public rateOverrideE18;
 
     error MockAeroRouterBadRoute();
@@ -614,9 +573,7 @@ contract MockClSwapRouter {
 
     mapping(address => mapping(address => uint256)) public rateE18;
 
-    /// @notice How much of `tokenOut` this router has been asked to BUY, per token, across both
-    ///         entrypoints. Lets a test prove a cover/shortfall swap actually happened rather than
-    ///         inferring it from net balances (which the sweeps move in the opposite direction).
+    /// @notice Cumulative `tokenOut` bought per token: proves a cover swap happened without net-balance inference.
     mapping(address => uint256) public boughtOf;
 
     error MockRouterNoRate();

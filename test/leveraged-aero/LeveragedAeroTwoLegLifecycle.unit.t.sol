@@ -94,20 +94,13 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     int24 internal constant TICK = 311_100;
 
     /// @dev The grid-aligned tick whose RAW price actually equals the two feeds' ratio:
-    ///      `raw = (P_LEG_B / P_LEG_A) × 10^(18−8) = 3.333e11`, `ln(raw)/ln(1.0001) ≈ 265_337`. `TICK`
-    ///      above is ~97× off that (a long-standing property of this fixture, harmless to the venue-
-    ///      mechanics tests that use it, but fatal to any test measuring a POOL-ratio effect in ORACLE
-    ///      value — see `testDeployAtASkewedRangeStrandsTheSamePredictedFractionEitherWay`).
+    ///      `raw = (P_LEG_B / P_LEG_A) x 10^(18-8) = 3.333e11`, so `ln(raw)/ln(1.0001) ~ 265_337`; `TICK` is ~97x off.
     int24 internal constant TICK_ORACLE_CONSISTENT = 265_300;
 
-    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
-    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation`; etched below (no code otherwise).
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
-    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
-    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
-    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
-    ///      `setPool` below writes to the etched address's own storage.
+    /// @dev `applyVenue` pins the canonical Slipstream CLFactory, so a fork-free test must etch the registry HERE.
     address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
 
     function setUp() public {
@@ -131,16 +124,14 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
         pool.setGauge(address(gauge));
-        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
-        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        // Venue validation probes a HARDCODED v2 factory for the AERO/USDC route; etch code there.
         vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockLendingMarket(address(usdc));
         mLegB = new MockLendingMarket(address(legB));
         mLegA = new MockLendingMarket(address(legA));
         npm = new MockNpm(pool);
-        // Real ERC-721 custody: a staked position is OWNED by the gauge, so any liquidity call
-        // that forgets to unstake first reverts here exactly as it would on chain.
+        // Real ERC-721 custody: a staked position is OWNED by the gauge, so a missing unstake reverts here.
         gauge.setNpm(address(npm));
         router = new MockClSwapRouter();
 
@@ -150,11 +141,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         legAFeed = new MockChainlinkFeed(int256(P_LEG_A), 8, 1, block.timestamp);
         aeroFeed = new MockChainlinkFeed(1e8, 8, 1, block.timestamp);
 
-        // Wire the comptroller's hypothetical-liquidity model — priced at its OWN oracle (the raw
-        // feed answers, NO staleness gate, exactly the real Moonwell ChainlinkOracle asymmetry the
-        // degraded `withdrawIdle` bound leans on) — and put the `redeemAllowed` belt on the
-        // collateral market, so both halves of "Moonwell's own check" are representable in this
-        // suite rather than assumed.
+        // The comptroller prices at its OWN oracle -- raw answers, no staleness gate -- which is the asymmetry the
+        // degraded `withdrawIdle` bound leans on.
         comptroller.registerMarket(address(mUsdc), address(usdcFeed), 6, 0.88e18);
         comptroller.registerMarket(address(mLegB), address(legBFeed), 8, 0);
         comptroller.registerMarket(address(mLegA), address(legAFeed), 18, 0);
@@ -173,8 +161,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         router.setRate(address(usdc), address(legA), (100 * 1e18 * 1e18) / P_LEG_A);
 
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
-        // `cloneAndBind` is the only path a clone is ever initialized by: `BaseStrategy.initialize`
-        // requires `msg.sender == vault_`.
+        // `cloneAndBind` is the only init path: `BaseStrategy.initialize` requires `msg.sender == vault_`.
         vm.startPrank(owner);
         strategy = LeveragedAerodromeCLStrategy(
             payable(vault.cloneAndBind(address(new LeveragedAerodromeCLStrategy()), proposer, abi.encode(_params())))
@@ -229,10 +216,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.execute();
     }
 
-    /// @dev The ADMIN/PROPOSER two-step that replaced the old one-shot `adjustLeverage(target, ...)`:
-    ///      the vault owner (multisig) sets POLICY with `setTargetLtv`, then the proposer (rebalancer)
-    ///      moves the book to it with `adjustLeverage`. Both roles are required — neither can do the
-    ///      other's half — which is exactly what these lifecycle tests exercise implicitly.
+    /// @dev The admin sets POLICY with `setTargetLtv`; the proposer then moves the book with `adjustLeverage`.
     function _retarget(uint16 target) internal {
         vm.prank(owner);
         strategy.setTargetLtv(target);
@@ -365,45 +349,27 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     // ==================== FULL LEVER-DOWN (the orphaned-NFT guard) ====================
 
-    /**
-     * @dev REGRESSION — a lever-down to zero debt must be REJECTED, not executed.
-     *
-     *      `_unwindLiquidity` unstakes unconditionally but re-stakes only while liquidity remains, and
-     *      `_leverDown` is the one 100%-unwind caller that neither clears `$.tokenId` nor mints a
-     *      replacement. Executing it therefore left a live `tokenId` pointing at an NFT the gauge no
-     *      longer held, and every later `gauge.withdraw` — settle, flatten, rerange, deployIdle,
-     *      compound, migrateVenue, redeploy, fulfillRedeem, emergencyRedeem — reverted forever.
-     *
-     *      Reverting is the fix rather than retiring the position: with the collateral still supplied,
-     *      clearing `tokenId` would send `nav()` down its flat-book branch, which counts ONLY idle USDC
-     *      and would erase the mUSDC collateral from NAV. A true full unwind has to redeem the
-     *      collateral too — that is what `flatten()` is for.
-     */
+    /// @dev REGRESSION -- a lever-down to zero debt must be REJECTED: `_leverDown` neither clears `$.tokenId` nor
+    ///      re-mints after its 100% unwind, orphaning the NFT and bricking every later `gauge.withdraw`.
     function testAdjustLeverageToZeroIsRejected() public {
         _execute(SEED);
         uint256 tokenIdBefore = strategy.layout().tokenId;
 
-        // Post role-split there is no target argument, so a zero target can only be reached through
-        // `setTargetLtv` — where it is rejected one barrier EARLIER than the manager's full-unwind
-        // guard. That guard remains the backstop and is exercised by the dust-target test below.
+        // A zero target is rejected at `setTargetLtv`, one barrier before the manager's full-unwind guard.
         vm.prank(owner);
         vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvZero.selector);
         strategy.setTargetLtv(0);
 
-        // Nothing moved, and the position is still staked — the whole point of the guard.
         assertEq(strategy.layout().tokenId, tokenIdBefore, "position untouched");
         assertTrue(gauge.stakedContains(address(strategy), tokenIdBefore), "NFT still staked");
         assertGt(mLegB.borrowBalance(address(strategy)), 0, "leg B debt untouched");
         assertGt(mLegA.borrowBalance(address(strategy)), 0, "leg A debt untouched");
     }
 
-    /// @dev The guard is on the DEBT delta, not on the literal argument: a tiny non-zero target whose
-    ///      `targetDebt` floors to 0 against the live collateral reaches the same branch and must be
-    ///      rejected identically.
+    /// @dev The guard is on the DEBT delta: a dust target whose `targetDebt` floors to 0 is rejected identically.
     function testAdjustLeverageToADustTargetThatFloorsToZeroDebtIsRejected() public {
         _execute(SEED);
-        // targetDebt = targetLtvBps * collateral / 10000; with collateral < 10000 (USDC 6dp) any
-        // targetLtvBps of 1 floors to 0. Shrink the collateral basis to reach that band.
+        // `targetDebt = targetLtvBps * collateral / 10000` floors to 0 once collateral < 10000; shrink the basis.
         mUsdc.setExchangeRateStored(1);
 
         vm.prank(owner);
@@ -413,8 +379,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.adjustLeverage(0, 0);
     }
 
-    /// @dev The guard must NOT catch an ordinary lever-down: a partial repay leaves liquidity, so the
-    ///      re-stake fires and the invariant holds.
+    /// @dev An ordinary partial lever-down leaves liquidity, so the re-stake fires and the position stays staked.
     function testPartialLeverDownKeepsThePositionStaked() public {
         _execute(SEED);
         uint256 tokenId = strategy.layout().tokenId;
@@ -428,11 +393,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     // ==================== TARGET-LTV PERSISTENCE (two-borrowed-legs) ====================
 
-    /// @dev The persist lives in the ADMIN's `setTargetLtv` and is SHAPE-INDEPENDENT, so it holds in the
-    ///      two-borrowed-legs shape exactly as in asset-mode, both directions. `adjustLeverage` no longer
-    ///      writes it at all — it CONSUMES it — which is asserted here by taking the position to the
-    ///      stored value in both directions with no target argument anywhere. The dedicated getter and
-    ///      `layout()` are the same storage read and are asserted together.
+    /// @dev The standing target lives in the ADMIN's `setTargetLtv` and is SHAPE-INDEPENDENT; `adjustLeverage`
+    ///      CONSUMES it rather than writing it.
     function testSetTargetLtvPersistsTheStandingTargetAndAdjustLeverageConsumesIt() public {
         _execute(SEED);
         assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "genesis: the init target IS the standing target");
@@ -467,10 +429,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs((debtUsdc * 10_000) / collateral, 3000, 20, "the book followed the stored target down");
     }
 
-    /// @dev The KEEPER-ONLY de-risk, end to end and asserted on the BOOK, not just the getter: the
-    ///      proposer lowers policy itself with `lowerTargetLtv` (no multisig, which is the whole point —
-    ///      the 2-day `FULFILL_WINDOW` must not depend on a signature) and its own `adjustLeverage` then
-    ///      sizes against the NEW stored value. The admin is never involved in this sequence.
+    /// @dev The KEEPER-ONLY de-risk, asserted on the BOOK: `lowerTargetLtv` needs no multisig, because the 2-day
+    ///      `FULFILL_WINDOW` must not depend on a signature.
     function testProposerLowerTargetLtvThenAdjustLeverageDeleversTheBook() public {
         _execute(SEED);
         uint256 debtBAtInit = mLegB.borrowBalance(address(strategy));
@@ -504,10 +464,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         _execute(SEED);
 
         _retarget(6000);
-        // Deliberately NOT asserting the getter here — that belongs to
-        // `testSetTargetLtvPersistsTheStandingTargetAndAdjustLeverageConsumesIt`.
-        // This test must fail on the OBSERVABLE BORROW instead, so the regression it guards
-        // is the economic one (the redeploy sizing) and not merely a storage read.
+        // Deliberately NOT asserting the getter: this must fail on the OBSERVABLE BORROW, i.e. the sizing.
 
         uint256 debtBBefore = mLegB.borrowBalance(address(strategy));
         uint256 debtABefore = mLegA.borrowBalance(address(strategy));
@@ -534,9 +491,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs((debtUsdc * 10_000) / collateral, 6000, 2, "realized LTV HELD at 6000");
     }
 
-    /// @dev Out-of-band target: refused at the ADMIN entrypoint, stores nothing, standing target
-    ///      untouched. The bound moved to `setTargetLtv` with the parameter — `adjustLeverage` has no
-    ///      target argument to bound any more.
+    /// @dev An out-of-band target is refused at the ADMIN entrypoint and stores nothing.
     function testSetTargetLtvAboveMaxRevertsAndLeavesTheStoredTargetUntouched() public {
         _execute(SEED);
 
@@ -562,14 +517,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     // ==================== RERANGE SKEW (two borrowed legs) ====================
-    //
-    // The two-leg shape had NO rerange coverage before the skew work. It is the shape where the skew's
-    // one real cost shows up (see `testRerangeSkewedLeavesALargerIdleRemainderThanCentered`), so the
-    // whole entrypoint is driven here end to end against the venue mocks.
 
-    /// @dev The re-range mints at the SKEWED range, not the centred one, and persists BOTH knobs. The
-    ///      centred range is computed alongside and asserted to differ, so a implementation that ignored
-    ///      `skewBps` entirely could not pass.
+    /// @dev The re-range mints at the SKEWED range, not the centred one, and persists BOTH knobs.
     function testRerangeSkewedMintsTheSkewedRange() public {
         _execute(SEED);
         uint256 oldTokenId = strategy.layout().tokenId;
@@ -588,31 +537,13 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.layout().width, WIDTH, "...alongside the width");
         assertTrue(strategy.layout().tokenId != oldTokenId, "a fresh tokenId (Slipstream ticks are immutable)");
         assertEq(gauge.depositCallCount(), 2, "the new NFT was restaked");
-        // The range still brackets spot, so the position is genuinely two-sided.
         assertLe(expLower, pool.tick(), "skewed range still brackets spot");
         assertGt(expUpper, pool.tick(), "skewed range still brackets spot");
     }
 
-    /**
-     * @dev THE KNOWN UTILISATION COST OF SKEWING — pinned so it is a documented consequence rather than a
-     *      surprise. A re-range does NOT swap: it re-adds exactly the two collected leg balances, and
-     *      those came from a book whose borrow is range-BLIND (the two-leg shape borrows 50/50 BY USD via
-     *      `_borrowHalfEach`, never against the range). Move the range and the mix it WANTS moves with it,
-     *      while the mix it is HANDED does not — so more of one leg is left over as an idle remainder.
-     *
-     *      THE DRAG IS DIRECTIONAL, and this test states both halves rather than the flattering one.
-     *      Extending the range further ABOVE spot makes it want more token0 (`amount0 ∝ 1/sqrtP −
-     *      1/sqrtUpper`), so an UP-skew here happens to consume MORE of the stranded leg than the centred
-     *      range does; the DOWN-skew is the direction that strands more. Which way is which is a property
-     *      of the book's current leg mix, not of skewing per se — the operator-facing claim is only that
-     *      a re-range cannot re-balance the mix, so any move off the mix the book happens to hold costs
-     *      utilisation in one direction.
-     *
-     *      The remainder is NOT a loss in either direction — `nav()` prices it and it stays redeployable
-     *      until the next `deployIdle` / `compound` — which is asserted alongside, so the cost is pinned
-     *      as a UTILISATION one and not a value one. All three branches run from the SAME post-genesis
-     *      snapshot, so the comparison is apples to apples.
-     */
+    /// @dev THE KNOWN UTILISATION COST OF SKEWING. A re-range does NOT swap -- it re-adds the two collected legs of
+    ///      a range-BLIND 50/50-by-USD borrow -- so moving off that mix strands more of one leg. Directional, and a
+    ///      utilisation cost only: `nav()` prices the remainder.
     function testRerangeSkewedLeavesALargerIdleRemainderThanCentered() public {
         _execute(SEED);
         uint256 navBefore = strategy.nav();
@@ -631,14 +562,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             centeredRemainder,
             "...and the opposite skew strands LESS: the drag is directional, not a penalty for skewing"
         );
-        // The remainder is unproductive, never lost: NAV prices it wherever it sits.
         assertApproxEqRel(centeredNav, navBefore, 1e16, "NAV indifferent (centred)");
         assertApproxEqRel(downSkewNav, navBefore, 1e16, "NAV indifferent (down-skew)");
         assertApproxEqRel(upSkewNav, navBefore, 1e16, "NAV indifferent (up-skew)");
     }
 
-    /// @dev Re-range at `skewBps_`, measure the idle borrowed-leg remainder and NAV, then roll the whole
-    ///      book back — so several skews can be compared against ONE post-genesis state.
+    /// @dev Re-range at `skewBps_`, measure the idle leg remainder and NAV, then roll the whole book back.
     function _remainderAfterRerange(uint16 skewBps_) internal returns (uint256 remainder, uint256 nav_) {
         uint256 snap = vm.snapshotState();
         vm.prank(proposer);
@@ -648,10 +577,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.revertToState(snap);
     }
 
-    /// @dev A re-range on a FLAT book is a venue no-op — but the proposer's `width` AND `skewBps` must
-    ///      still land, because the next `deployIdle` / `compound` mint reads them from storage. The
-    ///      persists sit in the strategy frame AHEAD of `rerangeImpl`'s `tokenId == 0` bail-out precisely
-    ///      so this holds after the write moved out of the library.
+    /// @dev A re-range on a FLAT book is a venue no-op, but `width` AND `skewBps` must still land for the next
+    ///      mint: the persists sit in the strategy frame AHEAD of `rerangeImpl`'s `tokenId == 0` bail-out.
     function testRerangeOnFlatBookPersistsSkew() public {
         _execute(SEED);
 
@@ -677,10 +604,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(gauge.depositCallCount(), stakedBefore, "nothing was staked");
     }
 
-    /// @dev The calm-gate still fires FIRST on the skewed path: a shoved spot reverts before any venue
-    ///      call, and — because the two persists now sit in the strategy frame — the atomic rollback
-    ///      leaves the STORED width/skew untouched too. A re-range can never land at a manipulated tick,
-    ///      nor half-land its params.
+    /// @dev The calm-gate fires FIRST on the skewed path, and the atomic rollback leaves the STORED knobs alone.
     function testRerangeSkewCalmGateStillGatesFirst() public {
         _execute(SEED);
         uint256 tokenIdBefore = strategy.layout().tokenId;
@@ -703,24 +627,14 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.layout().skewBps, SKEW_CENTERED, "...and so did the skew write");
     }
 
-    /**
-     * @dev F06, the OTHER one-sided branch. Walk spot clear BELOW the stored band: a CL position priced
-     *      under its range holds token0 only (leg B here), so the reopen must place the band STRICTLY
-     *      ABOVE spot. The asset-mode suite covers the mirror (token1 only → at/below spot).
-     *
-     *      Before the fix this reverted inside the pool: `skewedTickRange` returned a band straddling
-     *      spot, the mint computed zero liquidity for the leg the book did not hold, and `rerange` was
-     *      unusable in exactly the state it exists for.
-     */
+    /// @dev F06, the OTHER one-sided branch. Below its band a CL position holds token0 only (leg B here), so the
+    ///      reopen must place the band STRICTLY ABOVE spot; pre-fix the straddling band minted zero liquidity.
     function testRerangeReopensAboveSpotWhenPriceHasFallenOutOfTheBand() public {
         _execute(SEED);
         uint256 oldTokenId = strategy.layout().tokenId;
         uint256 stakedBefore = gauge.depositCallCount();
 
-        // Clear the genesis idle remainder on both legs, so the only tokens the re-add sees are the ones
-        // THIS unwind collects. The two-leg shape borrows 50/50 by USD — range-blind — so genesis always
-        // strands some of one leg, and a book holding both legs is two-sided and takes the recentre
-        // branch regardless of where spot is.
+        // Clear the genesis idle remainder: a book holding both legs is two-sided and takes the recentre branch.
         vm.startPrank(address(strategy));
         legB.transfer(address(0xdead), legB.balanceOf(address(strategy)));
         legA.transfer(address(0xdead), legA.balanceOf(address(strategy)));
@@ -729,8 +643,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         int24 farTick = strategy.layout().posTickLower - 5000;
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(farTick));
         pool.setTick(farTick);
-        // `MockNpm` custodies only what it was minted, so after a price move `collect` owes amounts
-        // re-priced at the new sqrtP that it never received. Float it, as a real pool's other LPs do.
+        // FIXTURE: `MockNpm` custodies only what it was minted, so float what a post-move `collect` owes.
         legB.mint(address(npm), 1_000_000e8);
         legA.mint(address(npm), 1_000_000e18);
 
@@ -746,8 +659,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(gauge.depositCallCount(), stakedBefore + 1, "the new NFT was restaked");
     }
 
-    /// @dev USDC face value of whatever borrowed-leg balance a re-range left sitting idle on the
-    ///      strategy — the utilisation drag the skew test compares.
+    /// @dev USDC face value of the borrowed-leg balances left idle -- the utilisation drag the skew test compares.
     function _idleLegValueUsdc() internal view returns (uint256) {
         return _valueUsdc(legB.balanceOf(address(strategy)), P_LEG_B, 8)
             + _valueUsdc(legA.balanceOf(address(strategy)), P_LEG_A, 18);
@@ -755,42 +667,24 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     // ==================== LEVER-DOWN COVER IS NEED-SIZED ====================
 
-    /**
-     * @dev THE IDLE REMAINDER A LEVER-DOWN MUST NOT LIQUIDATE. A partial lever-down repays `f` of each
-     *      debt from the legs the unwind collected; when a price move has skewed the LP's leg mix, one
-     *      leg comes up short and `_rebalanceCover` sells the OTHER leg for USDC to buy the deficit.
-     *
-     *      The surplus leg's BALANCE is not the same thing as this op's surplus. It can also hold a
-     *      pre-existing idle remainder — a skewed `rerange` leaves exactly that (see
-     *      `testRerangeSkewedLeavesALargerIdleRemainderThanCentered`) — which is still matched 1:1 by
-     *      that leg's Moonwell debt and is therefore DELTA-NEUTRAL where it sits. Selling it converts a
-     *      hedged holding into an unrecorded short: `hedgedDebt()` measures interest drift only, and the
-     *      repay clamp re-anchors the basis, so nothing downstream surfaces the missing leg.
-     *
-     *      The cover is therefore need-sized: sell what the shortfall needs (oracle-converted, with
-     *      slippage headroom on both legs of the round trip) and keep the rest. Two assertions pin it
-     *      from both sides — the remainder SURVIVES, and the proceeds did not pile up as idle USDC.
-     */
+    /// @dev THE IDLE REMAINDER A LEVER-DOWN MUST NOT LIQUIDATE. `_rebalanceCover` sells the surplus leg to buy the
+    ///      deficit, but an idle remainder is matched 1:1 by that leg's debt and so DELTA-NEUTRAL: selling it makes an
+    ///      unrecorded short nothing downstream surfaces. Hence need-sized.
     function testLeverDownCoverSellsOnlyWhatTheShortfallNeedsAndKeepsTheRest() public {
-        // Genesis on the oracle-consistent mark (see `TICK_ORACLE_CONSISTENT`), so the deploy strands
-        // essentially nothing and the ONLY idle leg-A in the book is the remainder seeded below. On the
-        // suite's default `TICK` the range-blind borrow already strands ~49% of one leg, and that
-        // accidental buffer absorbs every shortfall before `_rebalanceCover` is ever reached.
+        // Genesis on the oracle-consistent mark: on the default `TICK` the range-blind borrow already strands ~49%
+        // of one leg and that buffer absorbs the shortfall.
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK_ORACLE_CONSISTENT));
         pool.setTick(TICK_ORACLE_CONSISTENT);
 
         _execute(SEED);
 
-        // A pre-existing idle leg-A remainder: ~$150k, an order of magnitude more than the shortfall
-        // the move below opens, so "kept most of it" is unambiguous.
+        // A pre-existing idle leg-A remainder ~$150k: an order of magnitude above the shortfall opened below.
         uint256 remainder = 50e18;
         legA.mint(address(strategy), remainder);
         uint256 remainderValue = _valueUsdc(remainder, P_LEG_A, 18);
 
-        // Move the pool up (spot AND TWAP together) and keep leg B's oracle + swap rates on the same
-        // mark. Leg B is token0, so a higher tick leaves the LP holding LESS leg B than the leg-B debt —
-        // the lever-down repay comes up short on leg B and routes through `_rebalanceCover`, whose
-        // surplus leg is leg A: the very balance the remainder sits in.
+        // Move the pool up (spot AND TWAP) with leg B's oracle + swap rates: leg B is token0, so the LP holds LESS
+        // leg B than its debt and the repay shorts it, covering out of leg A.
         int24 newTick = TICK_ORACLE_CONSISTENT + 600;
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
         pool.setTick(newTick);
@@ -799,8 +693,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         legBFeed.setAnswer(int256(newPB));
         router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
         router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
-        // FIXTURE ONLY: `MockNpm` custodies exactly what it was minted, so a post-move `collect` owes
-        // amounts re-priced at the new sqrtP that it never received. Float it, as other LPs would.
+        // FIXTURE ONLY: float `MockNpm` for what a post-move `collect` owes but was never minted.
         legB.mint(address(npm), 100e8);
         legA.mint(address(npm), 100e18);
 
@@ -808,20 +701,16 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         _retarget(3000); // lever DOWN — repays f of both debts
 
-        // 1. The remainder survived: only a need-sized slice of the leg-A balance was sold.
         assertGt(
             legA.balanceOf(address(strategy)),
             remainder / 2,
             "the delta-neutral leg-A remainder was not liquidated wholesale to cover the leg-B shortfall"
         );
-        // 2. ...and the sell was not merely deferred into idle USDC: a wholesale sell would leave the
-        //    unspent proceeds sitting there.
         assertLt(
             usdc.balanceOf(address(strategy)),
             remainderValue / 10,
             "the cover raised roughly what it spent -- the sell was need-sized, not wholesale"
         );
-        // 3. The shortfall WAS covered: both debts repaid to the new target, so LTV landed on it.
         assertLt(mLegB.borrowBalance(address(strategy)), debtBBefore, "the leg-B debt really was repaid");
         uint256 collateral = (mUsdc.balanceOf(address(strategy)) * mUsdc.exchangeRateStored()) / 1e18;
         uint256 debtUsdc = _valueUsdc(mLegB.borrowBalance(address(strategy)), newPB, 8)
@@ -831,32 +720,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     // ==================== THE GENESIS DRAG A SKEWED RANGE CANNOT AVOID ====================
 
-    /**
-     * @dev THE ALWAYS-ADVERSE HALF of the skew's utilisation cost — the one
-     *      `testRerangeSkewedLeavesALargerIdleRemainderThanCentered` cannot show, because a re-range is
-     *      handed whatever mix the book already holds and so has a flattering direction.
-     *
-     *      A DEPLOY has no such luck. `_borrowHalfEach` splits the borrow 50/50 BY USD, range-BLIND,
-     *      while the range wants the mix its geometry implies — `w1 = (√P − √Pa) / [(√P − √Pa) + √P(1 −
-     *      √P/√Pb)]` of the value in token1 and the complement in token0. Off centre those are not 50/50,
-     *      the mint consumes only as much as the SCARCER side allows, and the difference is stranded as
-     *      idle borrowed tokens: `stranded = 0.5 − 0.5 · min(w0,w1)/max(w0,w1)` of the borrow.
-     *
-     *      DIRECTION-INDEPENDENT: skew `s` and skew `10000 − s` produce mirror-image ranges, so `w0` and
-     *      `w1` swap and the ratio — hence the stranded fraction — is IDENTICAL. There is no "good"
-     *      direction to skew in at deploy time; the drag is the price of expressing the view.
-     *
-     *      This is a property of the range-blind borrow, NOT a bug in the skew: the follow-up
-     *      range-aware-borrow work is expected to size the two borrows at `w0 : w1` instead of 50/50 and
-     *      drive this to ~0, at which point this test's assertion FLIPS (assert ~0 stranded, and keep the
-     *      direction-independence half as-is).
-     */
+    /// @dev THE ALWAYS-ADVERSE HALF of the skew's cost, which the re-range test cannot show. A DEPLOY borrows 50/50
+    ///      BY USD, range-BLIND, while the range wants `w1 = (sqrtP - sqrtPa) / [(sqrtP - sqrtPa) + sqrtP(1 -
+    ///      sqrtP/sqrtPb)]` in token1, so `stranded = 0.5 - 0.5 * min(w0,w1)/max(w0,w1)` -- and mirror skews match.
     function testDeployAtASkewedRangeStrandsTheSamePredictedFractionEitherWay() public {
-        // Put the pool on the SAME mark as the two feeds BEFORE genesis. The suite's default `TICK` is
-        // only loosely consistent with them, and this test measures a POOL-ratio effect in ORACLE value
-        // — a mismatched mark would show up as drag at every skew, centred included, and drown the thing
-        // under test. Moving it pre-genesis (rather than after) keeps the mocks self-consistent: nothing
-        // is minted at one price and collected at another.
+        // The pool must be on the SAME mark as the two feeds BEFORE genesis: a mismatch would show as drag at every
+        // skew, centred included, and drown the effect under test.
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK_ORACLE_CONSISTENT));
         pool.setTick(TICK_ORACLE_CONSISTENT);
 
@@ -866,22 +735,17 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         (uint256 upStranded, uint256 upPredicted) = _strandedFractionAfterRerangeAndDeploy(2000);
         (uint256 centeredStranded,) = _strandedFractionAfterRerangeAndDeploy(SKEW_CENTERED);
 
-        // The closed form is the claim; the measured drag is what the venue actually stranded.
         assertApproxEqRel(downStranded, downPredicted, 2e16, "down-skew: measured drag == the closed form");
         assertApproxEqRel(upStranded, upPredicted, 2e16, "up-skew: measured drag == the closed form");
-        // DIRECTION-INDEPENDENCE: mirror skews strand the same fraction (measured: 3669 vs 3678 bps).
-        // The residual 0.25% is grid alignment — both bounds round DOWN, so the two ranges are mirror
-        // images only up to one `tickSpacing`.
+        // DIRECTION-INDEPENDENCE (measured 3669 vs 3678 bps; the 0.25% residual is grid alignment).
         assertApproxEqRel(downStranded, upStranded, 1e16, "skew 8000 and skew 2000 strand the SAME fraction");
         assertGt(upStranded, 3000, "the up-skew is adverse too -- there is no free direction at deploy");
-        // ...and it is a real cost: the centred range strands essentially nothing at the same width.
         assertGt(downStranded, 3000, "a skewed deploy strands >30% of the borrow (range-blind 50/50)");
         assertLt(centeredStranded, 100, "...where the centred range strands ~nothing");
     }
 
-    /// @dev Re-range to `skewBps_`, deploy a fresh top-up into that STORED range, and return
-    ///      `(measured, predicted)` stranded fractions of the top-up's borrow, in bps. Rolls the book
-    ///      back so several skews compare against ONE post-genesis state.
+    /// @dev Re-range to `skewBps_`, deploy a top-up into that STORED range, and return `(measured, predicted)`
+    ///      stranded fractions of its borrow in bps. Rolls the book back.
     function _strandedFractionAfterRerangeAndDeploy(uint16 skewBps_)
         internal
         returns (uint256 measuredBps, uint256 predictedBps)
@@ -898,17 +762,14 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.deployIdle(topUp, 0);
 
-        // The whole top-up becomes collateral and `topUp × targetLtv` is borrowed 50/50 by USD; whatever
-        // of that the mint could not take is the new idle-leg value.
+        // `topUp x targetLtv` is borrowed 50/50 by USD; whatever the mint could not take is the new idle value.
         uint256 borrowed = (topUp * uint256(TARGET_LTV_BPS)) / 10_000;
         measuredBps = ((_idleLegValueUsdc() - idleBefore) * 10_000) / borrowed;
         vm.revertToState(snap);
     }
 
-    /// @dev `0.5 − 0.5 · min(w0,w1)/max(w0,w1)` in bps, where `w0`/`w1` are the VALUE shares the range
-    ///      demands at the current `sqrtP`. Derived from a reference-liquidity probe of the realised
-    ///      range (the same technique `LeveragedAeroValuation._rangeRatio` uses), so it is a genuinely
-    ///      independent prediction rather than a restatement of the implementation.
+    /// @dev `0.5 - 0.5 * min(w0,w1)/max(w0,w1)` in bps, with `w0`/`w1` the VALUE shares the range demands at the
+    ///      current `sqrtP`, from a reference-liquidity probe -- a genuinely independent prediction.
     function _predictedStrandedBps(int24 tickLower, int24 tickUpper) internal view returns (uint256) {
         (uint256 amt0, uint256 amt1) = LiquidityAmounts.getAmountsForLiquidity(
             pool.sqrtPriceX96(),
@@ -952,9 +813,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.supplyIdle(supplied);
     }
 
-    /// @dev DEPOSIT IS UNTOUCHED. Money-in has no Moonwell dependency: the USDC lands raw and stays
-    ///     raw until a keeper decides to park it. This is the assertion that pins the design choice —
-    ///     a paused / supply-capped Moonwell USDC market must never be able to refuse a deposit.
+    /// @dev DEPOSIT IS UNTOUCHED: money-in has no Moonwell dependency, so a paused / capped market cannot refuse it.
     function testDepositLeavesTheUsdcRawAndTouchesNoMoonwellMarket() public {
         _execute(SEED);
         uint256 collateralBefore = _collateralUsdc();
@@ -967,13 +826,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(_collateralUsdc(), collateralBefore, "deposit supplied nothing to Moonwell");
     }
 
-    /**
-     * @dev THE INVARIANT, under keeper control. `supplyIdle` moves raw USDC into mUSDC and the move is
-     *      value-neutral: NAV is unchanged. That second half is the load-bearing one — `nav()` counts
-     *      idle at FACE and collateral at `exchangeRateStored`, so "park it" is only free if those two
-     *      agree, which they do at any rate because the mint hands back `amount/rate` cTokens worth
-     *      `amount` again.
-     */
+    /// @dev `supplyIdle` is value-neutral: `nav()` counts idle at FACE and collateral at `exchangeRateStored`, and
+    ///      the mint hands back `amount/rate` cTokens worth `amount` again.
     function testSupplyIdleMovesRawUsdcIntoMoonwellAndConservesNav() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -992,8 +846,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(strategy.nav(), navBefore, 1, "NAV unchanged by the move (rounding dust only)");
     }
 
-    /// @dev The same, at a non-unit exchange rate — the case where "idle at face vs collateral at
-    ///      `exchangeRateStored`" could actually diverge if the accounting were wrong.
+    /// @dev The same at a non-unit exchange rate -- where idle-at-face vs collateral-at-rate could diverge.
     function testSupplyIdleConservesNavAtANonUnitExchangeRate() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1011,9 +864,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(strategy.nav(), navBefore, 2, "NAV unchanged, bar mint rounding");
     }
 
-    /// @dev PARTIAL BY DESIGN. The keeper decides how much float to leave un-supplied — that raw slice
-    ///      is what keeps the redeemer's ORACLE-FREE Phase-1 IL cover reachable. `supplyIdle` must
-    ///      therefore take an amount, not sweep, and must leave the remainder exactly alone.
+    /// @dev PARTIAL BY DESIGN: the un-supplied slice keeps the redeemer's ORACLE-FREE Phase-1 IL cover reachable.
     function testSupplyIdleLeavesTheKeepersChosenFloatRaw() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1027,13 +878,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(_collateralUsdc(), SEED + 200_000e6, "and only the parked slice became collateral");
     }
 
-    /**
-     * @dev THE POLICY, ASSERTED. Supplied-but-unlevered USDC is LEVERAGEABLE: there is no buffer/book
-     *      distinction in `Layout`, `_readCollateralDebt` sees one collateral base, and so
-     *      `adjustLeverage` ALONE levers a freshly-parked balance to `targetLtvBps` — no `deployIdle`
-     *      needed. The book-level LTV dips after the supply (collateral grew, debt did not) and the
-     *      retarget brings the WHOLE book, the new collateral included, back to target.
-     */
+    /// @dev Supplied-but-unlevered USDC is LEVERAGEABLE -- there is no buffer/book distinction in `Layout` -- so
+    ///      `adjustLeverage` ALONE levers a freshly-parked balance to `targetLtvBps`, with no `deployIdle`.
     function testSupplyIdleThenAdjustLeverageLeversTheNewCollateralToTarget() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1043,7 +889,6 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.supplyIdle(top);
 
-        // The supply diluted the leverage: same debt over a bigger base.
         assertApproxEqAbs(_ltvBps(), (uint256(TARGET_LTV_BPS) * SEED) / (SEED + top), 2, "LTV dipped on the supply");
 
         vm.prank(proposer);
@@ -1053,8 +898,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "adjustLeverage alone levered the new collateral");
     }
 
-    /// @dev Over-asking is a typed refusal against the RAW balance — `supplyIdle` supplies, it does not
-    ///      reach into the LP or re-supply collateral, so the raw balance is exactly its budget.
+    /// @dev Over-asking is a typed refusal against the RAW balance, which is exactly `supplyIdle`'s budget.
     function testSupplyIdleRevertsInsufficientIdleAboveTheRawBalance() public {
         _execute(SEED);
         _deposit(100_000e6);
@@ -1064,8 +908,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.supplyIdle(raw + 1);
     }
 
-    /// @dev PROPOSER-ONLY, like every other venue op. The admin (vault owner) holds POLICY, not
-    ///      operations — it sets the target LTV and stages venues; it does not move funds on venues.
+    /// @dev PROPOSER-ONLY, like every other venue op: the admin holds POLICY, not operations.
     function testSupplyIdleRejectsTheAdminAndStrangers() public {
         _execute(SEED);
         _deposit(100_000e6);
@@ -1087,9 +930,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.supplyIdle(100_000e6);
     }
 
-    /// @dev FAIL-CLOSED on the supply, and harmless: a Moonwell USDC market that refuses to mint
-    ///      (paused, at its supply cap) reverts with the market's own code and moves nothing. On a
-    ///      keeper op that is a retry — which is precisely why this call is not on the deposit path.
+    /// @dev FAIL-CLOSED on the supply: a market that refuses to mint reverts with its own code and moves nothing --
+    ///      a keeper retry, which is why this call is not on the deposit path.
     function testSupplyIdleRevertsMoonwellMintFailedWhenTheMarketRefuses() public {
         _execute(SEED);
         _deposit(100_000e6);
@@ -1100,9 +942,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.supplyIdle(100_000e6);
     }
 
-    /// @dev `deployIdle` still works when the amount lives in mUSDC rather than as a raw balance: the
-    ///      `InsufficientIdle` bound now measures raw + collateral, and `_materialiseUsdc` redeems the
-    ///      shortfall before `_supplyAndBorrow` puts it back. End state is identical to the raw case.
+    /// @dev `deployIdle` also works from mUSDC: the `InsufficientIdle` bound measures raw + collateral and
+    ///      `_materialiseUsdc` redeems the shortfall before `_supplyAndBorrow` puts it back.
     function testDeployIdleWorksFromSuppliedCollateralWithNoRawUsdc() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1123,8 +964,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "deployIdle landed the book on target");
     }
 
-    /// @dev The bound is still typed and still binding — it just measures the right basis now. Asking
-    ///      for one unit more than raw + collateral is `InsufficientIdle`, not a silent cap.
+    /// @dev The bound still binds, on the right basis: one unit above raw + collateral is `InsufficientIdle`.
     function testDeployIdleStillRevertsAboveRawPlusCollateral() public {
         _execute(SEED);
         uint256 available = usdc.balanceOf(address(strategy)) + _collateralUsdc();
@@ -1133,9 +973,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.deployIdle(available + 1, 0);
     }
 
-    /// @dev `redeploy` re-enters a FLAT book whose whole pot the keeper parked in mUSDC —
-    ///      `executeImpl` reads `_usdcAvailable()` and materialises it, where the raw-balance read
-    ///      would have seen 0 and refused `ExecuteZeroBalance` on a fully-funded fund.
+    /// @dev `redeploy` re-enters a FLAT book parked entirely in mUSDC: `executeImpl` reads `_usdcAvailable()`,
+    ///      where the raw-balance read would have refused `ExecuteZeroBalance`.
     function testRedeployReEntersAFlatBookHeldEntirelyAsCollateral() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
 
@@ -1146,10 +985,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "and landed on target");
     }
 
-    /// @dev Reach a FLAT book whose entire pot sits in mUSDC and NOTHING is raw — `flatten` realises
-    ///      the book to raw USDC and the keeper parks it, which is exactly the state `supplyIdle`
-    ///      exists for (a flat book is the one holding the most dead USDC).
-    /// @return pot The USDC now held entirely as collateral.
+    /// @dev Reach a FLAT book whose entire pot sits in mUSDC and NOTHING is raw.
     function _flatBookHeldEntirelyAsCollateral() internal returns (uint256 pot) {
         _execute(SEED);
         vm.prank(proposer);
@@ -1163,9 +999,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), pot, "flat-book nav() prices the collateral it now holds");
     }
 
-    /// @dev A failing `redeemUnderlying` surfaces as the typed `MoonwellRedeemFailed` on the paths that
-    ///      can NOW reach one — `deployIdle` materialises raw USDC on demand, which it never did while
-    ///      idle USDC could only sit raw.
+    /// @dev A failing `redeemUnderlying` surfaces as the typed `MoonwellRedeemFailed` on the paths that can NOW
+    ///      reach one -- `deployIdle` materialises raw USDC on demand.
     function testMoonwellRedeemFailedSurfacesOnTheNewlyMaterialisingPaths() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1190,14 +1025,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.redeploy(0);
     }
 
-    /**
-     * @dev THE RATCHET IS CLOSED. `deployIdle`'s funding basis is raw + UN-LEVERED collateral, not
-     *      raw + all collateral: funded from collateral that already backs debt, the op would be
-     *      redeem → supply-straight-back → borrow — a net debt-only increase that re-levers the same
-     *      USDC twice and walks LTV from `targetLtvBps` to `maxLtvBps`, i.e. the exact lever-up-risk
-     *      capability the admin-only target split denies the `onlyProposer` key. A book whose
-     *      collateral is fully levered at target has NOTHING deployable, typed and loud.
-     */
+    /// @dev THE RATCHET IS CLOSED. `deployIdle`'s basis is raw + UN-LEVERED collateral: off levered collateral the
+    ///      op is redeem -> supply-back -> borrow, walking LTV to `maxLtvBps` on the `onlyProposer` key alone.
     function testDeployIdleCannotRecycleLeveredCollateral() public {
         _execute(SEED); // at target: every USDC of collateral already backs debt
         uint256 ltvBefore = _ltvBps();
@@ -1207,9 +1036,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.deployIdle(20_000e6, 0);
         assertApproxEqAbs(_ltvBps(), ltvBefore, 0, "nothing moved");
 
-        // And the same after a park-then-lever cycle: once `adjustLeverage` has levered the parked
-        // slice, it stops being deployable — `deployIdle` cannot run the book above target by
-        // "deploying" collateral the retarget already consumed.
+        // And the same after a park-then-lever cycle: once levered, the parked slice stops being deployable.
         vm.prank(address(strategy));
         vault.strategyMint(lp, 1_000_000e12);
         uint256 top = 250_000e6;
@@ -1227,9 +1054,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     // ==================== THE INVERSE (`withdrawIdle`) ====================
 
-    /// @dev THE DIAL TURNS BOTH WAYS. Park, then un-park: the raw float — the oracle-free Phase-1
-    ///      IL-cover budget — is restorable without levering (`deployIdle`) or exiting the venue
-    ///      (`flatten`). Value-neutral in both directions.
+    /// @dev THE DIAL TURNS BOTH WAYS: the raw float (the oracle-free Phase-1 cover budget) is restorable without
+    ///      levering or exiting the venue, and value-neutral either way.
     function testWithdrawIdleIsTheInverseOfSupplyIdle() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1248,8 +1074,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(strategy.nav(), navBefore, 2, "value-neutral round trip (rounding dust only)");
     }
 
-    /// @dev The mirror of `deployIdle`'s bound: collateral backing debt at target is NOT withdrawable —
-    ///      pulling it would raise LTV above the admin-set target with no admin action. Typed refusal.
+    /// @dev The mirror bound: collateral backing debt at target is NOT withdrawable, since pulling it would raise
+    ///      LTV above the admin-set target with no admin action.
     function testWithdrawIdleRefusesLeveredCollateral() public {
         _execute(SEED); // at target: no un-levered collateral at all
         vm.prank(proposer);
@@ -1257,9 +1083,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.withdrawIdle(20_000e6);
     }
 
-    /// @dev On a FLAT parked book there is no debt, so the WHOLE pot is withdrawable — the deadman
-    ///      recovery path: a keeper (or a keeper's successor) can always turn a fully-parked flat book
-    ///      back into raw USDC.
+    /// @dev On a FLAT parked book there is no debt, so the WHOLE pot is withdrawable -- the recovery path.
     function testWithdrawIdleFreesTheWholeFlatParkedPot() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         vm.prank(proposer);
@@ -1268,23 +1092,9 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), pot, "nav unchanged: same value, raw again");
     }
 
-    /**
-     * @dev THE RESTORE DIRECTION SURVIVES AN ORACLE OUTAGE — the reviewers' Venue:304 finding. The
-     *      policy bound (`_unleveredCollateral`, the un-levered slice) is Chainlink-priced and reads
-     *      three feeds whenever there is debt, and each read fail-closes. That made `withdrawIdle`
-     *      unavailable in exactly the outage where an operator most wants raw USDC on hand — while
-     *      `supplyIdle`, which reads only the raw balance, stayed available. The dial jammed in the
-     *      PARK direction.
-     *
-     *      TWO BELTS, NOT ONE. The Chainlink bound is the STRATEGY'S POLICY (post-op LTV stays at the
-     *      admin-set target). Moonwell runs its OWN check underneath on every redeem out of an entered
-     *      market with live borrows and refuses at its collateral factor. Solvency never depended on our
-     *      feed, so an unreadable feed now degrades the POLICY line rather than blocking the op:
-     *      `WithdrawIdleBoundDegraded` is emitted and Moonwell's check is the belt for that call.
-     *
-     *      Asserted here on a LEVERED book (the only shape that reads feeds at all): stale feeds, the
-     *      withdraw goes through, the marker fires, and the value moved is real.
-     */
+    /// @dev THE RESTORE DIRECTION SURVIVES AN ORACLE OUTAGE. The policy bound (`_unleveredCollateral`) is
+    ///      Chainlink-priced and fail-closed, so the dial jammed in the PARK direction. Solvency never depended on
+    ///      our feed -- Moonwell checks its own CF on every redeem -- so it now degrades: the event fires instead.
     function testWithdrawIdleDegradesToMoonwellsCheckWhenTheOracleIsDown() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1296,7 +1106,6 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(mLegA.borrowBalance(address(strategy)), 0, "precondition: live debt, so the bound prices");
         uint256 collateralBefore = _collateralUsdc();
 
-        // Every feed stale: the policy bound cannot be priced at all.
         vm.warp(block.timestamp + 2 days + 1);
 
         vm.expectEmit(false, false, false, false, address(strategy));
@@ -1308,16 +1117,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(_collateralUsdc(), collateralBefore - top, "...and it really came out of the collateral");
     }
 
-    /**
-     * @dev THE DEGRADED PATH STILL HOLDS THE TARGET-LTV LINE — at the venue's oracle. An earlier
-     *      revision dropped the policy bound entirely on the catch path, leaving Moonwell's
-     *      collateral factor (8800 bps, ABOVE `maxLtvBps`) as the only limit: during an outage the
-     *      `onlyProposer` key could walk the book to the CF edge in one call — zero price cushion,
-     *      the permissionless `deleverage` valve armed — the exact risk-escalation capability the
-     *      admin-only target split denies that key. The bound is now re-derived from
-     *      `getAccountLiquidity`, so the SAME un-levered slice is withdrawable during the outage and
-     *      anything past it is the same typed refusal, feeds or no feeds.
-     */
+    /// @dev THE DEGRADED PATH STILL HOLDS THE TARGET-LTV LINE, at the venue's oracle. An earlier revision dropped
+    ///      the bound entirely, leaving Moonwell's 8800bps CF (above `maxLtvBps`) as the only limit.
     function testDegradedWithdrawIdleStillHoldsTheTargetLtvLine() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1328,22 +1129,18 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.supplyIdle(top);
         vm.warp(block.timestamp + 2 days + 1); // every hardened feed refuses
 
-        // Past the venue-derived un-levered slice: refused, typed, even mid-outage. This is the
-        // assertion the pre-fix degrade could not make — it let this call through, and 90% of the
-        // collateral after it.
+        // Past the venue-derived un-levered slice: refused, typed, even mid-outage.
         vm.prank(proposer);
         vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);
         strategy.withdrawIdle(top + 20_000e6);
 
-        // The blast radius, pinned: after the largest permitted degraded withdraw the book sits at
-        // the standing target — nowhere near the CF line.
+        // The blast radius: after the largest permitted degraded withdraw the book sits at the standing target.
         vm.prank(proposer);
         strategy.withdrawIdle(top - 10); // a few units inside the venue-oracle bound (integer slack)
         assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 3, "post-degrade LTV pinned at the standing target");
     }
 
-    /// @dev If even the VENUE cannot answer (a comptroller error code), the degraded path fails
-    ///      closed — the pre-degrade posture, and the right one when nothing at all can price the book.
+    /// @dev If even the VENUE cannot answer (a comptroller error code), the degraded path fails closed.
     function testDegradedWithdrawIdleFailsClosedWhenTheComptrollerErrors() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1360,11 +1157,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.withdrawIdle(1e6);
     }
 
-    /// @dev MOONWELL'S OWN BELT, representable at last (james-saint review): the mock market now
-    ///      consults the comptroller's hypothetical liquidity on the way out, so an over-draw against
-    ///      live debt answers with the Compound rejection CODE — the shape every production caller
-    ///      (`MoonwellRedeemFailed(err)`) is written around — instead of a mock-artifact balance
-    ///      underflow.
+    /// @dev MOONWELL'S OWN BELT, representable at last: the mock market consults the comptroller on the way out,
+    ///      so an over-draw answers with the Compound rejection CODE, not a mock-artifact underflow.
     function testMoonwellRefusesARedeemPastTheFreeCollateralLine() public {
         _execute(SEED); // levered at target 5000 with CF 8800: ~43% of collateral is free, no more
         uint256 collateral = _collateralUsdc();
@@ -1374,12 +1168,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(_collateralUsdc(), collateral, "the refusal is a code, not a partial fill");
     }
 
-    /// @dev THE OTHER HALF, both properties the name claims (an earlier revision duplicated
-    ///      `testWithdrawIdleRefusesLeveredCollateral` byte for byte and controlled nothing): with
-    ///      READABLE feeds the policy bound refuses past the un-levered slice through the PRIMARY
-    ///      read, and a healthy in-bound withdraw emits NO degradation marker — pinned the same way
-    ///      the sibling markers pin their no-degradation halves, so the marker cannot become
-    ///      free-running.
+    /// @dev THE OTHER HALF: with READABLE feeds the bound still refuses through the PRIMARY read, and a healthy
+    ///      in-bound withdraw emits NO marker -- so the marker cannot become free-running.
     function testWithdrawIdleStillEnforcesThePolicyBoundWhenFeedsAreReadable() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1424,13 +1214,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.withdrawIdle(pot);
     }
 
-    /**
-     * @dev THE FAILURE MODE THE `nav()` FLAT BRANCH EXISTS TO PREVENT, driven end to end. On a flat
-     *      book whose whole pot the keeper parked, a raw-balance-only nav would read 0: the next
-     *      depositor would mint against zero NAV (an unbacked claim on the parked pot) and every one
-     *      after would revert `NavUnpriceable`. With the collateral term counted, deposits price
-     *      against the parked pot exactly as they would against a raw one.
-     */
+    /// @dev THE FAILURE MODE THE `nav()` FLAT BRANCH PREVENTS: on a fully parked flat book a raw-balance-only nav
+    ///      reads 0, so the next depositor mints against zero NAV and every one after reverts `NavUnpriceable`.
     function testDepositPricesSharesFairlyOnAFlatBookHeldEntirelyAsCollateral() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -1443,18 +1228,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             shares, (assets * supply) / pot, 1e12, "shares priced against the parked pot, not against zero"
         );
 
-        // And the NEXT depositor still prices — the `NavUnpriceable` cascade cannot start.
         uint256 shares2 = _deposit(assets);
         assertGt(shares2, 0, "the second deposit still prices");
     }
 
-    /// @dev The materialise round trip at a NON-UNIT exchange rate — where Compound's truncating
-    ///      divisions actually truncate — AND with a partial raw float, so the SHORTFALL form is the
-    ///      branch under test: raw is spent first and only `amount − raw` is redeemed. The pin is on
-    ///      the Moonwell side (the only side `_materialiseUsdc` touches): the collateral moves by
-    ///      exactly `+amount − shortfall`, bar integer dust. (Whole-book NAV is not asserted here —
-    ///      the two-leg fixture's LP add reprices borrowed legs across the pool-vs-feed gap, which is
-    ///      `deployIdle`'s pre-existing add path, not the materialise.)
+    /// @dev The materialise round trip at a NON-UNIT rate with a partial raw float, so the SHORTFALL form is the
+    ///      branch under test: raw is spent first and only `amount - raw` is redeemed. Pinned Moonwell-side only.
     function testDeployIdleFromCollateralAtANonUnitRateConservesCollateralToADustBound() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1470,8 +1249,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.deployIdle(top, 0); // raw float first, then materialise ONLY the top/2 shortfall
 
         assertEq(usdc.balanceOf(address(strategy)), 0, "the raw float was consumed first and in full");
-        // -shortfall redeemed out, +full amount supplied back: net +top/2, with each truncating
-        // division (redeem burn, mint credit, value read) flooring at most once at rate 1.37.
+        // Net +top/2, with each truncating division (redeem burn, mint credit, value read) flooring once at 1.37.
         assertApproxEqAbs(
             _collateralUsdc(),
             collateralBefore + top / 2,
@@ -1513,21 +1291,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "redeemer paid");
     }
 
-    /**
-     * @dev F15. A PARTIAL ASYNC REDEEM BURNS `f` OF THE cTOKENS, not a stored-rate underlying estimate.
-     *      `redeemUnderlying(amt)` accrues and THEN burns `amt / rateFresh`, while `amt` was sized off
-     *      `exchangeRateStored` — the last-accrued rate — so the two disagree by the whole rate gap and
-     *      the redeemer's own slice of the accrued-but-uncapitalised supply interest stayed with the
-     *      stayers. The old note defended that as "the payout was priced off the same stored rate", which
-     *      is true of the FAST path but not of this one: `redeemUnwindImpl` is a PHYSICAL proportional
-     *      unwind with no price stamped anywhere, so `f` of the cTokens is simply what `f` of the
-     *      collateral means.
-     *
-     *      Armed with the supply-side gap the mock exists to express: views keep reporting 1.37e18 while
-     *      the redeem's own mUSDC call accrues to 1.40e18 before it burns. The assertion is exact — a
-     *      quarter redeem burns exactly a quarter of the cToken balance — and it is the fix's whole
-     *      content: the old form burned `cBal × 1.37/1.40 / 4`, ~2.1% less than the redeemer's share.
-     */
+    /// @dev F15. A PARTIAL ASYNC REDEEM BURNS `f` OF THE cTOKENS, not a stored-rate underlying estimate:
+    ///      `redeemUnderlying` burns at the fresh rate, leaving ~2.1% of the redeemer's accrual with the stayers.
     function testPartialRedeemPaysTheRedeemerTheCollateralAccrual() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1551,15 +1316,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         );
     }
 
-    /**
-     * @dev THE FAST PATH WITH NOTHING RAW. `fastRedeemImpl` draws idle first, then collateral; on a
-     *      book the keeper has fully parked there is no idle, so it always draws collateral and the
-     *      LTV gate — which a fully idle-funded redeem used to skip entirely — is always live. That is
-     *      the same economics either way (the USDC being paid out IS collateral now, so paying it out
-     *      really does move the LTV), and it is not a tightening in practice: the supply LOWERS the
-     *      book's LTV before it can be redeemed, so a supply-then-exit always has headroom. Both
-     *      halves asserted here.
-     */
+    /// @dev THE FAST PATH WITH NOTHING RAW: idle is drawn first, so a fully parked book always draws collateral and
+    ///      the LTV gate is always live -- no tightening, since the supply lowers LTV before the exit.
     function testFastRedeemDrawsFromCollateralWhenNothingIsRawIdle() public {
         _execute(SEED);
         uint256 top = 250_000e6;
@@ -1582,21 +1340,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(usdc.balanceOf(address(strategy)), 0, "and nothing was left raw behind it");
     }
 
-    /**
-     * @dev THE ASYNC PATH WITH NOTHING RAW, AND THE IL COVER. A full redeem repays both debts from the
-     *      unwound legs; a price move leaves one leg short, and the shortfall has to be bought. The
-     *      redeemer's Phase-1 cover budget IS the raw balance and Phase 1 is ORACLE-FREE; a keeper
-     *      that parks everything drives that budget to 0 and the redeem falls through to Phase 2
-     *      (`_settleShortfall`), which redeems collateral, buys the deficit off Chainlink and repays.
-     *      This pins that the exit still completes and still pays — the failure mode that matters on a
-     *      redeem valve — in the WORST case the keeper can create.
-     *
-     *      AND THAT IS WHY THE FLOAT IS A KEEPER DIAL. Phase 2 reads feeds; Phase 1 does not. Supplying
-     *      on deposit would have made this state unavoidable and pushed every shortfall-carrying full
-     *      redeem — including the trustless `emergencyRedeem` deadman — onto the oracle. With
-     *      `supplyIdle` the operator chooses: leave float, keep Phase 1 reachable, pay the supply APY
-     *      on that slice. `testSupplyIdleLeavesTheKeepersChosenFloatRaw` is the other side of this.
-     */
+    /// @dev THE ASYNC PATH WITH NOTHING RAW, AND THE IL COVER. The ORACLE-FREE Phase-1 budget IS the raw balance,
+    ///      so parking everything drives it to 0 and Phase 2 (`_settleShortfall`) has to buy off Chainlink.
     function testAsyncFullRedeemCoversAnIlShortfallWithZeroRawIdle() public {
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK_ORACLE_CONSISTENT));
         pool.setTick(TICK_ORACLE_CONSISTENT);
@@ -1607,8 +1352,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.supplyIdle(250_000e6); // keeper leaves NO float: Phase 1 has nothing to spend
         assertEq(usdc.balanceOf(address(strategy)), 0, "precondition: the redeemer's Phase-1 budget is 0");
 
-        // Move the pool up (spot AND TWAP) with leg B's oracle + swap rate: leg B is token0, so the LP
-        // now holds LESS leg B than the leg-B debt and the proportional repay comes up short.
+        // Move the pool up (spot AND TWAP) with leg B's oracle + swap rate: leg B is token0, so the repay shorts it.
         int24 newTick = TICK_ORACLE_CONSISTENT + 600;
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(newTick));
         pool.setTick(newTick);
@@ -1617,8 +1361,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         legBFeed.setAnswer(int256(newPB));
         router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
         router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
-        // FIXTURE ONLY: `MockNpm` custodies exactly what it was minted, so a post-move `collect` owes
-        // amounts re-priced at the new sqrtP that it never received. Float it, as other LPs would.
+        // FIXTURE ONLY: float `MockNpm` for what a post-move `collect` owes but was never minted.
         legB.mint(address(npm), 100e8);
         legA.mint(address(npm), 100e18);
 
@@ -1631,8 +1374,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
 
-        // The cover really ran — without this the test would pass vacuously on a book that had no
-        // shortfall to cover in the first place.
+        // The cover really ran -- without this the test would pass vacuously on a book with no shortfall.
         assertGt(
             router.boughtOf(address(legB)),
             legBBoughtBefore,
@@ -1644,12 +1386,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid despite the shortfall");
     }
 
-    /// @dev The IL shortfall of `testAsyncFullRedeemCoversAnIlShortfallWithZeroRawIdle`, factored out: a
-    ///      live book minted at the oracle-consistent tick, a `deposit` the keeper parks in full (so the
-    ///      raw float starts at exactly 0 and the tests below own the whole Phase-1 budget), then the pool
-    ///      moved 600 ticks up in lockstep across spot, TWAP, leg B's feed and its swap rate. Leg B is
-    ///      token0, so the LP now holds LESS leg B than the leg-B debt and the proportional repay comes up
-    ///      short. Returns the depositor's share balance, which IS the whole supply here.
+    /// @dev The IL shortfall factored out: genesis at the oracle-consistent tick, a deposit the keeper parks in full
+    ///      (raw float 0), then 600 ticks up in lockstep across spot, TWAP, leg B's feed and its swap rate.
     function _armLegBIlShortfall() internal returns (uint256 shares) {
         pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK_ORACLE_CONSISTENT));
         pool.setTick(TICK_ORACLE_CONSISTENT);
@@ -1667,8 +1405,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         legBFeed.setAnswer(int256(newPB));
         router.setRate(address(legB), address(usdc), (newPB * 1e18) / (100 * 1e8));
         router.setRate(address(usdc), address(legB), (100 * 1e8 * 1e18) / newPB);
-        // FIXTURE ONLY (see the sibling test): `MockNpm` custodies exactly what it was minted, so a
-        // post-move `collect` owes amounts re-priced at the new sqrtP that it never received.
+        // FIXTURE ONLY (see the sibling test): float `MockNpm` for what a post-move `collect` owes.
         legB.mint(address(npm), 100e8);
         legA.mint(address(npm), 100e18);
     }
@@ -1681,43 +1418,27 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev What an exact-OUTPUT buy of `legBOut` costs in USDC at the router's current rate, rounded up
-    ///      exactly as `MockClSwapRouter.exactOutputSingle` rounds it.
+    /// @dev What an exact-OUTPUT buy of `legBOut` costs in USDC, rounded up as `exactOutputSingle` rounds it.
     function _legBBuyCost(uint256 legBOut) internal view returns (uint256) {
         uint256 rate = router.rateE18(address(usdc), address(legB));
         return (legBOut * 1e18 + rate - 1) / rate;
     }
 
-    /// @dev Leg B's post-move mark — the feed answer `_armLegBIlShortfall` installs, and therefore the
-    ///      price `_settleShortfall` sizes its budget against.
+    /// @dev Leg B's post-move mark -- the answer `_armLegBIlShortfall` installs, so also what `_settleShortfall`
+    ///      sizes its budget against.
     function _legBMovedPrice() internal pure returns (uint256) {
         return (P_LEG_B * 1_061_837) / 1_000_000; // 1.0001^600
     }
 
-    /// @dev Re-price the USDC→leg B BUY side `worseBps` worse than the mark `_armLegBIlShortfall` left,
-    ///      i.e. the cover now costs `(1 + worseBps/10000)×` the oracle value of what it buys. Only the
-    ///      buy direction moves, so the leg sweeps are untouched.
+    /// @dev Re-price the USDC->leg B BUY side `worseBps` worse than the mark; the sell direction is untouched.
     function _worsenLegBBuy(uint256 worseBps) internal {
         uint256 fair = (100 * 1e8 * 1e18) / _legBMovedPrice();
         router.setRate(address(usdc), address(legB), (fair * 10000) / (10000 + worseBps));
     }
 
-    /**
-     * @dev F08 (a). THE SETTLE COVER'S BUDGET IS `maxSlippageBps`, NOT A HARDCODED 10%. The old
-     *      `_settleShortfall` redeemed `oracleCost × 110%` of collateral and pushed all of it through an
-     *      exact-INPUT swap floored only at `debtRem × (1 − maxSlippageBps)`. Those two bounds were
-     *      INDEPENDENT, so any router filling between them simply kept the difference — up to ~11% of the
-     *      shortfall on this 100bps clone, taken out of the collateral backing every other holder.
-     *
-     *      A fill 500bps worse than the mark is the witness: comfortably inside the old 10% budget (so it
-     *      used to go through and quietly overpay) and outside the configured 100bps band. Now that the
-     *      budget IS the bound — one exact-output buy of `debtRem` capped at `oracleCost × (1 + slip)` —
-     *      it is refused, and refused FAIL-CLOSED, because a half-cleared debt would only reappear as
-     *      dust Moonwell refuses to release the collateral against.
-     *
-     *      Reached through the full-redeem Phase 2: the keeper parked everything, so Phase 1 has a zero
-     *      budget and early-returns, leaving `_settleShortfall` to own the whole cover.
-     */
+    /// @dev F08 (a). THE SETTLE COVER'S BUDGET IS `maxSlippageBps`, NOT A HARDCODED 10%. The old `_settleShortfall`
+    ///      redeemed `oracleCost x 110%` and floored the exact-INPUT swap only at `debtRem x (1 - maxSlippageBps)`;
+    ///      independent bounds, so any fill between them kept the difference. Refused FAIL-CLOSED at 500bps worse.
     function testSettleShortfallCoverCannotOverpayPastMaxSlippage() public {
         uint256 shares = _armLegBIlShortfall();
         assertEq(usdc.balanceOf(address(strategy)), 0, "premise: Phase 1 has nothing to spend, so Phase 2 covers");
@@ -1729,12 +1450,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id, 0);
     }
 
-    /**
-     * @dev F08 (b). THE BAND, NOT A DEMAND FOR A PERFECT FILL — the companion that stops (a) from passing
-     *      on a cover that simply never works. 50bps worse than the mark is inside the clone's 100bps
-     *      band and must complete, and the USDC it spent must be inside `oracleValue(bought) × 1.01`.
-     *      Together the two tests bracket the settle cover at exactly `maxSlippageBps`.
-     */
+    /// @dev F08 (b). THE BAND, NOT A DEMAND FOR A PERFECT FILL: 50bps worse than the mark is inside the clone's
+    ///      100bps band, must complete, and must spend inside `oracleValue(bought) x 1.01`.
     function testSettleShortfallCoverAcceptsAFillInsideTheBand() public {
         uint256 shares = _armLegBIlShortfall();
         _worsenLegBBuy(50);
@@ -1758,25 +1475,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid");
     }
 
-    /**
-     * @dev F04. AN EXACT-OUTPUT SWAP HAS NO PARTIAL FILL, so a Phase-1 cover budget anywhere in the band
-     *      `0 < idle < needed` used to REVERT the whole redeem — `emergencyRedeem` deadman included. The
-     *      `usdcBal == 0` guard covered only the endpoint; every keeper float too small to finish the buy
-     *      bricked the exit outright, which is the opposite of what a partial float should do.
-     *
-     *      Driven in two runs off the SAME armed book. The first has no float at all and exists only to
-     *      MEASURE the cover — sizing the budget off a hardcoded guess would let the fixture drift out of
-     *      the band and pass vacuously. The second hands the redeem exactly half that, i.e. squarely
-     *      inside the band, and must complete: Phase 1's buy reverts in the router's own frame,
-     *      `swapExactOut` swallows it as `filled == false`, and the redeem falls through to Phase 2 —
-     *      which is precisely the next phase the fall-through exists for.
-     *
-     *      MUTATION-CHECKED: pass `false` for `bestEffort` at the two Phase-1 call sites and run (ii)
-     *      reverts `MockRouterMaxIn`.
-     */
+    /// @dev F04. AN EXACT-OUTPUT SWAP HAS NO PARTIAL FILL, so a Phase-1 budget anywhere in `0 < idle < needed` used
+    ///      to REVERT the whole redeem, `emergencyRedeem` included -- the `usdcBal == 0` guard covered only the
+    ///      endpoint. Run (i) MEASURES the cover; (ii) hands it half, where the buy fails as `filled == false`.
+    ///      MUTATION: pass `false` for `bestEffort` at the two Phase-1 call sites and (ii) reverts `MockRouterMaxIn`.
     function testFullRedeemSurvivesPartialIdleUsdc() public {
-        // (i) Reference run: no float, Phase 2 does all the covering, and the leg B it had to buy tells
-        //     us what the buy costs.
+        // (i) Reference run: no float, so Phase 2 does all the covering and the leg B it bought sizes the cost.
         uint256 shares = _armLegBIlShortfall();
         uint256 boughtBefore = router.boughtOf(address(legB));
         uint256 id = _requestRedeem(shares);
@@ -1785,8 +1489,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 needed = _legBBuyCost(router.boughtOf(address(legB)) - boughtBefore);
         assertGt(needed, 0, "premise: the armed book really does carry a leg-B shortfall to cover");
 
-        // (ii) Same book, but the keeper left HALF the cover's cost raw: inside the band, and the exact
-        //      band the old code could not survive.
+        // (ii) Same book, the keeper left HALF the cover's cost raw: the exact band the old code could not survive.
         setUp();
         shares = _armLegBIlShortfall();
         usdc.mint(address(strategy), needed / 2);
@@ -1804,15 +1507,9 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeemer was paid");
     }
 
-    /**
-     * @dev F04, THE OTHER HALF. Best-effort is scoped to the FULL-redeem Phase 1 — the only cover with a
-     *      documented next phase. A PARTIAL redeem's cover is the last word: its budget is deliberately
-     *      bounded at `balance − stayersIdle` so a shortfall can never be covered out of the stayers'
-     *      reserve, and an unaffordable buy must roll the whole redeem back rather than silently leave
-     *      the redeemer's debt slice behind on the stayers' book. Modelled with an illiquid buy side
-     *      (1000× worse than the mark) so the budget genuinely cannot reach, and bracketed against the
-     *      same redeem at the fair rate so the revert is provably the BUY and not the arming.
-     */
+    /// @dev F04, THE OTHER HALF. Best-effort is scoped to the FULL-redeem Phase 1, the only cover with a next phase.
+    ///      A PARTIAL redeem's cover is bounded at `balance - stayersIdle`, so an unaffordable buy must roll the whole
+    ///      redeem back. Bracketed against the fair rate, so the revert is provably the BUY and not the arming.
     function testPartialRedeemCoverStillFailsClosedOnAnUnaffordableBuy() public {
         uint256 shares = _armLegBIlShortfall();
         uint256 snap = vm.snapshotState();
@@ -1832,30 +1529,15 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id, 0);
     }
 
-    /**
-     * @dev F23 (a). THE DEADMAN IS ORACLE-FREE IN THE ORDINARY CASE, and one word in step B is what made
-     *      it so. `_repay` accrues the market BEFORE it applies the payment, so a repay sized off
-     *      `borrowBalanceStored` always left `current − stored` of interest standing. On a FULL redeem
-     *      that dust was the only thing keeping the borrow balance nonzero, so `_settleShortfall` never
-     *      took its `debtRem == 0` early return, every full redeem fell through into Phase 2 and read
-     *      Chainlink — `emergencyRedeem` included, the one exit built for the state where Chainlink is
-     *      exactly what is unavailable.
-     *
-     *      Armed with interest that has accrued in wall-clock time but that no transaction has folded in
-     *      (invisible to `borrowBalanceStored`, which is the whole condition), on a book with surplus on
-     *      both legs so the pro-rata repay can genuinely reach the accrued number. Then every feed is
-     *      staled by the deadman warp and the exit must still complete.
-     *
-     *      MUTATION-CHECKED: put `borrowBalanceStored` back in `_redeemRepayFromCollected` and this
-     *      reverts `StaleOracle` — from Phase 2's `_readAllPrices`, reached on the interest dust alone.
-     */
+    /// @dev F23 (a). THE DEADMAN IS ORACLE-FREE IN THE ORDINARY CASE. `_repay` accrues BEFORE applying the payment,
+    ///      so a repay sized off `borrowBalanceStored` left `current - stored` standing -- and on a FULL redeem that
+    ///      dust kept the borrow nonzero, so every full redeem fell into Phase 2 and read Chainlink.
+    ///      MUTATION: put `borrowBalanceStored` back in `_redeemRepayFromCollected` and this reverts `StaleOracle`.
     function testFullEmergencyRedeemIsOracleFreeOnABalancedBook() public {
         _execute(SEED);
         vm.prank(address(strategy));
         vault.strategyMint(lp, SUPPLY);
-        // Surplus on both legs: the repay has to be able to reach the ACCRUED debt out of held tokens,
-        // or the shortfall would send the redeem to Phase 2 for a legitimate reason and the test would
-        // be measuring the wrong thing.
+        // Surplus on both legs, so the pro-rata repay can reach the ACCRUED debt without a legitimate Phase-2 trip.
         legB.mint(address(strategy), IDLE_LEG_B);
         legA.mint(address(strategy), IDLE_LEG_A);
 
@@ -1888,27 +1570,10 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "collateral fully redeemed: no cToken dust");
     }
 
-    /**
-     * @dev F23 (b). DEEP IL, ORACLE DOWN, AND THE SURPLUS LEG FINISHES THE JOB. An IL shortfall is
-     *      ASYMMETRIC by construction: one leg over-collects while the other comes up short. The leg sweep
-     *      used to run at the very END of the unwind, so that surplus was still sitting there as leg
-     *      tokens while Phase 1 hunted for USDC and handed whatever it could not buy to Phase 2's
-     *      Chainlink reads. Hoisted above the covers, the surplus leg becomes funding for the deficit
-     *      leg's buy and the whole exchange stays oracle-free.
-     *
-     *      What the surplus leg CANNOT do is close the gap on its own, and that is not a fixture
-     *      artifact: the LP sold its leg B into the move at prices below the new mark, so the surplus
-     *      leg A is worth strictly LESS than the leg B it stopped holding. That difference IS the
-     *      impermanent loss, and something un-levered has to absorb it — raw float here, collateral (and
-     *      therefore Chainlink) in Phase 2. So the book is armed with HALF the cover's cost as float: too
-     *      little to finish alone, enough once the swept surplus is added to it.
-     *
-     *      Every feed is staled by the deadman warp, so the sweep floors degrade to 0 and Phase 2 would
-     *      revert `StaleOracle` the moment it were reached.
-     *
-     *      MUTATION-CHECKED: move the step-C sweep block back below the branch and this reverts
-     *      `StaleOracle` — the float alone cannot finish the buy.
-     */
+    /// @dev F23 (b). DEEP IL, ORACLE DOWN, AND THE SURPLUS LEG FINISHES THE JOB. The leg sweep used to run at the
+    ///      very END of the unwind, so the surplus sat idle while Phase 1 hunted USDC; hoisted above the covers it
+    ///      funds the deficit leg oracle-free. It cannot close the IL gap alone, hence half the cost as float.
+    ///      MUTATION: move the step-C sweep back below the branch and this reverts `StaleOracle`.
     function testDeepILFullRedeemSelfFundsFromTheSurplusLeg() public {
         // (i) Reference run: size the cover the same way `testFullRedeemSurvivesPartialIdleUsdc` does.
         uint256 shares = _armLegBIlShortfall();
@@ -1945,13 +1610,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
     }
 
-    /**
-     * @dev F23 (c). THE HOIST STRANDS NOTHING. Sweeping before the covers is only safe because Phase 2
-     *      now buys EXACTLY the debt (F08): the old exact-INPUT settle over-bought by its 10% buffer and
-     *      relied on the sweep running LAST to turn that excess back into USDC. Above the sweep, the
-     *      excess would have stranded as leg tokens on a book that is about to go flat — value left
-     *      behind on a fund with zero shares outstanding.
-     */
+    /// @dev F23 (c). THE HOIST STRANDS NOTHING, but only because Phase 2 now buys EXACTLY the debt (F08): the old
+    ///      exact-INPUT settle over-bought by its 10% buffer and relied on the sweep running LAST to recover it.
     function testHoistedSweepStrandsNoLegTokens() public {
         uint256 shares = _armLegBIlShortfall();
         uint256 id = _requestRedeem(shares);
@@ -1965,13 +1625,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
     }
 
-    /**
-     * @dev F14 (a). THE PROPOSER GETS TO STATE A FRESH FLOOR. The only bound on the net payout used to be
-     *      the `minAssetsOut` the requester fixed at `requestRedeem`, and the 2-day `FULFILL_WINDOW`
-     *      means that number can be two days old when the fulfil lands — a long time for a levered book.
-     *      Nothing else on the path covers the gap: `redeemUnwindImpl`'s sweep floors bound individual
-     *      SWAPS, not the payout, and a full redeem's covers lean on this number alone.
-     */
+    /// @dev F14 (a). THE PROPOSER GETS TO STATE A FRESH FLOOR: the requester's `minAssetsOut` can be two days old
+    ///      by the fulfil, and nothing else bounds the payout -- the sweep floors bound individual SWAPS, not it.
     function testFulfillRedeemEnforcesTheFreshProposerFloor() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -1983,11 +1638,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id, type(uint128).max); // an unreachable fresh floor
     }
 
-    /**
-     * @dev F14 (b). THE FLOOR IS `max(stored, fresh)`, NEVER `min`. The requester's own guarantee must not
-     *      be lowerable by whoever fulfils — that direction would let the proposer choose a worse payout
-     *      than the redeemer signed up for. A huge stored floor still binds when the proposer passes 0.
-     */
+    /// @dev F14 (b). THE FLOOR IS `max(stored, fresh)`, NEVER `min`: the fulfiller must not be able to choose a
+    ///      worse payout than the redeemer signed up for.
     function testFulfillRedeemCannotLowerTheRequestersFloor() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -2004,8 +1656,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id, 0); // "no fresh opinion" must not mean "drop the requester's floor"
     }
 
-    /// @dev F14 (c). `0` is the identity: an integrator with nothing fresher to say gets exactly the old
-    ///      behaviour, with the stored floor doing all the work.
+    /// @dev F14 (c). `0` is the identity: the stored floor does all the work, exactly as before.
     function testFulfillRedeemWithZeroFreshFloorIsUnchanged() public {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -2042,15 +1693,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqRel(usdc.balanceOf(lp), SEED, 5e16, "redeemer recovered ~the whole book");
     }
 
-    /**
-     * @dev THE LAST HOLDER OF A PARKED FLAT BOOK CAN LEAVE THROUGH THE FAST PATH. Zero debt means
-     *      there is no LTV to breach, so `fromCollateral == collateralUsdc` (the full-pot draw) is a
-     *      legitimate payout, not a gate violation — the `FastRedeemExceedsLtv` guard protects a
-     *      division that only exists when debt > 0 and must not fire without any. Before the guard
-     *      moved inside the debt branch, this exact call reverted
-     *      `FastRedeemExceedsLtv(uint256.max, …)` on a book carrying no debt at all, stranding the
-     *      redeemer behind `requestRedeem` + the fulfil window.
-     */
+    /// @dev THE LAST HOLDER OF A PARKED FLAT BOOK CAN LEAVE THROUGH THE FAST PATH: zero debt means no LTV to breach,
+    ///      but before the guard moved inside the debt branch this reverted `FastRedeemExceedsLtv(uint256.max, ...)`.
     function testFastFullRedeemPaysOutAFlatBookHeldEntirelyAsCollateral() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -2067,19 +1711,9 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "collateral fully drawn");
     }
 
-    /**
-     * @dev THE FAST-PATH TWIN of `testFullAsyncRedeemLeavesNoCollateralDustAtANonUnitRate`, and the more
-     *      dangerous half. `redeemUnderlying(amt)` accrues and burns at the FRESH rate while `amt` was
-     *      sized off `nav()`'s `exchangeRateStored`, so a full fast redeem used to strand
-     *      `cBal x (1 - stored/fresh)` cTokens. `_redeemCollateral` fixed exactly this on the ASYNC path;
-     *      the fast path never got it, and the parked-flat-book fast full redeem is precisely the state
-     *      that makes it reachable.
-     *
-     *      WHY IT IS WORSE THAN DUST: the redeem burns the LAST shares, so the residue is a fund with
-     *      assets and no shares — `nav() > 0` at `totalSupply() == 0`. The next depositor of 1 USDC mints
-     *      100% of a book that already holds the stranded collateral. The fix burns the cTOKEN balance
-     *      and pays the fresh-rate proceeds to the sole holder they belong to.
-     */
+    /// @dev THE FAST-PATH TWIN of `testFullAsyncRedeemLeavesNoCollateralDustAtANonUnitRate`, and the more dangerous
+    ///      half: the burn happens at the FRESH rate while `amt` was sized off `exchangeRateStored`, so a full fast
+    ///      redeem stranded `cBal x (1 - stored/fresh)` -- a fund with assets and no shares. Now burns the cTokens.
     function testFastFullRedeemLeavesNoCollateralDustAtANonUnitRate() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -2101,39 +1735,17 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), 0, "a fund with zero shares outstanding prices at exactly zero");
         assertGt(out, quotedAtStoredRate, "the sole holder is paid the FRESH-rate proceeds, not the stored-rate quote");
         assertEq(usdc.balanceOf(lp), out, "...and it is delivered");
-        // The surplus is exactly the rate gap on the parked pot: the pot was supplied at rate 1.0, so
-        // `cBal == pot` and the gap is `pot x (1.40 - 1.37)` == 30,000e6 on a 1,000,000e6 park — the
-        // precise figure james-saint's repro showed the next depositor would have minted against.
+        // The surplus is the rate gap on the parked pot: supplied at rate 1.0, so `cBal == pot`.
         assertEq(out - quotedAtStoredRate, (pot * 3) / 100, "surplus == pot x (fresh - stored)");
     }
 
-    /// @dev ERC-7201 base of the strategy's diamond storage (`LeveragedAerodromeCLStrategy.STORAGE_SLOT`),
-    ///      used to arm `protocolFeeOwed` directly — there is no setter for it and reaching a non-zero
-    ///      accrual through the fee machinery would drag HWM/timestamp state into a test about payout
-    ///      arithmetic. The write is asserted through `layout()` before it is relied on.
+    /// @dev ERC-7201 base of the strategy's diamond storage, used to arm `protocolFeeOwed` directly -- there is no
+    ///      setter. The write is asserted through `layout()` before it is relied on.
     bytes32 internal constant LAYOUT_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
 
-    /**
-     * @dev THE FEE MUST STAY FUNDED ACROSS THE FULL-REDEEM BURN — the sign-flipped twin of the windfall
-     *      bug above, and the reason the surplus is measured against `collateralUsdc` rather than
-     *      `fromCollateral`.
-     *
-     *      `fromCollateral` is already NET of `protocolFeeOwed`: on a full redeem
-     *      `assetsOut == navNet == raw + C - owed` and the idle draw is the whole raw balance, so
-     *      `fromCollateral == C - owed`. Baselining the fresh-rate surplus there pays out
-     *      `(C_fresh - C) + owed` — the rate gap PLUS the accrued fee — and the redeemer walks off with
-     *      a liability that has nothing behind it: `protocolFeeOwed` survives the redeem pointing at an
-     *      empty book, so the NEXT depositor's capital settles it.
-     *
-     *      `nav()` cannot see this either way (it floors at `gross > owed ? gross - owed : 0`, so it
-     *      reads 0 whether the fee is funded or drained), which is exactly why the dust test above —
-     *      which runs with `owed == 0`, where the two baselines coincide — cannot tell them apart. This
-     *      one arms a real fee.
-     *
-     *      REACHABLE ON THIS FIXTURE'S OWN CONFIG: with `performanceFeeBps == 0` and a protocol fee
-     *      configured, a crystallise accrues `protocolFeeOwed` while minting NO fee shares, so a sole
-     *      holder is still `shares == supply` and takes the full-redeem branch.
-     */
+    /// @dev THE FEE MUST STAY FUNDED ACROSS THE FULL-REDEEM BURN -- why the surplus is baselined on `collateralUsdc`
+    ///      and not `fromCollateral`, which is already NET of `protocolFeeOwed`: baselining there pays out
+    ///      `(C_fresh - C) + owed` and the liability survives pointing at an empty book. `nav()` floors at 0 anyway.
     function testFastFullRedeemKeepsTheProtocolFeeFunded() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -2162,14 +1774,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), 0, "book net of the fee is exactly zero");
     }
 
-    /**
-     * @dev THE EARLY-RETURN HOLE, closed: `owed >= collateral`. When the accrued fee exceeds the
-     *      parked slice, the raw balance covers the whole FEE-NETTED payout, `fromCollateral == 0`,
-     *      and the old early return skipped the burn branch entirely — burning the last shares with
-     *      100% of the cToken balance stranded (a strictly LARGER residue than the rate-gap dust the
-     *      branch exists to close). A small park under a larger accrued fee is an ordinary operating
-     *      state, not a corner: `supplyIdle` is a dial, not a sweep.
-     */
+    /// @dev THE EARLY-RETURN HOLE, closed: at `owed >= collateral` the raw balance covers the whole fee-netted payout,
+    ///      `fromCollateral == 0`, and the old early return skipped the burn -- stranding 100% of the cToken balance.
     function testFastFullRedeemSweepsTheParkedResidueWhenOwedExceedsTheCollateral() public {
         _execute(SEED);
         vm.prank(proposer);
@@ -2200,13 +1806,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(strategy.nav(), 0, "no assets-with-no-shares fund survives, even after the accrual lands");
     }
 
-    /**
-     * @dev THE `isFullRedeem` CONJUNCT, mutation-pinned. A PARTIAL redeem at a non-unit rate must pay
-     *      the stored-rate quote and NOTHING more: the fresh-rate surplus on the whole collateral
-     *      belongs to ALL holders, and a partial redeemer who triggered the burn-everything branch
-     *      would pocket it outright. Deleting the full-redeem condition on the burn branch passed the
-     *      entire suite before this test existed — no partial redeem ever ran at a non-unit rate.
-     */
+    /// @dev THE `isFullRedeem` CONJUNCT, mutation-pinned: a PARTIAL redeem at a non-unit rate must pay the
+    ///      stored-rate quote and NOTHING more. Deleting the conjunct passed the whole suite before this test.
     function testPartialFastRedeemAtANonUnitRatePaysTheStoredRateQuoteOnly() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -2222,16 +1823,14 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
 
         assertEq(out, quoted, "a partial redeemer is paid the stored-rate quote, NOT the rate gap");
-        // The stayers keep the accrual: the remaining collateral revalues at the fresh rate the
-        // redeem's own accrual just landed, so post-op nav is the fresh book minus the quote paid.
+        // The stayers keep the accrual: the remaining collateral revalues at the fresh rate the redeem just landed.
         assertApproxEqAbs(
             strategy.nav(), (pot * 140) / 100 - quoted, 2, "the fresh-rate surplus stays with the stayers"
         );
     }
 
-    /// @dev MIXED FUNDING on the burn branch — the realistic operating shape (a keeper float PLUS a
-    ///      parked slice), which both siblings above run with zero raw. Pins that the idle draw, the
-    ///      collateral burn and the fee retention compose: retained == owed to the wei, no dust.
+    /// @dev MIXED FUNDING on the burn branch -- the realistic shape both siblings skip. Pins that the idle draw, the
+    ///      collateral burn and the fee retention compose: retained == owed to the wei.
     function testFastFullRedeemWithMixedFundingRetainsExactlyTheFee() public {
         _execute(SEED);
         vm.prank(proposer);
@@ -2261,23 +1860,11 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     // ==================== previewRedeem MIRRORS THE EXECUTED redeem ====================
-    //
-    // `previewRedeem`'s natspec promises it mirrors `redeem` EXACTLY, and a frontend routes on its
-    // `fastOk`: false means "do not call redeem, go through requestRedeem + the fulfil window". Nothing
-    // pinned that promise, and it drifted — when `fastRedeemImpl` moved its `>= collateralUsdc` guard
-    // inside the debt branch, the preview's copy of the same guard stayed outside it, so the preview
-    // said `false` for a redeem the executed path pays in full. These three tests pin BOTH halves of
-    // the mirror (the routing flag AND the quoted number) on the states where they can disagree.
+    // A frontend routes on `fastOk`, and the mirror drifted: `fastRedeemImpl` moved its `>= collateralUsdc` guard
+    // inside the debt branch while the preview's copy stayed outside it.
 
-    /**
-     * @dev THE DRIFT, pinned at its worst case: the last holder of a parked flat book. Zero debt, the
-     *      whole pot as collateral, a FULL redeem — so `fromCollateral == collateralUsdc` exactly. The
-     *      executed `redeem` pays the whole pot (asserted directly above, in
-     *      `testFastFullRedeemPaysOutAFlatBookHeldEntirelyAsCollateral`), so a preview answering
-     *      `fastOk == false` would route the only remaining holder into `requestRedeem` + the deadman
-     *      for no reason. Both halves are asserted, and the quote is checked against the payout the
-     *      SAME call actually delivers.
-     */
+    /// @dev THE DRIFT at its worst case, the last holder of a parked flat book: zero debt, whole pot as collateral,
+    ///      `fromCollateral == collateralUsdc`, so `fastOk == false` would route the only holder into the deadman.
     function testPreviewRedeemMatchesTheExecutedFastRedeemOfAParkedFlatBook() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -2293,20 +1880,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 out = strategy.redeem(supply, 0);
         vm.stopPrank();
 
-        // NOTE the exactness of this mirror is scoped to a book with NO pending accrual: at a unit
-        // stored/fresh rate the full-redeem burn realises exactly the quote. With un-accrued interest
-        // outstanding the executed payout is LARGER than the quote — the carve-out pinned by
-        // `testPreviewUnderQuotesTheFullFlatBookFastRedeem` below.
+        // The exact mirror is scoped to a book with NO pending accrual (see the under-quote test below).
         assertEq(out, quoted, "quoted == executed: the preview is the mirror it claims to be");
     }
 
-    /**
-     * @dev THE DOCUMENTED CARVE-OUT, pinned with its own figures. A full redeem of a flat, zero-debt
-     *      book burns the whole cToken balance and pays the FRESH-rate proceeds, while `previewRedeem`
-     *      prices the same collateral at `nav()`'s stored (last-accrued) rate. The divergence is in the
-     *      SAFE direction only — the preview under-quotes, so a preview-derived `minAssetsOut` cannot
-     *      bounce — and `fastOk` stays true. These are the exact numbers the natspec cites.
-     */
+    /// @dev THE DOCUMENTED CARVE-OUT: a full redeem of a flat book pays the FRESH-rate proceeds while
+    ///      `previewRedeem` prices at the stored rate. SAFE direction only -- it under-quotes, so it cannot bounce.
     function testPreviewUnderQuotesTheFullFlatBookFastRedeem() public {
         uint256 pot = _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -2328,13 +1907,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGe(out, quoted, "the divergence is one-directional: the preview only ever UNDER-quotes");
     }
 
-    /**
-     * @dev THE OTHER SIDE OF THE SAME GUARD — it must still fire where it means something. A LEVERED
-     *      book carries debt, so a full redeem's collateral draw genuinely would breach `maxLtvBps`
-     *      (the post-draw denominator collapses while the debt stays put). `fastOk == false` here is
-     *      correct advice, and the executed fast path agrees by reverting: the flag and the gate are
-     *      the same decision, which is the property the zero-debt test above could not show on its own.
-     */
+    /// @dev THE OTHER SIDE OF THE SAME GUARD -- it must still fire where it means something. On a LEVERED book a
+    ///      full draw breaches `maxLtvBps`, and the executed path agrees by reverting: the same decision.
     function testPreviewRedeemAdvisesTheAsyncPathWhenTheDrawWouldBreachTheLtvGate() public {
         _execute(SEED);
         uint256 supply = 1_000_000e12;
@@ -2346,30 +1920,17 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(quoted, 0, "the payout is still quoted - only the ROUTING is negative");
         assertFalse(fastOk, "a full draw against a levered book breaches the LTV gate");
 
-        // ...and that is exactly what the executed path does, which is what makes the advice correct.
         vm.startPrank(lp);
         vault.approve(address(strategy), supply);
-        // Selector-only: the reverting LTV is whatever the post-draw book computes (here a real,
-        // finite number well over `maxLtvBps` — NOT the `uint256.max` sentinel, which is the
-        // collateral-exhausted arm). What is being pinned is that the gate fires at all, i.e. that the
-        // preview's `false` and the executed revert are the same decision.
+        // Selector-only: the reverting LTV is finite here, NOT the `uint256.max` collateral-exhausted arm.
         vm.expectPartialRevert(LeveragedAeroVenue.FastRedeemExceedsLtv.selector);
         strategy.redeem(supply, 0);
         vm.stopPrank();
     }
 
-    /**
-     * @dev THE OTHER DIRECTION OF THE SAME MIRROR, and the reason the zero-debt branch is a BOUND rather
-     *      than an unconditional `true`. A zero-debt book is NOT necessarily a flat one: `repayBorrowBehalf`
-     *      is permissionless, so anyone can retire the fund's debt while the LP position stays open (modelled
-     *      here by repaying both legs as the strategy). `nav()` then prices LP equity the mUSDC collateral
-     *      alone cannot fund, so a full redeem's `fromCollateral` STRICTLY exceeds `collateralUsdc` and the
-     *      fast path cannot serve it — the executed redeem refuses at Moonwell.
-     *
-     *      An unconditional `fastOk = true` on zero debt (the shape this suite briefly shipped) told a
-     *      frontend to call a `redeem` that reverts. The bound keeps EXACT cover true — that is the parked
-     *      flat-book case above — and flips only the strict over-draw.
-     */
+    /// @dev THE OTHER DIRECTION, and why the zero-debt branch is a BOUND rather than an unconditional `true`:
+    ///      `repayBorrowBehalf` is permissionless, so debt can be retired while the LP position stays open, and
+    ///      `nav()` then prices LP equity the collateral cannot fund -- a `true` would advise a reverting `redeem`.
     function testPreviewRefusesAZeroDebtOverDrawAgainstALiveLpPosition() public {
         _execute(SEED);
         uint256 supply = 1_000_000e12;
@@ -2386,10 +1947,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(quoted, _collateralUsdc(), "precondition: the payout exceeds the collateral that funds it");
         assertFalse(fastOk, "zero debt is not a free pass - the collateral must still COVER the draw");
 
-        // ...and the executed path agrees — with the TYPED refusal now: a full fast redeem of any
-        // non-flat book is refused up front (`fastRedeemImpl`'s top guard, the route-to-requestRedeem
-        // sentinel), rather than falling through to whatever Moonwell (or the mock's underflow) makes
-        // of the over-draw.
+        // ...and the executed path agrees with the TYPED refusal: `fastRedeemImpl`'s route-to-request sentinel.
         vm.startPrank(lp);
         vault.approve(address(strategy), supply);
         vm.expectRevert(
@@ -2399,10 +1957,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev Retire BOTH leg debts from outside the strategy's own ops — the reachable-by-anyone state
-    ///      `repayBorrowBehalf` creates on a live Compound-fork market. Pranked as the strategy because
-    ///      `MockLendingMarket.repayBorrow` is `msg.sender`-scoped; the resulting STATE (zero debt, live
-    ///      LP, untouched collateral) is what matters and is identical either way.
+    /// @dev Retire BOTH leg debts from outside the strategy's own ops, the state `repayBorrowBehalf` allows anyone.
+    ///      Pranked as the strategy only because `MockLendingMarket.repayBorrow` is `msg.sender`-scoped.
     function _retireAllDebtPermissionlessly() internal {
         uint256 debtA = mLegA.borrowBalance(address(strategy));
         uint256 debtB = mLegB.borrowBalance(address(strategy));
@@ -2416,12 +1972,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
     }
 
-    /**
-     * @dev THE EVERYDAY CASE, so the mirror is pinned where it is exercised most: a small partial
-     *      redeem of a levered book routes fast AND quotes the payout to the unit. This is the
-     *      assertion that would catch a future divergence in the SHARE-PRICING half of the preview
-     *      (fee simulation, idle-first split), which the two guard tests above do not touch.
-     */
+    /// @dev THE EVERYDAY CASE: a small partial redeem of a levered book routes fast AND quotes to the unit -- the
+    ///      SHARE-PRICING half of the preview, which the two guard tests do not touch.
     function testPreviewRedeemQuotesTheExecutedPayoutOnAPartialFastRedeem() public {
         _execute(SEED);
         uint256 supply = 1_000_000e12;
@@ -2441,21 +1993,15 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(out, quoted, "quoted == executed on the everyday path");
     }
 
-    /// @dev A FULL async redeem burns the cTOKEN balance (`redeem(cBal)`, `settleImpl`'s form), so no
-    ///      rate-gap dust survives — sized off `exchangeRateStored`, a full `redeemUnderlying` at the
-    ///      fresh rate always left a few cTokens behind, and the flat-branch `nav()` now PRICES that
-    ///      dust: a zero-share fund would read `nav() > 0` and gift it to the next depositor as a
-    ///      share-price discontinuity. The non-unit rate is what makes the two forms differ at all.
+    /// @dev A FULL async redeem burns the cTOKEN balance (`redeem(cBal)`), so no rate-gap dust survives: the
+    ///      flat-branch `nav()` prices such dust and a zero-share fund would gift it to the next depositor.
     function testFullAsyncRedeemLeavesNoCollateralDustAtANonUnitRate() public {
         _execute(SEED);
         uint256 supply = 1_000_000e12;
         vm.prank(address(strategy));
         vault.strategyMint(lp, supply);
-        // The gap the branch exists for: views report 1.37e18, the next MUTATING mUSDC call accrues to
-        // 1.40e18 first. Sizing a full draw as an UNDERLYING amount off the stored rate therefore burns
-        // `amount x 1e18 / 1.40e18` cTokens and strands `cBal x (1 - 1.37/1.40)`. Without a separate
-        // fresh rate this test passed with the branch deleted: one settable rate meant the mock burned
-        // at exactly the rate the caller sized with, so the dust could not exist.
+        // The gap: views report 1.37e18 while the next MUTATING call accrues to 1.40e18, so an UNDERLYING-sized full
+        // draw off the stored rate strands `cBal x (1 - 1.37/1.40)`. One settable rate hid the branch entirely.
         mUsdc.setExchangeRateStored(1.37e18); // stored < fresh is the on-chain norm
         mUsdc.setPendingExchangeRate(1.4e18); // ...and this is the fresh rate the redeem accrues to
 
@@ -2602,25 +2148,17 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     // ========= REDEEM-SWEEP ORACLE FLOORS, DEADMAN-PRESERVING (review finding 4) =========
-    //
-    // `redeemUnwindImpl` step E sweeps the two residual legs to USDC. Those were the LAST zero-min-out
-    // swaps in the system: a hostile router / sandwich could fill them at any price, and the loss landed
-    // entirely on the REDEEMER (the stayers' `(1-f)` share is reserved BEFORE the sweep and stays behind
-    // as legs). They now carry the same Chainlink floor every sibling sweep does —
-    // `oracleValue(amount ACTUALLY SOLD) x (1 - maxSlippageBps)` — derived behind a try-able external hop
-    // so `emergencyRedeem`, the deadman for the oracle-down-AND-backend-dead state, still completes with
-    // the floors falling back to 0.
+    // Step E's two leg sweeps were the LAST zero-min-out swaps in the system, with the loss landing on the REDEEMER.
+    // They now floor at `oracleValue(sold) x (1 - maxSlippageBps)`, derived behind a try-able hop so the floors fall
+    // back to 0 rather than freezing `emergencyRedeem`.
 
-    /// @dev A rerange-remainder-shaped idle balance on BOTH legs: $100k of leg B, $30k of leg A. Big
-    ///      enough that step E genuinely sells something (without it the unwind's collect is consumed by
-    ///      the pro-rata repay and the sweep is ~dust).
+    /// @dev A rerange-remainder-shaped idle balance on both legs ($100k leg B, $30k leg A), big enough to sell.
     uint256 internal constant IDLE_LEG_B = 1e8;
     uint256 internal constant IDLE_LEG_A = 10e18;
 
     uint256 internal constant SUPPLY = 1_000_000e12;
 
-    /// @dev Live position + `SUPPLY` shares outstanding + an idle remainder on both legs, then a request
-    ///      for `shares`. Returns the request id.
+    /// @dev Live position + `SUPPLY` shares + an idle remainder on both legs, then a request for `shares`.
     function _armRedeemWithIdleLegs(uint256 shares) internal returns (uint256 id) {
         _execute(SEED);
         vm.prank(address(strategy));
@@ -2633,27 +2171,20 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         id = strategy.requestRedeem(shares, 0);
     }
 
-    /// @dev Re-price the leg->USDC SELL direction at `bps` of the oracle mark (10000 == the fair rate
-    ///      `setUp` installs). The buy direction is untouched, so only the step-E sweeps are affected.
+    /// @dev Re-price the leg->USDC SELL direction at `bps` of the oracle mark (10000 == the fair rate); buys untouched.
     function _setLegSellRate(uint256 bps) internal {
         router.setRate(address(legB), address(usdc), (P_LEG_B * 1e18 * bps) / (100 * 1e8 * 10000));
         router.setRate(address(legA), address(usdc), (P_LEG_A * 1e18 * bps) / (100 * 1e18 * 10000));
     }
 
-    /// @dev The stayers' reserved leg share: `(1-f)` of the leg balance MEASURED just before the unwind,
-    ///      which is exactly what step E must leave behind on that leg. Measured, not assumed off
-    ///      `IDLE_LEG_*`: a genesis mint at a skewed/oracle-inconsistent tick already strands a real leg
-    ///      remainder (the documented per-borrow ratchet), so the pre-unwind balance is that PLUS the
-    ///      idle mint above.
+    /// @dev The stayers' reserved leg share: `(1-f)` of the leg balance MEASURED just before the unwind -- measured,
+    ///      because genesis already strands a real leg remainder on top of `IDLE_LEG_*`.
     function _stayerLegOf(uint256 preBal, uint256 shares) internal pure returns (uint256) {
         return preBal - Math.mulDiv(preBal, shares, SUPPLY);
     }
 
-    /**
-     * @dev (a) THE FINDING. A fill 2% under the oracle mark — outside the clone's `maxSlippageBps` band
-     *      of 100bps — is now REFUSED. Before the floor this filled silently and the redeemer simply got
-     *      less USDC, with nothing on-chain to say so.
-     */
+    /// @dev (a) THE FINDING. A fill 2% under the mark -- outside the clone's 100bps band -- is now REFUSED; before
+    ///      the floor it filled silently and the redeemer simply got less USDC.
     function testRedeemLegSweepRefusesAFillBelowTheOracleFloor() public {
         uint256 id = _armRedeemWithIdleLegs(SUPPLY / 4);
         _setLegSellRate(9800); // 200bps under oracle vs. a 100bps floor
@@ -2663,12 +2194,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id, 0);
     }
 
-    /**
-     * @dev (b) BINDING BUT NOT TRIPPING. A fill 50bps under the mark is inside the 100bps band and must
-     *      go through — the floor is a slippage bound, not a demand for a perfect fill. Together with (a)
-     *      this brackets the floor at `maxSlippageBps`, so the test pins the actual band and not merely
-     *      "some floor exists".
-     */
+    /// @dev (b) BINDING BUT NOT TRIPPING. 50bps under the mark is inside the band and must go through, so (a) and
+    ///      (b) together bracket the floor at `maxSlippageBps`.
     function testRedeemLegSweepAcceptsAFairFillWithTheFloorBinding() public {
         uint256 shares = SUPPLY / 4;
         uint256 id = _armRedeemWithIdleLegs(shares);
@@ -2681,33 +2208,20 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.fulfillRedeem(id, 0);
 
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeem completed and paid out");
-        // The sold slice really did clear a floor priced off the SOLD amount, not the raw balance: the
-        // stayers' reservation is untouched on both legs (see (d)).
+        // The sold slice cleared a floor priced off the SOLD amount, not the raw balance: the reservation is intact.
         assertEq(legB.balanceOf(address(strategy)), _stayerLegOf(preB, shares), "leg-B reservation intact");
         assertEq(legA.balanceOf(address(strategy)), _stayerLegOf(preA, shares), "leg-A reservation intact");
     }
 
-    /**
-     * @dev (c) THE DEADMAN TEST — the one that matters most. `emergencyRedeem` is the trustless exit for
-     *      the state where the ORACLE IS DOWN **and** the backend is dead, and it routes through this
-     *      exact sweep. If the floor were derived fail-closed, adding it would have converted a
-     *      value-protection guard into a fund freeze in precisely the state the deadman exists for.
-     *
-     *      Armed as hostilely as the state allows: every feed stale (the 2-day `FULFILL_WINDOW` warp does
-     *      that on its own, with `maxDelay` at 1 hour) AND the router filling 200bps under the mark — the
-     *      exact combination that reverts in (a). It must complete, at floor 0, paying the redeemer.
-     */
+    /// @dev (c) THE DEADMAN TEST. `emergencyRedeem` routes through this sweep, so a fail-closed floor would freeze
+    ///      the exit built for oracle-down. Armed with every feed stale AND the fill that reverts in (a).
     function testEmergencyRedeemStillCompletesWithStaleFeedsAndAHostileFill() public {
         uint256 shares = SUPPLY / 4;
         uint256 id = _armRedeemWithIdleLegs(shares);
         _setLegSellRate(9800);
 
         vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed; every feed now stale
-        // Sanity: the oracle really is down for this book — and down for THAT reason. The specific
-        // selector matters: a bare `expectRevert()` would also pass if `nav()` broke for an unrelated
-        // reason, quietly turning the premise of this test into a tautology. `nav()` prices its legs
-        // through `LeveragedAeroValuation.readUsd8` → `ChainlinkReader.readUsd`, whose `age > maxDelay`
-        // branch (the 1-hour `maxDelay` against a 2-day warp) raises `StaleOracle`.
+        // Sanity, on the specific selector: a bare `expectRevert()` would also pass on an unrelated `nav()` break.
         vm.expectRevert(ChainlinkReader.StaleOracle.selector);
         strategy.nav();
 
@@ -2724,13 +2238,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(legA.balanceOf(address(strategy)), _stayerLegOf(preA, shares), "leg-A swept at floor 0");
     }
 
-    /**
-     * @dev (d) INSULATION REGRESSION. The floors must not move the stayer/redeemer boundary: stayers keep
-     *      exactly `(1-f)` of every leg and of the idle USDC, whatever the fill was. Asserted in closed
-     *      form against the pre-unwind snapshot, and asserted to be the SAME number under a fair fill and
-     *      under a hostile-but-floor-0 deadman fill — the floor changes whether a swap is allowed, never
-     *      who owns what.
-     */
+    /// @dev (d) INSULATION REGRESSION. The floors must not move the stayer/redeemer boundary: stayers keep exactly
+    ///      `(1-f)` of every leg and of the idle USDC, the SAME number under a fair fill and a floor-0 deadman fill.
     function testStayerReservationIsIdenticalWithAndWithoutABindingFloor() public {
         uint256 shares = SUPPLY / 4;
         uint256 idleUsdc = 200_000e6;
@@ -2754,8 +2263,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             "stayers keep (1-f) of the idle USDC"
         );
 
-        // Same book, same f, but reached through the floor-0 deadman path under a hostile fill: the
-        // reservation is byte-identical, so the floor moved no value between the two parties.
+        // Same book, same f, through the floor-0 deadman path under a hostile fill: byte-identical either way.
         setUp();
         id = _armRedeemWithIdleLegs(shares);
         usdc.mint(address(strategy), idleUsdc);
@@ -2768,16 +2276,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(legA.balanceOf(address(strategy)), legAKept, "leg-A reservation byte-identical");
     }
 
-    /**
-     * @dev (e) THE FALLBACK IS MARKED ON CHAIN (review round 2, item 3). The `catch {}` that drops the
-     *      floors to 0 is deliberate — the deadman in (c) depends on it — but it cannot distinguish a
-     *      stale feed / down sequencer from an out-of-gas, and before this it left NO on-chain trace at
-     *      all. A monitor could not tell a healthy fulfill from one whose swaps ran unbounded.
-     *
-     *      Both directions asserted, because an event that always fires says nothing: the healthy fulfill
-     *      of (b) must emit NOTHING, and the deadman of (c) must emit `RedeemSweepFloorsDegraded` — FROM
-     *      THE STRATEGY ADDRESS, since the manager that raises it is delegatecalled.
-     */
+    /// @dev (e) THE FALLBACK IS MARKED ON CHAIN. The `catch {}` dropping the floors to 0 is deliberate -- (c) needs
+    ///      it -- but it cannot tell a stale feed from an out-of-gas. Healthy emits NOTHING; the deadman emits.
     function testTheRedeemFloorFallbackIsMarkedOnChain() public {
         uint256 shares = SUPPLY / 4;
 
@@ -2797,8 +2297,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         }
         vm.revertToState(snap);
 
-        // DEGRADED: the deadman warp staled every feed, so the derivation reverts and the floors fall
-        // back to 0 — the one state that fail-open exists for, now visible.
+        // DEGRADED: the deadman warp staled every feed, so the derivation reverts and the floors fall back to 0.
         id = _armRedeemWithIdleLegs(shares);
         vm.warp(block.timestamp + 2 days + 1);
         vm.recordLogs();
@@ -2846,26 +2345,16 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         return d > h ? d - h : 0;
     }
 
-    /**
-     * @dev THE FINDING. The harvest budget is ONE ceiling over TWO independent drifts. It used to be
-     *      handed to leg A whole, with leg B getting `budget - spentA` — and the spend path returned on
-     *      `budget == 0` BEFORE reading its market, so whenever leg A's drift priced at or above the
-     *      harvest (the normal state for the larger/faster leg on a thin harvest) leg B was never even
-     *      MEASURED. Every harvest in that band closed leg A and left leg B's short untouched, so a
-     *      partial hedge ROTATED the residual short onto one leg instead of shrinking it evenly.
-     *
-     *      Armed exactly in that band: leg A's drift alone costs more than the whole harvest, so the old
-     *      allocation gives leg B precisely zero. Both legs must now be hedged, and by the SAME FRACTION
-     *      of their own drift — which is what pro-rata means and what keeps a partial hedge leg-neutral.
-     */
+    /// @dev THE FINDING. The harvest budget is ONE ceiling over TWO independent drifts. It used to go to leg A whole
+    ///      with leg B getting `budget - spentA`, and the spend path returned on `budget == 0` BEFORE reading its
+    ///      market -- so on a thin harvest leg B was never even MEASURED and a partial hedge ROTATED the short.
     function testPartialBudgetHedgesBothLegsProRataInsteadOfStarvingLegB() public {
         _armAeroRouter();
         _execute(SEED);
         vm.prank(address(strategy));
         vault.strategyMint(lp, SUPPLY);
 
-        // ASYMMETRIC drift on purpose — leg A at 100bps of its debt, leg B at 25bps. A 4:1 cost ratio
-        // makes a pro-rata split visibly different from any equal split as well as from "leg A first".
+        // ASYMMETRIC on purpose -- leg A 100bps of debt, leg B 25bps: a 4:1 ratio separates pro-rata from either.
         uint256 iA = mLegA.borrowBalance(address(strategy)) / 100;
         uint256 iB = mLegB.borrowBalance(address(strategy)) / 400;
         assertGt(iA, 0, "fixture must produce a measurable leg-A accrual");
@@ -2886,12 +2375,10 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.compound(1, 0);
 
-        // THE BOUND: the shared ceiling still holds, and the whole of it was put to work.
         uint256 spent = usdc.balanceOf(address(router)) - routerUsdc0;
         assertLe(spent, budget, "total spend never exceeds the harvest budget");
         assertApproxEqRel(spent, budget, 1e15, "...and no allocation dust was stranded by the division");
 
-        // THE ASSERTION: both legs hedged, at the SAME coverage ratio.
         uint256 closedA = driftA0 - _driftLegA();
         uint256 closedB = driftB0 - _driftLegB();
         assertGt(closedB, 0, "leg B was hedged AT ALL - the finding (pre-fix this is exactly 0)");
@@ -2902,17 +2389,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             fracA, Math.mulDiv(budget, 1e18, costA + costB), 1e15, "...and that fraction is the budget's coverage"
         );
 
-        // GRACEFUL DEGRADATION, both legs: the unfunded remainder stays measured and carries.
         assertGt(_driftLegA(), 0, "leg-A remainder carries");
         assertGt(_driftLegB(), 0, "leg-B remainder carries");
     }
 
-    /**
-     * @dev REGRESSION on the full-budget case, stated separately from
-     *      `testCompoundRehedgesBorrowInterestOnBOTHLegs` because the pro-rata split is a NO-OP there and
-     *      that has to stay true: each leg's spend is capped at its own cost, so an ample budget
-     *      neutralises both legs exactly as before and leaves the surplus for the redeploy.
-     */
+    /// @dev REGRESSION on the full-budget case, separate because the pro-rata split is a NO-OP there and must stay
+    ///      one: each leg's spend is capped at its own cost, so an ample budget neutralises both exactly as before.
     function testFullBudgetStillNeutralisesBothLegsExactlyAndLeavesTheSurplusToRedeploy() public {
         _armAeroRouter();
         _execute(SEED);
@@ -2936,9 +2418,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(proposer);
         strategy.compound(1, 0);
 
-        // >99.99% of each leg's drift closed. The residue is integer-division dust on the two-way oracle
-        // conversion (the spend is floored in 6dp USDC, then the min-out re-derived from it) and is the
-        // SAME dust the pre-refactor single-leg-at-a-time path left.
+        // >99.99% of each leg's drift closed; the residue is the same two-way-oracle rounding dust as before.
         assertLt(_driftLegA() * 10_000, driftA0, "leg-A drift fully neutralised (to rounding dust)");
         assertLt(_driftLegB() * 10_000, driftB0, "leg-B drift fully neutralised (to rounding dust)");
         assertApproxEqRel(
@@ -2953,25 +2433,13 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     // ====== A SICK LEG MARKET DEGRADES ITS OWN HEDGE, NOT THE HARVEST (review finding: liveness) ======
-    //
-    // Measuring both legs unconditionally is what makes the pro-rata split above correct, but it turned
-    // `borrowBalanceCurrent` — a STATE-CHANGING Moonwell call that reverts whenever `accrueInterest`
-    // fails (a paused / arithmetically-broken market) — into a hard liveness dependency of `compound` on
-    // BOTH legs. The old shape returned on a per-leg `budget == 0` BEFORE touching the market, so a
-    // budget-starved leg never reached it. In the band armed below (fee + hedge consume the whole
-    // harvest, so `deployIdleImpl` is skipped) the hedge measure is the ONLY touch of that leg's market
-    // in the call, and one sick market would therefore have reverted the WHOLE harvest — the AERO sale,
-    // the fee crystallisation and the OTHER leg's hedge included.
-    //
-    // `_measureLeg` now degrades that leg's drift to zero instead, marking it with
-    // `HedgeLegMeasureDegraded`. Both legs are wrapped, not just leg B: the invariant is that the harvest
-    // survives a hedge problem, not that leg B is special — the (b) test below is the leg-A mirror.
+    // Measuring both legs unconditionally is what makes the pro-rata split correct, but it turned
+    // `borrowBalanceCurrent` -- a STATE-CHANGING call that reverts whenever `accrueInterest` fails -- into a liveness
+    // dependency of `compound` on BOTH legs, and in the band armed below it is the only touch of that leg's market.
+    // `_measureLeg` now degrades that leg's drift to zero, marked with `HedgeLegMeasureDegraded`.
 
-    /// @dev Break `market`'s accrual the way Moonwell does — `borrowBalanceCurrent` is
-    ///      `require(accrueInterest() == NO_ERROR, "accrue interest failed")`, so the failure surfaces as
-    ///      a plain string revert. `borrowBalanceStored` (used by `nav()`, `_assertHealthy` and this
-    ///      suite's own helpers) is deliberately left working: the point is a market that cannot ACCRUE,
-    ///      not a market that has vanished.
+    /// @dev Break `market`'s accrual the way Moonwell does: `borrowBalanceCurrent` is a
+    ///      `require(accrueInterest() == NO_ERROR, ...)`, so it reverts as a string. `borrowBalanceStored` still works.
     function _breakAccrual(address market) internal {
         vm.mockCallRevert(
             market,
@@ -2980,8 +2448,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         );
     }
 
-    /// @dev Count the degradation markers raised from the STRATEGY's address (both the manager and the
-    ///      valuation library are delegatecalled), and return the market named by the last one.
+    /// @dev Count `HedgeLegMeasureDegraded` markers raised from the STRATEGY's address; returns the last one named.
     function _degradations(Vm.Log[] memory logs) internal view returns (uint256 n, address market) {
         for (uint256 i; i < logs.length; i++) {
             if (
@@ -2994,10 +2461,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         }
     }
 
-    /// @dev Arm the two-leg book with drift on BOTH legs and a harvest budget SHORT of leg A's drift
-    ///      alone — the band where the whole harvest is consumed by the hedge, `deployIdleImpl` is
-    ///      skipped, and the measure is consequently the only touch of either leg's market.
-    /// @return driftA0 leg-A drift, `driftB0` leg-B drift, `budget` the armed harvest (6dp).
+    /// @dev Arm drift on BOTH legs plus a harvest budget SHORT of either leg's own drift -- the band where the hedge
+    ///      consumes the whole harvest, `deployIdleImpl` is skipped, and the measure is the only market touch.
     function _armTwoLegDriftAndAThinHarvest() internal returns (uint256 driftA0, uint256 driftB0, uint256 budget) {
         _armAeroRouter();
         _execute(SEED);
@@ -3014,18 +2479,15 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(driftA0, 0, "fixture must arm a leg-A drift");
         assertGt(driftB0, 0, "fixture must arm a leg-B drift");
 
-        // 99% of the SMALLER leg's cost: strictly below either leg's own cost, so whichever leg survives
-        // takes the whole budget, spends all of it, and leaves `redeploy == 0`.
+        // 99% of the SMALLER leg's cost: below either leg's own cost, so the surviving leg spends the whole budget.
         uint256 costA = _valueUsdc(driftA0, P_LEG_A, 18);
         uint256 costB = _valueUsdc(driftB0, P_LEG_B, 8);
         budget = ((costA < costB ? costA : costB) * 99) / 100;
         _armHarvest(budget);
     }
 
-    /**
-     * @dev (a) THE REGRESSION, on the leg it bites. Leg B's market cannot accrue; the harvest must still
-     *      complete in full and only leg B's hedge may be lost.
-     */
+    /// @dev (a) THE REGRESSION, on the leg it bites: leg B's market cannot accrue, the harvest must still complete
+    ///      in full, and only leg B's hedge may be lost.
     function testABrokenLegBMarketDegradesThatLegAndTheHarvestStillCompletes() public {
         (uint256 driftA0, uint256 driftB0, uint256 budget) = _armTwoLegDriftAndAThinHarvest();
         _breakAccrual(address(mLegB));
@@ -3041,17 +2503,14 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        // 1. THE DEGRADATION IS MARKED, once, naming leg B's market, from the strategy's own address.
         (uint256 marks, address named) = _degradations(logs);
         assertEq(marks, 1, "exactly one leg degraded");
         assertEq(named, address(mLegB), "...and it is leg B's market that is named");
 
-        // 2. THE REWARD SALE HAPPENED — the AERO left the strategy and reached the v2 router.
         assertEq(aero.balanceOf(address(strategy)), 0, "the whole claim was sold");
         assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, budget * 1e12, "...to the AERO->USDC router");
 
-        // 3. THE FEE CRYSTALLISATION HAPPENED and its state stuck (it precedes the hedge, so a reverting
-        //    hedge would have rolled it back with everything else). No deferral marker either.
+        // 3. THE FEE CRYSTALLISATION HAPPENED and stuck -- it precedes the hedge, so a revert would have undone it.
         assertGt(strategy.layout().hwmPerShare, 0, "the pre-compound crystallise ran and persisted");
         for (uint256 i; i < logs.length; i++) {
             assertTrue(
@@ -3060,26 +2519,18 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             );
         }
 
-        // 4. LEG A'S HEDGE HAPPENED, and took the WHOLE budget: with leg B's cost degraded to 0 the
-        //    pro-rata split allocates everything to the surviving leg.
+        // 4. LEG A'S HEDGE HAPPENED and took the WHOLE budget: leg B's cost degraded to 0, so pro-rata gives it all.
         assertEq(usdc.balanceOf(address(router)) - usdcInSwapRouter0, budget, "the whole budget bought leg A");
         assertApproxEqRel(driftA0 - _driftLegA(), (driftA0 * 99) / 100, 1e15, "leg A hedged by ~the budget's coverage");
 
-        // 5. LEG B PAID FOR ITS OWN BROKEN MARKET, AND ONLY THAT: its drift is untouched and carries
-        //    whole to the next harvest, exactly as an unfunded remainder does.
         assertEq(_driftLegB(), driftB0, "leg B's drift carries in full");
 
-        // 6. ...and this really WAS the only touch of leg B's market: the hedge consumed the whole
-        //    harvest, so `deployIdleImpl` never ran. Nothing else in the call could have covered it.
+        // 6. ...and this really WAS the only touch of leg B's market: the harvest was fully consumed by the hedge.
         assertEq(mUsdc.balanceOf(address(strategy)), collateral0, "redeploy skipped (redeploy == 0)");
     }
 
-    /**
-     * @dev (b) THE SYMMETRY, and the reason the fail-open is not leg-B-only. Nothing about the argument
-     *      is specific to leg B — it is "the harvest survives a hedge problem", and leg A's market can be
-     *      paused just as leg B's can. Same book, same budget, the OTHER market broken: the harvest still
-     *      completes and leg B is now the one hedged with the whole budget.
-     */
+    /// @dev (b) THE SYMMETRY, and why the fail-open is not leg-B-only: same book, same budget, the OTHER market
+    ///      broken -- the harvest still completes and leg B is the one hedged in full.
     function testABrokenLegAMarketDegradesThatLegInstead() public {
         (uint256 driftA0, uint256 driftB0, uint256 budget) = _armTwoLegDriftAndAThinHarvest();
         _breakAccrual(address(mLegA));
@@ -3099,10 +2550,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(_driftLegA(), driftA0, "leg A's drift carries in full");
     }
 
-    /**
-     * @dev (c) THE MARKER IS NOT FREE-RUNNING. A healthy two-leg harvest must emit NOTHING — an event
-     *      that always fires tells a monitor nothing about a leg that has stopped being hedged.
-     */
+    /// @dev (c) THE MARKER IS NOT FREE-RUNNING: a healthy two-leg harvest must emit NOTHING, or the event says
+    ///      nothing about a leg that has stopped being hedged.
     function testAHealthyTwoLegHarvestMarksNoDegradation() public {
         _armTwoLegDriftAndAThinHarvest();
 
@@ -3115,24 +2564,12 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     // ============ THE EMPTY BOOK: DORMANCY AND THE HWM ACROSS A supply == 0 CYCLE (F03) ============
-    //
-    // `_crystallizeFees` used to `return` outright on `totalSupply() == 0`, writing NEITHER the fee
-    // clock nor the HWM. Both omissions bill the reopening depositor for a cycle they were not in.
-    // The two tests below pin the two writes independently.
-    //
-    // FIXTURE NOTE: this suite runs with `managementFeeBps == performanceFeeBps == 0` (see `_params`),
-    // so neither leg can be observed as MINTED SHARES here. That does not weaken the assertions — the
-    // fee clock and the HWM are written unconditionally by `_crystallizeFees`, regardless of the rates,
-    // and they are precisely the state a later non-zero rate would bill against. The assertions are on
-    // that state directly, which is also what makes them exact rather than approximate.
+    // `_crystallizeFees` used to `return` outright on `totalSupply() == 0`, writing NEITHER the fee clock nor the HWM;
+    // both bill the reopening depositor for a cycle they were not in. FIXTURE: fees are 0 here, so the writes are
+    // asserted as state rather than as minted shares.
 
-    /**
-     * @dev THE CLOCK. Drain the book to zero shares, let a YEAR pass, and reopen it. The reopening
-     *      deposit's own crystallise must move `lastFeeAccrualTimestamp` to now, so the dormancy is
-     *      simply not part of any `dt`. Leaving it frozen at the draining redeem hands the next
-     *      crystallise a 365-day window on a fund that held nothing for all of it — a management fee
-     *      the reopening depositor pays in full and earned none of.
-     */
+    /// @dev THE CLOCK. Drain to zero shares, let a YEAR pass, reopen: the reopening crystallise must move
+    ///      `lastFeeAccrualTimestamp` to now, or the next one bills 365 days of fee on a dormant fund.
     function testDormancyIsNotBilledToTheReopeningDepositor() public {
         _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
@@ -3160,22 +2597,15 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(block.timestamp - clockAtDrain, 365 days, "...and the window skipped really was a full year");
     }
 
-    /**
-     * @dev THE HWM. A mark taken against the OLD supply is incommensurable with the basis the reopening
-     *      deposit sets: a drained book reopens at `WAD / SHARES_VIRTUAL_OFFSET` (1e12) whatever the dead
-     *      cycle traded at. Carrying the dead cycle's peak forward would hand the reopened fund a
-     *      fee-free run back up to it. The empty-book branch zeroes the mark, so the next crystallise
-     *      re-seeds at the reopened fund's OWN level via the `hwmPerShareX == 0` first-cycle branch.
-     */
+    /// @dev THE HWM. A mark taken against the OLD supply is incommensurable with the reopening basis
+    ///      (`WAD / SHARES_VIRTUAL_OFFSET` == 1e12), so the empty-book branch zeroes it and the next cycle reseeds.
     function testTheHwmResetsAcrossASupplyZeroCycle() public {
         _flatBookHeldEntirelyAsCollateral();
         uint256 supply = 1_000_000e12;
         vm.prank(address(strategy));
         vault.strategyMint(lp, supply);
 
-        // Two crystallisation points are needed to MARK the HWM: the first only seeds the clock
-        // (`lastFeeAccrualTimestamp == 0` short-circuits ahead of the library), the second marks.
-        // A gain lands between them so the mark sits strictly above the unit-rate basis.
+        // Two crystallisation points are needed to MARK the HWM: the first only seeds the clock, the second marks.
         _deposit(1_000e6);
         usdc.mint(address(strategy), 500_000e6); // raw idle is in `nav()` — a 50% gain on the book
         _deposit(1_000e6);
@@ -3190,8 +2620,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
         assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
 
-        // ── REOPEN. `navNet == 0` and `supply == 0`, so the depositor mints at
-        //    `assets x SHARES_VIRTUAL_OFFSET` — a per-share level of exactly 1e12. ──
+        // REOPEN. `navNet == 0` and `supply == 0`, so the depositor mints at `assets x SHARES_VIRTUAL_OFFSET` == 1e12.
         _deposit(100_000e6);
         assertEq(strategy.layout().hwmPerShare, 0, "the dead cycle's mark did not survive the empty book");
 

@@ -40,36 +40,13 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///         the strategy (Tasks 3.6 / 3.7).  `test_noPhantomFee_whenIdleJustLanded`
 ///         anchors the regression: given the correct pre-deposit input, this library
 ///         produces zero performance fee.
-///
 ///         ## Sampling — the HWM is sampled, not continuous (KNOWN AND ACCEPTED)
-///         The HWM only ever moves at a `crystallize` call, so the total performance fee a
-///         cohort pays telescopes to `perfBps × (max SAMPLED navPerShare − seed navPerShare)`,
-///         not `perfBps × (max ATTAINED navPerShare − seed)`. Denser sampling therefore weakly
-///         increases the fee, and the strategy crystallises before every deposit / redeem /
-///         compound — so while `LeveragedAeroVault.openDeposits` is on, an outsider can add a
-///         sampling point at a peak with a dust deposit. That is deliberate, on four grounds:
-///
-///         - **Crystallising before every issuance and burn is the fairness invariant.** Fees
-///           must settle against the state that produced them before the share count moves, or
-///           an entering LP buys into an unaccrued liability and an exiting one escapes it. Any
-///           scheme that skips a crystallise to deny a sampling point breaks that first.
-///         - **Interval-gating the perf leg does not work here.** The only clock available is
-///           `lastFeeAccrualTimestamp`, and EVERY op advances it for the price-free management
-///           leg (D6). A perf-leg gate measured off it would be reset by ordinary traffic and so
-///           would disable the performance fee outright rather than smooth it; a second,
-///           perf-only clock is a new storage slot plus a second dormancy-reset problem.
-///         - **A window that suppresses sampling is a real fee escape.** Redemptions inside an
-///           un-sampled window exit above an un-ratcheted HWM, paying nothing on the gain they
-///           realise. That loss is certain; the sampling over-charge is bounded.
-///         - **The caller profits nothing and cannot manufacture the peak.** Fee shares dilute to
-///           `feeRecipient`, never to the caller, and the dust depositor is diluted along with
-///           everyone else. `navPre` is Chainlink-priced behind the calm / TWAP-deviation gate, so
-///           a peak can be SELECTED but not MANUFACTURED, and each peak is charged once — the HWM
-///           ratchets, so the effect is one-shot per new high, not repeatable.
-///
-///         The operational lever, if a fund ever wants sampling closed to outsiders, is
-///         `LeveragedAeroVault.setOpenDeposits(false)`: deposits become whitelist-only and every
-///         sampling point is fund-controlled again.
+///         The HWM only moves at a `crystallize` call, so denser sampling weakly increases the fee, and
+///         while `LeveragedAeroVault.openDeposits` is on an outsider can add a sampling point at a peak
+///         with a dust deposit. Accepted: crystallising before every issuance and burn is the fairness
+///         invariant, an un-sampled window is the worse (and certain) fee escape, and the caller profits
+///         nothing — `navPre` is Chainlink-priced behind the calm / TWAP-deviation gate, so a peak can be
+///         SELECTED but not MANUFACTURED, and the ratcheting HWM charges each peak once.
 library LeveragedAeroFees {
     /// @dev 1e18 fixed-point scale for per-share HWM and the management fee rate.
     uint256 private constant WAD = 1e18;
@@ -179,17 +156,11 @@ library LeveragedAeroFees {
         uint256 totalGainUsdc = Math.mulDiv(gainPerShareX, totalSupply, WAD);
 
         // Protocol slice off the GROSS gain FIRST (rounds down, LP-favourable). USDC liability, never
-        // minted.
-        //
-        // CLAMP AT THE GAIN, not at `navPre`. `protocolFeeBps` is read LIVE from an owner-pointed
-        // ProtocolConfig this library cannot validate and nothing else bounds, so a `> 10_000`
-        // value is representable. Clamping only at `navPre` let such a value produce
-        // `protocolUsdc > totalGainUsdc`, and the `totalGainUsdc - protocolUsdc` subtraction below
-        // then panics 0x11 — swallowed by every best-effort crystallise caller, i.e. fees stop
-        // permanently and silently. `min(., totalGainUsdc)` keeps that subtraction total, bounds the
-        // liability accrued on the `performanceFeeBps == 0` early return by the gain rather than by
-        // the whole NAV, and subsumes the old `navPre` ceiling (the gain is a slice of `navPre` by
-        // construction, so `totalGainUsdc ≤ navPre`).
+        // minted. CLAMPED AT THE GAIN, not at `navPre`: `protocolFeeBps` is read LIVE from an
+        // owner-pointed ProtocolConfig nothing bounds, so `> 10_000` is representable, and a `navPre`
+        // clamp would let it panic 0x11 on the `totalGainUsdc - protocolUsdc` below — swallowed by every
+        // best-effort crystallise caller, so fees would stop permanently and silently. Clamping at the
+        // gain keeps that subtraction total and subsumes the `navPre` ceiling (`totalGainUsdc <= navPre`).
         protocolUsdc = Math.mulDiv(totalGainUsdc, protocolFeeBps, 10_000);
         if (protocolUsdc > totalGainUsdc) protocolUsdc = totalGainUsdc;
 

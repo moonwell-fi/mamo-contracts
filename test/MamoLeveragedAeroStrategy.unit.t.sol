@@ -272,10 +272,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
     // ==================== PARTIAL IDLE DEPOSIT ====================
 
-    /// @dev The caller picks the amount rather than the account sweeping everything. This is what
-    ///      makes the fund capacity ceiling usable: an account holding more idle USDC than the fund's
-    ///      remaining capacity must still be able to deploy the part that fits, because the ceiling
-    ///      rejects rather than trims.
+    /// @dev The caller picks the amount, so an account can still deploy just the part that fits the cap.
     function testDepositIdleDepositsOnlyTheRequestedAmount() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         usdc.mint(address(strategy), DEPOSIT * 3);
@@ -321,16 +318,13 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES * 100, "no ceiling applied");
     }
 
-    /// @dev THE POINT OF THE FEATURE: the ceiling is on the FUND, not the account. Once the book is
-    ///      full, a deposit is refused no matter whose account it comes through and no matter how
-    ///      little that account itself holds.
+    /// @dev The ceiling is on the FUND, not the account: a full book refuses a deposit from any account.
     function testDepositIsRefusedOnceTheFundIsFullEvenFromAnEmptyAccount() public {
         MamoLeveragedAeroStrategy first = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT); // capacity == exactly one DEPOSIT
         _deposit(first, user, DEPOSIT); // fund now full
         sherwood.setNav(DEPOSIT);
 
-        // A DIFFERENT user, whose account holds nothing at all, is still refused.
         MamoLeveragedAeroStrategy second = _createStrategy(thirdParty);
         usdc.mint(thirdParty, DEPOSIT);
         vm.startPrank(thirdParty);
@@ -343,17 +337,13 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(usdc.balanceOf(thirdParty), DEPOSIT, "no USDC moved");
     }
 
-    /// @dev The OTHER account deposit path. Both `deposit` and `depositIdle` funnel into
-    ///      `sherwoodStrategy.deposit`, so the capacity ceiling reaches both — and because the revert
-    ///      unwinds the whole transaction, the account's idle USDC is left exactly where it was and
-    ///      stays withdrawable by the owner. Nothing is stranded by a full fund.
+    /// @dev `depositIdle` funnels into the same vault deposit, and the revert leaves the idle withdrawable.
     function testDepositIdleIsRefusedOnceTheFundIsFullAndLeavesIdleUntouched() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT);
         _deposit(strategy, user, DEPOSIT); // fund now full
         sherwood.setNav(DEPOSIT);
 
-        // The user plain-transfers more USDC to their account (nothing on-chain can prevent that).
         usdc.mint(address(strategy), DEPOSIT);
 
         vm.prank(user);
@@ -362,7 +352,6 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
         assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "idle untouched, not stranded");
 
-        // ...and the owner can always take it back out.
         vm.prank(user);
         strategy.claimWithdrawnUsdc();
         assertEq(usdc.balanceOf(address(strategy)), 0, "owner recovered the idle USDC");
@@ -376,8 +365,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "exactly at capacity");
     }
 
-    /// @dev Revert-don't-trim: a deposit that would CROSS the ceiling is rejected outright, even
-    ///      though part of it would have fitted. The depositor retries with the room that is left.
+    /// @dev Revert-don't-trim: a deposit that would CROSS the ceiling is rejected outright, not trimmed.
     function testDepositCrossingCapacityIsRejectedOutrightNotTrimmed() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT);
@@ -389,15 +377,13 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.deposit(DEPOSIT * 2, 0);
         vm.stopPrank();
 
-        // Nothing moved, and the room that DOES fit is still usable.
         assertEq(strategy.sharesBalance(), 0, "no shares minted");
         assertEq(usdc.balanceOf(user), DEPOSIT * 2, "no USDC moved");
         _deposit(strategy, user, DEPOSIT);
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "the fitting amount goes in");
     }
 
-    /// @dev Capacity gates DEPOSITS only. Lowering it under a live book must not unwind or trap
-    ///      anyone — every withdrawal path is independent of it.
+    /// @dev Capacity gates DEPOSITS only: lowering it under a live book cannot unwind or trap anyone.
     function testLoweringCapacityDoesNotTrapExistingHolders() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT * 4);
@@ -412,8 +398,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.sharesBalance(), 0, "fully exited");
     }
 
-    /// @dev Withdrawing frees capacity for everyone, because the ceiling is measured against the
-    ///      fund's live NAV rather than a high-water mark.
+    /// @dev The ceiling is measured against live NAV, not a high-water mark, so withdrawing frees capacity.
     function testWithdrawingFreesCapacityForOtherDepositors() public {
         MamoLeveragedAeroStrategy first = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT);
@@ -424,7 +409,6 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         first.withdrawAll(0);
         sherwood.setNav(0); // the book emptied out
 
-        // A different user can now take the freed capacity.
         MamoLeveragedAeroStrategy second = _createStrategy(thirdParty);
         _deposit(second, thirdParty, DEPOSIT);
         assertEq(second.sharesBalance(), EXPECTED_SHARES, "freed capacity is reusable");
@@ -844,13 +828,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     }
 
     // ============ THE BACKEND CANNOT RE-LOCK UNCLAIMED WITHDRAWAL PROCEEDS (F11) ============
-    //
-    // Idle USDC is ambiguous: money waiting to be re-deposited, or a fulfilled async withdrawal the
-    // owner has not swept yet. Restricting `depositIdle` to owner-or-backend closed the anonymous
-    // griefer but left the BACKEND able to re-lock an exit the owner had already asked for, repeatably.
-    // The gate is now enforced, not a convention — and it must not over-block.
 
-    /// @dev Request + fulfil, leaving the proceeds unclaimed on the account.
     function _fulfilledRequest(MamoLeveragedAeroStrategy strategy) internal returns (uint256 id) {
         vm.prank(user);
         id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
@@ -869,16 +847,13 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(DEPOSIT, 0);
     }
 
-    /// @dev (2) ANTI-OVER-BLOCKING, the other half. An OUTSTANDING (unfulfilled) request must not gate
-    ///      the backend — it holds shares, not USDC, so there is nothing unclaimed to re-lock. Without
-    ///      this a single pending request would freeze the backend's ordinary re-deposit duty.
+    /// @dev (2) An OUTSTANDING request holds shares, not USDC, so it must not gate the backend.
     function testAnOutstandingRequestDoesNotBlockTheBackend() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
         vm.prank(user);
         strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        // Fresh USDC arrives for re-deposit while the request is still pending.
         usdc.mint(address(strategy), DEPOSIT);
         assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing is unclaimed yet");
 
@@ -904,9 +879,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(DEPOSIT, 0);
     }
 
-    /// @dev (4) OWNER INTENT IS UNAMBIGUOUS. The owner re-depositing their own proceeds is a choice, not
-    ///      a grief — so the owner is not gated, and the call prunes instead. That is also the manual
-    ///      unblock when a fulfilment is deliberately being left in place.
+    /// @dev (4) The owner re-depositing their own proceeds is a choice, not a grief: not gated, and it prunes.
     function testTheOwnerMayRedepositTheirOwnProceedsAndThatUnblocks() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
@@ -951,8 +924,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing unclaimed: the owner was paid directly");
     }
 
-    /// @dev (7) THE DEADLOCK THE HATCH EXISTS FOR. `recoverERC20` drains the proceeds without pruning,
-    ///      so the gate would stay shut on USDC that is no longer here. `syncRedeemRequests` clears it.
+    /// @dev (7) `recoverERC20` drains the proceeds without pruning, so the gate stays shut; sync clears it.
     function testRecoverERC20DeadlockIsClearedBySync() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
@@ -972,9 +944,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(DEPOSIT, 0);
     }
 
-    /// @dev (8) THE GATE IS ALL-OR-NOTHING ON MIXED IDLE, deliberately. It cannot tell an unclaimed
-    ///      fulfilment apart from fresh re-deposit money sitting beside it, so it refuses the whole
-    ///      call rather than guessing. The owner resolves it by claiming (or depositing themselves).
+    /// @dev (8) All-or-nothing on mixed idle: the gate cannot tell proceeds from fresh money, so it refuses.
     function testMixedIdleBlocksTheBackendEntirely() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
@@ -987,8 +957,6 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(DEPOSIT, 0);
     }
 
-    /// @dev (9) The prune must handle several tracked ids, settled and not, without dropping the wrong
-    ///      one — the tail-iteration swap-pop is what makes that true.
     function testPruneKeepsUnsettledIdsAndDropsSettledOnes() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT * 3);
@@ -1012,8 +980,6 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing settled is tracked any more");
     }
 
-    /// @dev (10) The view surface over one request's whole lifecycle — this is what the backend and the
-    ///      frontend read instead of scraping logs.
     function testOpenRequestIdsTracksTheLifecycle() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);

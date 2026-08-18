@@ -97,16 +97,10 @@ contract MulticallIntegrationTest is BaseTest {
     // Events
     event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
-    /// @dev PINNED Base fork. Previously this suite inherited the CLI `--fork-url base` at `latest`,
-    ///      and `updatePosition` → Moonwell's timestamp-based `accrueInterest` reverts
-    ///      `could not calculate block delta` whenever the live head's state is momentarily
-    ///      inconsistent with a market's last-accrued timestamp — a nondeterministic flake with no
-    ///      relation to the code under test. Pinning removes the drift (repo policy: fork tests MUST
-    ///      pin). The `make strategy-multicall` target drops `--fork-url base` so this self-fork is the
-    ///      only one; the `vm.fee(0)` / `vm.txGasPrice(0)` pair is the op-revm Isthmus operator-fee
-    ///      workaround the LPV2 integration suites already use. All referenced contracts
-    ///      (cbBTC_STRATEGY_FACTORY, STRATEGY_MULTICALL, MAMO_STRATEGY_REGISTRY, the Moonwell markets)
-    ///      have code at this block.
+    /// @dev PINNED Base fork (repo policy for fork tests): at `latest`, Moonwell's timestamp-based
+    ///      `accrueInterest` intermittently reverts `could not calculate block delta`. `make
+    ///      strategy-multicall` drops `--fork-url base`; `vm.fee(0)`/`vm.txGasPrice(0)` is the op-revm
+    ///      Isthmus operator-fee workaround.
     uint256 internal constant PINNED_BLOCK = 49_600_000;
 
     function setUp() public override {

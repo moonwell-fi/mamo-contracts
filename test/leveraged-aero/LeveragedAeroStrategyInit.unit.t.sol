@@ -80,24 +80,13 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      `keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))`.
     bytes32 internal constant STORAGE_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
 
-    /// @dev Slots consumed by `Layout` BEFORE its packed tail, i.e. the index of the slot holding
-    ///      `cbBTCDecimals … skewBps`. Counted off the struct: 11 addresses (0-10), `maxDelay` (11),
-    ///      `gracePeriod` (12), the packed `calmDeviationTicks`/`twapWindow`/`comptroller` slot (13),
-    ///      `npm`/`gauge`/`swapRouter` (14-16), the packed `tickSpacing` + risk-params slot (17),
-    ///      `tokenId` (18), the packed ticks + fee-params + `feeRecipient` slot (19), `hwmPerShare` (20),
-    ///      `lastFeeAccrualTimestamp` (21), `protocolFeeOwed` (22), `aeroUsdFeed` (23),
-    ///      `nextRedeemRequestId` (24), the `redeemRequests` mapping (25) — so the tail is slot 26 and
-    ///      the two `uint128` hedged principals share slot 27.
+    /// @dev Counted off `Layout`: the packed tail is slot 26, so the hedged principals share slot 27.
     uint256 internal constant TAIL_SLOT_OFFSET = 26;
 
-    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation` and probed by venue
-    ///      validation to prove the reward token has a USDC route. Etched below (no code otherwise).
+    /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation`, etched below for the probe.
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
-    /// @dev `LeveragedAeroVenue.applyVenue` pins the canonical Slipstream CLFactory rather than
-    ///      trusting `pool.factory()`, so a fork-free test has to place the registry HERE. Etch is
-    ///      safe despite `MockCLFactory` being storage-based: only the code is copied, and every
-    ///      `setPool` below writes to the etched address's own storage.
+    /// @dev `applyVenue` pins the canonical Slipstream CLFactory, so the mock registry is etched HERE.
     address internal constant AERODROME_CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
 
     function setUp() public {
@@ -121,8 +110,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         gauge = new MockCLGauge(address(aero));
         gauge.setPool(address(pool));
         pool.setGauge(address(gauge));
-        // The reward-route probe in venue validation reads a HARDCODED v2 factory address;
-        // place code there so the AERO/USDC route resolves in this fork-free suite.
+        // The reward-route probe reads a HARDCODED v2 factory address; place code there.
         vm.etch(AERO_V2_FACTORY, address(new MockAeroV2Factory(address(aero), address(usdc), address(0xA2F))).code);
         comptroller = new MockComptroller();
         mUsdc = new MockMoonwellMarket(address(usdc));
@@ -164,9 +152,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.minWidth = 200; // 2 x SPACING
         p.maxWidth = 20_000;
         p.skewBps = 5000; // centred — the historical behaviour, and the baseline every skew test perturbs
-        // The WIDEST LEGAL governance band, on purpose: `[1, 9999]` is exactly the open `(0, 10000)`
-        // interval `checkRange` already enforces, so the band is a no-op here and the skew cases below
-        // keep testing the SPAN predicate in isolation. The band-binding cases set it explicitly.
+        // The WIDEST LEGAL band `[1, 9999]` == the open `(0, 10000)` interval, so it is a no-op default.
         p.minSkewBps = 1;
         p.maxSkewBps = 9999;
         p.targetLtvBps = 5000;
@@ -182,10 +168,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         return LeveragedAerodromeCLStrategy(payable(Clones.clone(address(template))));
     }
 
-    /// @dev The UNBOUND init path: a clone initialized against `vault` but never bound to it. Kept
-    ///      separate from {_initBound} because `cloneAndBind` is set-once and most of this suite
-    ///      initializes many clones against the one vault. `initialize` is vault-only, so the vault is
-    ///      impersonated rather than called.
+    /// @dev The UNBOUND init path: `cloneAndBind` is set-once, so the vault-only `initialize` is pranked.
     function _init(LeveragedAerodromeCLStrategy.InitParams memory p)
         internal
         returns (LeveragedAerodromeCLStrategy s)
@@ -195,8 +178,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.initialize(address(vault), proposer, abi.encode(p));
     }
 
-    /// @dev The PRODUCTION path — clone + initialize + bind, atomically, as the owner. Used by the
-    ///      handful of tests that need the vault's share hooks to actually work against the clone.
+    /// @dev The PRODUCTION path: clone + initialize + bind atomically, for tests needing the share hooks.
     function _initBound(LeveragedAerodromeCLStrategy.InitParams memory p)
         internal
         returns (LeveragedAerodromeCLStrategy s)
@@ -218,10 +200,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         clFactory.setPool(address(usdc), legA_, LEG_A_SWAP_SPACING, makeAddr("legASwapPool"));
     }
 
-    /// @dev Re-register the LP pool in the canonical factory at its CURRENT pair + spacing.
-    ///      `applyVenue` requires `CLFactory.getPool(pair, spacing) == pool`, so any test that
-    ///      rewires `pool`'s tokens must re-register it or it stops being an adoptable venue and
-    ///      every later guard becomes unreachable behind `VenueMismatch`.
+    /// @dev Re-register a rewired LP pool, or `applyVenue` masks every later guard behind `VenueMismatch`.
     function _registerLpPool() internal {
         clFactory.setPool(pool.token0(), pool.token1(), pool.tickSpacing(), address(pool));
     }
@@ -234,9 +213,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         mLegB.setUnderlying(legB_);
         mLegA.setUnderlying(legA_);
         _registerSwapPools(legB_, legA_);
-        // LAST: `_registerSwapPools` writes (usdc, legB_, LEG_B_SWAP_SPACING), which is the SAME
-        // factory key as the LP pool whenever that spacing equals SPACING. One key holds one pool,
-        // so the LP registration has to win — the swap probe only asserts non-zero.
+        // LAST: the leg-B swap key can collide with the LP pool's, and the LP registration must win.
         _registerLpPool();
     }
 
@@ -269,16 +246,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== INITIALIZE IS VAULT-ONLY (F13) ====================
 
-    /**
-     * @dev A clone deployed and left uninitialized could once be `initialize`d by ANYONE — the
-     *      template's constructor only locks the TEMPLATE — so between a bare `Clones.clone` and the
-     *      owner's `initialize` a front-runner could seize the clone. Two distinct powers, not one: the
-     *      `proposer_` argument names the operator key, and `data` carries `targetLtvBps` / `maxLtvBps`,
-     *      i.e. the leverage policy the admin/proposer split deliberately keeps out of operator hands.
-     *
-     *      `initialize` is now gated on `msg.sender == vault_`. Gated against the ARGUMENT, because
-     *      nothing is stored yet — `_vault` is still zero, so `onlyVault` cannot be used.
-     */
+    /// @dev A bare clone could once be `initialize`d by ANYONE, seizing the operator key and the leverage
+    ///      policy. Gated on `msg.sender == vault_` — the ARGUMENT, since `_vault` is not stored yet.
     function testInitializeRejectsANonVaultCaller() public {
         LeveragedAerodromeCLStrategy s = _clone();
 
@@ -289,8 +258,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.expectRevert(BaseStrategy.NotVault.selector);
         s.initialize(address(vault), attacker, abi.encode(p));
 
-        // Not even the vault's OWNER: the vault itself is the only caller, which makes `cloneAndBind`
-        // the only path.
+        // Not even the vault's OWNER, which makes `cloneAndBind` the only path.
         vm.prank(owner);
         vm.expectRevert(BaseStrategy.NotVault.selector);
         s.initialize(address(vault), proposer, abi.encode(_baseParams()));
@@ -320,9 +288,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== PROPOSER ROTATION (F26) ====================
 
-    /// @dev VAULT-ONLY, and the vault is not the owner: the owner reaches it through
-    ///      `LeveragedAeroVault.setProposer`, which is `onlyOwner`. Direct calls — from the owner, from
-    ///      the incumbent proposer, from anyone — are refused.
+    /// @dev VAULT-ONLY: the owner reaches it through the vault's `onlyOwner` `setProposer`, never direct.
     function testSetProposerIsVaultOnly() public {
         LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         address newProposer = makeAddr("newProposer");
@@ -340,9 +306,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.setProposer(newProposer);
     }
 
-    /// @dev The rotation is real on the `onlyProposer` surface: the old key loses `rerange`, the new
-    ///      one gets it. `rerange` is used because on a flat book it still reaches its authorisation
-    ///      check and the impl then bails on `tokenId == 0` — no venues needed.
+    /// @dev The rotation is real on the `onlyProposer` surface: the old key loses `rerange`, the new gets it.
     function testRotationMovesTheOnlyProposerSurface() public {
         LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         _forceState(s, BaseStrategy.State.Executed);
@@ -448,11 +412,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.UnexpectedFeedDecimals.selector);
     }
 
-    /// @dev The LEG feeds are pinned to 8dp at validation time too, not only at read time — a non-8dp
-    ///      aggregator mis-scales every token↔USDC conversion by orders of magnitude. `wethFeed` had a
-    ///      test; `cbBTCFeed` (the very next clause, same selector) did not, so a mutant deleting the
-    ///      `cbBTCFeed.decimals() != 8` line alone survived. Only `cbBTCFeed` is odd here (others 8dp),
-    ///      so this clause is what fires. Leg A stays 8dp so the earlier `wethFeed` clause passes.
+    /// @dev `cbBTCFeed` is pinned to 8dp at validation time too; only it is odd here, so this clause is
+    ///      what fires. MUTATION: deleting the `cbBTCFeed.decimals() != 8` line alone survived before.
     function testInitRevertsOnNonEightDecimalCbBtcFeed() public {
         MockPriceFeed odd = new MockPriceFeed(1e18, 18, block.timestamp);
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
@@ -464,9 +425,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     function testInitRevertsOnNonEighteenDecimalRewardToken() public {
         MockToken sixDpReward = new MockToken("Reward", "RWD", 6);
         MockCLGauge oddGauge = new MockCLGauge(address(sixDpReward));
-        // Bind BOTH directions so the reward-decimals check is what fires: the gauge↔pool binding is
-        // reciprocal, and leaving `pool.gauge()` pointing at the default gauge would mask this guard
-        // behind a `VenueMismatch`.
+        // Bind BOTH directions, or the reciprocal gauge↔pool check masks this guard behind VenueMismatch.
         oddGauge.setPool(address(pool));
         pool.setGauge(address(oddGauge));
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
@@ -499,11 +458,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== GAUGE BINDING — ONE DIRECTION AT A TIME ====================
 
-    /// @dev UNMASKING. The gauge↔pool binding is two checks that share the `VenueMismatch` selector,
-    ///      and every existing fixture breaks BOTH at once — so deleting `gauge.pool() != pool` left
-    ///      the suite green, its partner absorbing the mutant. That is the same-selector masking the
-    ///      clause-by-clause work removed elsewhere. Here `pool.gauge()` is CORRECT and only the
-    ///      gauge lies, so this test can be killed by exactly one of the two clauses.
+    /// @dev The two gauge↔pool checks share a selector, so only the GAUGE lies here: `gauge.pool() != pool`.
     function testInitRejectsAGaugeThatMisreportsItsPool() public {
         MockCLGauge liar = new MockCLGauge(address(aero));
         liar.setPool(makeAddr("someOtherPool")); // the lie
@@ -513,8 +468,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
-    /// @dev The mirror, isolating the other clause: the gauge tells the truth and the POOL names a
-    ///      different gauge. Only `pool.gauge() != gauge` can fire.
+    /// @dev The mirror: the gauge is truthful and the POOL lies, so only `pool.gauge() != gauge` fires.
     function testInitRejectsAPoolThatNamesADifferentGauge() public {
         MockCLGauge honest = new MockCLGauge(address(aero));
         honest.setPool(address(pool)); // truthful, so its clause passes
@@ -526,9 +480,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== CANONICAL FACTORY BINDING ====================
 
-    /// @dev The seam this closes: `pool.factory()` is SELF-ATTESTED. Before the binding, a pool that
-    ///      named an attacker-controlled "factory" was adopted on that factory's say-so, and the two
-    ///      leg↔USDC probes then asked THAT contract whether the swap venues existed.
+    /// @dev `pool.factory()` is SELF-ATTESTED: a pool naming an attacker's "factory" was adopted on its say-so.
     function testInitRejectsAPoolThatNominatesAForeignFactory() public {
         MockCLFactory rogue = new MockCLFactory();
         rogue.setPool(address(usdc), address(legB), LEG_B_SWAP_SPACING, makeAddr("rogueLegBPool"));
@@ -539,8 +491,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
-    /// @dev The other half: claiming the canonical factory is not enough, it must actually have
-    ///      registered this pool at the declared pair + spacing.
+    /// @dev Claiming the canonical factory is not enough: it must register this pool at pair + spacing.
     function testInitRejectsAPoolTheCanonicalFactoryDoesNotRegister() public {
         clFactory.setPool(address(legB), address(legA), SPACING, address(0));
         _expectInitRevert(_baseParams(), LeveragedAerodromeCLStrategy.VenueMismatch.selector);
@@ -554,19 +505,14 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== TWAP AVAILABILITY (live at init) ====================
 
-    /// @dev REGRESSION for the vacuous-probe bug: `$.twapWindow` used to be written AFTER
-    ///      `applyVenue`, so the probe ran as `observe([0, 0])` — which every pool answers — and a
-    ///      pool younger than the window was adoptable at init, then bricked `execute`/`rerange`.
-    ///      With the store hoisted ahead of `applyVenue` the probe uses the REAL window, so this
-    ///      pool is rejected up front. Fails against the pre-fix ordering.
+    /// @dev REGRESSION: written AFTER `applyVenue`, `$.twapWindow` made the probe the vacuous `observe([0, 0])`.
     function testInitProbesTheTwapWindowAgainstTheRealHistory() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         pool.setMaxObservationAge(p.twapWindow - 1); // history one second short of the window
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.VenueMismatch.selector);
     }
 
-    /// @dev Boundary companion: history exactly spanning the window is adoptable, so the guard is
-    ///      rejecting on the window and not merely on the knob being set.
+    /// @dev Boundary companion: history exactly spanning the window is adoptable, so the guard is real.
     function testInitAcceptsAPoolWhoseHistoryExactlySpansTheWindow() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         pool.setMaxObservationAge(p.twapWindow);
@@ -915,8 +861,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
     }
 
-    /// @dev `skewedTickRange` spans up to `width` ticks on ONE side of the pool tick (the skew limit),
-    ///      so the band is capped at the full tick domain (`2 x TickMath.MAX_TICK`). Both edges of the cap.
+    /// @dev A skew can put up to `width` ticks on ONE side, so `maxWidth` is capped at `2 x MAX_TICK`.
     function testInitRevertsWhenMaxWidthExceedsTheTickDomain() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.maxWidth = MAX_BAND_WIDTH + uint24(uint24(SPACING)); // aligned, but past the ceiling
@@ -932,8 +877,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== RISK PARAMS ====================
 
-    /// @dev `_initialize` is one of the routes to a stored ZERO standing target (the two setters are the
-    ///      others); all are guarded. An init-zero would deploy a clone that silently never levers.
+    /// @dev All three routes to a stored ZERO target are guarded; an init-zero would never lever.
     function testInitRevertsOnZeroTargetLtv() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.targetLtvBps = 0;
@@ -1150,9 +1094,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== RERANGE ENTRYPOINT ====================
 
-    /// @dev The 4-arg `(width, skewBps, minLiq0, minLiq1)` signature is live and its gates are ordered
-    ///      lifecycle-first: a Pending clone rejects an otherwise-valid pair with `NotExecuted`, before
-    ///      any range-param check.
+    /// @dev Gates are ordered lifecycle-first: a Pending clone rejects a valid pair with `NotExecuted`.
     function testRerangeRevertsBeforeExecute() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         vm.prank(proposer);
@@ -1168,18 +1110,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     // ==================== RERANGE SKEW ====================
-    //
-    // `skewBps` is the fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == the historical
-    // centred range). ONE predicate — `_checkSkew` — validates it at init and on every rerange, and both
-    // callers raise the SHARED `OutOfBounds()` error (the old `WidthOutOfBounds()`, renamed and widened
-    // to cover both range knobs).
-    //
-    // These tests drive the predicate through the LIVE `rerange` entrypoint against a FLAT book
-    // (`tokenId == 0`), where `rerangeImpl` returns immediately — so the validation ladder plus the two
-    // persists are the only things that execute, and no Slipstream / Moonwell venue is needed.
+    // `skewBps` is the fraction of `width` placed BELOW the pool tick (1e4 scale; 5000 == centred), and the
+    // one `_checkSkew` predicate validates it at init and on rerange, both raising the SHARED `OutOfBounds()`.
+    // Driven through the LIVE `rerange` on a FLAT book, where only the validation ladder and persists run.
 
-    /// @dev An Executed clone on a flat book: `rerange` reaches `_checkWidth` / `_checkSkew` and, once
-    ///      they pass, is a persist-only no-op.
+    /// @dev An Executed clone on a flat book: `rerange` validates, then is a persist-only no-op.
     function _executedClone() internal returns (LeveragedAerodromeCLStrategy s) {
         s = _init(_baseParams());
         _forceState(s, BaseStrategy.State.Executed);
@@ -1192,36 +1127,23 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.rerange(width_, skewBps_, 0, 0);
     }
 
-    /// @dev A ZERO skew puts the WHOLE width above the tick — a one-sided range no `assetModeSplit` can
-    ///      size, and one that silently stops hedging. Rejected before any span arithmetic runs.
+    /// @dev A ZERO skew puts the WHOLE width above the tick: one-sided, unsizeable, and refused.
     function testRerangeRevertsForZeroSkew() public {
         _expectRerangeOutOfBounds(4000, 0);
     }
 
-    /// @dev The mirror image at the top of the band: 10000 would put the whole width BELOW the tick. The
-    ///      bound is STRICT (`>= 10000`), so 10000 itself is out — there is no "100% below" range.
+    /// @dev The mirror: the bound is STRICT (`>= 10000`), so there is no "100% below the tick" range.
     function testRerangeRevertsForFullSkew() public {
         _expectRerangeOutOfBounds(4000, 10_000);
     }
 
-    /// @dev Above the 1e4 scale entirely. Worth its own case: `skewBps` is a uint16, so an out-of-scale
-    ///      value is representable and a `> 10000` check that had been written as `!= 10000` would pass it
-    ///      through into `width x skew / 1e4` and produce a lower span WIDER than the whole width.
+    /// @dev Above the 1e4 scale: a `!= 10000` check would have let this uint16 through into the span math.
     function testRerangeRevertsForSkewAbove10000() public {
         _expectRerangeOutOfBounds(4000, 12_000);
     }
 
-    /**
-     * @dev THE REASON THE GUARD IS SPAN-BASED AND NOT A FLAT bps BAND. At the narrowest legal width
-     *      (`2 x tickSpacing`) there is no room to skew at all: 1000 bps of 200 ticks is 20 ticks, a
-     *      fifth of one spacing, so BOTH down-aligned bounds would land on the same grid point below the
-     *      tick and the range would stop STRICTLY BRACKETING it — exactly the invariant `assetModeSplit`
-     *      relies on. A flat band (say "skew must be within 2000 of centre") would have waved this
-     *      through while needlessly rejecting the same 1000 bps at a 200-spacing width, where it is safe.
-     *
-     *      Both starved sides are pinned, and the centred split at the same width is shown to be
-     *      ACCEPTED — so the rejection is about the span, not about the narrow width.
-     */
+    /// @dev WHY THE GUARD IS SPAN-BASED, NOT A FLAT bps BAND: at the narrowest legal width 1000 bps is a
+    ///      fifth of a spacing, so both bounds align onto one grid point — yet it is safe at a wider width.
     function testRerangeRevertsWhenSkewStarvesASideBelowOneSpacing() public {
         uint24 tightWidth = 2 * uint24(uint24(SPACING)); // == minWidth: a legal width with no skew room
         _expectRerangeOutOfBounds(tightWidth, 1000); // lower side starved (20 ticks < 100)
@@ -1233,18 +1155,14 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.layout().skewBps, 5000, "the centred split spans a full spacing each way and passes");
         assertEq(s.layout().width, tightWidth, "...and the width is persisted with it");
 
-        // The SAME 1000 bps is fine once the width can afford it — proof the guard bounds the span,
-        // not the skew value.
+        // The SAME 1000 bps is fine once the width can afford it: the guard bounds the span, not the value.
         s = _executedClone();
         vm.prank(proposer);
         s.rerange(2000, 1000, 0, 0); // 200 ticks below, 1800 above
         assertEq(s.layout().skewBps, 1000, "a hard skew is legal at a width that can carry it");
     }
 
-    /// @dev Gate ORDER around the new param: `onlyProposer` (a modifier) fires before the body, and the
-    ///      lifecycle check fires before the range params. So a stranger learns `NotProposer` and a
-    ///      proposer on a Pending clone learns `NotExecuted` — neither is told anything about the skew,
-    ///      and a bad skew can never be the reason an unauthorised call reverts.
+    /// @dev Gate ORDER: auth, then lifecycle, then range params — a bad skew never explains a refused call.
     function testRerangeSkewGatesAfterLifecycleAndAuth() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams()); // Pending
         vm.prank(proposer);
@@ -1257,9 +1175,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.rerange(4000, 0, 0, 0); // ...and auth wins over the params too
     }
 
-    /// @dev The genesis skew round-trips into storage — `layout().skewBps` is what every subsequent mint
-    ///      (`execute` / `deployIdle` / `compound`) derives its range from, so a dropped write would
-    ///      silently reopen every position centred.
+    /// @dev The genesis skew round-trips into storage: every subsequent mint derives its range from it.
     function testInitPersistsSkew() public {
         uint16[4] memory skews = [uint16(500), 3500, 5000, 9500];
         for (uint256 i; i < skews.length; ++i) {
@@ -1270,11 +1186,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     // ==================== SKEW GOVERNANCE BAND ====================
-    //
-    // `[minSkewBps, maxSkewBps]` is fixed at init and caps how far off centre a PROPOSER may rerange.
-    // It can only ever TIGHTEN the open `(0, 1e4)` interval the span predicate already enforces —
-    // `0 < minSkewBps <= maxSkewBps < 10000` is checked at init — so the band is a governance knob, not
-    // a second, contradictory definition of a legal skew. Every rejection is the SAME `OutOfBounds()`.
+    // `[minSkewBps, maxSkewBps]` is fixed at init and caps how far off centre a PROPOSER may rerange. Init
+    // checks `0 < min <= max < 10000`, so the band can only TIGHTEN the span predicate's open `(0, 1e4)`.
 
     /// @dev A clone whose band is `[2000, 8000]`, i.e. genuinely narrower than `(0, 1e4)`.
     function _bandedParams() internal view returns (LeveragedAerodromeCLStrategy.InitParams memory p) {
@@ -1290,10 +1203,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(v.maxSkewBps, 8000, "maxSkewBps persisted");
     }
 
-    /// @dev A genesis skew OUTSIDE the band is refused, on both sides — even though the SAME skew is
-    ///      legal against the spans at this width (4000 ticks / 100 spacing carries 1000 and 9000 fine,
-    ///      which `testRerangeRevertsWhenSkewStarvesASideBelowOneSpacing` already pins). So the rejection
-    ///      is the band biting, not the span guard.
+    /// @dev A genesis skew outside the band is refused on both sides, at a width whose SPANS carry it.
     function testInitRevertsWhenGenesisSkewIsOutsideTheBand() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _bandedParams();
         p.skewBps = 1999;
@@ -1311,9 +1221,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(_init(p).layout().skewBps, 8000, "the upper band edge is legal");
     }
 
-    /// @dev An INVERTED band would make every rerange impossible (an empty interval) — refused at init
-    ///      rather than left to brick the entrypoint later. `min == max` is NOT inverted: it pins the
-    ///      skew to a single value, which is a legal (if rigid) governance choice.
+    /// @dev An INVERTED band is refused at init; `min == max` is legal — it pins the skew to one value.
     function testInitRevertsOnInvertedSkewBand() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minSkewBps = 6000;
@@ -1326,9 +1234,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(_init(p).layout().skewBps, 4000, "a degenerate min == max band pins the skew and is legal");
     }
 
-    /// @dev The band's own edges: `minSkewBps == 0` and `maxSkewBps == 10000` would each admit a value
-    ///      the span predicate rejects outright, i.e. a band that claims to widen `(0, 1e4)`. Both are
-    ///      refused at init, so the band can only ever tighten.
+    /// @dev `minSkewBps == 0` / `maxSkewBps == 10000` would claim to WIDEN `(0, 1e4)`; both are refused.
     function testInitRevertsWhenTheBandWouldWidenTheOpenInterval() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minSkewBps = 0;
@@ -1343,8 +1249,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(_init(p).layout().maxSkewBps, 9999, "the widest legal band is accepted");
     }
 
-    /// @dev THE POINT OF THE BAND: `rerange` — the proposer-facing knob — is bounded by it. A skew the
-    ///      spans would happily carry is still refused outside the band, and both edges are reachable.
+    /// @dev The point of the band: a skew the spans carry is still refused outside it, and both edges pass.
     function testRerangeRefusesASkewOutsideTheBand() public {
         LeveragedAerodromeCLStrategy s = _init(_bandedParams());
         _forceState(s, BaseStrategy.State.Executed);
@@ -1365,13 +1270,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.layout().skewBps, 8000, "...and so does the upper one");
     }
 
-    /**
-     * @dev THE QUANTIZATION CLIFF, stated as a test so the band's interaction with `width` is not a
-     *      surprise: the USABLE skew set widens with `width / tickSpacing`. At the floor
-     *      (`width == 2 x spacing`) the only geometry leaving both spans >= one spacing is the centred
-     *      one, so a band that EXCLUDES ~5000 refuses every rerange at that width no matter what it
-     *      admits — the band and the spans are independent gates, and the narrower one wins.
-     */
+    /// @dev THE QUANTIZATION CLIFF: the usable skew set widens with `width / tickSpacing`, so at the width
+    ///      floor a band excluding ~5000 refuses every rerange. Independent gates; the narrower one wins.
     function testBandAndSpanGatesAreIndependentAtTheWidthFloor() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minSkewBps = 2000;
@@ -1381,8 +1281,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         LeveragedAerodromeCLStrategy s = _init(p);
         _forceState(s, BaseStrategy.State.Executed);
 
-        // The SAME in-band skew at the narrowest legal width starves the lower span (2 x 100 ticks x
-        // 0.4 = 80 < 100) — the span guard refuses what the band allows.
+        // The SAME in-band skew at the narrowest width starves the lower span (80 < 100 ticks).
         vm.prank(proposer);
         vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
         s.rerange(200, 4000, 0, 0);
@@ -1393,23 +1292,14 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.rerange(200, 5000, 0, 0);
     }
 
-    /**
-     * @dev ONE PREDICATE, TWO ENTRYPOINTS — they cannot drift. Whatever `_initialize` accepts as a
-     *      genesis `(width, skew)` pair, `rerange` accepts as a per-cycle one, and whatever either
-     *      rejects the other rejects with the same typed `OutOfBounds()`. The band is FUZZED alongside
-     *      the pair, and the whole predicate is restated independently here (from the spans and the
-     *      band, not by calling the contract) so the fuzz is a check on `checkRange` rather than a
-     *      tautology.
-     */
+    /// @dev ONE PREDICATE, TWO ENTRYPOINTS: any `(width, skew)` pair init accepts, `rerange` accepts, and
+    ///      either's `OutOfBounds()` is the other's. Restated independently here, so it is not a tautology.
     function testFuzzInitSkewBandMirrorsRerange(uint16 skewBps_, uint24 width_, uint16 minSkew_, uint16 maxSkew_)
         public
     {
         skewBps_ = uint16(bound(uint256(skewBps_), 0, 12_000));
         width_ = uint24(bound(uint256(width_), 2, 200)) * uint24(uint24(SPACING)); // aligned, in [200, 20000]
-        // A LEGAL band (`0 < min <= max < 1e4`) that STRADDLES centre — an illegal one is refused at init
-        // before the pair is ever looked at (the dedicated cases above own that), and straddling centre
-        // is what guarantees the mirror clone below has a genesis skew that is both in-band and
-        // span-legal at the reference width.
+        // A LEGAL band STRADDLING centre, so the mirror clone's centred genesis skew stays in-band.
         minSkew_ = uint16(bound(uint256(minSkew_), 1, 5000));
         maxSkew_ = uint16(bound(uint256(maxSkew_), 5000, 9999));
 
@@ -1433,9 +1323,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
             s.rerange(width_, skewBps_, 0, 0); // the SAME pair clears the rerange gate
         } else {
             _expectInitRevert(p, LeveragedAerodromeCLStrategy.OutOfBounds.selector);
-            // The mirror clone must carry the SAME band, or `rerange` would be measured against
-            // different bounds than init was. Its genesis pair is the centred one at the reference
-            // width, which the straddling bound above keeps in-band.
+            // The mirror clone must carry the SAME band, or `rerange` is measured against other bounds.
             LeveragedAerodromeCLStrategy.InitParams memory q = _baseParams();
             q.minSkewBps = minSkew_;
             q.maxSkewBps = maxSkew_;
@@ -1447,20 +1335,9 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         }
     }
 
-    /**
-     * @dev THE FREE-PACKING CLAIM, MACHINE-CHECKED. `skewBps` and its governance band
-     *      (`minSkewBps` / `maxSkewBps`) were inserted immediately after `legBIsAsset` — NOT appended
-     *      after the hedged principals — precisely because the packed tail slot had room (20 bytes used
-     *      -> 26), which leaves `hedgedDebtA` / `hedgedDebtB` on a byte-identical slot AND offset (26 + 16
-     *      > 32, so `hedgedDebtA` still starts the NEXT slot). Get that wrong and every live clone's
-     *      borrow-interest hedge basis reads garbage from the next upgrade onward, silently mis-sizing
-     *      every `compound` re-hedge.
-     *
-     *      Both halves of the claim are checked mechanically rather than by eyeballing the struct: the
-     *      packed tail is decoded field-by-field out of `vm.load` at its expected byte offsets and
-     *      compared against `layout()`, and a sentinel is `vm.store`d into the NEXT slot and read back
-     *      through the `hedgedDebt()` getter.
-     */
+    /// @dev THE FREE-PACKING CLAIM, MACHINE-CHECKED: `skewBps` + its band went into the packed tail's spare
+    ///      bytes (20 -> 26 used), so `hedgedDebtA`/`hedgedDebtB` keep their slot AND offset — get that wrong
+    ///      and every live clone's hedge basis reads garbage. Checked by `vm.load` decode plus a sentinel.
     function testLayoutTailPacksSkewWithoutMovingTheHedgedDebts() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         // Distinctive aligned in-band values, so a decode at the wrong offset cannot pass on zeros.
@@ -1521,8 +1398,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(uint256(s.state()), uint256(st), "forced state");
     }
 
-    /// @dev Mint `shares` of supply through the vault hook and leave the strategy Executed with
-    ///      `idleUsdc` on hand and `dt` elapsed since init. `s` must already be BOUND ({_initBound}).
+    /// @dev Leave `s` (which must be BOUND) Executed with `shares` of supply, `idleUsdc`, and `dt` elapsed.
     function _armForCompound(LeveragedAerodromeCLStrategy s, uint256 shares, uint256 idleUsdc, uint256 dt) internal {
         vm.prank(owner);
         vault.setOpenDeposits(true);
@@ -1690,12 +1566,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         s.rescueToVault(address(aero));
     }
 
-    /**
-     * @dev BEHAVIOUR CHANGE (admin/proposer split): `rescueToVault` used to accept the proposer OR the
-     *      vault owner; it is now ADMIN-ONLY. Moving tokens out of the strategy is a custody action, and
-     *      the split's whole premise is that the keeper key cannot move funds. The admin leg still works,
-     *      so nothing is stranded — the sweep just costs a multisig signature.
-     */
+    /// @dev `rescueToVault` is now ADMIN-ONLY: moving tokens out is custody, which the keeper key lacks.
     function testRescueToVaultIsAdminOnlyAndRejectsTheProposer() public {
         LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         aero.mint(address(s), 3e18);
@@ -1714,8 +1585,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== setTargetLtv (ADMIN-ONLY POLICY) ====================
 
-    /// @dev The happy path: the vault owner (== admin) writes the standing target, it is readable
-    ///      through both `targetLtvBps()` and `layout()`, and the policy event carries (previous, new).
+    /// @dev The admin writes the standing target; both getters read it and the event carries (prev, new).
     function testSetTargetLtvPersistsAndEmits() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         assertEq(s.targetLtvBps(), 5000, "the init target is the starting standing target");
@@ -1729,9 +1599,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.layout().targetLtvBps, 6200, "getter == layout()");
     }
 
-    /// @dev THE POINT OF THE SPLIT: the proposer — the rebalancer keeper, the hot key — cannot set
-    ///      policy. Neither can anyone else. A compromised keeper can rebalance the book toward the
-    ///      standing target; it cannot move the target itself.
+    /// @dev THE POINT OF THE SPLIT: a compromised keeper (or stranger) cannot move the target itself.
     function testSetTargetLtvRevertsForProposerAndStrangers() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 
@@ -1746,11 +1614,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 5000, "a refused caller stores nothing");
     }
 
-    /// @dev Zero is refused. On an already-levered book this is the sharp case: a zero target sends
-    ///      `_leverDown` through `_unwindLiquidity`'s full-removal branch — stripping all liquidity,
-    ///      skipping the re-stake, and leaving `$.tokenId` unstaked, which bricks every later venue op
-    ///      INCLUDING the `emergencyRedeem` deadman. Every route that can store a target shares this
-    ///      floor (`_initialize`, `setTargetLtv`, `lowerTargetLtv`). Refusal stores nothing.
+    /// @dev Zero is refused and stores nothing: it would strip the position and leave `$.tokenId` unstaked.
     function testSetTargetLtvRevertsOnZero() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 
@@ -1761,8 +1625,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 5000, "the zero target stored nothing");
     }
 
-    /// @dev The upper bound is `maxLtvBps` (6500 here) — the boundary itself is legal, one bps past it
-    ///      is not, and a refusal stores nothing.
+    /// @dev The upper bound is `maxLtvBps`, inclusive; one bps past it is refused and stores nothing.
     function testSetTargetLtvRevertsAboveMaxLtv() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 
@@ -1776,12 +1639,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 6500, "maxLtvBps itself is a legal target");
     }
 
-    /**
-     * @dev NOT state-gated: policy is settable while `Pending`, i.e. before the genesis `execute`.
-     *      Deliberate — correcting an init-time target before the fund is funded is exactly the case
-     *      that most wants to be settable, and it avoids redeploying the clone. Nothing about a stored
-     *      target requires a live position (`_initialize` itself writes one while Pending).
-     */
+    /// @dev NOT state-gated: correcting an init-time target before the fund is funded is the sharpest case.
     function testSetTargetLtvIsAllowedWhilePending() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         assertEq(uint8(s.state()), uint8(BaseStrategy.State.Pending), "fixture is Pending");
@@ -1793,10 +1651,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== lowerTargetLtv (PROPOSER-ONLY, MONOTONIC DOWN) ====================
 
-    /// @dev The happy path: the proposer — the keeper, the hot key — may REDUCE the standing target, so
-    ///      the pre-`fulfillRedeem` de-risk needs no multisig signature inside `FULFILL_WINDOW`. Same
-    ///      storage and the SAME `TargetLtvUpdated(previous, new)` event as the admin's setter (no second
-    ///      event to monitor), readable through both `targetLtvBps()` and `layout()`.
+    /// @dev The keeper may REDUCE the target (a no-multisig pre-`fulfillRedeem` de-risk), same event.
     function testLowerTargetLtvPersistsAndEmits() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         assertEq(s.targetLtvBps(), 5000, "the init target is the starting standing target");
@@ -1810,9 +1665,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.layout().targetLtvBps, 3000, "getter == layout()");
     }
 
-    /// @dev THE ASYMMETRY IS THE DESIGN, so it gets its own test: this entrypoint is the exact INVERSE
-    ///      gating of `setTargetLtv`. The admin — who may set policy in either direction there — is
-    ///      refused here, as is any stranger; only the proposer passes.
+    /// @dev The exact INVERSE gating of `setTargetLtv`: the admin is refused here, only the proposer passes.
     function testLowerTargetLtvRevertsForAdminAndStrangers() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 
@@ -1827,8 +1680,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 5000, "a refused caller stores nothing");
     }
 
-    /// @dev MONOTONIC DOWN, strictly: the keeper can never raise leverage, and equal is refused too — a
-    ///      no-op write would emit a misleading policy event. Both refusals store nothing.
+    /// @dev MONOTONIC DOWN, strictly: equal is refused too, since a no-op write would emit a policy event.
     function testLowerTargetLtvRevertsOnEqualOrHigher() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 
@@ -1848,8 +1700,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 4999, "strictly lower is accepted");
     }
 
-    /// @dev The floor is the SAME one `setTargetLtv` and `_initialize` enforce (`_storeTargetLtv`), so
-    ///      the keeper cannot ratchet the target all the way to the zero-target hazard.
+    /// @dev The shared `_storeTargetLtv` floor: the keeper cannot ratchet down to the zero-target hazard.
     function testLowerTargetLtvRevertsOnZero() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 
@@ -1860,8 +1711,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 5000, "the zero target stored nothing");
     }
 
-    /// @dev Matches `setTargetLtv`'s state gating deliberately — neither is gated to `Executed`, and the
-    ///      same reasoning applies: the stored target is meaningful while `Pending` too.
+    /// @dev Matches `setTargetLtv`: neither is gated to `Executed`, the target being meaningful earlier.
     function testLowerTargetLtvIsAllowedWhilePending() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
         assertEq(uint8(s.state()), uint8(BaseStrategy.State.Pending), "fixture is Pending");
@@ -1871,8 +1721,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 4000, "the target is reducible before execute");
     }
 
-    /// @dev The admin's setter is unaffected by sharing `_storeTargetLtv` with the proposer's: it still
-    ///      raises (the direction the keeper can never take) and still enforces the cap.
+    /// @dev Sharing `_storeTargetLtv` leaves the admin setter able to RAISE, and still capped.
     function testAdminCanStillRaiseAfterAProposerLower() public {
         LeveragedAerodromeCLStrategy s = _init(_baseParams());
 

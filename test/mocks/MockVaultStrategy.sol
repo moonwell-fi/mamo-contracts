@@ -44,13 +44,10 @@ contract MockVaultStrategy is IStrategy {
     /// @notice Asset balance observed at {execute} — the seed `activateStrategy` transferred in.
     uint256 public seedReceived;
 
-    /// @dev Book NAV (asset units, 6dp) reported by {nav}, which
-    ///      `LeveragedAeroVault.previewSharesForAssets` reads. Settable so a test can move the share
-    ///      price and watch the preview follow it.
+    /// @dev Book NAV (asset units, 6dp) reported by {nav}; settable so a test can move the share price.
     uint256 internal _nav;
 
-    /// @dev When true {nav} reverts — the real strategy is fail-closed on a stale oracle, and the
-    ///      preview inherits that posture.
+    /// @dev When true {nav} reverts, as the real strategy does on a stale oracle.
     bool internal _navReverts;
 
     function setNav(uint256 nav_) external {
@@ -99,7 +96,6 @@ contract MockVaultStrategy is IStrategy {
 
     function updateParams(bytes calldata) external {}
 
-    /// @notice Mirrors `BaseStrategy.setProposer`: vault-only operator rotation, zero rejected.
     function setProposer(address newProposer) external onlyVault {
         require(newProposer != address(0), "MockStrategy: zero proposer");
         _proposer = newProposer;

@@ -88,18 +88,14 @@ contract MockMoonwellMarket {
  * @notice Minimal Moonwell Comptroller stand-in: the `markets(address)` tuple the vendored
  *         strategy reads its USDC collateral factor from, plus the two calls the venue path makes.
  */
-/// @dev The market reads the comptroller's hypothetical-liquidity model needs — matched by both
-///      `MockMoonwellMarket` (init suites) and the custodial `MockLendingMarket` (venue harness).
 interface IMockMarketReads {
     function balanceOf(address account) external view returns (uint256);
     function exchangeRateStored() external view returns (uint256);
     function borrowBalanceStored(address account) external view returns (uint256);
 }
 
-/// @dev Raw Chainlink read for the comptroller's OWN oracle. DELIBERATELY no staleness/sequencer
-///      gate: the real Moonwell ChainlinkOracle serves the latest answer un-gated, which is exactly
-///      the asymmetry the degraded `withdrawIdle` bound leans on (our hardened reader refuses, the
-///      venue's oracle keeps answering).
+/// @dev Comptroller's OWN oracle: un-gated (no staleness check) like real Moonwell's — the asymmetry
+///      the degraded `withdrawIdle` bound leans on.
 interface IMockFeedRead {
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80);
 }
@@ -112,12 +108,8 @@ contract MockComptroller {
     uint256 public shortfall;
     uint256 public accountLiquidityError; // nonzero → getAccountLiquidity answers (err, 0, 0)
 
-    // ── Hypothetical-liquidity model (opt-in per fixture) ──
-    //
-    // Un-registered fixtures keep the legacy inert shape: `getAccountLiquidity` → (0, 0, shortfall)
-    // and `redeemAllowed` → 0 (always allow). Fixtures that register their markets get the real
-    // Compound shape: Σ collateral×CF×price − Σ debt×price at the comptroller's OWN (un-gated)
-    // oracle, feeding BOTH `getAccountLiquidity` and the market-side `redeemAllowed` belt.
+    // Liquidity model, opt-in: un-registered fixtures stay inert (liquidity → (0, 0, shortfall),
+    // redeemAllowed → 0); registered ones get Compound's Σ collateral×CF×price − Σ debt×price.
     struct RegisteredMarket {
         address feed; // 8dp USD answer, read raw — see IMockFeedRead
         uint8 underlyingDecimals;
@@ -143,10 +135,7 @@ contract MockComptroller {
         accountLiquidityError = err;
     }
 
-    /// @notice Register `market` in the liquidity model. `cfMantissa` weighs its cToken balance as
-    ///         collateral; pass 0 for markets the account only borrows from. For the mUSDC market
-    ///         pass THE SAME factor `markets()` reports, or the model and `readCollateralFactor`
-    ///         will disagree in ways real Moonwell cannot.
+    /// @notice `cfMantissa` 0 for borrow-only legs; for mUSDC pass the same factor `markets()` reports.
     function registerMarket(address market, address feed, uint8 underlyingDecimals, uint256 cfMantissa) external {
         if (registered[market].feed == address(0)) marketList.push(market);
         registered[market] = RegisteredMarket(feed, underlyingDecimals, cfMantissa);
@@ -168,16 +157,13 @@ contract MockComptroller {
         return (0, liq, sf);
     }
 
-    /// @notice Compound's `redeemAllowed`: refuse (with an INSUFFICIENT_LIQUIDITY-shaped code, never
-    ///         a revert) any redeem whose hypothetical post-state is in shortfall.
+    /// @notice Compound's `redeemAllowed`: a redeem into shortfall returns an error code, never reverts.
     function redeemAllowed(address market, address redeemer, uint256 redeemTokens) external view returns (uint256) {
         if (marketList.length == 0) return 0; // un-wired fixtures keep the legacy always-allow
         (, uint256 sf) = hypotheticalLiquidity(redeemer, market, redeemTokens);
         return sf > 0 ? 4 : 0;
     }
 
-    /// @notice `getHypotheticalAccountLiquidity`'s shape: account liquidity with `redeemTokens` of
-    ///         `hypoMarket`'s cTokens removed first. 18dp USD, comptroller-oracle priced.
     function hypotheticalLiquidity(address account, address hypoMarket, uint256 redeemTokens)
         public
         view

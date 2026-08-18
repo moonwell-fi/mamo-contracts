@@ -354,13 +354,8 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
 
     // ==================== RANGE GEOMETRY (why genesis is always two-sided) ====================
 
-    /**
-     * @dev `skewedTickRange` must STRICTLY BRACKET the current tick at the CENTRED skew for every width
-     *      init permits (`width >= 2 x tickSpacing`). This is load-bearing for asset-mode: it is what
-     *      guarantees a FRESH range is never one-sided, so `executeImpl` can always size. Only a STORED
-     *      range the price has since left can degenerate — hence `deployIdle`'s documented
-     *      `rerange`-first remedy. (The skewed generalisation is the fuzz two tests below.)
-     */
+    /// @dev At the centred skew `skewedTickRange` strictly brackets the tick for every width init permits
+    ///      (`width >= 2 x tickSpacing`), so a FRESH range is never one-sided and `executeImpl` can size.
     function testFuzzCenteredRangeStrictlyBracketsTheTick(int24 tick, uint24 width) public {
         tick = int24(int256(bound(int256(tick), -600_000, 600_000)));
         width = uint24(bound(uint256(width), 2, 4000)) * uint24(SPACING);
@@ -376,22 +371,15 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
 
     // ==================== RANGE GEOMETRY: THE SKEW ====================
 
-    /// @dev `LeveragedAeroValuation._alignTick`, restated so the equalities below compare against an
-    ///      INDEPENDENT expression rather than against the code under test.
+    /// @dev `LeveragedAeroValuation._alignTick` restated, so the equalities below compare independently.
     function _alignDown(int24 tick) internal pure returns (int24) {
         int24 rem = tick % SPACING;
         if (rem < 0) rem += SPACING;
         return tick - rem;
     }
 
-    /**
-     * @dev SKEW 5000 IS THE OLD CENTRED FORMULA, BIT FOR BIT — the compatibility pin for every live
-     *      clone and every existing test fixture. The pre-skew math was `span = width / 2` each side; the
-     *      skewed form computes `lowerSpan = width x 5000 / 1e4` and `upperSpan = width - lowerSpan`,
-     *      which coincide exactly whenever `width` is even (and every width on an even spacing grid is).
-     *      Asserted against the OLD expression verbatim, at on- AND off-grid ticks and both signs, so it
-     *      is a real regression pin and not a restatement of the new code.
-     */
+    /// @dev Skew 5000 reproduces the pre-skew centred formula (`span = width / 2` each side) bit for bit —
+    ///      the compatibility pin for live clones, asserted at on- and off-grid ticks and both signs.
     function testSkewedRangeReproducesCenteredAtHalf() public {
         uint24[4] memory widths = [uint24(200), 1000, 4000, 40_000];
         int24[4] memory ticks = [int24(0), TICK, TICK + 37, -TICK - 37]; // two of them deliberately off-grid
@@ -408,18 +396,8 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         }
     }
 
-    /**
-     * @dev THE GENERALISED BRACKETING INVARIANT. Over the whole `_checkSkew`-LEGAL set — any in-domain
-     *      tick, any aligned width in the init band, and any skew whose two spans each reach at least one
-     *      `tickSpacing` — the range must still strictly bracket the tick, sit on the grid, and measure
-     *      `width` to within one spacing. This is what licenses the skew at all: `assetModeSplit` can only
-     *      size a range that brackets the price, so if ANY legal skew produced a one-sided range the
-     *      feature would brick the deploy path.
-     *
-     *      The legal skew floor is derived, not guessed: `lowerSpan >= spacing` means
-     *      `skew >= ceil(spacing x 1e4 / width)`, and the same bound mirrored from the top caps the upper
-     *      side (`upperSpan = width - lowerSpan >= spacing` follows algebraically).
-     */
+    /// @dev Over the whole `_checkSkew`-legal set the range must still strictly bracket the tick, sit on
+    ///      the grid and measure `width` to within one spacing — else a legal skew would brick deploys.
     function testFuzzSkewedRangeStrictlyBracketsTheTick(int24 tick, uint24 width, uint16 skewBps) public {
         tick = int24(int256(bound(int256(tick), -600_000, 600_000)));
         width = uint24(bound(uint256(width), 2, 4000)) * uint24(SPACING);
@@ -440,17 +418,13 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         assertGe(lower, -maxAligned, "lower bound stays inside the aligned tick domain");
         assertLe(upper, maxAligned, "upper bound stays inside the aligned tick domain");
 
-        // The realised width claim holds only when NEITHER domain clamp fired: a clamped range is
-        // deliberately TRUNCATED (that is the clamp's whole job), so measuring it against `width` would
-        // be asserting the opposite of the intended behaviour. Reconstruct the pre-clamp bounds from the
-        // same align-down rule to tell the two cases apart — the clamped ones are covered by
-        // `testSkewedRangeClampsAtTickDomainEdges`, which asserts they stay mintable.
+        // The width claim holds only when NEITHER domain clamp fired: a clamped range is deliberately
+        // TRUNCATED, and is covered instead by `testSkewedRangeClampsAtTickDomainEdges`.
         uint256 lowerSpan = (uint256(width) * uint256(skewBps)) / 10_000;
         int24 nominalLower = _alignDown(int24(int256(current) - int256(lowerSpan)));
         int24 nominalUpper = _alignDown(int24(int256(current) + int256(uint256(width) - lowerSpan)));
         if (nominalLower >= -maxAligned && nominalUpper <= maxAligned) {
-            // Each bound aligns DOWN independently, so the realised width can differ from `width` by at
-            // most the two alignment remainders' difference — strictly less than one spacing.
+            // Each bound aligns DOWN independently, so realised width differs from `width` by < one spacing.
             assertApproxEqAbs(
                 uint256(int256(upper - lower)), uint256(width), spacing, "realised span == width (+/- one spacing)"
             );
@@ -461,12 +435,8 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         }
     }
 
-    /**
-     * @dev THE SEMANTIC CLAIM: `skewBps` really is the fraction of the width placed BELOW the tick.
-     *      Asserted at a large width, where the one-spacing alignment drift is 0.025% of the span, and
-     *      stated first as an ABSOLUTE tick tolerance of one spacing (not a loose ratio) so it cannot
-     *      pass on slack — then restated as the ratio a rebalancer actually reasons about.
-     */
+    /// @dev `skewBps` really is the fraction of the width placed BELOW the tick — stated first as an
+    ///      absolute one-spacing tick tolerance so it cannot pass on slack, then as the ratio.
     function testSkewedRangeSpanRatioMatchesSkew() public {
         uint24 width = 400_000; // 4000 spacings
         _setPoolTick(TICK);
@@ -489,14 +459,8 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         }
     }
 
-    /**
-     * @dev THE DOMAIN EDGES, which the skew makes reachable in a way centring never did: at the extreme
-     *      legal skews essentially the WHOLE width lands on ONE side of the tick, so a bound near
-     *      ±MAX_TICK leaves the tick domain outright. The `±_alignTick(MAX_TICK)` clamps must leave both
-     *      bounds ON the spacing grid, inside the domain and strictly ordered — i.e. MINTABLE, not merely
-     *      non-panicking. `getSqrtRatioAtTick` is called on both as the proof (it reverts out of domain,
-     *      which is the unhelpful deep-in-TickMath failure the clamps exist to prevent).
-     */
+    /// @dev At the extreme legal skews nearly the whole width lands on ONE side, so the
+    ///      `±_alignTick(MAX_TICK)` clamps must leave both bounds MINTABLE — `getSqrtRatioAtTick` proves it.
     function testSkewedRangeClampsAtTickDomainEdges() public {
         int24 maxAligned = (TickMath.MAX_TICK / SPACING) * SPACING;
         uint24 width = 1_774_400; // ~2 x MAX_TICK: the init ceiling on `maxWidth`, aligned to SPACING
@@ -521,44 +485,10 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
 
     // ==================== LEVER-UP SIZING (`assetModeLeverUpPair`) ====================
 
-    /**
-     * @dev THE "CANNOT DRIFT" IDENTITY. `assetModeSplit` and `assetModeLeverUpPair` solve the SAME
-     *      pairing relation `A / U = needA / needU` with different unknowns: the split is handed a total
-     *      and solves for the split point `C`, the lever-up is handed a debt delta and solves the fixed
-     *      point that accounts for the collateral its `U′` will consume.
-     *
-     *      THE INPUT IS THE WHOLE BOOK'S TARGET DEBT, NOT THE SPLIT'S OWN BORROW BUDGET — and that is
-     *      the change "no idle USDC sits dead" makes to this identity, not a fudge to keep it passing.
-     *      Deposits stay RAW by design (`deposit` never touches Moonwell); the state modelled here is
-     *      the keeper having run `supplyIdle` over the whole balance, after which a book holding
-     *      `AMOUNT` holds it ENTIRELY as collateral: `adjustLeverage` reads `collateral == AMOUNT`,
-     *      sizes the naive delta
-     *      `AMOUNT × ltv / 1e4`, and `assetModeLeverUpPair` rescales it by `1/(1 + ltv·m)` because the
-     *      pairing USDC has to be redeemed back out of that same collateral. The rescale is EXACTLY the
-     *      split's `w/(w+x)`, so the corrected `(A, U′)` equals the split's `(A, U)` to the same
-     *      tolerances as before. What this now asserts is the operator-visible statement:
-     *      **deposit → `supplyIdle` → `adjustLeverage` lands the identical book to
-     *      deposit → `deployIdle`.** Asserted across both orderings and several range shapes.
-     *
-     *      BOTH sides now match only to a RELATIVE tolerance. `A` used to match to the wei because the
-     *      lever-up applied `_legABorrow` and stopped; it now applies one further `mulDiv` rescale, and
-     *      that floor is exactly the split's `mulDiv(amount, w, w+x)` reached from the other direction —
-     *      algebraically identical, but the two orders of truncation differ in the last unit (measured:
-     *      220/3.3e14 = 6.7e-13 relative). `U` matched relatively before and for the same reason: the
-     *      floor is physical, not slack. The split derives `U` by
-     *      SUBTRACTION from an exact-arithmetic `C` (`amount − C`), whereas the lever-up derives it by
-     *      MULTIPLICATION off two already-FLOORED integers — `borrowUsd6 = floor(C·ltv/1e4)` and
-     *      `A = floor(borrowUsd6·100·10^dA/pA)`. Each lost unit is magnified into `U′` by its own scale
-     *      factor (`U/borrowUsd6` and `needU/needA` respectively), so the error is
-     *      `O(1/borrowUsd6 + 1/A)` RELATIVE — ~1e-8 at the sizes here, and it shrinks with position size.
-     *      TOLERANCES ARE PER-SIDE AND SIT JUST ABOVE THE MEASURED DRIFT, deliberately. The `A` drift
-     *      is ONE UNIT in the last place (the two truncation orders differ by at most 1), so its
-     *      relative bound follows the SMALLEST `A` across the shapes here (~5e8 units → 2e-9): `A` at
-     *      1e-8 gives one-unit drift 5× headroom. `U` at 1e-7 covers its measured worst (2.8e-9 for
-     *      the expensive-leg ordering, 1.5e-11 for the cheap-leg one) ~35×. An earlier revision used
-     *      a single 1e-6 for both — wide enough to wave through a ppm-scale sizing regression; these
-     *      bounds keep the identity a real pin while staying above integer-floor noise.
-     */
+    /// @dev THE "CANNOT DRIFT" IDENTITY: deposit → `supplyIdle` → `adjustLeverage` lands the identical book
+    ///      as deposit → `deployIdle`, because the lever-up's `1/(1 + ltv·m)` rescale is exactly the split's
+    ///      `w/(w+x)` reached from the other direction. Per-side tolerances sit just above the measured
+    ///      integer-floor drift (`A` one unit in the last place, `U` compounded off two floored integers).
     function testLeverUpPairReproducesTheSplitPairAtTheSameLtv() public {
         _setPoolTick(TICK);
         int24[3] memory lowerOffsets = [int24(-2000), -200, -20_000];
@@ -595,8 +525,7 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         }
     }
 
-    /// @dev The lever-up pair scales LINEARLY in the debt delta (it is a ratio, not a solve), which is
-    ///      what makes "borrow ΔB, pair with U′" hedge-neutral for ANY ΔB the retarget asks for.
+    /// @dev The lever-up pair scales LINEARLY in the debt delta, so "borrow ΔB, pair with U′" stays neutral.
     function testFuzzLeverUpPairScalesLinearlyInTheDebtDelta(uint256 borrowUsd6, bool legAIsToken0) public {
         borrowUsd6 = bound(borrowUsd6, 1_000e6, 10_000_000e6);
         _setPoolTick(TICK);
@@ -610,12 +539,8 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         (uint256 a2, uint256 u2) = LeveragedAeroValuation.assetModeLeverUpPair(
             address(pool), lower, upper, borrowUsd6 * 3, type(uint256).max, 0, 5000, LEG_A_DECIMALS, legAIsToken0, pA
         );
-        // Tolerance is INTEGER RESOLUTION, derived: each output passes through at most three floor
-        // divisions (`a0`, the fixed-point rescale, the pairing mulDiv), so `a1`/`a2` each sit within
-        // ~2 units of the real line and the ×3 comparison within ~8 — on the smallest bound-permitted
-        // delta (`a1 ≈ 2e6` units) that is ~4e-6 relative. 1e13 (1e-5) covers it with 2.5× headroom;
-        // the previous 1e12 sat BELOW the floor noise and flaked on fuzz seeds hitting small deltas
-        // (observed: `borrowUsd6 = 1022244657` → 3 units = 1.46e-6 relative).
+        // Tolerance is INTEGER RESOLUTION: three floor divisions per output, so the ×3 comparison sits
+        // within ~8 units — ~4e-6 relative at the smallest permitted delta. 1e12 sat below that noise.
         assertApproxEqRel(a2, a1 * 3, 1e13, "borrow scales linearly in the delta");
         assertApproxEqRel(u2, u1 * 3, 1e13, "the pairing USDC scales linearly in the delta");
 
@@ -630,8 +555,7 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         _assertConsumed(exp1, amt1, "token1 side of the lever-up pair consumed");
     }
 
-    /// @dev The FUNDING BOUND, pinned to the wei: `U′ - 1` of idle reverts with the exact
-    ///      `(needed, available)` pair, `U′` passes. No partial fill, no silent cap.
+    /// @dev The FUNDING BOUND to the wei: `U′ - 1` of idle reverts with the exact `(needed, available)` pair.
     function testLeverUpPairEnforcesTheIdleBoundToTheWei() public {
         _setPoolTick(TICK);
         uint256 pA = _legAPriceFromPool(pool.sqrtPriceX96(), false);
@@ -657,8 +581,7 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         assertEq(u, needed, "exactly U' of idle clears the bound");
     }
 
-    /// @dev A one-sided range fails closed on the lever-up path too (shared `_rangeRatio`), rather than
-    ///      pairing the borrow against nothing — the unhedged add the shape must never make.
+    /// @dev A one-sided range fails closed on the lever-up path too (shared `_rangeRatio`): no unhedged add.
     function testLeverUpPairFailsClosedOnAOneSidedRange() public {
         _setPoolTick(TICK);
         uint256 pA = _legAPriceFromPool(pool.sqrtPriceX96(), false);

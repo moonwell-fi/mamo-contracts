@@ -12,15 +12,13 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @dev Just the strategy's NAV read, for {LeveragedAeroVault.previewSharesForAssets}. Declared
-///      locally rather than added to the vendored `IStrategy`, because every stand-in that
-///      implements that interface would then have to grow the selector too.
+/// @dev The strategy's NAV read, declared locally so stand-ins for the vendored `IStrategy` need not
+///      grow the selector.
 interface IStrategyNav {
     function nav() external view returns (uint256);
 }
 
-/// @dev The vendored strategy's operator-rotation hook. Declared locally for the same reason
-///      {IStrategyNav} is: adding it to `IStrategy` would force every stand-in to grow the selector.
+/// @dev The vendored strategy's operator-rotation hook, declared locally for the {IStrategyNav} reason.
 interface IStrategyProposer {
     function setProposer(address newProposer) external;
 }
@@ -68,33 +66,11 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     ///         `address(0)` (the deploy default) == fees OFF.
     address public feeConfig;
 
-    /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp). `0` (the deploy
-    ///         default) == UNLIMITED. Once the fund is at or above this, NOBODY can deposit — it is a
-    ///         ceiling on the whole book, not a per-user allocation limit.
-    ///
-    /// @dev STORED HERE, ENFORCED IN THE STRATEGY'S `deposit`. That is the single path every new
-    ///      share-minting deposit takes — per-user accounts and direct depositors alike — so the
-    ///      ceiling genuinely binds the fund rather than one wrapper layer. Deliberately NOT enforced
-    ///      in {strategyMint}: that function also serves FEE-SHARE crystallisations, which the
-    ///      strategy performs best-effort inside a try/catch, so a capacity-blocked fee mint would
-    ///      silently defer fees forever instead of reverting. Same hazard {depositsOpen} already
-    ///      carries; not one to duplicate. Fees are an accounting event, not new capital, and must
-    ///      never be gated on capacity.
-    ///
-    ///      DENOMINATION IS USDC (6dp), the unit of account — operators set the figure they mean and
-    ///      no share conversion is involved. The trade-off, stated plainly: NAV moves on its own, so
-    ///      the fund can drift ABOVE the cap through gains alone (closing deposits with nobody having
-    ///      deposited) and back below it on a drawdown (reopening them). That is inherent to a
-    ///      value-denominated capacity limit and is the intended reading — capacity is about how much
-    ///      the venue can absorb, which is a value question, not a share-count one.
-    ///
-    ///      MEASURED PRE-DEPOSIT, AGAINST THE POST-CRYSTALLISE NET NAV, and a deposit that would CROSS
-    ///      the ceiling is rejected OUTRIGHT rather than trimmed — the same revert-don't-trim posture
-    ///      every other guard here takes. A depositor who wants the room that is left retries with a
-    ///      smaller amount; {remainingCapacity} reports it.
-    ///
-    ///      `0` means unlimited rather than frozen so a fresh deployment is not bricked before the
-    ///      owner acts; the freeze case is already served by {depositsOpen}.
+    /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp), over the whole book,
+    ///         not a per-user limit. `0` (the deploy default) == UNLIMITED; {depositsOpen} freezes.
+    /// @dev Enforced in the strategy's `deposit` (pre-deposit, against post-crystallise net NAV;
+    ///      crossing deposits rejected, not trimmed), NOT in {strategyMint} — that also serves
+    ///      best-effort FEE-SHARE mints, which capacity must never gate or fees defer forever.
     uint256 public maxTotalAssets;
 
     // ==================== EVENTS ====================
@@ -195,29 +171,15 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
 
     // ==================== OWNER: WIRING ====================
 
-    // NOTE: there is deliberately no `setStrategy`. It used to exist as the bind half of a
-    // deploy-then-initialize-then-bind flow, and that flow is now unreachable: `BaseStrategy.initialize`
-    // requires `msg.sender == vault_`, so nothing but this vault can initialize a clone naming it, and
-    // an UNinitialized clone cannot be bound either (`_bind` asks it for `vault()`, which reads
-    // `address(0)`). {cloneAndBind} is therefore the only path a strategy pointer is ever set by, which
-    // is exactly what closes the front-run window the two-transaction flow left open.
+    // NOTE: no `setStrategy` by design — {cloneAndBind} is the only path the strategy pointer is ever
+    // set by, which closes the front-run window a separate deploy-then-bind flow left open.
 
     /**
-     * @notice Deploy an ERC-1167 clone of `template`, initialize it against THIS vault, and bind it
-     *         — atomically, in one owner transaction. Set-once: the share ledger's integrity rests
-     *         entirely on `msg.sender == strategy`, so a rotatable pointer would let a future owner
-     *         mint freely against existing holders.
-     * @dev The gap this used to close by construction is now closed structurally as well. A clone
-     *      deployed and left uninitialized could once be `initialize`d by anyone — the template's
-     *      constructor only locks the TEMPLATE — so a front-runner could seize the proposer role, and
-     *      with it the `initData` that writes `targetLtvBps` / `maxLtvBps`. `BaseStrategy.initialize`
-     *      now gates on `msg.sender == vault_`, so this call is the only thing that can initialize a
-     *      clone pointed at this vault. `_bind` still re-checks the binding, so a foreign-vault clone
-     *      cannot be bound either.
-     * @param template  The strategy template to clone (its constructor locked its own `initialize`).
-     * @param proposer_ The proposer role for the new clone.
-     * @param initData  ABI-encoded strategy-specific init params.
-     * @return clone    The deployed, initialized and bound clone.
+     * @notice Atomically deploy an ERC-1167 clone of `template`, initialize it against THIS vault, and
+     *         bind it. Set-once: the share ledger rests entirely on `msg.sender == strategy`, so a
+     *         rotatable pointer would let a future owner mint against existing holders.
+     * @dev Front-run-proof: `BaseStrategy.initialize` gates on `msg.sender == vault_`, so only this call
+     *      can initialize a clone pointed here, and `_bind` re-checks the binding.
      */
     function cloneAndBind(address template, address proposer_, bytes calldata initData)
         external
@@ -229,8 +191,7 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         _bind(clone);
     }
 
-    /// @dev The set-once bind. Sole caller is {cloneAndBind}; kept as its own frame so the invariant
-    ///      reads in one place.
+    /// @dev The set-once bind; sole caller is {cloneAndBind}.
     function _bind(address strategy_) private {
         require(strategy == address(0), "LAV: strategy already set");
         // DEAD BELT: `Clones.clone` never returns the zero address, so the only caller cannot reach this.
@@ -241,21 +202,10 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     }
 
     /**
-     * @notice Rotate the bound strategy's operator (proposer) key.
-     * @dev Authority is identical to the derived admin the strategy already answers to — the strategy's
-     *      `setProposer` is `onlyVault`, and this is the only thing that calls it, behind `onlyOwner`.
-     *      NOT a fund-moving power: the new proposer inherits exactly the `onlyProposer` surface, which
-     *      can neither raise leverage (that is `setTargetLtv`, admin-only) nor move tokens.
-     *
-     *      Deliberately NOT set-once, unlike {cloneAndBind}. The share ledger's integrity rests on the
-     *      STRATEGY pointer, not on the operator, so rotating the operator cannot mint or burn anything.
-     *      Without rotation the only answer to a compromised keeper key is `settleStrategy` — a terminal
-     *      unwind of the whole fund.
-     *
-     *      DOES NOT MOVE THE FEE RECIPIENT. `Layout.feeRecipient` is a separate, init-only field on the
-     *      strategy; check `layout().feeRecipient` before treating rotation as a complete response to a
-     *      key compromise.
-     * @param newProposer The replacement operator. The strategy rejects zero.
+     * @notice Rotate the bound strategy's operator (proposer) key. The strategy rejects zero.
+     * @dev Not fund-moving: `onlyProposer` can neither raise leverage (`setTargetLtv` is admin-only)
+     *      nor move tokens, so this is deliberately not set-once. Does NOT move `Layout.feeRecipient`,
+     *      an init-only field, so it is not a complete key-compromise response.
      */
     function setProposer(address newProposer) external onlyOwner {
         address strategy_ = strategy;
@@ -269,25 +219,17 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         emit OpenDepositsUpdated(open);
     }
 
-    /// @notice Set the fund's capacity ceiling, in USDC (6dp). `0` == unlimited. Takes effect on the
-    ///         next deposit; it is a ceiling on the whole book, not a per-user allocation limit.
-    /// @dev Denominated in the unit of account, so set the dollar figure you mean — no share
-    ///      conversion. Lowering it below the fund's current NAV does NOT unwind or trap anyone: it
-    ///      closes new deposits until the fund is back under the ceiling, and every withdrawal path is
-    ///      independent of it.
-    /// @param maxAssets New capacity in USDC (6dp); `0` disables the cap.
+    /// @notice Set the fund's capacity ceiling over the whole book, in USDC (6dp); `0` == unlimited.
+    /// @dev Takes effect on the next deposit. Lowering it below current NAV unwinds and traps nobody —
+    ///      it only closes new deposits; every withdrawal path is independent of it.
     function setMaxTotalAssets(uint256 maxAssets) external onlyOwner {
         maxTotalAssets = maxAssets;
         emit MaxTotalAssetsSet(maxAssets);
     }
 
     /// @notice ADVISORY: USDC that could still be deposited before the capacity ceiling is reached.
-    /// @dev `0` means the fund is full (or exactly at the ceiling) — but note `0` is ALSO what an
-    ///      unlimited fund would report if read naively, so the flag is disambiguated here: when
-    ///      {maxTotalAssets} is `0` (unlimited) this returns `type(uint256).max`. POINT-IN-TIME: NAV
-    ///      moves, so this is a reading and not a reservation. Reverts when NAV is unpriceable, for
-    ///      the same fail-closed reason {previewSharesForAssets} does.
-    /// @return assets USDC still depositable, or `type(uint256).max` when the cap is disabled.
+    /// @dev Point-in-time reading, not a reservation. `0` == at or above the ceiling, and
+    ///      `type(uint256).max` == cap disabled. Reverts when NAV is unpriceable (fail-closed).
     function remainingCapacity() external view returns (uint256 assets) {
         uint256 cap = maxTotalAssets;
         if (cap == 0) return type(uint256).max; // unlimited
@@ -296,39 +238,20 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         return navNow >= cap ? 0 : cap - navNow;
     }
 
-    /// @notice ADVISORY: the shares a deposit of `assets` USDC would mint at CURRENT pricing — the
-    ///         the canonical assets->shares conversion for UI display and slippage (`minShares`) sizing.
-    /// @dev Mirrors the strategy's own deposit formula
-    ///      (`mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navNet + 1)`) against the live book.
-    ///      POINT-IN-TIME, NOT A PEG: the answer moves with NAV and supply, so a cap set from it
-    ///      represents that dollar figure only at the instant it was read (see the drift note on
-    ///      the fund). Reverts when the strategy's NAV is unpriceable (`nav() == 0` with
-    ///      shares outstanding), mirroring the deposit's own `NavUnpriceable` guard — it is a preview
-    ///      of a deposit, and inherits its fail-closed posture.
-    ///
-    ///      NOT AN UPPER BOUND ON THE REAL MINT. This prices against raw `nav()`, whereas `deposit`
-    ///      prices against `navNet` (post-crystallise, i.e. NAV minus the fee that crystallise mints
-    ///      away). With fees pending `navNet <= nav()`, so the real mint is `>=` this figure — size
-    ///      `minShares` with that asymmetry in mind rather than against the exact figure.
-    /// @param assets USDC (6dp) to convert.
-    /// @return shares Vault shares (12dp) that amount would mint right now.
+    /// @notice ADVISORY: the shares a deposit of `assets` USDC (6dp) would mint at CURRENT pricing —
+    ///         the canonical assets->shares conversion for UI and slippage (`minShares`) sizing.
+    /// @dev Point-in-time, not a peg; reverts when NAV is unpriceable, like the deposit's own
+    ///      `NavUnpriceable`. A LOWER bound, not upper: `deposit` prices off post-crystallise
+    ///      `navNet <= nav()`, so the real mint is `>=` this figure.
     function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
         require(strategy != address(0), "LAV: strategy unset");
         uint256 supply = totalSupply();
         uint256 navNow = IStrategyNav(strategy).nav();
-        // MIRROR THE DEPOSIT'S `NavUnpriceable` GUARD. The real `deposit` reverts on
-        // `navNet == 0 && supply > 0`; `nav()` FLOORS to 0 rather than reverting, so without this the
-        // denominator collapses to 1 and the preview returns a figure ~1e9-1e12x too large. That state
-        // is reachable, not theoretical: after `settleStrategy` the book is flat so `nav()` is the
-        // strategy's USDC balance (0) while supply is still outstanding, and likewise whenever
-        // `protocolFeeOwed >= gross`. Since this function is the documented way to choose the
-        // conversion any caller sizes a deposit from, handing back a garbage figure here would have
-        // it size against a price that is ~1e9-1e12x wrong.
-        // Fail closed instead, so the caller re-reads once the book is priceable again. `supply == 0`
-        // (genesis, empty book) legitimately prices at nav 0 and must stay allowed, matching deposit.
+        // Fail closed: `nav()` FLOORS to 0 instead of reverting, so without this the denominator
+        // collapses to 1 and the preview overstates by ~1e9-1e12x. Reachable post-`settleStrategy` and
+        // whenever `protocolFeeOwed >= gross`. `supply == 0` legitimately prices at nav 0, as in deposit.
         require(navNow > 0 || supply == 0, "LAV: nav unpriceable");
-        // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy; it is the same 6-decimal step `decimals()`
-        // documents, so it is derived here rather than duplicated as a second magic constant.
+        // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy: the same 6-decimal step `decimals()` documents.
         uint256 offset = 10 ** (decimals() - IERC20Metadata(asset).decimals());
         shares = Math.mulDiv(assets, supply + offset, navNow + 1);
     }
@@ -426,31 +349,12 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
      * @notice Sweep a token out of the vault.
      * @dev Any third-party token, any time — the vault is a plain transfer target for the strategy's
      *      `rescueToVault` sweeps, and those airdrops/strays back no shares. Two exclusions:
-     *
-     *      - The ASSET is claimable only once every EXTERNAL share is gone. Pre-settlement any asset
-     *        balance is dust/donations, and post-settlement it is the {redeemSettled} pot, so the owner
-     *        may not touch it while a single outstanding claim on that pot remains.
-     *
-     *        The test is `totalSupply() == balanceOf(address(this))`, deliberately NOT
-     *        `totalSupply() == 0`. Shares that reach this contract are permanent dead weight: the
-     *        bullet below refuses to rescue them, {redeemSettled} would have to be called BY the vault
-     *        to burn them, and nothing else moves them — so a plain `totalSupply() == 0` lets anyone
-     *        transfer one wei of shares here and disable the asset rescue FOREVER, stranding the last
-     *        redeemers' dust and every post-settlement stray.
-     *
-     *        DONATION-INVARIANT: a transfer-in raises `balanceOf(address(this))` and leaves
-     *        `totalSupply()` untouched, so the quantity this compares — external supply — is unchanged
-     *        by any donation. A donation therefore cannot open the gate EARLY either, and it cannot
-     *        dilute anyone: the donor is the only party who loses the shares.
-     *
-     *        STRATEGY-ESCROWED SHARES ARE STILL EXTERNAL and hold the gate shut, exactly as before —
-     *        they sit on the strategy, not here, and they are live depositor claims.
-     *      - The vault's OWN share token is never rescuable. The strategy custodies live shares
-     *        (`requestRedeem` escrows, and the shares it pulls mid-`redeem`); a share balance that
-     *        reaches this contract is someone's un-burned claim on the pot, or an init-configured
-     *        fee-share mint, not a stray — so forwarding it to an owner-chosen address would be an
-     *        exfiltration of depositor value. Escrowed shares are recovered by their owner through the
-     *        strategy's `cancelRedeem`.
+     *      - The ASSET is claimable only once every EXTERNAL share is gone, since post-settlement it is
+     *        the {redeemSettled} pot. The test is `totalSupply() == balanceOf(address(this))`, not
+     *        `totalSupply() == 0`, which one wei of dead-weight shares sent here would brick forever;
+     *        strategy-escrowed shares still count as external and hold the gate shut.
+     *      - The vault's OWN share token is never rescuable: a share balance here is an un-burned claim
+     *        or a fee-share mint, so sweeping it would exfiltrate depositor value.
      */
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "LAV: invalid recipient");

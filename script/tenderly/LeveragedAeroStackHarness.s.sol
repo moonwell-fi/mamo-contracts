@@ -32,9 +32,8 @@ WHY THE CLONE+INIT IS NOT DONE HERE
 -----------------------------------
 `LeveragedAeroVault.cloneAndBind` (added in PR #66 review remediation) is
 `onlyOwner` and atomically clones + initializes + binds, closing the front-run window
-the old two-step `Clones.clone` → `initialize` → `setStrategy` flow left open. Both halves of
-that flow are now gone: `BaseStrategy.initialize` is vault-only and `setStrategy` was removed,
-so `cloneAndBind` is the only wiring path there is. The owner
+the old two-step `Clones.clone` → `initialize` → `setStrategy` flow left open; both halves of that
+flow are now gone (`initialize` is vault-only, `setStrategy` removed), so it is the only path. The owner
 is `MAMO_MULTISIG`, which on a vnet is driven by UNLOCKED IMPERSONATION (no key), so the
 call belongs in bash (`cast send --from $MULTISIG --unlocked`), not in a broadcast script.
 This script only builds the calldata.
@@ -152,8 +151,7 @@ contract LeveragedAeroStackHarness is Script {
         console.log("  feeRecip :", p.feeRecipient);
         console.log("  mgmt/perf fee bps:", uint256(p.managementFeeBps), uint256(p.performanceFeeBps));
         console.log("  width band min/width/max:", uint256(p.minWidth), uint256(p.width), uint256(p.maxWidth));
-        // Separate line: console.log tops out at 4 args, and the band already uses all of them.
-        // Keep the "width band" prefix — run-leveraged-aero-stack.sh Phase B.2 greps for it.
+        // Separate line: console.log tops out at 4 args. Keep the "width band" prefix — Phase B.2 greps it.
         console.log(
             "  width band skewBps (below-fraction, 5000 = centered) min/skew/max:",
             uint256(p.minSkewBps),
@@ -205,13 +203,10 @@ contract LeveragedAeroStackHarness is Script {
         p.width = uint24(vm.envOr("WIDTH", uint256(4000))); // 40 × spacing — genesis mints at this
         p.minWidth = uint24(vm.envOr("MIN_WIDTH", uint256(200))); // 2 × spacing
         p.maxWidth = uint24(vm.envOr("MAX_WIDTH", uint256(20_000)));
-        // ── range skew: fraction of `width` placed BELOW the current tick, bps (10000 = 1.00).
-        // 5000 = centered, which is the ops default at genesis — skew is applied per-cycle via
-        // `rerange`, not baked into init. Must be in (0, 10000) exclusive, inside the governance band
-        // [MIN_SKEW_BPS, MAX_SKEW_BPS], AND leave BOTH spans >= one tickSpacing, else OutOfBounds().
+        // ── range skew: bps of `width` placed BELOW the current tick; 5000 = centered. Must be in
+        // (0, 10000), inside [MIN_SKEW_BPS, MAX_SKEW_BPS], and leave both spans >= one tickSpacing.
         p.skewBps = uint16(vm.envOr("SKEW_BPS", uint256(5000)));
-        // ── skew governance band: fixed for the clone's life, `0 < min <= max < 10000`. It caps how far
-        // off centre a proposer may rerange; ±40 points around centre is the ops default.
+        // ── skew governance band, fixed for the clone's life: `0 < min <= max < 10000`.
         p.minSkewBps = uint16(vm.envOr("MIN_SKEW_BPS", uint256(1000)));
         p.maxSkewBps = uint16(vm.envOr("MAX_SKEW_BPS", uint256(9000)));
         // ── risk params: targetLtv ≤ maxLtv < USDC CF, minHealth ≥ 10500, minHealth×maxLtv < 1e8 ──

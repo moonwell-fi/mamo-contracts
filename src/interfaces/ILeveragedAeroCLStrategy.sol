@@ -26,13 +26,13 @@ interface ILeveragedAeroCLStrategy {
 
     }
 
-    /// @notice An escrowed async-redeem request. Field order MUST match Sherwood's
-    ///         `LeveragedAerodromeCLStrategy.RedeemRequest` — it is ABI-decoded from that getter.
+    /// @notice An escrowed async-redeem request; field order MUST match Sherwood's
+    ///         `LeveragedAerodromeCLStrategy.RedeemRequest`, which it is ABI-decoded from.
     struct RedeemRequest {
-        address owner; // request creator; the only address that can cancel / emergency-redeem it
-        uint256 shares; // vault shares escrowed in the strategy at request time
-        uint256 minAssetsOut; // slippage floor enforced at fulfill
-        uint40 requestedAt; // request timestamp; the deadman clock anchor
+        address owner; // the only address that can cancel / emergency-redeem it
+        uint256 shares;
+        uint256 minAssetsOut;
+        uint40 requestedAt; // the deadman clock anchor
         bool settled; // set once fulfilled / cancelled / emergency-redeemed
     }
 
@@ -89,14 +89,8 @@ interface ILeveragedAeroCLStrategy {
      */
     function previewRedeem(uint256 shares) external view returns (uint256 assetsOut, bool fastOk);
 
-    /**
-     * @notice A single escrowed async-redeem request by id.
-     * @dev Field order MUST match Sherwood's `LeveragedAerodromeCLStrategy.RedeemRequest`. Queue
-     *      introspection: an in-flight request moves shares account → strategy, so `balanceOf` alone
-     *      understates a holder's position — a UI or keeper reporting on a pending withdrawal reads
-     *      the escrowed amount and its `settled` flag from here.
-     * @param id Request id.
-     */
+    /// @notice A single escrowed async-redeem request by id — an in-flight request moves shares to the
+    ///         strategy, so `balanceOf` alone understates a holder's position.
     function redeemRequest(uint256 id) external view returns (RedeemRequest memory);
 
     /// @notice The current strategy lifecycle state.

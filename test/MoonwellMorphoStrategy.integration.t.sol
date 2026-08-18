@@ -1558,8 +1558,7 @@ contract MoonwellMorphoStrategyTest is Test {
     function testSlippageAffectsPriceCheck() public {
         uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
-        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the slippage logic
-        // under test. Real prices are preserved -- see freshenRewardTokenPriceFeeds.
+        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the slippage logic.
         freshenRewardTokenPriceFeeds();
 
         // First check with default slippage (1%)
@@ -1651,8 +1650,7 @@ contract MoonwellMorphoStrategyTest is Test {
     function testRevertIfPriceCheckFails() public {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
-        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the price check
-        // under test. Real prices are preserved -- see freshenRewardTokenPriceFeeds.
+        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the price check.
         freshenRewardTokenPriceFeeds();
 
         vm.prank(owner);
@@ -2421,18 +2419,8 @@ contract MoonwellMorphoStrategyTest is Test {
 
     /**
      * @notice Neutralize fork-time Chainlink staleness for every configured reward-token price feed.
-     * @dev These tests fork Base at `latest`, so the age of a feed's last update is whatever the
-     *      forked block happened to carry. SlippagePriceChecker gates on
-     *      `block.timestamp <= updatedAt + heartbeat` ("Price feed update time exceeds heartbeat"),
-     *      and the WETH config prices xWELL/MORPHO through CHAINLINK_ETH_USD with a 1200s heartbeat.
-     *      Whenever the fork lands in the tail of that feed's update cycle -- made ~60s more likely
-     *      by the `vm.warp(block.timestamp + 1 minutes)` in setUp -- the staleness gate fires before
-     *      the slippage logic under test, and the price-check tests fail on the wrong revert string.
-     *
-     *      This re-mocks `latestRoundData()` with the feed's REAL roundId and REAL answer, changing
-     *      only the timestamps to `block.timestamp`. The price math -- and therefore what the
-     *      "price check failed" assertions actually prove -- is unchanged; only the staleness clock
-     *      is pinned. Call it immediately before exercising the price-check path.
+     * @dev Forked at `latest`, a feed can be past its heartbeat and SlippagePriceChecker's staleness
+     *      gate fires before the logic under test. Re-mocks only the timestamps, keeping real answers.
      */
     function freshenRewardTokenPriceFeeds() internal {
         for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {

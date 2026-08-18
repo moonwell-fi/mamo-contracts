@@ -4,12 +4,9 @@ pragma solidity ^0.8.28;
 import {Test} from "@forge-std/Test.sol";
 
 /// @title LayoutParity
-/// @notice Guards the CORRUPTION-CRITICAL invariant that `LeveragedAerodromeCLStrategy.sol`,
-///         `LeveragedAeroManager.sol` AND `LeveragedAeroVenue.sol` share an identical
-///         diamond-storage triplet: the `RedeemRequest` struct, the `Layout` struct (field
-///         types/order/names), and the `STORAGE_SLOT` literal `0x405ae0b1...`. Both libraries are
-///         delegatecalled by the strategy, so any drift silently corrupts storage. The script
-///         diffs manager AND venue against the strategy reference copy (empty == parity).
+/// @notice Guards the CORRUPTION-CRITICAL invariant that `LeveragedAerodromeCLStrategy.sol`, `LeveragedAeroManager.sol`
+///         and `LeveragedAeroVenue.sol` share a byte-identical diamond-storage triplet (`RedeemRequest`, `Layout`,
+///         `STORAGE_SLOT`); both are delegatecalled by the strategy, so any drift silently corrupts storage.
 /// @dev Uses FFI to extract each block from the on-disk sources and diff them. Run with:
 ///        forge test --match-path 'test/leveraged-aero/*' --ffi -vv
 ///      Line comments are stripped before comparison, so the check tolerates the one
