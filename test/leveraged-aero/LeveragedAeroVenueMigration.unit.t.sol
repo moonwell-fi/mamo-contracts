@@ -1268,12 +1268,12 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "target unchanged");
     }
 
-    /// @dev THE SCENARIO THE EVENT EXISTS FOR: a migration RESTORING a target the proposer lowered.
-    function testMigrateAnnouncesRestoringATargetTheProposerLowered() public {
+    /// @dev THE SCENARIO THE EVENT EXISTS FOR: a migration RESTORING a target the admin lowered.
+    function testMigrateAnnouncesRestoringALoweredTarget() public {
         _execute(SEED);
-        vm.prank(proposer);
-        strategy.lowerTargetLtv(3000);
-        assertEq(strategy.layout().targetLtvBps, 3000, "keeper de-risked");
+        vm.prank(owner);
+        strategy.setTargetLtv(3000);
+        assertEq(strategy.layout().targetLtvBps, 3000, "admin de-risked");
 
         _flatten();
         LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // same venue, target back to 5000

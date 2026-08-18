@@ -215,12 +215,19 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         strategy.execute();
     }
 
+    /// @dev `adjustLeverage` at the STANDING target. The read is hoisted ABOVE the prank on purpose: it is an
+    ///      external call, so leaving it in the argument list would consume the `vm.prank` meant for the op.
+    function _adjustToPolicy() internal {
+        uint16 policy = strategy.targetLtvBps();
+        vm.prank(proposer);
+        strategy.adjustLeverage(policy, 0, 0);
+    }
+
     /// @dev The two-step retarget: the owner sets policy, the proposer moves the book to it. Both bind.
     function _retarget(uint16 target) internal {
         vm.prank(owner);
         strategy.setTargetLtv(target);
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0);
+        _adjustToPolicy();
     }
 
     /// @dev The collateral / LP-USDC / borrow triple the split would return for `amount` at the range
@@ -730,9 +737,10 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
         vm.prank(owner);
         strategy.setTargetLtv(newTarget); // policy half succeeds - it touches no market
+        uint16 policy = strategy.targetLtvBps();
         vm.prank(proposer);
         vm.expectRevert(abi.encodeWithSelector(LeveragedAeroManager.MoonwellRedeemFailed.selector, uint256(9)));
-        strategy.adjustLeverage(0, 0);
+        strategy.adjustLeverage(policy, 0, 0);
 
         // NOTHING MOVED — above all no debt: the refusal must land before the borrow.
         (uint256 collateralAfter, uint256 debtAfter) = _collateralAndDebt();
@@ -749,8 +757,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
         // ...and it is genuinely retry-able: clear the refusal and the same op goes through.
         mUsdc.setSupplyErrors(0, 0);
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0);
+        _adjustToPolicy();
         (uint256 collateralFinal, uint256 debtFinal) = _collateralAndDebt();
         assertApproxEqAbs((debtFinal * 10_000) / collateralFinal, uint256(newTarget), 2, "the retry lands on target");
     }
@@ -859,9 +866,10 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
 
         vm.prank(owner);
         strategy.setTargetLtv(6000);
+        uint16 policy = strategy.targetLtvBps();
         vm.prank(proposer);
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
-        strategy.adjustLeverage(0, 0);
+        strategy.adjustLeverage(policy, 0, 0);
     }
 
     // ==================== TARGET-LTV PERSISTENCE (asset-mode) ====================

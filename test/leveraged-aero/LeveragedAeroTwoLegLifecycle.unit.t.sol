@@ -220,8 +220,15 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     function _retarget(uint16 target) internal {
         vm.prank(owner);
         strategy.setTargetLtv(target);
+        _adjustToPolicy();
+    }
+
+    /// @dev `adjustLeverage` at the STANDING target. The read is hoisted ABOVE the prank on purpose: it is an
+    ///      external call, so leaving it in the argument list would consume the `vm.prank` meant for the op.
+    function _adjustToPolicy() internal {
+        uint16 policy = strategy.targetLtvBps();
         vm.prank(proposer);
-        strategy.adjustLeverage(0, 0);
+        strategy.adjustLeverage(policy, 0, 0);
     }
 
     function _valueUsdc(uint256 amt, uint256 price8, uint256 dec) internal pure returns (uint256) {
@@ -374,9 +381,10 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         vm.prank(owner);
         strategy.setTargetLtv(1); // non-zero, so it clears `TargetLtvZero` and reaches the manager
+        uint16 policy = strategy.targetLtvBps();
         vm.prank(proposer);
         vm.expectRevert(LeveragedAeroManager.FullUnwindNotSupported.selector);
-        strategy.adjustLeverage(0, 0);
+        strategy.adjustLeverage(policy, 0, 0);
     }
 
     /// @dev An ordinary partial lever-down leaves liquidity, so the re-stake fires and the position stays staked.
@@ -409,8 +417,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(mLegB.borrowBalance(address(strategy)), debtBAtInit, "setTargetLtv is policy only: book untouched");
 
         // The keeper's op then takes the book there, reading the STORED value (self-funding in this shape).
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0);
+        _adjustToPolicy();
         assertGt(mLegB.borrowBalance(address(strategy)), debtBAtInit, "lever UP ran off the stored target");
         assertEq(strategy.targetLtvBps(), 6000, "adjustLeverage left the standing target alone");
 
@@ -429,27 +436,54 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs((debtUsdc * 10_000) / collateral, 3000, 20, "the book followed the stored target down");
     }
 
-    /// @dev The KEEPER-ONLY de-risk, asserted on the BOOK: `lowerTargetLtv` needs no multisig, because the 2-day
-    ///      `FULFILL_WINDOW` must not depend on a signature.
-    function testProposerLowerTargetLtvThenAdjustLeverageDeleversTheBook() public {
+    /// @dev The KEEPER-ONLY de-risk, asserted on the BOOK: the pre-`fulfillRedeem` lever-down needs no multisig,
+    ///      because the 2-day `FULFILL_WINDOW` must not depend on a signature — and it does NOT touch policy.
+    function testProposerAdjustLeverageBelowPolicyDeleversTheBookWithoutMovingTheTarget() public {
         _execute(SEED);
         uint256 debtBAtInit = mLegB.borrowBalance(address(strategy));
 
-        // Policy alone moves nothing here either — same contract as the admin's setter.
         vm.prank(proposer);
-        strategy.lowerTargetLtv(4000);
-        assertEq(strategy.targetLtvBps(), 4000, "the keeper's write IS the new standing target");
-        assertEq(mLegB.borrowBalance(address(strategy)), debtBAtInit, "lowerTargetLtv is policy only: book untouched");
-
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0);
-        assertLt(mLegB.borrowBalance(address(strategy)), debtBAtInit, "lever DOWN ran off the keeper's target");
+        strategy.adjustLeverage(4000, 0, 0);
+        assertLt(mLegB.borrowBalance(address(strategy)), debtBAtInit, "lever DOWN ran off the per-call target");
+        assertEq(strategy.targetLtvBps(), 5000, "the per-call target is NOT policy: the standing target stands");
 
         uint256 collateral = mUsdc.balanceOf(address(strategy));
         uint256 debtUsdc = _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
             + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18);
         assertApproxEqAbs((debtUsdc * 10_000) / collateral, 4000, 20, "the book landed on the KEEPER's target");
-        assertEq(strategy.targetLtvBps(), 4000, "adjustLeverage left the standing target alone");
+
+        // AND THE DE-LEVER IS REVERSIBLE BY THE SAME KEY: passing the untouched standing target back re-levers
+        // the book to policy, which is what keeps the multisig off the post-fulfil path as well as the pre one.
+        _adjustToPolicy();
+        assertApproxEqAbs(
+            (
+                (
+                    _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
+                        + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18)
+                ) * 10_000
+            ) / mUsdc.balanceOf(address(strategy)),
+            uint256(TARGET_LTV_BPS),
+            20,
+            "restored to the standing target with no admin signature"
+        );
+    }
+
+    /// @dev THE BOUND: the per-call target may reach policy but never pass it, so the `onlyProposer` key cannot
+    ///      raise fund risk. One bps over the standing target is refused and the book is untouched.
+    function testAdjustLeverageAbovePolicyReverts() public {
+        _execute(SEED);
+        uint256 debtBBefore = mLegB.borrowBalance(address(strategy));
+
+        vm.prank(proposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LeveragedAerodromeCLStrategy.TargetLtvExceedsPolicy.selector, TARGET_LTV_BPS + 1, TARGET_LTV_BPS
+            )
+        );
+        strategy.adjustLeverage(TARGET_LTV_BPS + 1, 0, 0);
+
+        assertEq(mLegB.borrowBalance(address(strategy)), debtBBefore, "a refused target moves no debt");
+        assertEq(strategy.targetLtvBps(), TARGET_LTV_BPS, "and stores nothing");
     }
 
     /**
@@ -891,8 +925,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         assertApproxEqAbs(_ltvBps(), (uint256(TARGET_LTV_BPS) * SEED) / (SEED + top), 2, "LTV dipped on the supply");
 
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0); // the STANDING target — no policy change, no deployIdle
+        _adjustToPolicy(); // the STANDING target — no policy change, no deployIdle
 
         assertEq(_collateralUsdc(), SEED + top, "collateral is the whole book, the parked slice included");
         assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "adjustLeverage alone levered the new collateral");
@@ -1043,8 +1076,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         _deposit(top);
         vm.prank(proposer);
         strategy.supplyIdle(top);
-        vm.prank(proposer);
-        strategy.adjustLeverage(0, 0); // the whole book, parked slice included, is now at target
+        _adjustToPolicy(); // the whole book, parked slice included, is now at target
 
         vm.prank(proposer);
         vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientIdle.selector);

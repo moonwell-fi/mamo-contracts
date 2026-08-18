@@ -204,18 +204,20 @@ explicitly, and note that the two backend keys above are **different addresses**
 >
 > ### The direction rule
 >
-> **The admin sets the target LTV in either direction; the proposer may only reduce it.** The proposer's
-> **`lowerTargetLtv(uint16)`** (`0xbd41b78c`) is monotonic down — it reverts `TargetLtvNotLower()`
-> (`0x4f3f9c5d`) unless the new value is *strictly* below the stored one, and it shares the same non-zero
-> floor (`TargetLtvZero()`). So a compromised keeper key can never raise leverage, never reach a zero
-> target, and never move tokens; it *can* ratchet the target down and destroy yield, which is bounded,
-> emits `TargetLtvUpdated` every step, and is reversible by the admin in one `setTargetLtv`. This is what
+> **The admin owns the standing target; the proposer only moves the book underneath it.** Policy is
+> written by **`setTargetLtv(uint16)`** alone. The proposer's **`adjustLeverage(uint16 targetBps, ...)`**
+> (`0x9792419f`) takes a per-call target that is capped at the stored one — `TargetLtvExceedsPolicy(uint16
+> requested, uint16 policy)` (`0x614db9b8`) above it — and **never persisted**. So a compromised keeper key
+> can never raise fund risk past policy and never move tokens; it *can* keep de-levering and destroy
+> yield, which is bounded, transient (the next `deployIdle`/`compound` sizes at the stored target again),
+> and reversible with one `adjustLeverage` back at policy. This is what
 > keeps the 2-day fulfil SLA off the multisig's critical path (see "SLA — the 2-day deadman" below).
 >
-> **ABI note for anyone remapping selectors:** `adjustLeverage` lost its target parameter —
-> `adjustLeverage(uint16,uint256,uint256)` (`0x9792419f`) → `adjustLeverage(uint256,uint256)`
-> (`0x4be1cadd`). Target LTV is now standing policy rather than a per-call argument. This is a
-> rebalancer-surface change; the account layer (`MamoLeveragedAeroStrategy`) is **unaffected**.
+> **ABI note for anyone remapping selectors:** `adjustLeverage` has its target parameter back —
+> `adjustLeverage(uint256,uint256)` (`0x4be1cadd`) → `adjustLeverage(uint16,uint256,uint256)`
+> (`0x9792419f`), the original selector. The target is a per-call argument again, but capped at the
+> stored policy target and never persisted, and **`lowerTargetLtv(uint16)` (`0xbd41b78c`) is removed**.
+> This is a rebalancer-surface change; the account layer (`MamoLeveragedAeroStrategy`) is **unaffected**.
 
 ---
 
@@ -278,7 +280,7 @@ sequenceDiagram
 
     A-->>BE: WithdrawRequested(id, shares, minAssetsOut)   (account event — backend indexes it)
     A-->>RB: RedeemRequested(id, account, shares)          (strategy event — the keeper trigger)
-    Note over RB: if the unwind needs it, RB lowers policy ITSELF (lowerTargetLtv, down only) and runs adjustLeverage down — no multisig
+    Note over RB: if the unwind needs it, RB runs adjustLeverage at a lower per-call target (≤ policy) — no multisig
     RB->>S: fulfillRedeem(id, minAssetsOut)                              (PROPOSER key = rebalancer)
     S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
     Note over A: owner then sweeps via claimWithdrawnUsdc() → UsdcClaimed(amount)
@@ -288,9 +290,9 @@ sequenceDiagram
 1. The backend watches each account's `WithdrawRequested(id, shares, minAssetsOut)` (equivalently the
    strategy's `RedeemRequested(id, account, shares)`) for UX/product state — **not** to fulfil it.
 2. The book is optionally levered **down** first so the oracle-free proportional unwind self-funds its IL
-   — a **single-actor** step: the rebalancer lowers the standing target itself with
-   `lowerTargetLtv(newTargetBps)` (proposer-only, strictly-lower) and runs `adjustLeverage(minLiq, minOut)`,
-   then calls `fulfillRedeem(id, minAssetsOut)` — all three with the **proposer** key, no multisig on the path.
+   — a **single-actor** step: the rebalancer runs `adjustLeverage(lowerTarget, minLiq, minOut)` and then
+   `fulfillRedeem(id, minAssetsOut)` — both with the **proposer** key, no multisig on the path, and the
+   restore afterwards is the same call at `targetLtvBps()`.
 3. USDC lands on the account; the **owner** claims it with `claimWithdrawnUsdc()`.
 4. Confirm downstream via the account's `UsdcClaimed(amount)` (owner-initiated) or the strategy's
    `RedeemFulfilled`.
@@ -303,9 +305,9 @@ account, owner-gated) can trustlessly self-service via `emergencyWithdraw(id, mi
 rebalancer's to meet, and the backend's to alert on: unfulfilled requests become user-executable and remove
 the operator from the loop.
 
-**No multisig signature sits inside that window.** The pre-fulfil de-risk is `lowerTargetLtv` +
-`adjustLeverage`, both proposer-only, so the SLA never depends on assembling multisig signers. The admin's
-`setTargetLtv` is needed only to **raise** the target back afterwards, which is off the critical path.
+**No multisig signature sits inside that window.** The pre-fulfil de-risk is one proposer-only
+`adjustLeverage` at a lower per-call target, so the SLA never depends on assembling multisig signers —
+and neither does restoring the book, which is the same call at the untouched `targetLtvBps()`.
 
 ---
 
