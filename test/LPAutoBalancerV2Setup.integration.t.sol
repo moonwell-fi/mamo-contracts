@@ -213,7 +213,9 @@ contract LPAutoBalancerV2SetupTest is Test {
         // warps 4 hours forward to accrue AERO and let the TWAP converge. On a live chain ETH/USD
         // and BTC/USD would each have published a dozen times across that window; on a pinned fork
         // they cannot, so the bound the proposal arms (3600s) correctly reads the warp as stale.
-        // Re-publish both feeds at the current timestamp, preserving their real answers.
+        // FREEZE both feeds' `updatedAt` at the current timestamp, preserving their real answers.
+        // Not a re-publish: the mock encodes `updatedAt` once, here, and never tracks "now" — any
+        // skip() past the armed bound AFTER this call goes stale exactly as the real feed would.
         // Deliberately NOT "widen the bound to make the test pass": the entire point of this test is
         // to assert the values the proposal actually ships, and loosening them here would hollow it
         // out into a test of a configuration nobody deploys.
@@ -328,17 +330,33 @@ contract LPAutoBalancerV2SetupTest is Test {
     ///      probe must fail StaleOracle; moved after `registerPosition`, the registration would pass
     ///      under the looser default and build() would succeed.
     ///
-    ///      The bound is derived from the feed's live `updatedAt` rather than hardcoded, so re-pinning
-    ///      PINNED_BLOCK cannot silently turn this into a vacuous test.
+    ///      Both bounds are derived from live state rather than hardcoded, so re-pinning PINNED_BLOCK
+    ///      cannot silently turn this into a vacuous test: leg 0 is tightened relative to the ETH/USD
+    ///      feed's own age, leg 1 is opened to the contract's own ceiling so it can never be the
+    ///      thing that reverts, and BOTH feeds are asserted fresh under the constructor default — the
+    ///      counterfactual placement has to SUCCEED for the revert to mean "the arming ran first".
+    ///      A hardcoded leg-1 bound would break silently at a future block where either feed is older
+    ///      than it: build() would revert StaleOracle under both placements and pin nothing.
     function test_proposal_armsMaxOracleDelaysBeforeRegisterPosition() public {
         proposal.deploy();
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
 
         (,,, uint256 updatedAt0,) = IPriceFeed(addresses.getAddress("CHAINLINK_ETH_USD")).latestRoundData();
+        (,,, uint256 updatedAt1,) = IPriceFeed(addresses.getAddress("CHAINLINK_BTC_USD")).latestRoundData();
         uint256 age0 = block.timestamp - updatedAt0;
+        uint256 age1 = block.timestamp - updatedAt1;
         assertGt(age0, 1, "fork feed must be non-trivially old for this test to bite");
 
-        // Tighter than the feed's own age → the registration probe cannot pass under it.
-        proposal.setMaxOracleDelays(age0 - 1, 3600);
+        // Non-vacuity: under the MOVED placement the registration probe runs on the constructor
+        // default, and this test only discriminates if that placement would have PASSED. Assert it
+        // rather than assume it — both feeds must be fresh under the default at the pinned block.
+        uint256 dflt = lab.DEFAULT_MAX_ORACLE_DELAY();
+        assertLt(age0, dflt, "ETH/USD must be fresh under the ctor default, else both placements revert");
+        assertLt(age1, dflt, "BTC/USD must be fresh under the ctor default, else both placements revert");
+
+        // Leg 0 tighter than the feed's own age → the registration probe cannot pass under it.
+        // Leg 1 opened to the contract's ceiling → it can never be the leg that reverts.
+        proposal.setMaxOracleDelays(age0 - 1, lab.MAX_ORACLE_DELAY());
 
         vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
         proposal.build();

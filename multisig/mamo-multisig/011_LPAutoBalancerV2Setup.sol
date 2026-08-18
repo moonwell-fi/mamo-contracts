@@ -39,8 +39,8 @@ import {console} from "forge-std/console.sol";
 ///
 ///         PRECONDITION (off-chain Phase B): the WETH/cbBTC Slipstream position NFT must already be
 ///         minted and held by the F-MAMO Safe BEFORE build() runs. registerPosition reverts with
-///         NotHeld unless the balancer owns the NFT, and the transfer action (2a) executes inside
-///         build()'s state-diff recording, so by the time registerPosition (2b) runs the balancer
+///         NotHeld unless the balancer owns the NFT, and the transfer action (2c) executes inside
+///         build()'s state-diff recording, so by the time registerPosition (2d) runs the balancer
 ///         already owns it. The production run MUST set the real values via the setters below:
 ///           - setTokenId(uint256)        — the tokenId the Safe holds (minted in Phase B2).
 ///           - setRebalancerEOA(address)  — the real backend signer EOA (MAMO_LP_REBALANCER).

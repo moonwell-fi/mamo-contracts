@@ -866,17 +866,28 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         ticks is what makes the placement verifiable rather than merely bounded.
     ///
     ///         SCOPE OF THE COMMITMENT — what it pins, and what it does NOT. The commitment names
-    ///         only the MAIN bounds. From them it also pins the ALT's ANCHOR, because the width is
-    ///         required to be an even multiple of tickSpacing (per-call check below and
+    ///         only the MAIN bounds. GIVEN THE BRANCH, they also pin the ALT's ANCHOR, because the
+    ///         width is required to be an even multiple of tickSpacing (per-call check below and
     ///         `LPPositionLib.validateRebalanceConfig` on the bounds). `_mintAlt` anchors on
-    ///         `floorAlign(spotTick)`, and each `_mainRange` branch inverts to that anchor uniquely
+    ///         `floorAlign(spotTick)`, and each `_mainRange` branch inverts to that anchor
     ///         under that constraint: balanced → `floorAlign(spot) = tickLower + width/2` (valid only
     ///         because `width/2` is a whole number of spacings); token0-single-sided →
     ///         `tickLower - tickSpacing`; token1-single-sided → `tickUpper`. Drop the even-multiple
     ///         rule and even that stops holding: at spacing 100 / width 300, spot 150 and spot 249
     ///         both yield main [0, 300] while the token0 alt slides from [200, 300] to [300, 400]
-    ///         with TickMismatch silent. So the alt's two candidate ranges — [floor + spacing,
-    ///         floor + 2*spacing] and [floor - spacing, floor] — are pinned to exact ticks.
+    ///         with TickMismatch silent.
+    ///
+    ///         Each inversion is PER-BRANCH, and the commitment does not name the branch. The same
+    ///         tick PAIR can therefore come from two branches at two different anchors when
+    ///         `width == 2 * tickSpacing`: balanced `[F - w/2, F + w/2]` (anchor F) and
+    ///         token1-single-sided `[F' - w, F']` with `F' = F + w/2` are the identical pair. At the
+    ///         phase-1 config (spacing 100, width 200, maxTickDeviation 100) that collision is
+    ///         reachable, so a committed pair is NOT proof of a balanced mint and the alt's anchor is
+    ///         not uniquely recoverable from it. Closed by config with zero bytecode: any
+    ///         `width >= 4 * tickSpacing` (equivalently `minWidth > 2 * maxTickDeviation`) makes the
+    ///         collision arithmetically unreachable. Under that condition — and only then — the alt's
+    ///         two candidate ranges, [floor + spacing, floor + 2*spacing] and
+    ///         [floor - spacing, floor], are pinned to exact ticks.
     ///
     ///         It does NOT pin WHICH of the two is minted. That choice is `_mintAlt`'s
     ///         `surplus0 = value0 >= value1`, computed from the balances left AFTER `_mintBalanced`,
@@ -892,9 +903,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         spot on opposite sides. What actually changes is which leg is deposited into the alt
     ///         and which is left loose for `_forwardDust` to sweep to the feeCollector after the value
     ///         floor. That is a real, if narrow, effect on principal placement, and it is stated here
-    ///         rather than papered over: the even-multiple width rule buys a pinned alt ANCHOR, not a
-    ///         pinned alt SIDE. Pinning the side would need the alt's own bounds (and its
-    ///         "no alt was minted" case) added to the commitment.
+    ///         rather than papered over: the even-multiple width rule buys a pinned alt ANCHOR (at a
+    ///         non-colliding width, per the branch-collision note above), not a pinned alt SIDE.
+    ///         Pinning the side would need the alt's own bounds (and its "no alt was minted" case)
+    ///         added to the commitment.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
     ///         out of the floor per H-1), BOTH floor snapshots here (the position and loose amounts)
     ///         are taken back in unwindForSwap — a prior transaction. A token

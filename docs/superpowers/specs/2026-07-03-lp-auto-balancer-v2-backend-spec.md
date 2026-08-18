@@ -219,17 +219,30 @@ spacings and the balanced branch simplifies to `[floor - width/2, floor + width/
 both Low and both closable off-chain:
 
 1. *Branch collision at `width == 2 × tickSpacing`.* The balanced pair `[F − w/2, F + w/2]` and the
-   token1-single-sided pair `[F' − w, F']` are the SAME pair whenever `F' = F + w/2` — i.e. one full
-   spacing of push, which the calm gate accepts (`dev == maxTickDeviation` passes). At the phase-1
+   token1-single-sided pair `[F' − w, F']` are the SAME pair whenever `F' = F + w/2` — i.e. the
+   floor-aligned anchor advances by one full spacing, which does NOT require a full spacing of push:
+   with honest spot at `F + 99` a **1-tick** push already crosses the alignment boundary, so the
+   deviation the attacker must spend is *at most* `maxTickDeviation`, not equal to it (the calm gate
+   accepts it either way — `dev == maxTickDeviation` passes). At the phase-1
    config (`tickSpacing` 100, `width` 200, `maxTickDeviation` 100) that collision is reachable: push
    spot to the old main's `tickUpper`, teardown returns 100% token1, `value0` falls under
    `MIN_MAIN_LEG_USD`, and the single-sided branch mints the pair you committed to. The geometry is
    correct so there is no mis-ranging loss, but the single-sided branch **zeroes the caller's token0
    mint minimum**, an intended two-sided deployment becomes a single-sided deposit priced at
-   manipulated spot, and the cooldown is consumed. Config closes it with zero bytecode: ship
-   `minWidth > 2 × maxTickDeviation` (i.e. `MIN_WIDTH` 400 at the phase-1 deviation bound), which
-   makes the collision arithmetically unreachable. Otherwise the backend must not treat a committed
-   pair as proof of a balanced mint — check the realized `amount0Min`/`amount1Min` forwarding.
+   manipulated spot, and the cooldown is consumed. Two zero-bytecode closures, in increasing cost:
+   - **Per-cycle, no Safe write (preferred interim).** The collision needs `width == 2 × tickSpacing`
+     exactly; **any per-call `width ≥ 4 × tickSpacing` is immune** at `maxTickDeviation` 100, because
+     the single-sided pair then spans `w` while the balanced pair spans `w` around an anchor that
+     would have to move `w/2 ≥ 2` spacings — a ≥ 101-tick push the calm gate rejects. The backend can
+     adopt this per cycle by choosing the submitted width, without committing every position to
+     double width and without touching config.
+   - **Config-level.** Ship `minWidth > 2 × maxTickDeviation` (i.e. `MIN_WIDTH` 400 at the phase-1
+     deviation bound), which makes the collision unreachable for every caller. Cost: it doubles the
+     minimum phase-1 position width, against a backtest whose edge is tight ranges (§5) — a product
+     call, tracked as R7 in the swap-rebalance design doc's risk register.
+
+   Until one is in force the backend must not treat a committed pair as proof of a balanced mint —
+   check the realized `amount0Min`/`amount1Min` forwarding.
 2. *Residual MAGNITUDE inside one committed bucket.* For `spot ∈ [floor, floor + tickSpacing − 1]`
    the main range is the same pair throughout, so `TickMismatch()` stays silent while the in-range
    value split swings from 50/50 at `spot == floor` to ≈0.6/99.4 at `floor + 99`. Sandwiching a
@@ -360,7 +373,7 @@ The emissions-regime guard is the `marginalUsd > MARGINAL_MIN_USD_PER_H` term: w
 - **Withdraw mins (unwind + alt path).** For each leg: `amounts = getAmountsForLiquidity(sqrtP, tickLower, tickUpper, liquidity)`, then `min = amount × (1 − WITHDRAW_TOLERANCE_BPS/10000)` (default 50). **Never send 0 mins** — the calm gate (~1%) would be the only sandwich backstop. If `hasAlt == false`, alt mins are 0 (nothing to tear down).
 - **Mint mins (rebuild + alt path).** Predict the in-ratio consumption from planned post-swap balances at `spotTick` for the chosen range, haircut by `MINT_TOLERANCE_BPS` (default 50). Alt mint mins: apply the haircut to the predicted surplus leg (the contract zeroes the unfunded side itself).
   **Send them, and size them — they are the only control for the in-bucket residual (§2.2).** On the balanced branch the contract forwards BOTH `amount0MinMain` and `amount1MinMain` to the position manager unchanged, so a min set at `predicted × (1 − MINT_TOLERANCE_BPS/10000)` reverts a sandwich that skews the in-range split inside a single committed tick bucket (where `TickMismatch()` is silent by construction). Zeros disable that protection entirely: `TickMismatch` pins WHERE liquidity lands, the minima pin HOW MUCH of each leg actually lands there, and neither substitutes for the other. The Tenderly reference harness passes zeros for rig convenience — do not copy it into a production caller.
-- **Width.** Default `WIDTH_TICKS` env (phase-1 default 200 = 2 × tickSpacing, the tightest allowed — the CL10 backtest's edge is tight ranges). Must satisfy `minWidth ≤ width ≤ maxWidth` **and `width % (2 × tickSpacing) == 0`** — at the phase-1 tickSpacing of 100 that is `width % 200 == 0`, so 200/400/600… are legal and 300/500/700… now revert `InvalidWidth()` even though they are multiples of 100. The even-multiple rule is load-bearing, not stylistic: it makes `width/2` a whole number of spacings, which is what lets the `RebuildParams` tick commitment pin the ALT placement as well as the main (§2.2). The same rule is validated on `minWidth`/`maxWidth` at config time, so a Safe config write with an odd-multiple bound reverts `InvalidWidth()` too. The phase-1 config (`minWidth` 200, `maxWidth` 20 000) and the default width all satisfy it unchanged. Any adaptive widening (realized-vol responsive) stays within the on-chain band AND on the even-multiple grid.
+- **Width.** Default `WIDTH_TICKS` env (phase-1 default 200 = 2 × tickSpacing, the tightest allowed — the CL10 backtest's edge is tight ranges). Must satisfy `minWidth ≤ width ≤ maxWidth` **and `width % (2 × tickSpacing) == 0`** — at the phase-1 tickSpacing of 100 that is `width % 200 == 0`, so 200/400/600… are legal and 300/500/700… now revert `InvalidWidth()` even though they are multiples of 100. The even-multiple rule is load-bearing, not stylistic: it makes `width/2` a whole number of spacings, which is what lets the `RebuildParams` tick commitment recover `floorAlign(spot)` — and so the ALT's anchor — from the committed `tickLower` **on the balanced branch**. It does NOT pin the ALT placement outright: the commitment names the tick pair, not the branch that produced it, and at `width == 2 × tickSpacing` two branches collide on the same pair at different anchors (§2.2 residual 1). Nor does it pin which SIDE of spot the alt takes (§2.2 residual 2). The same rule is validated on `minWidth`/`maxWidth` at config time, so a Safe config write with an odd-multiple bound reverts `InvalidWidth()` too. The phase-1 config (`minWidth` 200, `maxWidth` 20 000) and the default width all satisfy it unchanged. Any adaptive widening (realized-vol responsive) stays within the on-chain band AND on the even-multiple grid.
 - **Deadline.** `now + 300` seconds on every write.
 - **Order size ≠ approval.** After the unwind tx confirms, read actual loose balances and size the order: `sellAmountOrder = min(recomputed excess from actual balances, approval, balanceOf(sellToken))`. An order larger than the balance can never settle (fill-or-kill), it just wastes the cycle.
 

@@ -101,11 +101,15 @@ contract LPGeometryLibUnitTest is Test {
     }
 
     /// @dev MOO-727 follow-up. `LPAutoBalancerV2.rebuildAfterSwap`'s tick commitment names only the
-    ///      MAIN bounds, yet `_mintAlt` anchors the alt on `floorAlign(spot)`. What makes the
-    ///      commitment cover the alt too is that every legal width is an EVEN multiple of the
-    ///      spacing: then `width/2` is a whole number of spacings, `floorAlign(spot - width/2) ==
-    ///      floorAlign(spot) - width/2`, and the anchor is recoverable from the committed tickLower.
-    ///      Fuzzed here so the invariant the contract now depends on is asserted, not assumed.
+    ///      MAIN bounds, yet `_mintAlt` anchors the alt on `floorAlign(spot)`. What lets the
+    ///      committed bounds recover that anchor ON THE BALANCED BRANCH is that every legal width is
+    ///      an EVEN multiple of the spacing: then `width/2` is a whole number of spacings,
+    ///      `floorAlign(spot - width/2) == floorAlign(spot) - width/2`, and the anchor follows from
+    ///      the committed tickLower. Fuzzed here so the invariant the contract now depends on is
+    ///      asserted, not assumed. NOTE the scope: this pins the balanced branch's inversion only —
+    ///      at `width == 2 * tickSpacing` the same tick pair is also reachable from the
+    ///      token1-single-sided branch at a different anchor, so the pair alone does not determine
+    ///      the branch. See the SCOPE OF THE COMMITMENT note on `rebuildAfterSwap`.
     function testFuzz_alignedRange_evenMultipleWidthPinsFloorAlign(
         int24 currentTick,
         uint24 spacingSeed,

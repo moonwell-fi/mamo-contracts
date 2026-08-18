@@ -221,8 +221,9 @@ contract MockPositionManagerV2 {
     }
 
     /// @notice Trip-wire for ORDERING assertions. When set, the FIRST teardown call the balancer
-    ///         makes (`decreaseLiquidity`, which `_exitAll` reaches before `collect`/`burn`) reverts
-    ///         with a sentinel string instead of doing anything.
+    ///         makes reverts with a sentinel string instead of doing anything. `_exitAll` skims fees
+    ///         through `collect` (step 2) BEFORE `decreaseLiquidity` (step 3), so the wire is armed
+    ///         on BOTH and whichever runs first trips it.
     /// @dev    Counters cannot pin ordering: any revert rolls back `burnCallCount`, so a guard moved
     ///         BELOW the teardown still leaves `burnCallCount() == 0` for the test to read. The
     ///         revert REASON survives, though — so arming this sentinel and asserting the tx reverts

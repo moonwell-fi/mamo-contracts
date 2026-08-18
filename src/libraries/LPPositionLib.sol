@@ -58,8 +58,13 @@ library LPPositionLib {
     ///        preimage for the same main range — spot 150 and spot 249 both give main [0, 300] —
     ///        and the alt slides a full spacing while TickMismatch stays silent. `minWidth >=
     ///        2 * tickSpacing` above guarantees the smallest legal width already satisfies this, so
-    ///        the constraint never makes a config uninhabitable. NOTE the limit of what this buys:
-    ///        it pins the alt's candidate RANGES, not which side is chosen — see the SCOPE OF THE
+    ///        the constraint never makes a config uninhabitable. NOTE the two limits of what this
+    ///        buys. (i) The inversion is PER-BRANCH and the commitment does not name the branch: at
+    ///        `width == 2 * tickSpacing` a balanced pair and a token1-single-sided pair collide on
+    ///        the same ticks at different anchors, so the pair alone does not determine the anchor.
+    ///        Only `width >= 4 * tickSpacing` (i.e. `minWidth > 2 * maxTickDeviation`) rules that
+    ///        out; this validator does NOT enforce it, it is a config choice. (ii) Even then it pins
+    ///        the alt's candidate RANGES, not which side is chosen — see the SCOPE OF THE
     ///        COMMITMENT note on `LPAutoBalancerV2.rebuildAfterSwap`.
     ///      - `maxWidth <= int24.max`: widths are uint24 but the tick math casts them to int24,
     ///        which bit-REINTERPRETS rather than reverting — a huge maxWidth passes every check
