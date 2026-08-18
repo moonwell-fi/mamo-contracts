@@ -994,10 +994,18 @@ done
 ./script/tenderly/fund-address.sh 0xWALLET --erc20 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf 0.5 --rpc-url "$ADMIN_RPC"
 ```
 
-Two rules: **always pass `--rpc-url` with this instance's Admin RPC** (the script's `.env` fallback
-resolves `TENDERLY_VNET_RPC_URL`, which points at the unrelated LPV2 vnet), and the Admin RPC lives in
-1Password — the public RPC cannot fund (cheat methods are admin-only). The script verifies by reading
-the balance back after each set.
+Two rules: **check what `TENDERLY_VNET_RPC_URL` resolves to before relying on the fallback**, and get the
+Admin RPC from 1Password — the public RPC cannot fund (cheat methods are admin-only). The script verifies
+by reading the balance back after each set.
+
+On the RPC: the script uses `--rpc-url`, else `$TENDERLY_VNET_RPC_URL`, else `.env`. That variable has
+historically pointed at an *unrelated* vnet, so passing `--rpc-url` explicitly is the safe habit. Since
+2026-08-18 it points at THIS instance's Admin RPC, which is why the batch below runs without the flag.
+**One-line check before any batch — it must print `73578453`:**
+
+```bash
+cast chain-id --rpc-url "$TENDERLY_VNET_RPC_URL"   # 73578453 = this instance; 8453 = the wrong one
+```
 
 ### Deliberate history — retired, do not target
 
