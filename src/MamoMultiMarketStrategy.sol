@@ -755,6 +755,16 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
             uint256 toWithdraw = amount > capacity ? capacity : amount;
             if (toWithdraw == 0) return 0;
+            // The require stays strict for every OTHER Compound error code. That is safe today
+            // rather than semantically necessary: a non-zero code means the mToken changed no state,
+            // so tolerating it would measure a zero delta, let pass 2 try elsewhere, and still revert
+            // on `remaining == 0` if the funds cannot be found anywhere. It is safe because none of
+            // the other codes is reachable on Moonwell — COMPTROLLER_REJECTION needs market
+            // membership and this strategy never calls `enterMarkets`, MARKET_NOT_LISTED needs
+            // `_unsupportMarket` (absent from the comptroller), and redeem is not pausable. Revisit
+            // before adding any non-Moonwell Compound-v2 market, or if a strategy ever enters a
+            // market: one bad code would then brick `withdraw`, `withdrawAll` AND `updatePosition`
+            // for every strategy on that asset.
             require(IMToken(market.target).redeemUnderlying(toWithdraw) == 0, "Failed to redeem mToken");
         } else {
             // maxWithdraw already accounts for the vault's withdrawal fee and liquidity limits.
@@ -926,10 +936,11 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     ///      Approving the underlying would put every user deposit within reach of a CoW order;
     ///      approving an mToken or 4626 share does the same one level up, and because
     ///      `sweepRewardFees` is permissionless a single mistaken price-checker entry would let
-    ///      anyone tax 5% of the position's shares. That entry cannot be walked back either —
-    ///      SlippagePriceChecker.removeTokenConfiguration leaves `maxTimePriceValid` set, so
-    ///      `isRewardToken` is a one-way latch — which is what makes the redundant check here worth
-    ///      its gas.
+    ///      anyone tax 5% of the position's shares. Walking that entry back takes a deliberate
+    ///      owner action on the price checker — `removeTokenConfiguration` leaves `maxTimePriceValid`
+    ///      set (it is keyed by `fromToken` alone), so only `clearRewardToken` flips `isRewardToken`
+    ///      back to false, and only fleet-wide. That is what makes the redundant check here worth
+    ///      its gas: it holds locally, per strategy, without any price-checker mutation.
     function _requireRewardToken(address rewardToken) internal view {
         require(rewardToken != address(token), "Not a reward token");
         require(!_isMarketTarget(rewardToken), "Market share is not a reward token");

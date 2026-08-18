@@ -128,18 +128,22 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
         // {_isBackend} stays a constant lookup. That leaves the two definitions free to disagree,
         // and a disagreement is not a graceful failure — `hasRole` against an id nobody holds makes
         // every backend gate permanently unsatisfiable. Assert the two agree once, at init, where it
-        // is a deployment-time revert rather than a discovery. Same rule the factory applies to its
-        // own copy; see {IMamoStrategyRegistry.BACKEND_ROLE}.
+        // is a deployment-time revert rather than a discovery. {MultiMarketStrategyFactory} asserts
+        // the same invariant on its own copy, but fails CLOSED with a different string, and the two
+        // other factories ({MamoLeveragedAeroStrategyFactory}, {MamoStakingStrategyFactory}) assert
+        // nothing at all — for those, this is the only place the invariant is checked.
+        // See {IMamoStrategyRegistry.BACKEND_ROLE}.
         //
-        // Raw staticcall, and DELIBERATELY fail-open when the read is unavailable. This is a
-        // typo-catcher for a real registry, not an access-control gate: a `_mamoStrategyRegistry`
-        // with no code (or no such selector) is a broken strategy either way, and
-        // `MamoStrategyRegistry.addStrategy` already refuses it with "Strategy registry not set
-        // correctly". A typed call here would instead revert inside initialize() with empty
-        // returndata, replacing that specific diagnosis with an undecodable one.
-        (bool ok, bytes memory ret) =
-            _mamoStrategyRegistry.staticcall(abi.encodeWithSelector(IMamoStrategyRegistry.BACKEND_ROLE.selector));
-        if (ok && ret.length == 32) {
+        // Raw staticcall, fail-open for a CODELESS address ONLY. That single exemption exists so the
+        // registry keeps its own precise diagnosis: `MamoStrategyRegistry.addStrategy` refuses such a
+        // strategy with "Strategy registry not set correctly", whereas a typed call here would revert
+        // inside initialize() with empty returndata and replace that diagnosis with an undecodable
+        // one. A registry that HAS code and still cannot answer is not a diagnosis question — it is a
+        // strategy whose backend gate would be permanently unsatisfiable, so it fails closed.
+        if (_mamoStrategyRegistry.code.length > 0) {
+            (bool ok, bytes memory ret) =
+                _mamoStrategyRegistry.staticcall(abi.encodeWithSelector(IMamoStrategyRegistry.BACKEND_ROLE.selector));
+            require(ok && ret.length == 32, "Registry BACKEND_ROLE unreadable");
             require(abi.decode(ret, (bytes32)) == BACKEND_ROLE, "Registry BACKEND_ROLE mismatch");
         }
 

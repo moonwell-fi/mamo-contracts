@@ -142,8 +142,11 @@ factory takes a caller-chosen target or calldata — their only calls are `new E
 *is* an arbitrary-call surface but already occupied index 0, so it gains nothing. The material new
 principal is **`MAMO_BACKEND` (`0x2Ab0…5e73`, an EOA)**, granted in this same proposal: before the
 change that key could reach nothing on a strategy; after it, it can call `setFeeRecipient`
-fleet-wide (re-pointing the compound-fee stream), plus `updatePosition` and
-`migrateV1ToMarketRegistry`. Net: the strategy-side backend surface goes from one hot EOA (the
+(re-pointing the compound-fee stream), plus `updatePosition` and `migrateV1ToMarketRegistry` — but
+**only on strategies running the new implementation**. Strategies still on the un-upgraded
+implementation resolve the backend through `getBackendAddress()`, which returns `STRATEGY_MULTICALL`,
+so a genuine role member calling directly is rejected with `"Not backend"`. The surface becomes
+fleet-wide only as the fleet is upgraded. Net: the strategy-side backend surface goes from one hot EOA (the
 compounder, via the multicall) to two. Accepted deliberately, but it is the risk being accepted.
 
 #### Live topology, and what actually triggers this
@@ -169,9 +172,11 @@ Operating rules:
   grant-before-revoke does not protect it, it only decides which address lands there. (Grant before
   revoke is still the house style, and `011` follows it, but it buys nothing here: the members `011`
   revokes sit at indices 1, 2 and 5.)
-- Recovery, if index 0 does move or must move: grant the desired principal first — a fresh grant
-  appends, so it is last — then revoke the index-0 occupant, and the freshly granted member swaps
-  into slot 0. Re-grant anything revoked along the way.
+- Recovery, if index 0 does move or must move: grant the desired principal first — a grant to a
+  **non-member** appends, so it is last — then revoke the index-0 occupant, and the freshly granted
+  member swaps into slot 0. Re-grant anything revoked along the way. The "appends" half only holds
+  for a non-member: `EnumerableSet.add` returns false and moves nothing if the principal already
+  holds the role, in which case revoking index 0 pulls whatever is genuinely last into slot 0.
 - Every proposal that mutates `BACKEND_ROLE` must assert `getBackendAddress()` in **both**
   `preBuildMock` and `validate`, so a change of identity is a test failure rather than a discovery.
   `011` carries the pair. Note what that pair does and does not buy: both are **simulation-time**
@@ -234,7 +239,7 @@ pre-fix implementation is claimable and must be redeployed.
 - `function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external`: Sets the staleness window; rejects zero. Owner only.
 - `function clearRewardToken(address fromToken) external`: Retires the token entirely by zeroing `maxTimePriceValid`. Owner only. Added because `isRewardToken` was otherwise a **one-way latch** — nothing could unset it, so a mistakenly configured token remained permanently eligible for the permissionless compound-fee sweep and relayer approval in `MamoMultiMarketStrategy`.
 
-  Note the interaction with the compound fee, which is why `MamoMultiMarketStrategy.recoverERC20` settles on the **anchor** (`rewardFeeCharged[token] > 0`) and not on the current `isRewardToken` answer. Clearing a token makes `isRewardToken` go false while an unsettled fee position may still exist on the strategy; before that change, recovery of a cleared token skipped both settles, took the balance untaxed, and left the anchor stale-high, so the next batch after a re-configuration computed `pendingRewardFee == 0`. A cleared token also cannot be swept — `sweepRewardFees` reverts `"Token not allowed"` — so the fee would have been stranded rather than deferred. Operationally: clearing is still safe at any time, but the settlement now rides on recovery rather than on the configuration.
+  Note the interaction with the compound fee, which is why `MamoMultiMarketStrategy.recoverERC20` settles on the **anchor** (`rewardFeeCharged[token] > 0`) and not on the current `isRewardToken` answer. Clearing a token makes `isRewardToken` go false while an unsettled fee position may still exist on the strategy; before that change, recovery of a cleared token skipped both settles, took the balance untaxed, and left the anchor stale-high, so the next batch after a re-configuration computed `pendingRewardFee == 0`. A cleared token also cannot be swept — `sweepRewardFees` reverts `"Token not allowed"` — so the fee would have been stranded rather than deferred. Operationally: **sweep every affected strategy before clearing.** The anchor settle covers a token that was swept at least once, but a batch that was *never* swept before the clear escapes entirely — the anchor is zero, so neither disjunct in `recoverERC20` fires, and `sweepRewardFees` can no longer be called to collect it. Measured: 1000e18 of a never-swept reward token, retired then recovered, yields **zero** fee. Clearing is safe for the anchored case only; for the un-swept case the settlement rides on the sweep having already happened, not on recovery.
 - `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks a swap against the feed price with the provided slippage.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Expected output amount for a swap.
 - `function isRewardToken(address token) external view returns (bool)`: Whether the token has a staleness window configured.
@@ -252,11 +257,15 @@ Notes that are easy to get wrong and are enforced in code:
   `min(balanceOfUnderlying, getCash())`, not just the position size. A fully lent-out market returns
   `TOKEN_INSUFFICIENT_CASH` rather than reverting, and treating that as a hard failure took down the
   whole withdrawal — including the pass that would have covered the shortfall elsewhere
-  (Sherlock #37). ERC4626 legs are capped at `maxWithdraw`, and a full-capacity exit goes through
-  `redeem(maxRedeem(...))` so a vault whose rounding makes `withdraw(maxWithdraw(...))` unsatisfiable
-  cannot brick the leg.
+  (Sherlock #37). ERC4626 legs are capped at `maxWithdraw`, and a full-capacity exit redeems the
+  strategy's **whole share balance** — the same quantity `_getTotalBalance` advertises — so the
+  advertised value is always deliverable while the vault is liquid. `redeem(maxRedeem(...))` is used
+  only on the liquidity-constrained fallback. Either way a vault whose rounding makes
+  `withdraw(maxWithdraw(...))` unsatisfiable cannot brick the leg.
 - **`withdrawAll` and `updatePosition` are best-effort sweeps**, not all-or-nothing. They drain what
-  each market can currently pay and leave the rest in place.
+  each market can currently pay and leave the rest in place. Consequently `PositionUpdated(updates)`
+  reports the splits **requested**, not the allocation achieved — an indexer reading it as achieved
+  state will be wrong whenever a market was liquidity-constrained. No fund risk, observability only.
 - **The compound fee is a property of the balance**, not of the call that fetched it — Merkl's
   `claim` is permissionless, so anything keyed to the claim path is trivially bypassed. It is
   charged on receipt of any priced non-principal token, donations included, and is settled by the

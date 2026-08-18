@@ -768,9 +768,15 @@ contract MultiMarketStrategyTest is Test {
         // The shipped configs are 100/0, which leaves the vault leg empty and the 4626 capacity
         // branch unreachable. Move everything into the vault: with no second leg holding anything,
         // pass 1 targets the vault at its full capacity — the branch under test — and there is
-        // nothing anywhere to absorb a payout that lands under what was advertised. (A 50/50 split
-        // does NOT express this: the two legs round apart by a unit, the vault's pass-1 target
-        // lands just below its capacity, and the residual gets swept in pass 2 either way.)
+        // nothing anywhere to absorb a payout that lands under what was advertised.
+        //
+        // 0/100 rather than 50/50 because 0/100 is the config that reproduces on EVERY block. A
+        // 50/50 split is flaky, not vacuous: it does hit the bug on some blocks (measured pre-fix at
+        // Base 50094000) and not on others (50098000, 50100000, 50101000), because the two legs round
+        // apart by a unit, the vault's pass-1 target can land just below its capacity, and whether the
+        // 1-unit residual then re-enters the capacity branch in pass 2 depends on live vault state.
+        // This suite runs unpinned against `latest`, so only the always-reverting config is a
+        // trustworthy regression test.
         MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
         updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 0});
         updates[1] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 10000});
@@ -785,6 +791,15 @@ contract MultiMarketStrategyTest is Test {
         assertGt(shares, 0, "the vault leg must be funded for this test to mean anything");
         uint256 advertised = metaMorphoVault.previewRedeem(shares) + mToken.balanceOfUnderlying(address(strategy))
             + underlying.balanceOf(address(strategy));
+
+        // Pin WHICH branch runs. Without this the test passes vacuously through the
+        // liquidity-constrained else-branch on any block where the live vault cannot honour 1000
+        // units, and the capacity branch under test is never reached.
+        assertGe(
+            metaMorphoVault.maxWithdraw(address(strategy)),
+            metaMorphoVault.previewRedeem(shares),
+            "the live vault must be liquid enough to take the capacity branch, else this test is vacuous"
+        );
 
         vm.prank(owner);
         strategy.withdraw(advertised);

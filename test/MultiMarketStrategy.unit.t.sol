@@ -358,17 +358,41 @@ contract MultiMarketStrategyUnitTest is Test {
         new ERC1967Proxy(address(implementation), data);
     }
 
-    /// @notice The same check must NOT harden into a gate. A registry address with no code is a
-    ///         broken strategy either way, and MamoStrategyRegistry.addStrategy diagnoses it
+    /// @notice The one tolerated case, and only this one: a registry address with NO CODE. Such a
+    ///         strategy is broken either way, and MamoStrategyRegistry.addStrategy diagnoses it
     ///         precisely ("Strategy registry not set correctly"); reverting here with empty
-    ///         returndata would replace that diagnosis with an undecodable one.
-    function test_initialize_toleratesARegistryThatCannotAnswer() public {
+    ///         returndata would replace that diagnosis with an undecodable one. Note the exemption
+    ///         is keyed on `code.length`, not on the call failing — see the companion test below.
+    function test_initialize_toleratesACodelessRegistry() public {
         uint256[] memory splits = new uint256[](2);
         splits[0] = 5000;
         splits[1] = 5000;
 
         MamoMultiMarketStrategy deployed = _deployStrategyWithRegistry(splits, makeAddr("codelessRegistry"));
         assertEq(address(deployed.mamoStrategyRegistry()), makeAddr("codelessRegistry"));
+    }
+
+    /// @notice A registry that HAS code and still cannot answer fails CLOSED. This is not the same
+    ///         case as a codeless address: `MultiMarketStrategyFactory` asserts this invariant on
+    ///         its own copy, but MamoLeveragedAeroStrategyFactory and MamoStakingStrategyFactory do
+    ///         not, so for those strategies this read is the only defense — and a contract that
+    ///         cannot answer would otherwise ship a strategy whose backend gate (`_isBackend`, a
+    ///         `hasRole` against the local id) is permanently unsatisfiable.
+    function test_initialize_rejectsARegistryContractThatCannotAnswer() public {
+        uint256[] memory splits = new uint256[](2);
+        splits[0] = 5000;
+        splits[1] = 5000;
+
+        // A contract with code but no BACKEND_ROLE selector: the staticcall fails, ret.length == 0.
+        address muteRegistry = address(new MockSlippagePriceChecker());
+
+        // Hoisted for the same reason as above: constructing the implementation inside the helper
+        // would consume the one-shot expectRevert.
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        bytes memory data = _initCalldata(splits, muteRegistry);
+
+        vm.expectRevert("Registry BACKEND_ROLE unreadable");
+        new ERC1967Proxy(address(implementation), data);
     }
 
     function _deposit(uint256 amount) internal {
@@ -639,6 +663,42 @@ contract MultiMarketStrategyUnitTest is Test {
             (secondBatch * COMPOUND_FEE) / 10000,
             "a batch arriving after a retirement still owes its fee"
         );
+    }
+
+    /// @notice The anchor disjunct in {recoverERC20} carries two principal exclusions with it
+    ///         (`!= token`, `!_isMarketTarget`), and they are the only thing standing between that
+    ///         branch and the strategy's own position. They are NOT redundant with the sweep gate:
+    ///         a token can be anchored while it is a legitimate reward and *later* become a market
+    ///         target, at which point `rewardFeeCharged > 0` is true and the second disjunct would
+    ///         fire on principal. Dropping `!_isMarketTarget(t)` makes this recovery tax 5% of a live
+    ///         market position; with it, recovery of a market target settles nothing.
+    function test_recoverERC20_doesNotSettleOnATokenThatLaterBecameAMarketTarget() public {
+        uint256 arrived = 1000e18;
+        uint256 firstFee = (arrived * COMPOUND_FEE) / 10000;
+        rewardToken.mint(address(strategy), arrived);
+
+        // Phase 1: a genuine reward. Sweeping arms the anchor, which is what makes the second
+        // disjunct reachable for this token from here on.
+        strategy.sweepRewardFees(address(rewardToken));
+        assertEq(rewardToken.balanceOf(feeRecipient), firstFee, "the reward phase charged its fee");
+        assertGt(strategy.rewardFeeCharged(address(rewardToken)), 0, "anchor armed - the disjunct is now live");
+
+        // Phase 2: the same address is onboarded as a market. From here it is principal, and the
+        // price checker still prices it, so nothing but `_isMarketTarget` distinguishes the two.
+        vm.prank(backend);
+        marketRegistry.addMarket(address(underlying), address(rewardToken), MarketType.ERC4626);
+
+        // A position accrues. Under the mutation this delta is the 5% that gets taken.
+        uint256 position = 500e18;
+        rewardToken.mint(address(strategy), position);
+        uint256 feeBefore = rewardToken.balanceOf(feeRecipient);
+
+        vm.prank(owner);
+        strategy.recoverERC20(address(rewardToken), owner, position);
+
+        assertEq(rewardToken.balanceOf(feeRecipient), feeBefore, "a market position is never taxed on recovery");
+        assertEq(rewardToken.balanceOf(owner), position, "the owner recovers the position in full");
+        assertGt(strategy.rewardFeeCharged(address(rewardToken)), 0, "no settle ran, so the old anchor is left alone");
     }
 
     function test_sweepRewardFees_rejectsTheStrategyToken() public {
