@@ -171,6 +171,10 @@ are `onlyProposer` except where noted. Risk caps live in the ERC-7201 `Layout` (
 compile-time constants bound the recovery valve: `DELEVERAGE_BUFFER_BPS = 500` (+5%) and, in the
 strategy, `FULFILL_WINDOW = 2 days`.
 
+Three further proposer ops — `flatten`, `migrateVenue`, `redeploy` — belong to the venue-migration
+sequence and are specified in **§G2**, not here. `flatten` and `redeploy` are also the recovery pair for a
+range the price has left; §D's idle loop says when that reaches you.
+
 ### `supplyIdle` — park idle USDC in Moonwell so it earns (no borrow, no LP)
 
 ```solidity
@@ -736,6 +740,60 @@ and earn nothing until deployed. Key facts for the agent:
   backend member-0, and it moves a user's plain-transferred USDC into the fund. This section is about
   **strategy-level** idle USDC — the pooled deposits sitting on the strategy clone — deployed with the
   **proposer** key via `deployIdle`.
+
+### The idle loop — how `deployIdle`, `supplyIdle`, `withdrawIdle` and `flatten` compose
+
+The withdraw side has a clock (§C); the deposit side does not. Idle USDC is in `nav()` and correctly
+priced whether or not it is deployed, so nothing here is an SLA — the cadence is a yield decision.
+**Two of these are the routine loop; the rest are exception paths.**
+
+| Op | Cadence | Trigger |
+|---|---|---|
+| `deployIdle(amount, minLiquidity)` | **routine** | Idle USDC has accumulated on a **live** book. Unchanged by the ops below — a keeper that only ever calls this is correct, just not maximally yielding. |
+| `supplyIdle(amount)` | **routine, optional** | That idle will sit a while before it is levered, or the book is **flat**. Parks it in Moonwell at supply interest, NAV-neutral. Gas-bounded: pick a floor (≈$100) and let smaller residues wait for the next sweep. |
+| `withdrawIdle(amount)` | exception | The **raw** float has drifted below the redeem cover you want to hold oracle-free. Not part of the deposit flow — it is the same dial turning back. |
+| `flatten(minRewardUsdcOut, minIdleUsdcOut)` | exception | Venue migration (§G2), or a range the price has left that `rerange` cannot reopen two-sided. **Never terminal — always followed by `redeploy`.** |
+| `redeploy(minLiquidity)` | exception | Re-enter from a **flat** book (§G2). The pair to `flatten`. |
+
+**The composition fact that makes the ordering free:** parking with `supplyIdle` does **not** put USDC
+out of `deployIdle`'s reach. `deployIdle` is bounded by raw **plus un-levered collateral**
+(`C − ceil(D·1e4 / targetLtvBps)`) and redeems the shortfall on demand, so `supplyIdle` now →
+`deployIdle` later needs no `withdrawIdle` in between. Same for `redeploy`, which funds off
+`_usdcAvailable()` (raw **plus** collateral) precisely so it can re-enter a book the keeper swept into
+mUSDC. On a live book, `supplyIdle` + `adjustLeverage` and `deployIdle` land the same position; the
+difference is that `deployIdle` is one call with a `minLiquidity` floor.
+
+The loop, in the order a keeper run should evaluate it:
+
+```
+idle = usdc.balanceOf(strategy)        # RAW only; parked collateral is not in this number
+if state != Executed:      nothing to do (§F)
+if idle < gasThreshold:    nothing to do
+
+if layout().tokenId == 0:              # FLAT book
+    supplyIdle(idle)                   # optional: earn while flat, does not strand it
+    redeploy(minLiquidity)             # deployIdle CANNOT re-enter a flat book
+else:                                  # LIVE book
+    deployIdle(idle - reserve, minLiquidity)   # the normal path
+    # or, if levering on a separate cadence:
+    supplyIdle(idle - float)                   # NAV-neutral; levered by the next deployIdle/adjustLeverage
+```
+
+**`deployIdle` cannot re-open a flat book.** It `increaseLiquidity`s the stored `tokenId`, which is `0`
+when flat; `redeploy` is the genesis-sequence re-entry and conversely reverts `PositionAlreadyOpen` on a
+live book. So `flatten` is never complete on its own: the sequence is `flatten` → (`migrateVenue`, if
+migrating) → `redeploy`. Note `redeploy` deploys the **whole** pot at the stored target LTV, which leaves
+the book with no un-levered slice — a `withdrawIdle` immediately after it will hit `InsufficientIdle`, and
+the raw float rebuilds from subsequent deposits.
+
+**Do not sweep to zero — two different reserves come out of the same idle balance.**
+
+- The **raw** float is the ORACLE-FREE IL cover: Phase 1 of a full async redeem's shortfall buy reads no
+  Chainlink feed. `supplyIdle` spends this budget, `withdrawIdle` restores it.
+- **Total** idle (raw + parked) is what keeps ordinary exits off your SLA loop: the fast `redeem` path
+  draws idle first, never touches the LP, and skips the LTV gate entirely when idle covers the redeem.
+
+Both are policy dials, deliberately — §B (`supplyIdle`) has the trade-off in full.
 
 ---
 
