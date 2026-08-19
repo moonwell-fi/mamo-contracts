@@ -678,9 +678,86 @@ sequenceDiagram
         Note over K: deleverage/adjust more, or wait, then retry (never lower the floor)
     end
     Note over K: escalation — if unfulfilled at requestedAt + 2 days, the account can emergencyRedeem (missed SLA)
-    Note over M: the multisig is OFF this path; only raising the target back afterwards is its call
-    M-->>S: setTargetLtv(restoreTarget)                      (ADMIN-only, at leisure)
+    K->>S: adjustLeverage(targetLtvBps(), minLiq, minOut)    (restore — PROPOSER, no multisig)
+    Note over M: the multisig is OFF this path entirely; policy only moves if it CHOOSES to setTargetLtv
 ```
+
+
+### Sizing the fulfil — the de-lever decision and the `minAssetsOut` quote
+
+Two questions arrive together on every request: *do I need to lever down first, and what floor do I
+pass?* Both are answered by **one simulation**, not by a formula — and the answer to the first is
+usually "no".
+
+#### The loop
+
+1. **Simulate `fulfillRedeem(id, 0)`** from `proposer()` against the live book. On a Tenderly vnet use
+   `tenderly_simulateTransaction`; elsewhere `trace_call` / `debug_traceCall` — anything that returns
+   logs (a plain `eth_call` works as a pass/fail check but returns `0x`, see below).
+2. **It passes** → read the payout out of the simulated log, apply your tolerance, send. Most fulfils
+   end here; a book whose LP is in range self-funds its unwind.
+3. **It reverts** → lever down and re-simulate. Ladder off the STANDING target — read it live with
+   `targetLtvBps()` — trying ~90% of it, then ~80%, and send the first that passes.
+   `adjustLeverage(targetBps, minLiq, minOut)` refuses anything above policy with
+   `TargetLtvExceedsPolicy(requested, policy)`, so the ladder only ever goes down.
+4. **After the fulfil, restore**: `adjustLeverage(targetLtvBps(), minLiq, minOut)` — the same proposer
+   key, no multisig, and the standing target never moved.
+
+#### Quoting `minAssetsOut`
+
+| | |
+|---|---|
+| The **stored** floor | `redeemRequest(id).minAssetsOut` — the **third** field of `(owner, shares, minAssetsOut, requestedAt, settled)`. **The strategy's `RedeemRequested(id, owner, shares)` does NOT carry it** — only the account's `WithdrawRequested(id, shares, minAssetsOut)` does. Read the struct, don't reconstruct it from strategy logs. |
+| What the chain enforces | `max(stored, fresh)`. Your fresh floor can only **tighten** the requester's, never loosen it — passing `0` is the identity, and passing a number below theirs changes nothing. |
+| Getting the **fresh** number | `fulfillRedeem` has **no return value**, so an `eth_call` yields `0x` — pass/fail only. The realised payout appears solely in **`RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)`**. Simulate the transaction, decode that log, and send with `minAssetsOut = assetsOut × (1 − tolerance)`. |
+| **Do NOT quote with `previewRedeem`** | It is the **fast-path** quote — `shares × navNet / supplyPost`, oracle-priced — and it does not model the async unwind's swap costs, so it **over-quotes** the async payout. Used raw as a floor it reverts `InsufficientAssetsOut` against itself. |
+
+Measured on the live staging clone (10% of supply, calm book, LP in range):
+
+```
+previewRedeem(shares)            10,001,212,660   (fastOk = false — routed to async)
+RedeemFulfilled.assetsOut        10,001,153,342   (simulated fulfil — 0.6 bps lower)
+```
+
+0.6 bps of drift on a calm in-range book; **wider whenever there is an IL gap to cover**, since the
+cover buy and the leg sweeps both cross a pool. Fine as a sanity check on the order of magnitude, never
+as the floor itself.
+
+#### Why levering down is what fixes a failing fulfil
+
+The asymmetry is the whole mechanism, and it is not "leverage is too high" in the abstract:
+
+- A **partial** redeem caps its IL cover at the **redeemer's own pro-rata budget** (`balance −
+  stayersIdle`) and is **not** best-effort — a deficit buy that will not fit inside that budget reverts
+  the whole fulfil rather than spending the stayers' `(1−f)` share.
+- `adjustLeverage`'s lever-down has **no such cap**: its `_rebalanceCover` is bounded only by your
+  `minOut` and the oracle floor, so the fund covers the gap out of the **whole book**.
+
+Levering down also shrinks the gap itself. Collateral is untouched while debt *and* the matching CL
+fraction both scale by `targetBps / targetLtvBps()`, so the per-leg mismatch the redeem must cover
+shrinks in the same proportion while the collateral funding the cover does not.
+
+#### The target does not depend on the withdrawal size — single or batch
+
+Every term in the constraint is the redeemer's pro-rata slice: the shortfall is `f × (debt − LP amount)`
+per leg, and the budget is `f × collateral` (`_redeemCollateral` burns `f` of the cToken balance) plus
+`f × idle` (`stayersIdle` reserves the rest) plus the `f`-scaled surplus-leg sweep. **`f` cancels out of
+both sides.** A fulfil that works at 5% of supply works at 60%, and one that fails fails at any size.
+
+Consequences for the keeper:
+
+- **Do not scale the de-lever to the request.** The target follows the book's IL state, not the amount.
+- **One de-lever serves the whole queue.** No per-request arithmetic, no summing the batch.
+- **Order is free** — `fulfillRedeem` indexes a mapping; there is no FIFO and no head pointer, so
+  requests can be fulfilled in any order or batched into one multicall, and a stuck one blocks only
+  itself.
+
+#### Two different reverts — only one is a de-lever problem
+
+| Revert | Cause | Fix |
+|---|---|---|
+| the cover's swap reverts (partial redeem) | the IL deficit buy does not fit the redeemer's pro-rata budget | **lever down and re-simulate** — this is the case the ladder above exists for |
+| `InsufficientAssetsOut` | net payout is under `max(stored, fresh)` — the **requester's** floor, set when they requested | **not** a de-lever problem. Levering down realises swap costs and pushes the payout marginally the *wrong* way. Wait for the position to recover and retry, or the request owner `cancelRedeem`s. |
 
 ---
 
