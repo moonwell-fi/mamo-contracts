@@ -121,10 +121,8 @@ contract MultiMarketStrategyFactoryTest is Test {
 
         MultiMarketStrategyFactory factory = new MultiMarketStrategyFactory(
             address(registry),
-            backend,
             address(underlying),
             address(slippagePriceChecker),
-            address(implementation),
             admin,
             address(marketRegistry),
             strategyTypeId,

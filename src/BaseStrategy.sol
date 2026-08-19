@@ -31,6 +31,26 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     /// @notice Emitted when tokens are recovered from the contract
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice Role identifier the registry uses for backend authorization
+    /// @dev Constant (not storage) so this is layout-neutral for every deployed proxy.
+    bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
+
+    /// @notice Whether `account` is authorized to act as the Mamo backend for this strategy
+    /// @dev Sherlock #41. The predecessor of this check was
+    ///      `account == mamoStrategyRegistry.getBackendAddress()`, i.e. `getRoleMember(BACKEND_ROLE, 0)`.
+    ///      OpenZeppelin's EnumerableSet has no ordering guarantee and its removal swaps the LAST
+    ///      member into the vacated slot, so index 0 silently changes identity whenever ANY member
+    ///      is revoked — revoking a retired factory can re-point every strategy's backend gate at a
+    ///      different principal. Membership, not position, is the property the gate actually wants.
+    ///
+    ///      Consequence to be aware of: this authorizes the whole BACKEND_ROLE set, which today
+    ///      includes the per-asset factories as well as the operator. That is the same principal
+    ///      set {MultiMarketStrategyFactory} already gates on, so the two halves of an operation
+    ///      that spans factory and strategy now agree on who may perform it.
+    function _isBackend(address account) internal view returns (bool) {
+        return mamoStrategyRegistry.hasRole(BACKEND_ROLE, account);
+    }
+
     /**
      * @notice Allows the contract to receive ETH
      */
@@ -43,7 +63,11 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
      * @param to The address to send the tokens to
      * @param amount The amount of tokens to recover
      */
-    function recoverERC20(address tokenAddress, address to, uint256 amount) external onlyOwner {
+    /// @dev `public virtual` rather than `external` so a strategy that holds tokens with an
+    ///      obligation attached (e.g. reward tokens owing a protocol fee) can settle it before the
+    ///      owner is allowed to take the balance out. `super.recoverERC20` is only reachable from
+    ///      an override if this is `public`.
+    function recoverERC20(address tokenAddress, address to, uint256 amount) public virtual onlyOwner {
         require(to != address(0), "Cannot send to zero address");
         require(amount > 0, "Amount must be greater than 0");
 
@@ -99,6 +123,30 @@ contract BaseStrategy is Initializable, UUPSUpgradeable, OwnableUpgradeable, IBa
     {
         mamoStrategyRegistry = IMamoStrategyRegistry(_mamoStrategyRegistry);
         strategyTypeId = _strategyTypeId;
+
+        // {BACKEND_ROLE} is re-derived locally rather than read from the registry, so that
+        // {_isBackend} stays a constant lookup. That leaves the two definitions free to disagree,
+        // and a disagreement is not a graceful failure — `hasRole` against an id nobody holds makes
+        // every backend gate permanently unsatisfiable. Assert the two agree once, at init, where it
+        // is a deployment-time revert rather than a discovery. {MultiMarketStrategyFactory} asserts
+        // the same invariant on its own copy, but fails CLOSED with a different string, and the two
+        // other factories ({MamoLeveragedAeroStrategyFactory}, {MamoStakingStrategyFactory}) assert
+        // nothing at all — for those, this is the only place the invariant is checked.
+        // See {IMamoStrategyRegistry.BACKEND_ROLE}.
+        //
+        // Raw staticcall, fail-open for a CODELESS address ONLY. That single exemption exists so the
+        // registry keeps its own precise diagnosis: `MamoStrategyRegistry.addStrategy` refuses such a
+        // strategy with "Strategy registry not set correctly", whereas a typed call here would revert
+        // inside initialize() with empty returndata and replace that diagnosis with an undecodable
+        // one. A registry that HAS code and still cannot answer is not a diagnosis question — it is a
+        // strategy whose backend gate would be permanently unsatisfiable, so it fails closed.
+        if (_mamoStrategyRegistry.code.length > 0) {
+            (bool ok, bytes memory ret) =
+                _mamoStrategyRegistry.staticcall(abi.encodeWithSelector(IMamoStrategyRegistry.BACKEND_ROLE.selector));
+            require(ok && ret.length == 32, "Registry BACKEND_ROLE unreadable");
+            require(abi.decode(ret, (bytes32)) == BACKEND_ROLE, "Registry BACKEND_ROLE mismatch");
+        }
+
         __Ownable_init(initialOwner);
     }
 

@@ -73,6 +73,20 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      */
     event MaxTimePriceValidSet(address indexed fromToken, uint256 maxTimePriceValid);
 
+    /// @notice Locks the implementation so it can never be initialized directly
+    /// @dev Sherlock #44. Without this the first caller of {initialize} on the implementation
+    ///      becomes its owner and gains every onlyOwner entry point on that address —
+    ///      addTokenConfiguration, setMaxTimePriceValid, transferOwnership. The live implementation
+    ///      deployed before this change (0x413C38B68fe730F2bC30d8Cde965967D1C7BC599) reports
+    ///      `owner() == address(0)` and is claimable today. Impact is confined to the
+    ///      implementation's own storage — proxies initialize their own, and `upgradeToAndCall` is
+    ///      `onlyProxy`, so a claimant cannot reach the proxy or any funds — but an implementation
+    ///      with a live owner is a standing invitation to misread it as authoritative, and the fix
+    ///      is three lines. Requires redeploying the implementation and re-pointing the proxy.
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @dev Initializes the contract with the given owner
      * @param _owner The address that will own the contract
@@ -132,8 +146,33 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         // Clear configurations
         delete tokenPairOracleData[fromToken][toToken];
+        // NOTE: `maxTimePriceValid[fromToken]` is deliberately NOT cleared here. It is keyed by
+        // fromToken alone while configurations are keyed by the pair, so clearing it as a side
+        // effect of removing ONE pair would silently invalidate every other pair the same token
+        // still has. Use {clearRewardToken} to retire the token itself.
 
         emit TokenPairConfigurationRemoved(fromToken, toToken);
+    }
+
+    /**
+     * @notice Retires `fromToken` as a reward token entirely
+     * @dev `isRewardToken` is defined as `maxTimePriceValid[token] > 0`, and until now nothing
+     *      could ever set that back to zero — {setMaxTimePriceValid} rejects a zero value and
+     *      {removeTokenConfiguration} only touches the pair mapping. The flag was therefore a
+     *      one-way latch: a token configured once stayed a reward token forever. That matters
+     *      because MamoMultiMarketStrategy treats "is a reward token" as permission to charge a
+     *      compound fee on it permissionlessly and to approve the CoW relayer for the remainder, so
+     *      a mistaken entry was unrecoverable. Removing the pair configurations is still the
+     *      caller's job — this only closes the latch.
+     * @param fromToken The token to stop treating as a reward token
+     */
+    function clearRewardToken(address fromToken) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+        require(maxTimePriceValid[fromToken] > 0, "Token not configured");
+
+        delete maxTimePriceValid[fromToken];
+
+        emit MaxTimePriceValidSet(fromToken, 0);
     }
 
     function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external onlyOwner {
