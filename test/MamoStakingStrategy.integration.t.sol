@@ -1439,11 +1439,15 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         MamoStakingStrategy(userStrategy).setStakingRegistry(address(wrongToken));
     }
 
-    /// @notice Neither the backend nor the strategy owner may repoint the registry.
-    /// @dev The authority is the CURRENT registry's DEFAULT_ADMIN_ROLE, chosen because that role can
-    ///      already redirect every compound() swap via setDEXRouter. Pinning backend and owner as
+    /// @notice The backend may not repoint the registry, nor may an unrelated address.
+    /// @dev The admin arm's authority is the CURRENT registry's DEFAULT_ADMIN_ROLE, chosen because that
+    ///      role can already redirect every compound() swap via setDEXRouter. Pinning the BACKEND as
     ///      rejected is what makes this test discriminating — a random-address check would pass under
     ///      almost any gate.
+    ///
+    ///      The strategy OWNER is deliberately absent from this list and is asserted to SUCCEED below,
+    ///      which is the New-1 remediation: see testSetStakingRegistryOwnerRecoversFromAFrozenPointer
+    ///      for why an owner arm is required rather than merely tolerable.
     function testSetStakingRegistryRevertsForNonAdmin() public {
         userStrategy = _deployUserStrategy(user);
         address replacement = address(_deployReplacementRegistry());
@@ -1453,18 +1457,176 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
             stakingRegistry.hasRole(stakingRegistry.BACKEND_ROLE(), backend),
             "backend must genuinely hold BACKEND_ROLE for this to mean anything"
         );
+        assertFalse(
+            stakingRegistry.hasRole(stakingRegistry.DEFAULT_ADMIN_ROLE(), user),
+            "owner must NOT hold the admin role, or the owner-arm assertion below proves nothing"
+        );
 
         vm.prank(backend);
-        vm.expectRevert("Not staking registry admin");
-        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
-
-        vm.prank(user); // the strategy owner
         vm.expectRevert("Not staking registry admin");
         MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
 
         vm.prank(makeAddr("randomUser"));
         vm.expectRevert("Not staking registry admin");
         MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        // The owner arm: same call, same target, allowed.
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            replacement,
+            "the strategy owner must be able to repoint their own strategy"
+        );
+    }
+
+    /// @notice New-1 regression: the pointer must never be one-way.
+    /// @dev The freeze this defends against is structural, not hypothetical. `setStakingRegistry`'s
+    ///      admin arm authorises against `stakingRegistry` — the slot it writes — so a candidate that
+    ///      stops answering `hasRole` after the migration strands the strategy for the staking admin,
+    ///      MAMO_MULTISIG and the owner alike, and recovery would need a fresh implementation plus a
+    ///      per-strategy upgradeStrategy opt-in from every one of the deployed owners.
+    ///
+    ///      The fixture flips `roleAnswer` AFTER the admin migration rather than before, because the
+    ///      candidate-admin check added for New-4 rejects a registry that answers false up front. That
+    ///      ordering is the whole point: New-4 closes the honest-mistake path into the freeze, and this
+    ///      test covers what New-4 cannot — a candidate that degrades later.
+    function testSetStakingRegistryOwnerRecoversFromAFrozenPointer() public {
+        userStrategy = _deployUserStrategy(user);
+        address admin = _stakingRegistryAdmin();
+
+        ProbeableStakingRegistry hostile = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+
+        vm.prank(admin);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(hostile));
+        assertEq(address(MamoStakingStrategy(userStrategy).stakingRegistry()), address(hostile), "migrated");
+
+        // The candidate stops recognising anyone. Every admin-arm caller is now locked out.
+        hostile.setRoleAnswer(false);
+
+        address replacement = address(_deployReplacementRegistry());
+        vm.prank(admin);
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        // The escape hatch: the owner recovers in one transaction, without touching the wedged
+        // registry (`||` short-circuits, so the broken hasRole is never consulted on this arm).
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            replacement,
+            "owner must be able to recover a strategy whose registry no longer authorises anyone"
+        );
+    }
+
+    /// @notice New-4: the admin arm cannot hand a strategy to a registry the admin does not control.
+    /// @dev Costs an honest migration nothing — whoever prepares the new registry holds its admin role
+    ///      — while making the admin path structurally non-one-way. Not applied to the owner arm, which
+    ///      the second half pins so a future change cannot quietly extend it there.
+    function testSetStakingRegistryAdminArmRequiresAdminOnCandidate() public {
+        userStrategy = _deployUserStrategy(user);
+
+        ProbeableStakingRegistry candidate = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+        candidate.setRoleAnswer(false); // answers nobody, including the migrating admin
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Not admin on new staking registry");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+
+        // Same candidate, owner arm: allowed, because an owner can only stranded themselves and can
+        // repoint again afterwards.
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+        assertEq(address(MamoStakingStrategy(userStrategy).stakingRegistry()), address(candidate), "owner arm");
+    }
+
+    /// @notice New-2: a candidate cannot import an unbounded default slippage.
+    /// @dev getAccountSlippage() falls back to the registry default whenever the owner never set one —
+    ///      the common case — and compound() spends it as `(10000 - slippage)`. 10000 means a zero
+    ///      minimum-out with the honest checker and honest router still installed, so nothing
+    ///      attacker-authored appears on chain for monitoring to catch. Bounded against a
+    ///      strategy-side constant, never the candidate's own MAX_SLIPPAGE_IN_BPS(), which would be
+    ///      circular — the second leg pins exactly that.
+    function testSetStakingRegistryRevertsOnUnboundedDefaultSlippage() public {
+        userStrategy = _deployUserStrategy(user);
+        address admin = _stakingRegistryAdmin();
+
+        ProbeableStakingRegistry candidate = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+        candidate.setDefaultSlippageInBps(10000);
+
+        vm.prank(admin);
+        vm.expectRevert("Staking registry slippage too high");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+
+        // A candidate that reports its OWN cap as 10000 must still be rejected: the bound is a
+        // strategy-side constant, so self-reported headroom buys nothing.
+        candidate.setMaxSlippageInBps(10000);
+        assertEq(candidate.MAX_SLIPPAGE_IN_BPS(), 10000, "fixture must actually claim the wider cap");
+        vm.prank(admin);
+        vm.expectRevert("Staking registry slippage too high");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+
+        // Control: at the boundary the same candidate is accepted, so the revert above is the bound
+        // firing rather than the fixture being unusable.
+        candidate.setDefaultSlippageInBps(MamoStakingStrategy(userStrategy).MAX_REGISTRY_SLIPPAGE_IN_BPS());
+        vm.prank(admin);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+    }
+
+    /// @notice New-4: a candidate missing a selector the strategy reads at runtime is rejected.
+    /// @dev The three-function contract that passes a dexRouter()/slippagePriceChecker() probe and
+    ///      still bricks the owner's own exit — withdrawAll()/withdrawRewards() revert on the missing
+    ///      getRewardTokens(), and since multiRewards.getReward() is only ever called from
+    ///      registry-reading functions, unclaimed rewards would be permanently stranded.
+    function testSetStakingRegistryRevertsWhenCandidateDropsASelector() public {
+        userStrategy = _deployUserStrategy(user);
+
+        RegistryMissingRewardTokens candidate = new RegistryMissingRewardTokens(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+
+        // Prove the fixture would have passed the ORIGINAL two-selector probe, so this test is about
+        // the widened probe rather than about a contract that fails everything.
+        (bool okChecker,) = address(candidate).staticcall(abi.encodeWithSignature("slippagePriceChecker()"));
+        (bool okRouter,) = address(candidate).staticcall(abi.encodeWithSignature("dexRouter()"));
+        assertTrue(okChecker && okRouter, "fixture must satisfy the original narrow probe");
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Staking registry has no reward tokens");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+    }
+
+    /// @notice The staked principal is out of reach even under a registry that lists MAMO as a reward.
+    /// @dev MamoStakingRegistry forbids this, but setStakingRegistry accepts any contract passing the
+    ///      probes, and MAMO genuinely IS a MultiRewards reward token on both live instances — so
+    ///      getReward() really does bring MAMO onto the strategy. Before the explicit guard the only
+    ///      thing stopping the swap was `received = after - before` underflowing when
+    ///      tokenIn == tokenOut: correct but accidental, and invisible to a reader.
+    function testCompoundRejectsAMamoRewardToken() public {
+        userStrategy = _deployUserStrategy(user);
+
+        ProbeableStakingRegistry hostile = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+        hostile.addRewardToken(address(mamoToken), stakingRegistry.getRewardTokenPool(addresses.getAddress("cbBTC")));
+
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(hostile));
+
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        vm.expectRevert("Reward token is MAMO");
+        MamoStakingStrategy(userStrategy).compound(_deadline());
     }
 
     function testSetStakingRegistryRevertsOnInvalidTargets() public {
@@ -1840,4 +2002,97 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
     event Withdrawn(address indexed token, uint256 amount);
     event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
+}
+
+/// @notice A stand-in registry that satisfies `setStakingRegistry`'s probe set while letting each
+///         answer be steered independently.
+/// @dev Defined in the test file on purpose: the Makefile's coverage target skips `t.sol` and `s.sol`
+///      only, so a test-only contract in its own `Mock*.sol` file would silently enter the coverage
+///      denominator. It has to be a bespoke contract rather than a real MamoStakingRegistry because
+///      every scenario below is one the real registry's own constructor and setters forbid — which is
+///      exactly the point: `setStakingRegistry` accepts any address, so its guards must hold against
+///      contracts that were never built by MamoStakingRegistry at all.
+contract ProbeableStakingRegistry {
+    address public slippagePriceChecker;
+    address public dexRouter;
+    address public mamoToken;
+    uint256 public MAX_SLIPPAGE_IN_BPS = 2500;
+    uint256 public defaultSlippageInBps = 100;
+    bool public paused;
+
+    /// @dev The flip that makes the New-1 freeze reachable: a candidate can answer `hasRole` honestly
+    ///      at migration time and stop answering afterwards (a bug, a self-revoke, a re-init).
+    bool public roleAnswer = true;
+
+    MamoStakingRegistry.RewardToken[] internal _rewardTokens;
+
+    constructor(address checker_, address router_, address mamo_) {
+        slippagePriceChecker = checker_;
+        dexRouter = router_;
+        mamoToken = mamo_;
+    }
+
+    function BACKEND_ROLE() external pure returns (bytes32) {
+        return keccak256("BACKEND_ROLE");
+    }
+
+    function DEFAULT_ADMIN_ROLE() external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    function hasRole(bytes32, address) external view returns (bool) {
+        return roleAnswer;
+    }
+
+    function getRewardTokens() external view returns (MamoStakingRegistry.RewardToken[] memory) {
+        return _rewardTokens;
+    }
+
+    function setRoleAnswer(bool v) external {
+        roleAnswer = v;
+    }
+
+    function setDefaultSlippageInBps(uint256 v) external {
+        defaultSlippageInBps = v;
+    }
+
+    /// @dev Lets a test make the candidate claim its own, wider cap — the circularity the strategy's
+    ///      strategy-side constant exists to refuse.
+    function setMaxSlippageInBps(uint256 v) external {
+        MAX_SLIPPAGE_IN_BPS = v;
+    }
+
+    function addRewardToken(address token, address pool) external {
+        _rewardTokens.push(MamoStakingRegistry.RewardToken({token: token, pool: pool}));
+    }
+}
+
+/// @notice Same surface, minus `getRewardTokens()` — the honest-v3-drops-a-selector case.
+/// @dev Three functions were enough to pass the original two-selector probe while bricking
+///      withdrawAll()/withdrawRewards(); this fixture is what proves the probe now covers it.
+contract RegistryMissingRewardTokens {
+    address public slippagePriceChecker;
+    address public dexRouter;
+    address public mamoToken;
+    uint256 public MAX_SLIPPAGE_IN_BPS = 2500;
+    uint256 public defaultSlippageInBps = 100;
+    bool public paused;
+
+    constructor(address checker_, address router_, address mamo_) {
+        slippagePriceChecker = checker_;
+        dexRouter = router_;
+        mamoToken = mamo_;
+    }
+
+    function BACKEND_ROLE() external pure returns (bytes32) {
+        return keccak256("BACKEND_ROLE");
+    }
+
+    function DEFAULT_ADMIN_ROLE() external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    function hasRole(bytes32, address) external pure returns (bool) {
+        return true;
+    }
 }

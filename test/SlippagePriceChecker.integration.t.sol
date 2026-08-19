@@ -613,6 +613,75 @@ contract SlippagePriceCheckerTest is BaseTest {
         }
     }
 
+    /// @notice N3: the SAME three guards, asserted against the implementation this PR ships.
+    /// @dev The three tests above run WITHOUT `_upgradeChecker()`, so they exercise the bytecode
+    ///      already live on Base. This PR rewrites `getExpectedOutFromChainlink` wholesale for #34,
+    ///      which makes those guards NEW code in the artifact being upgraded onto the live proxy —
+    ///      and nothing in the repo would have noticed if the rewrite had dropped one. Proven, not
+    ///      assumed: before this test, deleting the heartbeat require, the `answer > 0` require or
+    ///      the `updatedAt != 0` require from source left all three of the tests above passing.
+    ///
+    ///      Deliberately one test covering all three rather than three upgraded clones: the upgrade
+    ///      is the expensive part, and the point is coverage of the new artifact, not new scenarios.
+    function testRevertsOnBadChainlinkDataAfterUpgrade() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            address tokenAddress = addresses.getAddress(rewardToken.token);
+            address firstFeed = addresses.getAddress(rewardToken.priceFeeds[0].priceFeed);
+
+            // Non-vacuity: the pair must quote successfully on the UPGRADED implementation with live
+            // feed data, otherwise every revert below could be the pair being unconfigured instead of
+            // the guard firing.
+            assertGt(
+                checker.getExpectedOut(1e18, tokenAddress, address(underlying)),
+                0,
+                "pair must quote on the upgraded implementation before the guards are provoked"
+            );
+
+            // 1. answer <= 0
+            vm.mockCall(
+                firstFeed,
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(uint80(1), int256(0), uint256(0), block.timestamp, uint80(1))
+            );
+            vm.expectRevert("Chainlink price cannot be lower or equal to 0");
+            checker.getExpectedOut(1e18, tokenAddress, address(underlying));
+
+            // 2. incomplete round (updatedAt == 0)
+            vm.mockCall(
+                firstFeed,
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(uint80(1), int256(1e8), uint256(0), uint256(0), uint80(1))
+            );
+            vm.expectRevert("Round is in incompleted state");
+            checker.getExpectedOut(1e18, tokenAddress, address(underlying));
+
+            // 3. older than the configured heartbeat, on EVERY leg (a multi-hop pair reverts on
+            //    whichever leg is checked first, so staling only the first hop would be ambiguous).
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                vm.mockCall(
+                    addresses.getAddress(rewardToken.priceFeeds[j].priceFeed),
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(
+                        uint80(1),
+                        int256(1e8),
+                        uint256(0),
+                        block.timestamp - rewardToken.priceFeeds[j].heartbeat - 1,
+                        uint80(1)
+                    )
+                );
+            }
+            vm.expectRevert("Price feed update time exceeds heartbeat");
+            checker.getExpectedOut(1e18, tokenAddress, address(underlying));
+
+            // Clear the mocks so the next token starts from live feed data (the non-vacuity assert
+            // at the top of the loop reads real feeds).
+            vm.clearMockedCalls();
+        }
+    }
+
     function testIsRewardToken() public {
         for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
             DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];

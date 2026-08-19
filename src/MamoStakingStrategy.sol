@@ -36,6 +36,17 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     ///      price expires is not protected by that price.
     uint256 public constant MAX_COMPOUND_DEADLINE = 1 hours;
 
+    /**
+     * @notice Hard ceiling this strategy will accept for a candidate registry's default slippage
+     * @dev Deliberately a strategy-side constant rather than a read of the candidate's own
+     *      MAX_SLIPPAGE_IN_BPS(): bounding a candidate against a number the candidate itself reports
+     *      is circular, and a replacement registry answering 10000 would pass such a check while
+     *      driving compound()'s amountOutMinimum to zero with the honest checker and honest router
+     *      still in place. Mirrors MamoStakingRegistry.MAX_SLIPPAGE_IN_BPS; if that policy ever
+     *      changes, this constant is the second place to change.
+     */
+    uint256 public constant MAX_REGISTRY_SLIPPAGE_IN_BPS = 2500;
+
     /// @notice The MultiRewards contract for staking
     IMultiRewards public multiRewards;
 
@@ -117,38 +128,95 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
      *      registry-side remediations could never reach the deployed fleet, and a strategy pointed at
      *      a registry missing a selector compound() needs was permanently bricked for compounding.
      *
-     * @dev Authorised by the CURRENT registry's DEFAULT_ADMIN_ROLE, and that choice is the security
-     *      argument: this grants no capability that role does not already hold. It can already call
-     *      setDEXRouter, setSlippagePriceChecker and setDefaultSlippage on the registry every
-     *      strategy reads, so it already decides which router receives the reward-token allowance in
-     *      compound() and what minimum-out floor applies. Gating instead on MamoStrategyRegistry's
-     *      admin WOULD be an escalation: that role cannot presently change a strategy's behaviour
-     *      without the owner opting into an upgrade.
+     * @dev TWO authorised callers, and the pairing is the security argument.
+     *
+     *      (1) The CURRENT registry's DEFAULT_ADMIN_ROLE — this grants that role no capability it does
+     *      not already hold. It can already call setDEXRouter, setSlippagePriceChecker and
+     *      setDefaultSlippage on the registry every strategy reads, so it already decides which router
+     *      receives the reward-token allowance in compound() and what minimum-out floor applies.
+     *      Gating instead on MamoStrategyRegistry's admin WOULD be an escalation: that role cannot
+     *      presently change a strategy's behaviour without the owner opting into an upgrade. This is
+     *      the arm that makes a fleet-wide migration one batched transaction.
+     *
+     *      (2) This strategy's OWNER — the escape hatch. See the body: without it the first use of the
+     *      admin arm is irrevocable, because the gate reads the slot it writes. The owner arm is
+     *      additive, never a veto: it does not gate, delay or reorder (1).
      *
      * @dev Deliberately not gated on the registry's pause state. Migrating off a broken registry is
      *      remediation, and a registry can be broken in ways that make unpausing impossible.
      *
-     * @dev Cannot reach the staked principal: withdraw/withdrawAll stay onlyOwner and multiRewards is
-     *      a separate storage slot this function does not touch. The blast radius is reward routing
-     *      during compound(), which is the current admin's existing reach.
+     * @dev Cannot reach the staked principal, and the reason is NOT the onlyOwner withdraw paths. A
+     *      registry listing MAMO in getRewardTokens() is forbidden by MamoStakingRegistry, but an
+     *      arbitrary contract passed here is bound by no such rule. What actually holds the line is
+     *      the explicit `rewardTokens[i].token != mamoTokenAddr` guard in compound(): MAMO is a
+     *      genuine MultiRewards reward token on both live instances, so getReward() really does pull
+     *      MAMO in on every compound, and without that guard a registry could list it and route staked
+     *      principal through the swap. The blast radius that remains is reward routing during
+     *      compound(), which is the current admin's existing reach.
      *
      * @param newStakingRegistry The registry to point at
      */
     function setStakingRegistry(address newStakingRegistry) external {
         MamoStakingRegistry currentRegistry = stakingRegistry;
-        require(currentRegistry.hasRole(currentRegistry.DEFAULT_ADMIN_ROLE(), msg.sender), "Not staking registry admin");
+
+        // OWNER ESCAPE HATCH, and it is load-bearing rather than defensive. The admin arm below reads
+        // `stakingRegistry` — the very slot this function writes — so without an alternative caller the
+        // FIRST use of this function is irrevocable: point a strategy at a contract whose hasRole()
+        // answers false for everyone (or reverts) and the pointer freezes permanently, for the staking
+        // admin, for MAMO_MULTISIG and for this contract's owner alike. Recovery would then need a
+        // fixed implementation whitelisted under a fresh type id plus a per-strategy upgradeStrategy
+        // opt-in from every owner — precisely the un-migratable-fleet dead end this function exists to
+        // escape, recreated. Every other capability the staking admin holds is revocable (setDEXRouter
+        // and setSlippagePriceChecker can be called again, grantRole has revokeRole); this one would
+        // not be, which is why it needs an escape and they do not.
+        //
+        // `||` short-circuits, so the owner arm never touches the current registry. That matters: the
+        // state this hatch exists for is one where currentRegistry.hasRole() itself reverts, which
+        // would take an owner-second ordering down with it.
+        //
+        // Not a veto on the admin: the owner arm is additive and does not gate, delay or reorder the
+        // batched fleet-wide migration. It only means no single key can permanently strand a user —
+        // New-1 goes from "unrecoverable" to "the affected owner fixes it in one transaction".
+        bool byOwner = msg.sender == owner();
+        require(
+            byOwner || currentRegistry.hasRole(currentRegistry.DEFAULT_ADMIN_ROLE(), msg.sender),
+            "Not staking registry admin"
+        );
 
         require(newStakingRegistry != address(0), "Invalid staking registry");
         require(newStakingRegistry != address(currentRegistry), "Staking registry already set");
         require(newStakingRegistry.code.length != 0, "Staking registry not a contract");
 
-        // Probe the surface compound() depends on before committing. This is the check whose absence
-        // produced the un-migratable fleet in the first place: both registries deployed to date lack
-        // slippagePriceChecker(), so a strategy pointed at one can never compound. Raw staticcalls
-        // with an explicit returndata check, because a typed call against a contract missing the
-        // selector reverts in THIS frame with no data and is indistinguishable from an internal bug.
+        // Probe the WHOLE surface this strategy reads at runtime before committing, not just the two
+        // selectors that caused the last incident. A contract implementing only dexRouter() and
+        // slippagePriceChecker() passes a narrow probe and still bricks the owner's own exit:
+        // withdrawAll()/withdrawRewards() revert on a missing getRewardTokens(), and since
+        // multiRewards.getReward() is only ever called from registry-reading functions, unclaimed
+        // rewards are stranded. This needs no malice — an honest v3 registry that renames or drops any
+        // of these passes a two-selector probe and bricks the fleet.
+        //
+        // Raw staticcalls with an explicit returndata check throughout, because a typed call against a
+        // contract missing the selector reverts in THIS frame with no data and is indistinguishable
+        // from an internal bug.
         require(_readsAddress(newStakingRegistry, "slippagePriceChecker()"), "Staking registry has no price checker");
         require(_readsAddress(newStakingRegistry, "dexRouter()"), "Staking registry has no DEX router");
+        require(_readsWord(newStakingRegistry, "BACKEND_ROLE()"), "Staking registry has no backend role");
+        require(_readsWord(newStakingRegistry, "DEFAULT_ADMIN_ROLE()"), "Staking registry has no admin role");
+        require(_readsWord(newStakingRegistry, "paused()"), "Staking registry has no pause state");
+        require(_readsWord(newStakingRegistry, "MAX_SLIPPAGE_IN_BPS()"), "Staking registry has no slippage cap");
+
+        // hasRole is probed UNCONDITIONALLY, not merely as part of the admin arm below: compound()
+        // gates on it every call, so a registry missing it bricks compounding even on the owner arm.
+        // Any (role, account) pair exercises the selector; the ANSWER is irrelevant here.
+        bytes memory hasRoleCall = abi.encodeWithSignature("hasRole(bytes32,address)", bytes32(0), address(0));
+        (bool okHasRole, bytes memory retHasRole) = newStakingRegistry.staticcall(hasRoleCall);
+        require(okHasRole && retHasRole.length == 32, "Staking registry has no hasRole");
+
+        // getRewardTokens() returns a dynamic array: ABI head is a 32-byte offset plus a 32-byte
+        // length, so anything shorter than 64 bytes cannot be a well-formed encoding of one.
+        (bool okRewards, bytes memory retRewards) =
+            newStakingRegistry.staticcall(abi.encodeWithSignature("getRewardTokens()"));
+        require(okRewards && retRewards.length >= 64, "Staking registry has no reward tokens");
 
         // The MAMO token is what this strategy stakes; a registry disagreeing about it would price
         // and route swaps for a different asset than the one held.
@@ -156,13 +224,32 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
         require(ok && ret.length == 32, "Staking registry has no MAMO token");
         require(abi.decode(ret, (address)) == address(mamoToken), "Staking registry MAMO token mismatch");
 
+        // getAccountSlippage() falls back to the registry's default whenever the owner never set one —
+        // the common case — and compound() spends it as `(10000 - slippage)`. An unbounded default is
+        // therefore a zero minimum-out (or, above 10000, an underflow that DoSes compound outright)
+        // reachable with the honest price checker and honest router still in place, i.e. with no
+        // attacker-authored contract on chain for monitoring to notice.
+        (bool okSlip, bytes memory retSlip) =
+            newStakingRegistry.staticcall(abi.encodeWithSignature("defaultSlippageInBps()"));
+        require(okSlip && retSlip.length == 32, "Staking registry has no default slippage");
+        require(abi.decode(retSlip, (uint256)) <= MAX_REGISTRY_SLIPPAGE_IN_BPS, "Staking registry slippage too high");
+
+        // On the ADMIN arm only, require the caller still administers the destination. This costs an
+        // honest migration nothing (whoever prepares the new registry holds its admin role) and makes
+        // the admin path structurally non-one-way: an admin cannot hand the strategy to a registry
+        // they do not control. Deliberately NOT applied to the owner arm — an owner who points their
+        // own strategy somewhere useless can point it back, and can already withdraw everything.
+        if (!byOwner) {
+            require(_isAdminOn(newStakingRegistry, msg.sender), "Not admin on new staking registry");
+        }
+
         stakingRegistry = MamoStakingRegistry(newStakingRegistry);
 
         emit StakingRegistryUpdated(address(currentRegistry), newStakingRegistry);
     }
 
     /**
-     * @notice Whether `target` answers `selector` with a non-zero address
+     * @notice Whether `target` answers `signature` with a non-zero address
      * @dev Fails closed: a missing selector returns empty returndata, which reads as false rather
      *      than bubbling an undecodable revert out of the caller's frame.
      */
@@ -172,6 +259,38 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
             return false;
         }
         return abi.decode(ret, (address)) != address(0);
+    }
+
+    /**
+     * @notice Whether `target` answers `signature` with a single 32-byte word
+     * @dev Presence check only — the VALUE is not constrained, because for these selectors any word
+     *      is legitimate (a role hash may be zero, as DEFAULT_ADMIN_ROLE is; `paused()` may be either
+     *      boolean). What is being ruled out is the missing selector, which reverts at the call site
+     *      later instead of here.
+     */
+    function _readsWord(address target, string memory signature) private view returns (bool) {
+        (bool ok, bytes memory ret) = target.staticcall(abi.encodeWithSignature(signature));
+        return ok && ret.length == 32;
+    }
+
+    /**
+     * @notice Whether `account` holds DEFAULT_ADMIN_ROLE on `target`
+     * @dev Two raw staticcalls rather than typed calls, for the same reason as the probes above: the
+     *      candidate is untrusted, and a missing selector must read as "no" rather than bubbling
+     *      undecodable revert data. Callers must have already established that both selectors exist.
+     */
+    function _isAdminOn(address target, address account) private view returns (bool) {
+        (bool okRole, bytes memory retRole) = target.staticcall(abi.encodeWithSignature("DEFAULT_ADMIN_ROLE()"));
+        if (!okRole || retRole.length != 32) {
+            return false;
+        }
+        bytes32 adminRole = abi.decode(retRole, (bytes32));
+        bytes memory hasRoleCall = abi.encodeWithSignature("hasRole(bytes32,address)", adminRole, account);
+        (bool ok, bytes memory ret) = target.staticcall(hasRoleCall);
+        if (!ok || ret.length != 32) {
+            return false;
+        }
+        return abi.decode(ret, (bool));
     }
 
     /**
@@ -295,6 +414,17 @@ contract MamoStakingStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
 
         // Process each reward token by swapping to MAMO
         for (uint256 i = 0; i < rewardTokens.length; i++) {
+            // The staked principal is protected HERE, explicitly, and this is the only thing
+            // protecting it. MamoStakingRegistry forbids listing MAMO as a reward token, but
+            // setStakingRegistry accepts any contract satisfying the probes, and MAMO is a real
+            // MultiRewards reward token on both live instances — so getReward() genuinely brings MAMO
+            // onto this contract and `balanceOf` below would sweep the staked position into a swap.
+            // Before this require the bound rested entirely on `received = after - before` underflowing
+            // when tokenIn == tokenOut: correct, but accidental, unstated, and one refactor away from
+            // being optimised into a silent loss. Fail closed rather than skip, so a registry that
+            // lists MAMO is a loud, diagnosable revert instead of a partially-processed compound.
+            require(rewardTokens[i].token != mamoTokenAddr, "Reward token is MAMO");
+
             IERC20 rewardToken = IERC20(rewardTokens[i].token);
             uint256 rewardBalance = rewardToken.balanceOf(address(this));
 

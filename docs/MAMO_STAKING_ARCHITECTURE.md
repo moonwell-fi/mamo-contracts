@@ -490,30 +490,79 @@ sequenceDiagram
    - ⚠️ **Scope of the pause fix (MOO-735): new strategies only.** The `stakingRegistry.paused()`
      check lives in the strategy implementation, and `MamoStrategyRegistry.upgradeStrategy` can only
      move a proxy to `latestImplementationById[itsOwnTypeId]`. The 3,846 strategies deployed by the
-     deprecated factory `0xd7C3f474…` are `strategyTypeId == 2`, and this release whitelists its
-     implementation under a NEW type id, so those proxies keep running the pre-fix code and the
-     guardian's pause does not stop reward processing for them. Whitelisting this implementation for
-     type 2 as well would make the fix reachable — the registry incompatibility that used to block
-     that is now solvable, see `setStakingRegistry` below — but it still requires each of the 3,846
-     owners to call `upgradeStrategy` themselves, since nothing can upgrade a user's strategy on
-     their behalf. Accepted residual pending that migration, not a code gap.
+     deprecated factory `0xd7C3f474…` are `strategyTypeId == 2`, so those proxies keep running the
+     pre-fix code and the guardian's pause does not stop reward processing for them.
+
+     Three mechanical facts constrain the migration, and each of them was stated wrongly in an
+     earlier revision of this section:
+
+     1. **The same address cannot be whitelisted twice.** `whitelistImplementation` begins
+        `require(!whitelistedImplementations[implementation], "Implementation already whitelisted")`
+        — one address, one type id, permanently. "Whitelist this implementation for type 2 as well"
+        does not revert-and-retry, it simply cannot be done. Reaching type 2 requires a SECOND,
+        separately deployed, byte-identical instance whitelisted under type 2.
+     2. **Do not whitelist with `strategyTypeId == 0`.** Auto-assign takes `nextStrategyTypeId()`,
+        which is currently `4` — and `latestImplementationById(4)` is ALREADY the WETH
+        implementation, because `010` passed an explicit `4` and an explicit id does not advance the
+        counter. An auto-assigned whitelist therefore overwrites the WETH upgrade target, and a WETH
+        owner calling `upgradeStrategy` would be pointed at the staking implementation.
+        `008`'s own `validate()` asserts id 3 and so fails simulation — but only if someone
+        simulates before signing. Pass the type id explicitly.
+     3. **`setStakingRegistry` cannot help the un-upgraded majority.** It exists only in the new
+        implementation, so it cannot be called on a type-2 proxy until that proxy has already
+        upgraded. The ordering is upgrade-then-repoint, never the reverse, and until a type-2 proxy
+        upgrades, the only authority that can act on it is the DEPRECATED registry's admin — which
+        must therefore stay live for the duration of the migration.
+
+     Either way the migration still requires each of the 3,846 owners to call `upgradeStrategy`
+     themselves, since nothing can upgrade a user's strategy on their behalf. Accepted residual
+     pending that migration, not a code gap.
    - ✅ **Registry-side fixes are deliverable to existing strategies (`setStakingRegistry`).**
      `MamoStakingRegistry` is not upgradeable — plain constructor, no proxy — so any fix to it ships
      as a fresh deployment. `stakingRegistry` used to be write-once in `initialize`, which stranded
      every existing strategy on the registry it was born with: registry-side remediation could never
      reach the fleet, and a strategy pointed at a registry missing a selector `compound()` needs was
      permanently unable to compound (both registries deployed to date lack `slippagePriceChecker()`).
-     `setStakingRegistry` closes that. It is authorised by the **current** registry's
-     `DEFAULT_ADMIN_ROLE`, which grants no new capability: that role can already call `setDEXRouter`,
-     `setSlippagePriceChecker` and `setDefaultSlippage` on the registry every strategy reads, so it
-     already decides which router receives the reward-token allowance and what minimum-out floor
-     applies. Gating on `MamoStrategyRegistry`'s admin instead *would* be an escalation, since that
-     role cannot presently change a strategy's behaviour without the owner opting into an upgrade.
+     `setStakingRegistry` closes that. It has **two** authorised callers:
+
+     - The **current** registry's `DEFAULT_ADMIN_ROLE`, which grants that role no new capability: it
+       can already call `setDEXRouter`, `setSlippagePriceChecker` and `setDefaultSlippage` on the
+       registry every strategy reads, so it already decides which router receives the reward-token
+       allowance and what minimum-out floor applies. Gating on `MamoStrategyRegistry`'s admin instead
+       *would* be an escalation, since that role cannot presently change a strategy's behaviour
+       without the owner opting into an upgrade. This is the arm that makes a fleet-wide migration
+       one batched transaction.
+     - The strategy's **owner**, as an escape hatch. Without it the admin arm is one-way: the gate
+       reads `stakingRegistry`, the same slot the function writes, so a candidate that stops
+       answering `hasRole` freezes the pointer permanently — for the staking admin, `MAMO_MULTISIG`
+       and the owner alike — and recovery would need a fresh implementation plus per-strategy
+       `upgradeStrategy` opt-ins, recreating the very dead-end above. The owner arm is additive and
+       never a veto: it does not gate, delay or reorder the admin migration, it only means no single
+       key can permanently strand a user.
+
      It is not pause-gated (migrating off a broken registry is remediation, and a registry can break
-     in ways that make unpausing impossible), and it cannot reach the staked principal —
-     `withdraw`/`withdrawAll` stay `onlyOwner` and `multiRewards` is a separate slot. The candidate
-     registry is probed by raw `staticcall` for `slippagePriceChecker()`, `dexRouter()` and a matching
-     `mamoToken()` before the write, so the exact dead-end above cannot be re-entered.
+     in ways that make unpausing impossible). The candidate is probed by raw `staticcall` across the
+     **whole** surface the strategy reads at runtime — `slippagePriceChecker()`, `dexRouter()`,
+     `hasRole`, `BACKEND_ROLE()`, `DEFAULT_ADMIN_ROLE()`, `paused()`, `MAX_SLIPPAGE_IN_BPS()`,
+     `getRewardTokens()` and a matching `mamoToken()` — because a contract implementing only the
+     first two passes a narrow probe and still bricks the owner's own exit (`withdrawAll()` and
+     `withdrawRewards()` revert on a missing `getRewardTokens()`, stranding unclaimed rewards). Its
+     `defaultSlippageInBps()` is bounded against a strategy-side constant, never the candidate's own
+     `MAX_SLIPPAGE_IN_BPS()`, which would be circular: `getAccountSlippage()` falls back to that
+     default whenever the owner never set one, and `compound()` spends it as `(10000 - slippage)`, so
+     an unbounded value is a zero minimum-out with the honest checker and honest router still in
+     place. On the admin arm only, the caller must also hold `DEFAULT_ADMIN_ROLE` on the CANDIDATE,
+     which costs an honest migration nothing and stops an admin handing the fleet to a registry it
+     does not control.
+
+     It cannot reach the staked principal — but note WHY, because the obvious reason is not the
+     operative one. `withdraw`/`withdrawAll` staying `onlyOwner` does not bind here, and while
+     `MamoStakingRegistry` forbids listing MAMO as a reward token, an arbitrary contract accepted by
+     the probes is bound by no such rule — and MAMO genuinely IS a `MultiRewards` reward token on
+     both live instances, so `getReward()` really does pull MAMO onto the strategy. What holds the
+     line is the explicit `rewardTokens[i].token != mamoTokenAddr` check in `compound()`. Before it,
+     the bound rested on `received = balanceAfter - balanceBefore` underflowing when
+     `tokenIn == tokenOut`: correct, but accidental and unstated.
    - ⚠️ **`BACKEND_ROLE` setters are pause-gated, so remediation via them is not.** `addRewardToken`,
      `removeRewardToken`, `updateRewardTokenPool`, `setQuoter` and `setDefaultSlippage` all carry
      `whenNotPaused`, matching the convention in `MamoStrategyRegistry` and `MarketRegistry`. If an
@@ -653,7 +702,7 @@ new strategy must be pointed at the new registry.
 `SlippagePriceChecker`'s sequencer-uptime check is a no-op while `sequencerUptimeFeed` is
 `address(0)`, which is deliberately the state an in-place upgrade lands in — so the implementation
 on its own leaves MOO-741 exactly as unmitigated as before. Proposal
-`013_SlippagePriceCheckerOracleHardening` batches the three steps that make the fix real, and its
+`013_SlippagePriceCheckerOracleHardening` batches the four steps that make the fix real, and its
 `validate()` asserts the guard ends up enabled:
 
 1. `upgradeToAndCall` the proxy to the new implementation.
@@ -683,9 +732,22 @@ code delivers:
 - **`setSequencerUptimeFeed` does not probe the address it is given.** Any contract is accepted;
   pointing it at something that is not a Chainlink aggregator bricks every quote until the owner
   fixes it. It is owner-only and the value is asserted by `013`'s `validate()`.
-- **One single-hop pair has a 24h heartbeat.** `xWELL → USDC` prices off WELL/USD, whose heartbeat is
-  86400s, so once the 3600s grace expires it can serve a pre-outage answer up to 24h old. Multi-hop
-  pairs are bounded by their second leg. This is a feed-configuration property, not a code defect.
+- **Two single-hop pairs have a 24h heartbeat.** `xWELL → USDC` (WELL/USD) and `MORPHO → USDC`
+  (MORPHO/USD) both configure 86400s, so once the 3600s grace expires either can serve a pre-outage
+  answer up to 24h old. Multi-hop pairs are bounded by their second leg. This is a
+  feed-configuration property, not a code defect.
+  Measured cadence: WELL/USD has shown a max inter-round gap of 53,012s over 140 rounds, MORPHO/USD
+  3,932s — so neither is in the failure mode that ETH/USD was (a bound set BELOW the feed's own
+  cadence). What they do share with it structurally is zero slack: 86400 is exactly the published
+  heartbeat. Consider 90000 at the next config revision, for the same reason 3600 replaced 1200.
+- **The corrected WETH quote leg now equals the sequencer grace period.** After the ETH/USD heartbeat
+  went 1200s → 3600s, that leg's bound is the same 3600s as `sequencerGracePeriod`, and BOTH
+  comparisons are inclusive — pinned behaviour: an answer exactly 3600s old is accepted, 3601s is
+  refused. So the second leg no longer contributes margin over the outage guard (it contributed
+  2400s before). The `SECURITY:` note above covers `maxTimePriceValid` against grace; this is the
+  heartbeat-against-grace case, and it is accepted deliberately: 3600s is 2.9× ETH/USD's measured
+  worst-case gap of 1232s, and lowering it back toward 1800s would reintroduce the reverts the
+  1200s bound caused. Revisit if the grace period is ever raised.
 
 ## Key Architecture Changes
 
