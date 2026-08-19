@@ -125,8 +125,11 @@ case "$MODE" in
   stop)
     pid="$(running_pid)" || die "no ticker running (no live pid in ${PIDFILE##*/})"
     kill -TERM "$pid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-    kill -0 "$pid" 2>/dev/null && die "pid $pid did not exit — kill -9 $pid"
+    # The child only notices TERM when its `sleep <interval>` ends, so the grace
+    # period has to exceed the interval it was started with — which --stop does not
+    # know. 60s covers any sane setting; past that it is a genuine hang.
+    for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    kill -0 "$pid" 2>/dev/null && die "pid $pid still alive after 60s — kill -9 $pid"
     rm -f "$PIDFILE"
     ok "stopped ticker (pid $pid); chain now at block $(bn)"
     exit 0 ;;
@@ -172,7 +175,8 @@ MINED=0; FAILS=0; LAST_STATUS=$(date +%s)
 finish() {
   trap - INT TERM # a second Ctrl-C should kill it, not re-enter this
   echo
-  ok "stopped after $MINED block(s) at $(bn)"
+  # No RPC here: the whole point is to be gone before --stop's grace period expires.
+  ok "stopped after $MINED block(s) since $START_BLOCK"
   exit 0
 }
 trap finish INT TERM
