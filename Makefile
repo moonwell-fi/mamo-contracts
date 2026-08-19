@@ -105,7 +105,7 @@ tenderly-price-checker:
 # Vnet heartbeat (MOO-768). A Tenderly vnet mines a block ONLY when a tx arrives, so an idle chain
 # mints nothing and wallets misbehave: any waitForTransactionReceipt with confirmations > 1 deadlocks
 # between interactive legs, and MetaMask's activity tracker keeps mined txs as "submitted/pending"
-# (the stale-queue banner). This calls evm_mine every 2s so the chain ticks like Base while a human is
+# (the stale-queue banner). This calls evm_mine every 15s so the chain keeps ticking while a human is
 # clicking through a manual QA session. Foreground; Ctrl-C to stop. Holds no state — safe to start and
 # stop at will, and it does NOT fast-forward chain time (Tenderly stamps each block with the real
 # elapsed time). Uses TENDERLY_VNET_RPC_URL; `--once` catches a drifted vnet up before a run.

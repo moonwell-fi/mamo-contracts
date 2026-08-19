@@ -18,8 +18,8 @@
 # no state — starting and stopping it is always safe.
 #
 # It does NOT fast-forward the chain. Tenderly stamps each mined block with the
-# real time elapsed since the previous one, so a 2s cadence advances chain time
-# ~2s per block. What it does fix is drift: an idle vnet falls behind wall clock
+# real time elapsed since the previous one, so the cadence sets the block rate but
+# not the rate of chain time. What it does fix is drift: an idle vnet falls behind
 # by exactly as long as it sat idle (measured 2026-08-19: ~2h of lag after an
 # idle weekend), and the first transaction after that idles jumps the timestamp
 # by the whole gap in one block. A running ticker keeps the offset flat.
@@ -28,7 +28,11 @@
 #   ./script/tenderly/mine-ticker.sh [--interval <seconds>] [--rpc-url <url>]
 #                                    [--once | --daemon | --stop | --status] [--quiet]
 #
-#   --interval N   seconds between blocks (default 2, matching Base)
+#   --interval N   seconds between blocks (default 15). Base is 2s, but the heartbeat
+#                  only has to cover the IDLE gaps: a tester's own transaction still
+#                  mines its own block instantly. 15s keeps the wallet tracker moving
+#                  at ~1/7th the RPC traffic. Drop to 2 to mirror Base exactly; raise
+#                  to 30 if the vnet is rate-limiting.
 #   --rpc-url URL  admin (write-capable) RPC; else $TENDERLY_VNET_RPC_URL, else .env
 #   --once         mine a single block and exit — use to catch a vnet up before a run
 #   --daemon       detach and keep mining across terminals; logs to mine-ticker.log
@@ -37,8 +41,8 @@
 #   --quiet        suppress the periodic status line (errors still print)
 #
 # Examples:
-#   ./script/tenderly/mine-ticker.sh                     # 2s heartbeat, Ctrl-C to stop
-#   ./script/tenderly/mine-ticker.sh --interval 5
+#   ./script/tenderly/mine-ticker.sh                     # 15s heartbeat, Ctrl-C to stop
+#   ./script/tenderly/mine-ticker.sh --interval 2        # exactly Base's cadence
 #   ./script/tenderly/mine-ticker.sh --once
 #   make tenderly-mine / tenderly-mine-start / tenderly-mine-stop / tenderly-mine-status
 #
@@ -57,7 +61,7 @@ ok()   { printf '\033[0;32m✓ %s\033[0m\n' "$1"; }
 warn() { printf '\033[0;33m! %s\033[0m\n' "$1" >&2; }
 
 # ── args ─────────────────────────────────────────────────────────────────────
-INTERVAL=2; ONCE=0; QUIET=0; MODE=run; RPC="${TENDERLY_VNET_RPC_URL:-}"
+INTERVAL=15; ONCE=0; QUIET=0; MODE=run; RPC="${TENDERLY_VNET_RPC_URL:-}"
 PIDFILE="$ROOT/script/tenderly/.mine-ticker.pid"
 LOGFILE="$ROOT/script/tenderly/mine-ticker.log"
 while [ $# -gt 0 ]; do

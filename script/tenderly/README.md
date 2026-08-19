@@ -265,16 +265,17 @@ always safe, and it needs the **admin** (write-capable) RPC: on the public one `
 `Access forbidden by access rules`.
 
 ```bash
-make tenderly-mine                                  # foreground 2s heartbeat, Ctrl-C to stop
+make tenderly-mine                                  # foreground 15s heartbeat, Ctrl-C to stop
 make tenderly-mine-start                            # detached — logs to mine-ticker.log
 make tenderly-mine-status                           # running? and how far behind wall clock
 make tenderly-mine-stop
 ./script/tenderly/mine-ticker.sh --once             # single block — catch a drifted vnet up
-./script/tenderly/mine-ticker.sh --interval 5 --quiet --rpc-url <admin-rpc>
+./script/tenderly/mine-ticker.sh --interval 2 --quiet   # exactly Base's cadence
 ```
 
 **It does not fast-forward the chain.** Tenderly stamps each mined block with the real time elapsed
-since the previous one, so a 2s cadence advances chain time ~2s per block. What it fixes is *drift*:
+since the previous one, so the cadence sets the block rate, not the rate of chain time — a 15s ticker
+and a 2s ticker both keep the offset flat. What it fixes is *drift*:
 an idle vnet falls behind wall clock by exactly as long as it sat idle (measured 2026-08-19: the
 shared instance was ~2h behind after a quiet stretch), and the first transaction afterwards closes the
 whole gap in a single block's timestamp. A running ticker keeps that offset flat — which is the more
@@ -292,7 +293,7 @@ failure this exists to prevent. On macOS, a LaunchAgent restarts it across crash
   <key>Label</key>            <string>fi.moonwell.vnet-mine</string>
   <key>ProgramArguments</key> <array>
     <string>/path/to/mamo-contracts/script/tenderly/mine-ticker.sh</string>
-    <string>--interval</string><string>2</string>
+    <string>--interval</string><string>15</string>
     <string>--quiet</string>
   </array>
   <key>EnvironmentVariables</key> <dict>
