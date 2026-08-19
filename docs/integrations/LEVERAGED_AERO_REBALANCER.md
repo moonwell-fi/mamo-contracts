@@ -757,7 +757,7 @@ Consequences for the keeper:
 | Revert | Cause | Fix |
 |---|---|---|
 | the cover's swap reverts (partial redeem) | the IL deficit buy does not fit the redeemer's pro-rata budget | **lever down and re-simulate** — this is the case the ladder above exists for |
-| `InsufficientAssetsOut` | net payout is under `max(stored, fresh)` — the **requester's** floor, set when they requested | **not** a de-lever problem. Levering down realises swap costs and pushes the payout marginally the *wrong* way. Wait for the position to recover and retry, or the request owner `cancelRedeem`s. |
+| `InsufficientAssetsOut` | net payout is under `max(stored, fresh)` — the **requester's** floor, set when they requested | **Depends which half is binding.** If cover swaps are eating the payout, levering down shrinks the shortfall and *raises* the achievable net — retry lower (this is the §C option). If the floor is simply unreachable at the current price, levering down cannot help and its own swap costs come out of NAV: **wait and retry, or the request owner `cancelRedeem`s.** Never try to lower the floor — the stored half is the requester's and `max()` ignores you. |
 
 ---
 
