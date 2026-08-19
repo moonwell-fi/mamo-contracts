@@ -135,6 +135,58 @@ contract LPCompoundModuleUnitTest is Test {
         assertEq(module.isValidSignature(d, e), MAGIC);
     }
 
+    // --- MOO-730(b): compound settlement must not overlap a swap rebalance ---
+
+    /// @dev The swap-rebalance value floor compares a snapshot taken at unwindForSwap against a
+    ///      valueAfter measured at rebuildAfterSwap. Compound proceeds settle to the BALANCER
+    ///      (receiver == balancer), so an AERO order filling inside that window inflates valueAfter
+    ///      without inflating either snapshot term — free headroom that a real rebalance loss can
+    ///      hide behind. validateRebalanceOrder already REQUIRES rebalanceInFlight; this asserts the
+    ///      complementary exclusion on the compound class, so exactly one of the two can settle at
+    ///      any time.
+    function test_isValidSignature_rejectedWhileRebalanceInFlight() public {
+        GPv2Order.Data memory o = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        (bytes32 d, bytes memory e) = _sig(o);
+
+        // Control: identical order settles fine outside the window.
+        assertEq(module.isValidSignature(d, e), MAGIC, "valid outside the window");
+
+        bal.setInFlight(true);
+        vm.expectRevert(bytes("rebalance in flight"));
+        module.isValidSignature(d, e);
+
+        // Window closes → the same order is valid again (deferral, not permanent rejection).
+        bal.setInFlight(false);
+        assertEq(module.isValidSignature(d, e), MAGIC, "valid again once the window closes");
+    }
+
+    /// @dev The two order classes are mutually exclusive by construction: exactly one of them
+    ///      validates for any given value of rebalanceInFlight.
+    function test_orderClasses_areMutuallyExclusiveOnInFlight() public {
+        GPv2Order.Data memory compoundOrder = _order(aero, token0, address(bal), uint32(block.timestamp + 10 minutes));
+        (bytes32 cd, bytes memory ce) = _sig(compoundOrder);
+
+        bal.setSellTokenInFlight(token0);
+        spc.setMaxTimePriceValid(token0, 1 hours);
+        spc.setMaxTimePriceValid(token1, 1 hours);
+        // Pricing is not the subject here: price strictly above oracle so both knobs clear.
+        spc.setOracleDiscountBps(-1);
+        GPv2Order.Data memory rebalanceOrder =
+            _order(token0, token1, address(bal), uint32(block.timestamp + 10 minutes));
+        (bytes32 rd, bytes memory re) = _sig(rebalanceOrder);
+
+        // Not in flight: compound validates, rebalance does not.
+        assertEq(module.isValidSignature(cd, ce), MAGIC);
+        vm.expectRevert(bytes("no rebalance in flight"));
+        module.validateRebalanceOrder(rd, re);
+
+        // In flight: exactly the reverse.
+        bal.setInFlight(true);
+        vm.expectRevert(bytes("rebalance in flight"));
+        module.isValidSignature(cd, ce);
+        assertEq(module.validateRebalanceOrder(rd, re), MAGIC);
+    }
+
     function test_isValidSignature_survivesSetPool() public {
         address newT0 = address(new MockERC20("New0", "N0"));
         address newT1 = address(new MockERC20("New1", "N1"));
@@ -515,8 +567,22 @@ contract LPCompoundModuleUnitTest is Test {
         GPv2Order.Data memory o = _rebalanceOrder(aero, token1);
         (bytes32 d, bytes memory e) = _sig(o);
 
+        // In flight, the rebalance class accepts the AERO leg — and the compound class is now
+        // excluded, so the two never accept the SAME order at the SAME time even in this
+        // impossible configuration.
         assertEq(module.validateRebalanceOrder(d, e), MAGIC, "rebalance class accepts the AERO leg");
-        assertEq(module.isValidSignature(d, e), MAGIC, "compound class accepts the SAME order");
+        vm.expectRevert(bytes("rebalance in flight"));
+        module.isValidSignature(d, e);
+
+        // Out of flight the roles swap: the compound class accepts the very same order, the
+        // rebalance class refuses it. The classes are now disjoint IN TIME as well as in shape —
+        // but they still overlap in SHAPE, which is why the balancer's AERO-exclusion at
+        // registration (_validateAndStore's InvalidConfig guard) remains load-bearing: without it
+        // the same signed order would be replayable across the two windows.
+        bal.setInFlight(false);
+        assertEq(module.isValidSignature(d, e), MAGIC, "compound class accepts the SAME order out of flight");
+        vm.expectRevert(bytes("no rebalance in flight"));
+        module.validateRebalanceOrder(d, e);
     }
 
     // ---------- structural order-shape rejections (both validation paths) ----------

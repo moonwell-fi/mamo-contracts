@@ -24,9 +24,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///        the escape hatch cannot revert — enforced HERE, independent of any caller prechecks.
 ///      - inFlight == false ⟺ every field is zero (both closers clear through the shared _wipe;
 ///        a future struct field is a one-place update there).
-///      - The floor snapshot (valueBeforePos/looseBefore) is only readable through
-///        closeForRebuild, which has already revoked and is about to clear — a stale snapshot
-///        cannot outlive its window.
+///      - The floor snapshot (the `Snapshot` amounts) is only readable through closeForRebuild,
+///        which has already revoked and is about to clear — a stale snapshot cannot outlive its
+///        window.
 /// @dev Errors are redeclared here; a Solidity error's 4-byte selector depends only on its
 ///      signature, so existing vm.expectRevert(LPAutoBalancerV2.X.selector) matchers keep working.
 library SwapWindowLib {
@@ -41,12 +41,33 @@ library SwapWindowLib {
     ///      duplicates this constant from LPCompoundModule for the same hot-path reason).
     address internal constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
 
+    /// @notice The value-floor baseline captured at unwind, in TOKEN AMOUNTS — never USD.
+    /// @dev The floor spans two transactions (unwind → settle → rebuild). A USD baseline frozen at
+    ///      unwind and compared against a USD `valueAfter` read at rebuild measures the MARKET's
+    ///      move, not the rebalance's: both legs of a WETH/cbBTC position are volatile against USD
+    ///      with no offsetting leg, so an ordinary decline during settlement reads as rebalance loss
+    ///      and reverts an honest rebuild — stranding principal loose and unstaked with only the
+    ///      admin exit() as recovery. Storing amounts and pricing them at rebuild time with the SAME
+    ///      feed reads that produce `valueAfter` makes the market move cancel on both sides.
+    /// @param amount0Pos token0 backing main+alt PRINCIPAL at unwind — the floor's haircut base.
+    /// @param amount1Pos token1 backing main+alt PRINCIPAL at unwind.
+    /// @param loose0 pre-existing loose token0 — added back un-haircut (H-1).
+    /// @param loose1 pre-existing loose token1 — added back un-haircut (H-1).
+    struct Snapshot {
+        uint256 amount0Pos;
+        uint256 amount1Pos;
+        uint256 loose0;
+        uint256 loose1;
+    }
+
     struct SwapWindow {
         bool inFlight;
         bool wasStaked; // main was staked at unwind; restake at rebuild
         address sellToken; // approved to VAULT_RELAYER while in flight (packs with the bools)
-        uint256 valueBeforePos; // USD 1e8, main+alt PRINCIPAL only — the floor's haircut base
-        uint256 looseBefore; // USD 1e8, pre-existing loose balance — added back un-haircut (H-1)
+        uint256 amount0Pos; // see Snapshot
+        uint256 amount1Pos;
+        uint256 loose0;
+        uint256 loose1;
         uint256 startedAt; // unwind timestamp (diagnostics / decision snapshot)
     }
 
@@ -58,14 +79,9 @@ library SwapWindowLib {
     ///      calm gate's oracle reads and before _exitAll burns anything.
     /// @dev Caller ordering constraint this module cannot see or enforce: `wasStaked` must be
     ///      captured from p.mainStaked BEFORE the teardown (_exitAll) un-stakes the position.
-    function open(
-        SwapWindow storage w,
-        address sellToken,
-        uint256 sellAmount,
-        uint256 valueBeforePos,
-        uint256 looseBefore,
-        bool wasStaked
-    ) internal {
+    function open(SwapWindow storage w, address sellToken, uint256 sellAmount, Snapshot memory snap, bool wasStaked)
+        internal
+    {
         if (w.inFlight) revert AlreadyInFlight();
         // Guarantees inFlight ⟹ sellToken != 0 by construction (not by caller precheck): the
         // escape hatch's forceApprove(sellToken, 0) must never target address(0) and revert.
@@ -73,8 +89,10 @@ library SwapWindowLib {
         w.inFlight = true;
         w.wasStaked = wasStaked;
         w.sellToken = sellToken;
-        w.valueBeforePos = valueBeforePos;
-        w.looseBefore = looseBefore;
+        w.amount0Pos = snap.amount0Pos;
+        w.amount1Pos = snap.amount1Pos;
+        w.loose0 = snap.loose0;
+        w.loose1 = snap.loose1;
         w.startedAt = block.timestamp;
         IERC20(sellToken).forceApprove(VAULT_RELAYER, sellAmount);
     }
@@ -88,14 +106,10 @@ library SwapWindowLib {
     ///      revert: reverts are whole-transaction, so a failed rebuild unwinds this close too and
     ///      the window stays open for retry — identical retry semantics to the old late
     ///      _clearInFlight().
-    function closeForRebuild(SwapWindow storage w)
-        internal
-        returns (uint256 valueBeforePos, uint256 looseBefore, bool wasStaked)
-    {
+    function closeForRebuild(SwapWindow storage w) internal returns (Snapshot memory snap, bool wasStaked) {
         if (!w.inFlight) revert NotInFlight();
         IERC20(w.sellToken).forceApprove(VAULT_RELAYER, 0);
-        valueBeforePos = w.valueBeforePos;
-        looseBefore = w.looseBefore;
+        snap = Snapshot({amount0Pos: w.amount0Pos, amount1Pos: w.amount1Pos, loose0: w.loose0, loose1: w.loose1});
         wasStaked = w.wasStaked;
         _wipe(w);
     }
@@ -121,8 +135,10 @@ library SwapWindowLib {
         delete w.inFlight;
         delete w.wasStaked;
         delete w.sellToken;
-        delete w.valueBeforePos;
-        delete w.looseBefore;
+        delete w.amount0Pos;
+        delete w.amount1Pos;
+        delete w.loose0;
+        delete w.loose1;
         delete w.startedAt;
     }
 }

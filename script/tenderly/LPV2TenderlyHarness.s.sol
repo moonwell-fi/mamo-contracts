@@ -104,7 +104,7 @@ contract LPV2TenderlyHarness is Script {
     }
 
     function _lab() internal view returns (LPAutoBalancerV2) {
-        return LPAutoBalancerV2(vm.envAddress("HARNESS_LAB"));
+        return LPAutoBalancerV2(payable(vm.envAddress("HARNESS_LAB")));
     }
 
     /// @dev Broadcaster private key, read from the ENVIRONMENT (vm.envUint) rather than passed to
@@ -158,7 +158,24 @@ contract LPV2TenderlyHarness is Script {
         (, t,,,,) = ICLPool(POOL).slot0();
     }
 
+    /// @dev The main range `rebalanceUsingAlt` will derive at the CURRENT live spot — the off-chain
+    ///      half of the tick commitment, reproducing `_mainRange` for the scenario this harness ran.
+    ///      The balanced scenario withdraws two-sided principal and takes the straddle branch; the
+    ///      singlesided scenario withdraws 100% token0 (WETH) and takes the token0-majority branch,
+    ///      which parks the range on the first aligned tick strictly above spot.
+    function _expectedMainRange() internal view returns (int24 tl, int24 tu) {
+        int24 spot = _spotTick();
+        if (_isSingleSided()) {
+            tl = _align(spot) + TICK_SPACING;
+            tu = tl + int24(WIDTH);
+        } else {
+            tl = _align(spot - int24(WIDTH) / 2);
+            tu = tl + int24(WIDTH);
+        }
+    }
+
     function _resetParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        (int24 expectedTl, int24 expectedTu) = _expectedMainRange();
         // mins = 0: the vnet is calm (no in-harness price manipulation), so the rebuild is
         // deterministic. Sandwich-min wiring is asserted in the unit suite.
         return LPAutoBalancerV2.RebalanceParams({
@@ -174,7 +191,12 @@ contract LPV2TenderlyHarness is Script {
             // Generous: a broadcast tx lands in a LATER block than simulation, so a `+1` deadline
             // (fine for in-process fork tests) would expire before the tx mines. 1 day is safe and
             // well inside the harness's lifetime.
-            deadline: block.timestamp + 1 days
+            deadline: block.timestamp + 1 days,
+            // Tick commitment. NOTE this is computed at SIMULATION time while the broadcast lands in
+            // a later block: if spot crosses an alignment boundary in between, the tx reverts
+            // TickMismatch. That is the guard working as designed on a live chain — re-run the step.
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTu
         });
     }
 
@@ -223,6 +245,19 @@ contract LPV2TenderlyHarness is Script {
         // deployer holds ALL roles so one signer drives the whole lifecycle. Role SEPARATION
         // (rebalancer vs admin) is verified independently by checkRoleGating() and the unit suite.
         LPAutoBalancerV2 lab = new LPAutoBalancerV2(dep, dep, dep, dep, NFPM, AERO);
+
+        // Widen both staleness bounds to the contract's own ceiling (MAX_ORACLE_DELAY, 1 day).
+        // MOO-740 tightened the CONSTRUCTOR default to 1 hour, which is right for a live chain whose
+        // feeds publish on a ~1200s heartbeat — and wrong for this harness, which drives the
+        // lifecycle by WARPING the vnet clock (`advance_time 7200` before doReset) against feeds
+        // that do not publish while it warps. Under the 1h default every warped phase would fail
+        // StaleOracle for a reason that has nothing to do with what the phase is testing. Feed
+        // repointing is deliberately not implemented for LPV2 (see lib/market.sh), so raising the
+        // bound is the available lever. This is a TEST-RIG concession, not the shipped config:
+        // proposal 011 arms 3600/3600 on chain and LPAutoBalancerV2SetupTest pins that.
+        // The matrix's stale-oracle scenario still fires — it warps 27h, past this 24h ceiling.
+        uint256 maxDelay = lab.MAX_ORACLE_DELAY();
+        lab.setMaxOracleDelays(maxDelay, maxDelay);
 
         IERC20(WETH).approve(NFPM, a0);
         if (a1 > 0) IERC20(CBBTC).approve(NFPM, a1);

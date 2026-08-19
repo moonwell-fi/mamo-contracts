@@ -6,6 +6,7 @@ import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
+import {LPValuationLib} from "@libraries/LPValuationLib.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -32,6 +33,61 @@ library LPPositionLib {
     error GaugeRewardMismatch();
     error PoolMismatch();
     error NotHeld();
+    error LossCapExceeded();
+    error InvalidConfig();
+    error InvalidWidth();
+    error WidthTooNarrow();
+    error WidthOutOfBounds();
+
+    /// @notice The rebalance-parameter validation shared by `registerPosition`/`setPool` (via
+    ///         `_validateAndStore`) and `setPositionConfig`, so the registration and the
+    ///         post-registration admin path cannot drift apart.
+    /// @dev Invariants, in the order checked:
+    ///      - loss cap: `maxRebalanceLossBps <= maxLossCapBps`.
+    ///      - calm gate + centering must be configured at all (a zero twapWindow, a non-positive
+    ///        maxTickDeviation, or a zero maxCenterDeviation each disable a guard silently).
+    ///      - `minWidth >= 2 * tickSpacing`: a narrower width can never straddle an ALIGNED spot,
+    ///        so every balanced rebalance would revert inside `alignedRange`.
+    ///      - both widths aligned to `2 * tickSpacing` (which implies spacing-aligned; an unaligned
+    ///        bound only fails deep inside the pool mint). The EVEN-multiple requirement — not merely
+    ///        spacing-aligned — is what makes the rebalance paths' tick commitment pin the ALT's
+    ///        ANCHOR: the balanced main is `[floorAlign(spot - width/2), +width]`, so only when
+    ///        `width/2` is itself a multiple of `tickSpacing` does the committed `tickLower` determine
+    ///        `floorAlign(spot) = tickLower + width/2`, which is the anchor `mintAlt` places the alt
+    ///        from. With an ODD multiple (e.g. spacing 100, width 300) spot has a 2-spacing-wide
+    ///        preimage for the same main range — spot 150 and spot 249 both give main [0, 300] —
+    ///        and the alt slides a full spacing while TickMismatch stays silent. `minWidth >=
+    ///        2 * tickSpacing` above guarantees the smallest legal width already satisfies this, so
+    ///        the constraint never makes a config uninhabitable. NOTE the two limits of what this
+    ///        buys. (i) The inversion is PER-BRANCH and the commitment does not name the branch: at
+    ///        `width == 2 * tickSpacing` a balanced pair and a token1-single-sided pair collide on
+    ///        the same ticks at different anchors, so the pair alone does not determine the anchor.
+    ///        Only `width >= 4 * tickSpacing` (i.e. `minWidth > 2 * maxTickDeviation`) rules that
+    ///        out; this validator does NOT enforce it, it is a config choice. (ii) Even then it pins
+    ///        the alt's candidate RANGES, not which side is chosen — see the SCOPE OF THE
+    ///        COMMITMENT note on `LPAutoBalancerV2.rebuildAfterSwap`.
+    ///      - `maxWidth <= int24.max`: widths are uint24 but the tick math casts them to int24,
+    ///        which bit-REINTERPRETS rather than reverting — a huge maxWidth passes every check
+    ///        above and then corrupts the geometry.
+    function validateRebalanceConfig(
+        uint24 minWidth,
+        uint24 maxWidth,
+        uint24 maxCenterDeviation,
+        uint32 twapWindow,
+        int24 maxTickDeviation,
+        uint16 maxRebalanceLossBps,
+        uint16 maxLossCapBps,
+        int24 tickSpacing
+    ) public pure {
+        if (maxRebalanceLossBps > maxLossCapBps) revert LossCapExceeded();
+        if (twapWindow == 0 || maxTickDeviation <= 0 || maxCenterDeviation == 0) revert InvalidConfig();
+        if (tickSpacing <= 0) revert InvalidConfig();
+        if (minWidth < 2 * uint24(tickSpacing) || maxWidth < minWidth) revert WidthTooNarrow();
+        if (minWidth % (2 * uint24(tickSpacing)) != 0 || maxWidth % (2 * uint24(tickSpacing)) != 0) {
+            revert InvalidWidth();
+        }
+        if (maxWidth > uint24(type(int24).max)) revert WidthOutOfBounds();
+    }
 
     /// @dev Redeclared so `skimFees` logs the same topic as LPAutoBalancerV2.FeesSkimmed (event topic
     ///      is keccak of the signature; emitted from the balancer's address under DELEGATECALL).
@@ -47,9 +103,9 @@ library LPPositionLib {
     ///         validates the descriptor against `pool`, NOT that the NFT belongs to that pool. A
     ///         position minted against a DIFFERENT pool (wrong fee tier / token order) would
     ///         otherwise register and corrupt every TickMath/LiquidityAmounts computation.
-    ///      NOTE: the INonfungiblePositionManager interface labels field 4 `fee` (Uniswap), but on
-    ///      Aerodrome Slipstream this slot carries tickSpacing — the same value MintParams.tickSpacing
-    ///      consumes. It is uint24 in the interface, so compare against uint24(spacing).
+    ///      NOTE: field 4 of the Slipstream `positions()` tuple carries tickSpacing (the same value
+    ///      MintParams.tickSpacing consumes), NOT Uniswap's `uint24 fee`. The interface now declares
+    ///      it as `int24 tickSpacing`, so this compares signed-to-signed with no cast.
     function validatePoolAndNft(
         address pool,
         address positionManager,
@@ -63,9 +119,9 @@ library LPPositionLib {
                 || ICLPool(pool).tickSpacing() != spacing
         ) revert PoolMismatch();
         if (INonfungiblePositionManager(positionManager).ownerOf(mainTokenId) != address(this)) revert NotHeld();
-        (,, address nftToken0, address nftToken1, uint24 nftSpacing,,,,,,,) =
+        (,, address nftToken0, address nftToken1, int24 nftSpacing,,,,,,,) =
             INonfungiblePositionManager(positionManager).positions(mainTokenId);
-        if (nftToken0 != token0 || nftToken1 != token1 || nftSpacing != uint24(spacing)) {
+        if (nftToken0 != token0 || nftToken1 != token1 || nftSpacing != spacing) {
             revert PoolMismatch();
         }
     }
@@ -175,6 +231,125 @@ library LPPositionLib {
             sqrtPriceX96: 0
         });
         (tokenId,,,) = ICLPositionManager(positionManager).mint(mp);
+    }
+
+    /// @notice The geometry of `tokenId`: its tick range and stored liquidity.
+    /// @dev Exists so the balancer never decodes the position manager's 12-field return tuple
+    ///      itself — that decode is several hundred bytes of bytecode per call site, and the
+    ///      balancer is within a few hundred bytes of EIP-170.
+    function positionTicks(address positionManager, uint256 tokenId)
+        public
+        view
+        returns (int24 tickLower, int24 tickUpper, uint128 liquidity)
+    {
+        (,,,,, tickLower, tickUpper, liquidity,,,,) = INonfungiblePositionManager(positionManager).positions(tokenId);
+    }
+
+    /// @notice Total AERO earned across the staked legs, tolerating a broken gauge.
+    /// @dev A leg whose `earned` reverts contributes 0 rather than bricking the read. This is a
+    ///      DIAGNOSTIC path (the off-chain agent's primary read interface) — it must stay callable
+    ///      even when the gauge misbehaves, which is why the try/catch is here rather than letting
+    ///      the whole snapshot revert.
+    function earnedTolerant(
+        address gauge,
+        address owner,
+        uint256 mainTokenId,
+        bool mainStaked,
+        uint256 altTokenId,
+        bool altStaked
+    ) public view returns (uint256 total) {
+        if (mainStaked) {
+            try ICLGauge(gauge).earned(owner, mainTokenId) returns (uint256 e) {
+                total += e;
+            } catch {}
+        }
+        if (altStaked && altTokenId != 0) {
+            try ICLGauge(gauge).earned(owner, altTokenId) returns (uint256 e) {
+                total += e;
+            } catch {}
+        }
+    }
+
+    /// @notice Inputs for `mintAlt` — grouped so the balancer passes one memory struct (it is within
+    ///         a few hundred bytes of EIP-170).
+    /// @param minAltValueUsd the balancer's MIN_ALT_VALUE_USD, passed in so the constant keeps a
+    ///        single definition site.
+    struct AltParams {
+        address positionManager;
+        address token0;
+        address token1;
+        address holder;
+        int24 spotTick;
+        int24 tickSpacing;
+        uint8 dec0;
+        uint8 dec1;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        uint256 deadline;
+        uint256 minAltValueUsd;
+    }
+
+    /// @notice Mint the single-sided `alt` from the post-main-mint leftover (NO SWAP). The surplus
+    ///         leg is whichever token holds the most USD VALUE (never raw base units — the pair's
+    ///         decimals differ, e.g. WETH 18 / cbBTC 8). Returns 0 (minting nothing) when the surplus
+    ///         is below `minAltValueUsd`: a sub-tick remainder too small to seed liquidity.
+    /// @dev Anchored to SPOT, not to the main range's bounds, with floor = floorAlign(spotTick):
+    ///        - token0 surplus => [floor + spacing, floor + 2*spacing]  (tickLower strictly > spot)
+    ///        - token1 surplus => [floor - spacing, floor]              (tickUpper <= spot)
+    ///      Those are the CLOSEST single-token ranges to spot. Activity is
+    ///      `tickLower <= tick < tickUpper`, so a token0 alt only needs tickLower above spot and a
+    ///      token1 alt only needs tickUpper at or below it — anchoring to the main bounds instead
+    ///      parked the alt width/2 ticks away on the straddle branch, where it earned nothing until
+    ///      price traversed half the main width. Overlapping the main range is fine: separate NFTs,
+    ///      independent liquidity.
+    /// @dev Anchoring on spot keeps the alt's ANCHOR inside the callers' tick commitment, but not its
+    ///      SIDE. `validateRebalanceConfig` forces every legal width to be an even multiple of
+    ///      tickSpacing, which makes `floorAlign(spotTick)` a function of the committed MAIN bounds
+    ///      (see the TICK COMMITMENT note on `LPAutoBalancerV2.rebuildAfterSwap`), so committing the
+    ///      main range pins both candidate alt ranges below to exact ticks. It does NOT pin which one
+    ///      is minted: `surplus0` is decided from the post-`_mintBalanced` residual balances, and the
+    ///      position manager splits those at the exact `sqrtP`, not at `floorAlign(spotTick)` — so a
+    ///      spot that moves within the committed bucket can flip the side while TickMismatch stays
+    ///      silent. See the SCOPE OF THE COMMITMENT note on `rebuildAfterSwap` for the bound on that.
+    /// @dev Forwards NO dust. The caller must run the value floor AFTER this returns — counting both
+    ///      the fresh alt and any loose balance — and only THEN forward the sub-threshold remainder;
+    ///      forwarding here would let a non-trivial surplus escape the floor as "dust".
+    function mintAlt(AltParams memory ap, LPValuationLib.OracleConfig memory cfg) public returns (uint256 altId) {
+        uint256 value0 = LPValuationLib.valueInUsd(IERC20(ap.token0).balanceOf(ap.holder), 0, cfg, ap.dec0, ap.dec1);
+        uint256 value1 = LPValuationLib.valueInUsd(0, IERC20(ap.token1).balanceOf(ap.holder), cfg, ap.dec0, ap.dec1);
+
+        bool surplus0 = value0 >= value1;
+        if ((surplus0 ? value0 : value1) < ap.minAltValueUsd) {
+            return 0; // genuine dust: caller forwards it after the value floor.
+        }
+
+        // `floor` is the largest aligned tick <= spot, so floor + spacing is strictly above spot
+        // (also when spot is exactly aligned), and `floor` itself is <= spot.
+        int24 floorTick = LPGeometryLib.floorAlign(ap.spotTick, ap.tickSpacing);
+        int24 altTl;
+        int24 altTu;
+        if (surplus0) {
+            altTl = floorTick + ap.tickSpacing;
+            altTu = altTl + ap.tickSpacing;
+        } else {
+            altTu = floorTick;
+            altTl = floorTick - ap.tickSpacing;
+        }
+
+        // Single-sided: force the UNFUNDED leg's min to 0. The caller cannot predict which leg the
+        // surplus lands on (selection is by USD value at execution time), so a nonzero min on the
+        // leg that ends up unfunded would revert an otherwise-valid mint.
+        altId = mintPosition(
+            ap.positionManager,
+            ap.token0,
+            ap.token1,
+            ap.tickSpacing,
+            altTl,
+            altTu,
+            surplus0 ? ap.amount0Min : 0,
+            surplus0 ? 0 : ap.amount1Min,
+            ap.deadline
+        );
     }
 
     /// @notice Guards + calm-gate for phase 1 of a swap rebalance (unwindForSwap).
