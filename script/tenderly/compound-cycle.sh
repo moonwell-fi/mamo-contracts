@@ -48,9 +48,11 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 CFG="$HERE/leveraged-aero-vnet.json"
 
 [[ -f "$ROOT/.env" ]] && set -a && . "$ROOT/.env" && set +a
-# LEVERAGED_AERO_ADMIN_RPC_URL wins over TENDERLY_VNET_RPC_URL: the latter is shared with the LPV2
-# harness and routinely points at a DIFFERENT vnet. Pointing this script at the wrong instance is
-# caught by `check-feeds` (a non-FreshFeed instance fails the gate) — but set it explicitly.
+# LEVERAGED_AERO_ADMIN_RPC_URL wins over TENDERLY_VNET_RPC_URL. Historically the latter named a
+# DIFFERENT vnet (the LPV2 one), so the two had to be kept apart; since 2026-08-19 both names
+# resolve to the shared leveraged-aero instance (chainId 73578453) and .env says to keep them in
+# sync. The preference order is retained so an explicit override still wins. Pointing this script
+# at the wrong instance is caught by `check-feeds` (a non-FreshFeed instance fails the gate).
 RPC="${LEVERAGED_AERO_ADMIN_RPC_URL:-${TENDERLY_VNET_RPC_URL:?set LEVERAGED_AERO_ADMIN_RPC_URL (admin RPC) or TENDERLY_VNET_RPC_URL}}"
 
 # ── resolved from leveraged-aero-vnet.json (never hardcode; the instance rotates) ──
