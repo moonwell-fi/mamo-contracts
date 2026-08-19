@@ -458,8 +458,9 @@ account that escrowed the shares) net of its pro-rata protocol-fee skim, enforci
 **The `minAssetsOut` argument is YOUR floor, layered on top of the requester's — never instead of it.**
 The stored floor was fixed at `requestRedeem` and can be up to the 2-day `FULFILL_WINDOW` stale by the
 time you fulfil, which is a long time for a levered book to move; nothing else on the path covers that
-gap (the per-swap sweep floors below bound individual **swaps**, not the payout). Quote it fresh off
-`previewRedeem` / `redeemRequest(id)` at send time. Passing `0` defers entirely to the stored floor —
+gap (the per-swap sweep floors below bound individual **swaps**, not the payout). **Quote it by
+SIMULATING the fulfil and decoding `RedeemFulfilled.assetsOut` — see §C "Sizing the fulfil". Do NOT quote
+off `previewRedeem`**, which is the fast-path quote and over-quotes the async payout. Passing `0` defers entirely to the stored floor —
 the previous behaviour, byte for byte. You cannot go the other way: a value **below** the stored floor
 is ignored, so the requester's guarantee is not lowerable by whoever fulfils.
 
@@ -642,8 +643,10 @@ fully cover `f` of the debt, the unwind must cover the shortfall.
 
 Because a levered position tends to run a debt/IL shortfall against the collected legs, levering
 **down** first shrinks the debt the unwind must repay, so the proportional unwind self-funds cleanly
-instead of eating deep into collateral. This is the standard pre-fulfill step for anything but small
-requests, and it is a **single-actor** step: one `adjustLeverage(lowerTarget, minLiq, minOut)`. **No
+instead of eating deep into collateral. It is a **single-actor** step: one
+`adjustLeverage(lowerTarget, minLiq, minOut)`. **It is NOT a routine pre-step and it is not sized off the
+request** — most fulfils need no de-lever at all, and whether this one does is decided by simulation,
+not by how large the request is (§C "Sizing the fulfil"). **No
 multisig signature is on the fulfil path**, which is what keeps the 2-day SLA achievable — and none is on
 the way back either, since restoring the book is the same call with the untouched `targetLtvBps()`.
 
@@ -686,78 +689,148 @@ sequenceDiagram
 ### Sizing the fulfil — the de-lever decision and the `minAssetsOut` quote
 
 Two questions arrive together on every request: *do I need to lever down first, and what floor do I
-pass?* Both are answered by **one simulation**, not by a formula — and the answer to the first is
-usually "no".
+pass?* Both are answered by **simulation, not by a formula** — and the answer to the first is usually
+"no". A book whose LP is in range self-funds its own unwind.
+
+#### Simulate STATEFULLY — and pick the method by environment
+
+The ladder below is "de-lever **then** fulfil" evaluated in one context. A stateless call cannot express
+that, so without a stateful simulator you would have to *actually transact* each rung and eat every
+intermediate unwind's cost.
+
+| Environment | Method | Notes |
+|---|---|---|
+| **Base mainnet (prod)** | **`eth_simulateV1`** | The portable one, verified live against Base. Executes `calls[]` sequentially with state carried, and returns `logs` **and** `returnData` per call. **Standardise on this.** |
+| Staging vnet (`73578453`) | `eth_simulateV1` **or** `tenderly_simulateBundle` | Both work here. **`tenderly_simulateBundle` is vnet-only — it returns HTTP 400 on Base**, so never let it reach a production code path. |
+| Anywhere | plain `eth_call` | **Pass/fail only** — no logs, no state carried between calls. Fine as the first probe; useless for the ladder or the quote. |
+| Fallback | local fork (`anvil --fork-url`) | When a provider exposes neither simulator. |
+
+**Simulators disagree at the dust level.** The same de-lever returned `34,130,340` through
+`tenderly_simulateBundle` and `34,130,346` through `eth_simulateV1` — block-timestamp accrual, ~6 units
+on 3.4e7. Keep a tolerance; never treat a simulated payout as exact.
 
 #### The loop
 
-1. **Simulate `fulfillRedeem(id, 0)`** from `proposer()` against the live book. On a Tenderly vnet use
-   `tenderly_simulateTransaction`; elsewhere `trace_call` / `debug_traceCall` — anything that returns
-   logs (a plain `eth_call` works as a pass/fail check but returns `0x`, see below).
-2. **It passes** → read the payout out of the simulated log, apply your tolerance, send. Most fulfils
-   end here; a book whose LP is in range self-funds its unwind.
-3. **It reverts** → lever down and re-simulate. Ladder off the STANDING target — read it live with
-   `targetLtvBps()` — trying ~90% of it, then ~80%, and send the first that passes.
-   `adjustLeverage(targetBps, minLiq, minOut)` refuses anything above policy with
-   `TargetLtvExceedsPolicy(requested, policy)`, so the ladder only ever goes down.
-4. **After the fulfil, restore**: `adjustLeverage(targetLtvBps(), minLiq, minOut)` — the same proposer
-   key, no multisig, and the standing target never moved.
+1. **Probe** — simulate `fulfillRedeem(id, 0)` from `proposer()` against the live book.
+2. **It passes** → decode the payout from the simulated `RedeemFulfilled` log, apply your tolerance,
+   send. **Most fulfils end here.**
+3. **It reverts** → **classify before reacting** (table at the end of this section). Only a cover-budget
+   failure belongs on the ladder.
+4. **Ladder** — simulate `[adjustLeverage(candidate, minLiq, minOut), fulfillRedeem(id, 0)]` as one
+   stateful bundle. The first candidate that passes is what you then send as two real transactions.
+5. **Restore once, after the queue drains** — not per request.
+
+#### The ladder, specified
+
+```
+currentLtv = debtUsdc × 1e4 / collateralUsdc      // read from the venue, NOT assumed to be policy
+anchor     = min(currentLtv, targetLtvBps())      // NEVER anchor on policy alone — see below
+candidates = anchor − 250, anchor − 500, anchor − 750, …   // integer bps, round DOWN
+floor      = operator policy (e.g. 2500 bps)      // stop here
+```
+
+- **Every candidate must be strictly below `currentLtv`.** `adjustLeverageImpl` takes the **lever-UP**
+  branch whenever `targetDebt > debtUsdc`, so a candidate above current LTV *increases* risk while the
+  operator believes they are de-risking. Anchoring on `targetLtvBps()` alone is wrong whenever the book
+  has drifted **below** policy — which is an ordinary state, not an edge case.
+- **If no candidate passes by the floor, stop and escalate.** Do not keep dropping; past some point the
+  request is not fulfillable at any leverage and the answer is to wait, or let the requester cancel.
+- **Restore is one call after the queue drains**: `adjustLeverage(targetLtvBps(), minLiq, minOut)`.
+  Restoring between requests just pays the round trip repeatedly.
 
 #### Quoting `minAssetsOut`
 
 | | |
 |---|---|
-| The **stored** floor | `redeemRequest(id).minAssetsOut` — the **third** field of `(owner, shares, minAssetsOut, requestedAt, settled)`. **The strategy's `RedeemRequested(id, owner, shares)` does NOT carry it** — only the account's `WithdrawRequested(id, shares, minAssetsOut)` does. Read the struct, don't reconstruct it from strategy logs. |
-| What the chain enforces | `max(stored, fresh)`. Your fresh floor can only **tighten** the requester's, never loosen it — passing `0` is the identity, and passing a number below theirs changes nothing. |
-| Getting the **fresh** number | `fulfillRedeem` has **no return value**, so an `eth_call` yields `0x` — pass/fail only. The realised payout appears solely in **`RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)`**. Simulate the transaction, decode that log, and send with `minAssetsOut = assetsOut × (1 − tolerance)`. |
-| **Do NOT quote with `previewRedeem`** | It is the **fast-path** quote — `shares × navNet / supplyPost`, oracle-priced — and it does not model the async unwind's swap costs, so it **over-quotes** the async payout. Used raw as a floor it reverts `InsufficientAssetsOut` against itself. |
+| The **stored** floor | `redeemRequest(id).minAssetsOut` — the **third** field of `(owner, shares, minAssetsOut, requestedAt, settled)`. **The strategy's `RedeemRequested(id, owner, shares)` does NOT carry it** — only the account's `WithdrawRequested(id, shares, minAssetsOut)` does. Read the struct; do not reconstruct it from strategy logs. |
+| What the chain enforces | `max(stored, fresh)`. Your fresh floor can only **tighten** the requester's, never loosen it — `0` is the identity. |
+| Getting the **fresh** number | `fulfillRedeem` has **no return value**, so a plain `eth_call` yields `0x`. The realised payout lives solely in **`RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)`**. Simulate, decode that log, send with `minAssetsOut = assetsOut × (1 − tolerance)`. |
+| **Do NOT quote with `previewRedeem`** | It is the **fast-path** quote — `shares × navNet / supplyPost`, oracle-priced — and does not model the async unwind's swap costs, so it **over-quotes**. Used raw as a floor it reverts `InsufficientAssetsOut` against itself. |
 
-Measured on the live staging clone (10% of supply, calm book, LP in range):
+Measured on the live staging clone — 10% of supply, calm book, LP in range:
 
 ```
 previewRedeem(shares)            10,001,212,660   (fastOk = false — routed to async)
 RedeemFulfilled.assetsOut        10,001,153,342   (simulated fulfil — 0.6 bps lower)
 ```
 
-0.6 bps of drift on a calm in-range book; **wider whenever there is an IL gap to cover**, since the
-cover buy and the leg sweeps both cross a pool. Fine as a sanity check on the order of magnitude, never
-as the floor itself.
+0.6 bps of drift on a calm in-range book, **wider whenever there is an IL gap to cover**, since the
+cover buy and the leg sweeps both cross a pool. An order-of-magnitude sanity check, never the floor.
 
-#### Why levering down is what fixes a failing fulfil
+#### Why levering down fixes a failing fulfil
 
-The asymmetry is the whole mechanism, and it is not "leverage is too high" in the abstract:
+An asymmetry in **who pays for the IL cover** — not "leverage is too high" in the abstract:
 
-- A **partial** redeem caps its IL cover at the **redeemer's own pro-rata budget** (`balance −
-  stayersIdle`) and is **not** best-effort — a deficit buy that will not fit inside that budget reverts
-  the whole fulfil rather than spending the stayers' `(1−f)` share.
-- `adjustLeverage`'s lever-down has **no such cap**: its `_rebalanceCover` is bounded only by your
-  `minOut` and the oracle floor, so the fund covers the gap out of the **whole book**.
+- A **partial** redeem caps its cover at the **redeemer's own pro-rata budget** (`balance − stayersIdle`)
+  and is **not** best-effort: a deficit buy that will not fit inside that budget reverts the whole fulfil
+  rather than spending the stayers' `(1−f)` share.
+- `adjustLeverage`'s lever-down has **no such cap** — bounded only by your `minOut` and the oracle floor,
+  so the fund pays out of the **whole book**.
 
-Levering down also shrinks the gap itself. Collateral is untouched while debt *and* the matching CL
-fraction both scale by `targetBps / targetLtvBps()`, so the per-leg mismatch the redeem must cover
-shrinks in the same proportion while the collateral funding the cover does not.
+It also shrinks the gap. Collateral is untouched while debt *and* the matching CL fraction both scale by:
 
-#### The target does not depend on the withdrawal size — single or batch
+```
+f = targetBps / currentLtv          ← NOT targetBps / targetLtvBps()
+```
 
-Every term in the constraint is the redeemer's pro-rata slice: the shortfall is `f × (debt − LP amount)`
-per leg, and the budget is `f × collateral` (`_redeemCollateral` burns `f` of the cToken balance) plus
-`f × idle` (`stayersIdle` reserves the rest) plus the `f`-scaled surplus-leg sweep. **`f` cancels out of
-both sides.** A fulfil that works at 5% of supply works at 60%, and one that fails fails at any size.
+because `targetDebt = targetBps × collateral / 1e4` is compared against **current** debt, and
+`_unwindLiquidity` removes `(debt − targetDebt) / debt`. The two coincide **only** when the book sits
+exactly at policy. Measured on the live clone, at `currentLtv = 6157` against a policy of `5000`:
 
-Consequences for the keeper:
+| `targetBps` | debt before | debt after | realised `f` | `targetBps/currentLtv` | `targetBps/policy` (wrong) |
+|---|---|---|---|---|---|
+| 4800 | 50,036,587 | 39,006,102 | 0.77955 | 0.77960 | 0.96000 |
+| 4200 | 50,036,587 | 34,130,340 | 0.68211 | 0.68215 | 0.84000 |
+| 3600 | 50,036,587 | 29,254,577 | 0.58466 | 0.58470 | 0.72000 |
+| 3000 | 50,036,587 | 24,378,814 | 0.48722 | 0.48725 | 0.60000 |
 
-- **Do not scale the de-lever to the request.** The target follows the book's IL state, not the amount.
-- **One de-lever serves the whole queue.** No per-request arithmetic, no summing the batch.
-- **Order is free** — `fulfillRedeem` indexes a mapping; there is no FIFO and no head pointer, so
-  requests can be fulfilled in any order or batched into one multicall, and a stuck one blocks only
-  itself.
+#### How much does the withdrawal size matter?
 
-#### Two different reverts — only one is a de-lever problem
+**To first order, not at all** — which is why the de-lever target tracks the book's IL state rather than
+the amount. Every term in the cover constraint is the redeemer's pro-rata slice: the shortfall is
+`f × (debt − LP amount)` per leg; the budget is `f × collateral` (the redeem burns `f` of the cToken
+balance) plus `f × idle` (`stayersIdle` reserves the rest) plus the `f`-scaled surplus-leg sweep. The
+`f` cancels.
 
-| Revert | Cause | Fix |
+**It is an approximation, not an invariant.** Simulate every request regardless. Five things break exact
+proportionality:
+
+- **AMM price impact is nonlinear** — a bigger cover buy moves the pool further per unit.
+- **A FULL redeem (`shares == supply`) is a different code path**, not a scaled partial: three phases,
+  a `type(uint256).max` cover budget, and a best-effort Phase 1.
+- **Stored floors are absolute per request** — one request can fail `InsufficientAssetsOut` where
+  another of a different size passes.
+- **Rounding** — `mulDiv` floors, and small requests can reach `ZeroAssetsOut`.
+- **Each fulfil mutates the book and the pool**, so a later request's simulation must be re-run against
+  post-fulfil state.
+
+So: **one de-lever can serve the whole queue** (the target does not need recomputing per request), but
+**each request still needs its own simulation, in queue order, after the previous receipt.**
+
+**Ordering — two different claims, both true.** The *protocol* imposes none: `fulfillRedeem` indexes a
+mapping, there is no FIFO and no head pointer, so any order or one multicall is legal and a stuck request
+blocks only itself. The *outcomes* are path-dependent: each fulfil moves the book and the pool, so a
+different order gives different payouts and a different simulation result. Do not read "no ordering
+constraint" as "order does not matter".
+
+#### Classify the revert before reacting
+
+| Revert | Meaning | Action |
 |---|---|---|
-| the cover's swap reverts (partial redeem) | the IL deficit buy does not fit the redeemer's pro-rata budget | **lever down and re-simulate** — this is the case the ladder above exists for |
-| `InsufficientAssetsOut` | net payout is under `max(stored, fresh)` — the **requester's** floor, set when they requested | **Depends which half is binding.** If cover swaps are eating the payout, levering down shrinks the shortfall and *raises* the achievable net — retry lower (this is the §C option). If the floor is simply unreachable at the current price, levering down cannot help and its own swap costs come out of NAV: **wait and retry, or the request owner `cancelRedeem`s.** Never try to lower the floor — the stored half is the requester's and `max()` ignores you. |
+| **router revert** (untyped) from the cover's `exactOutputSingle` | the IL deficit buy did not fit the redeemer's pro-rata budget | **the ladder.** This is the one case it exists for |
+| `InsufficientAssetsOut` | payout under `max(stored, fresh)` | **conditional.** If cover swaps are eating the payout, a lower target raises the achievable net — retry lower. If the floor is unreachable at the current price, levering down cannot help and its own swap costs come out of NAV: wait, or the owner cancels. Never try to lower the floor |
+| `RequestSettled` | already fulfilled or cancelled | drop it from the queue — **never** a de-lever |
+| `NotProposer` / `NotExecuted` | wrong key, or the strategy is not `Executed` | fix the caller / check lifecycle — **never** a de-lever |
+| `MoonwellRepayFailed` / `MoonwellRedeemFailed(errCode)` | the venue refused (market paused, short of cash) | retry later — **never** a de-lever |
+| oracle / sequencer failures, `RedeemSweepFloorsDegraded` | feed or L2 uptime problem | do not fulfil into a degraded oracle unless the deadman forces it — **never** a de-lever |
+| broken AERO→USDC route, `RedeemRewardSaleDeferred` | the reward leg could not sell | non-fatal to the redeem; investigate the route separately |
+
+> **KNOWN GAP — classification is brittle today.** The cover-budget failure is the *router's* untyped
+> revert: `swapExactOut` with `bestEffort == false` calls `exactOutputSingle` **directly**, so there is no
+> strategy-specific selector to branch on. Keyers must match on the router's revert data, which is
+> fragile across router versions. A typed error on that path is a worthwhile contract follow-up — it is
+> the single signal the whole loop keys off.
+
 
 ---
 
@@ -938,7 +1011,9 @@ function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns
 - **`previewRedeem(shares)`** returns `(assetsOut, fastOk)`; `assetsOut` is the advisory oracle-priced
   fast-path payout and `fastOk` whether the fast path would currently price **and** clear the LTV gate.
   Both are advisory — the manager's on-chain gate is authoritative. Returns `(0, false)` on an oracle
-  outage. Useful for dashboards and for deciding whether a given size needs a deleverage before fulfill.
+  outage. Useful for dashboards and for routing a user between the fast and async paths. **NOT for the
+  async fulfil**: it neither quotes the async payout nor predicts whether a fulfil needs a de-lever —
+  simulate for both (§C "Sizing the fulfil").
 - **`layout()`** (memory-returnable `LayoutView`, minus the `redeemRequests` mapping) is the single read
   for **risk caps** (`targetLtvBps`, `maxLtvBps`, `minHealthBps`, `maxSlippageBps`,
   `usdcCollateralFactorBps`), **fees** (`managementFeeBps`, `performanceFeeBps`, `feeRecipient`,
@@ -1509,7 +1584,7 @@ Production addresses are published separately at deploy.
 - [ ] Size `(width, skewBps)` for the **realised** geometry, not the requested one: down-alignment preserves width exactly but always moves up to `tickSpacing − 1` ticks from the upper span into the lower one, so keep `upperSpan ≥ 2 × tickSpacing`; and remember skew is inert at `width == 2 × tickSpacing` (needs `≥ 3 × tickSpacing` to do anything) (§B).
 - [ ] In the two-borrowed-legs shape, budget for the **per-borrow ratchet** a skewed range creates against the range-blind 50/50 borrow: each `deployIdle`/`compound` strands a fresh, debt-funded slice of its own borrow (≈19 % at `skewBps` 3500, ≈33.5 % at 2000 *or* 8000) and the idle fraction grows with every compound until an op that resizes the book folds it back in (§B). Utilisation drag and borrow carry — not a hedge or health change.
 - [ ] `adjustLeverage(targetBps, minLiq, minOut)` — **selector `0x9792419f`** — pass `targetLtvBps()` to hold the book at policy. To lever **down before `fulfillRedeem`** so the oracle-free unwind self-funds, pass a lower `targetBps` (capped at policy → `TargetLtvExceedsPolicy`, never stored) — no multisig step, in either direction. `lowerTargetLtv` no longer exists.
-- [ ] Watch `RedeemRequested` → assess self-funding via `redeemRequest(id)`/`previewRedeem` → (deleverage if needed) → `fulfillRedeem(id, minAssetsOut)`; on `InsufficientAssetsOut`, deleverage more or wait — never lower the requester's floor.
+- [ ] Watch `RedeemRequested` → **simulate** `fulfillRedeem(id, 0)` statefully (`eth_simulateV1`; `tenderly_simulateBundle` is **vnet-only**) → passes: decode `RedeemFulfilled.assetsOut`, send with a tolerance → reverts: **classify first**, and only a cover-budget failure goes on the ladder (`min(currentLtv, targetLtvBps())` anchored, candidates strictly **below current LTV**, integer steps down to a floor, then escalate). Restore with `adjustLeverage(targetLtvBps(), …)` **once, after the queue drains**. Never quote from `previewRedeem` and never lower the requester's floor — §C "Sizing the fulfil".
 - [ ] Treat `FULFILL_WINDOW = 2 days` as the hard SLA; alert before it; every `RedeemEmergency` is a missed SLA.
 - [ ] Alert on **supply reaching zero**: a full redeem burns the position NFT (`tokenId == 0` while still `Executed`) and the book cannot be rebuilt — `rerange` silently mints nothing, `deployIdle` fails closed, `compound` no-ops, and the only way forward is `settleStrategy()` plus a **new vault** (§F).
 - [ ] Run `deleverage(minOut)` proactively as health nears `minHealthBps`; remember it is permissionless (others will trigger it too).
