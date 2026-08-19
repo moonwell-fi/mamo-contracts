@@ -102,6 +102,29 @@ tenderly-matrix:
 tenderly-price-checker:
 	./script/tenderly/run-harness.sh price-checker
 
+# Vnet heartbeat (MOO-768). A Tenderly vnet mines a block ONLY when a tx arrives, so an idle chain
+# mints nothing and wallets misbehave: any waitForTransactionReceipt with confirmations > 1 deadlocks
+# between interactive legs, and MetaMask's activity tracker keeps mined txs as "submitted/pending"
+# (the stale-queue banner). This calls evm_mine every 2s so the chain ticks like Base while a human is
+# clicking through a manual QA session. Foreground; Ctrl-C to stop. Holds no state — safe to start and
+# stop at will, and it does NOT fast-forward chain time (Tenderly stamps each block with the real
+# elapsed time). Uses TENDERLY_VNET_RPC_URL; `--once` catches a drifted vnet up before a run.
+tenderly-mine:
+	./script/tenderly/mine-ticker.sh
+
+# Same heartbeat, detached — for an all-day ticker the team can share. Logs to
+# script/tenderly/mine-ticker.log (gitignored). Run it on an always-on host: a laptop that
+# sleeps stops the chain, which is the failure the ticker exists to prevent. See the launchd
+# recipe under "Vnet heartbeat" in script/tenderly/README.md.
+tenderly-mine-start:
+	./script/tenderly/mine-ticker.sh --daemon
+
+tenderly-mine-stop:
+	./script/tenderly/mine-ticker.sh --stop
+
+tenderly-mine-status:
+	./script/tenderly/mine-ticker.sh --status
+
 # POOLED-layer deploy against the LIVE persistent Base-fork vnet (runbook Phase B). B.0 FreshFeed-
 # overrides the 5 venue Chainlink feeds via tenderly_setCode (never stale, warping safe) → B.1 deploys
 # the LeveragedAerodromeCLStrategy TEMPLATE + LeveragedAeroVault(USDC, owner=MAMO_MULTISIG) as
@@ -124,4 +147,4 @@ tenderly-leveraged-aero-stack:
 tenderly-leveraged-aero-account:
 	./script/tenderly/run-harness.sh leveraged-aero-account
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-leveraged-aero-stack tenderly-leveraged-aero-account
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account

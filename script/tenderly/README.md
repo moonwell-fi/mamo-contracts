@@ -245,6 +245,84 @@ cast call <account> 'sharesBalance()(uint256)' --rpc-url <public-rpc>
 TENDERLY_VNET_RPC_URL=<admin-rpc> make tenderly-leveraged-aero-account
 ```
 
+## Vnet heartbeat — an idle vnet mines nothing (MOO-768)
+
+A Tenderly vnet produces a block **only when a transaction arrives**. Real Base produces one every
+~2s, and wallets assume the latter. Two QA artifacts fall out of that, both seen during FE-05 manual
+testing:
+
+1. **Confirmation deadlock** — any `waitForTransactionReceipt` with `confirmations > 1` between
+   interactive legs never resolves: the first leg mines into its own block and no further blocks come.
+2. **MetaMask "previous transactions are still being signed or submitted"** — MetaMask's activity
+   tracker needs block progression to mark a tx confirmed, so mined txs linger locally as
+   submitted/pending and the next signature request shows the stale-queue banner. Benign (nonces come
+   from the RPC and are correct) but it reads as a failure to testers. Clears via MetaMask → Settings
+   → Advanced → *Clear activity tab data*.
+
+`mine-ticker.sh` closes the gap from outside the app — it calls `evm_mine` on a fixed interval so the
+chain keeps ticking while nobody is transacting. It holds no state, so starting and stopping it is
+always safe, and it needs the **admin** (write-capable) RPC: on the public one `evm_mine` returns
+`Access forbidden by access rules`.
+
+```bash
+make tenderly-mine                                  # foreground 2s heartbeat, Ctrl-C to stop
+make tenderly-mine-start                            # detached — logs to mine-ticker.log
+make tenderly-mine-status                           # running? and how far behind wall clock
+make tenderly-mine-stop
+./script/tenderly/mine-ticker.sh --once             # single block — catch a drifted vnet up
+./script/tenderly/mine-ticker.sh --interval 5 --quiet --rpc-url <admin-rpc>
+```
+
+**It does not fast-forward the chain.** Tenderly stamps each mined block with the real time elapsed
+since the previous one, so a 2s cadence advances chain time ~2s per block. What it fixes is *drift*:
+an idle vnet falls behind wall clock by exactly as long as it sat idle (measured 2026-08-19: the
+shared instance was ~2h behind after a quiet stretch), and the first transaction afterwards closes the
+whole gap in a single block's timestamp. A running ticker keeps that offset flat — which is the more
+production-faithful thing for anything reading a TWAP or an oracle age.
+
+### Keeping it up all day
+
+QA wants blocks whenever someone is clicking, not only when someone remembers to start a ticker. The
+daemon has to live on a host that does not sleep — a closed laptop stops the chain, which is the exact
+failure this exists to prevent. On macOS, a LaunchAgent restarts it across crashes and reboots:
+
+```xml
+<!-- ~/Library/LaunchAgents/fi.moonwell.vnet-mine.plist -->
+<plist version="1.0"><dict>
+  <key>Label</key>            <string>fi.moonwell.vnet-mine</string>
+  <key>ProgramArguments</key> <array>
+    <string>/path/to/mamo-contracts/script/tenderly/mine-ticker.sh</string>
+    <string>--interval</string><string>2</string>
+    <string>--quiet</string>
+  </array>
+  <key>EnvironmentVariables</key> <dict>
+    <!-- admin RPC from 1Password; the plist is NOT in the repo -->
+    <key>TENDERLY_VNET_RPC_URL</key> <string>https://virtual.base.…</string>
+  </dict>
+  <key>RunAtLoad</key>  <true/>
+  <key>KeepAlive</key>  <true/>
+  <key>StandardOutPath</key>   <string>/tmp/vnet-mine.log</string>
+  <key>StandardErrorPath</key> <string>/tmp/vnet-mine.err</string>
+</dict></plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/fi.moonwell.vnet-mine.plist
+launchctl print gui/$(id -u)/fi.moonwell.vnet-mine | grep 'pid ='
+launchctl bootout   gui/$(id -u) ~/Library/LaunchAgents/fi.moonwell.vnet-mine.plist   # remove
+```
+
+Run it under `--quiet` there: the status line is for humans watching a terminal, and unattended it
+just grows the log. Note the plist embeds the write-capable RPC, so it stays out of the repo — keep it
+in `~/Library/LaunchAgents` and source the URL from 1Password.
+
+The alternative that depends on nobody's machine is a scheduled CI job holding the admin RPC as a
+secret and mining for the length of its run — worth it only if the vnet outlives the QA train.
+
+Fixing this at the source instead — interval mining configured on the vnet itself — is a Tenderly
+dashboard/admin action rather than anything in this repo, and it is still the right permanent answer.
+The ticker is the version that needs no account privileges and no maintainer in the loop.
+
 ## vnet resolution
 
 Mirrors the goal's "(a) spin up a vnet **or** (b) use the url in `.env`":
@@ -298,6 +376,9 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   the persistent vnet carrying the pooled layer (unlocked impersonation; always `--reuse`). See section
   above.
 - `setup-staging.sh` — stands up a **persistent** frontend staging vnet (not torn down after the run).
+- `mine-ticker.sh` — vnet heartbeat: `evm_mine` on an interval so an idle chain keeps producing
+  blocks for wallet-driven manual QA. `--daemon/--stop/--status` for an all-day ticker (see
+  "Vnet heartbeat" above for the launchd recipe). Standalone; not part of any harness run.
 - `lib/common.sh` — shared plumbing (vnet resolution/teardown, cheat-RPC fund/time helpers, the
   forge-phase runner, address-book lookup, vnet gotcha fixes). Sourced, never executed.
 - `lib/market.sh` — reusable price/market simulation cheat primitives (`snapshot`/`revert_to`,
