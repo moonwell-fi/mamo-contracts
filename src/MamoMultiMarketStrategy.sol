@@ -17,7 +17,6 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 interface IMerkleDistributor {
     function claim(
@@ -68,6 +67,25 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /// @notice The address of the WETH token
     address public constant WETH = 0x4200000000000000000000000000000000000006;
 
+    /// @notice The exact CoW Protocol appData document every reward order must carry.
+    /// @dev No hooks: the compound fee is settled on-chain by {sweepRewardFees}, so the balance an
+    ///      order is allowed to sell is already net of fees and the order needs no pre-hook. The
+    ///      previous design pinned a `transferFrom(this, feeRecipient, fee)` pre-hook, which could
+    ///      never succeed — for transferFrom the spender is the CALLER (HooksTrampoline), and this
+    ///      strategy only ever approves VAULT_RELAYER. The trampoline swallows hook reverts, so
+    ///      settlement proceeded and the fee was silently never collected. Approving the
+    ///      trampoline is NOT the fix: CoW documents that allowances granted to it are usable by
+    ///      anyone.
+    ///
+    ///      OPERATIONAL NOTE: the CoW appData schema version is pinned here as a constant, with no
+    ///      setter. Pinning is the point — the document is what an order commits to, and a mutable
+    ///      one would let whoever can change it widen what this strategy will sign. The cost is
+    ///      that a CoW schema bump makes new orders unsignable until the implementation is upgraded
+    ///      and each proxy is moved to it. Rewards are not at risk in that window (they simply stop
+    ///      compounding and remain withdrawable), but the upgrade is on the critical path, so
+    ///      schema announcements need to be watched rather than discovered.
+    string internal constant EXPECTED_APP_DATA = '{"appCode":"Mamo","metadata":{},"version":"1.3.0"}';
+
     // ==================== STORAGE LAYOUT ====================
     // Slots 0-49: BaseStrategy (mamoStrategyRegistry, strategyTypeId, __gap[48])
 
@@ -109,6 +127,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     // Slot 61: per-market splits keyed by market address
     mapping(address => uint256) public marketSplitBps;
 
+    // Slot 62: how much of the CURRENT balance of a reward token has already had the compound fee
+    // charged on it. Together with the VAULT_RELAYER allowance (which this contract is the only
+    // writer of) it is enough to reconstruct, at any later time, how much of the balance is
+    // freshly arrived and still owes the fee — see {_unchargedRewards}.
+    mapping(address => uint256) public rewardFeeCharged;
+
     // Events
     event Deposit(address indexed asset, uint256 amount);
     event DepositIdle(address indexed asset, uint256 amount);
@@ -117,12 +141,13 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
     event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
     event RewardsClaimed(address[] rewardTokens, uint256[] rewardAmounts);
+    event CompoundFeeCollected(address indexed feeRecipient, address[] rewardTokens, uint256[] feeAmounts);
+    event RewardFeeSettled(address indexed rewardToken, address indexed feeRecipient, uint256 feeAmount);
     event MarketRegistryMigrated(address indexed marketRegistry);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
-        address mamoBackend;
         address token;
         address slippagePriceChecker;
         address feeRecipient;
@@ -151,11 +176,19 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     }
 
     modifier onlyBackend() {
-        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        require(_isBackend(msg.sender), "Not backend");
         _;
     }
 
     // ==================== INITIALIZER ====================
+
+    /// @notice Locks the implementation so it can never be initialized directly.
+    /// @dev Without this the first caller of {initialize} on the implementation becomes its owner
+    ///      (initialize takes the owner from caller-supplied params) and gains the inherited
+    ///      recoverERC20/recoverETH. Proxies are unaffected — they initialize their own storage.
+    constructor() {
+        _disableInitializers();
+    }
 
     /**
      * @notice Initializer for new deployments using MarketRegistry
@@ -163,7 +196,6 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      */
     function initialize(InitParams calldata params) external initializer {
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
-        require(params.mamoBackend != address(0), "Invalid mamoBackend address");
         require(params.token != address(0), "Invalid token address");
         require(params.slippagePriceChecker != address(0), "Invalid SlippagePriceChecker address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
@@ -188,15 +220,28 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(regMarkets.length > 0, "No markets in registry");
         require(params.defaultSplitBps.length == regMarkets.length, "Split count must match market count");
 
+        // Inactive registry entries are skipped, not rejected. MarketRegistry never removes a
+        // market — retiring one is a deactivation — so requiring every historical entry to be
+        // active would make every creation after the first retirement revert. An inactive entry
+        // may only carry a zero allocation; the ACTIVE splits still have to total SPLIT_TOTAL,
+        // which _validateTotalSplit enforces (it, depositInternal and _withdrawProRata all agree
+        // on skipping inactive markets).
         for (uint256 i = 0; i < regMarkets.length; i++) {
-            require(regMarkets[i].active, "Market not active");
+            if (!regMarkets[i].active) {
+                require(params.defaultSplitBps[i] == 0, "Inactive market must have zero split");
+                continue;
+            }
             marketSplitBps[regMarkets[i].target] = params.defaultSplitBps[i];
         }
         _validateTotalSplit();
 
-        // Approve CowSwap for each reward token
+        // Reward tokens are validated here but deliberately NOT given a standing allowance. The
+        // CoW vault relayer is approved for exactly the fee-settled balance by {sweepRewardFees},
+        // which is what lets a later settlement see how much the relayer pulled (see
+        // {_unchargedRewards}); an unlimited, never-decreasing allowance would erase that signal
+        // and with it the only defence against rewards that arrive outside {claimRewards}.
         for (uint256 i = 0; i < params.rewardTokens.length; i++) {
-            _approveCowSwap(params.rewardTokens[i], type(uint256).max);
+            _requireRewardToken(params.rewardTokens[i]);
         }
     }
 
@@ -207,8 +252,15 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      * @param _marketRegistry The address of the MarketRegistry contract
      */
     function migrateV1ToMarketRegistry(address _marketRegistry) external reinitializer(2) {
-        require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
+        require(msg.sender == owner() || _isBackend(msg.sender), "Not owner or backend");
         require(_marketRegistry != address(0), "Invalid market registry address");
+        // A strategy created by the factory is already at `_initialized == 1` with both legacy
+        // splits at zero, so both migration branches below would be skipped and _validateTotalSplit
+        // would pass against the splits it was initialized with — leaving the owner free to point
+        // `marketRegistry` at an arbitrary contract and spoof every registry-derived invariant
+        // (market set, active flags, and therefore _getTotalBalance) for that strategy. Migration is
+        // by definition a one-way move off the v1 layout, so it may only run before a registry is set.
+        require(address(marketRegistry) == address(0), "Market registry already set");
 
         marketRegistry = IMarketRegistry(_marketRegistry);
 
@@ -232,8 +284,44 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
 
     // ==================== OWNER FUNCTIONS ====================
 
-    function approveCowSwap(address tokenAddress, uint256 amount) public onlyOwner {
-        _approveCowSwap(tokenAddress, amount);
+    /**
+     * @notice Recovers ERC20 tokens from this contract, settling any compound fee owed first
+     * @dev Sherlock #49. Reward tokens sit here as plain balances, so the inherited unconditional
+     *      owner recovery is otherwise a complete escape hatch from the compound fee: claim (or
+     *      let anyone claim) the rewards, sweep them out before any order exists, done. Settling
+     *      first means the owner can only ever take the post-fee remainder. The trailing settle is
+     *      what makes it stick — it drops the anchor and the relayer allowance back down to what
+     *      is left, so the next batch of rewards cannot hide behind the recovered amount.
+     *
+     *      KNOWN LIMITATION: for a reward token, recovery now depends on the fee transfer to
+     *      `feeRecipient` succeeding. A token that can blocklist an address (USDC and friends) can
+     *      therefore suspend the escape hatch for that token until the backend re-points
+     *      `feeRecipient` via {setFeeRecipient}. Accepted deliberately — the alternative, letting
+     *      recovery proceed when the fee cannot be paid, is exactly the bypass #49 is about.
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) public override onlyOwner {
+        // Settle on the ANCHOR, not only on the current price-checker answer. A token that has been
+        // swept at least once carries an unsettled-fee position (`rewardFeeCharged`) that outlives
+        // its configuration: SlippagePriceChecker.clearRewardToken makes isRewardToken() go false,
+        // after which the old code took both settles off and the anchor stayed stale-high. That is a
+        // second #49 escape by a different door — recover the whole balance untaxed, re-configure,
+        // and the next batch is masked by the stale anchor because {_unchargedRewards} clamps to it.
+        // The trailing settle is the half that actually closes it: it re-anchors to the remaining
+        // balance, so a retired token cannot carry a stale credit back into a future configuration.
+        // The principal exclusions are re-asserted here because they are the only thing standing
+        // between this branch and the strategy's own assets.
+        bool settle = _isSettleableRewardToken(tokenAddress)
+            || (rewardFeeCharged[tokenAddress] > 0 && tokenAddress != address(token) && !_isMarketTarget(tokenAddress));
+
+        if (settle) {
+            _settleRewardFees(tokenAddress);
+        }
+
+        super.recoverERC20(tokenAddress, to, amount);
+
+        if (settle) {
+            _settleRewardFees(tokenAddress);
+        }
     }
 
     function setSlippage(uint256 _newSlippageInBps) external onlyOwner {
@@ -285,13 +373,17 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /**
      * @notice Updates the position across markets with new splits (address-keyed)
      * @param updates Array of market address + new splitBps pairs
+     * @dev Runs on an EMPTY strategy too. This is the only way to repair the split configuration
+     *      after a market is deactivated (deposit() refuses to run while the active splits are
+     *      incomplete), so refusing to run at zero balance would permanently brick every strategy
+     *      that happened to hold nothing at that moment — with no way back, because it cannot be
+     *      funded either. There is simply nothing to re-deposit in that case.
      */
     function updatePosition(MarketSplitUpdate[] calldata updates) external onlyBackend {
         // Withdraw everything from all markets
         _withdrawAllFromMarkets();
 
         uint256 totalTokenBalance = token.balanceOf(address(this));
-        require(totalTokenBalance > 0, "Nothing to rebalance");
 
         // Zero out all splits first
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
@@ -310,11 +402,22 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         _validateTotalSplit();
 
         // Re-deposit via depositInternal
-        depositInternal(totalTokenBalance);
+        if (totalTokenBalance > 0) {
+            depositInternal(totalTokenBalance);
+        }
 
         emit PositionUpdated(updates);
     }
 
+    /**
+     * @notice Claims Merkl rewards for this strategy and settles the compound fee on what arrived
+     * @dev Convenience only. The fee is NOT charged on the claimed delta: Merkl's distributor
+     *      exposes a permissionless `claim`, so anyone — the strategy owner included — can pull
+     *      this strategy's rewards straight from the distributor and the tokens land here without
+     *      this function ever running. The fee therefore has to be a property of the BALANCE, not
+     *      of the call that fetched it; {sweepRewardFees} is where it is actually charged, and no
+     *      CoW order for a reward token can settle until it has been (see {isValidSignature}).
+     */
     function claimRewards(
         address[] calldata rewardTokens,
         uint256[] calldata rewardAmounts,
@@ -323,14 +426,94 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(rewardTokens.length == rewardAmounts.length, "Reward tokens and amounts length mismatch");
         require(rewardTokens.length == proofs.length, "Reward tokens and proofs length mismatch");
 
-        address[] memory accounts = new address[](rewardTokens.length);
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        uint256 length = rewardTokens.length;
+        address[] memory accounts = new address[](length);
+        for (uint256 i = 0; i < length; i++) {
             accounts[i] = address(this);
         }
 
         IMerkleDistributor(MERKLE_PROTOCOL_DISTRIBUTOR).claim(accounts, rewardTokens, rewardAmounts, proofs);
 
         emit RewardsClaimed(rewardTokens, rewardAmounts);
+
+        uint256[] memory feeAmounts = new uint256[](length);
+        for (uint256 i = 0; i < length; i++) {
+            // Skipped, not reverted: the claim itself has already succeeded by this point, and the
+            // set of tokens Merkl pays is not ours to choose. It routinely includes the market's
+            // own asset, and a campaign can start paying a token before the price checker is
+            // configured for it — either one would make _requireRewardToken revert the whole batch
+            // and strand every other reward in this call. A token that cannot be settled simply
+            // stays where it is, with no fee charged and no relayer allowance armed, until it
+            // becomes settleable.
+            // A duplicated token settles to zero on its second visit — the first visit already
+            // moved the whole uncharged balance behind the anchor.
+            if (_isSettleableRewardToken(rewardTokens[i])) {
+                feeAmounts[i] = sweepRewardFees(rewardTokens[i]);
+            }
+        }
+
+        emit CompoundFeeCollected(feeRecipient, rewardTokens, feeAmounts);
+    }
+
+    /**
+     * @notice Charges the compound fee on any balance of `rewardToken` that has not been charged
+     *         yet, and re-arms the CoW vault relayer allowance at the fee-settled balance
+     * @dev PERMISSIONLESS on purpose. It is the single settlement point for the fee regardless of
+     *      how the tokens got here — a backend {claimRewards}, a permissionless distributor claim
+     *      by the owner, or a plain transfer. Anyone may force it, and the relayer allowance this
+     *      re-arms is what bounds a CoW settlement to the fee-settled amount, so the only way to
+     *      turn rewards into strategy tokens runs through here.
+     *
+     *      SCOPE NOTE (deliberate broadening vs the audited design): the fee is a property of the
+     *      BALANCE, charged on receipt of any priced non-principal token, whether or not a swap
+     *      ever happens and regardless of who sent it. A donation of a reward token is taxed like a
+     *      reward. That is the direct consequence of the fee not being able to live on the claim
+     *      path — Merkl's `claim` is permissionless, so anything keyed to "the call that fetched
+     *      the rewards" is trivially bypassed — and it over-collects rather than under-collects,
+     *      which is the safe direction. What it is NOT robust to is a REBASING reward token: a
+     *      negative rebase moves the balance under a fixed anchor, and a positive one reads as
+     *      fresh rewards. Fee-on-transfer tokens are already documented unsupported; rebasing
+     *      reward tokens are unsupported for the same reason.
+     * @param rewardToken The reward token to settle
+     * @return fee The amount transferred to the fee recipient by this call
+     */
+    function sweepRewardFees(address rewardToken) public returns (uint256 fee) {
+        _requireRewardToken(rewardToken);
+
+        return _settleRewardFees(rewardToken);
+    }
+
+    /// @dev The settlement itself, with the eligibility check factored out. {recoverERC20} needs to
+    ///      settle a token whose price-checker entry has since been RETIRED
+    ///      (SlippagePriceChecker.clearRewardToken), which {_requireRewardToken} would reject — see
+    ///      the escape documented on {recoverERC20}. Every caller is responsible for proving the
+    ///      token is not principal before getting here; there is no path that reaches this with the
+    ///      strategy's own asset or a market share.
+    function _settleRewardFees(address rewardToken) internal returns (uint256 fee) {
+        uint256 balance = IERC20(rewardToken).balanceOf(address(this));
+        fee = (_unchargedRewards(rewardToken, balance) * compoundFee) / SPLIT_TOTAL;
+
+        address recipient = feeRecipient;
+        if (fee > 0) {
+            IERC20(rewardToken).safeTransfer(recipient, fee);
+            balance -= fee;
+        }
+
+        // Re-anchor BOTH observables to the post-fee balance. The next settlement compares them:
+        // the relayer allowance falls by exactly what CoW pulled, and crediting that outflow is
+        // what stops a stale anchor from masking an equal amount of freshly arrived rewards.
+        rewardFeeCharged[rewardToken] = balance;
+        IERC20(rewardToken).forceApprove(VAULT_RELAYER, balance);
+
+        emit RewardFeeSettled(rewardToken, recipient, fee);
+    }
+
+    /**
+     * @notice The compound fee `rewardToken` currently owes, i.e. what {sweepRewardFees} would pay
+     */
+    function pendingRewardFee(address rewardToken) public view returns (uint256) {
+        uint256 balance = IERC20(rewardToken).balanceOf(address(this));
+        return (_unchargedRewards(rewardToken, balance) * compoundFee) / SPLIT_TOTAL;
     }
 
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
@@ -397,39 +580,37 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     ///      sell-order mechanics + price check live in GPv2OrderChecks.validate — one
     ///      implementation for this path and both of LPCompoundModule's. Revert strings are the
     ///      repo-canonical short set (see the library).
+    ///      The order carries no fee hook. What actually secures the fee is the FINITE relayer
+    ///      allowance: {sweepRewardFees} re-arms it at exactly the fee-settled balance, so CoW can
+    ///      never pull a unit that has not been taxed, whatever else is sitting in this contract.
+    ///      The one state that lock does not cover is a legacy proxy upgraded into this
+    ///      implementation while still carrying the old unlimited approval — there the allowance
+    ///      says nothing and the fee has to be settled before an order may be signed. Hence the
+    ///      conditional below.
+    ///
+    ///      Applying the gate unconditionally was a liveness bug (and its old comment, claiming
+    ///      dust could not block an order, was simply wrong): `pendingRewardFee` is a bps
+    ///      multiplication that rounds down, so at the production compoundFee of 500 any donation
+    ///      of 20 wei or more of the sell token rounds up to a nonzero owed fee and reverted the
+    ///      solver's entire batch. Repeating it after each sweep costs the griefer ~20 wei plus gas
+    ///      and stalls reward compounding indefinitely.
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory _order = abi.decode(encodedOrder, (GPv2Order.Data));
 
         require(_order.sellToken != token, "Sell token can't be strategy token");
         require(_order.buyToken == token, "Buy token must match the strategy token");
 
-        uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
-
-        bytes memory preHookCalldata =
-            abi.encodeWithSelector(IERC20.transferFrom.selector, address(this), feeRecipient, feeAmount);
-
-        string memory preHookCalldataStr = string.concat("0x", _bytesToHexString(preHookCalldata));
-
-        string memory targetAddress = Strings.toHexString(uint160(address(_order.sellToken)), 20);
-
-        string memory expectedAppData = string(
-            abi.encodePacked(
-                '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
-                preHookCalldataStr,
-                '","gasLimit":"',
-                Strings.toString(hookGasLimit),
-                '","target":"',
-                targetAddress,
-                '"}],"version":"0.1.0"}},"version":"1.3.0"}'
-            )
-        );
+        address sellToken = address(_order.sellToken);
+        if (IERC20(sellToken).allowance(address(this), VAULT_RELAYER) > rewardFeeCharged[sellToken]) {
+            require(pendingRewardFee(sellToken) == 0, "Reward fee not settled");
+        }
 
         GPv2OrderChecks.validate(
             _order,
             GPv2OrderChecks.Binding({
                 orderDigest: orderDigest,
                 domainSeparator: DOMAIN_SEPARATOR,
-                expectedAppData: keccak256(bytes(expectedAppData))
+                expectedAppData: keccak256(bytes(EXPECTED_APP_DATA))
             }),
             address(this),
             slippagePriceChecker,
@@ -437,6 +618,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         );
 
         return MAGIC_VALUE;
+    }
+
+    /// @notice The appData document (and its hash) every reward order must carry
+    function expectedAppData() external pure returns (string memory doc, bytes32 hash) {
+        doc = EXPECTED_APP_DATA;
+        hash = keccak256(bytes(EXPECTED_APP_DATA));
     }
 
     // ==================== INTERNAL FUNCTIONS ====================
@@ -449,14 +636,24 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
         uint256 deposited = 0;
 
-        // Find the last active market with nonzero split for remainder handling
+        // Find the last active market with nonzero split for remainder handling, and check the
+        // active allocation is complete. The remainder branch below is a DUST sink (integer
+        // division leftovers); without this guard it silently absorbs the entire allocation of a
+        // market that was just deactivated — 40/30/30 with B deactivated would send 60% of the
+        // deposit to C, which is configured for 30%. Depositing is blocked during that window
+        // until updatePosition (or the factory's split config) restores a complete allocation.
         uint256 lastActiveIdx = type(uint256).max;
+        uint256 totalActiveSplit = 0;
         for (uint256 i = regMarkets.length; i > 0; i--) {
-            if (regMarkets[i - 1].active && marketSplitBps[regMarkets[i - 1].target] > 0) {
+            if (!regMarkets[i - 1].active) continue;
+
+            uint256 activeSplit = marketSplitBps[regMarkets[i - 1].target];
+            totalActiveSplit += activeSplit;
+            if (activeSplit > 0 && lastActiveIdx == type(uint256).max) {
                 lastActiveIdx = i - 1;
-                break;
             }
         }
+        require(totalActiveSplit == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
 
         for (uint256 i = 0; i < regMarkets.length; i++) {
             if (!regMarkets[i].active) continue;
@@ -493,29 +690,116 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     }
 
     /**
-     * @notice Withdraws pro-rata from active markets based on their split
+     * @notice Withdraws `amountNeeded` underlying tokens, pro-rata by split where possible
      * @param amountNeeded The total amount of underlying tokens needed
-     * @dev Integer division may leave up to (N-1) wei undrawn where N = active markets.
-     *      Users can call withdrawAll() to fully drain all markets if withdraw() reverts on dust.
+     * @dev Splits are a target allocation, not a statement about what each market currently holds.
+     *      Balances drift with interest, an ERC4626 vault can cap what it will pay out, exit fees
+     *      make a share worth less than its configured share of principal, and during the
+     *      deactivate-then-updatePosition window the active splits do not describe the whole
+     *      position at all. So each market is asked for at most its CURRENT capacity, the
+     *      shortfall is carried forward, and a second pass sweeps every market — including
+     *      inactive ones, which still hold funds — until the amount is covered. Anything less
+     *      makes withdraw() revert on ordinary drift while withdrawAll() would have succeeded.
      */
     function _withdrawProRata(uint256 amountNeeded) internal {
         RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
+        uint256 remaining = amountNeeded;
 
-        for (uint256 i = 0; i < regMarkets.length; i++) {
+        // Pass 1: pro-rata against the configured allocation, capped at each market's capacity.
+        for (uint256 i = 0; i < regMarkets.length && remaining > 0; i++) {
             if (!regMarkets[i].active) continue;
 
             uint256 split = marketSplitBps[regMarkets[i].target];
             if (split == 0) continue;
 
-            uint256 withdrawAmount = (amountNeeded * split) / SPLIT_TOTAL;
-            if (withdrawAmount == 0) continue;
+            uint256 target = (amountNeeded * split) / SPLIT_TOTAL;
+            if (target > remaining) target = remaining;
 
-            if (regMarkets[i].marketType == MarketType.MTOKEN) {
-                require(IMToken(regMarkets[i].target).redeemUnderlying(withdrawAmount) == 0, "Failed to redeem mToken");
+            // Clamped, not subtracted: _withdrawUpTo reports a measured balance DELTA, and nothing
+            // in the ERC4626/mToken interfaces forbids a market paying out more than was asked for.
+            // A bare `-=` would panic on the overshoot and revert a withdrawal that had in fact
+            // already been over-covered.
+            remaining = _subFloorZero(remaining, _withdrawUpTo(regMarkets[i], target));
+        }
+
+        // Pass 2: cover the shortfall from wherever the funds actually are.
+        for (uint256 i = 0; i < regMarkets.length && remaining > 0; i++) {
+            remaining = _subFloorZero(remaining, _withdrawUpTo(regMarkets[i], remaining));
+        }
+
+        require(remaining == 0, "Withdrawal failed: insufficient market liquidity");
+    }
+
+    /**
+     * @notice Withdraws at most `amount` underlying from a single market
+     * @return withdrawn The amount of underlying tokens this strategy actually received
+     * @dev Measured as a balance delta rather than trusting the requested amount, so a market
+     *      that pays out less (or, for a WETH mToken, pays in native ETH that `receive` wraps)
+     *      is accounted correctly.
+     */
+    function _withdrawUpTo(RegistryMarket memory market, uint256 amount) internal returns (uint256 withdrawn) {
+        if (amount == 0) return 0;
+
+        uint256 balanceBefore = token.balanceOf(address(this));
+
+        if (market.marketType == MarketType.MTOKEN) {
+            // Two independent ceilings, and only taking the lower of them keeps this a partial
+            // withdrawal instead of a revert. What the strategy owns is balanceOfUnderlying; what
+            // the market can actually pay out today is getCash() — the rest is lent to borrowers.
+            // Asking for more than the cash returns TOKEN_INSUFFICIENT_CASH, which the require
+            // below turns into a hard revert of the ENTIRE withdrawal, including the second pass
+            // that would have covered the shortfall from a market that does have the funds.
+            uint256 capacity = IMToken(market.target).balanceOfUnderlying(address(this));
+            uint256 cash = IMToken(market.target).getCash();
+            if (cash < capacity) capacity = cash;
+
+            uint256 toWithdraw = amount > capacity ? capacity : amount;
+            if (toWithdraw == 0) return 0;
+            // The require stays strict for every OTHER Compound error code. That is safe today
+            // rather than semantically necessary: a non-zero code means the mToken changed no state,
+            // so tolerating it would measure a zero delta, let pass 2 try elsewhere, and still revert
+            // on `remaining == 0` if the funds cannot be found anywhere. It is safe because none of
+            // the other codes is reachable on Moonwell — COMPTROLLER_REJECTION needs market
+            // membership and this strategy never calls `enterMarkets`, MARKET_NOT_LISTED needs
+            // `_unsupportMarket` (absent from the comptroller), and redeem is not pausable. Revisit
+            // before adding any non-Moonwell Compound-v2 market, or if a strategy ever enters a
+            // market: one bad code would then brick `withdraw`, `withdrawAll` AND `updatePosition`
+            // for every strategy on that asset.
+            require(IMToken(market.target).redeemUnderlying(toWithdraw) == 0, "Failed to redeem mToken");
+        } else {
+            // maxWithdraw already accounts for the vault's withdrawal fee and liquidity limits.
+            uint256 capacity = IERC4626(market.target).maxWithdraw(address(this));
+            if (capacity == 0) return 0;
+
+            if (amount >= capacity) {
+                // Taking the whole capacity goes through redeem(), not withdraw(maxWithdraw): the two
+                // are only equivalent when the vault's asset<->share conversions are exactly
+                // self-inverse, and a vault whose maxWithdraw floors while previewWithdraw ceils
+                // reports a capacity that costs one more share than it holds, so withdraw() reverts at
+                // precisely the boundary this branch always sits on.
+                //
+                // WHICH share count to redeem is the same asset-terms decision {_withdrawFromMarket}
+                // makes, and for the same reason: MetaMorpho's maxRedeem round-trips
+                // shares -> assets -> shares flooring at each step, so redeem(maxRedeem) delivers
+                // maxWithdraw - 1 while {_getTotalBalance} advertised previewRedeem(shareBalance) ==
+                // maxWithdraw. Being one unit short is enough to fail the `remaining == 0` require at
+                // the end of {_withdrawFromMarkets} — i.e. a max withdrawal reverts — so the full share
+                // balance has to go out whenever the vault can honour it, and maxRedeem is only the
+                // right answer when the vault is genuinely liquidity-constrained.
+                uint256 shareBalance = IERC4626(market.target).balanceOf(address(this));
+                if (capacity >= IERC4626(market.target).previewRedeem(shareBalance)) {
+                    IERC4626(market.target).redeem(shareBalance, address(this), address(this));
+                } else {
+                    uint256 shares = IERC4626(market.target).maxRedeem(address(this));
+                    if (shares == 0) return 0;
+                    IERC4626(market.target).redeem(shares, address(this), address(this));
+                }
             } else {
-                IERC4626(regMarkets[i].target).withdraw(withdrawAmount, address(this), address(this));
+                IERC4626(market.target).withdraw(amount, address(this), address(this));
             }
         }
+
+        return token.balanceOf(address(this)) - balanceBefore;
     }
 
     /**
@@ -530,18 +814,48 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     }
 
     /**
-     * @notice Withdraws all funds from a single market
+     * @notice Withdraws as much as the market can currently pay out
+     * @dev Best-effort, NOT all-or-nothing. A Moonwell market that is fully lent out cannot honour
+     *      a full-position redeem, and reverting here would take down every caller: withdrawAll()
+     *      (the documented recovery route), and updatePosition(), which opens with this sweep and
+     *      is the only way to repair a split configuration. Draining what cash there is and leaving
+     *      the remainder earning interest is strictly better than bricking all three.
      */
     function _withdrawFromMarket(RegistryMarket memory market) internal {
         if (market.marketType == MarketType.MTOKEN) {
             uint256 mTokenBalance = IERC20(market.target).balanceOf(address(this));
-            if (mTokenBalance > 0) {
+            if (mTokenBalance == 0) return;
+
+            uint256 underlying = IMToken(market.target).balanceOfUnderlying(address(this));
+            uint256 cash = IMToken(market.target).getCash();
+
+            if (cash >= underlying) {
+                // Share-denominated so the whole position leaves, dust included.
                 require(IMToken(market.target).redeem(mTokenBalance) == 0, "Failed to redeem mToken");
+            } else if (cash > 0) {
+                require(IMToken(market.target).redeemUnderlying(cash) == 0, "Failed to redeem mToken");
             }
         } else {
             uint256 shareBalance = IERC4626(market.target).balanceOf(address(this));
-            if (shareBalance > 0) {
+            if (shareBalance == 0) return;
+
+            // Decide in ASSET terms, then act in SHARE terms. Comparing `maxRedeem` against the
+            // share balance directly does not work on MetaMorpho: its maxRedeem round-trips
+            // shares -> assets -> shares with a floor at each step, so even with ample liquidity it
+            // comes back a few units short and a redeem(maxRedeem) leaves permanent share dust
+            // behind. maxWithdraw and previewRedeem are both asset-denominated and both floor once,
+            // so they agree exactly whenever the vault can honour the whole position.
+            if (
+                IERC4626(market.target).maxWithdraw(address(this))
+                    >= IERC4626(market.target).previewRedeem(shareBalance)
+            ) {
                 IERC4626(market.target).redeem(shareBalance, address(this), address(this));
+            } else {
+                // Genuinely liquidity-constrained: take what the vault will pay and leave the rest.
+                uint256 redeemable = IERC4626(market.target).maxRedeem(address(this));
+                if (redeemable > 0) {
+                    IERC4626(market.target).redeem(redeemable, address(this), address(this));
+                }
             }
         }
     }
@@ -561,12 +875,20 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
             } else {
                 uint256 shares = IERC4626(regMarkets[i].target).balanceOf(address(this));
                 if (shares > 0) {
-                    total += IERC4626(regMarkets[i].target).convertToAssets(shares);
+                    // previewRedeem, not convertToAssets: per EIP-4626 convertToAssets excludes
+                    // withdrawal fees, so it reports a gross value the shares cannot actually
+                    // deliver — withdraw() would accept an amount the vault then refuses to pay.
+                    total += IERC4626(regMarkets[i].target).previewRedeem(shares);
                 }
             }
         }
 
         return total;
+    }
+
+    /// @dev Saturating subtraction, so an over-delivering market cannot panic the withdrawal loop
+    function _subFloorZero(uint256 a, uint256 b) internal pure returns (uint256) {
+        return b >= a ? 0 : a - b;
     }
 
     /**
@@ -584,22 +906,76 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         require(total == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
     }
 
-    function _approveCowSwap(address tokenAddress, uint256 amount) internal {
-        require(slippagePriceChecker.isRewardToken(tokenAddress), "Token not allowed");
-        IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
+    /**
+     * @notice How much of `balance` has never had the compound fee charged on it
+     * @dev Two observables, both of which only this contract writes:
+     *      - `rewardFeeCharged[t]`, set to the whole balance at the end of every settlement;
+     *      - the VAULT_RELAYER allowance, set to the same value at the same moment.
+     *      Between settlements the relayer is the only party that can move tokens out without
+     *      going through this contract, and every unit it moves decrements the allowance by one.
+     *      So `charged - allowance` is exactly the CoW outflow since the last settlement, and
+     *      subtracting it prevents the (now too high) anchor from swallowing an equal amount of
+     *      rewards that arrived afterwards — the concrete bypass being: let a swap drain the
+     *      balance, then permissionlessly claim the next epoch's rewards from the distributor.
+     *      The final clamp covers any other outflow the contract itself performed.
+     */
+    function _unchargedRewards(address rewardToken, uint256 balance) internal view returns (uint256) {
+        uint256 charged = rewardFeeCharged[rewardToken];
+
+        uint256 allowanceLeft = IERC20(rewardToken).allowance(address(this), VAULT_RELAYER);
+        if (allowanceLeft < charged) charged = allowanceLeft;
+        if (charged > balance) charged = balance;
+
+        return balance - charged;
     }
 
-    function _bytesToHexString(bytes memory _bytes) internal pure returns (string memory) {
-        bytes memory hexString = new bytes(_bytes.length * 2);
-        bytes memory hexChars = "0123456789abcdef";
+    /// @dev A reward token is anything the price checker will price that is NEITHER the strategy's
+    ///      own asset NOR one of its market positions. Both exclusions exist for the same reason:
+    ///      {sweepRewardFees} transfers a cut to the fee recipient and approves the relayer for the
+    ///      remainder, so anything that reaches it is treated as yield rather than principal.
+    ///      Approving the underlying would put every user deposit within reach of a CoW order;
+    ///      approving an mToken or 4626 share does the same one level up, and because
+    ///      `sweepRewardFees` is permissionless a single mistaken price-checker entry would let
+    ///      anyone tax 5% of the position's shares. Walking that entry back takes a deliberate
+    ///      owner action on the price checker — `removeTokenConfiguration` leaves `maxTimePriceValid`
+    ///      set (it is keyed by `fromToken` alone), so only `clearRewardToken` flips `isRewardToken`
+    ///      back to false, and only fleet-wide. That is what makes the redundant check here worth
+    ///      its gas: it holds locally, per strategy, without any price-checker mutation.
+    function _requireRewardToken(address rewardToken) internal view {
+        require(rewardToken != address(token), "Not a reward token");
+        require(!_isMarketTarget(rewardToken), "Market share is not a reward token");
+        require(slippagePriceChecker.isRewardToken(rewardToken), "Token not allowed");
+    }
 
-        for (uint256 i = 0; i < _bytes.length; i++) {
-            uint8 value = uint8(_bytes[i]);
-            hexString[i * 2] = hexChars[value >> 4];
-            hexString[i * 2 + 1] = hexChars[value & 0xf];
+    /// @dev Non-reverting counterpart of {_requireRewardToken}, for the batch paths that must skip
+    ///      an unsettleable token rather than take the whole call down with it.
+    function _isSettleableRewardToken(address rewardToken) internal view returns (bool) {
+        return rewardToken != address(token) && !_isMarketTarget(rewardToken)
+            && slippagePriceChecker.isRewardToken(rewardToken);
+    }
+
+    /// @dev Scans the registry's market list rather than calling isMarketActive, which REVERTS for
+    ///      an unregistered target — the common case here — and would turn a check into a failure.
+    ///      Deactivated markets count too: the strategy can still be holding their shares.
+    ///
+    ///      The unset-registry branch is NOT defensive padding. A live v1 proxy sits at
+    ///      `marketRegistry == address(0)` for the whole window between being upgraded to this
+    ///      implementation and its `migrateV1ToMarketRegistry` call, and its positions are still in
+    ///      the legacy `mToken` / `metaMorphoVault` slots. Calling `getMarkets` on the zero address
+    ///      there reverts, which would take down `claimRewards`, the permissionless
+    ///      `sweepRewardFees`, and reward-token `recoverERC20` for every un-migrated strategy —
+    ///      paths that worked before this check existed. Reading the legacy slots keeps the
+    ///      protection itself intact across the window rather than merely skipping it.
+    function _isMarketTarget(address candidate) internal view returns (bool) {
+        if (address(marketRegistry) == address(0)) {
+            return candidate == address(mToken) || candidate == address(metaMorphoVault);
         }
 
-        return string(hexString);
+        RegistryMarket[] memory regMarkets = marketRegistry.getMarkets(address(token));
+        for (uint256 i = 0; i < regMarkets.length; i++) {
+            if (regMarkets[i].target == candidate) return true;
+        }
+        return false;
     }
 
     /**

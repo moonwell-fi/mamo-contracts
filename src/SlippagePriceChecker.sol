@@ -8,6 +8,7 @@ import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/Own
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IERC20MetaData {
     function decimals() external view returns (uint8);
@@ -26,6 +27,15 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     uint256 internal constant MAX_BPS = 10_000;
 
     /**
+     * @notice The internal fixed-point scale every quote is carried at
+     * @dev Quotes are normalized to this many decimals before the first price-feed hop and converted
+     *      back to the output token's smallest units exactly once, at the end. Carrying the running
+     *      value at the sell token's own (possibly tiny) precision made every hop truncate up to a
+     *      whole unit at that scale, and later hops amplified the error.
+     */
+    uint256 internal constant INTERNAL_DECIMALS = 36;
+
+    /**
      * @notice Maps token addresses to their oracle configurations
      * @dev Each token can have multiple price feed configurations in sequence
      * @dev DEPRECATED: Use tokenPairOracleData instead
@@ -42,6 +52,53 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @dev Primary storage for token pair configurations (fromToken -> toToken -> configurations)
      */
     mapping(address fromToken => mapping(address toToken => TokenFeedConfiguration[])) public tokenPairOracleData;
+
+    // ==================== Storage appended after the initial deployment ====================
+    // NOTE: this contract is behind a UUPS proxy and has no storage gap. Everything below was added
+    // after the first deployment, so new variables MUST be appended here and never reordered.
+
+    /**
+     * @notice Number of distinct toTokens currently configured for a given fromToken
+     * @dev Lets isRewardToken() answer from real pair configuration without enumerating the nested
+     *      tokenPairOracleData mapping.
+     */
+    mapping(address fromToken => uint256 configuredPairs) public configuredPairCount;
+
+    /**
+     * @notice Chainlink L2 sequencer uptime feed (address(0) disables the check)
+     */
+    address public sequencerUptimeFeed;
+
+    /**
+     * @notice Seconds that must elapse after the sequencer comes back up before prices are trusted
+     */
+    uint256 public sequencerGracePeriod;
+
+    /**
+     * @notice Optional per-aggregator sane-range bounds
+     * @param minAnswer Lowest answer accepted from this feed
+     * @param maxAnswer Highest answer accepted from this feed; zero means "no bounds configured"
+     */
+    struct FeedBounds {
+        uint256 minAnswer;
+        uint256 maxAnswer;
+    }
+
+    /**
+     * @notice Maps a Chainlink feed to its configured sane-range bounds
+     */
+    mapping(address chainlinkFeed => FeedBounds bounds) public feedBounds;
+
+    /**
+     * @notice Whether a specific pair is already represented in configuredPairCount
+     * @dev configuredPairCount is bookkeeping added after the first deployment, so pairs configured
+     *      BEFORE the upgrade are live in tokenPairOracleData while contributing nothing to the
+     *      count. Deriving "is this pair counted?" from `tokenPairOracleData[...].length` therefore
+     *      let removeTokenConfiguration decrement a count the pair never incremented, which could
+     *      drive the count of a token with live pairs back to zero. This flag makes increment and
+     *      decrement exactly symmetric; backfillPairCount() registers pre-upgrade pairs.
+     */
+    mapping(address fromToken => mapping(address toToken => bool counted)) public pairCounted;
 
     /**
      * @notice Emitted when a token pair's price feed configuration is updated
@@ -73,6 +130,43 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      */
     event MaxTimePriceValidSet(address indexed fromToken, uint256 maxTimePriceValid);
 
+    /// @notice Locks the implementation so it can never be initialized directly
+    /// @dev Sherlock #44. Without this the first caller of {initialize} on the implementation
+    ///      becomes its owner and gains every onlyOwner entry point on that address —
+    ///      addTokenConfiguration, setMaxTimePriceValid, transferOwnership. The live implementation
+    ///      deployed before this change (0x413C38B68fe730F2bC30d8Cde965967D1C7BC599) reports
+    ///      `owner() == address(0)` and is claimable today. Impact is confined to the
+    ///      implementation's own storage — proxies initialize their own, and `upgradeToAndCall` is
+    ///      `onlyProxy`, so a claimant cannot reach the proxy or any funds — but an implementation
+    ///      with a live owner is a standing invitation to misread it as authoritative, and the fix
+    ///      is three lines. Requires redeploying the implementation and re-pointing the proxy.
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @notice Emitted when the sequencer uptime feed or its grace period changes
+     * @param sequencerUptimeFeed The new sequencer uptime feed (address(0) disables the check)
+     * @param gracePeriod The new post-recovery grace period in seconds
+     */
+    event SequencerUptimeFeedSet(address indexed sequencerUptimeFeed, uint256 gracePeriod);
+
+    /**
+     * @notice Emitted when a feed's sane-range bounds change
+     * @param chainlinkFeed The feed the bounds apply to
+     * @param minAnswer The lowest accepted answer
+     * @param maxAnswer The highest accepted answer; zero clears the bounds
+     */
+    event FeedBoundsSet(address indexed chainlinkFeed, uint256 minAnswer, uint256 maxAnswer);
+
+    /**
+     * @notice Emitted when a pre-upgrade pair is registered into configuredPairCount
+     * @param fromToken The sell token the pair belongs to
+     * @param toToken The buy token of the registered pair
+     * @param configuredPairs The token's pair count after the backfill
+     */
+    event PairCountBackfilled(address indexed fromToken, address indexed toToken, uint256 configuredPairs);
+
     /**
      * @dev Initializes the contract with the given owner
      * @param _owner The address that will own the contract
@@ -98,6 +192,16 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         require(fromToken != address(0), "Invalid from token address");
         require(toToken != address(0), "Invalid to token address");
         require(configurations.length > 0, "Empty configurations array");
+
+        // Track the pair the first time it is configured so isRewardToken() can answer from real
+        // pair configuration rather than from the legacy maxTimePriceValid mapping. The flag — not
+        // the presence of oracle data — is what removeTokenConfiguration decrements against, so a
+        // pair configured before this bookkeeping existed can never take the count below its true
+        // value.
+        if (!pairCounted[fromToken][toToken]) {
+            pairCounted[fromToken][toToken] = true;
+            configuredPairCount[fromToken] += 1;
+        }
 
         // Clear existing configurations for this pair
         delete tokenPairOracleData[fromToken][toToken];
@@ -130,18 +234,158 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         require(toToken != address(0), "Invalid to token address");
         require(tokenPairOracleData[fromToken][toToken].length > 0, "Token pair not configured");
 
+        // Only give back what this pair actually took. A pair configured before configuredPairCount
+        // existed never incremented it, so decrementing here would under-count the token and could
+        // report a token with LIVE pairs as no longer a reward token.
+        if (pairCounted[fromToken][toToken]) {
+            pairCounted[fromToken][toToken] = false;
+            configuredPairCount[fromToken] -= 1;
+        }
+
         // Clear configurations
         delete tokenPairOracleData[fromToken][toToken];
+        // NOTE: `maxTimePriceValid[fromToken]` is deliberately NOT cleared here. It is keyed by
+        // fromToken alone while configurations are keyed by the pair, so clearing it as a side
+        // effect of removing ONE pair would silently invalidate every other pair the same token
+        // still has. Use {clearRewardToken} to retire the token itself.
+
+        // MOO-726: maxTimePriceValid is the legacy reward-token flag and used to be a one-way latch,
+        // so a token whose last pair had been removed still passed the isRewardToken() gate and
+        // consumers (MamoMultiMarketStrategy._approveCowSwap, LPCompoundModule.approveCowSwap) kept
+        // handing the CoW relayer an allowance for it. Once nothing is configured for the token, the
+        // flag goes with it. Pre-upgrade pairs must be registered with backfillPairCount() first,
+        // otherwise the count reads zero while other pairs are still live.
+        if (configuredPairCount[fromToken] == 0 && maxTimePriceValid[fromToken] != 0) {
+            maxTimePriceValid[fromToken] = 0;
+            emit MaxTimePriceValidSet(fromToken, 0);
+        }
 
         emit TokenPairConfigurationRemoved(fromToken, toToken);
     }
 
+    /**
+     * @notice Retires `fromToken` as a reward token entirely
+     * @dev ORIGIN (MOO-736, PR #73): `isRewardToken` was defined as `maxTimePriceValid[token] > 0`
+     *      and nothing could set that back to zero — {setMaxTimePriceValid} rejected zero and
+     *      {removeTokenConfiguration} only touched the pair mapping. The flag was a one-way latch, so
+     *      a mistaken entry was unrecoverable, which matters because MamoMultiMarketStrategy treats
+     *      "is a reward token" as permission to charge a compound fee permissionlessly and to approve
+     *      the CoW relayer for the remainder.
+     *
+     * @dev MERGE NOTE (PR #74): that latch is now closed from the other end as well —
+     *      {removeTokenConfiguration} zeroes the flag once the last COUNTED pair goes, and
+     *      `isRewardToken` reads `configuredPairCount[token] > 0 || maxTimePriceValid[token] > 0`.
+     *      Clearing the flag alone therefore no longer retires a token that still has counted pairs:
+     *      the count term keeps answering true. Left as a silent no-op that would be a trap for the
+     *      exact operator reaching for it, so the precondition below makes it LOUD instead. Retiring
+     *      a token is now: remove its pair configurations, then call this for any residual legacy
+     *      flag.
+     *
+     * @dev Deliberately NOT rebuilt as a standalone `rewardTokenRetired` override that short-circuits
+     *      `isRewardToken`. That would restore single-call force-retirement even with live pairs, but
+     *      it is a new storage slot and a new semantic, i.e. a product decision rather than a merge
+     *      resolution. Open that as a follow-up if operations wants force-retire back.
+     *
+     * @dev Same backfill caveat as {removeTokenConfiguration}: for a token whose pairs predate
+     *      `configuredPairCount`, the count reads zero while pairs are still live, so this would clear
+     *      the flag and report a still-configured token as no longer a reward token. Run
+     *      {backfillPairCount} for the token first.
+     * @param fromToken The token to stop treating as a reward token
+     */
+    function clearRewardToken(address fromToken) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+        require(maxTimePriceValid[fromToken] > 0, "Token not configured");
+        require(configuredPairCount[fromToken] == 0, "Remove pair configurations first");
+
+        delete maxTimePriceValid[fromToken];
+
+        emit MaxTimePriceValidSet(fromToken, 0);
+    }
+
+    /**
+     * @notice Sets (or clears) the legacy max-time-price-valid flag for a token
+     * @dev Zero is accepted and CLEARS the flag. Rejecting zero made the flag a one-way latch: a
+     *      token configured before configuredPairCount existed could never stop being reported as a
+     *      reward token, even after every pair for it had been removed. This also has to accept zero
+     *      because {removeTokenConfiguration} writes zero through this same mapping internally.
+     * @dev SECURITY: this value doubles as the maximum lifetime of an order, and the sequencer-outage
+     *      protection in _requireSequencerUp only closes the replay window because that lifetime is
+     *      no longer than sequencerGracePeriod. An order signed just before an outage stays valid for
+     *      _maxTimePriceValid seconds; the grace period is how long after recovery quotes stay
+     *      refused. Setting this ABOVE sequencerGracePeriod silently reopens the window MOO-741
+     *      closed — the two are deployed equal (1 hours / 3600) on purpose. Raise the grace period
+     *      first if this ever needs to grow.
+     * @param fromToken The token the flag applies to
+     * @param _maxTimePriceValid Seconds a price stays valid, or zero to clear the flag
+     */
     function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external onlyOwner {
         require(fromToken != address(0), "Invalid from token address");
-        require(_maxTimePriceValid > 0, "Max time price valid can't be zero");
         maxTimePriceValid[fromToken] = _maxTimePriceValid;
 
         emit MaxTimePriceValidSet(fromToken, _maxTimePriceValid);
+    }
+
+    /**
+     * @notice Registers pairs configured before configuredPairCount existed into the counter
+     * @dev Only callable by the owner, and idempotent: a pair already counted, or with no oracle
+     *      data, is skipped. The nested tokenPairOracleData mapping cannot be enumerated on chain,
+     *      so the release that ships this contract must call this with the live pair list — see
+     *      multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol. Without it,
+     *      isRewardToken() answers for pre-upgrade pairs only through the legacy flag, and
+     *      removeTokenConfiguration cannot tell "last pair removed" from "never counted".
+     * @param fromToken The sell token whose pairs are being registered
+     * @param toTokens The buy tokens already configured for fromToken
+     */
+    function backfillPairCount(address fromToken, address[] calldata toTokens) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+
+        for (uint256 i = 0; i < toTokens.length; i++) {
+            address toToken = toTokens[i];
+            if (tokenPairOracleData[fromToken][toToken].length == 0) continue;
+            if (pairCounted[fromToken][toToken]) continue;
+
+            pairCounted[fromToken][toToken] = true;
+            configuredPairCount[fromToken] += 1;
+
+            emit PairCountBackfilled(fromToken, toToken, configuredPairCount[fromToken]);
+        }
+    }
+
+    /**
+     * @notice Sets the L2 sequencer uptime feed and the post-recovery grace period
+     * @dev Only callable by the owner. Passing address(0) disables the check, which is the state the
+     *      contract upgrades into so an in-place upgrade cannot brick pricing before the feed is
+     *      configured.
+     * @param _sequencerUptimeFeed The Chainlink sequencer uptime feed, or address(0) to disable
+     * @param _gracePeriod Seconds that must elapse after the sequencer restarts before prices are used
+     */
+    function setSequencerUptimeFeed(address _sequencerUptimeFeed, uint256 _gracePeriod) external onlyOwner {
+        require(_sequencerUptimeFeed == address(0) || _gracePeriod > 0, "Grace period must be greater than 0");
+
+        sequencerUptimeFeed = _sequencerUptimeFeed;
+        sequencerGracePeriod = _gracePeriod;
+
+        emit SequencerUptimeFeedSet(_sequencerUptimeFeed, _gracePeriod);
+    }
+
+    /**
+     * @notice Sets sane-range bounds for a Chainlink feed
+     * @dev Only callable by the owner. Today's aggregators report minAnswer = 1 and
+     *      maxAnswer = 2**176 - 1, i.e. representational limits rather than market bounds, so no
+     *      answer can saturate. A future proxy upgrade to an aggregator with ACTIVE finite bounds
+     *      would report a clamped boundary value as a valid price; these bounds reject that.
+     *      Setting maxAnswer to zero clears the bounds for the feed.
+     * @param chainlinkFeed The feed the bounds apply to
+     * @param minAnswer The lowest accepted answer
+     * @param maxAnswer The highest accepted answer, or zero to clear
+     */
+    function setFeedBounds(address chainlinkFeed, uint256 minAnswer, uint256 maxAnswer) external onlyOwner {
+        require(chainlinkFeed != address(0), "Invalid chainlink feed address");
+        require(maxAnswer == 0 || maxAnswer > minAnswer, "Invalid bounds");
+
+        feedBounds[chainlinkFeed] = FeedBounds({minAnswer: minAnswer, maxAnswer: maxAnswer});
+
+        emit FeedBoundsSet(chainlinkFeed, minAnswer, maxAnswer);
     }
 
     // ==================== External View Functions ====================
@@ -173,24 +417,38 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     }
 
     /**
-     * @notice Checks if a token is configured as a reward token
-     * @dev DEPRECATED: This function cannot determine reward tokens in the new token pair model
-     * @dev keeping it here for backwards compatibility
+     * @notice Checks if a token is configured as a sellable reward token
+     * @dev Answers from real pair configuration: a token is a reward token once at least one
+     *      fromToken -> toToken pair has been configured for it. It previously returned
+     *      maxTimePriceValid[token] > 0, which addTokenConfiguration never writes, so a pair
+     *      configured the modern way reported false and every consumer that gates on this
+     *      function (strategy approvals, CoW swap approvals) reverted with "Token not allowed".
+     * @dev The legacy maxTimePriceValid term is kept so tokens configured before this contract was
+     *      upgraded — whose pairs predate configuredPairCount — keep reporting true.
      * @param token The address of the token to check
      * @return Whether the token is configured as a reward token
      */
     function isRewardToken(address token) external view override returns (bool) {
-        return maxTimePriceValid[token] > 0;
+        return configuredPairCount[token] > 0 || maxTimePriceValid[token] > 0;
     }
 
     /**
      * @notice Checks if a token pair is configured
+     * @dev Answers from the pair's own oracle data, the single source of truth addTokenConfiguration
+     *      writes and removeTokenConfiguration clears. It previously also required
+     *      maxTimePriceValid[fromToken] > 0 — the legacy per-token reward flag that
+     *      addTokenConfiguration never writes — so a pair configured the modern way reported false
+     *      even though every pricing path would serve it. That is the same two-sources-of-truth
+     *      defect MOO-726 fixed in isRewardToken.
+     * @dev Configured is not the same as settleable: an order also needs maxTimePriceValid[fromToken]
+     *      to be non-zero (see GPv2OrderChecks), which setMaxTimePriceValid controls independently.
+     *      Read both when checking whether a pair can actually trade.
      * @param fromToken The address of the token to swap from
      * @param toToken The address of the token to swap to
      * @return Whether the token pair is configured
      */
     function isTokenPairConfigured(address fromToken, address toToken) external view override returns (bool) {
-        return tokenPairOracleData[fromToken][toToken].length > 0 && maxTimePriceValid[fromToken] > 0;
+        return tokenPairOracleData[fromToken][toToken].length > 0;
     }
 
     /**
@@ -268,6 +526,19 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         require(_priceFeedsLen == _reverses.length, "Price feeds and reverses must have same length");
         require(_priceFeedsLen == _heartbeats.length, "Price feeds and heartbeats must have same length");
 
+        _requireSequencerUp();
+
+        uint256 _fromTokenDecimals = uint256(IERC20MetaData(_fromToken).decimals());
+        uint256 _toTokenDecimals = uint256(IERC20MetaData(_toToken).decimals());
+        require(
+            _fromTokenDecimals <= INTERNAL_DECIMALS && _toTokenDecimals <= INTERNAL_DECIMALS,
+            "Unsupported token decimals"
+        );
+
+        // Normalize the input to a common high-precision scale ONCE, up front, so that no hop
+        // truncates at the sell token's own precision.
+        uint256 _running = _amountIn * (10 ** (INTERNAL_DECIMALS - _fromTokenDecimals));
+
         for (uint256 _i = 0; _i < _priceFeedsLen; _i++) {
             IPriceFeed _priceFeed = IPriceFeed(_priceFeeds[_i]);
 
@@ -275,30 +546,60 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
             require(answer > 0, "Chainlink price cannot be lower or equal to 0");
             require(updatedAt != 0, "Round is in incompleted state");
+            require(updatedAt <= block.timestamp, "Price feed update time in the future");
 
             require(block.timestamp <= updatedAt + _heartbeats[_i], "Price feed update time exceeds heartbeat");
 
-            uint256 _scaleAnswerBy = 10 ** uint256(_priceFeed.decimals());
+            _requireAnswerInBounds(_priceFeeds[_i], uint256(answer));
 
-            // If it's first iteration, use amountIn to calculate. Else, use the result from the previous iteration.
-            uint256 _amountIntoThisIteration = _i == 0 ? _amountIn : _expectedOutFromChainlink;
+            uint256 _scaleAnswerBy = 10 ** uint256(_priceFeed.decimals());
 
             // Without a reverse, we multiply amount * price
             // With a reverse, we divide amount / price
-            _expectedOutFromChainlink = _reverses[_i]
-                ? (_amountIntoThisIteration * _scaleAnswerBy) / uint256(answer)
-                : (_amountIntoThisIteration * uint256(answer)) / _scaleAnswerBy;
+            // mulDiv keeps the intermediate product at full 512-bit precision, so the only rounding
+            // in the whole chain is the single floor division at the end of each hop.
+            _running = _reverses[_i]
+                ? Math.mulDiv(_running, _scaleAnswerBy, uint256(answer))
+                : Math.mulDiv(_running, uint256(answer), _scaleAnswerBy);
         }
 
-        uint256 _fromTokenDecimals = uint256(IERC20MetaData(_fromToken).decimals());
-        uint256 _toTokenDecimals = uint256(IERC20MetaData(_toToken).decimals());
+        // Convert to the output token's smallest units exactly once. This floor division is the only
+        // rounding left in the chain, and it rounds AGAINST the protocol, not for it: both consumers
+        // derive a minimum-out from this quote (expectedOut * (MAX_BPS - slippage) / MAX_BPS), so a
+        // quote one unit low makes the floor one unit looser, not tighter. The strictly conservative
+        // direction would be Math.Rounding.Ceil. Kept as floor division because the discrepancy is a
+        // single smallest-unit of the output token, orders of magnitude inside any configured
+        // slippage tolerance — do not read this line as a safety margin, it is not one.
+        _expectedOutFromChainlink = _running / (10 ** (INTERNAL_DECIMALS - _toTokenDecimals));
+    }
 
-        if (_fromTokenDecimals > _toTokenDecimals) {
-            // if fromToken has more decimals than toToken, we need to divide
-            _expectedOutFromChainlink = _expectedOutFromChainlink / (10 ** (_fromTokenDecimals - _toTokenDecimals));
-        } else if (_fromTokenDecimals < _toTokenDecimals) {
-            _expectedOutFromChainlink = _expectedOutFromChainlink * (10 ** (_toTokenDecimals - _fromTokenDecimals));
-        }
+    /**
+     * @notice Reverts if the L2 sequencer is down or has not been back up for the grace period
+     * @dev No-op while sequencerUptimeFeed is unset. A Chainlink uptime feed answers 0 when the
+     *      sequencer is up and 1 when it is down, and startedAt is when that status began.
+     */
+    function _requireSequencerUp() internal view {
+        address _feed = sequencerUptimeFeed;
+        if (_feed == address(0)) return;
+
+        (, int256 _answer, uint256 _startedAt,,) = IPriceFeed(_feed).latestRoundData();
+
+        require(_answer == 0, "Sequencer is down");
+        require(_startedAt != 0, "Sequencer round is in incompleted state");
+        require(block.timestamp >= _startedAt + sequencerGracePeriod, "Sequencer grace period not over");
+    }
+
+    /**
+     * @notice Reverts if a feed answer falls outside its configured sane range
+     * @dev No-op for feeds with no bounds configured (maxAnswer == 0).
+     * @param chainlinkFeed The feed the answer came from
+     * @param answer The answer to bound-check
+     */
+    function _requireAnswerInBounds(address chainlinkFeed, uint256 answer) internal view {
+        FeedBounds memory _bounds = feedBounds[chainlinkFeed];
+        if (_bounds.maxAnswer == 0) return;
+
+        require(answer >= _bounds.minAnswer && answer <= _bounds.maxAnswer, "Chainlink price out of bounds");
     }
 
     /**

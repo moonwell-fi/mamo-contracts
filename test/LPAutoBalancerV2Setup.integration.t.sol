@@ -9,6 +9,7 @@ import {Test} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -138,7 +139,14 @@ contract LPAutoBalancerV2SetupTest is Test {
         return this.onERC721Received.selector;
     }
 
+    /// @dev The single test below drives the main FULLY out of range on the token0 (WETH) side, so
+    ///      the teardown returns 100% token0 and `_mainRange` takes the token0-majority single-sided
+    ///      branch: [floorAlign(spot) + spacing, +width]. That is the range committed to here — the
+    ///      off-chain half of the tick commitment a real rebalancer computes from a decision-time
+    ///      snapshot before submitting.
     function _defaultRebalanceParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 expectedTl = _align(spotTick) + TICK_SPACING;
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
             amount0MinMain: 0,
@@ -149,7 +157,9 @@ contract LPAutoBalancerV2SetupTest is Test {
             amount1MinWithdraw: 0,
             amount0MinWithdrawAlt: 0,
             amount1MinWithdrawAlt: 0,
-            deadline: block.timestamp + 1
+            deadline: block.timestamp + 1,
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTl + 400
         });
     }
 
@@ -164,7 +174,7 @@ contract LPAutoBalancerV2SetupTest is Test {
 
         address labAddr = addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2");
         assertTrue(labAddr != address(0), "balancer deployed");
-        LPAutoBalancerV2 lab = LPAutoBalancerV2(labAddr);
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(labAddr));
 
         // 2-3. Build the Safe actions, simulate (Safe executes them atomically), validate.
         proposal.build();
@@ -199,16 +209,186 @@ contract LPAutoBalancerV2SetupTest is Test {
         skip(2 hours);
         vm.roll(block.number + 1);
 
+        // The fork PINS the block, so both Chainlink feeds' `updatedAt` is frozen while this test
+        // warps 4 hours forward to accrue AERO and let the TWAP converge. On a live chain ETH/USD
+        // and BTC/USD would each have published a dozen times across that window; on a pinned fork
+        // they cannot, so the bound the proposal arms (3600s) correctly reads the warp as stale.
+        // FREEZE both feeds' `updatedAt` at the current timestamp, preserving their real answers.
+        // Not a re-publish: the mock encodes `updatedAt` once, here, and never tracks "now" — any
+        // skip() past the armed bound AFTER this call goes stale exactly as the real feed would.
+        // Deliberately NOT "widen the bound to make the test pass": the entire point of this test is
+        // to assert the values the proposal actually ships, and loosening them here would hollow it
+        // out into a test of a configuration nobody deploys.
+        _refreshPriceFeeds();
+
         LPAutoBalancerV2.DecisionSnapshotV2 memory snapBefore = lab.getDecisionSnapshot();
         assertFalse(snapBefore.mainInRange, "main driven out of range");
         assertTrue(snapBefore.deviationGateOpen, "TWAP converged: deviation gate open for rebalanceUsingAlt");
 
         // As the granted rebalancer: rebalanceUsingAlt must succeed (no revert) and rebuild a real position.
+        // HOISTED: _defaultRebalanceParams reads live spot (an external call). In ARGUMENT position
+        // it would be evaluated first and consume the one-shot vm.prank, so the call would run as
+        // this test contract and fail the REBALANCER_ROLE check.
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultRebalanceParams();
         vm.prank(rebalancerEOA);
-        lab.rebalanceUsingAlt(_defaultRebalanceParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
         assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
+    }
+
+    // ─── MOO-741: the setup proposal must leave the L2 sequencer guard ENABLED ──────────────────
+    //
+    // `sequencerUptimeFeed` defaults to address(0) and `LPValuationLib.checkSequencer` early-returns
+    // while it is unset, so a deployment that never runs the setter ships with the guard OFF and the
+    // balancer is exactly as exposed as before MOO-741. This test pins the wiring (feed + non-zero
+    // grace period) AND proves the guard is LIVE — not merely stored — by driving the real
+    // `_readFeed` path with the uptime aggregator mocked into each failure state.
+
+    function test_proposal_armsSequencerUptimeGuard() public {
+        proposal.deploy();
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+
+        // Pre-condition: a freshly deployed balancer has the guard DISABLED. If this ever starts
+        // failing, the default changed and the rest of this test is measuring the wrong thing.
+        assertEq(lab.sequencerUptimeFeed(), address(0), "guard disabled before the proposal runs");
+        assertEq(lab.sequencerGracePeriod(), 0, "grace period unset before the proposal runs");
+
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        address feed = addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED");
+        assertEq(lab.sequencerUptimeFeed(), feed, "sequencer uptime feed armed by the proposal");
+        assertEq(lab.sequencerGracePeriod(), proposal.sequencerGracePeriod(), "grace period armed");
+        assertTrue(lab.sequencerGracePeriod() != 0, "grace period is non-zero (guard not neutered)");
+
+        address eth = addresses.getAddress("CHAINLINK_ETH_USD");
+        address btc = addresses.getAddress("CHAINLINK_BTC_USD");
+
+        // Control: with the real (up, long past its grace window) feed, the oracle path still works.
+        vm.prank(safe);
+        lab.setOracles(eth, btc);
+
+        // 1. Sequencer reported DOWN (answer == 1) → every feed read fails closed.
+        _mockSequencer(feed, 1, block.timestamp - 10 days);
+        vm.prank(safe);
+        vm.expectRevert(LPAutoBalancerV2.SequencerDown.selector);
+        lab.setOracles(eth, btc);
+
+        // 2. Sequencer back UP but still inside the grace window → reads stay rejected. This is the
+        //    case a plain "answer == 0" check would wave through while the price feeds still carry
+        //    their pre-outage round.
+        _mockSequencer(feed, 0, block.timestamp - 60);
+        vm.prank(safe);
+        vm.expectRevert(LPAutoBalancerV2.SequencerGracePeriod.selector);
+        lab.setOracles(eth, btc);
+
+        // 3. Up and past the grace window → accepted again.
+        _mockSequencer(feed, 0, block.timestamp - 2 hours);
+        vm.prank(safe);
+        lab.setOracles(eth, btc);
+    }
+
+    // ─── MOO-740: the setup proposal must ARM both staleness bounds, and arm them before it registers
+    //
+    // Same lens as the sequencer test above, and the same trap MOO-741 fell into. The values the
+    // proposal ships (3600/3600) are byte-identical to the balancer's constructor default
+    // (DEFAULT_MAX_ORACLE_DELAY == 1 hours == 3600), so `validate()`'s
+    // `assertEq(lab.maxOracleDelay0(), 3600)` passes whether `setMaxOracleDelays` actually ran or the
+    // default was silently inherited — deleting `_wireOracleDelays` from build() leaves the
+    // lifecycle test green. The two tests below arm NON-default values so the action is observable.
+
+    function test_proposal_armsNonDefaultMaxOracleDelays() public {
+        // Distinct from each other AND from the constructor default, so this also pins that the two
+        // bounds are wired per-feed rather than both taking delay0 (the flattening MOO-740 is about).
+        proposal.setMaxOracleDelays(1800, 2700);
+
+        proposal.deploy();
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+
+        // Pre-condition: a fresh balancer carries the constructor default on both legs. If this ever
+        // fails, the default moved and the "non-default" values below may no longer be non-default.
+        uint256 dflt = lab.DEFAULT_MAX_ORACLE_DELAY();
+        assertEq(lab.maxOracleDelay0(), dflt, "oracle0 bound is the ctor default before the proposal");
+        assertEq(lab.maxOracleDelay1(), dflt, "oracle1 bound is the ctor default before the proposal");
+        assertTrue(dflt != 1800 && dflt != 2700, "test values must differ from the default to be observable");
+
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        assertEq(lab.maxOracleDelay0(), 1800, "oracle0 bound armed by the proposal, not inherited");
+        assertEq(lab.maxOracleDelay1(), 2700, "oracle1 bound armed by the proposal, not inherited");
+    }
+
+    /// @dev ORDERING: the bounds must be armed BEFORE `registerPosition`, which probes both feeds.
+    ///      At the shipped values that ordering is unobservable for the same reason as above — armed
+    ///      == default makes the probe behave identically either way. So arm a bound TIGHTER than
+    ///      the pinned fork's actual feed age: if `_wireOracleDelays` runs first, the registration
+    ///      probe must fail StaleOracle; moved after `registerPosition`, the registration would pass
+    ///      under the looser default and build() would succeed.
+    ///
+    ///      Both bounds are derived from live state rather than hardcoded, so re-pinning PINNED_BLOCK
+    ///      cannot silently turn this into a vacuous test: leg 0 is tightened relative to the ETH/USD
+    ///      feed's own age, leg 1 is opened to the contract's own ceiling so it can never be the
+    ///      thing that reverts, and BOTH feeds are asserted fresh under the constructor default — the
+    ///      counterfactual placement has to SUCCEED for the revert to mean "the arming ran first".
+    ///      A hardcoded leg-1 bound would break silently at a future block where either feed is older
+    ///      than it: build() would revert StaleOracle under both placements and pin nothing.
+    function test_proposal_armsMaxOracleDelaysBeforeRegisterPosition() public {
+        proposal.deploy();
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+
+        (,,, uint256 updatedAt0,) = IPriceFeed(addresses.getAddress("CHAINLINK_ETH_USD")).latestRoundData();
+        (,,, uint256 updatedAt1,) = IPriceFeed(addresses.getAddress("CHAINLINK_BTC_USD")).latestRoundData();
+        uint256 age0 = block.timestamp - updatedAt0;
+        uint256 age1 = block.timestamp - updatedAt1;
+        assertGt(age0, 1, "fork feed must be non-trivially old for this test to bite");
+
+        // Non-vacuity: under the MOVED placement the registration probe runs on the constructor
+        // default, and this test only discriminates if that placement would have PASSED. Assert it
+        // rather than assume it — both feeds must be fresh under the default at the pinned block.
+        uint256 dflt = lab.DEFAULT_MAX_ORACLE_DELAY();
+        assertLt(age0, dflt, "ETH/USD must be fresh under the ctor default, else both placements revert");
+        assertLt(age1, dflt, "BTC/USD must be fresh under the ctor default, else both placements revert");
+
+        // Leg 0 tighter than the feed's own age → the registration probe cannot pass under it.
+        // Leg 1 opened to the contract's ceiling → it can never be the leg that reverts.
+        proposal.setMaxOracleDelays(age0 - 1, lab.MAX_ORACLE_DELAY());
+
+        vm.expectRevert(LPAutoBalancerV2.StaleOracle.selector);
+        proposal.build();
+    }
+
+    /// @dev FREEZE both price feeds' `updatedAt` at the current block timestamp, keeping their real
+    ///      answers, so a pinned fork that warps forward still reads as fresh.
+    /// @dev Deliberately NOT a re-publish: `vm.mockCall` encodes its return data ONCE, when this
+    ///      runs, and never clears — `updatedAt` is frozen at call time, it does not track "now" at
+    ///      read time. That suffices here only because nothing warps between this call and the
+    ///      rebalance it enables; insert any `skip()` past the armed bound in between and the mock
+    ///      goes stale exactly as the real feed would.
+    function _refreshPriceFeeds() internal {
+        _refreshPriceFeed(addresses.getAddress("CHAINLINK_ETH_USD"));
+        _refreshPriceFeed(addresses.getAddress("CHAINLINK_BTC_USD"));
+    }
+
+    function _refreshPriceFeed(address feed) internal {
+        (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+        vm.mockCall(
+            feed,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+        );
+    }
+
+    /// @dev Force the uptime aggregator's answer/startedAt. `answer` 0 == up, 1 == down.
+    function _mockSequencer(address feed, int256 answer, uint256 startedAt) internal {
+        vm.mockCall(
+            feed,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(uint80(1), answer, startedAt, block.timestamp, uint80(1))
+        );
     }
 }

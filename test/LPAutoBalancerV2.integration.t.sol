@@ -49,6 +49,14 @@ interface ICLPoolSwap {
     ) external returns (int256 amount0, int256 amount1);
 }
 
+/// @notice Pushes its balance onto `target` with selfdestruct — the one ETH transfer a contract
+///         cannot refuse. Used to donate to the SHARED, real Slipstream position manager.
+contract ForceEtherFork {
+    constructor(address payable target) payable {
+        selfdestruct(target);
+    }
+}
+
 contract LPAutoBalancerV2Integration is Test {
     // ─── real addresses ──────────────────────────────────────────────────────
     address constant POOL = 0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1;
@@ -86,6 +94,20 @@ contract LPAutoBalancerV2Integration is Test {
         vm.txGasPrice(0);
         vm.fee(0);
         lab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, NFPM, AERO);
+
+        // The fork PINS the block, so the Chainlink feeds' `updatedAt` is frozen at the pinned
+        // timestamp while these tests warp hours forward (to accrue AERO and let the TWAP converge).
+        // On a live chain both feeds keep publishing across that interval; on a pinned fork they
+        // cannot, so the balancer's shipped 1-hour default reads the warp as a stale feed and every
+        // rebalance fails closed. Widen both bounds to the contract's own maximum for these
+        // mechanics tests. This does NOT weaken coverage of the bound itself: the shipped default,
+        // the cap, and the per-feed staleness behaviour are all asserted in the unit suite
+        // (test_constructor_seedsTightOracleDelayDefaults, test_setMaxOracleDelays_revertsOutOfBounds,
+        // test_rebalanceUsingAlt_perFeedDelay_rejectsStaleLeg).
+        // `cap` is HOISTED: an external call in argument position would consume the vm.prank below.
+        uint256 cap = lab.MAX_ORACLE_DELAY();
+        vm.prank(admin);
+        lab.setMaxOracleDelays(cap, cap);
     }
 
     // ─── CL pool swap callback (this contract is the swapper) ──────────────────
@@ -185,7 +207,20 @@ contract LPAutoBalancerV2Integration is Test {
         return this.onERC721Received.selector;
     }
 
+    /// @dev Default rebalanceUsingAlt params, committing to the BALANCED range at live spot. Tests
+    ///      that push the position fully out of range take _mainRange's SINGLE-SIDED branch and must
+    ///      commit to that range instead — see _rebalanceParamsAt.
     function _defaultParams() internal view returns (LPAutoBalancerV2.RebalanceParams memory) {
+        (int24 tl, int24 tu) = _expectedStraddle(400);
+        return _rebalanceParamsAt(tl, tu);
+    }
+
+    /// @dev rebalanceUsingAlt params committing to an explicit range.
+    function _rebalanceParamsAt(int24 expectedTl, int24 expectedTu)
+        internal
+        view
+        returns (LPAutoBalancerV2.RebalanceParams memory)
+    {
         // Width 400 (= 4 * spacing); mins 0 (fork is deterministic, pinned).
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
@@ -197,11 +232,46 @@ contract LPAutoBalancerV2Integration is Test {
             amount1MinWithdraw: 0,
             amount0MinWithdrawAlt: 0,
             amount1MinWithdrawAlt: 0,
-            deadline: block.timestamp + 1
+            deadline: block.timestamp + 1,
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTu
         });
     }
 
+    /// @dev The SINGLE-SIDED main range _mainRange derives when one leg is dust: token0-majority →
+    ///      [floorAlign(spot) + spacing, +width]; token1-majority → [floorAlign(spot) - width, floor].
+    function _expectedSingleSided(uint24 width, bool token0Majority) internal view returns (int24 tl, int24 tu) {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 floorTick = _align(spotTick);
+        if (token0Majority) {
+            tl = floorTick + TICK_SPACING;
+            tu = tl + int24(width);
+        } else {
+            tu = floorTick;
+            tl = tu - int24(width);
+        }
+    }
+
+    /// @dev The BALANCED main range the contract will derive at the CURRENT live spot, reproducing
+    ///      LPGeometryLib.alignedRange: tickLower = floorAlign(spot - width/2), upper = lower+width.
+    ///      This is the off-chain half of the MOO-727 tick commitment — a real caller computes the
+    ///      same thing from a decision-time snapshot.
+    function _expectedStraddle(uint24 width) internal view returns (int24 tl, int24 tu) {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        tl = _align(spotTick - int24(width) / 2);
+        tu = tl + int24(width);
+    }
+
     function _defaultRebuildParams() internal view returns (LPAutoBalancerV2.RebuildParams memory) {
+        (int24 tl, int24 tu) = _expectedStraddle(400);
+        return _rebuildParamsAt(tl, tu);
+    }
+
+    function _rebuildParamsAt(int24 expectedTl, int24 expectedTu)
+        internal
+        view
+        returns (LPAutoBalancerV2.RebuildParams memory)
+    {
         LPAutoBalancerV2.RebalanceParams memory p = _defaultParams();
         return LPAutoBalancerV2.RebuildParams({
             width: p.width,
@@ -209,7 +279,9 @@ contract LPAutoBalancerV2Integration is Test {
             amount1MinMain: p.amount1MinMain,
             amount0MinAlt: p.amount0MinAlt,
             amount1MinAlt: p.amount1MinAlt,
-            deadline: p.deadline
+            deadline: p.deadline,
+            expectedTickLower: expectedTl,
+            expectedTickUpper: expectedTu
         });
     }
 
@@ -325,9 +397,12 @@ contract LPAutoBalancerV2Integration is Test {
         uint256 feeColl1Before = IERC20(CBBTC).balanceOf(feeCollector);
         uint256 aeroBefore = IERC20(AERO).balanceOf(feeCollector);
 
+        // HOISTED: _defaultParams reads live spot (external call). In ARGUMENT position it would be
+        // evaluated first and consume the one-shot vm.prank, so the call would run as this contract.
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultParams();
         vm.prank(rebalancer);
         vm.recordLogs();
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
@@ -366,10 +441,14 @@ contract LPAutoBalancerV2Integration is Test {
         uint256 feeColl1Before = IERC20(CBBTC).balanceOf(feeCollector);
         uint256 aeroBefore = IERC20(AERO).balanceOf(feeCollector);
 
+        // Teardown returns 100% WETH (token0), so _mainRange takes the token0-majority single-sided
+        // branch — commit to THAT range, not the straddle. Hoisted: see the note at the balanced site.
+        (int24 ssTl, int24 ssTu) = _expectedSingleSided(400, true);
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _rebalanceParamsAt(ssTl, ssTu);
         vm.prank(rebalancer);
         vm.recordLogs();
         // Without the _mainRange fix this reverts inside the position manager (0-liquidity straddle).
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,) = _assertNoSwapRebuild(tokenId, feeColl0Before, feeColl1Before, aeroBefore);
 
@@ -427,8 +506,9 @@ contract LPAutoBalancerV2Integration is Test {
 
         skip(120);
         vm.roll(block.number + 1);
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultParams(); // hoist: see note above
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(_defaultParams());
+        lab.rebalanceUsingAlt(rebalParams);
 
         (uint256 newMain,,) = _readSlot();
         assertGt(newMain, 0, "new main minted");
@@ -484,7 +564,8 @@ contract LPAutoBalancerV2Integration is Test {
         assertTrue(lab.rebalanceInFlight());
         assertEq(lab.sellTokenInFlight(), WETH);
         assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), sellAmount);
-        assertGt(lab.rebalanceValueBefore(), 0);
+        (uint256 snapA0, uint256 snapA1,,) = lab.rebalanceAmountsBefore();
+        assertGt(snapA0 + snapA1, 0, "amount baseline captured");
         assertGt(IERC20(WETH).balanceOf(address(lab)), 0, "principal loose on balancer");
 
         // ---- simulate the NET EFFECT of CowSwap settlement (not the transferFrom mechanics: this
@@ -498,14 +579,18 @@ contract LPAutoBalancerV2Integration is Test {
         deal(CBBTC, address(lab), IERC20(CBBTC).balanceOf(address(lab)) + 0.006e8);
 
         // ---- phase 2: rebuild ----
+        // Hoist: _defaultRebuildParams reads live spot (an EXTERNAL call), which would consume the
+        // one-shot vm.prank and leave the rebuild un-pranked.
+        LPAutoBalancerV2.RebuildParams memory rp = _defaultRebuildParams();
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebuildParams());
+        lab.rebuildAfterSwap(rp);
 
         (uint256 mainTokenId,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
         assertTrue(mainTokenId != 0 && mainTokenId != tokenId, "new main minted");
         assertFalse(lab.rebalanceInFlight(), "window closed");
         assertEq(lab.sellTokenInFlight(), address(0));
-        assertEq(lab.rebalanceValueBefore(), 0);
+        (uint256 clearedA0, uint256 clearedA1, uint256 clearedL0, uint256 clearedL1) = lab.rebalanceAmountsBefore();
+        assertEq(clearedA0 + clearedA1 + clearedL0 + clearedL1, 0, "snapshot wiped");
         assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), 0, "approval revoked");
         assertTrue(mainStaked, "restaked (bootstrap stakes)");
     }
@@ -522,8 +607,11 @@ contract LPAutoBalancerV2Integration is Test {
         lab.unwindForSwap(_defaultUnwindParams(WETH, 0.2 ether));
 
         // order expires unfilled: NO balance changes at all. Rebuild immediately.
+        // Hoist: _defaultRebuildParams reads live spot (an EXTERNAL call), which would consume the
+        // one-shot vm.prank and leave the rebuild un-pranked.
+        LPAutoBalancerV2.RebuildParams memory rp = _defaultRebuildParams();
         vm.prank(rebalancer);
-        lab.rebuildAfterSwap(_defaultRebuildParams());
+        lab.rebuildAfterSwap(rp);
 
         (uint256 mainTokenId,,,,,,,,,,,,,,,,,,,,) = lab.position();
         assertTrue(mainTokenId != 0, "rebuilt from original balances, identical outcome to rebalanceUsingAlt");
@@ -556,6 +644,34 @@ contract LPAutoBalancerV2Integration is Test {
         assertEq(IERC20(CBBTC).balanceOf(safe), cbbtcOnContract, "principal recovered mid-flight");
         assertFalse(lab.rebalanceInFlight());
         assertEq(IERC20(WETH).allowance(address(lab), lab.VAULT_RELAYER()), 0, "approval revoked on exit");
+    }
+
+    /// @notice MOO-723 against the REAL Slipstream NonfungiblePositionManager. Its mint() ends with
+    ///         an unconditional refundETH(), which forwards the manager's ENTIRE native balance to
+    ///         msg.sender (this balancer) and bubbles the failure if the recipient rejects it. The
+    ///         manager is shared infrastructure, so anyone can force ETH into it via
+    ///         create+selfdestruct. Without `receive()` on the balancer this reverts and every
+    ///         principal-redeployment path is permanently bricked; the mock suite reproduces the
+    ///         mechanism, but only this test exercises the real refundETH.
+    function test_fork_rebalanceUsingAlt_survivesForcedEthOnRealPositionManager() public {
+        (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        _bootstrap(center - 200, center + 200, 2 ether, 0.05e8);
+        skip(120);
+        vm.roll(block.number + 1);
+
+        uint256 labEthBefore = address(lab).balance;
+        vm.deal(address(this), 1 wei);
+        new ForceEtherFork{value: 1}(payable(NFPM));
+        assertGt(NFPM.balance, 0, "ETH forced into the shared position manager");
+
+        LPAutoBalancerV2.RebalanceParams memory rebalParams = _defaultParams(); // hoist: see note above
+        vm.prank(rebalancer);
+        lab.rebalanceUsingAlt(rebalParams);
+
+        (uint256 newMain,,) = _readSlot();
+        assertGt(newMain, 0, "principal redeployed despite the donation");
+        assertGt(address(lab).balance, labEthBefore, "refundETH proceeds accepted, not reverted");
     }
 
     /// @dev Regression for a whole-feature-review finding: unwindForSwap burns both real NFTs and

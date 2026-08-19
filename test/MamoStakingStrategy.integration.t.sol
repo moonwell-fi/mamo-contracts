@@ -12,11 +12,16 @@ import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
+
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {MockConfigurableSwapRouter} from "./mocks/MockConfigurableSwapRouter.sol";
 import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 
 contract MamoStakingStrategyIntegrationTest is BaseTest {
@@ -25,6 +30,8 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
     MamoStrategyRegistry public mamoStrategyRegistry;
     IMultiRewards public multiRewards;
     MultiMarketStrategyFactory public cbBTCStrategyFactory;
+
+    ISlippagePriceChecker public slippagePriceChecker;
 
     IERC20 public mamoToken;
     address public user;
@@ -47,8 +54,83 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Get the cbBTC strategy factory for testing reward distribution
         cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
 
+        // The implementation the live factory points at is the bytecode deployed on Base before this
+        // branch. Every proxy the factory creates delegatecalls into it, so without this the whole
+        // suite would exercise the pre-audit logic and none of the fixes below would be covered.
+        // The implementation holds no state of its own (proxies keep theirs), so replacing only its
+        // runtime code is sufficient and leaves every live address, role and balance untouched.
+        vm.etch(stakingStrategyImplementation, address(new MamoStakingStrategy()).code);
+
+        // The staking stack in this branch is AHEAD of what is deployed on Base: compound() prices
+        // its minimum-out through MamoStakingRegistry.slippagePriceChecker(), and the live registry
+        // predates that field (the call reverts on chain). The two fixtures below stand in for the
+        // redeployment this branch ships with -- see the deployment note in the PR description.
+        slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        _mockRegistryPriceChecker();
+        _configureCbBtcToMamoOracle();
+
         // Create test user
         user = makeAddr("testUser");
+    }
+
+    function _mockRegistryPriceChecker() internal {
+        vm.mockCall(
+            address(stakingRegistry),
+            abi.encodeWithSignature("slippagePriceChecker()"),
+            abi.encode(address(slippagePriceChecker))
+        );
+    }
+
+    /// @dev Mirrors multisig/mamo-multisig/008_MamoStakingV2Deployment._configureCbBtcToMamoOracle:
+    ///      cbBTC * (BTC/USD) / (MAMO/USD) = MAMO equivalent. Not yet applied on chain.
+    function _configureCbBtcToMamoOracle() internal {
+        address checkerOwner = OwnableUpgradeable(address(slippagePriceChecker)).owner();
+        address cbBTC = addresses.getAddress("cbBTC");
+
+        if (slippagePriceChecker.tokenPairOracleInformation(cbBTC, address(mamoToken)).length > 0) return;
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+        // Production heartbeats are 3600 / 86400. The fork is pinned, so its rounds never refresh
+        // while tests vm.warp days forward; a heartbeat that spans the suite keeps the REAL answers
+        // usable. Heartbeat enforcement itself is covered in SlippagePriceChecker.integration.t.sol.
+        feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_BTC_USD"),
+            reverse: false,
+            heartbeat: 3650 days
+        });
+        feeds[1] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"),
+            reverse: true,
+            heartbeat: 3650 days
+        });
+
+        vm.prank(checkerOwner);
+        slippagePriceChecker.addTokenConfiguration(cbBTC, address(mamoToken), feeds);
+        vm.prank(checkerOwner);
+        slippagePriceChecker.setMaxTimePriceValid(cbBTC, 3600);
+    }
+
+    /// @notice Deadline handed to compound() in tests that are not about the deadline itself
+    /// @dev Deliberately makes no external calls: it is used in argument position, where Solidity
+    ///      evaluates it BEFORE the call, so any call it made would consume a pending vm.prank or an
+    ///      armed vm.expectRevert.
+    function _deadline() internal view returns (uint256) {
+        return vm.getBlockTimestamp() + 300;
+    }
+
+    /// @dev Widens this strategy's slippage to the protocol maximum.
+    ///      On the pinned fork the Aerodrome cbBTC/MAMO pool price sits further than the 1% default
+    ///      from the BTC/USD ÷ MAMO/USD Chainlink pair, so a real swap cannot clear a 1% floor. That
+    ///      is a property of the fork's market data, not of the code under test; every test that
+    ///      actually swaps therefore opts into the widest slippage the registry permits.
+    function _allowWideSlippage(address payable strategy) internal {
+        // Hoisted: a call in argument position is evaluated first and would consume the prank.
+        address strategyOwner = MamoStakingStrategy(strategy).owner();
+        uint256 maxSlippage = stakingRegistry.MAX_SLIPPAGE_IN_BPS();
+
+        vm.prank(strategyOwner);
+        MamoStakingStrategy(strategy).setAccountSlippage(maxSlippage);
     }
 
     // Test basic deployment and functionality
@@ -709,7 +791,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.startPrank(backend);
 
         // Should not revert even with no rewards
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Verify the original deposit is still there
@@ -727,7 +809,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.startPrank(backend);
 
         // Process rewards with COMPOUND mode explicitly
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Verify deposit is maintained
@@ -843,24 +925,25 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Attempt to process rewards as non-backend
         vm.startPrank(attacker);
         vm.expectRevert("Not backend");
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Attempt to process rewards as owner (should also fail)
         vm.startPrank(user);
         vm.expectRevert("Not backend");
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Should work as backend
         address backend = addresses.getAddress("STRATEGY_MULTICALL");
         vm.startPrank(backend);
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
     }
 
     function testCompoundModeProcessing() public {
         userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
         uint256 depositAmount = 1000 * 10 ** 18;
 
         // Setup and deposit
@@ -869,6 +952,11 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // Verify initial staked balance
         uint256 initialBalance = multiRewards.balanceOf(userStrategy);
         assertEq(initialBalance, depositAmount, "Initial balance should match deposit");
+
+        // Seed a real reward stream. Without it this strategy accrues a few WEI of cbBTC from the
+        // live programme, and swapping dust through the pool cannot clear the oracle-derived
+        // minimum-out at any slippage -- the router itself reverts with "Too little received".
+        _setupRewardsInMultiRewards(addresses.getAddress("cbBTC"), 1 * 10 ** 8, 7 days);
 
         // Simulate time passing to accrue rewards
         vm.warp(block.timestamp + 7 days);
@@ -880,7 +968,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.startPrank(backend);
 
         // Process rewards in compound mode - this will claim any accrued rewards
-        MamoStakingStrategy(userStrategy).compound();
+        MamoStakingStrategy(userStrategy).compound(_deadline());
         vm.stopPrank();
 
         // Check the balance after processing rewards
@@ -902,6 +990,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
 
     function testCompoundModeEmitsCorrectEvents() public {
         userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 cbBTCRewardAmount = 1 * 10 ** 8; // cbBTC has 8 decimals
 
@@ -925,7 +1014,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
             vm.expectEmit(true, false, false, false);
             emit CompoundRewardTokenProcessed(cbBTC, 0, 0); // amounts will be checked separately
 
-            MamoStakingStrategy(userStrategy).compound();
+            MamoStakingStrategy(userStrategy).compound(_deadline());
             vm.stopPrank();
         }
     }
@@ -977,6 +1066,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
 
     function testEventParametersAreAccurate() public {
         userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
         uint256 depositAmount = 1000 * 10 ** 18;
         uint256 cbBTCRewardAmount = 5 * 10 ** 8; // Larger amount for better testing
 
@@ -1000,7 +1090,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
             // Record events manually to verify parameters
             vm.recordLogs();
 
-            MamoStakingStrategy(userStrategy).compound();
+            MamoStakingStrategy(userStrategy).compound(_deadline());
 
             Vm.Log[] memory logs = vm.getRecordedLogs();
 
@@ -1209,9 +1299,800 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         vm.stopPrank();
     }
 
+    // ========== SHERLOCK AUDIT REGRESSION TESTS ==========
+
+    /// @dev Puts a real, non-zero cbBTC reward balance on the user's staking strategy.
+    function _stakeAndAccrueCbBtcRewards() internal returns (address cbBTC) {
+        userStrategy = _deployUserStrategy(user);
+        _allowWideSlippage(userStrategy);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        cbBTC = addresses.getAddress("cbBTC");
+        _setupRewardsInMultiRewards(cbBTC, 10 * 10 ** 8, 7 days);
+
+        vm.warp(vm.getBlockTimestamp() + 1 days);
+        assertGt(multiRewards.earned(userStrategy, cbBTC), 0, "Setup should have accrued cbBTC rewards");
+    }
+
+    /// @notice MOO-744: the swap deadline must come from the caller, not from block.timestamp.
+    /// @dev `block.timestamp + 300` is computed inside the very transaction that executes the swap,
+    ///      so the router's `require(block.timestamp <= deadline)` can never fail. A compound() left
+    ///      in the mempool stayed valid indefinitely and would execute against whatever market
+    ///      existed when it finally landed.
+    function testCompoundRevertsWhenDeadlineHasPassed() public {
+        userStrategy = _deployUserStrategy(user);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+
+        uint256 stale = vm.getBlockTimestamp() - 1;
+        uint256 now_ = vm.getBlockTimestamp();
+
+        vm.prank(backend);
+        vm.expectRevert("Deadline in the past");
+        MamoStakingStrategy(userStrategy).compound(stale);
+
+        // The current instant is still a valid deadline.
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(now_);
+    }
+
+    // ─── setStakingRegistry: migrating off a non-upgradeable registry ────────────
+
+    /// @dev Deploys a MamoStakingRegistry from this branch's source, wired to the same MAMO token and
+    ///      the same admin/backend/guardian as the live one. MamoStakingRegistry has a plain
+    ///      constructor and no proxy, so a registry-side fix can only ship as a new deployment —
+    ///      which is exactly the migration setStakingRegistry exists to make possible.
+    function _deployReplacementRegistry() internal returns (MamoStakingRegistry replacement) {
+        replacement = new MamoStakingRegistry(
+            _stakingRegistryAdmin(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0),
+            address(mamoToken),
+            address(stakingRegistry.dexRouter()),
+            address(stakingRegistry.quoter()),
+            address(slippagePriceChecker),
+            100
+        );
+    }
+
+    function _stakingRegistryAdmin() internal view returns (address) {
+        return stakingRegistry.getRoleMember(stakingRegistry.DEFAULT_ADMIN_ROLE(), 0);
+    }
+
+    function testSetStakingRegistryByAdmin() public {
+        userStrategy = _deployUserStrategy(user);
+        MamoStakingRegistry replacement = _deployReplacementRegistry();
+        address admin = _stakingRegistryAdmin();
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit MamoStakingStrategy.StakingRegistryUpdated(address(stakingRegistry), address(replacement));
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(replacement));
+
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            address(replacement),
+            "Strategy should read configuration from the replacement registry"
+        );
+    }
+
+    /// @notice The whole point: a strategy must be able to compound after being migrated.
+    /// @dev Without setStakingRegistry, `stakingRegistry` was write-once, so a strategy born against a
+    ///      registry lacking a selector compound() needs could never compound again. This drives the
+    ///      real swap path against the replacement registry.
+    function testCompoundWorksAfterRegistryMigration() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MamoStakingRegistry replacement = _deployReplacementRegistry();
+
+        // The replacement needs the same reward-token configuration to route the accrued cbBTC.
+        address cbBtcPool = stakingRegistry.getRewardTokenPool(cbBTC);
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        replacement.addRewardToken(cbBTC, cbBtcPool);
+
+        vm.prank(_stakingRegistryAdmin());
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(replacement));
+
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(_deadline());
+
+        assertGt(multiRewards.balanceOf(userStrategy), stakedBefore, "Compound must work through the new registry");
+        assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Reward token should have been swapped");
+    }
+
+    /// @notice Rejects a registry that would brick compound() — the situation that created this need.
+    /// @dev MAMO_STAKING_REGISTRY_DEPRECATED genuinely reverts on `slippagePriceChecker()` on chain,
+    ///      and it is deliberately NOT covered by setUp's mock, so this is the real failure mode
+    ///      rather than a synthetic one. A typed call to a missing selector reverts in the caller's
+    ///      frame with empty returndata, so the probe has to be a raw staticcall with a length check.
+    function testSetStakingRegistryRevertsWhenRegistryHasNoPriceChecker() public {
+        userStrategy = _deployUserStrategy(user);
+        address deprecated = addresses.getAddress("MAMO_STAKING_REGISTRY_DEPRECATED");
+
+        // Prove the fixture is the real thing: the selector genuinely does not answer.
+        (bool ok,) = deprecated.staticcall(abi.encodeWithSignature("slippagePriceChecker()"));
+        assertFalse(ok, "Fixture must be a registry that truly lacks slippagePriceChecker()");
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Staking registry has no price checker");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(deprecated);
+    }
+
+    function testSetStakingRegistryRevertsOnMamoTokenMismatch() public {
+        userStrategy = _deployUserStrategy(user);
+
+        MamoStakingRegistry wrongToken = new MamoStakingRegistry(
+            _stakingRegistryAdmin(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0),
+            addresses.getAddress("cbBTC"), // not MAMO
+            address(stakingRegistry.dexRouter()),
+            address(stakingRegistry.quoter()),
+            address(slippagePriceChecker),
+            100
+        );
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Staking registry MAMO token mismatch");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(wrongToken));
+    }
+
+    /// @notice The backend may not repoint the registry, nor may an unrelated address.
+    /// @dev The admin arm's authority is the CURRENT registry's DEFAULT_ADMIN_ROLE, chosen because that
+    ///      role can already redirect every compound() swap via setDEXRouter. Pinning the BACKEND as
+    ///      rejected is what makes this test discriminating — a random-address check would pass under
+    ///      almost any gate.
+    ///
+    ///      The strategy OWNER is deliberately absent from this list and is asserted to SUCCEED below,
+    ///      which is the New-1 remediation: see testSetStakingRegistryOwnerRecoversFromAFrozenPointer
+    ///      for why an owner arm is required rather than merely tolerable.
+    function testSetStakingRegistryRevertsForNonAdmin() public {
+        userStrategy = _deployUserStrategy(user);
+        address replacement = address(_deployReplacementRegistry());
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+
+        assertTrue(
+            stakingRegistry.hasRole(stakingRegistry.BACKEND_ROLE(), backend),
+            "backend must genuinely hold BACKEND_ROLE for this to mean anything"
+        );
+        assertFalse(
+            stakingRegistry.hasRole(stakingRegistry.DEFAULT_ADMIN_ROLE(), user),
+            "owner must NOT hold the admin role, or the owner-arm assertion below proves nothing"
+        );
+
+        vm.prank(backend);
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        vm.prank(makeAddr("randomUser"));
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        // The owner arm: same call, same target, allowed.
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            replacement,
+            "the strategy owner must be able to repoint their own strategy"
+        );
+    }
+
+    /// @notice New-1 regression: the pointer must never be one-way.
+    /// @dev The freeze this defends against is structural, not hypothetical. `setStakingRegistry`'s
+    ///      admin arm authorises against `stakingRegistry` — the slot it writes — so a candidate that
+    ///      stops answering `hasRole` after the migration strands the strategy for the staking admin,
+    ///      MAMO_MULTISIG and the owner alike, and recovery would need a fresh implementation plus a
+    ///      per-strategy upgradeStrategy opt-in from every one of the deployed owners.
+    ///
+    ///      The fixture flips `roleAnswer` AFTER the admin migration rather than before, because the
+    ///      candidate-admin check added for New-4 rejects a registry that answers false up front. That
+    ///      ordering is the whole point: New-4 closes the honest-mistake path into the freeze, and this
+    ///      test covers what New-4 cannot — a candidate that degrades later.
+    function testSetStakingRegistryOwnerRecoversFromAFrozenPointer() public {
+        userStrategy = _deployUserStrategy(user);
+        address admin = _stakingRegistryAdmin();
+
+        ProbeableStakingRegistry hostile = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+
+        vm.prank(admin);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(hostile));
+        assertEq(address(MamoStakingStrategy(userStrategy).stakingRegistry()), address(hostile), "migrated");
+
+        // The candidate stops recognising anyone. Every admin-arm caller is now locked out.
+        hostile.setRoleAnswer(false);
+
+        address replacement = address(_deployReplacementRegistry());
+        vm.prank(admin);
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        vm.expectRevert("Not staking registry admin");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+
+        // The escape hatch: the owner recovers in one transaction, without touching the wedged
+        // registry (`||` short-circuits, so the broken hasRole is never consulted on this arm).
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(replacement);
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            replacement,
+            "owner must be able to recover a strategy whose registry no longer authorises anyone"
+        );
+    }
+
+    /// @notice New-4: the admin arm cannot hand a strategy to a registry the admin does not control.
+    /// @dev Costs an honest migration nothing — whoever prepares the new registry holds its admin role
+    ///      — while making the admin path structurally non-one-way. Not applied to the owner arm, which
+    ///      the second half pins so a future change cannot quietly extend it there.
+    function testSetStakingRegistryAdminArmRequiresAdminOnCandidate() public {
+        userStrategy = _deployUserStrategy(user);
+
+        ProbeableStakingRegistry candidate = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+        candidate.setRoleAnswer(false); // answers nobody, including the migrating admin
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Not admin on new staking registry");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+
+        // Same candidate, owner arm: allowed, because an owner can only stranded themselves and can
+        // repoint again afterwards.
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+        assertEq(address(MamoStakingStrategy(userStrategy).stakingRegistry()), address(candidate), "owner arm");
+    }
+
+    /// @notice New-2: a candidate cannot import an unbounded default slippage.
+    /// @dev getAccountSlippage() falls back to the registry default whenever the owner never set one —
+    ///      the common case — and compound() spends it as `(10000 - slippage)`. 10000 means a zero
+    ///      minimum-out with the honest checker and honest router still installed, so nothing
+    ///      attacker-authored appears on chain for monitoring to catch. Bounded against a
+    ///      strategy-side constant, never the candidate's own MAX_SLIPPAGE_IN_BPS(), which would be
+    ///      circular — the second leg pins exactly that.
+    function testSetStakingRegistryRevertsOnUnboundedDefaultSlippage() public {
+        userStrategy = _deployUserStrategy(user);
+        address admin = _stakingRegistryAdmin();
+
+        ProbeableStakingRegistry candidate = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+        candidate.setDefaultSlippageInBps(10000);
+
+        vm.prank(admin);
+        vm.expectRevert("Staking registry slippage too high");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+
+        // A candidate that reports its OWN cap as 10000 must still be rejected: the bound is a
+        // strategy-side constant, so self-reported headroom buys nothing.
+        candidate.setMaxSlippageInBps(10000);
+        assertEq(candidate.MAX_SLIPPAGE_IN_BPS(), 10000, "fixture must actually claim the wider cap");
+        vm.prank(admin);
+        vm.expectRevert("Staking registry slippage too high");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+
+        // Control: at the boundary the same candidate is accepted, so the revert above is the bound
+        // firing rather than the fixture being unusable.
+        candidate.setDefaultSlippageInBps(MamoStakingStrategy(userStrategy).MAX_REGISTRY_SLIPPAGE_IN_BPS());
+        vm.prank(admin);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+    }
+
+    /// @notice New-4: a candidate missing a selector the strategy reads at runtime is rejected.
+    /// @dev The three-function contract that passes a dexRouter()/slippagePriceChecker() probe and
+    ///      still bricks the owner's own exit — withdrawAll()/withdrawRewards() revert on the missing
+    ///      getRewardTokens(), and since multiRewards.getReward() is only ever called from
+    ///      registry-reading functions, unclaimed rewards would be permanently stranded.
+    function testSetStakingRegistryRevertsWhenCandidateDropsASelector() public {
+        userStrategy = _deployUserStrategy(user);
+
+        RegistryMissingRewardTokens candidate = new RegistryMissingRewardTokens(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+
+        // Prove the fixture would have passed the ORIGINAL two-selector probe, so this test is about
+        // the widened probe rather than about a contract that fails everything.
+        (bool okChecker,) = address(candidate).staticcall(abi.encodeWithSignature("slippagePriceChecker()"));
+        (bool okRouter,) = address(candidate).staticcall(abi.encodeWithSignature("dexRouter()"));
+        assertTrue(okChecker && okRouter, "fixture must satisfy the original narrow probe");
+
+        vm.prank(_stakingRegistryAdmin());
+        vm.expectRevert("Staking registry has no reward tokens");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(candidate));
+    }
+
+    /// @notice The staked principal is out of reach even under a registry that lists MAMO as a reward.
+    /// @dev MamoStakingRegistry forbids this, but setStakingRegistry accepts any contract passing the
+    ///      probes, and MAMO genuinely IS a MultiRewards reward token on both live instances — so
+    ///      getReward() really does bring MAMO onto the strategy. Before the explicit guard the only
+    ///      thing stopping the swap was `received = after - before` underflowing when
+    ///      tokenIn == tokenOut: correct but accidental, and invisible to a reader.
+    function testCompoundRejectsAMamoRewardToken() public {
+        userStrategy = _deployUserStrategy(user);
+
+        ProbeableStakingRegistry hostile = new ProbeableStakingRegistry(
+            address(slippagePriceChecker), address(stakingRegistry.dexRouter()), address(mamoToken)
+        );
+        hostile.addRewardToken(address(mamoToken), stakingRegistry.getRewardTokenPool(addresses.getAddress("cbBTC")));
+
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(hostile));
+
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        vm.expectRevert("Reward token is MAMO");
+        MamoStakingStrategy(userStrategy).compound(_deadline());
+    }
+
+    function testSetStakingRegistryRevertsOnInvalidTargets() public {
+        userStrategy = _deployUserStrategy(user);
+        address admin = _stakingRegistryAdmin();
+
+        vm.prank(admin);
+        vm.expectRevert("Invalid staking registry");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(0));
+
+        vm.prank(admin);
+        vm.expectRevert("Staking registry already set");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(stakingRegistry));
+
+        vm.prank(admin);
+        vm.expectRevert("Staking registry not a contract");
+        MamoStakingStrategy(userStrategy).setStakingRegistry(makeAddr("notAContract"));
+    }
+
+    /// @notice Migration must work while the old registry is paused.
+    /// @dev Moving off a broken registry is remediation, and a registry can be broken in ways that
+    ///      make unpausing it impossible, so the pause must not stand between the fleet and the fix.
+    function testSetStakingRegistrySucceedsWhileOldRegistryPaused() public {
+        userStrategy = _deployUserStrategy(user);
+        MamoStakingRegistry replacement = _deployReplacementRegistry();
+        address guardian = stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0);
+
+        vm.prank(guardian);
+        stakingRegistry.pause();
+        assertTrue(stakingRegistry.paused(), "old registry should be paused");
+
+        vm.prank(_stakingRegistryAdmin());
+        MamoStakingStrategy(userStrategy).setStakingRegistry(address(replacement));
+
+        assertEq(
+            address(MamoStakingStrategy(userStrategy).stakingRegistry()),
+            address(replacement),
+            "Migration must not require unpausing the broken registry"
+        );
+    }
+
+    /// @notice MOO-744 follow-up: the caller-supplied deadline needs an upper bound too.
+    /// @dev Without one, compound(type(uint256).max) restores exactly the tautology the
+    ///      caller-supplied deadline removed — an unbounded-lifetime swap authorisation — while
+    ///      leaving no on-chain trace that the protection was bypassed. The bound is sized to the
+    ///      price checker's max order lifetime, since a swap authorised past the expiry of its
+    ///      reference price is not protected by that price.
+    function testCompoundRevertsWhenDeadlineTooFarInTheFuture() public {
+        userStrategy = _deployUserStrategy(user);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        uint256 maxDeadline = MamoStakingStrategy(userStrategy).MAX_COMPOUND_DEADLINE();
+
+        vm.prank(backend);
+        vm.expectRevert("Deadline too far in the future");
+        MamoStakingStrategy(userStrategy).compound(type(uint256).max);
+
+        vm.prank(backend);
+        vm.expectRevert("Deadline too far in the future");
+        MamoStakingStrategy(userStrategy).compound(vm.getBlockTimestamp() + maxDeadline + 1);
+
+        // Exactly at the bound is still accepted, so the cap does not shrink the usable window.
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(vm.getBlockTimestamp() + maxDeadline);
+    }
+
+    /// @notice MOO-733: compound() must verify the MAMO it actually received, not the router's word.
+    /// @dev The router here reports a huge amountOut while transferring nothing. Before the fix the
+    ///      strategy accepted that return value as the swap result, so amountOutMinimum was enforced
+    ///      only by the router's own implementation and an honest-but-buggy router (or a router
+    ///      upgrade with different return semantics) silently defeated the slippage guard.
+    function testCompoundRevertsWhenRouterUnderDeliversDespiteReturnValue() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        address dexRouter = address(stakingRegistry.dexRouter());
+
+        // Router returns a large amountOut but moves no MAMO.
+        vm.mockCall(
+            dexRouter, abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector), abi.encode(type(uint128).max)
+        );
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        uint256 deadline = _deadline();
+        vm.prank(backend);
+        vm.expectRevert("Insufficient MAMO received");
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        vm.clearMockedCalls();
+        _mockRegistryPriceChecker();
+
+        // Sanity: with the real router the same compound succeeds, so the revert above is the
+        // balance check firing and not a broken fixture.
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+        deadline = _deadline();
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(deadline);
+        assertGt(multiRewards.balanceOf(userStrategy), stakedBefore, "Real compound should restake swapped MAMO");
+        assertEq(IERC20(cbBTC).balanceOf(userStrategy), 0, "Reward token should have been fully swapped");
+    }
+
+    /// @dev Replaces MamoStakingRegistry.dexRouter() with a router whose behaviour can be dialled in,
+    ///      funded with enough MAMO to settle any swap the strategy asks for. The price-checker mock
+    ///      installed in setUp() is on a different selector and survives.
+    function _installMockRouter() internal returns (MockConfigurableSwapRouter router) {
+        router = new MockConfigurableSwapRouter();
+        deal(address(mamoToken), address(router), 1e30);
+
+        vm.mockCall(address(stakingRegistry), abi.encodeWithSignature("dexRouter()"), abi.encode(address(router)));
+    }
+
+    /// @notice MOO-744: the caller's deadline must reach the router, not just the require at the top.
+    /// @dev testCompoundRevertsWhenDeadlineHasPassed only pins the `require(deadline >= block.timestamp)`;
+    ///      its happy-path call runs on a strategy with no accrued rewards, so the swap loop is skipped
+    ///      and the deadline never reaches a router. Restoring the pre-fix `deadline: block.timestamp
+    ///      + 300` in the swap params therefore left that test — and the whole suite — green. This
+    ///      test hands compound() a deadline that nothing inside the transaction can reconstruct and
+    ///      reads back the value the router was actually called with.
+    function testCompoundForwardsCallerDeadlineToRouter() public {
+        _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+
+        // A distinctive offset: any deadline the strategy synthesises from block.timestamp misses it.
+        // Kept inside MAX_COMPOUND_DEADLINE so this test pins deadline FORWARDING, not the cap.
+        uint256 deadline = vm.getBlockTimestamp() + 2718;
+
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        assertEq(router.callCount(), 1, "The accrued reward token must actually have been swapped");
+        assertGt(router.lastAmountIn(), 0, "The swap must have carried a real amountIn");
+        assertEq(router.lastDeadline(), deadline, "Router must be handed the CALLER's deadline");
+    }
+
+    /// @notice MOO-733: the reward-token allowance granted to the router must not survive the swap.
+    /// @dev Non-regression guard only. The real Aerodrome router pulls exactly `amountIn`, so the
+    ///      allowance is already zero without the trailing `forceApprove(dexRouter, 0)` — this test
+    ///      passes against the pre-fix implementation and is evidence for nothing on its own. The
+    ///      discriminating version is testCompoundClearsRewardTokenAllowanceWhenRouterPullsLess.
+    function testCompoundLeavesNoRouterAllowanceWithTheRealRouter() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        address dexRouter = address(stakingRegistry.dexRouter());
+
+        uint256 deadline = _deadline();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        assertEq(IERC20(cbBTC).allowance(userStrategy, dexRouter), 0, "Router allowance should be cleared after swap");
+    }
+
+    /// @notice MOO-733: a router that pulls LESS than it was approved for must not keep the remainder.
+    /// @dev This is what the trailing `forceApprove(dexRouter, 0)` is for. Nothing in the real router's
+    ///      behaviour can produce a residual allowance, so only a router that under-pulls can tell the
+    ///      fixed implementation from the pre-fix one.
+    function testCompoundClearsRewardTokenAllowanceWhenRouterPullsLess() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+        router.setPullBps(5000); // pulls half of what it is approved for
+
+        uint256 deadline = _deadline();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        assertEq(router.callCount(), 1, "The reward token must have been routed through the swap");
+        assertLt(router.lastPulled(), router.lastAmountIn(), "Fixture must leave an unspent approval behind");
+        assertEq(
+            IERC20(cbBTC).allowance(userStrategy, address(router)),
+            0,
+            "The unpulled remainder of the approval must not survive the swap"
+        );
+    }
+
+    /// @notice MOO-733: the emitted amountOut must be the measured delta, not the router's claim.
+    /// @dev The real router's return value equals the balance delta it produced, so with it the
+    ///      emitted `actualAmountOut` and the measured `received` are indistinguishable. Here the
+    ///      router over-reports while still delivering more than the minimum, so the two diverge.
+    function testCompoundEmitsMeasuredAmountOutNotRouterReport() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+        router.setDeliverExtra(1e18); // delivers strictly more than amountOutMinimum
+        router.setOverReportBy(777e18); // but claims even more than it delivered
+
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+        uint256 earnedMamo = multiRewards.earned(userStrategy, address(mamoToken));
+
+        uint256 deadline = _deadline();
+        vm.recordLogs();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        (bool found, uint256 reportedOut) = _findCompoundAmountOut(cbBTC);
+        assertTrue(found, "CompoundRewardTokenProcessed should be emitted for cbBTC");
+
+        assertTrue(router.lastReported() != router.lastDelivered(), "Fixture must make claim and delivery diverge");
+        assertEq(reportedOut, router.lastDelivered(), "Emitted amountOut must be the MAMO actually received");
+        assertLt(reportedOut, router.lastReported(), "Emitted amountOut must not be the router's own claim");
+        assertEq(
+            multiRewards.balanceOf(userStrategy) - stakedBefore,
+            earnedMamo + router.lastDelivered(),
+            "Only the MAMO actually delivered can have been staked"
+        );
+    }
+
+    /// @notice MOO-733: the emitted amountIn must be what the router actually pulled, not what it was
+    ///         offered.
+    /// @dev The event is the feed off-chain reconciliation uses to compare claimed rewards against
+    ///      swapped rewards, and that reconciliation is the natural monitor for a malicious-router
+    ///      incident. Emitting the requested balance instead lets an under-pulling router drift the
+    ///      reconciliation with nothing on chain disagreeing. The real router pulls exactly amountIn,
+    ///      so only an under-pulling router separates the two values.
+    function testCompoundEmitsPulledAmountInNotRequestedBalance() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+        MockConfigurableSwapRouter router = _installMockRouter();
+        router.setPullBps(5000); // pulls half of what it is approved for
+
+        uint256 deadline = _deadline();
+        vm.recordLogs();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        (bool found, uint256 reportedIn) = _findCompoundAmountIn(cbBTC);
+        assertTrue(found, "CompoundRewardTokenProcessed should be emitted for cbBTC");
+
+        assertLt(router.lastPulled(), router.lastAmountIn(), "Fixture must make offered and pulled diverge");
+        assertEq(reportedIn, router.lastPulled(), "Emitted amountIn must be what the router actually pulled");
+        assertLt(reportedIn, router.lastAmountIn(), "Emitted amountIn must not be the requested balance");
+
+        // Cross-check without asking the router anything: amountIn offered was the strategy's whole
+        // reward balance at swap time, so whatever was not pulled must still be sitting there.
+        // Anchored to the post-claim balance on purpose — compound() calls getReward() first, so a
+        // balance read before the call is NOT the quantity the swap was sized against.
+        assertEq(
+            reportedIn + IERC20(cbBTC).balanceOf(userStrategy),
+            router.lastAmountIn(),
+            "Pulled plus remaining must account for the whole balance the swap was sized against"
+        );
+    }
+
+    /// @dev Pulls `amountIn` out of the CompoundRewardTokenProcessed log for `rewardToken`.
+    function _findCompoundAmountIn(address rewardToken) internal returns (bool found, uint256 amountIn) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == userStrategy
+                    && logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")
+                    && address(uint160(uint256(logs[i].topics[1]))) == rewardToken
+            ) {
+                (amountIn,) = abi.decode(logs[i].data, (uint256, uint256));
+                return (true, amountIn);
+            }
+        }
+    }
+
+    /// @dev Pulls `actualAmountOut` out of the CompoundRewardTokenProcessed log for `rewardToken`.
+    function _findCompoundAmountOut(address rewardToken) internal returns (bool found, uint256 amountOut) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == userStrategy
+                    && logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")
+                    && address(uint160(uint256(logs[i].topics[1]))) == rewardToken
+            ) {
+                (, amountOut) = abi.decode(logs[i].data, (uint256, uint256));
+                return (true, amountOut);
+            }
+        }
+    }
+
+    /// @notice MOO-733: the emitted amountOut must be the measured balance delta.
+    /// @dev Non-regression guard only. The real router's return value already equals the measured
+    ///      delta, so this cannot separate `actualAmountOut` from `received`; see
+    ///      testCompoundEmitsMeasuredAmountOutNotRouterReport for the discriminating version.
+    function testCompoundEmitsAmountOutConsistentWithTheRealRouter() public {
+        address cbBTC = _stakeAndAccrueCbBtcRewards();
+
+        assertEq(mamoToken.balanceOf(userStrategy), 0, "Strategy holds no idle MAMO before compounding");
+
+        uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
+        // Any MAMO claimed as a reward is staked alongside the swap proceeds; read it at the same
+        // timestamp compound() will claim it at so the two are exactly comparable.
+        uint256 earnedMamo = multiRewards.earned(userStrategy, address(mamoToken));
+
+        uint256 deadline = _deadline();
+        vm.recordLogs();
+        vm.prank(addresses.getAddress("STRATEGY_MULTICALL"));
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 reportedOut;
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == userStrategy
+                    && logs[i].topics[0] == keccak256("CompoundRewardTokenProcessed(address,uint256,uint256)")
+                    && address(uint160(uint256(logs[i].topics[1]))) == cbBTC
+            ) {
+                (, reportedOut) = abi.decode(logs[i].data, (uint256, uint256));
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "CompoundRewardTokenProcessed should be emitted for cbBTC");
+
+        assertGt(reportedOut, 0, "Reported amountOut should be non-zero");
+
+        // Everything the strategy holds in MAMO gets staked, so the staked delta is exactly the MAMO
+        // claimed as a reward plus the MAMO the swap actually delivered.
+        assertEq(
+            multiRewards.balanceOf(userStrategy) - stakedBefore,
+            earnedMamo + reportedOut,
+            "Reported amountOut should equal the MAMO actually received and staked"
+        );
+    }
+
+    /// @notice MOO-735: backend operations must stop while the staking registry is paused.
+    /// @dev The pause exists for exactly these scenarios (faulty router, bad price-checker config,
+    ///      compromised reinvest destination), yet compound() and reinvest() kept running through it.
+    function testCompoundAndReinvestRevertWhileRegistryPaused() public {
+        userStrategy = _deployUserStrategy(user);
+        _setupAndDeposit(user, userStrategy, 1000 * 10 ** 18);
+
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+        address guardian = stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0);
+
+        vm.prank(guardian);
+        stakingRegistry.pause();
+        assertTrue(stakingRegistry.paused(), "Registry should be paused");
+
+        uint256 deadline = _deadline();
+        vm.prank(backend);
+        vm.expectRevert("Registry paused");
+        MamoStakingStrategy(userStrategy).compound(deadline);
+
+        address[] memory strategies = new address[](stakingRegistry.getRewardTokenCount());
+        vm.prank(backend);
+        vm.expectRevert("Registry paused");
+        MamoStakingStrategy(userStrategy).reinvest(strategies);
+
+        // Unpausing restores backend operation.
+        vm.prank(guardian);
+        stakingRegistry.unpause();
+
+        deadline = _deadline();
+        vm.prank(backend);
+        MamoStakingStrategy(userStrategy).compound(deadline);
+    }
+
+    /// @notice MOO-735: the pause must never trap user funds.
+    function testOwnerCanStillExitWhileRegistryPaused() public {
+        userStrategy = _deployUserStrategy(user);
+        uint256 depositAmount = 1000 * 10 ** 18;
+        _setupAndDeposit(user, userStrategy, depositAmount);
+
+        address guardian = stakingRegistry.getRoleMember(stakingRegistry.GUARDIAN_ROLE(), 0);
+        vm.prank(guardian);
+        stakingRegistry.pause();
+
+        // Partial withdraw, reward claim and full exit all remain available to the owner.
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).withdraw(depositAmount / 2);
+
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).withdrawRewards();
+
+        vm.prank(user);
+        MamoStakingStrategy(userStrategy).withdrawAll();
+
+        assertEq(multiRewards.balanceOf(userStrategy), 0, "Owner should have fully exited while paused");
+        assertEq(mamoToken.balanceOf(user), depositAmount, "Owner should hold all their MAMO back");
+    }
+
     // Event declarations
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event Withdrawn(address indexed token, uint256 amount);
     event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
+}
+
+/// @notice A stand-in registry that satisfies `setStakingRegistry`'s probe set while letting each
+///         answer be steered independently.
+/// @dev Defined in the test file on purpose: the Makefile's coverage target skips `t.sol` and `s.sol`
+///      only, so a test-only contract in its own `Mock*.sol` file would silently enter the coverage
+///      denominator. It has to be a bespoke contract rather than a real MamoStakingRegistry because
+///      every scenario below is one the real registry's own constructor and setters forbid — which is
+///      exactly the point: `setStakingRegistry` accepts any address, so its guards must hold against
+///      contracts that were never built by MamoStakingRegistry at all.
+contract ProbeableStakingRegistry {
+    address public slippagePriceChecker;
+    address public dexRouter;
+    address public mamoToken;
+    uint256 public MAX_SLIPPAGE_IN_BPS = 2500;
+    uint256 public defaultSlippageInBps = 100;
+    bool public paused;
+
+    /// @dev The flip that makes the New-1 freeze reachable: a candidate can answer `hasRole` honestly
+    ///      at migration time and stop answering afterwards (a bug, a self-revoke, a re-init).
+    bool public roleAnswer = true;
+
+    MamoStakingRegistry.RewardToken[] internal _rewardTokens;
+
+    constructor(address checker_, address router_, address mamo_) {
+        slippagePriceChecker = checker_;
+        dexRouter = router_;
+        mamoToken = mamo_;
+    }
+
+    function BACKEND_ROLE() external pure returns (bytes32) {
+        return keccak256("BACKEND_ROLE");
+    }
+
+    function DEFAULT_ADMIN_ROLE() external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    function hasRole(bytes32, address) external view returns (bool) {
+        return roleAnswer;
+    }
+
+    function getRewardTokens() external view returns (MamoStakingRegistry.RewardToken[] memory) {
+        return _rewardTokens;
+    }
+
+    function setRoleAnswer(bool v) external {
+        roleAnswer = v;
+    }
+
+    function setDefaultSlippageInBps(uint256 v) external {
+        defaultSlippageInBps = v;
+    }
+
+    /// @dev Lets a test make the candidate claim its own, wider cap — the circularity the strategy's
+    ///      strategy-side constant exists to refuse.
+    function setMaxSlippageInBps(uint256 v) external {
+        MAX_SLIPPAGE_IN_BPS = v;
+    }
+
+    function addRewardToken(address token, address pool) external {
+        _rewardTokens.push(MamoStakingRegistry.RewardToken({token: token, pool: pool}));
+    }
+}
+
+/// @notice Same surface, minus `getRewardTokens()` — the honest-v3-drops-a-selector case.
+/// @dev Three functions were enough to pass the original two-selector probe while bricking
+///      withdrawAll()/withdrawRewards(); this fixture is what proves the probe now covers it.
+contract RegistryMissingRewardTokens {
+    address public slippagePriceChecker;
+    address public dexRouter;
+    address public mamoToken;
+    uint256 public MAX_SLIPPAGE_IN_BPS = 2500;
+    uint256 public defaultSlippageInBps = 100;
+    bool public paused;
+
+    constructor(address checker_, address router_, address mamo_) {
+        slippagePriceChecker = checker_;
+        dexRouter = router_;
+        mamoToken = mamo_;
+    }
+
+    function BACKEND_ROLE() external pure returns (bytes32) {
+        return keccak256("BACKEND_ROLE");
+    }
+
+    function DEFAULT_ADMIN_ROLE() external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    function hasRole(bytes32, address) external pure returns (bool) {
+        return true;
+    }
 }

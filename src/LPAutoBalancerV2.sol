@@ -19,7 +19,6 @@ import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {LPPositionLib} from "@libraries/LPPositionLib.sol";
 import {LPValuationLib} from "@libraries/LPValuationLib.sol";
 import {SwapWindowLib} from "@libraries/SwapWindowLib.sol";
-import {FullMath} from "@libraries/uniswap/FullMath.sol";
 
 /// @dev Minimal view surface of LPCompoundModule needed for the EIP-1271 passthrough.
 interface ILPCompoundModuleRebalance {
@@ -48,21 +47,30 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     uint16 public constant MAX_COMPOUND_BPS = 10_000;
 
     /// @notice Minimum USD value of the surplus leg required to mint the single-sided alt.
-    ///         Scale is 8-decimal USD (Chainlink convention), the same scale `_valueInUsd`
+    ///         Scale is 8-decimal USD (Chainlink convention), the same scale `LPValuationLib.valueInUsd`
     ///         returns. Below this the leftover is treated as dust and forwarded to the
     ///         feeCollector instead — a sub-tick remainder too small to seed a position would
     ///         revert the mint or round to zero liquidity. MUST be a USD threshold, never raw
     ///         base units: the phase-1 pair is WETH (18-dec) / cbBTC (8-dec), so a flat raw
     ///         threshold means wildly different USD amounts per leg. 1e6 = $0.01.
     ///
-    ///         INVARIANT: MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD (asserted in the unit suite). A
-    ///         single-sided main sits one spacing off spot, so the OPPOSITE-side alt range would
-    ///         straddle spot — an in-range two-sided "single-sided" mint whose in-range leg's min is
-    ///         forced to 0 (sandwichable). That is only reachable if a minority leg can clear the alt
-    ///         threshold while still being sub-MIN_MAIN_LEG_USD (i.e. this constant drops below it).
-    ///         Keeping MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD guarantees any sub-main-threshold minority
-    ///         is also sub-alt-threshold and returns 0 in _mintAlt before such a range can mint. If you
-    ///         bump MIN_ALT_VALUE_USD, keep it >= MIN_MAIN_LEG_USD or add a spot-containment guard.
+    ///         ORDERING: MIN_ALT_VALUE_USD >= MIN_MAIN_LEG_USD (asserted in the unit suite). This was
+    ///         originally a SAFETY invariant, and no longer is — the hazard it existed to block was
+    ///         removed when `mintAlt` stopped anchoring the alt to the MAIN range's bounds and started
+    ///         anchoring it to `floorAlign(spotTick)`. Under the old anchoring, a single-sided main
+    ///         sitting one spacing off spot could place the opposite-side alt straddling spot: an
+    ///         in-range two-sided "single-sided" mint whose in-range leg's min is forced to 0, hence
+    ///         sandwichable. Spot anchoring makes that unreachable by construction — a token0 alt is
+    ///         `[floor + spacing, floor + 2*spacing]`, whose tickLower is strictly above spot, and a
+    ///         token1 alt is `[floor - spacing, floor]`, whose tickUpper is at or below spot. Neither
+    ///         can contain spot, whatever the main did. See `LPPositionLib.mintAlt`.
+    ///
+    ///         What the ordering buys NOW is only a dust-vs-deploy choice: it keeps any leg too small
+    ///         to seed a main from also being seeded as an alt, so sub-threshold remainders take one
+    ///         consistent path (forwarded as dust) rather than two. The unit assertion is retained as
+    ///         a change-detector on that choice. It is no longer load-bearing for sandwich safety, so
+    ///         do not treat it as a licence to skip re-deriving safety if `mintAlt`'s placement rule
+    ///         changes again — the anchoring is what carries that property.
     uint256 public constant MIN_ALT_VALUE_USD = 1e6;
 
     /// @notice Minimum USD value (8-decimal scale) a minority leg must hold for the main to be built
@@ -76,7 +84,48 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     INonfungiblePositionManager public immutable POSITION_MANAGER;
     address public immutable AERO;
 
-    uint256 public maxOracleDelay;
+    /// @notice Hard ceiling on either per-feed staleness bound. 1 day is ~72x the ~20-minute
+    ///         heartbeat of the feeds this contract is built for (Base ETH/USD, BTC/USD), so it
+    ///         leaves ample room for a slow or degraded feed while still rejecting a fat-fingered
+    ///         value outright. Deliberately NOT the 7-day cap the sequencer grace period uses: a
+    ///         staleness bound three orders of magnitude above the heartbeat is indistinguishable
+    ///         from no bound at all, which is the substance of MOO-740.
+    uint256 public constant MAX_ORACLE_DELAY = 1 days;
+
+    /// @notice Constructor default for BOTH per-feed staleness bounds. 3x the ~20-minute heartbeat
+    ///         of the feeds this contract is built for: tight enough that the value which SHIPS is
+    ///         already a real bound, loose enough to ride out a couple of missed rounds.
+    /// @dev    The value a deployment ships with is the value that protects it. A default sized for
+    ///         "some feed, somewhere" (the old 26 hours) means a deployment whose setup proposal
+    ///         forgets to tighten the bound is running with no meaningful staleness check at all —
+    ///         and nothing on chain distinguishes that from a deliberate choice. Failing CLOSED is
+    ///         cheap here: `registerPosition`/`setOracles` probe both feeds against these bounds, so
+    ///         pairing this contract with a genuinely slower feed reverts in the admin transaction
+    ///         rather than shipping a silent hole.
+    uint256 public constant DEFAULT_MAX_ORACLE_DELAY = 1 hours;
+
+    /// @notice Staleness bound for `position.oracle0` ONLY.
+    /// @dev Per-feed, not shared. The two legs are different assets on different heartbeats — Base
+    ///      cbBTC/USD and ETH/USD both publish on ~20-minute cadences — so a single bound sized for
+    ///      the slowest feed accepts the fastest feed's answers many multiples past their own
+    ///      validity. Both `_mainRange` and `_mintAlt` pick a SIDE from a value0-vs-value1
+    ///      comparison, so one stale leg puts the position on the wrong side of the market.
+    ///      Constructor seeds `DEFAULT_MAX_ORACLE_DELAY` for both; admins tighten each to its feed's
+    ///      real heartbeat via `setMaxOracleDelays` (proposal 011 does this explicitly for the
+    ///      phase-1 pair, and its `validate()` asserts the result).
+    uint256 public maxOracleDelay0;
+
+    /// @notice Staleness bound for `position.oracle1` ONLY. See `maxOracleDelay0`.
+    uint256 public maxOracleDelay1;
+
+    /// @notice Base sequencer uptime feed (Chainlink L2 uptime aggregator). `address(0)` disables
+    ///         the check — every Chainlink read then trusts a report that may pre-date an outage.
+    ///         Set it (with a grace period) on any L2 deployment.
+    address public sequencerUptimeFeed;
+
+    /// @notice Seconds the sequencer must have been continuously up before a feed read is accepted.
+    ///         Only consulted when `sequencerUptimeFeed != address(0)`.
+    uint256 public sequencerGracePeriod;
 
     struct ManagedPositionV2 {
         uint256 mainTokenId;
@@ -118,8 +167,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice The swap-rebalance in-flight window (see SwapWindowLib): open between
     ///         unwindForSwap() and rebuildAfterSwap()/exit(). All writes go through the library's
     ///         open/closeForRebuild/closeForExit — never direct field assignment (write discipline
-    ///         documented on the library). Reads from views are fine. The public getters below
-    ///         preserve the pre-refactor flat-field ABI verbatim.
+    ///         documented on the library). Reads from views are fine.
+    /// @dev    ABI NOTE: the old `rebalanceValueBefore()` / `rebalanceValueBeforePos()` /
+    ///         `rebalanceLooseBefore()` USD getters are GONE, replaced by
+    ///         `rebalanceAmountsBefore()`. They reported a USD figure frozen at unwind, which is
+    ///         exactly the quantity the floor stopped using (see SwapWindowLib.Snapshot) — keeping
+    ///         them would have meant re-deriving a number the contract no longer relies on, at a
+    ///         cost the balancer's EIP-170 budget could not absorb. Off-chain consumers should read
+    ///         the amounts and price them themselves.
     SwapWindowLib.SwapWindow private _window;
 
     /// @notice True between unwindForSwap() and rebuildAfterSwap()/exit(); gates rebalance-order validation.
@@ -127,23 +182,15 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         return _window.inFlight;
     }
 
-    /// @notice USD (1e8) diagnostic total at unwind: positions + loose, COMBINED. Computed from
-    ///         the split fields (no longer stored); the floor math uses the split terms.
-    function rebalanceValueBefore() external view returns (uint256) {
-        return _window.valueBeforePos + _window.looseBefore;
-    }
-
-    /// @notice USD (1e8) value of main+alt PRINCIPAL ONLY (no loose), snapshotted at unwind.
-    ///         The value floor's loss haircut applies to this term alone.
-    function rebalanceValueBeforePos() external view returns (uint256) {
-        return _window.valueBeforePos;
-    }
-
-    /// @notice USD (1e8) value of loose token0/token1 already on the contract at unwind (e.g.
-    ///         un-folded AERO-compound proceeds). Added back UN-HAIRCUT to the rebuild floor's
-    ///         RHS, matching rebalanceUsingAlt's H-1 fix.
-    function rebalanceLooseBefore() external view returns (uint256) {
-        return _window.looseBefore;
+    /// @notice Raw token AMOUNTS snapshotted at unwind: main+alt principal, and the pre-existing
+    ///         loose balance. These are what the window actually stores and what the rebuild floor
+    ///         re-prices — see SwapWindowLib.Snapshot for why the baseline is amounts, not USD.
+    function rebalanceAmountsBefore()
+        external
+        view
+        returns (uint256 amount0Pos, uint256 amount1Pos, uint256 loose0, uint256 loose1)
+    {
+        return (_window.amount0Pos, _window.amount1Pos, _window.loose0, _window.loose1);
     }
 
     /// @notice Timestamp of the last unwindForSwap() (diagnostics + snapshot field).
@@ -167,6 +214,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error ZeroAddress();
     error TwapDeviation();
     error StaleOracle();
+    /// @dev Redeclared from LPValuationLib so they appear in this contract's ABI (an error's
+    ///      selector depends only on its signature, so the library's reverts match these).
+    error SequencerDown();
+    error SequencerGracePeriod();
     error LossCapExceeded();
     error InvalidWidth();
     error WidthTooNarrow();
@@ -193,6 +244,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error AlreadyInFlight();
     error InvalidSellToken();
     error SwapLossAllowanceTooHigh();
+    /// @dev The range the contract computed differs from the one the caller committed to in
+    ///      RebuildParams — spot moved (or was moved) between decision and execution.
+    error TickMismatch();
+    /// @dev Only the position manager may push an NFT onto this contract.
+    error NotPositionManager();
+    /// @dev `recoverETH` recipient rejected the transfer.
+    error EthTransferFailed();
 
     event PositionRegistered(address indexed pool, uint256 indexed tokenId);
     event PoolChanged(address indexed pool, uint256 indexed mainTokenId);
@@ -202,7 +260,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     event FeeCollectorUpdated(address feeCollector);
     event OraclesUpdated(address oracle0, address oracle1);
     event GaugeUpdated(address gauge);
-    event MaxOracleDelayUpdated(uint256 oldDelay, uint256 newDelay);
+    event MaxOracleDelaysUpdated(uint256 delay0, uint256 delay1);
+    event SequencerUptimeFeedUpdated(address feed, uint256 gracePeriod);
     event TokensRecovered(address indexed token, address indexed to, uint256 amount);
     event Staked(uint256 indexed tokenId, address gauge);
     event Unstaked(uint256 indexed tokenId, address gauge);
@@ -234,13 +293,25 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         POSITION_MANAGER = INonfungiblePositionManager(positionManager_);
         AERO = aero_;
-        maxOracleDelay = 26 hours;
+        maxOracleDelay0 = DEFAULT_MAX_ORACLE_DELAY;
+        maxOracleDelay1 = DEFAULT_MAX_ORACLE_DELAY;
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external view returns (bytes4) {
-        require(msg.sender == address(POSITION_MANAGER), "Only position manager");
+        if (msg.sender != address(POSITION_MANAGER)) revert NotPositionManager();
         return this.onERC721Received.selector;
     }
+
+    /// @notice Accept native ETH.
+    /// @dev REQUIRED, not a convenience. Slipstream's NonfungiblePositionManager.mint() ends with an
+    ///      unconditional `refundETH()`, which forwards the manager's ENTIRE native balance to
+    ///      msg.sender and reverts if the recipient rejects it. The manager is shared infrastructure,
+    ///      so anyone can force 1 wei into it (create + selfdestruct) — without a payable receiver
+    ///      every mint from this contract would revert, disabling rebalanceUsingAlt() and
+    ///      rebuildAfterSwap(), the only two paths that redeploy principal. Landing mid swap-window
+    ///      that would strand the whole principal loose with no rebalancer-callable recovery.
+    ///      Any ETH that arrives here is sweepable by the admin via `recoverETH`.
+    receive() external payable {}
 
     /// @notice Register a position NFT already held by this contract.
     /// @param config Full position configuration. `active`, `mainStaked`, `altStaked`, `altTokenId`,
@@ -269,28 +340,35 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         deregister a pure book-keeping/transfer path and never silently strands a staked
     ///         NFT (an NFT held by the gauge can't be safeTransferFrom'd by this contract).
     function deregisterPosition(address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
-        ManagedPositionV2 storage p = position;
-        if (!p.active) revert NotActive();
-        if (to == address(0)) revert ZeroAddress();
-        if (p.mainStaked || p.altStaked) revert PositionStaked();
-        uint256 tokenId = p.mainTokenId;
-        p.active = false; // effects before interaction (CEI)
-        emit PositionDeregistered(to);
-        if (p.altTokenId != 0) POSITION_MANAGER.safeTransferFrom(address(this), to, p.altTokenId);
-        POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
+        _releaseNfts(to, false);
     }
 
     /// @notice Emergency withdraw: auto-unstakes both legs (if staked) then transfers the NFT(s)
     ///         to `to`. Allows an admin to rescue a position in one call regardless of staking state.
     function withdrawPosition(address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        _releaseNfts(to, true);
+    }
+
+    /// @dev Shared body of deregisterPosition/withdrawPosition — the two differ only in whether a
+    ///      staked leg is auto-unstaked or rejected, and in which event they emit.
+    /// @param autoUnstake true  → unstake both legs first (auto-claims AERO to the feeCollector);
+    ///                    false → revert PositionStaked if EITHER leg is staked, keeping deregister
+    ///                    a pure book-keeping/transfer path that can never strand a staked NFT (one
+    ///                    held by the gauge cannot be safeTransferFrom'd by this contract).
+    function _releaseNfts(address to, bool autoUnstake) private {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
         if (to == address(0)) revert ZeroAddress();
-        if (p.mainStaked) _unstake(p); // auto-claims AERO -> feeCollector, returns NFT to this contract
-        if (p.altStaked) _unstakeAlt(p); // unstake the alt before transferring it
+        if (autoUnstake) {
+            if (p.mainStaked) _unstakeLeg(p, true); // returns NFT to this contract
+            if (p.altStaked) _unstakeLeg(p, false);
+        } else if (p.mainStaked || p.altStaked) {
+            revert PositionStaked();
+        }
         uint256 tokenId = p.mainTokenId;
         p.active = false; // effects before interaction (CEI)
-        emit PositionWithdrawn(to);
+        if (autoUnstake) emit PositionWithdrawn(to);
+        else emit PositionDeregistered(to);
         if (p.altTokenId != 0) POSITION_MANAGER.safeTransferFrom(address(this), to, p.altTokenId);
         POSITION_MANAGER.safeTransferFrom(address(this), to, tokenId); // interaction last
     }
@@ -310,16 +388,18 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 minRebalanceInterval
     ) external onlyRole(MANAGER_ROLE) {
         if (!position.active) revert NotActive();
-        if (maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
-        if (twapWindow == 0 || maxTickDeviation <= 0) revert InvalidConfig();
-        if (maxCenterDeviation == 0) revert InvalidConfig();
-        int24 spacing = position.tickSpacing;
-        // minWidth must be at least 2*tickSpacing so a balanced rebalanceUsingAlt can straddle an aligned spot.
-        if (minWidth < 2 * uint24(spacing) || maxWidth < minWidth) revert WidthTooNarrow();
-        if (minWidth % uint24(spacing) != 0 || maxWidth % uint24(spacing) != 0) revert InvalidWidth();
-        // Same int24-reinterpretation guard as _validateAndStore: keep the two width-config paths
-        // enforcing identical bounds.
-        if (maxWidth > uint24(type(int24).max)) revert WidthOutOfBounds();
+        // Same validation body as registration (LPPositionLib.validateRebalanceConfig), so the two
+        // config paths cannot drift.
+        LPPositionLib.validateRebalanceConfig(
+            minWidth,
+            maxWidth,
+            maxCenterDeviation,
+            twapWindow,
+            maxTickDeviation,
+            maxRebalanceLossBps,
+            MAX_LOSS_CAP_BPS,
+            position.tickSpacing
+        );
 
         ManagedPositionV2 storage p = position;
         p.minWidth = minWidth;
@@ -350,8 +430,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function setOracles(address oracle0, address oracle1) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!position.active) revert NotActive();
         if (oracle0 == address(0) || oracle1 == address(0)) revert OracleRequired();
-        _readFeed(oracle0); // probe: fail in the admin tx, not on the next rebalance
-        _readFeed(oracle1);
+        // probe each feed against ITS OWN staleness bound: fail in the admin tx, not on the next rebalance
+        _readFeed(oracle0, maxOracleDelay0);
+        _readFeed(oracle1, maxOracleDelay1);
         position.oracle0 = oracle0;
         position.oracle1 = oracle1;
         emit OraclesUpdated(oracle0, oracle1);
@@ -372,12 +453,44 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit GaugeUpdated(gauge);
     }
 
-    /// @notice Update the maximum acceptable oracle staleness.
-    function setMaxOracleDelay(uint256 newDelay) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (newDelay == 0 || newDelay > 7 days) revert InvalidConfig();
-        uint256 old = maxOracleDelay;
-        maxOracleDelay = newDelay;
-        emit MaxOracleDelayUpdated(old, newDelay);
+    /// @notice Update each feed's staleness bound independently. The ONLY way to write these bounds.
+    /// @dev There is deliberately no single-argument `setMaxOracleDelay(uint256)` convenience
+    ///      overload. The whole point of splitting one shared bound into two (MOO-740) is that the
+    ///      legs are different assets on different heartbeats; a setter that writes one value to both
+    ///      silently flattens exactly the per-feed tuning the split exists to enable, and does so
+    ///      through the shortest, most reachable call path. Forcing both values to be named at every
+    ///      write makes flattening them a visible choice rather than an accident. Nothing on chain
+    ///      depends on the old selector — this contract is deployed for the first time by proposal
+    ///      011, so there is no prior ABI to stay compatible with.
+    function setMaxOracleDelays(uint256 newDelay0, uint256 newDelay1) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setMaxOracleDelays(newDelay0, newDelay1);
+    }
+
+    /// @dev Sole writer for both bounds. Each must be non-zero (a zero bound rejects every read) and
+    ///      within `MAX_ORACLE_DELAY` — see that constant for why the ceiling is a day and not a week.
+    function _setMaxOracleDelays(uint256 newDelay0, uint256 newDelay1) private {
+        if (newDelay0 == 0 || newDelay0 > MAX_ORACLE_DELAY || newDelay1 == 0 || newDelay1 > MAX_ORACLE_DELAY) {
+            revert InvalidConfig();
+        }
+        maxOracleDelay0 = newDelay0;
+        maxOracleDelay1 = newDelay1;
+        emit MaxOracleDelaysUpdated(newDelay0, newDelay1);
+    }
+
+    /// @notice Configure the L2 sequencer uptime guard applied to every Chainlink read.
+    /// @param feed the sequencer uptime aggregator; `address(0)` disables the guard entirely.
+    /// @param gracePeriod seconds the sequencer must have been continuously up before feed reads
+    ///        are accepted again. Must be non-zero whenever `feed` is set: a zero grace period
+    ///        re-admits the pre-outage report in the very block the sequencer resumes, which is
+    ///        exactly the window this guard exists to close. Capped at 7 days so a fat-fingered
+    ///        value cannot brick every valuation path indefinitely.
+    function setSequencerUptimeFeed(address feed, uint256 gracePeriod) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (feed != address(0) && (gracePeriod == 0 || gracePeriod > 7 days)) revert InvalidConfig();
+        sequencerUptimeFeed = feed;
+        sequencerGracePeriod = gracePeriod;
+        // Probe immediately so a wrong address / down sequencer fails in the admin tx.
+        if (feed != address(0)) LPValuationLib.checkSequencer(feed, gracePeriod);
+        emit SequencerUptimeFeedUpdated(feed, gracePeriod);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -400,20 +513,34 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @notice Approve the gauge and deposit the position NFT(s) into it for AERO emissions.
     ///         Stakes the main NFT always; also stakes the alt NFT when altTokenId != 0.
+    /// @dev SKIM BEFORE STAKE. Slipstream's CLGauge.deposit() collects all pre-stake LP fees with
+    ///      `recipient == msg.sender` — i.e. this contract. Without the `_skimFees` call below those
+    ///      fees land as loose token0/token1 and are indistinguishable from principal: a later
+    ///      rebalance mints them into the new position, or exit() pays them to the principal
+    ///      recipient, and the feeCollector never sees them. `_exitAll` already uses this
+    ///      skim-then-act ordering; this matches it.
     function stake() external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
         if (p.gauge == address(0)) revert NoGauge();
         if (p.mainStaked) revert AlreadyStaked();
-        POSITION_MANAGER.approve(p.gauge, p.mainTokenId);
-        ICLGauge(p.gauge).deposit(p.mainTokenId);
-        p.mainStaked = true;
+        _skimFees(p, p.mainTokenId);
+        _stakeLeg(p, p.mainTokenId, true);
         if (p.altTokenId != 0) {
-            POSITION_MANAGER.approve(p.gauge, p.altTokenId);
-            ICLGauge(p.gauge).deposit(p.altTokenId);
-            p.altStaked = true;
+            _skimFees(p, p.altTokenId);
+            _stakeLeg(p, p.altTokenId, false);
         }
-        emit Staked(p.mainTokenId, p.gauge);
+    }
+
+    /// @dev Approve the gauge for one NFT, deposit it, set that leg's staked flag, emit Staked.
+    ///      Shared by stake() and _restakeBoth so the approve/deposit/flag triple has one definition.
+    /// @param main true → the main leg, false → the alt leg.
+    function _stakeLeg(ManagedPositionV2 storage p, uint256 tokenId, bool main) private {
+        POSITION_MANAGER.approve(p.gauge, tokenId);
+        ICLGauge(p.gauge).deposit(tokenId);
+        if (main) p.mainStaked = true;
+        else p.altStaked = true;
+        emit Staked(tokenId, p.gauge);
     }
 
     /// @notice Withdraw the position NFT(s) from the gauge and skim any AERO to the fee collector.
@@ -421,39 +548,47 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function unstake() external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         ManagedPositionV2 storage p = position;
         if (!p.mainStaked) revert NotStaked();
-        _unstake(p);
-        if (p.altStaked && p.altTokenId != 0) _unstakeAlt(p);
+        _unstakeLeg(p, true);
+        if (p.altStaked && p.altTokenId != 0) _unstakeLeg(p, false);
     }
 
-    /// @dev Internal unstake: withdraw from gauge (auto-claims AERO), set mainStaked=false,
-    ///      then skim any AERO balance to the fee collector (CEI: state update before AERO transfer).
-    function _unstake(ManagedPositionV2 storage p) internal {
-        // Measure only the AERO GAINED by this withdraw so we never sweep a stray AERO
-        // balance sitting on this contract.
+    /// @dev Withdraw one leg from the gauge (which auto-claims AERO), clear that leg's staked flag,
+    ///      then skim ONLY the AERO gained by this withdraw to the feeCollector. Measuring the gain
+    ///      rather than the balance means a stray AERO balance already sitting on this contract is
+    ///      never swept. CEI: the flag is cleared before the AERO transfer.
+    /// @dev NO LP-FEE MIRROR OF MOO-736 HERE. `CLGauge.withdraw()` opens with the same
+    ///      `nft.collect({recipient: msg.sender})` that motivated the skim-before-stake fix in
+    ///      `stake()`, so the symmetric worry is that fees land loose on the way OUT and get counted
+    ///      as principal. They cannot, and the reason is in Slipstream, not here:
+    ///        - `CLPool.calculateFees` routes the STAKED share of every swap fee to `gaugeFee` and
+    ///          grows `feeGrowthGlobalX128` only over `liquidity - stakedLiquidity`, and
+    ///          `Position.update(..., staked = true)` skips the tokensOwed accrual outright;
+    ///        - Slipstream's `NonfungiblePositionManager.collect` takes a separate branch for a
+    ///          gauge-owned position that updates the feeGrowthInside snapshot but adds NOTHING to
+    ///          tokensOwed;
+    ///        - `CLGauge.deposit()` already collected every pre-stake fee (and `stake()` skims before
+    ///          that), so tokensOwed is zero when staking begins and stays zero throughout.
+    ///      The withdraw-time collect therefore transfers 0/0. Verified against
+    ///      github.com/aerodrome-finance/slipstream (`CLGauge.deposit/withdraw`, `CLPool.stake` /
+    ///      `calculateFees`, `Position.update`, `NonfungiblePositionManager.collect`) rather than
+    ///      assumed. The balancer never calls increase/decreaseLiquidity or collect on a staked
+    ///      tokenId (it is not the owner while staked, and `collectFees()` reverts AlreadyStaked), so
+    ///      there is no path that makes tokensOwed non-zero mid-stake. `_exitAll`'s existing
+    ///      unstake-then-`_skimFees` order is correct as written: the post-unstake skim is what picks
+    ///      up any fee accrued after the gauge released the NFT.
+    /// @param main true → the main leg, false → the alt leg.
+    function _unstakeLeg(ManagedPositionV2 storage p, bool main) private {
+        uint256 tokenId = main ? p.mainTokenId : p.altTokenId;
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        ICLGauge(p.gauge).withdraw(p.mainTokenId); // returns NFT + auto-claims AERO
-        p.mainStaked = false; // CEI: effect before interaction (AERO transfer below)
+        ICLGauge(p.gauge).withdraw(tokenId); // returns NFT + auto-claims AERO
+        if (main) p.mainStaked = false;
+        else p.altStaked = false;
         uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         if (aeroEarned > 0) {
             IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
             emit EmissionsClaimed(aeroEarned);
         }
-        emit Unstaked(p.mainTokenId, p.gauge);
-    }
-
-    /// @dev Internal unstake for the ALT leg: withdraw the alt NFT from the gauge
-    ///      (auto-claims AERO), set altStaked=false, then skim only the AERO gained by
-    ///      this withdraw to the feeCollector (CEI: state update before AERO transfer).
-    function _unstakeAlt(ManagedPositionV2 storage p) internal {
-        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        ICLGauge(p.gauge).withdraw(p.altTokenId); // returns NFT + auto-claims AERO
-        p.altStaked = false; // CEI: effect before interaction (AERO transfer below)
-        uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
-        if (aeroEarned > 0) {
-            IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
-            emit EmissionsClaimed(aeroEarned);
-        }
-        emit Unstaked(p.altTokenId, p.gauge);
+        emit Unstaked(tokenId, p.gauge);
     }
 
     /// @notice Emergency exit: unstake (skimming AERO to feeCollector), collect fees, remove all
@@ -496,10 +631,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         }
 
         // Transfer all principal recovered from the position to `to`.
-        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
-        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
-        if (bal0 > 0) IERC20(p.token0).safeTransfer(to, bal0);
-        if (bal1 > 0) IERC20(p.token1).safeTransfer(to, bal1);
+        _sweepPairTo(p, to);
 
         // Bookkeeping: zero NFT references now that _exitAll has consumed and burned them.
         p.mainTokenId = 0;
@@ -510,8 +642,13 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @notice Claim AERO emissions from the gauge for a staked position and forward to feeCollector.
     ///         Claims from both main and alt (if altStaked && altTokenId != 0).
-    ///         Permissionless — anyone may call to trigger the skim.
-    function claimEmissions() external whenNotPaused nonReentrant {
+    /// @dev REBALANCER_ROLE-gated, deliberately NOT permissionless. This routes 100% of the claimed
+    ///      AERO to the feeCollector, while `compound()` is the ONLY path that ever sends AERO to the
+    ///      compoundModule. Permissionless, a bot calling this every block keeps the gauge's pending
+    ///      balance at ~0, so `compound(compoundBps)` always harvests ~nothing and the compound share
+    ///      never materializes — a griefing vector that silently disables reinvestment. The claim is
+    ///      not time-critical (emissions keep accruing in the gauge), so gating it costs nothing.
+    function claimEmissions() external onlyRole(REBALANCER_ROLE) whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
         if (!p.mainStaked) revert NotStaked();
@@ -570,7 +707,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 aero = IERC20(AERO).balanceOf(address(this));
         if (aero == 0) revert NothingToCompound();
 
-        uint256 dropAmount = FullMath.mulDiv(aero, BPS_DENOMINATOR - compoundBps, BPS_DENOMINATOR);
+        // Plain arithmetic: `aero` is an ERC-20 balance and the multiplier is <= 10_000, so the
+        // product cannot overflow uint256 for any real token supply (FullMath's 512-bit path
+        // costs the balancer bytecode it does not have).
+        uint256 dropAmount = aero * (BPS_DENOMINATOR - compoundBps) / BPS_DENOMINATOR;
         uint256 compoundAmount = aero - dropAmount;
 
         if (dropAmount > 0) {
@@ -601,6 +741,43 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Phase 1 of a swap rebalance: tears down both positions, snapshots value,
     ///         approves the CowSwap vault relayer for exactly `sellAmount`, and opens the
     ///         order-validation window. No mint happens here; `rebuildAfterSwap` completes the cycle.
+    /// @dev    ORACLE PRECHECK. Both feeds are probed below purely for the revert, before `_exitAll`
+    ///         burns anything. This function does not need a price — `_snapshotAmounts` is
+    ///         oracle-free by design — but `rebuildAfterSwap` cannot complete without one: it prices
+    ///         the snapshot through `_mainRange`, `_mintAlt` and the value floor. Unwinding while a
+    ///         feed (or the sequencer guard) is already blocking is therefore a teardown that
+    ///         provably cannot be rebuilt: both NFTs burn, principal sits loose and unstaked, and the
+    ///         only exit is `exit()` behind DEFAULT_ADMIN_ROLE (the timelocked Safe) until the feed
+    ///         recovers. An earlier revision got this check for free — the unwind used to compute a
+    ///         USD snapshot, which read both feeds incidentally. Moving the snapshot to raw amounts
+    ///         (correct: a USD baseline frozen across two transactions reads an ordinary market move
+    ///         as a rebalance loss) dropped the read, and with it the precondition. It is restored
+    ///         here as an explicit, intentional gate rather than a side effect of a computation.
+    ///
+    ///         Sharpened by the L2 sequencer guard on this same path: after every Base sequencer
+    ///         recovery, `checkSequencer` rejects reads for the whole grace period (3600s as
+    ///         proposal 011 arms it), so without this probe each recovery opens a window in which
+    ///         unwind succeeds and the matching rebuild reverts SequencerGracePeriod.
+    ///
+    ///         RESIDUAL (unchanged, and not closable here): this bounds the state at unwind, not the
+    ///         state at rebuild. Three ways a rebuild is still blocked after a clean unwind:
+    ///         (i) a feed goes stale BETWEEN the two transactions; (ii) the sequencer restarts
+    ///         between them, after which `checkSequencer` rejects every read for the whole grace
+    ///         period — same class as (i), and the very case the paragraph above is built on, only
+    ///         arriving after the probe instead of before it; (iii) the Safe calls `setOracles` or
+    ///         `setMaxOracleDelays` mid-flight. Closing any of them would require an oracle-free
+    ///         rebuild path, which would mean minting and clearing the value floor with no price —
+    ///         strictly worse. The probe removes the case the contract can see coming; the rest is
+    ///         monitoring.
+    ///
+    ///         FREQUENCY (MOO-740 interaction, accepted): tightening the staleness bound from 26h to
+    ///         3600s makes case (i) ~26x more reachable. At the measured ~1232s worst-case heartbeat
+    ///         of the configured Base feeds, THREE consecutive missed rounds now strand a rebuild
+    ///         where it previously took ~76. Funds are never locked — `exit()` is oracle-free and the
+    ///         order can be retried — but the principal sits loose and unstaked with a live
+    ///         VAULT_RELAYER allowance until a feed publishes. Backend mitigations: a short CowSwap
+    ///         `validTo`, and preferring the no-swap `rebalanceUsingAlt` while either feed is
+    ///         degraded. See the backend spec's runbook.
     function unwindForSwap(UnwindParams calldata params)
         external
         onlyRole(REBALANCER_ROLE)
@@ -611,9 +788,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Guards + calm-gate delegated to LPPositionLib (primitives in, primitives out) to keep this
         // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
         // error selectors declared here (NotActive/AlreadyInFlight/Cooldown/ModuleNotSet/
-        // InvalidSellToken/TwapDeviation) and returns the current sqrt price + token decimals so the
-        // shared `_totalValue` below computes the USD value-before floor base.
-        (uint160 sqrtP, uint8 dec0, uint8 dec1) = LPPositionLib.unwindPrecheck(
+        // InvalidSellToken/TwapDeviation) and returns the current sqrt price, from which
+        // `_snapshotAmounts` below derives the floor's token-amount baseline.
+        (uint160 sqrtP,,) = LPPositionLib.unwindPrecheck(
             p.active,
             _window.inFlight,
             p.lastRebalance,
@@ -628,10 +805,31 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             p.maxTickDeviation
         );
 
+        // Probe both feeds (and, inside them, the sequencer guard) BEFORE `_exitAll` burns the NFTs.
+        // Discarded return values: called for the revert, not for a price — see the ORACLE PRECHECK
+        // note above. Each leg is checked against ITS OWN bound, with the same reader and the same
+        // storage the rebuild uses — but STRICTLY MORE than the rebuild does: this probes both feeds
+        // unconditionally, while `valueInUsd` reads a leg's feed only when that leg's amount is
+        // non-zero. So a fully single-sided unwind can be blocked on a feed the rebuild would never
+        // have touched. Fail-closed and deliberate; the alternative is a conditional probe that
+        // duplicates the valuation's branch logic on the balancer's last 90 bytes.
+        // Two direct `_readFeed` calls, deliberately: routing this through a single
+        // `LPValuationLib.probeFeeds(cfg)` helper reads better but measures WORSE (+34 bytes on the
+        // balancer), because materialising the six-field OracleConfig in memory costs more than the
+        // second external call it saves. The balancer is inside 100 bytes of EIP-170; that trade is
+        // not available here.
+        _readFeed(p.oracle0, maxOracleDelay0);
+        _readFeed(p.oracle1, maxOracleDelay1);
+
         // Split the snapshot the same way rebalanceUsingAlt does: position principal (haircut by
         // the floor below) vs. pre-existing loose token0/token1 (added back un-haircut). See H-1.
-        uint256 looseBefore = _contractPairValue(p, dec0, dec1);
-        uint256 valueBeforePos = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+        //
+        // Recorded as TOKEN AMOUNTS, never USD: the floor is compared in a LATER transaction, and a
+        // USD baseline frozen here would make an ordinary market move during CowSwap settlement read
+        // as a rebalance loss and revert an honest rebuild (see SwapWindowLib.Snapshot). No oracle is
+        // consulted at unwind at all — rebuildAfterSwap prices this snapshot with the same feed reads
+        // that produce valueAfter, so the market move cancels on both sides.
+        SwapWindowLib.Snapshot memory snap = _snapshotAmounts(p, sqrtP);
         bool wasStaked = p.mainStaked; // MUST be captured before _exitAll un-stakes the main
 
         _exitAll(
@@ -645,7 +843,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         // One call opens the window: snapshot, exact-amount relayer approval and the in-flight
         // flag are set together — none can be skipped or reordered by this call site.
-        _window.open(params.sellToken, params.sellAmount, valueBeforePos, looseBefore, wasStaked);
+        _window.open(params.sellToken, params.sellAmount, snap, wasStaked);
 
         emit RebalanceUnwound(params.sellToken, params.sellAmount);
     }
@@ -657,9 +855,61 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @dev    Deliberately NOT gated on cooldown or on CowSwap order state: filled, expired,
     ///         or never-placed orders all rebuild from current balances. IS gated on pause and
     ///         the calm gate; exit() remains the escape hatch if either blocks.
+    /// @dev    TICK COMMITMENT. `expectedTickLower`/`expectedTickUpper` are the range the CALLER
+    ///         computed off-chain when it decided to rebuild; if the range this function derives from
+    ///         live spot differs at all, it reverts TickMismatch. Without it this function commits to
+    ///         no ticks: calmGate bounds spot-vs-TWAP deviation but hands back LIVE spot for
+    ///         placement, and `_mainRange` floor-aligns that attacker-influenced spot, so one
+    ///         tickSpacing of manipulation shifts the whole range. The amount minima cannot catch
+    ///         that — a single-sided mint consumes the entire funded balance at both the honest and
+    ///         the manipulated price, so amount0MinMain passes either way. Committing to the exact
+    ///         ticks is what makes the placement verifiable rather than merely bounded.
+    ///
+    ///         SCOPE OF THE COMMITMENT — what it pins, and what it does NOT. The commitment names
+    ///         only the MAIN bounds. GIVEN THE BRANCH, they also pin the ALT's ANCHOR, because the
+    ///         width is required to be an even multiple of tickSpacing (per-call check below and
+    ///         `LPPositionLib.validateRebalanceConfig` on the bounds). `_mintAlt` anchors on
+    ///         `floorAlign(spotTick)`, and each `_mainRange` branch inverts to that anchor
+    ///         under that constraint: balanced → `floorAlign(spot) = tickLower + width/2` (valid only
+    ///         because `width/2` is a whole number of spacings); token0-single-sided →
+    ///         `tickLower - tickSpacing`; token1-single-sided → `tickUpper`. Drop the even-multiple
+    ///         rule and even that stops holding: at spacing 100 / width 300, spot 150 and spot 249
+    ///         both yield main [0, 300] while the token0 alt slides from [200, 300] to [300, 400]
+    ///         with TickMismatch silent.
+    ///
+    ///         Each inversion is PER-BRANCH, and the commitment does not name the branch. The same
+    ///         tick PAIR can therefore come from two branches at two different anchors when
+    ///         `width == 2 * tickSpacing`: balanced `[F - w/2, F + w/2]` (anchor F) and
+    ///         token1-single-sided `[F' - w, F']` with `F' = F + w/2` are the identical pair. At the
+    ///         phase-1 config (spacing 100, width 200, maxTickDeviation 100) that collision is
+    ///         reachable, so a committed pair is NOT proof of a balanced mint and the alt's anchor is
+    ///         not uniquely recoverable from it. Closed by config with zero bytecode: any
+    ///         `width >= 4 * tickSpacing` (equivalently `minWidth > 2 * maxTickDeviation`) makes the
+    ///         collision arithmetically unreachable. Under that condition — and only then — the alt's
+    ///         two candidate ranges, [floor + spacing, floor + 2*spacing] and
+    ///         [floor - spacing, floor], are pinned to exact ticks.
+    ///
+    ///         It does NOT pin WHICH of the two is minted. That choice is `_mintAlt`'s
+    ///         `surplus0 = value0 >= value1`, computed from the balances left AFTER `_mintBalanced`,
+    ///         and the position manager consumes the in-ratio portion at the exact `sqrtP` — not at
+    ///         `floorAlign(spot)`. So spot can move WITHIN the committed bucket, leave TickMismatch
+    ///         silent, and still flip the alt to the other side of spot. (`_mainRange`'s own branch is
+    ///         immune: it classifies on oracle-priced leg values, which spot does not move. Only the
+    ///         alt's post-mint residual is spot-sensitive.)
+    ///
+    ///         Bounded, and here is the bound. The flip can only occur near `value0 == value1`, since
+    ///         that is the comparison being flipped — so the two candidate legs are close in USD value
+    ///         precisely where the outcome is in doubt, and both candidate ranges sit one spacing from
+    ///         spot on opposite sides. What actually changes is which leg is deposited into the alt
+    ///         and which is left loose for `_forwardDust` to sweep to the feeCollector after the value
+    ///         floor. That is a real, if narrow, effect on principal placement, and it is stated here
+    ///         rather than papered over: the even-multiple width rule buys a pinned alt ANCHOR (at a
+    ///         non-colliding width, per the branch-collision note above), not a pinned alt SIDE.
+    ///         Pinning the side would need the alt's own bounds (and its "no alt was minted" case)
+    ///         added to the commitment.
     /// @dev    Unlike rebalanceUsingAlt (same-transaction before/after split, so a donation cancels
-    ///         out of the floor per H-1), BOTH floor snapshots here (rebalanceValueBeforePos and
-    ///         rebalanceLooseBefore) are taken back in unwindForSwap — a prior transaction. A token
+    ///         out of the floor per H-1), BOTH floor snapshots here (the position and loose amounts)
+    ///         are taken back in unwindForSwap — a prior transaction. A token
     ///         donated to the contract between unwindForSwap and rebuildAfterSwap inflates valueAfter
     ///         (whichever term — position or loose — the donation lands in) without inflating either
     ///         snapshot, widening the floor's apparent headroom by the donated amount. Not a
@@ -687,18 +937,27 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Success-close at the top: guard (NotInFlight), approval revoke and snapshot handoff in
         // one statement. Safe before the mint/floor logic below — a later revert unwinds this
         // close too, so a failed rebuild leaves the window open for retry (see SwapWindowLib).
-        (uint256 floorValueBeforePos, uint256 floorLooseBefore, bool wasStaked) = _window.closeForRebuild();
+        (SwapWindowLib.Snapshot memory snap, bool wasStaked) = _window.closeForRebuild();
         ManagedPositionV2 storage p = position;
 
         (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
             LPGeometryLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
+        // ONE oracle set for the whole call: the unwind snapshot below is priced with exactly the
+        // same feed reads (same block, same bounds, same sequencer guard) that produce valueAfter,
+        // so a market move between unwind and rebuild cancels on both sides of the floor.
+        LPValuationLib.OracleConfig memory cfg = _oracleCfg(p);
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
-        // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
-        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
-        if (params.width % uint24(p.tickSpacing) != 0) revert InvalidWidth();
+        // Config bounds are 2*spacing-aligned but the per-call width is caller-supplied: an unaligned
+        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint, and
+        // an ODD multiple of the spacing would un-pin the alt from the tick commitment (see above).
+        if (params.width % (2 * uint24(p.tickSpacing)) != 0) revert InvalidWidth();
 
-        (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
+        (int24 tl, int24 tu) = _mainRange(p, cfg, spotTick, params.width, dec0, dec1);
+        // TICK COMMITMENT (see the natspec above): the caller pinned the range it decided on; a spot
+        // that moved — or was moved — between decision and execution must abort, not silently mint a
+        // shifted range that the amount minima cannot detect.
+        if (tl != params.expectedTickLower || tu != params.expectedTickUpper) revert TickMismatch();
 
         uint256 newMain =
             _mintBalanced(p, spotTick, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
@@ -707,11 +966,17 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         p.mainStaked = false;
         p.lastRebalance = block.timestamp;
 
-        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
+        p.altTokenId =
+            _mintAlt(p, cfg, spotTick, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
 
-        uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
+        uint256 valueAfter = _totalValue(p, cfg, sqrtP, dec0, dec1);
         // Swap round trip gets the extra swapLossAllowanceBps tolerance on top of maxRebalanceLossBps.
-        _enforceValueFloor(floorValueBeforePos, floorLooseBefore, valueAfter, swapLossAllowanceBps);
+        _enforceValueFloor(
+            LPValuationLib.valueInUsd(snap.amount0Pos, snap.amount1Pos, cfg, dec0, dec1),
+            LPValuationLib.valueInUsd(snap.loose0, snap.loose1, cfg, dec0, dec1),
+            valueAfter,
+            swapLossAllowanceBps
+        );
 
         _forwardDust(p);
 
@@ -720,6 +985,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit RebalanceRebuilt(newMain, p.altTokenId);
     }
 
+    /// @param expectedTickLower the main range's lower bound the CALLER computed off-chain, with the
+    ///        same meaning and the same TickMismatch enforcement as on `RebuildParams` — see the TICK
+    ///        COMMITMENT note on `rebuildAfterSwap`.
+    /// @param expectedTickUpper the main range's upper bound the CALLER committed to.
     struct RebalanceParams {
         uint24 width;
         uint256 amount0MinMain;
@@ -731,12 +1000,20 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 amount0MinWithdrawAlt;
         uint256 amount1MinWithdrawAlt;
         uint256 deadline;
+        int24 expectedTickLower;
+        int24 expectedTickUpper;
     }
 
     /// @notice Parameters for phase 2 of a swap rebalance (rebuildAfterSwap). Unlike
     ///         RebalanceParams, this has NO withdraw-min fields — unwindForSwap already tore
     ///         down the position in a prior transaction, so there is no _exitAll here to sandwich-
     ///         floor. Only the mint side needs protection.
+    /// @param expectedTickLower the main range's lower bound the CALLER computed off-chain. The
+    ///        rebuild reverts TickMismatch unless the range derived from live spot matches exactly.
+    ///        Off-chain callers reproduce it with the same rule `_mainRange` uses: the spot-centered
+    ///        aligned straddle when both legs clear MIN_MAIN_LEG_USD, otherwise the single-sided
+    ///        range on the majority side adjacent to spot.
+    /// @param expectedTickUpper the main range's upper bound the CALLER committed to.
     struct RebuildParams {
         uint24 width;
         uint256 amount0MinMain;
@@ -744,6 +1021,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 amount0MinAlt;
         uint256 amount1MinAlt;
         uint256 deadline;
+        int24 expectedTickLower;
+        int24 expectedTickUpper;
     }
 
     /// @notice Tear down both positions and rebuild a fresh balanced `main` plus a single-sided
@@ -778,6 +1057,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Shared calm-gate preamble (spot + TWAP deviation gate + token decimals) in LPGeometryLib.
         (uint160 sqrtP, int24 spotTick, uint8 dec0, uint8 dec1) =
             LPGeometryLib.calmGate(p.pool, p.twapWindow, p.maxTickDeviation, p.token0, p.token1);
+        // ONE oracle set for the whole call, so both sides of the value floor are priced under
+        // identical rules (same bounds, same sequencer guard, same block).
+        LPValuationLib.OracleConfig memory cfg = _oracleCfg(p);
 
         // value BEFORE: both positions' principal at the current sqrtP snapshot, PLUS any loose
         // token0/token1 ALREADY held by this contract (donated, or leftover from a prior reverted
@@ -785,11 +1067,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // captures only the genuinely pre-existing balance — not post-withdraw principal. valueAfter
         // also counts loose balances (_contractPairValue), so a stray/donated balance cancels on both
         // sides and cannot inflate the floor's headroom to mask a real rebalance loss (H-1).
-        uint256 looseBefore = _contractPairValue(p, dec0, dec1);
+        uint256 looseBefore = _contractPairValue(p, cfg, dec0, dec1);
         // valueBeforePos is POSITION principal only (main + alt). The loss haircut below applies to
         // this alone — never to looseBefore. A donated loose balance is added UNHAIRCUT to the floor's
         // RHS instead (see the value-floor gate), so a donation cannot widen the loss tolerance.
-        uint256 valueBeforePos = _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1);
+        uint256 valueBeforePos = _positionsValue(p, cfg, sqrtP, dec0, dec1);
 
         bool wasStaked = p.mainStaked;
 
@@ -807,9 +1089,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         );
 
         if (params.width < p.minWidth || params.width > p.maxWidth) revert WidthOutOfBounds();
-        // Config bounds are spacing-aligned but the per-call width is caller-supplied: an unaligned
-        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint.
-        if (params.width % uint24(p.tickSpacing) != 0) revert InvalidWidth();
+        // Config bounds are 2*spacing-aligned but the per-call width is caller-supplied: an unaligned
+        // width would produce an unaligned tickUpper and only revert deep inside the pool's mint, and
+        // an ODD multiple of the spacing would un-pin the alt anchor from the tick commitment below
+        // (see the TICK COMMITMENT note on rebuildAfterSwap). Identical rule on both rebalance paths,
+        // so "legal width" has ONE definition across them and across the config bounds.
+        if (params.width % (2 * uint24(p.tickSpacing)) != 0) revert InvalidWidth();
 
         // Choose the new main range. The common case is a spot-centered straddle. But rebalancing a
         // FULLY out-of-range position withdraws 100%-single-sided principal (a CL position outside
@@ -818,7 +1103,21 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // manufacture the missing leg, so in that degenerate case we place the main entirely on the
         // FUNDED side, adjacent to spot — a valid single-sided main that waits for price to oscillate
         // back into balance (Beefy "never sell"). Principal is fully redeployed; nothing is sold.
-        (int24 tl, int24 tu) = _mainRange(p, spotTick, params.width, dec0, dec1);
+        (int24 tl, int24 tu) = _mainRange(p, cfg, spotTick, params.width, dec0, dec1);
+        // TICK COMMITMENT — same rule, same enforcement as rebuildAfterSwap (see its natspec).
+        // Being single-transaction does NOT substitute for it. Atomicity guarantees the teardown and
+        // the mint see one price; it says nothing about whether that price is honest. `calmGate`
+        // bounds spot against the TWAP but then hands LIVE spot to `_mainRange`, which floor-aligns
+        // it — so a sandwich that moves spot by up to maxTickDeviation (one full spacing at the
+        // phase-1 config) shifts the entire range by a spacing and reverts the price afterwards.
+        // Neither the withdraw minima nor the mint minima can see it: `_mintBalanced` zeroes the
+        // unfunded leg's min on the single-sided branch, and the funded leg's min passes at ANY range
+        // because the whole balance is consumed either way. Nor can the value floor: `valueAfter` is
+        // measured at the manipulated sqrtP, where the freshly minted position still holds exactly
+        // the tokens just deposited. The mis-ranging only materialises once spot reverts — after this
+        // transaction has committed. Committing to the exact ticks is what makes the placement
+        // verifiable rather than merely bounded.
+        if (tl != params.expectedTickLower || tu != params.expectedTickUpper) revert TickMismatch();
 
         uint256 newMain =
             _mintBalanced(p, spotTick, tl, tu, params.amount0MinMain, params.amount1MinMain, params.deadline);
@@ -831,15 +1130,16 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // surplus leg by USD VALUE, returns 0 (minting nothing) when the surplus is below
         // MIN_ALT_VALUE_USD, and — critically — does NOT forward dust. The value floor below must
         // see all value the contract controls BEFORE anything is shipped out as "dust".
-        // Set altTokenId BEFORE the value-floor read so _altValue sees the new alt.
-        p.altTokenId = _mintAlt(p, tl, tu, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
+        // Set altTokenId BEFORE the value-floor read so _totalValue sees the new alt.
+        p.altTokenId =
+            _mintAlt(p, cfg, spotTick, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
 
         // value AFTER: new main principal + alt principal at the same sqrtP snapshot, PLUS the
         // USD value of any loose token0/token1 still held by this contract (_contractPairValue).
         // Counting the loose balance is the key invariant: a non-trivial surplus cannot escape the
         // floor by being forwarded as "dust" — if it's real value it is either in the alt (counted)
         // or loose (counted) at floor time. Only sub-threshold dust leaves, and only AFTER this check.
-        uint256 valueAfter = _totalValue(p, sqrtP, dec0, dec1);
+        uint256 valueAfter = _totalValue(p, cfg, sqrtP, dec0, dec1);
         // Haircut applies to POSITION value only; the pre-existing loose balance is added back UNHAIRCUT.
         // looseAfter (in valueAfter) ≈ looseBefore + withdrawn surplus, so the donated L cancels on both
         // sides and cannot inflate headroom to mask a real principal loss (H-1). No-swap path: extraBps = 0.
@@ -862,16 +1162,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      the next rebalance.
     function _restakeBoth(ManagedPositionV2 storage p, uint256 newMain, bool wasStaked) private {
         if (!wasStaked || p.gauge == address(0)) return;
-        POSITION_MANAGER.approve(p.gauge, newMain);
-        ICLGauge(p.gauge).deposit(newMain);
-        p.mainStaked = true;
-        emit Staked(newMain, p.gauge);
-        if (p.altTokenId != 0) {
-            POSITION_MANAGER.approve(p.gauge, p.altTokenId);
-            ICLGauge(p.gauge).deposit(p.altTokenId);
-            p.altStaked = true;
-            emit Staked(p.altTokenId, p.gauge);
-        }
+        _stakeLeg(p, newMain, true);
+        if (p.altTokenId != 0) _stakeLeg(p, p.altTokenId, false);
     }
 
     /// @dev Tear down the managed position(s): unstake the main (auto-claims AERO →
@@ -894,8 +1186,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 altId = p.altTokenId;
 
         // 1. unstake both legs if staked (auto-claims AERO → feeCollector)
-        if (p.mainStaked) _unstake(p);
-        if (altId != 0 && p.altStaked) _unstakeAlt(p);
+        if (p.mainStaked) _unstakeLeg(p, true);
+        if (altId != 0 && p.altStaked) _unstakeLeg(p, false);
 
         // 2. skim LP fees (pre-decrease) → feeCollector, for each held NFT
         _skimFees(p, mainId);
@@ -913,6 +1205,14 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // 4. burn the old NFTs
         POSITION_MANAGER.burn(mainId);
         if (altId != 0) POSITION_MANAGER.burn(altId);
+
+        // 5. clear the now-dangling ids. exit() and rebalanceUsingAlt overwrite these in the SAME
+        //    transaction, but unwindForSwap returns with active == true and no re-mint until
+        //    rebuildAfterSwap lands in a LATER transaction — so without this the public `position()`
+        //    getter serves BURNED tokenIds to clients for the whole in-flight window. The locals
+        //    above already hold what steps 1-4 needed.
+        p.mainTokenId = 0;
+        p.altTokenId = 0;
     }
 
     /// @dev Remove all liquidity from `tokenId` and collect the resulting tokens into
@@ -958,76 +1258,35 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         );
     }
 
-    /// @dev Mint a single-sided `alt` position from the post-main-mint leftover (NO SWAP). The
-    ///      surplus leg is whichever token holds the most USD VALUE (NOT raw base units) — the
-    ///      legs may have different decimals (phase-1 pair: WETH 18-dec / cbBTC 8-dec), so comparing
-    ///      raw balances would almost always pick the higher-decimal leg regardless of real value.
-    ///      The surplus leg is parked in a one-tickSpacing-wide range that holds ONLY that token, so
-    ///      no swap is needed. Returns 0 (minting nothing) when the surplus leg's USD value is below
-    ///      MIN_ALT_VALUE_USD — a sub-tick remainder too small to seed liquidity.
-    ///
-    ///      NOTE: this function does NOT forward dust. The caller (`rebalanceUsingAlt`) must run the value floor
-    ///      AFTER this returns — counting both the freshly minted alt and any loose contract balance
-    ///      via `_contractPairValue` — and only THEN forward the genuine sub-threshold remainder.
-    ///      Forwarding here would let a non-trivial surplus escape the floor as "dust".
-    ///
-    ///      Orientation (Slipstream/Uniswap: price = token1/token0, ticks increase with price):
-    ///      a range strictly ABOVE spot holds only token0; strictly BELOW holds only token1
-    ///      (see LiquidityAmounts.getAmountsForLiquidity branches). Therefore:
-    ///        - token0 surplus => range ABOVE the main upper:  [mainTu, mainTu + tickSpacing]
-    ///        - token1 surplus => range BELOW the main lower:  [mainTl - tickSpacing, mainTl]
+    /// @dev Mint the single-sided `alt` from the post-main-mint leftover (NO SWAP). Body lives in
+    ///      LPPositionLib.mintAlt (EIP-170 headroom); see its NatSpec for the value-based leg
+    ///      selection, the spot-anchored placement, and the "forwards NO dust" contract.
     function _mintAlt(
         ManagedPositionV2 storage p,
-        int24 mainTl,
-        int24 mainTu,
+        LPValuationLib.OracleConfig memory cfg,
+        int24 spotTick,
         uint8 dec0,
         uint8 dec1,
         uint256 amount0MinAlt,
         uint256 amount1MinAlt,
         uint256 deadline
     ) private returns (uint256 altId) {
-        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
-        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
-
-        // Value each leg in USD (8-decimal scale) from its own oracle. Pass the other amount as 0
-        // so each call values exactly one leg. Selection is by USD value, never raw base units.
-        uint256 value0 = _valueInUsd(bal0, 0, p.oracle0, p.oracle1, dec0, dec1);
-        uint256 value1 = _valueInUsd(0, bal1, p.oracle0, p.oracle1, dec0, dec1);
-
-        bool surplus0 = value0 >= value1;
-        uint256 surplusValue = surplus0 ? value0 : value1;
-        if (surplusValue < MIN_ALT_VALUE_USD) {
-            return 0; // genuine dust: caller forwards it after the value floor.
-        }
-
-        int24 altTl;
-        int24 altTu;
-        if (surplus0) {
-            altTl = mainTu;
-            altTu = mainTu + p.tickSpacing;
-        } else {
-            altTu = mainTl;
-            altTl = mainTl - p.tickSpacing;
-        }
-
-        // The alt is single-sided: a range strictly above spot consumes ONLY token0, strictly below
-        // ONLY token1. Force the unfunded leg's min to 0 — the caller cannot predict which leg the
-        // surplus lands on (selection is by USD value at execution time), so a nonzero min on the
-        // leg that ends up unfunded would revert an otherwise-valid mint. Only the funded leg keeps
-        // the caller-supplied floor.
-        uint256 altAmount0Min = surplus0 ? amount0MinAlt : 0;
-        uint256 altAmount1Min = surplus0 ? 0 : amount1MinAlt;
-
-        altId = LPPositionLib.mintPosition(
-            address(POSITION_MANAGER),
-            p.token0,
-            p.token1,
-            p.tickSpacing,
-            altTl,
-            altTu,
-            altAmount0Min,
-            altAmount1Min,
-            deadline
+        return LPPositionLib.mintAlt(
+            LPPositionLib.AltParams({
+                positionManager: address(POSITION_MANAGER),
+                token0: p.token0,
+                token1: p.token1,
+                holder: address(this),
+                spotTick: spotTick,
+                tickSpacing: p.tickSpacing,
+                dec0: dec0,
+                dec1: dec1,
+                amount0Min: amount0MinAlt,
+                amount1Min: amount1MinAlt,
+                deadline: deadline,
+                minAltValueUsd: MIN_ALT_VALUE_USD
+            }),
+            cfg
         );
     }
 
@@ -1039,62 +1298,101 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         LPPositionLib.skimFees(address(POSITION_MANAGER), p.token0, p.token1, p.feeCollector, tokenId);
     }
 
-    /// @dev Transfer residual balances of t0 and t1 to `to`.
-    function _forwardDustTokens(address t0, address t1, address to) private {
-        uint256 d0 = IERC20(t0).balanceOf(address(this));
-        uint256 d1 = IERC20(t1).balanceOf(address(this));
-        if (d0 > 0) IERC20(t0).safeTransfer(to, d0);
-        if (d1 > 0) IERC20(t1).safeTransfer(to, d1);
+    /// @dev Transfer this contract's whole token0/token1 balance to `to`.
+    function _sweepPairTo(ManagedPositionV2 storage p, address to) private {
+        uint256 d0 = IERC20(p.token0).balanceOf(address(this));
+        uint256 d1 = IERC20(p.token1).balanceOf(address(this));
+        if (d0 > 0) IERC20(p.token0).safeTransfer(to, d0);
+        if (d1 > 0) IERC20(p.token1).safeTransfer(to, d1);
     }
 
     /// @dev Transfer any residual token0 / token1 balance of this contract to the feeCollector.
+    ///      Callers MUST run the value floor first: this is the "genuine sub-threshold remainder"
+    ///      hand-off, and running it earlier would let real surplus escape the floor as "dust".
     function _forwardDust(ManagedPositionV2 storage p) private {
-        _forwardDustTokens(p.token0, p.token1, p.feeCollector);
+        _sweepPairTo(p, p.feeCollector);
+    }
+
+    /// @dev The oracle set every valuation runs against: both feeds, their INDEPENDENT staleness
+    ///      bounds, and the L2 sequencer-uptime guard. Built once per call site so every leg of a
+    ///      before/after comparison is priced under identical rules.
+    function _oracleCfg(ManagedPositionV2 storage p) private view returns (LPValuationLib.OracleConfig memory) {
+        return LPValuationLib.OracleConfig({
+            oracle0: p.oracle0,
+            oracle1: p.oracle1,
+            maxDelay0: maxOracleDelay0,
+            maxDelay1: maxOracleDelay1,
+            sequencerUptimeFeed: sequencerUptimeFeed,
+            sequencerGracePeriod: sequencerGracePeriod
+        });
+    }
+
+    /// @dev Raw token amounts backing main + alt principal at `sqrtP`, plus the pre-existing loose
+    ///      balance — the swap-rebalance floor's baseline. Oracle-free by construction (see
+    ///      SwapWindowLib.Snapshot): pricing happens at rebuild, not here.
+    function _snapshotAmounts(ManagedPositionV2 storage p, uint160 sqrtP)
+        private
+        view
+        returns (SwapWindowLib.Snapshot memory s)
+    {
+        (uint256 m0, uint256 m1) = LPValuationLib.principalAmounts(address(POSITION_MANAGER), p.mainTokenId, sqrtP);
+        (uint256 a0, uint256 a1) = LPValuationLib.principalAmounts(address(POSITION_MANAGER), p.altTokenId, sqrtP);
+        s.amount0Pos = m0 + a0;
+        s.amount1Pos = m1 + a1;
+        s.loose0 = IERC20(p.token0).balanceOf(address(this));
+        s.loose1 = IERC20(p.token1).balanceOf(address(this));
     }
 
     /// @dev USD value of this contract's current (non-position) balances of the pair tokens.
     ///      Used by the rebalance value floor to net contract-held balances out of the
     ///      before/after comparison.
-    function _contractPairValue(ManagedPositionV2 storage p, uint8 dec0, uint8 dec1) private view returns (uint256) {
-        return LPValuationLib.contractPairValue(
-            p.token0, p.token1, address(this), p.oracle0, p.oracle1, dec0, dec1, maxOracleDelay
+    function _contractPairValue(
+        ManagedPositionV2 storage p,
+        LPValuationLib.OracleConfig memory cfg,
+        uint8 dec0,
+        uint8 dec1
+    ) private view returns (uint256) {
+        return LPValuationLib.contractPairValue(p.token0, p.token1, address(this), cfg, dec0, dec1);
+    }
+
+    /// @dev USD value of main + alt PRINCIPAL at `sqrtP` (no loose balances). Uses
+    ///      LiquidityAmounts to derive token amounts from each NFT's stored liquidity — never
+    ///      counts tokensOwed (fees), so skimming fees does not perturb this measurement. A zero
+    ///      tokenId contributes 0 (no alt).
+    function _positionsValue(
+        ManagedPositionV2 storage p,
+        LPValuationLib.OracleConfig memory cfg,
+        uint160 sqrtP,
+        uint8 dec0,
+        uint8 dec1
+    ) private view returns (uint256) {
+        return LPValuationLib.positionsValue(
+            address(POSITION_MANAGER), p.mainTokenId, p.altTokenId, sqrtP, cfg, dec0, dec1
         );
     }
 
-    /// @dev Compute the USD value of the principal tokens locked in `tokenId`,
-    ///      valued at the given sqrtP (Q64.96 sqrt price). Uses LiquidityAmounts to
-    ///      derive token amounts from the NFT's stored liquidity — never counts tokensOwed
-    ///      (fees), so skimming fees does not perturb this measurement.
-    ///      Returns 0 for tokenId == 0 (no position), used by _altValue when there is no alt.
-    function _principalValue(ManagedPositionV2 storage p, uint256 tokenId, uint160 sqrtP, uint8 dec0, uint8 dec1)
-        private
-        view
-        returns (uint256)
-    {
-        return LPValuationLib.principalValue(
-            address(POSITION_MANAGER), tokenId, sqrtP, p.oracle0, p.oracle1, dec0, dec1, maxOracleDelay
+    /// @dev Total USD value the rebalance value-floor's "after" side counts: main + alt principal,
+    ///      plus any loose token0/token1 held by this contract. Shared by rebalanceUsingAlt and the
+    ///      swap-rebalance rebuild floor.
+    function _totalValue(
+        ManagedPositionV2 storage p,
+        LPValuationLib.OracleConfig memory cfg,
+        uint160 sqrtP,
+        uint8 dec0,
+        uint8 dec1
+    ) private view returns (uint256) {
+        return LPValuationLib.totalValue(
+            address(POSITION_MANAGER),
+            p.mainTokenId,
+            p.altTokenId,
+            sqrtP,
+            p.token0,
+            p.token1,
+            address(this),
+            cfg,
+            dec0,
+            dec1
         );
-    }
-
-    /// @dev USD value of the alt position principal at `sqrtP`; 0 when there is no alt.
-    function _altValue(ManagedPositionV2 storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
-        private
-        view
-        returns (uint256)
-    {
-        return _principalValue(p, p.altTokenId, sqrtP, dec0, dec1);
-    }
-
-    /// @dev Total USD value the rebalance value-floor cares about: main + alt principal, plus any
-    ///      loose token0/token1 already held by the contract. Shared by rebalanceUsingAlt's
-    ///      "after" snapshot and (in a later task) the swap-rebalance rebuild floor.
-    function _totalValue(ManagedPositionV2 storage p, uint160 sqrtP, uint8 dec0, uint8 dec1)
-        private
-        view
-        returns (uint256)
-    {
-        return _principalValue(p, p.mainTokenId, sqrtP, dec0, dec1) + _altValue(p, sqrtP, dec0, dec1)
-            + _contractPairValue(p, dec0, dec1);
     }
 
     /// @notice Collect accrued LP fees for an unstaked position and forward to feeCollector.
@@ -1102,10 +1400,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function collectFees() external whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
-        // Mid-swap-rebalance both NFTs are burned but p.mainTokenId/altTokenId still hold the burned
-        // ids until rebuildAfterSwap re-mints (same window getDecisionSnapshot guards); collect() on
-        // a burned id reverts deep inside the position manager, and mainStaked is already false here,
-        // so fail fast with a clear error instead.
+        // Mid-swap-rebalance there is nothing to collect: unwindForSwap burned both NFTs and zeroed
+        // both ids (_exitAll step 5), and rebuildAfterSwap does not re-mint until a LATER transaction
+        // (same window getDecisionSnapshot guards). Without this, _skimFees would run collect() on
+        // tokenId 0 and revert deep inside the position manager; mainStaked is already false here, so
+        // no other guard catches it. Fail fast with a clear error instead.
         if (_window.inFlight) revert AlreadyInFlight();
         if (p.mainStaked) revert AlreadyStaked(); // staked => fees accrue to the gauge; use claimEmissions
         // Skim BOTH legs to the feeCollector via the shared helper. Ignoring the alt here would strand
@@ -1141,10 +1440,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     /// @notice Return a snapshot of the fields the off-chain rebalancer reads to decide
     ///         whether and how to rebalanceUsingAlt a position. All values are read atomically in one
     ///         call. The `earnedAero` field uses try/catch so a broken gauge never blocks the view.
-    /// @dev    Mid-swap-rebalance (rebalanceInFlight), unwindForSwap has already burned both NFTs —
-    ///         p.mainTokenId/p.altTokenId point at burned tokenIds until rebuildAfterSwap re-mints.
-    ///         POSITION_MANAGER.positions() on a burned tokenId reverts on the real position manager,
-    ///         so the main/alt geometry + gauge-earned reads are SKIPPED while in flight (both legs
+    /// @dev    Mid-swap-rebalance (rebalanceInFlight), unwindForSwap has already burned both NFTs and
+    ///         zeroed both ids (_exitAll step 5); nothing is re-minted until rebuildAfterSwap lands in
+    ///         a LATER transaction. POSITION_MANAGER.positions() reverts on the real position manager
+    ///         for tokenId 0 just as it does for a burned id, so the geometry reads would revert
+    ///         either way — the main/alt geometry + gauge-earned reads are SKIPPED while in flight (both legs
     ///         are already unstaked by unwindForSwap's teardown, so mainStaked/altStaked read false
     ///         here regardless). This keeps the view itself always callable — the off-chain agent
     ///         must be able to observe rebalanceInFlight/rebalanceStartedAt precisely when a rebalance
@@ -1161,33 +1461,20 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
         bool inFlight = _window.inFlight;
         if (!inFlight) {
-            (,,,,, int24 mtl, int24 mtu, uint128 mliq,,,,) = POSITION_MANAGER.positions(p.mainTokenId);
-            s.mainTickLower = mtl;
-            s.mainTickUpper = mtu;
-            s.mainInRange = mtl <= spotTick && spotTick < mtu;
-            s.mainLiquidity = mliq;
+            // Tuple decodes and the gauge try/catch live in LPPositionLib (EIP-170 headroom).
+            (s.mainTickLower, s.mainTickUpper, s.mainLiquidity) =
+                LPPositionLib.positionTicks(address(POSITION_MANAGER), p.mainTokenId);
+            s.mainInRange = s.mainTickLower <= spotTick && spotTick < s.mainTickUpper;
             s.hasAlt = p.altTokenId != 0;
             if (s.hasAlt) {
-                (,,,,, int24 atl, int24 atu, uint128 aliq,,,,) = POSITION_MANAGER.positions(p.altTokenId);
-                s.altTickLower = atl;
-                s.altTickUpper = atu;
-                s.altLiquidity = aliq;
+                (s.altTickLower, s.altTickUpper, s.altLiquidity) =
+                    LPPositionLib.positionTicks(address(POSITION_MANAGER), p.altTokenId);
             }
             s.mainStaked = p.mainStaked;
             s.hasGauge = p.gauge != address(0);
-
-            uint256 aero;
-            if (p.mainStaked) {
-                try ICLGauge(p.gauge).earned(address(this), p.mainTokenId) returns (uint256 e) {
-                    aero += e;
-                } catch {}
-            }
-            if (p.altStaked && p.altTokenId != 0) {
-                try ICLGauge(p.gauge).earned(address(this), p.altTokenId) returns (uint256 e) {
-                    aero += e;
-                } catch {}
-            }
-            s.earnedAero = aero;
+            s.earnedAero = LPPositionLib.earnedTolerant(
+                p.gauge, address(this), p.mainTokenId, p.mainStaked, p.altTokenId, p.altStaked
+            );
         }
 
         uint256 ready = p.lastRebalance + p.minRebalanceInterval;
@@ -1200,7 +1487,12 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @notice EIP-1271 passthrough. The balancer is the CowSwap order owner (tokens pulled
     ///         from / delivered to it); all validation logic lives on the compound module.
-    function isValidSignature(bytes32 digest, bytes calldata order) external view returns (bytes4) {
+    /// @dev    `whenNotPaused` is load-bearing, not decoration. unwindForSwap leaves a live
+    ///         VAULT_RELAYER allowance on the sell token, and pause() does not revoke it — so
+    ///         without this check a solver could settle a principal-moving order while the guardian
+    ///         has the contract paused, i.e. pause could not stop an in-flight swap. Safe on a view
+    ///         function: Pausable._requireNotPaused() is itself view.
+    function isValidSignature(bytes32 digest, bytes calldata order) external view whenNotPaused returns (bytes4) {
         return ILPCompoundModuleRebalance(compoundModule).validateRebalanceOrder(digest, order);
     }
 
@@ -1220,7 +1512,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = address(this).balance;
         (bool ok,) = to.call{value: bal}("");
-        require(ok, "ETH transfer failed");
+        if (!ok) revert EthTransferFailed();
         emit TokensRecovered(address(0), to, bal);
     }
 
@@ -1228,91 +1520,34 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     // Internal helpers
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @dev Round `tick` down to the nearest multiple of `spacing`, toward −∞.
-    ///      Solidity truncates division toward zero, so we adjust negative remainders.
-    function _floorAlign(int24 tick, int24 spacing) internal pure returns (int24) {
-        return LPGeometryLib.floorAlign(tick, spacing);
-    }
-
-    /// @dev Compute a tick range of `width` ticks centered on `referenceTick`,
-    ///      with both bounds aligned to `spacing`. The range is shifted left until
-    ///      `tickLower` is the largest spacing-aligned tick that is ≤ (referenceTick − width/2).
-    ///      Reverts if `currentTick` does not strictly straddle the resulting range.
-    function _alignedRange(int24 referenceTick, uint24 width, int24 spacing, int24 currentTick)
-        internal
-        pure
-        returns (int24 tickLower, int24 tickUpper)
-    {
-        return LPGeometryLib.alignedRange(referenceTick, width, spacing, currentTick);
-    }
-
-    /// @dev Pick the new main range from this contract's current (post-withdraw) balances.
-    ///      - Both legs funded → spot-centered straddle (the normal balanced main).
-    ///      - The minority leg below MIN_MAIN_LEG_USD (including exactly one leg funded — a fully
-    ///        out-of-range rebalance returns 100% single-sided principal) → a single-sided `width`-wide
-    ///        range on the MAJORITY (funded) side, adjacent to spot, so the mint has positive
-    ///        liquidity. NO SWAP is ever performed; this only changes WHERE the funded token is parked.
-    ///        Orientation (price = token1/token0, ticks rise with price): a range strictly ABOVE spot
-    ///        holds only token0; strictly BELOW holds only token1.
-    ///          token0-majority: [up, up + width]      where up   = first aligned tick > spot
-    ///          token1-majority: [down - width, down]  where down = first aligned tick < spot
-    ///      Both-empty is impossible here (rebalanceUsingAlt withdrew real principal; an empty teardown would
-    ///      already have reverted the value floor downstream).
-    ///
-    ///      Classifier is VALUE-based, not exact-zero: a tiny minority leg (e.g. 1 wei) would force the
-    ///      straddle branch and compute near-zero (or zero, reverting) liquidity. Only when BOTH legs
-    ///      carry >= MIN_MAIN_LEG_USD do we straddle; a genuinely dust minority is parked single-sided
-    ///      on the majority side and its remainder flows to the alt/dust path downstream.
-    function _mainRange(ManagedPositionV2 storage p, int24 spotTick, uint24 width, uint8 dec0, uint8 dec1)
-        private
-        view
-        returns (int24 tickLower, int24 tickUpper)
-    {
-        uint256 bal0 = IERC20(p.token0).balanceOf(address(this));
-        uint256 bal1 = IERC20(p.token1).balanceOf(address(this));
-        int24 spacing = p.tickSpacing;
-        int24 w = int24(width);
-
-        // Value each leg independently (pass the other amount as 0). The minority is the smaller-value
-        // leg; only straddle when BOTH legs are >= MIN_MAIN_LEG_USD. A sub-threshold minority is treated
-        // as dust → single-sided main on the majority side (placed on the correct side of spot below).
-        uint256 value0 = _valueInUsd(bal0, 0, p.oracle0, p.oracle1, dec0, dec1);
-        uint256 value1 = _valueInUsd(0, bal1, p.oracle0, p.oracle1, dec0, dec1);
-        uint256 minorityValue = value0 < value1 ? value0 : value1;
-
-        if (minorityValue >= MIN_MAIN_LEG_USD) {
-            // Balanced straddle centered on spot (guaranteed straddle for width ≥ 2*spacing).
-            (tickLower, tickUpper) = _alignedRange(spotTick, width, spacing, spotTick);
-            // Enforce maxCenterDeviation on the BALANCED path only. The range is centered on spotTick
-            // (the reference), so today the deviation is just the spacing-alignment remainder and is
-            // always within a non-trivial bound. This guard backstops any future change to the
-            // centering reference (e.g. centering on TWAP) so a skewed center can never slip through.
-            // The single-sided branch is intentionally off-center (it parks on the funded side), so it
-            // is NOT subject to this check.
-            int24 center = (tickLower + tickUpper) / 2;
-            int24 dev = center > spotTick ? center - spotTick : spotTick - center;
-            if (uint24(dev) > p.maxCenterDeviation) revert CenterDeviation();
-            return (tickLower, tickUpper);
-        }
-
-        // Single-sided on the MAJORITY (higher-value) leg. token0-majority → range ABOVE spot;
-        // token1-majority → range BELOW spot.
-        int24 floor = _floorAlign(spotTick, spacing);
-        if (value0 >= value1) {
-            // token0-majority → range strictly ABOVE spot. `floor` is the largest aligned tick ≤ spot,
-            // so floor+spacing is the first aligned tick strictly above spot (also holds when spot
-            // is exactly aligned: floor == spot ⇒ floor+spacing > spot).
-            int24 up = floor + spacing;
-            tickLower = up;
-            tickUpper = up + w;
-        } else {
-            // token1-majority → range strictly BELOW spot.
-            // The first aligned tick strictly below spot is `floor` when spot is unaligned, else
-            // floor - spacing when spot sits exactly on an aligned tick.
-            int24 down = floor == spotTick ? floor - spacing : floor;
-            tickUpper = down;
-            tickLower = down - w;
-        }
+    /// @dev Pick the new main range from this contract's current (post-withdraw) balances. Body
+    ///      lives in LPValuationLib.mainRange (EIP-170 headroom); see its NatSpec for the
+    ///      straddle-vs-single-sided classifier, the placement rules, and the center-deviation guard.
+    ///      Both-empty is impossible here: rebalanceUsingAlt withdrew real principal, and an empty
+    ///      teardown would already have reverted the value floor downstream.
+    function _mainRange(
+        ManagedPositionV2 storage p,
+        LPValuationLib.OracleConfig memory cfg,
+        int24 spotTick,
+        uint24 width,
+        uint8 dec0,
+        uint8 dec1
+    ) private view returns (int24 tickLower, int24 tickUpper) {
+        return LPValuationLib.mainRange(
+            LPValuationLib.RangeParams({
+                token0: p.token0,
+                token1: p.token1,
+                holder: address(this),
+                spotTick: spotTick,
+                width: width,
+                tickSpacing: p.tickSpacing,
+                maxCenterDeviation: p.maxCenterDeviation,
+                minMainLegUsd: MIN_MAIN_LEG_USD,
+                dec0: dec0,
+                dec1: dec1
+            }),
+            cfg
+        );
     }
 
     /// @dev Consult the pool's TWAP oracle and return the time-weighted average tick
@@ -1321,43 +1556,32 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         return LPGeometryLib.consultTwapTick(pool, window);
     }
 
-    /// @dev Read a Chainlink-style price feed and validate freshness and positivity.
-    ///      Reverts with StaleOracle if the answer is non-positive or the feed is stale.
-    function _readFeed(address feed) internal view returns (uint256 price, uint8 decimals) {
-        return LPValuationLib.readFeed(feed, maxOracleDelay);
+    /// @dev Read a Chainlink-style price feed and validate the L2 sequencer, then freshness and
+    ///      positivity. Reverts StaleOracle if the answer is non-positive or the feed is stale
+    ///      against `delay` — which is THAT feed's own bound, never a shared one.
+    function _readFeed(address feed, uint256 delay) internal view returns (uint256 price, uint8 decimals) {
+        return LPValuationLib.readFeed(feed, delay, sequencerUptimeFeed, sequencerGracePeriod);
     }
 
-    /// @notice Value token amounts in USD scaled to 1e8 (8-decimal USD).
-    /// @param dec0 token0 ERC20 decimals; dec1 token1 ERC20 decimals.
-    function _valueInUsd(uint256 amount0, uint256 amount1, address oracle0, address oracle1, uint8 dec0, uint8 dec1)
-        internal
-        view
-        returns (uint256 usd)
-    {
-        return LPValuationLib.valueInUsd(amount0, amount1, oracle0, oracle1, dec0, dec1, maxOracleDelay);
-    }
-
-    /// @dev Shared value-floor gate for both rebalance paths (H-1). Reverts `ValueFloor` when
-    ///      `valueAfter` drops below the haircut position floor plus the un-haircut loose balance.
-    ///      The haircut is (maxRebalanceLossBps + extraBps) of the position principal ONLY; the
-    ///      pre-existing loose balance (`looseBefore`) is added back un-haircut so a donated loose
-    ///      balance cannot inflate headroom to mask a real principal loss. `extraBps` carries
-    ///      swapLossAllowanceBps on the swap-rebuild path and 0 on rebalanceUsingAlt.
+    /// @dev Shared value-floor gate for both rebalance paths (H-1); body in
+    ///      LPValuationLib.enforceValueFloor (EIP-170 headroom). The haircut is
+    ///      (maxRebalanceLossBps + extraBps) of the POSITION principal only; `looseBefore` is added
+    ///      back un-haircut. `extraBps` carries swapLossAllowanceBps on the swap-rebuild path and 0
+    ///      on rebalanceUsingAlt. Both terms are admin-capped (MAX_LOSS_CAP_BPS +
+    ///      MAX_SWAP_LOSS_ALLOWANCE_BPS = 1000 bps), so `10_000 - lossBps` cannot underflow.
     function _enforceValueFloor(uint256 valueBeforePos, uint256 looseBefore, uint256 valueAfter, uint16 extraBps)
         private
         view
     {
-        uint256 floor = FullMath.mulDiv(
-            valueBeforePos, BPS_DENOMINATOR - position.maxRebalanceLossBps - extraBps, BPS_DENOMINATOR
-        ) + looseBefore;
-        if (valueAfter < floor) revert ValueFloor();
+        LPValuationLib.enforceValueFloor(
+            valueBeforePos, looseBefore, valueAfter, uint256(position.maxRebalanceLossBps) + extraBps
+        );
     }
 
     /// @dev Validate all fields of `config` and store them via `_store`.
     ///      Shared by registerPosition and setPool — the validation body is moved here verbatim so
     ///      both entry points exercise identical checks.
     function _validateAndStore(ManagedPositionV2 calldata config) private {
-        if (config.maxRebalanceLossBps > MAX_LOSS_CAP_BPS) revert LossCapExceeded();
         if (config.pool == address(0) || config.token0 == address(0) || config.token1 == address(0)) {
             revert InvalidConfig();
         }
@@ -1374,56 +1598,44 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (config.token0 == AERO || config.token1 == AERO) revert InvalidConfig();
         // Probe both feeds now so a wrong address fails in the admin tx (Safe simulation),
         // not as a StaleOracle revert on the next rebalance.
-        _readFeed(config.oracle0);
-        _readFeed(config.oracle1);
-        if (config.twapWindow == 0 || config.maxTickDeviation <= 0) revert InvalidConfig();
-        if (config.maxCenterDeviation == 0) revert InvalidConfig();
-        int24 spacing = config.tickSpacing;
-        if (spacing <= 0) revert InvalidConfig();
-        // A width narrower than 2*tickSpacing can never straddle an aligned spot, so a balanced
-        // rebalanceUsingAlt would always revert in _alignedRange. Require at least two spacings of room.
-        if (config.minWidth < 2 * uint24(spacing) || config.maxWidth < config.minWidth) revert WidthTooNarrow();
-        if (config.minWidth % uint24(spacing) != 0 || config.maxWidth % uint24(spacing) != 0) revert InvalidWidth();
-        // Widths are uint24 but _mainRange/alignedRange cast them to int24, which bit-reinterprets
-        // (not reverts) above int24.max — a huge maxWidth would pass every check here and corrupt
-        // tick math downstream. Fail closed at config time; per-call widths are bounded by maxWidth.
-        if (config.maxWidth > uint24(type(int24).max)) revert WidthOutOfBounds();
+        _readFeed(config.oracle0, maxOracleDelay0);
+        _readFeed(config.oracle1, maxOracleDelay1);
+        // Loss cap, calm-gate/centering presence, and the width invariants — shared verbatim with
+        // setPositionConfig via LPPositionLib.validateRebalanceConfig (see its NatSpec).
+        LPPositionLib.validateRebalanceConfig(
+            config.minWidth,
+            config.maxWidth,
+            config.maxCenterDeviation,
+            config.twapWindow,
+            config.maxTickDeviation,
+            config.maxRebalanceLossBps,
+            MAX_LOSS_CAP_BPS,
+            config.tickSpacing
+        );
         // Gauge reward-token + gauge->pool binding, shared with setGauge (LPPositionLib.validateGauge)
         // so the registration and post-registration admin paths enforce the same invariant.
         LPPositionLib.validateGauge(config.gauge, config.pool, AERO);
         // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPPositionLib for
         // EIP-170 headroom (see validatePoolAndNft's NatSpec for the full invariants).
         LPPositionLib.validatePoolAndNft(
-            config.pool, address(POSITION_MANAGER), config.mainTokenId, config.token0, config.token1, spacing
+            config.pool, address(POSITION_MANAGER), config.mainTokenId, config.token0, config.token1, config.tickSpacing
         );
 
         _store(config);
     }
 
-    /// @dev Copies every field from `config` into `position`, but forces
-    ///      `active = true`, `mainStaked = false`, `altStaked = false`, `altTokenId = 0`, and `lastRebalance = 0`.
+    /// @dev Copy `config` into `position`, then force the derived fields:
+    ///      `altTokenId = 0`, `mainStaked = false`, `altStaked = false`, `lastRebalance = 0`,
+    ///      `active = true`. The whole-struct assignment is deliberate — a field-by-field copy of a
+    ///      21-field struct costs the balancer bytecode it does not have, and it silently drops any
+    ///      field added later, whereas this cannot.
     function _store(ManagedPositionV2 calldata config) private {
+        position = config;
         ManagedPositionV2 storage p = position;
-        p.mainTokenId = config.mainTokenId;
-        p.altTokenId = 0; // forced
-        p.pool = config.pool;
-        p.token0 = config.token0;
-        p.token1 = config.token1;
-        p.tickSpacing = config.tickSpacing;
-        p.gauge = config.gauge;
-        p.mainStaked = false; // forced
-        p.altStaked = false; // forced
-        p.feeCollector = config.feeCollector;
-        p.oracle0 = config.oracle0;
-        p.oracle1 = config.oracle1;
-        p.minWidth = config.minWidth;
-        p.maxWidth = config.maxWidth;
-        p.maxCenterDeviation = config.maxCenterDeviation;
-        p.twapWindow = config.twapWindow;
-        p.maxTickDeviation = config.maxTickDeviation;
-        p.maxRebalanceLossBps = config.maxRebalanceLossBps;
-        p.minRebalanceInterval = config.minRebalanceInterval;
-        p.lastRebalance = 0; // forced
-        p.active = true; // forced
+        p.altTokenId = 0;
+        p.mainStaked = false;
+        p.altStaked = false;
+        p.lastRebalance = 0;
+        p.active = true;
     }
 }

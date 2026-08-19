@@ -156,7 +156,6 @@ contract MultiMarketStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -187,7 +186,6 @@ contract MultiMarketStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -217,7 +215,6 @@ contract MultiMarketStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -750,6 +747,64 @@ contract MultiMarketStrategyTest is Test {
 
         vm.prank(backend);
         strategy.updatePosition(updates);
+    }
+
+    /// @notice A MAX withdrawal against the LIVE MetaMorpho vault: ask for exactly what the strategy
+    ///         advertises. The unit suite models this, but only the real vault carries the actual
+    ///         mechanism — MetaMorpho's `maxRedeem` is `convertToShares(maxWithdraw)`, a
+    ///         shares -> assets -> shares round trip that floors at each step, so
+    ///         `previewRedeem(maxRedeem) == maxWithdraw - 1`. Exiting on `maxRedeem` therefore lands
+    ///         one unit under the requested amount and the trailing `remaining == 0` require takes
+    ///         the whole withdrawal down. 50/50 is the case with no slack anywhere else to absorb it.
+    function testMaxWithdrawAgainstLiveMetaMorpho() public {
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, depositAmount);
+
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        // The shipped configs are 100/0, which leaves the vault leg empty and the 4626 capacity
+        // branch unreachable. Move everything into the vault: with no second leg holding anything,
+        // pass 1 targets the vault at its full capacity — the branch under test — and there is
+        // nothing anywhere to absorb a payout that lands under what was advertised.
+        //
+        // 0/100 rather than 50/50 because 0/100 is the config that reproduces on EVERY block. A
+        // 50/50 split is flaky, not vacuous: it does hit the bug on some blocks (measured pre-fix at
+        // Base 50094000) and not on others (50098000, 50100000, 50101000), because the two legs round
+        // apart by a unit, the vault's pass-1 target can land just below its capacity, and whether the
+        // 1-unit residual then re-enters the capacity branch in pass 2 depends on live vault state.
+        // This suite runs unpinned against `latest`, so only the always-reverting config is a
+        // trustworthy regression test.
+        MamoMultiMarketStrategy.MarketSplitUpdate[] memory updates = new MamoMultiMarketStrategy.MarketSplitUpdate[](2);
+        updates[0] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(mToken), splitBps: 0});
+        updates[1] = MamoMultiMarketStrategy.MarketSplitUpdate({market: address(metaMorphoVault), splitBps: 10000});
+
+        vm.prank(backend);
+        strategy.updatePosition(updates);
+
+        // What the strategy will accept is previewRedeem of the whole share balance, not
+        // convertToAssets — the two differ on a vault with an exit fee, and previewRedeem is what
+        // the withdrawal path has to be able to actually deliver.
+        uint256 shares = metaMorphoVault.balanceOf(address(strategy));
+        assertGt(shares, 0, "the vault leg must be funded for this test to mean anything");
+        uint256 advertised = metaMorphoVault.previewRedeem(shares) + mToken.balanceOfUnderlying(address(strategy))
+            + underlying.balanceOf(address(strategy));
+
+        // Pin WHICH branch runs. Without this the test passes vacuously through the
+        // liquidity-constrained else-branch on any block where the live vault cannot honour 1000
+        // units, and the capacity branch under test is never reached.
+        assertGe(
+            metaMorphoVault.maxWithdraw(address(strategy)),
+            metaMorphoVault.previewRedeem(shares),
+            "the live vault must be liquid enough to take the capacity branch, else this test is vacuous"
+        );
+
+        vm.prank(owner);
+        strategy.withdraw(advertised);
+
+        assertEq(underlying.balanceOf(owner), advertised, "a max withdrawal delivers the full advertised total");
     }
 
     function _getTotalBalance() internal returns (uint256) {
