@@ -27,3 +27,5 @@ script/tenderly/staging-setup.log
 
 script/tenderly/mine-ticker.log
 script/tenderly/.mine-ticker.pid
+
+script/tenderly/harness-results-leveraged-aero-withdraw.log

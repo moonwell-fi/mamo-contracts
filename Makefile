@@ -147,4 +147,16 @@ tenderly-leveraged-aero-stack:
 tenderly-leveraged-aero-account:
 	./script/tenderly/run-harness.sh leveraged-aero-account
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account
+# Withdraw-flow EDGE matrix against the LIVE persistent vnet. The account harness proves the HAPPY
+# path (deposit / fast withdraw / request-fulfill-claim); this runs the states a frontend has to
+# RENDER and that path never reaches: quote drift between preview and signature, request->cancel,
+# emergency after the 2-day FULFILL_WINDOW, a stuck fulfil with an unreachable floor, the
+# MAX_OPEN_REQUESTS cap, claim-on-empty, claim sweeping a plain transfer, fulfilled-but-unclaimed
+# (the state with no account-side event), and both exits closing when state != Executed. Each
+# scenario runs behind an evm_snapshot and reverts, so the shared vnet is left as found. Emits
+# script/tenderly/leveraged-aero-withdraw-findings.json — the measured input to the FE artifact.
+# Run AFTER tenderly-leveraged-aero-account (it reads mamo.accountFactory from the manifest).
+tenderly-leveraged-aero-withdraw:
+	./script/tenderly/run-harness.sh leveraged-aero-withdraw
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
