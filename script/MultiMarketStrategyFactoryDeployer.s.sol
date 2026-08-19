@@ -20,11 +20,11 @@ contract MultiMarketStrategyFactoryDeployer is Script {
         uint256 strategyTypeId,
         address deployer
     ) public returns (address) {
+        // The factory resolves the strategy implementation and the backend from
+        // MamoStrategyRegistry at call time, so neither is pinned at deployment.
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
-        address mamoBackend = addresses.getAddress("MAMO_BACKEND");
         address underlying = addresses.getAddress(assetConfig.token);
         address slippagePriceChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address strategyImplementation = addresses.getAddress(assetConfig.strategyImplementation);
         address feeRecipient = addresses.getAddress("MAMO_MULTISIG");
         address marketRegistryAddr = addresses.getAddress("MARKET_REGISTRY");
 
@@ -44,10 +44,8 @@ contract MultiMarketStrategyFactoryDeployer is Script {
 
         MultiMarketStrategyFactory factory = new MultiMarketStrategyFactory(
             mamoStrategyRegistry,
-            mamoBackend,
             underlying,
             slippagePriceChecker,
-            strategyImplementation,
             feeRecipient,
             marketRegistryAddr,
             strategyTypeId,

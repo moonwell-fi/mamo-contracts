@@ -106,7 +106,7 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 - `function isUserStrategy(address user, address strategy) external view returns (bool)`: Checks if a strategy belongs to a user.
 
-- `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE).
+- `function getBackendAddress() external view returns (address)`: Gets the backend address (first member of the BACKEND_ROLE). **Deprecated as an authorization primitive** — index 0 changes identity as a side effect of unrelated membership edits (Sherlock #41). New code gates on `hasRole(BACKEND_ROLE, account)`; see `docs/STRATEGY_REGISTRY_SPEC.md`. It remains a live read for the already-deployed strategy proxies, which still authorize against index 0 until their owners upgrade.
 
 ## SlippagePriceChecker
 

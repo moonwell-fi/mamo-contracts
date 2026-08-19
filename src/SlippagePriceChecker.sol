@@ -130,6 +130,20 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      */
     event MaxTimePriceValidSet(address indexed fromToken, uint256 maxTimePriceValid);
 
+    /// @notice Locks the implementation so it can never be initialized directly
+    /// @dev Sherlock #44. Without this the first caller of {initialize} on the implementation
+    ///      becomes its owner and gains every onlyOwner entry point on that address —
+    ///      addTokenConfiguration, setMaxTimePriceValid, transferOwnership. The live implementation
+    ///      deployed before this change (0x413C38B68fe730F2bC30d8Cde965967D1C7BC599) reports
+    ///      `owner() == address(0)` and is claimable today. Impact is confined to the
+    ///      implementation's own storage — proxies initialize their own, and `upgradeToAndCall` is
+    ///      `onlyProxy`, so a claimant cannot reach the proxy or any funds — but an implementation
+    ///      with a live owner is a standing invitation to misread it as authoritative, and the fix
+    ///      is three lines. Requires redeploying the implementation and re-pointing the proxy.
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice Emitted when the sequencer uptime feed or its grace period changes
      * @param sequencerUptimeFeed The new sequencer uptime feed (address(0) disables the check)
@@ -152,15 +166,6 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
      * @param configuredPairs The token's pair count after the backfill
      */
     event PairCountBackfilled(address indexed fromToken, address indexed toToken, uint256 configuredPairs);
-
-    /**
-     * @notice Locks the implementation contract so it cannot be initialized directly
-     * @dev Without this, anyone can call initialize() on the implementation and become its owner,
-     *      which is enough to authorize an upgrade of the implementation itself.
-     */
-    constructor() {
-        _disableInitializers();
-    }
 
     /**
      * @dev Initializes the contract with the given owner
@@ -239,6 +244,10 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         // Clear configurations
         delete tokenPairOracleData[fromToken][toToken];
+        // NOTE: `maxTimePriceValid[fromToken]` is deliberately NOT cleared here. It is keyed by
+        // fromToken alone while configurations are keyed by the pair, so clearing it as a side
+        // effect of removing ONE pair would silently invalidate every other pair the same token
+        // still has. Use {clearRewardToken} to retire the token itself.
 
         // MOO-726: maxTimePriceValid is the legacy reward-token flag and used to be a one-way latch,
         // so a token whose last pair had been removed still passed the isRewardToken() gate and
@@ -255,10 +264,50 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
     }
 
     /**
+     * @notice Retires `fromToken` as a reward token entirely
+     * @dev ORIGIN (MOO-736, PR #73): `isRewardToken` was defined as `maxTimePriceValid[token] > 0`
+     *      and nothing could set that back to zero — {setMaxTimePriceValid} rejected zero and
+     *      {removeTokenConfiguration} only touched the pair mapping. The flag was a one-way latch, so
+     *      a mistaken entry was unrecoverable, which matters because MamoMultiMarketStrategy treats
+     *      "is a reward token" as permission to charge a compound fee permissionlessly and to approve
+     *      the CoW relayer for the remainder.
+     *
+     * @dev MERGE NOTE (PR #74): that latch is now closed from the other end as well —
+     *      {removeTokenConfiguration} zeroes the flag once the last COUNTED pair goes, and
+     *      `isRewardToken` reads `configuredPairCount[token] > 0 || maxTimePriceValid[token] > 0`.
+     *      Clearing the flag alone therefore no longer retires a token that still has counted pairs:
+     *      the count term keeps answering true. Left as a silent no-op that would be a trap for the
+     *      exact operator reaching for it, so the precondition below makes it LOUD instead. Retiring
+     *      a token is now: remove its pair configurations, then call this for any residual legacy
+     *      flag.
+     *
+     * @dev Deliberately NOT rebuilt as a standalone `rewardTokenRetired` override that short-circuits
+     *      `isRewardToken`. That would restore single-call force-retirement even with live pairs, but
+     *      it is a new storage slot and a new semantic, i.e. a product decision rather than a merge
+     *      resolution. Open that as a follow-up if operations wants force-retire back.
+     *
+     * @dev Same backfill caveat as {removeTokenConfiguration}: for a token whose pairs predate
+     *      `configuredPairCount`, the count reads zero while pairs are still live, so this would clear
+     *      the flag and report a still-configured token as no longer a reward token. Run
+     *      {backfillPairCount} for the token first.
+     * @param fromToken The token to stop treating as a reward token
+     */
+    function clearRewardToken(address fromToken) external onlyOwner {
+        require(fromToken != address(0), "Invalid from token address");
+        require(maxTimePriceValid[fromToken] > 0, "Token not configured");
+        require(configuredPairCount[fromToken] == 0, "Remove pair configurations first");
+
+        delete maxTimePriceValid[fromToken];
+
+        emit MaxTimePriceValidSet(fromToken, 0);
+    }
+
+    /**
      * @notice Sets (or clears) the legacy max-time-price-valid flag for a token
      * @dev Zero is accepted and CLEARS the flag. Rejecting zero made the flag a one-way latch: a
      *      token configured before configuredPairCount existed could never stop being reported as a
-     *      reward token, even after every pair for it had been removed.
+     *      reward token, even after every pair for it had been removed. This also has to accept zero
+     *      because {removeTokenConfiguration} writes zero through this same mapping internally.
      * @dev SECURITY: this value doubles as the maximum lifetime of an order, and the sequencer-outage
      *      protection in _requireSequencerUp only closes the replay window because that lifetime is
      *      no longer than sequencerGracePeriod. An order signed just before an outage stays valid for
