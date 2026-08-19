@@ -61,13 +61,19 @@ contract SlippagePriceCheckerUnitTest is Test {
 
     // ==================== isRewardToken IS NO LONGER A ONE-WAY LATCH ====================
 
-    /// @notice `isRewardToken` is defined as `maxTimePriceValid[token] > 0`, and nothing could ever
-    ///         set that back to zero: setMaxTimePriceValid rejects a zero value and
-    ///         removeTokenConfiguration only clears the pair mapping. A token configured once
-    ///         therefore stayed a reward token forever — which in MamoMultiMarketStrategy is
-    ///         standing permission to charge a compound fee on it permissionlessly and approve the
-    ///         CoW relayer for the remainder.
-    function test_removeTokenConfigurationAloneDoesNotRetireTheToken() public {
+    /// @notice The latch was: `isRewardToken` == `maxTimePriceValid[token] > 0`, with nothing able to
+    ///         set that back to zero — setMaxTimePriceValid rejected zero and removeTokenConfiguration
+    ///         only cleared the pair mapping. A token configured once stayed a reward token forever,
+    ///         which in MamoMultiMarketStrategy is standing permission to charge a compound fee on it
+    ///         permissionlessly and approve the CoW relayer for the remainder.
+    ///
+    /// @dev MERGE (#74 into #73): this test asserted that removal leaves the flag standing "by
+    ///      design". That was right under the old definition; #74's MOO-726 change is precisely that a
+    ///      token with no configured pairs must stop passing the gate, so removeTokenConfiguration now
+    ///      clears the flag once the counted-pair count reaches zero. The original intent — removing
+    ///      ONE pair must not invalidate a token's other pairs — is untouched and is covered by
+    ///      test_removingOnePairLeavesSiblingPairsUsable below.
+    function test_removingTheLastPairRetiresTheToken() public {
         _configure(rewardToken, underlying, 3600);
         assertTrue(checker.isRewardToken(rewardToken));
 
@@ -75,12 +81,35 @@ contract SlippagePriceCheckerUnitTest is Test {
         checker.removeTokenConfiguration(rewardToken, underlying);
 
         assertFalse(checker.isTokenPairConfigured(rewardToken, underlying), "pair is gone");
-        assertTrue(checker.isRewardToken(rewardToken), "but the token-level flag survives, by design");
+        assertFalse(checker.isRewardToken(rewardToken), "and the token is no longer a reward token");
+        assertEq(checker.maxTimePriceValid(rewardToken), 0, "legacy flag cleared with the last pair");
     }
 
-    function test_clearRewardTokenClosesTheLatch() public {
+    /// @notice `clearRewardToken` refuses to run while counted pairs remain, rather than no-op.
+    /// @dev Post-merge `isRewardToken` reads `configuredPairCount > 0 || maxTimePriceValid > 0`, so
+    ///      zeroing the flag with pairs still counted would return successfully and change the answer
+    ///      not at all. A silent no-op is the worst outcome for the operator reaching for this, so the
+    ///      precondition makes it a revert.
+    function test_clearRewardTokenRequiresPairsRemovedFirst() public {
         _configure(rewardToken, underlying, 3600);
-        assertTrue(checker.isRewardToken(rewardToken));
+
+        vm.prank(owner);
+        vm.expectRevert("Remove pair configurations first");
+        checker.clearRewardToken(rewardToken);
+
+        assertTrue(checker.isRewardToken(rewardToken), "still a reward token, as the revert implies");
+    }
+
+    /// @notice The residual-flag case `clearRewardToken` still exists for.
+    /// @dev A token can carry a non-zero legacy flag with zero counted pairs: set directly, or left
+    ///      behind by a configuration predating `configuredPairCount`. `removeTokenConfiguration`
+    ///      cannot reach that — there is no pair to remove — so this is the call that retires it.
+    function test_clearRewardTokenClosesTheLegacyLatch() public {
+        vm.prank(owner);
+        checker.setMaxTimePriceValid(rewardToken, 3600);
+
+        assertEq(checker.configuredPairCount(rewardToken), 0, "no counted pairs, only the legacy flag");
+        assertTrue(checker.isRewardToken(rewardToken), "the flag alone makes it a reward token");
 
         vm.prank(owner);
         checker.clearRewardToken(rewardToken);

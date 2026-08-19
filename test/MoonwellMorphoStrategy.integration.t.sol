@@ -32,6 +32,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "./MockERC20.sol";
 
 import {DeployMultiMarketSystem} from "../multisig/mamo-multisig/011_DeployMultiMarketSystem.sol";
+
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 /**
@@ -1557,6 +1559,8 @@ contract MoonwellMorphoStrategyTest is Test {
     }
 
     function testSlippageAffectsPriceCheck() public {
+        _freshenPriceFeeds();
+
         uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
         // The fee gate runs before the price check, so settle first — this test is about slippage.
@@ -1648,7 +1652,40 @@ contract MoonwellMorphoStrategyTest is Test {
         assertEq(result, MAGIC_VALUE, "Order should be valid with high slippage");
     }
 
+    /// @notice Re-stamps every configured price feed's `updatedAt` to now, keeping its real answer.
+    /// @dev These tests fork at `latest` and assert a SPECIFIC revert reason from checkPrice. Any feed
+    ///      whose last update is older than its configured heartbeat reverts first with
+    ///      "Price feed update time exceeds heartbeat", so the assertion becomes a coin flip on where
+    ///      in the feed's update cycle the fork block happens to land. That is not theoretical: the
+    ///      WETH config allows 1200s for CHAINLINK_ETH_USD while that feed's observed cadence on Base
+    ///      is ~1230s (five consecutive 1230s gaps measured 2026-08-14), so the tail of every cycle is
+    ///      stale by the configured bound and CI fails there. Freezing freshness keeps these tests
+    ///      about the price check they name. The heartbeat bound itself is covered by
+    ///      SlippagePriceChecker.integration.t.sol, and the live config value is an on-chain concern
+    ///      tracked separately — do NOT widen a heartbeat to make a test pass.
+    function _freshenPriceFeeds() internal {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.PriceFeedConfig[] memory feeds = assetConfig.rewardTokens[i].priceFeeds;
+
+            for (uint256 j = 0; j < feeds.length; j++) {
+                address feed = addresses.getAddress(feeds[j].priceFeed);
+
+                // Read the live round FIRST: the point is to preserve the real price and move only
+                // its timestamp, so the arithmetic under test stays the production arithmetic.
+                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+
+                vm.mockCall(
+                    feed,
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+                );
+            }
+        }
+    }
+
     function testRevertIfPriceCheckFails() public {
+        _freshenPriceFeeds();
+
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
@@ -1819,6 +1856,17 @@ contract MoonwellMorphoStrategyTest is Test {
             "underlying is never approved to the relayer"
         );
     }
+
+    // MERGE NOTE (#74 into #73): `testApproveCowSwapZeroAmountStillRevokesAfterTokenDeconfigured`
+    // lived here. It pinned that `_approveCowSwap`'s reward-token gate exempted `amount == 0`, so a
+    // standing relayer allowance stayed revocable after MOO-726 made `isRewardToken` follow live pair
+    // configuration instead of latching forever. Both the test and the exemption are removed because
+    // #73 deleted `approveCowSwap`/`_approveCowSwap` outright: the allowance is now written only by
+    // `sweepRewardFees`, at the settled balance, and there is no owner-callable path left to grant an
+    // unlimited one — so the stranded-allowance failure mode the exemption defended against can no
+    // longer be created. The invariant that replaced it is covered by the tests above
+    // (`testSweepRewardFeesArmsRelayerAtSettledBalance` in particular): the allowance is finite and
+    // the strategy is its only writer.
 
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade

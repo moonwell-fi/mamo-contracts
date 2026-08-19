@@ -222,28 +222,36 @@ pre-fix implementation is claimable and must be redeployed.
 
 - `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
 - `mapping(address => TokenFeedConfiguration[]) public tokenOracleData`: **Deprecated**, superseded by `tokenPairOracleData`
-- `mapping(address => uint256) public maxTimePriceValid`: Per-token staleness window. Doubles as the reward-token flag: `isRewardToken(t)` is `maxTimePriceValid[t] > 0`.
-- `mapping(address => mapping(address => TokenFeedConfiguration[])) public tokenPairOracleData`: Primary storage, keyed `fromToken -> toToken`
+- `mapping(address fromToken => mapping(address toToken => TokenFeedConfiguration[])) public tokenPairOracleData`: Primary storage, keyed `fromToken -> toToken`
+- `mapping(address token => uint256) public maxTimePriceValid`: Per-`fromToken` price validity window, and the LEGACY reward-token flag. No longer the sole basis of `isRewardToken` — see below.
+- `mapping(address fromToken => uint256) public configuredPairCount`: How many configured pairs a token has
+- `mapping(address fromToken => mapping(address toToken => bool)) public pairCounted`: Whether a pair is already represented in `configuredPairCount`
 
 ### TokenFeedConfiguration
 
 - `address chainlinkFeed`: The address of the Chainlink price feed
 - `bool reverse`: Whether to reverse the price calculation (divide instead of multiply)
-- `uint256 heartbeat`: Maximum time between price feed updates
+- `uint256 heartbeat`: Maximum age accepted for that feed's answer
 
 ### Functions
 
-- `function initialize(address _owner) external`: Initializes the contract with the given owner.
-- `function addTokenConfiguration(address fromToken, address toToken, TokenFeedConfiguration[] calldata configurations) external`: Configures the feed chain for a token pair. Owner only.
-- `function removeTokenConfiguration(address fromToken, address toToken) external`: Removes the feed chain for a pair. Owner only. Deliberately does **not** clear `maxTimePriceValid`, which is keyed by `fromToken` alone and shared with the token's other pairs.
-- `function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external`: Sets the staleness window; rejects zero. Owner only.
-- `function clearRewardToken(address fromToken) external`: Retires the token entirely by zeroing `maxTimePriceValid`. Owner only. Added because `isRewardToken` was otherwise a **one-way latch** — nothing could unset it, so a mistakenly configured token remained permanently eligible for the permissionless compound-fee sweep and relayer approval in `MamoMultiMarketStrategy`.
-
-  Note the interaction with the compound fee, which is why `MamoMultiMarketStrategy.recoverERC20` settles on the **anchor** (`rewardFeeCharged[token] > 0`) and not on the current `isRewardToken` answer. Clearing a token makes `isRewardToken` go false while an unsettled fee position may still exist on the strategy; before that change, recovery of a cleared token skipped both settles, took the balance untaxed, and left the anchor stale-high, so the next batch after a re-configuration computed `pendingRewardFee == 0`. A cleared token also cannot be swept — `sweepRewardFees` reverts `"Token not allowed"` — so the fee would have been stranded rather than deferred. Operationally: **sweep every affected strategy before clearing.** The anchor settle covers a token that was swept at least once, but a batch that was *never* swept before the clear escapes entirely — the anchor is zero, so neither disjunct in `recoverERC20` fires, and `sweepRewardFees` can no longer be called to collect it. Measured: 1000e18 of a never-swept reward token, retired then recovered, yields **zero** fee. Clearing is safe for the anchored case only; for the un-swept case the settlement rides on the sweep having already happened, not on recovery.
+- `function initialize(address _owner) external initializer`: Initializes the contract with the given owner.
+- `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Authorizes an upgrade to a new implementation. Owner only.
 - `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks a swap against the feed price with the provided slippage.
 - `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Expected output amount for a swap.
-- `function isRewardToken(address token) external view returns (bool)`: Whether the token has a staleness window configured.
-- `function isTokenPairConfigured(address fromToken, address toToken) external view returns (bool)`: Whether the pair has feeds *and* the from-token has a staleness window.
+- `function addTokenConfiguration(address fromToken, address toToken, TokenFeedConfiguration[] calldata configurations) external`: Configures the oracle path for a single `fromToken -> toToken` pair. Owner only. Does NOT write `maxTimePriceValid` — that is a separate, per-`fromToken` setting.
+- `function removeTokenConfiguration(address fromToken, address toToken) external`: Removes the configuration for one pair. Owner only. When it removes the last COUNTED pair for `fromToken` it also clears that token's `maxTimePriceValid`. (This supersedes the earlier statement that it deliberately leaves the flag alone: the flag is per-`fromToken`, so it is only cleared once no pair remains.)
+- `function setMaxTimePriceValid(address fromToken, uint256 maxTimePriceValid) external`: Sets, or with zero clears, how long a price stays valid for `fromToken`. Owner only. Zero is ACCEPTED — rejecting it is what made the flag a one-way latch, and `removeTokenConfiguration` writes zero through this mapping internally. **This value also bounds an order's lifetime, and the sequencer-outage protection only closes its replay window while this is no greater than the sequencer grace period.**
+- `function clearRewardToken(address fromToken) external`: Retires the token by zeroing its legacy `maxTimePriceValid`. Owner only. **Requires the token to have no counted pairs left** (`configuredPairCount[fromToken] == 0`), because `isRewardToken` now also answers from that count — without the precondition the call would succeed while changing nothing. Retiring a token is therefore: remove its pair configurations, then call this for any residual legacy flag. Run `backfillPairCount` first for tokens configured before the counter existed, or the count reads zero while pairs are still live.
+
+  Note the interaction with the compound fee, which is why `MamoMultiMarketStrategy.recoverERC20` settles on the **anchor** (`rewardFeeCharged[token] > 0`) and not on the current `isRewardToken` answer. Clearing a token makes `isRewardToken` go false while an unsettled fee position may still exist on the strategy; before that change, recovery of a cleared token skipped both settles, took the balance untaxed, and left the anchor stale-high, so the next batch after a re-configuration computed `pendingRewardFee == 0`. A cleared token also cannot be swept — `sweepRewardFees` reverts `"Token not allowed"` — so the fee would have been stranded rather than deferred. Operationally: **sweep every affected strategy before clearing.** The anchor settle covers a token that was swept at least once, but a batch that was *never* swept before the clear escapes entirely — the anchor is zero, so neither disjunct in `recoverERC20` fires, and `sweepRewardFees` can no longer be called to collect it. Measured: 1000e18 of a never-swept reward token, retired then recovered, yields **zero** fee. Clearing is safe for the anchored case only; for the un-swept case the settlement rides on the sweep having already happened, not on recovery.
+- `function setSequencerUptimeFeed(address feed, uint256 gracePeriod) external`: Points the checker at a Chainlink L2 sequencer uptime feed and sets how long after recovery quotes stay refused. Owner only. While `feed` is unset the check is a no-op, which is the state an in-place upgrade lands in — proposal `013` arms it.
+- `function setFeedBounds(address chainlinkFeed, uint256 minAnswer, uint256 maxAnswer) external`: Sets a sane-range band for a feed's answer; a zero `maxAnswer` clears the band. Owner only. Left unset on purpose today — see the 013 notes in `docs/MAMO_STAKING_ARCHITECTURE.md`.
+- `function backfillPairCount(address fromToken, address[] calldata toTokens) external`: Registers pairs configured before `configuredPairCount` existed into that counter. Note the shape — ONE `fromToken` against many `toTokens` per call, so backfilling several source tokens is one call each. Owner only, and idempotent. Required because the nested pair mapping cannot be enumerated on chain.
+- `function configuredPairCount(address fromToken) external view returns (uint256)`: How many configured pairs a token has. Together with the legacy `maxTimePriceValid` flag this is what `isRewardToken` answers from.
+- `function maxTimePriceValid(address token) external view returns (uint256)`: The maximum time a price is considered valid for a token.
+- `function isRewardToken(address token) external view returns (bool)`: Whether the token has at least one configured pair, OR a non-zero legacy `maxTimePriceValid`.
+- `function isTokenPairConfigured(address fromToken, address toToken) external view returns (bool)`: Whether that pair has oracle data. Configured is not the same as settleable — an order also needs a non-zero `maxTimePriceValid` for `fromToken`.
 
 ## MamoMultiMarketStrategy
 

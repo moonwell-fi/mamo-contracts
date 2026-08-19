@@ -20,13 +20,16 @@ contract MamoStakingStrategyFactory is AccessControl {
     bytes32 public constant BACKEND_ROLE = keccak256("BACKEND_ROLE");
 
     // Strategy parameters
+    // NOTE: there is deliberately no defaultSlippageInBps here. Slippage has a single source of
+    // truth, MamoStakingRegistry.defaultSlippageInBps, which MamoStakingStrategy.getAccountSlippage()
+    // falls back to; per-strategy overrides go through MamoStakingStrategy.setAccountSlippage().
+    // The factory used to validate and store one that createStrategyForUser never passed on.
     address public immutable mamoStrategyRegistry;
     address public immutable stakingRegistry;
     address public immutable multiRewards;
     address public immutable mamoToken;
     address public immutable strategyImplementation;
     uint256 public immutable strategyTypeId;
-    uint256 public immutable defaultSlippageInBps;
 
     // Reference to the MamoStrategyRegistry
     IMamoStrategyRegistry public immutable mamoStrategyRegistryInterface;
@@ -44,7 +47,6 @@ contract MamoStakingStrategyFactory is AccessControl {
      * @param _mamoToken Address of the MAMO token
      * @param _strategyImplementation Address of the MamoStakingStrategy implementation
      * @param _strategyTypeId The strategy type ID
-     * @param _defaultSlippageInBps The default slippage in basis points
      */
     constructor(
         address _admin,
@@ -54,8 +56,7 @@ contract MamoStakingStrategyFactory is AccessControl {
         address _multiRewards,
         address _mamoToken,
         address _strategyImplementation,
-        uint256 _strategyTypeId,
-        uint256 _defaultSlippageInBps
+        uint256 _strategyTypeId
     ) {
         require(_admin != address(0), "Invalid admin address");
         require(_mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
@@ -65,7 +66,6 @@ contract MamoStakingStrategyFactory is AccessControl {
         require(_mamoToken != address(0), "Invalid mamoToken address");
         require(_strategyImplementation != address(0), "Invalid strategyImplementation address");
         require(_strategyTypeId != 0, "Strategy type id not set");
-        require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Slippage exceeds maximum");
 
         // Set up roles
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
@@ -77,7 +77,6 @@ contract MamoStakingStrategyFactory is AccessControl {
         mamoToken = _mamoToken;
         strategyImplementation = _strategyImplementation;
         strategyTypeId = _strategyTypeId;
-        defaultSlippageInBps = _defaultSlippageInBps;
 
         // Initialize the MamoStrategyRegistry reference
         mamoStrategyRegistryInterface = IMamoStrategyRegistry(_mamoStrategyRegistry);
