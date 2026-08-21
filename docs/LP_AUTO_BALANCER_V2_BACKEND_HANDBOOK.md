@@ -2,7 +2,7 @@
 
 **Audience:** the team building and running the offchain rebalancer service.
 **Status:** bootstrap deployment, proposal `014_LPAutoBalancerV2CbETHBootstrap`.
-**Measurements taken on Base, 2026-08-21; §3 re-measured 2026-08-22.** Numbers move — the stake/unstake winner already flipped once between those two dates. Re-measurement methods are inline; re-run §3 before fixing the allocation.
+**Addresses and feed cadences verified on Base 2026-08-21/22.** Re-measurement methods are inline. Yield, cost and payback figures are deliberately absent — the backend computes those from live state (§6.3, §6.5).
 
 ## Related documents
 
@@ -93,49 +93,26 @@ amount1 (WETH,  18dp) = halfUsd * 1e18 / chainlink(ETH/USD)
 
 At the pinned block the residual mismatch is 0.13%, so the NFPM consumes nearly all of both. `test_proposal_lifecycle` mints this way and passes `validate()` at 500 bps — proof the recipe works; `test_validate_rejectsWrongAllocation` is its non-vacuity control (same position, 2× target, must fail).
 
-Read §3 before choosing the number.
+§3 covers the venue mechanics behind that choice.
 
 ---
 
-## 3. Venue economics — read before sizing
+## 3. Venue mechanics
 
-Every figure below is reproducible from onchain reads.
+How income works on this pool. **The numbers are the backend's job** — it reads them at runtime and computes yield, cost and payback per cycle from live state (§6.3, §6.5). This section is the mechanics those computations sit on, not a projection.
 
-**Slipstream is fees XOR emissions.** A staked position earns AERO and its swap fees divert to the gauge (`pool.gaugeFees()`); an unstaked one earns fees less the 10% `unstakedFee`. `stake()`/`unstake()` is a real economic choice, and it is `REBALANCER_ROLE` — the backend owns it.
+**Slipstream is fees XOR emissions.** A staked position earns AERO and its swap fees divert to the gauge (`pool.gaugeFees()`); an unstaked one earns fees less the 10% `unstakedFee`. So `stake()`/`unstake()` is a real economic choice, not a formality, and it is `REBALANCER_ROLE` — the backend owns it and re-evaluates it per sweep. The winner moves with pool volume and the AERO price and does genuinely flip; §6.5 has the comparison and the hysteresis that keeps it from thrashing.
 
-Pool-level, measured 2026-08-22 (2026-08-21 in brackets — one day apart, to show how fast this moves):
+014 registers the position **unstaked** — `_store` forces `mainStaked = false` at registration. Whether to stake is the backend's first decision, not a proposal setting.
 
-| Quantity | Value |
-| --- | --- |
-| Pool TVL | ~$3.98 M *(3.86)* |
-| 24 h volume | ~$3.67 M *(6.63)* |
-| Fee income (0.0065%) | ~$239 / day → ~$215 net of `unstakedFee` *(431 → 388)* |
-| Gauge emissions (`rewardRate` 8.3996e15 wei/s × AERO $0.475) | ~$345 / day *(347)* |
+**Income accrues per unit of liquidity, not per unit of capital.** For fixed capital `L ∝ 1 / width`, so a wider range earns proportionally less than the same money in a narrow one. That matters here more than on most pools: read `pool.liquidity()` against the pool's token balances and you will find effectively all incumbent liquidity sitting within a couple of ticks of spot (as of writing, one tick's worth of `liquidity()` exceeds the pool's entire WETH balance, and 99.98% of it is staked). A 50-tick range is therefore a small share of in-range liquidity for its capital.
 
-**Staked (AERO) beats unstaked (fees) by ~60%.** Volume roughly halved in a day while emissions held flat, which inverted the ranking — on 2026-08-21 unstaked led by 12%. So the backend's first live action is `stake()`, not a claim. 014 registers the position unstaked because `_store` forces `mainStaked = false` at registration; staking is the backend's call (§6.5), and at these numbers it should make it immediately.
+Two consequences for how this deployment is run, both independent of what the numbers happen to be on any given day:
 
-Re-read this before go-live. A 2× volume swing flips the decision, and it took one day.
+- **The recenter gate will often say `TOO_THIN`** (§6.3) — gross income at `minWidth` is small relative to gas. That is the gate reporting the venue honestly, not a bug to tune away.
+- **Competing on yield would mean 2–6 tick ranges**, which collides with `minWidth > 2 × maxTickDeviation` (§4 — it would force `maxTickDeviation ≤ 2`, an unusably tight calm gate) and with a 6 h cooldown against a band that exits on ordinary noise. The shipped config deliberately does not chase that.
 
-**The problem is concentration, not the pool.** In-range liquidity is `2.264e25`, 99.99% staked. One tick of it holds ~1,207 WETH against a pool balance of ~1,017 WETH — so effectively all incumbent liquidity sits within ~1–2 ticks of spot. Income accrues per unit of *liquidity*, not capital, and `L ∝ 1 / width`:
-
-> **Gross APR ≈ 4.4% / `width_ticks`**, independent of allocation size while we are small relative to the pool.
-
-| `width` | Band | Share of in-range L @ $50k | Gross | APR |
-| --- | --- | --- | --- | --- |
-| 2 | ±0.01% | ~0.85% | ~$2.93/day | ~2.14% |
-| 6 | ±0.03% | ~0.28% | ~$0.98/day | ~0.71% |
-| **50** (shipped `minWidth`) | ±0.25% | ~0.034% | ~$0.12/day | **~0.086%** |
-| 100 | ±0.50% | ~0.017% | ~$0.06/day | ~0.043% |
-| 200 | ±1.00% | ~0.0085% | ~$0.03/day | ~0.021% |
-| Pool average | — | — | — | ~3.16% |
-
-Consequences:
-
-- At `minWidth` 50 the bootstrap earns ~$0.12/day on $50,000, against $0.05–0.10 of gas per `rebalanceUsingAlt`. The recenter gate (§6.3) will return `TOO_THIN` most of the time — that is the gate working.
-- Competing on yield means 2–6 ticks, which collides with `minWidth > 2 × maxTickDeviation` (§4 — forces `maxTickDeviation ≤ 2`, an unusably tight calm gate) and with a 6 h cooldown against a band that exits on ordinary noise.
-- **Recommendation:** run this as a mechanism proving-ground — $25–50k, width 50, ~0.1% APR expected, success measured as "ran unattended for N weeks, every guard fired when it should, no principal lost". Revisit the venue before raising `totalAllocationUsd`; raising it does not improve APR.
-
-If the goal is yield rather than mechanism validation, this pool is the wrong venue at any prudent width.
+Treat the bootstrap as a mechanism proving-ground: success is "ran unattended for N weeks, every guard fired when it should, no principal lost". Sizing `totalAllocationUsd` is a product call informed by the backend's live figures — note that raising it scales the absolute numbers without changing the rate, since our share of in-range liquidity scales with it.
 
 ---
 
@@ -246,7 +223,7 @@ Port `mamo-rebalancer`'s `evaluateRecenterGate` unchanged in structure. Verdicts
 
 - Drive off **gross** income, not net-of-IL carry. Out of range you earn $0 while still holding 100% of one leg, so the divergence you would re-incur in range is being incurred anyway; netting IL double-counts it and makes the keeper far too patient.
 - `recenterCostUsd` is gas only — `rebalanceUsingAlt` performs no swap.
-- `grossIncomeUsdDay < recenterCostUsd` ⇒ `TOO_THIN`: hold and flag. Per §3 that is the expected steady state; do not lower the cost multiplier to escape it.
+- `grossIncomeUsdDay < recenterCostUsd` ⇒ `TOO_THIN`: hold and flag. Expected often at `minWidth` (§3); do not lower the cost multiplier to escape it.
 - `CLOCK_STARTING` on the first out-of-range observation — hold a tick rather than react to a wick.
 
 ### 6.4 Parameters
@@ -267,7 +244,7 @@ unstakedUsdDay = feeRate_usd_day * (1 - unstakedFee/1e6)         * σ
 
 `σ` is your in-range liquidity share. Flip only when the winner leads by more than `MOONWELL_LP_HYSTERESIS_BPS` (200), never mid-cycle. `unstake()` claims and skims AERO to the feeCollector; restake after a rebalance is automatic if the position was staked at teardown.
 
-Staked leads by ~60% as of 2026-08-22, but it led the other way by 12% the day before — the gap is driven by pool volume, which halved overnight. Expect real flips, and expect the hysteresis to be what stops them thrashing.
+The gap between the two sides is driven by pool volume and the AERO price, both of which move fast enough to invert the ranking within a day. Expect real flips; the hysteresis is what stops them thrashing.
 
 ---
 
@@ -344,7 +321,7 @@ When the swap path is enabled later, spec §4/§6 governs unchanged. One venue n
 | Idle relayer allowance | non-zero on either token while `!rebalanceInFlight` ⇒ PAGE (approval leak) |
 | Unstaked-while-idle | `mainStaked == false` > 1 h while the stake decision says stake ⇒ WARN |
 | Unswept AERO | `earnedAero > MOONWELL_LP_MAX_UNSWEPT_AERO` ⇒ compound/claim |
-| Out-of-range clock | `> MAX_OUT_OF_RANGE_HOURS` with the gate at `TOO_THIN` ⇒ WARN + review (§3 surfacing) |
+| Out-of-range clock | `> MAX_OUT_OF_RANGE_HOURS` with the gate at `TOO_THIN` ⇒ WARN + review (expected at `minWidth`, §3) |
 | Guard regression | `sequencerUptimeFeed() == 0`, `sequencerGracePeriod() == 0`, or an oracle bound outside `(0, MAX_ORACLE_DELAY]` ⇒ PAGE |
 | Config events mid-cycle | `OraclesUpdated`, `MaxOracleDelaysUpdated`, `SequencerUptimeFeedUpdated`, `PositionConfigUpdated`, `GaugeUpdated` ⇒ alert; never rebalance while one is in flight |
 | Paused | `EnforcedPause()` ⇒ freeze writes, keep read-only monitoring |
@@ -397,7 +374,7 @@ Swap-mode variables (`MOONWELL_LP_COW_API`, `_ORDER_WINDOW_S`, `_IMBALANCE_MIN`,
 
 1. `make lp-v2-cbeth-bootstrap` green on a pinned fork.
 2. Re-run the §1.2 heartbeat measurement; confirm `maxOracleDelay0` still tolerates ≥ 2 missed rounds.
-3. Re-run the §3 economics reads; agree the allocation with that table in front of you.
+3. Have the backend report live fee/emission rates and the stake-vs-unstake verdict; agree `totalAllocationUsd` against them.
 4. Safe mints the cbETH/WETH NFT offchain at the agreed size (§2.1); record `INIT_TOKEN_ID`.
 5. Run 014 with `setTokenId`, `setRebalancerEOA`, `setTotalAllocation` — `validate()` must pass, allocation band included.
 6. Preflight (§7) green, including every guard-armed read.
