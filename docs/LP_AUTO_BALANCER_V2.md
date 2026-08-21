@@ -167,5 +167,6 @@ cooldownRemaining, deviationGateOpen, rebalanceInFlight, rebalanceStartedAt
 | [`CONTEXT.md`](../CONTEXT.md) | canonical vocabulary |
 | [backend spec](superpowers/specs/2026-07-03-lp-auto-balancer-v2-backend-spec.md) | operational contract for `lp_balancer_sweep`: reads/writes, decision math, CoW lifecycle, error table, monitoring, launch checklist |
 | [setup runbook](LP_AUTO_BALANCER_V2_WETH_CBBTC_SETUP.md) | phase-1 WETH/cbBTC deployment: 011 proposal, deferred checker steps, handover |
+| [backend handbook (cbETH/WETH)](LP_AUTO_BALANCER_V2_BACKEND_HANDBOOK.md) | bootstrap deployment: the cbETH/WETH venue, the 014 proposal's total-allocation parameter, venue economics, backend process shape, preflight + go-live |
 | [dual-position design](superpowers/specs/2026-06-17-lp-auto-balancer-v2-dual-position-design.md) | why dual-position/no-swap; original design record |
 | [swap-rebalance design](superpowers/specs/2026-07-02-lp-auto-balancer-v2-swap-rebalance-design.md) | two-phase swap path design + review residuals R1–R6 |
