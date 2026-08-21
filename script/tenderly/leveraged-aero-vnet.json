@@ -4,9 +4,9 @@
   "parentNetworkId": 8453,
   "vnetSlug": "mamo-leveraged-aero-pr66-1786640530",
   "publicRpc": "https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282",
-  "adminRpc": "1Password (write-capable — never committed)",
+  "adminRpc": "1Password (write-capable \u2014 never committed)",
   "stateSync": false,
-  "stateSyncDisabledReason": "Deliberate, not a Tenderly limitation (sync is API-compatible with custom chain ids): sync re-hydrates the canonical mainnet feed addresses this instance code-overrides with FreshFeed, and it corrupts the Slipstream pool TWAP ring buffer (observe reverts OLD, observed live 2026-07-29), fail-closing every priced path. Creation-time-only flag — a synced instance cannot be repaired, only replaced.",
+  "stateSyncDisabledReason": "Deliberate, not a Tenderly limitation (sync is API-compatible with custom chain ids): sync re-hydrates the canonical mainnet feed addresses this instance code-overrides with FreshFeed, and it corrupts the Slipstream pool TWAP ring buffer (observe reverts OLD, observed live 2026-07-29), fail-closing every priced path. Creation-time-only flag \u2014 a synced instance cannot be repaired, only replaced.",
   "strategyTypeId": 5,
   "mamo": {
     "accountImplementation": "0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9",
@@ -19,23 +19,26 @@
     "template": "0x92b37B73d51Ff44b5562Dd3e7563B5b45d1c2FB9",
     "proposer": "0x73f6B456d063F78129113D42DBC315b9eEee8FAf",
     "seed": "100000000000",
-    "lpPool": "0x4e962BB3889Bf030368F56810A9c96B83CB3E778"
+    "lpPool": "0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1",
+    "lpGauge": "0x41b2126661C673C2bEDd208cc72E85DC51a5320a",
+    "venueShape": "twoleg (WETH/cbBTC, tickSpacing 100) \u2014 legBIsAsset=false"
   },
   "sherwood": {
     "strategyClone": "0x01BF606144a56AB2e992bd96E5E4BaFdf09287F1",
     "syndicateVault": "0x8D2F111794992AEF0bD4733E2af3c0F800A11E59"
   },
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  "note": "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
+  "note": "Addresses change when the instance rotates or a harness redeploys \u2014 always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
   "vaultGeneration": 3,
   "vaultGenerationName": "leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())",
   "vaultGenerationRequired": 3,
   "feeds": {
     "pattern": "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
     "legAUsd": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
-    "legBUsd": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
+    "legBUsd": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
     "usdcUsd": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
     "aeroUsd": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0",
     "sequencerUptime": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
-  }
+  },
+  "venueNote": "VENUE FIELDS ARE DEPLOY-TIME AND GO STALE ON A migrateVenue. This clone was deployed 2026-08-18 in ASSET mode (cbBTC/USDC, pool 0x4e962BB3\u2026, legB feed = USDC/USD) and was later migrated to the TWOLEG shape (WETH/cbBTC, pool 0x70aCDF\u2026, legB feed = ETH/USD); the values here were corrected by hand on 2026-08-21 from the clone's own layout(). No harness rewrites this file on migrateVenue, so ALWAYS read pool/gauge/legs/markets/feeds off layout() on the clone you target rather than trusting these fields. All five feeds are FreshFeed-mocked on this instance (verified: identical code size, 60s lag)."
 }

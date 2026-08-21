@@ -956,7 +956,9 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 | Strategy clone (operator target) | `0x01BF606144a56AB2e992bd96E5E4BaFdf09287F1` — width `4000` raw ticks, band `[200, 20000]`; skew `5000` (centered), band `[1000, 9000]` | `pooled.strategyClone` |
 | Strategy template (clone source) | `0x92b37B73d51Ff44b5562Dd3e7563B5b45d1c2FB9` | `pooled.template` |
 | Strategy `proposer` (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
-| LP pool (Slipstream, tickSpacing 100; asset-mode cbBTC/USDC) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
+| LP pool (Slipstream, tickSpacing 100; **twoleg WETH/cbBTC**) | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` | `pooled.lpPool` |
+| LP gauge | `0x41b2126661C673C2bEDd208cc72E85DC51a5320a` | `pooled.lpGauge` |
+| ⚠️ venue shape | **Migrated 2026-08-21** from asset-mode (cbBTC/USDC, pool `0x4e962BB3…`) to twoleg. Deploy-time manifest fields do **not** follow a `migrateVenue` — read `layout()` on the clone. | — |
 | Seed | `100000000000` = 100,000 USDC (6dp) | `pooled.seed` |
 | Mamo account impl | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
 | Mamo account factory (typeId 5, latest) | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |

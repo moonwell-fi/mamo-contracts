@@ -815,15 +815,28 @@ constraint" as "order does not matter".
 
 #### Classify the revert before reacting
 
+> **Ranked by what actually fires.** The three rows marked **LADDER** below are the observed failures on a
+> real out-of-range matrix (vnet, 2026-08-21, five price scenarios); `ZeroAssetsOut` was the dominant one
+> and `MoonwellRedeemFailed` was the blocker in the only scenario that needed a de-lever at all.
+
 | Revert | Meaning | Action |
 |---|---|---|
-| **router revert** (untyped) from the cover's `exactOutputSingle` | the IL deficit buy did not fit the redeemer's pro-rata budget | **the ladder.** This is the one case it exists for |
+| **`ZeroAssetsOut`** | The unwind paid the redeemer **exactly nothing**: `redeemUnwindImpl` returns `usdcFinal − stayersIdle` floored at 0, and the cover consumed the redeemer's whole slice. The **most common** ladder signal out of range — every greyed rung of the observed matrix ended here. Fail-closed by design: the escrowed shares are **not** burned and stay cancellable | **LADDER.** A deeper de-lever repays more debt out of the *whole book*, leaving the redeemer's slice intact |
+| **`MoonwellRedeemFailed(errCode)`** on the FULFIL path | The partial branch calls `_redeemCollateral` **first**, and Moonwell refuses a collateral redeem that would leave the account under-collateralised. Observed at **70.53% LTV** — above `maxLtvBps`, which is reachable by price drift because the cap binds *operations*, not drift | **LADDER.** This is a leverage problem, not a venue outage. (A paused market or a cash-short market is the *other* cause of the same error — distinguish by `errCode` and by whether LTV is elevated) |
+| **router revert** (untyped) from the cover's `exactOutputSingle` | the IL deficit buy did not fit the redeemer's pro-rata budget **and** could not partially fill | **LADDER** |
 | `InsufficientAssetsOut` | payout under `max(stored, fresh)` | **conditional.** If cover swaps are eating the payout, a lower target raises the achievable net — retry lower. If the floor is unreachable at the current price, levering down cannot help and its own swap costs come out of NAV: wait, or the owner cancels. Never try to lower the floor |
 | `RequestSettled` | already fulfilled or cancelled | drop it from the queue — **never** a de-lever |
 | `NotProposer` / `NotExecuted` | wrong key, or the strategy is not `Executed` | fix the caller / check lifecycle — **never** a de-lever |
-| `MoonwellRepayFailed` / `MoonwellRedeemFailed(errCode)` | the venue refused (market paused, short of cash) | retry later — **never** a de-lever |
+| `MoonwellRepayFailed` | the venue refused a **repay** (market paused) | retry later — **never** a de-lever |
 | oracle / sequencer failures, `RedeemSweepFloorsDegraded` | feed or L2 uptime problem | do not fulfil into a degraded oracle unless the deadman forces it — **never** a de-lever |
 | broken AERO→USDC route, `RedeemRewardSaleDeferred` | the reward leg could not sell | non-fatal to the redeem; investigate the route separately |
+
+**Retry the SAME request id — do not cancel and re-request.** A reverted `fulfillRedeem` leaves the
+request untouched and retryable: nothing is settled, nothing is burned, the escrow stands. Cancelling and
+re-requesting works, but `requestRedeem` stamps a **fresh `requestedAt`**, which **restarts the 2-day
+`FULFILL_WINDOW`** and pushes back the requester's trustless `emergencyRedeem` escape hatch. That is a
+silent downgrade of a user guarantee, taken by the operator, in a state where the operator has already
+demonstrated it cannot pay. Retry in place.
 
 > **KNOWN GAP — classification is brittle today.** The cover-budget failure is the *router's* untyped
 > revert: `swapExactOut` with `bestEffort == false` calls `exactOutputSingle` **directly**, so there is no
@@ -1559,7 +1572,7 @@ Three things to keep straight:
 | Vault (`LeveragedAeroVault`, shares 12dp) | `0x8D2F111794992AEF0bD4733E2af3c0F800A11E59` | `pooled.vault` |
 | Strategy template (clone source) | `0x92b37B73d51Ff44b5562Dd3e7563B5b45d1c2FB9` | `pooled.template` |
 | **Proposer / agent** (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
-| LP pool (Slipstream, tickSpacing 100) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
+| LP pool (Slipstream, tickSpacing 100) | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` — **twoleg WETH/cbBTC**, migrated 2026-08-21 from the asset-mode cbBTC/USDC pool. A `migrateVenue` does **not** update the manifest: read `layout()`. | `pooled.lpPool` |
 | Seed (USDC, 6dp) | `100000000000` = 100,000 USDC | `pooled.seed` |
 | Venue feeds | FreshFeed-mocked via `tenderly_setCode` — never stale, warping safe | `feeds.*` |
 
