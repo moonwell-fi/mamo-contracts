@@ -2,7 +2,7 @@
 
 **Audience:** the team building and running the offchain rebalancer service.
 **Status:** bootstrap deployment, proposal `014_LPAutoBalancerV2CbETHBootstrap`.
-**Measurements taken on Base at blocks 50,264,168 / 50,200,000 (2026-08-21).** Numbers move; re-measurement methods are inline. Re-run §3 before fixing the allocation.
+**Measurements taken on Base, 2026-08-21; §3 re-measured 2026-08-22.** Numbers move — the stake/unstake winner already flipped once between those two dates. Re-measurement methods are inline; re-run §3 before fixing the allocation.
 
 ## Related documents
 
@@ -103,32 +103,35 @@ Every figure below is reproducible from onchain reads.
 
 **Slipstream is fees XOR emissions.** A staked position earns AERO and its swap fees divert to the gauge (`pool.gaugeFees()`); an unstaked one earns fees less the 10% `unstakedFee`. `stake()`/`unstake()` is a real economic choice, and it is `REBALANCER_ROLE` — the backend owns it.
 
-Pool-level, 2026-08-21:
+Pool-level, measured 2026-08-22 (2026-08-21 in brackets — one day apart, to show how fast this moves):
 
 | Quantity | Value |
 | --- | --- |
-| Pool TVL | ~$3.86 M |
-| 24 h volume | ~$6.63 M |
-| Fee income (0.0065%) | ~$431 / day → ~$388 net of `unstakedFee` |
-| Gauge emissions (`rewardRate` 8.3996e15 wei/s × AERO $0.478) | ~$347 / day |
+| Pool TVL | ~$3.98 M *(3.86)* |
+| 24 h volume | ~$3.67 M *(6.63)* |
+| Fee income (0.0065%) | ~$239 / day → ~$215 net of `unstakedFee` *(431 → 388)* |
+| Gauge emissions (`rewardRate` 8.3996e15 wei/s × AERO $0.475) | ~$345 / day *(347)* |
 
-Unstaked beats staked by ~12% at current prices — close enough to flip with the AERO price. 014 registers the position unstaked.
+**Staked (AERO) beats unstaked (fees) by ~60%.** Volume roughly halved in a day while emissions held flat, which inverted the ranking — on 2026-08-21 unstaked led by 12%. So the backend's first live action is `stake()`, not a claim. 014 registers the position unstaked because `_store` forces `mainStaked = false` at registration; staking is the backend's call (§6.5), and at these numbers it should make it immediately.
+
+Re-read this before go-live. A 2× volume swing flips the decision, and it took one day.
 
 **The problem is concentration, not the pool.** In-range liquidity is `2.264e25`, 99.99% staked. One tick of it holds ~1,207 WETH against a pool balance of ~1,017 WETH — so effectively all incumbent liquidity sits within ~1–2 ticks of spot. Income accrues per unit of *liquidity*, not capital, and `L ∝ 1 / width`:
 
-> **Gross APR ≈ 4.7% / `width_ticks`**, independent of allocation size while we are small relative to the pool.
+> **Gross APR ≈ 4.4% / `width_ticks`**, independent of allocation size while we are small relative to the pool.
 
 | `width` | Band | Share of in-range L @ $50k | Gross | APR |
 | --- | --- | --- | --- | --- |
-| 2 | ±0.01% | ~0.92% | ~$3.2/day | ~2.3% |
-| 6 | ±0.03% | ~0.31% | ~$1.1/day | ~0.78% |
-| **50** (shipped `minWidth`) | ±0.25% | ~0.037% | ~$0.13/day | **~0.093%** |
-| 100 | ±0.50% | ~0.018% | ~$0.06/day | ~0.047% |
-| Pool average | — | — | — | ~3.3% |
+| 2 | ±0.01% | ~0.85% | ~$2.93/day | ~2.14% |
+| 6 | ±0.03% | ~0.28% | ~$0.98/day | ~0.71% |
+| **50** (shipped `minWidth`) | ±0.25% | ~0.034% | ~$0.12/day | **~0.086%** |
+| 100 | ±0.50% | ~0.017% | ~$0.06/day | ~0.043% |
+| 200 | ±1.00% | ~0.0085% | ~$0.03/day | ~0.021% |
+| Pool average | — | — | — | ~3.16% |
 
 Consequences:
 
-- At `minWidth` 50 the bootstrap earns ~$0.13/day on $50,000, against $0.05–0.10 of gas per `rebalanceUsingAlt`. The recenter gate (§6.3) will return `TOO_THIN` most of the time — that is the gate working.
+- At `minWidth` 50 the bootstrap earns ~$0.12/day on $50,000, against $0.05–0.10 of gas per `rebalanceUsingAlt`. The recenter gate (§6.3) will return `TOO_THIN` most of the time — that is the gate working.
 - Competing on yield means 2–6 ticks, which collides with `minWidth > 2 × maxTickDeviation` (§4 — forces `maxTickDeviation ≤ 2`, an unusably tight calm gate) and with a 6 h cooldown against a band that exits on ordinary noise.
 - **Recommendation:** run this as a mechanism proving-ground — $25–50k, width 50, ~0.1% APR expected, success measured as "ran unattended for N weeks, every guard fired when it should, no principal lost". Revisit the venue before raising `totalAllocationUsd`; raising it does not improve APR.
 
@@ -262,7 +265,9 @@ stakedUsdDay   = gauge.rewardRate() * 86400 * aeroUsd            * σ
 unstakedUsdDay = feeRate_usd_day * (1 - unstakedFee/1e6)         * σ
 ```
 
-`σ` is your in-range liquidity share. Flip only when the winner leads by more than `MOONWELL_LP_HYSTERESIS_BPS` (200), never mid-cycle. `unstake()` claims and skims AERO to the feeCollector; restake after a rebalance is automatic if the position was staked at teardown. The two sides are within 12% of each other, so expect flips with the AERO price — the hysteresis is what stops them.
+`σ` is your in-range liquidity share. Flip only when the winner leads by more than `MOONWELL_LP_HYSTERESIS_BPS` (200), never mid-cycle. `unstake()` claims and skims AERO to the feeCollector; restake after a rebalance is automatic if the position was staked at teardown.
+
+Staked leads by ~60% as of 2026-08-22, but it led the other way by 12% the day before — the gap is driven by pool volume, which halved overnight. Expect real flips, and expect the hysteresis to be what stops them thrashing.
 
 ---
 
@@ -398,5 +403,5 @@ Swap-mode variables (`MOONWELL_LP_COW_API`, `_ORDER_WINDOW_S`, `_IMBALANCE_MIN`,
 6. Preflight (§7) green, including every guard-armed read.
 7. Checker-owner transaction (§7.1) — needed for AERO compounding, not for ALT-only operation.
 8. Dry-run soak: one full sweep cadence, completion gate agreeing with the agent's report on every tick.
-9. Flip `DRY_RUN=false` with a human watching. First live action should be `claimEmissions`/`compound`, not a rebalance.
+9. Flip `DRY_RUN=false` with a human watching. First live action should be `stake()` (§3), then `claimEmissions`/`compound` — not a rebalance.
 10. Confirm AERO routing lands in `DROP_AUTOMATION` and the realized drop share matches `1 − COMPOUND_BPS/10000` within tolerance.
