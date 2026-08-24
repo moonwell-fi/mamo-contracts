@@ -1861,7 +1861,9 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
         vm.prank(owner);
         s.setWidthBounds(200, 8000); // exactly 2 x spacing is the floor, inclusive
-        assertEq(s.layout().minWidth, 200, "the floor itself is legal");
+        // 200 is also the init default, so the NON-default half is what witnesses the write.
+        assertEq(s.layout().maxWidth, 8000, "the floor itself is legal, and the band landed");
+        assertEq(s.layout().minWidth, 200, "the floor is stored");
     }
 
     /// @dev `checkBands` rung 3: an inverted band admits nothing (and `checkRange` catches it too).

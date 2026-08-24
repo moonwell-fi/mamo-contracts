@@ -1317,6 +1317,103 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "the staged target won, loudly");
     }
 
+    /// @dev The ceiling and the width band get the SAME inequality-guarded announcement as the target —
+    ///      `VenueMigrated` carries only the two pools, so without these a migration moves them in silence.
+    function testMigrateAnnouncesTheCeilingAndTheWidthBandItRestores() public {
+        _execute(SEED);
+        vm.startPrank(owner);
+        strategy.setTargetLtv(3000);
+        strategy.setMaxLtv(3500);
+        strategy.setWidthBounds(400, 8000);
+        vm.stopPrank();
+
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // restores 6500 and [200, 20000]
+        _stage(v);
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.WidthBoundsUpdated(400, 8000, 200, 20_000);
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.MaxLtvUpdated(3500, 6500);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().maxLtvBps, 6500, "the staged ceiling won, loudly");
+        assertEq(strategy.layout().minWidth, 200, "...and the staged band");
+    }
+
+    /// @dev An UNCHANGED ceiling / band stays quiet, so the events mean "it moved", not "a migration ran".
+    function testMigrateStaysQuietWhenTheCeilingAndBandAreUnchanged() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // byte-identical to what is stored
+        _stage(v);
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool sawMigrated;
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.MaxLtvUpdated.selector,
+                "an unchanged ceiling must not announce a change"
+            );
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.WidthBoundsUpdated.selector,
+                "...nor an unchanged band"
+            );
+            if (logs[i].topics[0] == LeveragedAeroVenue.VenueMigrated.selector) sawMigrated = true;
+        }
+        assertTrue(sawMigrated, "the migration itself did run -- the assertions above are not vacuous");
+    }
+
+    /// @dev THE STALE-AUTHORIZATION CLOSE. An owner stage carries a ceiling picked under the policy standing
+    ///      at stage time; an admin ratchet-down moves that policy, so the setter consumes the stage exactly
+    ///      as `redeploy` does. Without it the proposer alone could restore the pre-ratchet ceiling.
+    function testSetMaxLtvConsumesAStaleVenueStageSoAMigrationCannotUndoTheRatchet() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 6500 ceiling
+        _stage(v);
+        assertEq(strategy.layout().stagedVenueHash, keccak256(abi.encode(v)), "owner authorization armed");
+
+        // Markets turn: the admin ratchets policy and the ceiling down.
+        vm.startPrank(owner);
+        strategy.setTargetLtv(3000);
+        strategy.setMaxLtv(3500);
+        vm.stopPrank();
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the ratchet consumed the stale authorization");
+
+        // The proposer's migration now has nothing to fire.
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().maxLtvBps, 3500, "the ceiling the admin set still stands");
+
+        // The owner can still re-authorize deliberately, under the policy now standing.
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().maxLtvBps, 6500, "a FRESH owner stage migrates as before");
+    }
+
+    /// @dev Same close on the band setter.
+    function testSetWidthBoundsConsumesAStaleVenueStage() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams();
+        _stage(v);
+
+        vm.prank(owner);
+        strategy.setWidthBounds(400, 8000);
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the band write consumed the stage");
+
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().minWidth, 400, "the admin's band still stands");
+    }
+
     // ==================== migrate: happy paths ====================
 
     function testMigratePreservesNavSharesAndHwm() public {

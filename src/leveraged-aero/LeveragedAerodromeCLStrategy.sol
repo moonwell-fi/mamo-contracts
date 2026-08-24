@@ -154,8 +154,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      next `adjustLeverage` / `deployIdle` / `compound` sizes at the new value.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
-    /// @dev `setMaxLtv` / `setWidthBounds`; both emitted from THIS address by the delegatecalled
-    ///      `LeveragedAeroVenue` impls, which mirror-declare them for the same `topic0`.
+    /// @dev `setMaxLtv` / `setWidthBounds`, and `applyVenue` (init + `migrateVenue`) inequality-guarded;
+    ///      emitted from THIS address by the delegatecalled `LeveragedAeroVenue`, which mirror-declares them.
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
 
@@ -1101,6 +1101,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev Lowering BELOW the book's live LTV is intended (a risk ratchet-down): debt-adding ops then fail
     ///      their post-op `_assertHealthy` until a lever-DOWN brings the book back inside.
     /// @dev Lowering below the STANDING TARGET needs `setTargetLtv` first — rung 1 refuses it otherwise.
+    /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old policy.
     /// @param maxLtvBps_ New ceiling in bps, validated by the shared `checkLtvBand` against the LIVE
     ///        collateral factor: Moonwell governance can move CF after init, and the init-time snapshot
     ///        could approve a ceiling now above the liquidation line.
@@ -1114,6 +1115,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      past it reverts `OutOfBounds` — rerange into the intended width first.
     /// @dev No `setWidth` (the live range moves only by minting at a calm-gated tick, i.e. `rerange`), and
     ///      the SKEW band stays init-frozen by design.
+    /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old band.
     function setWidthBounds(uint24 minWidth_, uint24 maxWidth_) external onlyAdmin {
         LeveragedAeroVenue.setWidthBoundsImpl(minWidth_, maxWidth_);
     }

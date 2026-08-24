@@ -585,6 +585,66 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(_ltvBps(), 4000, 2, "the redeployed book sits on the new target, under the ceiling");
     }
 
+    /// @dev `compound` is the OTHER debt-adding op the ceiling gates: its redeployed harvest borrows at the
+    ///      target, and the blended book is still over the fresh ceiling, so the same post-op gate fires.
+    function testLoweringMaxLtvAlsoBlocksCompoundUntilTheBookDeLevers() public {
+        _execute(SEED);
+
+        vm.startPrank(owner);
+        strategy.setTargetLtv(4000);
+        strategy.setMaxLtv(4500);
+        vm.stopPrank();
+
+        _armAeroRouter();
+        _armHarvest(40_000e6);
+
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.compound(1, 0);
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "the refused harvest rolled back whole");
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(4000, 0, 0);
+        vm.prank(proposer);
+        strategy.compound(1, 0); // inside the band the same harvest lands
+        assertLe(_ltvBps(), 4500, "the compounded book sits under the ceiling");
+    }
+
+    /// @dev The FAST-REDEEM gate reads `$.maxLtvBps` LIVE: the same draw flips from allowed to refused when
+    ///      the admin lowers the ceiling under it, and back when the ceiling is raised again. An init-cached
+    ///      copy would give the same answer all three times.
+    function testLoweringMaxLtvTightensTheFastRedeemGateImmediately() public {
+        _execute(SEED);
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        vm.prank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 shares = supply / 10; // a draw that lands the post-redeem LTV around 5263 bps
+
+        uint256 snapA = vm.snapshotState();
+        vm.prank(lp);
+        strategy.redeem(shares, 0); // ceiling 6500: the fast path is open
+        vm.revertToState(snapA);
+
+        vm.prank(owner);
+        strategy.setMaxLtv(5100); // still above the book's live 5000, below the POST-draw LTV
+        uint256 snapB = vm.snapshotState();
+        vm.prank(lp);
+        vm.expectPartialRevert(LeveragedAeroVenue.FastRedeemExceedsLtv.selector);
+        strategy.redeem(shares, 0);
+
+        // ...and the documented fallback is open: the same shares still queue.
+        vm.prank(lp);
+        strategy.requestRedeem(shares, 0);
+        vm.revertToState(snapB);
+
+        vm.prank(owner);
+        strategy.setMaxLtv(5500); // back above the post-draw LTV
+        vm.prank(lp);
+        strategy.redeem(shares, 0);
+    }
+
     /// @dev The keeper's three closed doors after a ratchet-down: re-lever, raise policy, raise the ceiling.
     function testLoweredMaxLtvKeepsTheKeeperFromLeveringBackUp() public {
         _execute(SEED);
