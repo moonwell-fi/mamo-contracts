@@ -128,8 +128,7 @@ library LeveragedAeroValuation {
     error MaxLtvExceedsCF();
     /// @notice `minHealthBps × maxLtvBps >= 1e8` — the deleverage trigger LTV would sit inside the band (L4).
     error MinHealthMaxLtvConflict();
-    /// @notice `minHealthBps × cfBps <= 1e8` — the deleverage trigger LTV would sit at or above the
-    ///         Moonwell collateral factor, i.e. liquidation could precede the public rescue (L4).
+    /// @notice `minHealthBps × cfBps <= 1e8` — the deleverage trigger LTV would sit at or above the CF (L4).
     error DeleverageTriggerAboveCF();
     /// @notice A non-zero fee rate with a zero recipient.
     error FeeRecipientRequired();
@@ -328,15 +327,9 @@ library LeveragedAeroValuation {
     /// @notice The five VENUE-SCOPED risk invariants: the LTV band's own shape and its relationship to the
     ///         destination market's collateral factor (bps). Shared by `checkRiskParams` and
     ///         `LeveragedAeroVenue.applyVenue`, which re-runs them at every `migrateVenue`.
-    /// @dev L4: permissionless deleverage triggers at `LTV = 1e8 / minHealthBps`, and that trigger LTV is
-    ///      BRACKETED from both sides — the two rungs below are what make the rescue window structural
-    ///      rather than a lucky parameter choice:
-    ///      - strictly ABOVE `maxLtvBps` (`minHealthBps × maxLtvBps < 1e8`), or there is an in-band range
-    ///        anyone can grief-deleverage;
-    ///      - strictly BELOW `cfBps`, the market's liquidation line (`minHealthBps × cfBps > 1e8`), or there
-    ///        is a band where the book is already liquidatable while `deleverage()` still reverts
-    ///        `HealthyNoDeleverage` — liquidation would precede the public rescue.
-    ///      Together with `maxLtvBps < cfBps` the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`.
+    /// @dev L4: permissionless deleverage triggers at `LTV = 1e8 / minHealthBps`; the last two rungs bracket
+    ///      it above `maxLtvBps` (grief-deleverage) and below `cfBps` (liquidation precedes the rescue), so
+    ///      the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`.
     function checkLtvBand(uint16 targetLtvBps, uint16 maxLtvBps, uint16 minHealthBps, uint16 cfBps) public pure {
         if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
         if (minHealthBps < 10500) revert MinHealthTooLow();

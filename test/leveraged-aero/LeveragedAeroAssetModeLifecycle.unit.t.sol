@@ -1007,10 +1007,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGe(healthAfter, 12_000, "health restored above the minimum");
     }
 
-    /// @dev L4's other half: the valve is a BACKSTOP, not a lever anyone may pull. On a healthy book
-    ///      (`_execute` lands at target 5000, i.e. health 20000 vs the 12000 minimum) `deleverage()`
-    ///      refuses, so a stranger cannot force-delever a fund that is inside policy.
-    ///      MUTATION: drop the `healthBefore >= minHealth` clause and this succeeds.
+    /// @dev L4's other half: the valve is a BACKSTOP — neither a stranger nor the proposer may force-delever.
     function testDeleverageRefusesAHealthyBookForAnyCaller() public {
         _execute(SEED);
 
@@ -1088,17 +1085,9 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
     }
 
     // ============ LAYER 2: THE POST-OP HEALTH GATE (`_assertHealthy`) ============
-    // Every debt-adding op ends in `LeveragedAeroManager._assertHealthy()` — `executeImpl`,
-    // `deployIdleImpl` (and `compoundImpl` through it), `rerangeImpl`, `adjustLeverageImpl`. It reverts
-    // `UnhealthyPosition(ltvBps, maxLtvBps)` on a Chainlink-priced LTV above `maxLtvBps`, or on any
-    // Moonwell shortfall. It is the gate that makes "the proposer key over-levers the book" unreachable
-    // regardless of what the proposer asks for: an op that would land above the ceiling does not land.
-    // The collateral basis is the lever here (prices untouched), so the LP stays two-sided and the only
-    // thing under test is the gate.
+    // The collateral basis is the lever below (prices untouched), so the LP stays two-sided.
 
-    /// @dev `rerangeImpl`'s gate. Rerange itself is debt-neutral (it unwinds and remints liquidity, it
-    ///      does not borrow), so it is the cleanest read of the gate alone: the book is ALREADY above
-    ///      `maxLtvBps` and the op is refused rather than allowed to consolidate the breach.
+    /// @dev Rerange is debt-neutral, so it reads the gate alone: the book is ALREADY above `maxLtvBps`.
     function testRerangeRevertsUnhealthyPositionWhenTheBookSitsAboveMaxLtv() public {
         _execute(SEED);
         mUsdc.setExchangeRateStored(0.7e18); // LTV 5000 -> ~7142, above maxLtv 6500
@@ -1110,8 +1099,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
     }
 
-    /// @dev The non-vacuity twin: the SAME op at an LTV inside the ceiling succeeds, so the revert above
-    ///      is the gate firing and not rerange being broken by a moved collateral basis.
+    /// @dev Non-vacuity: the same op inside the ceiling succeeds, so the revert above is the gate firing.
     function testRerangeSucceedsWhenTheSameCollateralMoveKeepsTheBookInsideMaxLtv() public {
         _execute(SEED);
         mUsdc.setExchangeRateStored(0.9e18); // LTV 5000 -> ~5555, still under maxLtv 6500
@@ -1123,10 +1111,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGt(strategy.layout().tokenId, 0, "rerange landed: the position is live, the op was not refused");
     }
 
-    /// @dev `deployIdleImpl`'s gate. Deploying idle USDC BORROWS at the standing target, so this is the
-    ///      "add debt to an already-breached book" case — the shape of an over-leverage attempt. The op
-    ///      is sized at target 5000, well under the ceiling, and is still refused because the gate reads
-    ///      the WHOLE book's post-op LTV, not the marginal op's.
+    /// @dev The op is sized at target 5000 yet still refused: the gate reads the WHOLE book's post-op LTV.
     function testDeployIdleRevertsUnhealthyPositionOnABookAlreadyAboveMaxLtv() public {
         _execute(SEED);
         mUsdc.setExchangeRateStored(0.5e18); // LTV 5000 -> ~10000, far above maxLtv 6500
@@ -1137,10 +1122,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         strategy.deployIdle(10_000e6, 0);
     }
 
-    /// @dev The Moonwell belt, on an op rather than on `deleverage`: even with the strategy's own
-    ///      Chainlink LTV inside `maxLtvBps`, a shortfall reported by the comptroller fails the op.
-    ///      That is the authoritative liquidation check, and it binds the proposer's ops too.
-    ///      MUTATION: delete the `shortfall != 0` clause in `_assertHealthy` and this succeeds.
+    /// @dev The Moonwell belt binds ops too, not just `deleverage` — the Chainlink LTV here is in-ceiling.
     function testRerangeRevertsOnAMoonwellShortfallEvenWhileTheChainlinkLtvIsInsideTheCeiling() public {
         _execute(SEED);
         (uint256 c, uint256 d) = _collateralAndDebt();

@@ -209,8 +209,7 @@ contract LeveragedAeroStackHarness is Script {
         // ── skew governance band, fixed for the clone's life: `0 < min <= max < 10000`.
         p.minSkewBps = uint16(vm.envOr("MIN_SKEW_BPS", uint256(1000)));
         p.maxSkewBps = uint16(vm.envOr("MAX_SKEW_BPS", uint256(9000)));
-        // ── risk params: targetLtv ≤ maxLtv < USDC CF, minHealth ≥ 10500, minHealth×maxLtv < 1e8, and
-        //    minHealth×CF > 1e8 so the public-deleverage trigger sits BELOW the CF (12000 × 8800 = 1.056e8) ──
+        // ── risk params: targetLtv ≤ maxLtv < USDC CF, minHealth ≥ 10500, minHealth×maxLtv < 1e8, minHealth×CF > 1e8 ──
         p.targetLtvBps = uint16(vm.envOr("TARGET_LTV_BPS", uint256(5000)));
         p.maxLtvBps = uint16(vm.envOr("MAX_LTV_BPS", uint256(6500)));
         p.minHealthBps = uint16(vm.envOr("MIN_HEALTH_BPS", uint256(12_000)));

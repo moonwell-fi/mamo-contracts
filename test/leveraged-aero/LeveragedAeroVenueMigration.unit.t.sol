@@ -1225,21 +1225,17 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _expectMigrateRevert(v, LeveragedAeroVenue.TargetLtvZero.selector);
     }
 
-    /// @dev L4 on the MIGRATE path, driven from the CF side — the case only this path can produce.
-    ///      `applyVenue` re-reads the LIVE collateral factor, so a market whose CF Moonwell has since
-    ///      LOWERED can push the permissionless-deleverage trigger (`1e8 / minHealthBps`, 8333 here) up to
-    ///      or past the liquidation line even though the same params passed at init. Rejected here rather
-    ///      than left as a book that is liquidatable before anyone can publicly rescue it.
+    /// @dev Only this path can produce it: `applyVenue` re-reads the LIVE CF, so a CF Moonwell has since
+    ///      LOWERED lifts the trigger past the liquidation line post-init.
     function testMigrateRejectsADestinationWhoseCollateralFactorSitsUnderTheDeleverageTrigger() public {
         _execute(SEED);
         _flatten();
         comptroller.setCollateralFactorMantissa(0.83e18); // cf 8300; 12000 * 8300 = 9.96e7 <= 1e8
-        LeveragedAeroVenue.VenueParams memory v = _venueBParams(); // maxLtv 6000 < 8300, so the earlier
-        _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector); // rungs clear
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams(); // maxLtv 6000 < 8300: earlier rungs clear
+        _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector);
     }
 
-    /// @dev The same rung driven from the `minHealthBps` side: a migration may lower minHealth, which
-    ///      RAISES the trigger LTV. 11000 triggers at 9090, above the 8800 CF -> rejected.
+    /// @dev The other knob: a migration may lower minHealth, which RAISES the trigger (11000 -> 9090 > 8800).
     function testMigrateRejectsAMinHealthThatLiftsTheDeleverageTriggerToTheCollateralFactor() public {
         _execute(SEED);
         _flatten();
@@ -1248,8 +1244,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector);
     }
 
-    /// @dev The positive twin, one bps of CF above the bound: 12000 * 8334 = 1.00008e8 > 1e8, so the
-    ///      migration lands and the venue is actually rewritten. Pins the rung as a boundary, not a ban.
+    /// @dev The positive twin, one bps of CF above the bound: the migration lands. A boundary, not a ban.
     function testMigrateAcceptsACollateralFactorOneBpsAboveTheDeleverageTrigger() public {
         _execute(SEED);
         _flatten();
