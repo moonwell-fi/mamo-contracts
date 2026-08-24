@@ -124,7 +124,6 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
         IERC20(address(vaultToken)).safeTransferFrom(msg.sender, address(this), shares);
 
-        // Mirrors the real strategy: a zero recipient means "pay me", so the stored field is never zero.
         if (recipient == address(0)) recipient = msg.sender;
 
         id = nextRequestId++;
@@ -180,8 +179,7 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
     /**
      * @notice Burns the escrowed shares and pays USDC to the request's RECIPIENT (not its owner), as the
-     *         real `fulfillRedeem` does; no proposer gate (test helper). Enforces the real
-     *         `max(stored, fresh)` floor, never lowerable by the fulfiller.
+     *         real one does; no proposer gate (test helper). Enforces the real `max(stored, fresh)` floor.
      */
     function fulfillRedeem(uint256 id, uint256 minAssetsOut) external returns (uint256 assetsOut) {
         RedeemRequest storage req = requests[id];

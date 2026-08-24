@@ -62,18 +62,14 @@ interface ILeveragedAeroCLStrategy {
      *         (caller must approve the strategy on the VAULT token first).
      * @param shares Vault shares to escrow (12dp).
      * @param minAssetsOut Slippage floor enforced at fulfill.
-     * @param recipient Payee of the eventual `fulfillRedeem` payout, fixed here; `address(0)` defaults to
-     *        `msg.sender`. A CONTRACT requester names the end user so a fulfil settles in one transaction
-     *        instead of parking USDC on the requester. Confers no authority — cancel and
-     *        {emergencyRedeem} stay with the request's `owner` (the requester).
+     * @param recipient Payee of the eventual `fulfillRedeem` payout, fixed here; 0 means `msg.sender`.
      * @return id The request id.
      */
     function requestRedeem(uint256 shares, uint256 minAssetsOut, address recipient) external returns (uint256 id);
 
     /**
      * @notice Cancels an unsettled request and returns the escrowed shares to its owner.
-     * @dev Request owner only; callable in ANY strategy state. Shares go back to `owner`, never
-     *      `recipient` — the escrow was the owner's property.
+     * @dev Request owner only; callable in ANY strategy state. Shares go to `owner`, never `recipient`.
      * @param id Request id to cancel.
      */
     function cancelRedeem(uint256 id) external;
@@ -81,8 +77,7 @@ interface ILeveragedAeroCLStrategy {
     /**
      * @notice Deadman trustless backstop: after the fulfill window elapses on an unfulfilled request,
      *         its owner may self-fulfill via an oracle-free proportional unwind; pays USDC to `msg.sender`.
-     * @dev Pays the request's `owner` (== `msg.sender`), NOT its `recipient`: this path is synchronous and
-     *      returns `assetsOut` to its caller, so a contract requester forwards the proceeds itself.
+     * @dev Pays `owner` (== `msg.sender`), NOT `recipient`: it returns `assetsOut` for its caller to forward.
      * @param id Request id (owner-gated).
      * @param minAssetsOut Fresh slippage floor on the net payout.
      * @return assetsOut USDC paid to the caller (6dp).

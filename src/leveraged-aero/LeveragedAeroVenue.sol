@@ -61,8 +61,7 @@ library LeveragedAeroVenue {
     ///      migration could silently restore a target the proposer had just ratcheted down.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
-    /// @notice An async-redeem request was escrowed. Re-declared with the strategy's signature (so the
-    ///         same `topic0`) because `requestRedeemImpl` is delegatecalled and emits from its address.
+    /// @notice An async-redeem request was escrowed. Re-declared with the strategy's signature (same `topic0`).
     event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
 
     /// @notice `withdrawIdle` could not read the hardened oracle, so the SAME target-LTV bound was
@@ -385,14 +384,9 @@ library LeveragedAeroVenue {
         }
     }
 
-    /// @notice Escrow `shares` for an async proportional redeem — the body of the strategy's
-    ///         `requestRedeem` (auth is none, the `State.Executed` gate and `nonReentrant` live in that
-    ///         entrypoint). Relocated here purely for the strategy's EIP-170 headroom, same as
-    ///         `previewRedeemImpl` / `fastRedeemImpl`.
-    /// @dev `recipient` is the FULFIL PAYEE, fixed here and immutable afterwards; `address(0)` means
-    ///      "pay me" and is substituted with `msg.sender`, so the stored field is NEVER zero and
-    ///      `fulfillRedeem` can pay it unconditionally. It confers no authority: cancel and
-    ///      `emergencyRedeem` stay gated on `owner`.
+    /// @notice Escrow `shares` for an async proportional redeem — the body of the strategy's `requestRedeem`,
+    ///         whose entrypoint keeps the `State.Executed` gate and `nonReentrant`. Here for EIP-170 headroom.
+    /// @dev The `address(0)` → `msg.sender` substitution keeps the stored `recipient` never zero.
     function requestRedeemImpl(uint256 shares, uint256 minAssetsOut, address recipient) public returns (uint256 id) {
         if (recipient == address(0)) recipient = msg.sender;
         IERC20(LeveragedAerodromeCLStrategy(payable(address(this))).vault()).safeTransferFrom(

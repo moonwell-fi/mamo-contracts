@@ -1708,9 +1708,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     }
 
     // ==================== THE REQUEST'S RECIPIENT ====================
-    //
-    // A fulfilled redemption pays the END RECIPIENT named at request time, not the requesting contract.
-    // The requester keeps every authority (cancel, deadman) and the payout is the ONLY thing that moves.
+    // A fulfil pays the recipient named at request time; the requester keeps cancel and the deadman.
 
     /// @dev Live position + `SUPPLY` shares held by `lp`, then a request for `shares` paying `to`.
     function _requestRedeemTo(uint256 shares, address to) internal returns (uint256 id) {
@@ -1723,9 +1721,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev (1) THE FIX. `fulfillRedeem` pays the STORED RECIPIENT; the requester receives nothing. This is
-    ///      what lets a per-user account wrapper settle a withdrawal in ONE transaction, with no USDC
-    ///      parked on the wrapper and no second claim call.
+    /// @dev (1) THE FIX: `fulfillRedeem` pays the stored recipient; the requester receives nothing.
     function testFulfillRedeemPaysTheStoredRecipientAndNotTheRequester() public {
         address payee = makeAddr("payee");
         uint256 id = _requestRedeemTo(SUPPLY / 4, payee);
@@ -1740,8 +1736,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertTrue(strategy.redeemRequest(id).settled, "and the request settled");
     }
 
-    /// @dev (2) `address(0)` MEANS "PAY ME": the default preserves the EOA / direct-requester behaviour
-    ///      exactly, so the stored recipient is never zero and the fulfil can pay it unconditionally.
+    /// @dev (2) `address(0)` means "pay me", so the stored recipient is never zero.
     function testRequestRedeemDefaultsTheRecipientToTheRequester() public {
         uint256 id = _requestRedeemTo(SUPPLY / 4, address(0));
 
@@ -1755,9 +1750,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertGt(usdc.balanceOf(lp) - lpBefore, 0, "so the requester is paid, as before");
     }
 
-    /// @dev (3) SHARES BELONG TO THE REQUESTER. A cancel is the reversal of the escrow, so it returns the
-    ///      shares to `owner` even when a different address was named for the USDC payout — otherwise a
-    ///      request could hand a third party the position itself.
+    /// @dev (3) A cancel reverses the escrow, so shares return to `owner` even with a differing recipient
+    ///      — otherwise a request could hand a third party the position itself.
     function testCancelRedeemReturnsSharesToTheRequesterEvenWhenTheRecipientDiffers() public {
         address payee = makeAddr("payee");
         uint256 shares = SUPPLY / 4;
@@ -1772,11 +1766,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(usdc.balanceOf(payee), 0, "and no USDC");
     }
 
-    /// @dev (4) THE DEADMAN STILL PAYS ITS CALLER. `emergencyRedeem` is owner-gated, synchronous and
-    ///      RETURNS `assetsOut`, so "pays msg.sender" is part of its contract: a contract requester
-    ///      forwards the proceeds itself in the same transaction. Routing it to `recipient` would hand
-    ///      such a requester nothing to forward, while changing no end-state — for a Mamo account the
-    ///      recipient IS the address its `emergencyWithdraw` forwards to.
+    /// @dev (4) THE DEADMAN STILL PAYS ITS CALLER: it returns `assetsOut` for a contract requester to
+    ///      forward, so paying `recipient` would leave it nothing to forward.
     function testEmergencyRedeemPaysTheRequesterNotTheRecipient() public {
         address payee = makeAddr("payee");
         uint256 id = _requestRedeemTo(SUPPLY / 4, payee);
@@ -1791,8 +1782,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(usdc.balanceOf(payee), 0, "the recipient was not paid on this path");
     }
 
-    /// @dev (5) THE RECIPIENT IS A PAYEE, NOT AN AUTHORITY. Naming an address must not give it any control
-    ///      over the request: it can neither cancel it nor drive the deadman exit.
+    /// @dev (5) The recipient is a payee, not an authority: it can neither cancel nor drive the deadman.
     function testTheRecipientHasNoAuthorityOverTheRequest() public {
         address payee = makeAddr("payee");
         uint256 id = _requestRedeemTo(SUPPLY / 4, payee);
@@ -1807,8 +1797,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         strategy.emergencyRedeem(id, 0);
     }
 
-    /// @dev (6) THE PAYEE IS OBSERVABLE ON-CHAIN at request and at fulfil, with the REQUESTER still in
-    ///      topic2 so an indexer keyed on the account address keeps working.
+    /// @dev (6) The payee is observable on-chain, with the REQUESTER still in topic2 for indexers.
     function testRedeemEventsExposeTheRecipientWithoutMovingTheOwnerTopic() public {
         address payee = makeAddr("payee");
         _execute(SEED);
@@ -1826,7 +1815,6 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 payeeBefore = usdc.balanceOf(payee);
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
-        // Assert the emitted payout against the measured one, so the event cannot drift from the transfer.
         vm.assertGt(usdc.balanceOf(payee) - payeeBefore, 0, "the recipient in topic3 is the address paid");
     }
 
