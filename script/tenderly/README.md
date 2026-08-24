@@ -99,6 +99,14 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
 - `lib/market.sh` — reusable price/market simulation cheat primitives (`snapshot`/`revert_to`,
   time advance). Sourced after `common.sh`.
 - `harness-results.log` — written each run (gitignored).
+- `lpv2-vnet.json` — staging manifest for the last recorded harness run: vnet chain id, fork block,
+  library + per-scenario balancer addresses, and the measured invariants. **Every address in it is
+  vnet-only** — none have code on Base mainnet, and a fresh vnet reassigns them. It is deliberately
+  NOT `addresses/8453.json`: proposal 011 gates its deploy on
+  `!addresses.isAddressSet("MAMO_LP_AUTO_BALANCER_V2")`, so a vnet address registered there would
+  make the production Safe run skip deployment and wire itself to a nonexistent contract. The RPC
+  endpoint is not recorded — a vnet URL grants the cheat RPCs to anyone holding it; read it from
+  `TENDERLY_VNET_RPC_URL` in `.env`.
 
 ## Notes / gotchas baked into the harness
 
