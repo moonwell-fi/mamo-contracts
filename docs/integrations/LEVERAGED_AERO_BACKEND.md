@@ -318,7 +318,6 @@ and neither does restoring the book, which is the same call at the untouched `ta
 ```solidity
 function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
 function hasSettledRequest()      external view returns (bool);   // a tracked request has COMPLETED
-function hasUnclaimedWithdrawal() external pure returns (bool);   // DEPRECATED, always false
 function openRequestIds()         external view returns (uint256[] memory);
 function syncRedeemRequests()     external;                       // owner-only housekeeping
 ```
@@ -339,10 +338,11 @@ What replaced it:
 - **`hasSettledRequest()` is a COMPLETION SIGNAL, not a gate**, and BEST-EFFORT: your own `depositIdle`
   prunes, which clears it. The durable records are the account's `WithdrawSettled(id)` and the strategy's
   `RedeemFulfilled`. It claims nothing and blocks nothing.
-- **`hasUnclaimedWithdrawal()` is retained but now returns `false` unconditionally.** Under its original
-  meaning ("a fulfilled withdrawal is unswept on the account") that is the truthful answer, so a backend
-  still following the old "skip `depositIdle` while true" rule keeps working instead of stalling forever.
-  Migrate to `hasSettledRequest()` for completion, or better to the `WithdrawSettled` event below.
+- **`hasUnclaimedWithdrawal()` is REMOVED**, not aliased — calls to it no longer compile. Deliberate
+  pre-deploy ABI break: leaving a stub that always reads `false` would have hidden the change, and a stub
+  that tracked `settled` would stall any backend still applying the old "skip `depositIdle` while true"
+  rule (it declines, and its own `depositIdle` was one of the calls that prunes). Use `hasSettledRequest()`
+  for completion, or better the `WithdrawSettled` event below.
 - **`recoverERC20` no longer deadlocks anything** — it can leave a stale tracked id, and that is inert.
   `syncRedeemRequests()` (owner-only) still prunes explicitly if you want the set tidy.
 - **`requestWithdraw` is capped** at `MAX_OPEN_REQUESTS` (16) simultaneously-tracked requests; it prunes

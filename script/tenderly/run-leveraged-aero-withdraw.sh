@@ -348,20 +348,20 @@ sc_request_cancel() {
   ok "requestWithdraw → id=$id"
   assert_eq "account shares escrowed"   "$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)" "0"
   assert_eq "openRequestIds length"     "$(ccall "$ACCT" 'openRequestIds()(uint256[])' | tr -d '[]' | tr ',' '\n' | grep -c .)" "1"
-  assert_eq "hasUnclaimedWithdrawal"    "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "false"
+  assert_eq "hasSettledRequest"         "$(ccall "$ACCT" 'hasSettledRequest()(bool)')" "false"
 
   csend "cancelWithdraw(id)" "$USER" "$ACCT" 'cancelWithdraw(uint256)' "$id"
   assert_eq "shares returned to account" "$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)" "$SHARES"
   assert_eq "openRequestIds emptied"     "$(ccall "$ACCT" 'openRequestIds()(uint256[])' | tr -d '[] ' | grep -c . || true)" "0"
 
   # THE TRAP: cancel sets `settled` on the strategy too. A frontend reading redeemRequest(id).settled
-  # off the shared strategy would call this "fulfilled, money waiting". Only the ACCOUNT's
-  # hasUnclaimedWithdrawal() is correct, because cancel untracks the id.
+  # off the shared strategy would call this "fulfilled". Only the ACCOUNT's hasSettledRequest() is
+  # correct, because cancel untracks the id.
   local settled
   settled="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool,address))' "$id" | grep -oE 'true|false' | tail -1)"
   info "strategy.redeemRequest($id).settled after CANCEL = $settled"
   record "settledFlagAfterCancel" "$settled"
-  assert_eq "account hasUnclaimedWithdrawal after cancel" "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "false"
+  assert_eq "account hasSettledRequest after cancel" "$(ccall "$ACCT" 'hasSettledRequest()(bool)')" "false"
   return 0
 }
 
@@ -408,7 +408,7 @@ sc_stuck_fulfil() {
   settled="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool,address))' "$id" | grep -oE 'true|false' | tail -1)"
   assert_eq "request still unsettled after a failed fulfil" "$settled" "false"
   assert_eq "shares still escrowed"                          "$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)" "0"
-  assert_eq "hasUnclaimedWithdrawal still false"             "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "false"
+  assert_eq "hasSettledRequest still false"                  "$(ccall "$ACCT" 'hasSettledRequest()(bool)')" "false"
   # The user's own escape hatches both still work — this is the recovery story for the UI.
   csend "cancelWithdraw(id) recovers the stuck request" "$USER" "$ACCT" 'cancelWithdraw(uint256)' "$id"
   assert_eq "shares returned" "$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)" "$SHARES"

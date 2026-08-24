@@ -927,7 +927,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.cancelWithdraw(id);
 
         assertEq(strategy.openRequestIds().length, 0, "cancelled id untracked");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "and it never counted as unclaimed");
+        assertFalse(strategy.hasSettledRequest(), "and the pooled settled flag is not reported");
     }
 
     /// @dev (6) The emergency path pays the owner straight through, so its id is disposed of too.
@@ -943,7 +943,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.emergencyWithdraw(id, DEPOSIT);
 
         assertEq(strategy.openRequestIds().length, 0, "emergency-redeemed id untracked");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing unclaimed: the owner was paid directly");
+        assertFalse(strategy.hasSettledRequest(), "untracked, so its pooled settled flag is not reported");
     }
 
     /// @dev (7) The `recoverERC20`-without-pruning deadlock is gone with the gate it deadlocked.
@@ -1019,23 +1019,6 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.prank(user);
         strategy.syncRedeemRequests();
         assertEq(strategy.openRequestIds().length, 0, "disposed of");
-    }
-
-    /// @dev The retained shim must stay FALSE even once a request settles: a backend still following the
-    ///      old "refuse depositIdle while true" rule would otherwise stall its own duty forever, since no
-    ///      claim step exists to prune and its own call is what would have pruned.
-    function testHasUnclaimedWithdrawalIsAlwaysFalseSoAnOldRuleBackendCannotStall() public {
-        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        _deposit(strategy, user, DEPOSIT);
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "at rest");
-
-        vm.prank(user);
-        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "outstanding");
-
-        sherwood.fulfillRedeem(id, 0);
-        assertTrue(strategy.hasSettledRequest(), "premise: the request really did settle");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "...and the shim still reports nothing unclaimed");
     }
 
     /// @dev The recipient is frozen at request time, so a transfer mid-request pays the address that asked.

@@ -388,7 +388,6 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 // Request tracking — read these instead of scraping logs.
 function openRequestIds() external view returns (uint256[] memory);   // ids the account is tracking
 function hasSettledRequest() external view returns (bool);            // any of them COMPLETED (fulfilled)
-function hasUnclaimedWithdrawal() external pure returns (bool);       // DEPRECATED, always false
 function syncRedeemRequests() external;                               // onlyOwner housekeeping
 ```
 

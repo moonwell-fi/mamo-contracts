@@ -299,13 +299,6 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         return sherwoodStrategy.state();
     }
 
-    /// @notice DEPRECATED, always false — kept only so an integration built against the old gate keeps
-    ///         working. Under its original meaning ("a fulfilled withdrawal is unswept here") false is now
-    ///         the truthful answer: a fulfil pays the recipient directly. Use {hasSettledRequest}.
-    function hasUnclaimedWithdrawal() public pure returns (bool) {
-        return false;
-    }
-
     /// @notice True while a tracked async request has settled, i.e. completed.
     /// @dev Gates nothing, and BEST-EFFORT: any pruning call clears it, backend `depositIdle` included.
     ///      {WithdrawSettled} is the durable completion record.
