@@ -1,8 +1,8 @@
-# LPAutoBalancerV2 — Backend Handbook (cbETH/WETH bootstrap)
+# LPAutoBalancerV2 — Backend Handbook (WETH/cbBTC)
 
 **Audience:** the team building and running the offchain rebalancer service.
-**Status:** bootstrap deployment, proposal `014_LPAutoBalancerV2CbETHBootstrap`.
-**Addresses and feed cadences verified on Base 2026-08-21/22.** Re-measurement methods are inline. Yield, cost and payback figures are deliberately absent — the backend computes those from live state (§6.3, §6.5).
+**Status:** phase-1 deployment, proposal `011_LPAutoBalancerV2Setup`.
+**Addresses and feed cadences verified on Base 2026-08-24.** Re-measurement methods are inline. Yield, cost and payback figures are deliberately absent — the backend computes those from live state (§6.3, §6.5).
 
 ## Related documents
 
@@ -10,9 +10,9 @@
 | --- | --- |
 | [`LP_AUTO_BALANCER_V2.md`](LP_AUTO_BALANCER_V2.md) | System overview. Read first; this assumes its vocabulary. |
 | [backend spec](superpowers/specs/2026-07-03-lp-auto-balancer-v2-backend-spec.md) | The operational contract: ABI, selectors, decision math, CoW lifecycle, error table. **Wins on every conflict** — this handbook is the venue layer on top. |
-| [`LP_AUTO_BALANCER_V2_WETH_CBBTC_SETUP.md`](LP_AUTO_BALANCER_V2_WETH_CBBTC_SETUP.md) | Phase-1 WETH/cbBTC runbook (proposal 011). Different pair, different instance — do not copy its constants (§1.1). |
-| `multisig/mamo-multisig/014_LPAutoBalancerV2CbETHBootstrap.sol` | The Safe proposal. Arms the §4 config; `validate()` asserts it. |
-| `test/LPAutoBalancerV2CbETHBootstrap.integration.t.sol` | Fork proof — `make lp-v2-cbeth-bootstrap` |
+| [setup runbook](LP_AUTO_BALANCER_V2_WETH_CBBTC_SETUP.md) | How the Safe stands the position up (Phases A–C, deferred checker steps, handover). That is the deployment side; this is the operating side. |
+| `multisig/mamo-multisig/011_LPAutoBalancerV2Setup.sol` | The Safe proposal. Arms the §4 config; `validate()` asserts it. |
+| `test/LPAutoBalancerV2Setup.integration.t.sol` | Fork proof — `make lp-v2-setup` |
 
 `moonwell-fi/mamo-rebalancer` is the reference for *process shape* (§5), not for domain: it drives a leveraged strategy, so its `ADJUST_LEVERAGE` / `FULFILL_REDEEM` / health-and-LTV surface has no counterpart here.
 
@@ -20,58 +20,65 @@
 
 ## 1. The venue
 
-Aerodrome Slipstream CL, Base. Addresses verified onchain 2026-08-21.
+Aerodrome Slipstream CL, Base. Verified onchain 2026-08-24.
 
 | Thing | Address / value |
 | --- | --- |
-| cbETH/WETH CL pool | `0x47cA96Ea59C13F72745928887f84C9F52C3D7348` |
-| **tickSpacing** | **`1`** |
-| Swap fee (`fee()`, pips) | `65` → 0.0065% |
-| `unstakedFee` | `100000` → 10% cut on unstaked-position fees |
-| CL gauge (`rewardToken` = AERO, alive) | `0xF5550F8F0331B8CAA165046667f4E6628E9E3Aac` |
+| WETH/cbBTC CL pool | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` |
+| **tickSpacing** | **`100`** |
+| Swap fee (`fee()`, pips) | `2505` → ~0.25% (dynamic, from the factory's swap-fee module) |
+| `unstakedFee` | `50000` → 5% cut on unstaked-position fees |
+| CL gauge (`rewardToken` = AERO, alive) | `0x41b2126661C673C2beDd208cC72E85DC51a5320a` |
 | Gauge `nft()` | `0x827922686190790b37229fd06084350E74485b72` — the Slipstream NFPM the balancer uses |
-| cbETH — **token0**, 18 dp | `0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22` |
-| WETH — **token1**, 18 dp | `0x4200000000000000000000000000000000000006` |
-| Chainlink cbETH/USD — **oracle0**, 8 dp | `0xd7818272B9e248357d13057AAb0B417aF31E817d` |
-| Chainlink ETH/USD — **oracle1**, 8 dp | `0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70` |
+| WETH — **token0**, **18 dp** | `0x4200000000000000000000000000000000000006` |
+| cbBTC — **token1**, **8 dp** | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` |
+| Chainlink ETH/USD — **oracle0**, 8 dp | `0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70` |
+| Chainlink BTC/USD — **oracle1**, 8 dp | `0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F` |
 | Chainlink AERO/USD | `0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0` |
 | Chainlink L2 sequencer uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` |
 | feeCollector | `DROP_AUTOMATION` in `addresses/8453.json` |
-| Balancer | `MAMO_LP_AUTO_BALANCER_V2_CBETH` |
-| Compound module | `MAMO_LP_COMPOUND_MODULE_CBETH` |
+| Balancer | `MAMO_LP_AUTO_BALANCER_V2` |
+| Compound module | `MAMO_LP_COMPOUND_MODULE` |
 
-Token order is by address: cbETH (`0x2Ae3…`) < WETH (`0x4200…`), so **cbETH is token0**. Every `token0`/`token1`, `oracle0`/`oracle1`, `amount0`/`amount1`, `maxOracleDelay0`/`maxOracleDelay1` follows. The 011 deployment has WETH as token0 — a copied field mapping is silently wrong, not loudly wrong.
+Two things that bite if assumed rather than read:
 
-### 1.1 What differs from 011
+- **Token order is by address: WETH (`0x4200…`) < cbBTC (`0xcbB7…`), so WETH is token0.** Every `token0`/`token1`, `oracle0`/`oracle1`, `amount0`/`amount1`, `maxOracleDelay0`/`maxOracleDelay1` follows.
+- **The legs have different decimals — WETH 18, cbBTC 8.** Any USD conversion, min-amount computation or allocation check must carry both. A helper that assumes symmetric decimals is off by 1e10 on one leg and will still look plausible.
 
-1. **`tickSpacing` is 1, not 100.** The width grid is 100× finer; legal widths are even numbers (`width % (2 × tickSpacing) == 0`). 011's `minWidth 200 / maxWidth 20000` describe different geometry.
-2. **Separate balancer instance.** One `LPAutoBalancerV2` manages one pool (`registerPosition` reverts `AlreadyRegistered` once active), so cbETH/WETH gets its own balancer and compound module. 011 is untouched.
-3. **LST ratio, not two independent assets.** cbETH accrues staking yield against ETH, so the ratio drifts upward at `ln(1.0275)/ln(1.0001) ≈ 271 ticks/year ≈ 0.74 ticks/day` plus noise. Drift alone will not push a 50-tick band out of range for weeks; range exits here are depeg or liquidity events.
-4. **Both feeds are ETH-correlated,** ~99% common-mode, so the USD value floor is far less noisy than on WETH/cbBTC. Hence 014's tighter `maxRebalanceLossBps` (50 vs 100) and `swapLossAllowanceBps` (100 vs 300).
+The position manager the **gauge accepts** is `0x827922…`, registered as `UNISWAP_V3_POSITION_MANAGER_AERODROME` — **not** `AERODROME_POSITION_MANAGER` (`0xc741be…`, a different contract).
 
-### 1.2 Oracle heartbeats — measured, not assumed
+### 1.1 Oracle heartbeats — measured, not assumed
 
-Some LST feeds run a 24h heartbeat on other chains, and `MAX_ORACLE_DELAY` caps at 1 day — a 24h feed under a 3600s bound would brick every priced path.
+`maxOracleDelay0/1 = 3600` is only safe if both feeds actually publish faster than that, and the balancer's `MAX_ORACLE_DELAY` ceiling is 1 day — a slow feed under a 3600 s bound would brick every priced path.
 
-Measured 2026-08-21: 501 consecutive rounds over 37.4 hours, **max inter-round gap 1290 s**. cbETH/USD behaves like a ~1200 s heartbeat, same as ETH/USD, so 3600 s tolerates two missed rounds.
+Measured on Base 2026-08-24, 501 consecutive rounds each, zero missing samples:
 
-Re-measure before any re-pin or new pair:
+| Feed | Max consecutive gap | Span | Missed rounds tolerated at 3600 s |
+| --- | --- | --- | --- |
+| ETH/USD (`oracle0`) | 1234 s | 30.6 h | ~2.9 → ≥ 2 |
+| BTC/USD (`oracle1`) | 1232 s | 52.0 h | ~2.9 → ≥ 2 |
+
+Both behave like ~1200 s heartbeat feeds. Re-measure before any re-pin:
 
 ```bash
-AGG=$(cast call 0xd7818272B9e248357d13057AAb0B417aF31E817d "aggregator()(address)" --rpc-url base)
+FEED=0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70          # or the BTC/USD proxy
+AGG=$(cast call $FEED "aggregator()(address)" --rpc-url base)
 LR=$(cast call $AGG "latestRound()(uint256)" --rpc-url base | awk '{print $1}')
-seq $((LR-500)) $LR | xargs -P 20 -I{} sh -c \
+seq $((LR-500)) $LR | xargs -P 6 -I{} sh -c \
   "echo {} \$(cast call $AGG 'getTimestamp(uint256)(uint256)' {} --rpc-url base | awk '{print \$1}')" \
-  | sort -n | awk 'NF==2{if(p>0&&$2-p>m)m=$2-p; p=$2} END{print "max gap:", m, "s"}'
+  | sort -n | awk 'NF==2{if(p>0 && $1==pr+1){g=$2-p; if(g>m)m=g} p=$2; pr=$1} END{print "max gap:", m, "s"}'
 ```
 
-`latestRound()` on the **proxy** returns a phase-encoded id that overflows shell arithmetic — walk the aggregator.
+Two traps in that measurement, both of which produce a **false** over-limit reading:
+
+- `latestRound()` on the **proxy** returns a phase-encoded id that overflows shell arithmetic — walk the aggregator.
+- At high `xargs -P` some calls return empty and the gap is then computed across non-adjacent rounds. Keep concurrency low, retry empties, and only compare **consecutive** round ids (`$1 == pr+1` above). A first pass at `-P 20` reported a 3662 s ETH/USD gap that did not exist.
 
 ---
 
 ## 2. Total allocation
 
-`totalAllocationUsd` is a parameter of proposal 014 (8-decimal USD, matching `valueInUsd`), default $50,000:
+`totalAllocationUsd` is a parameter of proposal 011 (8-decimal USD, matching `valueInUsd`), default $50,000:
 
 ```solidity
 proposal.setTotalAllocation(50_000e8, 500);   // target, tolerance bps
@@ -83,17 +90,18 @@ proposal.setTotalAllocation(50_000e8, 500);   // target, tolerance bps
 
 ### 2.1 Sizing the mint
 
-For a tick-symmetric (hence log-price-symmetric) range around spot, the legs carry near-equal value:
+**Do not split the target 50/50 by value.** That is only correct when spot sits exactly at the range's centre, and at `tickSpacing 100` the aligned centre can be up to 99 ticks from spot. At that offset the legs bind roughly 25/75, the NFPM refunds about a third of the intended size, and the mint lands well outside a 500 bps band.
+
+Size from the range geometry instead — price one reference unit of liquidity across the actual `[tickLower, tickUpper]` at the live `sqrtPriceX96`, then scale:
 
 ```text
-halfUsd = totalAllocationUsd / 2
-amount0 (cbETH, 18dp) = halfUsd * 1e18 / chainlink(cbETH/USD)
-amount1 (WETH,  18dp) = halfUsd * 1e18 / chainlink(ETH/USD)
+(r0, r1) = amountsForLiquidityAtTicks(sqrtP, tickLower, tickUpper, 1e18)
+refUsd   = r0 * ethUsd / 1e18  +  r1 * btcUsd / 1e8        // note the asymmetric decimals
+amount0  = r0 * targetUsd / refUsd
+amount1  = r1 * targetUsd / refUsd
 ```
 
-At the pinned block the residual mismatch is 0.13%, so the NFPM consumes nearly all of both. `test_proposal_lifecycle` mints this way and passes `validate()` at 500 bps — proof the recipe works; `test_validate_rejectsWrongAllocation` is its non-vacuity control (same position, 2× target, must fail).
-
-§3 covers the venue mechanics behind that choice.
+Both legs then bind together by construction. Add ~50 bps of headroom on the desired amounts so the NFPM's own rounding cannot leave the mint a wei short of the band. `test_proposal_lifecycle` mints exactly this way and passes `validate()`; `test_validate_rejectsWrongAllocation` is its non-vacuity control (same position, 2× target, must fail).
 
 ---
 
@@ -101,40 +109,41 @@ At the pinned block the residual mismatch is 0.13%, so the NFPM consumes nearly 
 
 How income works on this pool. **The numbers are the backend's job** — it reads them at runtime and computes yield, cost and payback per cycle from live state (§6.3, §6.5). This section is the mechanics those computations sit on, not a projection.
 
-**Slipstream is fees XOR emissions.** A staked position earns AERO and its swap fees divert to the gauge (`pool.gaugeFees()`); an unstaked one earns fees less the 10% `unstakedFee`. So `stake()`/`unstake()` is a real economic choice, not a formality, and it is `REBALANCER_ROLE` — the backend owns it and re-evaluates it per sweep. The winner moves with pool volume and the AERO price and does genuinely flip; §6.5 has the comparison and the hysteresis that keeps it from thrashing.
+**Slipstream is fees XOR emissions.** A staked position earns AERO and its swap fees divert to the gauge (`pool.gaugeFees()`); an unstaked one earns fees less the 5% `unstakedFee`. So `stake()`/`unstake()` is a real economic choice, not a formality, and it is `REBALANCER_ROLE` — the backend owns it and re-evaluates it per sweep. The winner moves with pool volume and the AERO price and does genuinely flip; §6.5 has the comparison and the hysteresis that keeps it from thrashing.
 
-014 registers the position **unstaked** — `_store` forces `mainStaked = false` at registration. Whether to stake is the backend's first decision, not a proposal setting.
+011 registers the position **unstaked** — `_store` forces `mainStaked = false` at registration. Whether to stake is the backend's first decision, not a proposal setting.
 
-**Income accrues per unit of liquidity, not per unit of capital.** For fixed capital `L ∝ 1 / width`, so a wider range earns proportionally less than the same money in a narrow one. That matters here more than on most pools: read `pool.liquidity()` against the pool's token balances and you will find effectively all incumbent liquidity sitting within a couple of ticks of spot (as of writing, one tick's worth of `liquidity()` exceeds the pool's entire WETH balance, and 99.98% of it is staked). A 50-tick range is therefore a small share of in-range liquidity for its capital.
+**Income accrues per unit of liquidity, not per unit of capital.** For fixed capital `L` scales as `1 / width`, so a wider range earns proportionally less than the same money in a narrow one. Read `pool.liquidity()` against the pool's token balances to see how tightly incumbents are concentrated before choosing an operating width — that ratio, not the pool's headline TVL, is what determines our share.
 
-Two consequences for how this deployment is run, both independent of what the numbers happen to be on any given day:
-
-- **The recenter gate will often say `TOO_THIN`** (§6.3) — gross income at `minWidth` is small relative to gas. That is the gate reporting the venue honestly, not a bug to tune away.
-- **Competing on yield would mean 2–6 tick ranges**, which collides with `minWidth > 2 × maxTickDeviation` (§4 — it would force `maxTickDeviation ≤ 2`, an unusably tight calm gate) and with a 6 h cooldown against a band that exits on ordinary noise. The shipped config deliberately does not chase that.
-
-Treat the bootstrap as a mechanism proving-ground: success is "ran unattended for N weeks, every guard fired when it should, no principal lost". Sizing `totalAllocationUsd` is a product call informed by the backend's live figures — note that raising it scales the absolute numbers without changing the rate, since our share of in-range liquidity scales with it.
+**The two legs are independent assets.** Unlike an LST pair, WETH and cbBTC diverge on ordinary market action, so: ranges exit for normal reasons rather than only in a depeg, the USD value floor is genuinely noisy across a two-transaction swap cycle, and the swap-rebalance path earns its keep here — a no-swap rebuild cannot fix a ratio that has actually moved. That is the opposite posture from a correlated pair, where ALT-only is sufficient indefinitely.
 
 ---
 
-## 4. The config 014 arms
+## 4. The config 011 arms
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `tickSpacing` | `1` | The pool's. |
-| `minWidth` | `50` | Closes the R7 branch-collision residual at config level: `minWidth > 2 × maxTickDeviation`. At `width == 2 × tickSpacing` the balanced and token1-single-sided tick pairs collide, so a spot push inside the calm gate turns a committed two-sided mint into a single-sided one with a zeroed mint minimum; only `width ≥ 4 × tickSpacing` rules that out for every caller. 011 declined it (doubles a 200-tick minimum); here it costs 50 ticks. `validatePosition()` asserts the inequality. |
-| `maxWidth` | `2000` | ~22% wide — headroom for a depeg regime. |
-| `maxTickDeviation` | `20` | Calm gate ~0.20%. Tight because both legs are the same underlying. |
-| `maxCenterDeviation` | `20` | Backstop on minted-range center vs spot. |
-| `twapWindow` | `1800` | Pool observation cardinality is 1440 → ≥ 1440 blocks (~48 min); window covered. |
-| `maxRebalanceLossBps` | `50` | Half of 011's. A no-swap rebuild on a correlated pair loses only rounding plus forwarded dust. |
+| `tickSpacing` | `100` | The pool's. Legal widths are multiples of `2 × tickSpacing` = **200**. |
+| `minWidth` | `200` | The floor the contract allows (`2 × tickSpacing`). **Note this does NOT close the R7 branch-collision residual** — see §4.1. |
+| `maxWidth` | `20000` | Operator headroom. |
+| `maxTickDeviation` | `100` | Calm gate, one full spacing (~1%). |
+| `maxCenterDeviation` | `200` | Backstop on minted-range centre vs spot. |
+| `twapWindow` | `1800` | Pool observation cardinality is 11,000 — window comfortably covered. |
+| `maxRebalanceLossBps` | `100` | 1%. Sanity guard on the atomic no-swap path. |
 | `minRebalanceInterval` | `21600` (6 h) | Sweep cadence; stops a buggy agent looping rebalances. |
-| `maxOracleDelay0 / 1` | `3600 / 3600` | Two missed rounds on ~1200 s heartbeats (§1.2). Armed explicitly — the constructor default is byte-identical, so `validate()` alone cannot tell armed from inherited; the fork test arms non-default values to make the action observable. |
+| `maxOracleDelay0 / 1` | `3600 / 3600` | Two missed rounds on ~1200 s heartbeats (§1.1). Armed explicitly — the constructor default is byte-identical, so `validate()` alone cannot tell armed from inherited; the fork test arms non-default values to make the action observable. |
 | `sequencerUptimeFeed` / grace | `0xBCF85224…` / `3600` | Ships **disabled** (`address(0)` makes `checkSequencer` a no-op). Armed before `registerPosition`, which probes both feeds. |
-| `swapLossAllowanceBps` | `100` | Not 011's 300 — cbETH↔WETH executes inside a few bps, and a loose allowance is a loss the floor stops detecting, not one it prevents. |
-| module `rebalanceSlippageBps` | `30` | The binding price floor on approved principal while `rebalanceInFlight`, since EIP-1271 placement is permissionless. Tighter than 011's 50: correlated feeds, 0.0065% pool fee. |
+| `swapLossAllowanceBps` | `300` | Extra floor tolerance for the CoW round-trip, on top of `maxRebalanceLossBps`. |
+| module `rebalanceSlippageBps` | `50` | The binding price floor on approved principal while `rebalanceInFlight`, since EIP-1271 placement is permissionless. |
 | module `allowedSlippageInBps` | `200` | AERO → underlying compound orders (reward-only). |
 
-Operating width: **50** (`MOONWELL_LP_WIDTH_TICKS=50`) — even, inside `[50, 2000]`.
+### 4.1 R7 is live at `minWidth` — submit width ≥ 400
+
+`minWidth` is exactly `2 × tickSpacing`, and at `width == 2 × tickSpacing` the balanced tick pair and the token1-single-sided tick pair **collide**: they are the same `(tickLower, tickUpper)` at different anchors. A spot push *inside* the calm gate can therefore turn a committed two-sided mint into a single-sided one with a zeroed mint minimum, and the tick commitment cannot detect it — it pins the pair, not the branch that produced it.
+
+011 deliberately did not close this at config level (raising `minWidth` to 400 would double the minimum position width against a backtest whose edge is tight ranges). **So the mitigation is the backend's, per cycle: submit `width ≥ 4 × tickSpacing = 400`.** At `maxTickDeviation` 100 that is immune, because the collision would require the anchor to move `width/2 ≥ 2` spacings — a ≥ 101-tick push the calm gate rejects.
+
+**Operating width: `400`** (`MOONWELL_LP_WIDTH_TICKS=400`). Legal — a multiple of 200, inside `[200, 20000]`. Never submit 200 in production. Until this is in force, do not treat a committed pair as proof of a balanced mint; check the realized `amount0Min`/`amount1Min` forwarding.
 
 ---
 
@@ -150,7 +159,7 @@ src/
   reads/
     snapshot.ts       getDecisionSnapshot() + position() — ONE pinned block
     pool.ts           slot0, TWAP, liquidity curve
-    prices.ts         cbETH/USD + ETH/USD + AERO/USD, freshness assertions
+    prices.ts         ETH/USD + BTC/USD + AERO/USD, freshness assertions
     gauge.ts          rewardRate, earned, staked liquidity
   decision/
     decide.ts         action priority (§6.1)
@@ -192,46 +201,50 @@ One action per tick, first match wins:
 | # | Action | Fires when |
 | --- | --- | --- |
 | 1 | HOLD (degraded) | Either feed stale against **its own** bound, sequencer down or in grace, TWAP window uncovered, or paused. No writes. |
-| 2 | RESUME (in-flight) | `rebalanceInFlight == true`. Swap-cycle recovery (spec §3). Should never happen at bootstrap — the swap path is dark (§8). Page. |
-| 3 | REBALANCE | Main out of range, gate (§6.3) says `RECENTER`, `deviationGateOpen`, `cooldownRemaining == 0`. Always `rebalanceUsingAlt`. |
+| 2 | RESUME (in-flight) | `rebalanceInFlight == true`. Enter the swap-cycle recovery machine (spec §3). |
+| 3 | REBALANCE | Main out of range, gate (§6.3) says `RECENTER`, `deviationGateOpen`, `cooldownRemaining == 0`. Choose ALT vs SWAP per spec §4 — on this pair both are live once §7.1 lands. |
 | 4 | COMPOUND / CLAIM | Idle, staked, `earnedAero × aeroUsd > COMPOUND_MIN_USD`. `claimEmissions()` is role-gated, so the backend is the only thing draining the gauge — put it on the sweep cadence. |
 | 5 | STAKE / UNSTAKE | The §6.5 comparison flips by more than `MOONWELL_LP_HYSTERESIS_BPS`. |
 | 6 | NOOP | Otherwise. |
 
 ### 6.2 Tick commitment (every rebalance)
 
-`rebalanceUsingAlt` (12 fields) and `rebuildAfterSwap` (8) both end in `expectedTickLower` / `expectedTickUpper` and revert `TickMismatch()` unless the range the contract derives from live spot matches. Reproduce `_mainRange` exactly (spec §2.2 is normative). At `tickSpacing == 1`, `floorAlign(t) == t`:
+`rebalanceUsingAlt` (12 fields) and `rebuildAfterSwap` (8) both end in `expectedTickLower` / `expectedTickUpper` and revert `TickMismatch()` unless the range the contract derives from live spot matches. Reproduce `_mainRange` exactly (spec §2.2 is normative):
 
 ```text
-v0 = usd(cbETH balance), v1 = usd(WETH balance)   // 1e8, per-leg feeds
+floor = floorAlign(spotTick, 100)                 // largest aligned tick <= spot, floors toward -inf
+v0 = usd(WETH balance), v1 = usd(cbBTC balance)   // 1e8, per-leg feeds, 18dp and 8dp
 
 if min(v0, v1) >= MIN_MAIN_LEG_USD ($0.01):       // balanced straddle
-    tickLower = spotTick - width/2 ;  tickUpper = tickLower + width
-elif v0 >= v1:                                    // cbETH-majority, single-sided ABOVE spot
-    tickLower = spotTick + 1 ;        tickUpper = tickLower + width
-else:                                             // WETH-majority, single-sided AT/BELOW spot
-    tickUpper = spotTick ;            tickLower = tickUpper - width
+    tickLower = floorAlign(spotTick - width/2, 100) ;  tickUpper = tickLower + width
+elif v0 >= v1:                                    // WETH-majority, single-sided ABOVE spot
+    tickLower = floor + 100 ;                          tickUpper = tickLower + width
+else:                                             // cbBTC-majority, single-sided AT/BELOW spot
+    tickUpper = floor ;                                tickLower = tickUpper - width
 ```
+
+Because `width` is a multiple of `2 × tickSpacing`, `width/2` is a whole number of spacings and the balanced branch simplifies to `[floor - width/2, floor + width/2]`.
 
 On `rebalanceUsingAlt` the principal is still in the positions, so those balances are what the teardown returns: `principalAmounts(mainTokenId) + principalAmounts(altTokenId)` at current `sqrtPriceX96`, plus loose balance. `getDecisionSnapshot()` gives ticks and liquidity for both legs.
 
-`TickMismatch()` under ordinary drift is a retry: re-read `slot0()`, recompute, resubmit. Expect it more often than on 011 — one tick of drift is enough. Budget two or three per cycle; persistent mismatch across blocks means spot is being pushed, so back off and re-check `deviationGateOpen`. Never widen the commitment to whatever the contract computes — it exists because the amount minima cannot detect a shifted range.
+`TickMismatch()` under ordinary drift is a retry: re-read `slot0()`, recompute, resubmit. Budget two or three per cycle; persistent mismatch across blocks means spot is being pushed, so back off and re-check `deviationGateOpen`. Never widen the commitment to whatever the contract computes — it exists because the amount minima cannot detect a shifted range.
 
 ### 6.3 Economic recenter gate
 
 Port `mamo-rebalancer`'s `evaluateRecenterGate` unchanged in structure. Verdicts: `IN_RANGE`, `CLOCK_STARTING`, `TOO_THIN`, `PATIENT`, `RECENTER`.
 
 - Drive off **gross** income, not net-of-IL carry. Out of range you earn $0 while still holding 100% of one leg, so the divergence you would re-incur in range is being incurred anyway; netting IL double-counts it and makes the keeper far too patient.
-- `recenterCostUsd` is gas only — `rebalanceUsingAlt` performs no swap.
-- `grossIncomeUsdDay < recenterCostUsd` ⇒ `TOO_THIN`: hold and flag. Expected often at `minWidth` (§3); do not lower the cost multiplier to escape it.
+- `recenterCostUsd` on the ALT path is gas only — `rebalanceUsingAlt` performs no swap. On the SWAP path add the quote's expected shortfall, the in-flight downtime (nothing is staked while the window is open) and the cooldown drag of an unfilled cycle; spec §4 has the full cost model.
+- `grossIncomeUsdDay < recenterCostUsd` ⇒ `TOO_THIN`: hold and flag rather than chase pennies.
 - `CLOCK_STARTING` on the first out-of-range observation — hold a tick rather than react to a wick.
 
 ### 6.4 Parameters
 
-- **Width** — `MOONWELL_LP_WIDTH_TICKS` (50). `minWidth ≤ width ≤ maxWidth` and `width % 2 == 0`, asserted against live `position()` bounds, never a hardcoded constant.
+- **Width** — `MOONWELL_LP_WIDTH_TICKS` (400, §4.1). `minWidth ≤ width ≤ maxWidth` and `width % 200 == 0`, asserted against live `position()` bounds, never a hardcoded constant. An odd multiple of `tickSpacing` (300, 500, …) reverts `InvalidWidth()` — after the teardown, on the swap path, wasting the cycle.
 - **Withdraw mins** — per leg, `getAmountsForLiquidity(sqrtP, tickLower, tickUpper, liquidity) × (1 − 50 bps)`. Never 0, or the calm gate is the only sandwich backstop. Alt mins are 0 only when `hasAlt == false`.
 - **Mint mins** — predicted in-ratio consumption at `spotTick`, haircut 50 bps. Size them: on the balanced branch the contract forwards both minima unchanged, and they are the only control for the in-bucket residual. `TickMismatch` pins *where* liquidity lands; the minima pin *how much of each leg*. Neither substitutes for the other. The contract force-zeroes the unfunded leg's minimum on a single-sided mint. (The Tenderly harness passes zeros for rig convenience — do not copy that.)
 - **Deadline** — `now + 300` on every write.
+- **Sell size (SWAP path)** — from the position snapshot (`rebalanceAmountsBefore()`), never from `balanceOf(balancer)`. Pre-existing loose balance is commingled at unwind, and slippage on it inflates loss against a floor sized to position value only.
 
 ### 6.5 Stake vs unstake
 
@@ -254,7 +267,7 @@ Assert against the live chain, not env — a wrong address must fail at boot, no
 
 ```bash
 RPC=$BASE_RPC_URL
-LAB=$MOONWELL_LP_AUTO_BALANCER          # MAMO_LP_AUTO_BALANCER_V2_CBETH
+LAB=$MOONWELL_LP_AUTO_BALANCER          # MAMO_LP_AUTO_BALANCER_V2
 
 # 1. identity
 cast call $LAB "position()" --rpc-url $RPC              # pool/tokens/tickSpacing/gauge/oracles
@@ -265,7 +278,7 @@ cast call $LAB "sequencerUptimeFeed()(address)" --rpc-url $RPC   # 0xBCF85224…
 cast call $LAB "sequencerGracePeriod()(uint256)" --rpc-url $RPC  # 3600, NOT 0
 cast call $LAB "maxOracleDelay0()(uint256)" --rpc-url $RPC       # 3600
 cast call $LAB "maxOracleDelay1()(uint256)" --rpc-url $RPC       # 3600
-cast call $LAB "swapLossAllowanceBps()(uint16)" --rpc-url $RPC   # 100
+cast call $LAB "swapLossAllowanceBps()(uint16)" --rpc-url $RPC   # 300
 
 # 3. our role
 cast call $LAB "hasRole(bytes32,address)(bool)" $(cast keccak "REBALANCER_ROLE") $BACKEND_EOA --rpc-url $RPC
@@ -285,7 +298,7 @@ Internal-consistency asserts — read from `position()`, never hardcode:
 - `pool.token0()/token1()/tickSpacing()` equal the registered descriptor;
 - `gauge.rewardToken() == AERO` and `gauge.pool() == position.pool`;
 - `width % (2 × position.tickSpacing) == 0` for every planned width, and for `minWidth`/`maxWidth`;
-- `minWidth > 2 × maxTickDeviation` (R7 closure — if this stops holding, the collision is live again);
+- **every planned width is `≥ 4 × position.tickSpacing`** (§4.1 — config does not enforce this, the backend must);
 - both feeds fresh against their own getter, never one shared value;
 - sequencer up for at least `sequencerGracePeriod()`.
 
@@ -293,35 +306,27 @@ Internal-consistency asserts — read from `position()`, never hardcode:
 
 `CHAINLINK_SWAP_CHECKER_PROXY`'s owner is the MAMO multisig (`0x26c158A4…`), not F-MAMO, so three steps are a separate owner transaction:
 
-1. **AERO reward config:** `addTokenConfiguration(AERO → cbETH)` and `(AERO → WETH)` using `CHAINLINK_AERO_USD` forward + cbETH/USD resp. ETH/USD reverse, plus `setMaxTimePriceValid(AERO, …)`. Until this lands AERO is not a reward token.
-2. **Swap-rebalance pair:** `addTokenConfiguration(cbETH → WETH)` and `(WETH → cbETH)`, plus `setMaxTimePriceValid` for **both** tokens. Keep both < `minRebalanceInterval` (6 h) so a cycle-N order cannot settle in cycle N+1; 3600 s suggested.
+1. **AERO reward config:** `addTokenConfiguration(AERO → WETH)` and `(AERO → cbBTC)` using `CHAINLINK_AERO_USD` forward + ETH/USD resp. BTC/USD reverse, plus `setMaxTimePriceValid(AERO, …)`. Until this lands AERO is not a reward token.
+2. **Swap-rebalance pair:** `addTokenConfiguration(WETH → cbBTC)` and `(cbBTC → WETH)`, plus `setMaxTimePriceValid` for **both** tokens. Keep both < `minRebalanceInterval` (6 h) so a cycle-N order cannot settle in cycle N+1; 3600 s suggested.
 3. **F-MAMO:** `module.approveCowSwap()` — reverts `"Token not allowed"` until (1) lands.
 
-Plus **appData**: 014 ships the placeholder `keccak256("mamo-lpv2-compound-cbeth")`, which has no valid appData-JSON preimage while the orderbook demands the full document at placement. Before the first order of either kind, generate a plain `{appCode:"Mamo"}` document (no pre-hook — this system takes its cut via the onchain compound split and the module enforces `feeAmount == 0`), `PUT` it to `/app_data/{hash}`, and have F-MAMO call `setCompoundAppData(realHash)`.
+`maxTimePriceValid == 0` for a token collapses the module's `validTo ≤ now + maxTimePriceValid` bound against its own `validTo ≥ now + 5 min` floor: **every** order reverts, even after the pair configs exist. Missing it bricks the swap path silently — `unwindForSwap` tears the position down, no order can settle, and admin `exit()` is the only way back.
 
-Until (1) and (3) land, `compound(compoundBps)` still harvests AERO, drops the non-compound share to `feeCollector`, and forwards the rest to the module — only the CowSwap sell leg is inert, which is safe.
+Plus **appData**: 011 ships the placeholder `keccak256("mamo-lpv2-compound")`, which has no valid appData-JSON preimage while the orderbook demands the full document at placement. Before the first order of either kind, generate a plain `{appCode:"Mamo"}` document (no pre-hook — this system takes its cut via the onchain compound split and the module enforces `feeAmount == 0`), `PUT` it to `/app_data/{hash}`, and have F-MAMO call `setCompoundAppData(realHash)`.
 
----
-
-## 8. The swap path is dark at bootstrap
-
-Do not call `unwindForSwap` / `rebuildAfterSwap` until §7.1 step 2 lands. `validateRebalanceOrder` calls `checkPrice` on the cbETH↔WETH pair, and an unconfigured pair reverts — so every cycle would tear the position down, place nothing, rebuild unswapped, and burn a full 6 h cooldown. Worse, `maxTimePriceValid == 0` collapses the module's `validTo ≤ now + maxTimePriceValid` bound against its own `validTo ≥ now + 5 min` floor: every order reverts even after the pair configs exist.
-
-This costs nothing here. The pair is an LST ratio, so a principal-conserving re-range is essentially always sufficient. **Run ALT-only:** make `SWAP` unreachable in the decision engine and alert if `rebalanceInFlight` is ever true.
-
-When the swap path is enabled later, spec §4/§6 governs unchanged. One venue note: size `sellAmount` from the position snapshot (`rebalanceAmountsBefore()`), never from `balanceOf(balancer)` — pre-existing loose balance is commingled at unwind, and slippage on it inflates loss against a floor sized to position value only.
+**Until step 2 lands, run ALT-only.** `validateRebalanceOrder` calls `checkPrice` on the WETH↔cbBTC pair, and an unconfigured pair reverts — so a swap cycle would tear down, place nothing, rebuild unswapped, and burn a full 6 h cooldown. Make `SWAP` unreachable in the decision engine until the checker tx is confirmed. Unlike a correlated pair, that is a real capability loss here (§3), so treat step 2 as a launch item rather than a nice-to-have.
 
 ---
 
-## 9. Monitoring and failure playbook
+## 8. Monitoring and failure playbook
 
 | Watch | Threshold |
 | --- | --- |
-| `rebalanceInFlight` | any true at bootstrap ⇒ PAGE (§8) |
+| In-flight age | `now − rebalanceStartedAt` > `ORDER_WINDOW + 15 min` ⇒ WARN; > 2 h ⇒ PAGE |
 | Idle relayer allowance | non-zero on either token while `!rebalanceInFlight` ⇒ PAGE (approval leak) |
 | Unstaked-while-idle | `mainStaked == false` > 1 h while the stake decision says stake ⇒ WARN |
 | Unswept AERO | `earnedAero > MOONWELL_LP_MAX_UNSWEPT_AERO` ⇒ compound/claim |
-| Out-of-range clock | `> MAX_OUT_OF_RANGE_HOURS` with the gate at `TOO_THIN` ⇒ WARN + review (expected at `minWidth`, §3) |
+| Submitted width | any planned `width < 4 × tickSpacing` ⇒ PAGE (§4.1) |
 | Guard regression | `sequencerUptimeFeed() == 0`, `sequencerGracePeriod() == 0`, or an oracle bound outside `(0, MAX_ORACLE_DELAY]` ⇒ PAGE |
 | Config events mid-cycle | `OraclesUpdated`, `MaxOracleDelaysUpdated`, `SequencerUptimeFeedUpdated`, `PositionConfigUpdated`, `GaugeUpdated` ⇒ alert; never rebalance while one is in flight |
 | Paused | `EnforcedPause()` ⇒ freeze writes, keep read-only monitoring |
@@ -331,54 +336,56 @@ Decode revert data before retrying (full table: spec §2.4). The ones you will s
 | Error | Response |
 | --- | --- |
 | `TickMismatch()` | Expected. Re-read `slot0()`, recompute, resubmit. |
-| `TwapDeviation()` | Calm gate closed. Skip the cycle; backoff-retry. |
+| `TwapDeviation()` | Calm gate closed. Skip the cycle; backoff-retry 5→15→30 min if in flight. |
 | `Cooldown()` | Wait `cooldownRemaining`. |
+| `ValueFloor()` | Rebuild floor breached. Predict it from `rebalanceAmountsBefore()` priced at CURRENT feeds (spec §8.2) and retry every 15 min while the margin trends up. Do not spam retries during a drawdown. |
 | `StaleOracle()` | Do nothing onchain. PAGE — feed outage. The offending feed is stale against its own bound. |
 | `SequencerDown()` / `SequencerGracePeriod()` | Freeze writes. Resume once the feed reads up **and** `now − startedAt ≥ sequencerGracePeriod()`. |
-| `ValueFloor()` | Rare on the ALT path (atomic floor). If it fires, something moved principal — investigate, do not retry blindly. |
 | `InvalidWidth()` / `WidthOutOfBounds()` | Backend bug — fix params, do not retry. |
 | Unknown selector | Stop the branch, dump revert data + tx, PAGE. |
 
-**Emergency levers, escalating:** `pause()` (guardian; blocks everything operational, leaves `exit` available) → `revokeRole(REBALANCER_ROLE, backendEOA)` → `exit(SAFE)` (admin, not pausable, works mid-flight; unstakes, withdraws, burns, returns all cbETH + WETH to the Safe).
+**Emergency levers, escalating:** `pause()` (guardian; blocks everything operational — including `isValidSignature`, so open CoW orders stop settling — while leaving `exit` available) → `revokeRole(REBALANCER_ROLE, backendEOA)` → `exit(SAFE)` (admin, not pausable, works mid-flight; unstakes, withdraws, burns, returns all WETH + cbBTC to the Safe).
+
+If the backend key goes dark mid-flight, `exit(SAFE)` is the **only** escape. `withdrawPosition`/`deregisterPosition` revert mid-flight and do not clear the window — do not reach for them.
 
 ---
 
-## 10. Environment
+## 9. Environment
 
 Names are the backend spec §11 names verbatim, so there is one vocabulary across both documents.
 
 | Env | Value | Note |
 | --- | --- | --- |
-| `MOONWELL_LP_AUTO_BALANCER` | `MAMO_LP_AUTO_BALANCER_V2_CBETH` | from `addresses/8453.json` after 014 |
-| `MOONWELL_LP_COMPOUND_MODULE` | `MAMO_LP_COMPOUND_MODULE_CBETH` | |
+| `MOONWELL_LP_AUTO_BALANCER` | `MAMO_LP_AUTO_BALANCER_V2` | from `addresses/8453.json` after 011 |
+| `MOONWELL_LP_COMPOUND_MODULE` | `MAMO_LP_COMPOUND_MODULE` | |
 | `MOONWELL_LP_RPC_URL` | Base RPC | |
-| `MOONWELL_LP_WIDTH_TICKS` | `50` | even, inside `[minWidth, maxWidth]` |
+| `MOONWELL_LP_WIDTH_TICKS` | `400` | multiple of 200, **≥ 400** (§4.1) |
 | `MOONWELL_LP_WITHDRAW_TOL_BPS` / `_MINT_TOL_BPS` | `50` / `50` | sandwich floors — never 0 |
 | `MOONWELL_LP_HYSTERESIS_BPS` | `200` | stake/unstake anti-flap (§6.5) |
 | `MOONWELL_LP_MAX_UNSWEPT_AERO` | operator choice | compound trigger |
 | `MOONWELL_LP_COMPOUND_BPS` | `7000` | reinvest share; drop share = `10000 −` this |
 | `MOONWELL_LP_DROP_SHARE_TOL_BPS` | `500` | alert on realized vs policy drop share |
-| `MOONWELL_LP_FEED_FRESHNESS_MAX_S` | `2400` | 2× the measured ~1200 s heartbeat (§1.2) |
+| `MOONWELL_LP_FEED_FRESHNESS_MAX_S` | `2400` | 2× the measured ~1200 s heartbeat (§1.1) |
 | `MOONWELL_LP_SEQUENCER_GRACE_S` | `3600` | ≥ the onchain value |
 | `MOONWELL_LP_SWEEP_INTERVAL_S` | `300` | monitoring cadence; the rebalance branch is gated by `cooldownRemaining`, not this |
 | `DRY_RUN` | `true` until go-live | |
 | `HEALTH_PORT` | `8080` | |
 
-Swap-mode variables (`MOONWELL_LP_COW_API`, `_ORDER_WINDOW_S`, `_IMBALANCE_MIN`, `_PAYBACK_MAX_H`, `_LIMIT_HAIRCUT_BPS`, `_APPROVE_BUFFER_BPS`) stay unset at bootstrap (§8).
+Swap-mode variables (`MOONWELL_LP_COW_API`, `_ORDER_WINDOW_S`, `_IMBALANCE_MIN`, `_PAYBACK_MAX_H`, `_LIMIT_HAIRCUT_BPS`, `_APPROVE_BUFFER_BPS`) come into play once §7.1 step 2 lands; see spec §11.
 
 `BACKEND_REBALANCER_EOA` is provisioned inside the sandbox only; the workflow layer never holds it.
 
 ---
 
-## 11. Go-live checklist
+## 10. Go-live checklist
 
-1. `make lp-v2-cbeth-bootstrap` green on a pinned fork.
-2. Re-run the §1.2 heartbeat measurement; confirm `maxOracleDelay0` still tolerates ≥ 2 missed rounds.
+1. `make lp-v2-setup` green on a pinned fork.
+2. Re-run the §1.1 heartbeat measurement for **both** feeds; confirm each tolerates ≥ 2 missed rounds.
 3. Have the backend report live fee/emission rates and the stake-vs-unstake verdict; agree `totalAllocationUsd` against them.
-4. Safe mints the cbETH/WETH NFT offchain at the agreed size (§2.1); record `INIT_TOKEN_ID`.
-5. Run 014 with `setTokenId`, `setRebalancerEOA`, `setTotalAllocation` — `validate()` must pass, allocation band included.
-6. Preflight (§7) green, including every guard-armed read.
-7. Checker-owner transaction (§7.1) — needed for AERO compounding, not for ALT-only operation.
+4. Safe mints the WETH/cbBTC NFT offchain at the agreed size (§2.1 — geometry-sized, not 50/50); record `INIT_TOKEN_ID`.
+5. Run 011 with `setTokenId`, `setRebalancerEOA`, `setTotalAllocation` — `validate()` must pass, allocation band included.
+6. Preflight (§7) green, including every guard-armed read and the `width ≥ 400` assert.
+7. Checker-owner transaction (§7.1). Steps 1+3 gate AERO compounding; step 2 gates the swap path — ALT-only until it lands.
 8. Dry-run soak: one full sweep cadence, completion gate agreeing with the agent's report on every tick.
-9. Flip `DRY_RUN=false` with a human watching. First live action should be `stake()` (§3), then `claimEmissions`/`compound` — not a rebalance.
+9. Flip `DRY_RUN=false` with a human watching. First live action is the stake decision (§3), then claim/compound — not a rebalance.
 10. Confirm AERO routing lands in `DROP_AUTOMATION` and the realized drop share matches `1 − COMPOUND_BPS/10000` within tolerance.

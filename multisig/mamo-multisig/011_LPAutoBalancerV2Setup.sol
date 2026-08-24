@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
+import {LPValuationLib} from "@contracts/libraries/LPValuationLib.sol";
+import {ICLPool} from "@interfaces/ICLPool.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {DeployLPAutoBalancerV2} from "@script/DeployLPAutoBalancerV2.s.sol";
 
@@ -44,6 +46,10 @@ import {console} from "forge-std/console.sol";
 ///         already owns it. The production run MUST set the real values via the setters below:
 ///           - setTokenId(uint256)        — the tokenId the Safe holds (minted in Phase B2).
 ///           - setRebalancerEOA(address)  — the real backend signer EOA (MAMO_LP_REBALANCER).
+///         And ONE the production run SHOULD set, since it defaults to $50k:
+///           - setTotalAllocation(uint256,uint16) — the USD size committed to this position.
+///             validate() asserts the registered principal lands inside that band. See the field's
+///             NatSpec for why the size is VALIDATED here rather than minted.
 ///         The fork test injects fork-minted / makeAddr values via the same setters.
 ///         If MAMO_LP_REBALANCER is registered in addresses/8453.json at run time it is used as the
 ///         default; otherwise rebalancerEOA MUST be set explicitly or build() reverts.
@@ -109,6 +115,28 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     ///         MAMO_LP_REBALANCER address entry when present; otherwise MUST be set via setRebalancerEOA.
     address public rebalancerEOA;
 
+    /// @notice TOTAL ALLOCATION committed to this position, 8-decimal USD (the balancer's own
+    ///         `valueInUsd` scale). $50,000 by default: large enough that emissions and gas are
+    ///         measurable against real fee income, small enough that phase-1 proves the rebalancer at
+    ///         a TVL the protocol can afford to lose. Change it per run via `setTotalAllocation`,
+    ///         never by editing this file.
+    /// @dev    This is a VALIDATED parameter, not a minting instruction. The position NFT is minted
+    ///         off-chain in Phase B2 and pinned via `setTokenId`; `validate()` then asserts the
+    ///         registered principal matches this target. It cannot mint here: FPS records `build()`'s
+    ///         actions as calldata and replays them at Safe-execution time, so a `mint` inside
+    ///         `build()` would return a tokenId observed during SIMULATION while the Slipstream NFPM's
+    ///         tokenId is a global counter that anyone's mint advances in between — the encoded
+    ///         `registerPosition(tokenId)` would then name someone else's NFT. Minting off-chain and
+    ///         asserting the resulting SIZE is the only form of this parameter that cannot silently
+    ///         bind the wrong token.
+    uint256 public totalAllocationUsd = 50_000e8;
+
+    /// @notice Band `validate()` accepts around `totalAllocationUsd`. 500 bps absorbs the spread
+    ///         between the price the Safe minted at and the price validation reads, plus the in-ratio
+    ///         remainder the NFPM refunds. NOT slack for a wrong allocation: a position minted at half
+    ///         the intended size fails this assertion.
+    uint16 public allocationToleranceBps = 500;
+
     /// @notice Default seconds the Base sequencer must have been continuously up before the balancer
     ///         accepts a Chainlink read. 3600s is the conventional L2 grace period: long enough for
     ///         ETH/USD and BTC/USD to publish a post-outage round, short enough that a recovery does
@@ -142,6 +170,18 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
 
     function setRebalancerEOA(address rebalancerEOA_) external {
         rebalancerEOA = rebalancerEOA_;
+    }
+
+    /// @notice Set the total allocation this proposal commits and validates.
+    /// @param totalAllocationUsd_ 8-decimal USD. Must be non-zero — a zero target collapses the
+    ///        validation band to `[0, 0]` and would silently accept any position, which is the one
+    ///        outcome this parameter exists to prevent.
+    /// @param allocationToleranceBps_ band around the target, <= 10000.
+    function setTotalAllocation(uint256 totalAllocationUsd_, uint16 allocationToleranceBps_) external {
+        require(totalAllocationUsd_ != 0, "totalAllocationUsd must be non-zero");
+        require(allocationToleranceBps_ <= 10_000, "tolerance > 100%");
+        totalAllocationUsd = totalAllocationUsd_;
+        allocationToleranceBps = allocationToleranceBps_;
     }
 
     /// @notice Override the sequencer grace period this proposal arms the guard with. Must be
@@ -191,7 +231,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position, and grant REBALANCER_ROLE to the backend signer.";
+        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position at the configured total allocation, and grant REBALANCER_ROLE to the backend signer.";
     }
 
     function deploy() public override {
@@ -359,6 +399,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         // views so via_ir compiles each in its own frame (position() returns a 21-field tuple; inlining
         // both into validate() overflows the stack).
         this.validatePosition(lab);
+        this.validateAllocation();
         this.validateModule(labAddr, safe);
     }
 
@@ -406,6 +447,34 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
             address(lab),
             "balancer owns the WETH/cbBTC NFT"
         );
+    }
+
+    /// @dev Assert the registered position's principal actually equals the allocation this proposal
+    ///      commits. Priced with the SAME feeds, staleness bounds and sequencer guard the balancer
+    ///      itself uses, at the pool's live sqrtPriceX96 — so this is the balancer's own notion of the
+    ///      position's value, not an independent estimate that could agree by luck.
+    function validateAllocation() public view {
+        LPValuationLib.OracleConfig memory cfg = LPValuationLib.OracleConfig({
+            oracle0: addresses.getAddress("CHAINLINK_ETH_USD"),
+            oracle1: addresses.getAddress("CHAINLINK_BTC_USD"),
+            maxDelay0: maxOracleDelay0,
+            maxDelay1: maxOracleDelay1,
+            sequencerUptimeFeed: addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            sequencerGracePeriod: sequencerGracePeriod
+        });
+
+        (uint160 sqrtP,,,,,) = ICLPool(addresses.getAddress("WETH_CBBTC_CL_POOL")).slot0();
+
+        // Leg decimals are NOT symmetric on this pair: WETH (token0) is 18dp, cbBTC (token1) is 8dp.
+        uint256 principalUsd = LPValuationLib.principalValue(
+            addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME"), tokenId, sqrtP, cfg, 18, 8
+        );
+
+        uint256 lo = (totalAllocationUsd * (10_000 - allocationToleranceBps)) / 10_000;
+        uint256 hi = (totalAllocationUsd * (10_000 + allocationToleranceBps)) / 10_000;
+
+        assertTrue(principalUsd >= lo, "position under-allocated vs totalAllocationUsd");
+        assertTrue(principalUsd <= hi, "position over-allocated vs totalAllocationUsd");
     }
 
     /// @dev Assert the compound module was deployed and wired (the F-MAMO-doable portion; the

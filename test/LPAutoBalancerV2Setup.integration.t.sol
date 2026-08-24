@@ -6,6 +6,7 @@ import {LPAutoBalancerV2Setup} from "../multisig/mamo-multisig/011_LPAutoBalance
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {Test} from "@forge-std/Test.sol";
 
+import {LPGeometryLib} from "@contracts/libraries/LPGeometryLib.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -50,6 +51,12 @@ contract LPAutoBalancerV2SetupTest is Test {
     uint256 constant PINNED_BLOCK = 47_600_000;
     int24 constant TICK_SPACING = 100;
 
+    /// @dev The allocation this run commits. A ROUND NUMBER chosen up front, not read back from the
+    ///      minted position — the point of the parameter is that the position has to match the
+    ///      target, not the other way round. Set explicitly (rather than relying on the proposal's
+    ///      $50k default) so the setter itself is exercised.
+    uint256 constant TARGET_ALLOCATION_USD = 25_000e8;
+
     uint160 constant MIN_SQRT_RATIO_PLUS_ONE = 4_295_128_740;
 
     LPAutoBalancerV2Setup proposal;
@@ -74,8 +81,9 @@ contract LPAutoBalancerV2SetupTest is Test {
 
         safe = addresses.getAddress("F-MAMO");
 
-        // Mint a REAL WETH/cbBTC Slipstream position owned by the F-MAMO Safe (Phase-B precondition).
-        tokenId = _mintMainPositionTo(safe, 2 ether, 0.05e8);
+        // Mint a REAL WETH/cbBTC Slipstream position owned by the F-MAMO Safe (Phase-B precondition),
+        // sized from the target USD via the runbook's 50/50-by-value recipe.
+        tokenId = _mintAllocationTo(safe, TARGET_ALLOCATION_USD);
 
         // Instantiate + wire the proposal.
         proposal = new LPAutoBalancerV2Setup();
@@ -83,6 +91,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         proposal.setAddresses(addresses);
         proposal.setTokenId(tokenId);
         proposal.setRebalancerEOA(rebalancerEOA);
+        proposal.setTotalAllocation(TARGET_ALLOCATION_USD, 500);
     }
 
     // ─── helpers ─────────────────────────────────────────────────────────────
@@ -91,6 +100,40 @@ contract LPAutoBalancerV2SetupTest is Test {
         int24 q = tick / TICK_SPACING;
         if (tick < 0 && tick % TICK_SPACING != 0) q -= 1;
         return q * TICK_SPACING;
+    }
+
+    /// @dev Chainlink answer, 8-decimal, for a feed name in the address book.
+    function _price(string memory feedName) internal view returns (uint256) {
+        (, int256 answer,,,) = IPriceFeed(addresses.getAddress(feedName)).latestRoundData();
+        require(answer > 0, "feed answer non-positive");
+        return uint256(answer);
+    }
+
+    /// @dev Mint a real WETH/cbBTC CL position worth ~`targetUsd` (1e8) straddling spot.
+    /// @dev Sized from the RANGE GEOMETRY, not from a 50/50 value split. A 50/50 split is only right
+    ///      when spot sits at the range's centre, and at `tickSpacing` 100 the aligned centre can be
+    ///      up to 99 ticks away from spot — at which point the legs bind ~25/75 and the NFPM refunds
+    ///      a third of the intended size, putting the mint far outside the proposal's 500 bps band.
+    ///      So: price one unit of liquidity across the actual `[tl, tu]` at the live `sqrtPriceX96`,
+    ///      then scale to the target. Both legs bind together by construction.
+    ///      NOTE the asymmetric decimals — WETH (token0) is 18dp, cbBTC (token1) is 8dp.
+    function _mintAllocationTo(address recipient, uint256 targetUsd) internal returns (uint256 id) {
+        (uint160 sqrtP, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        int24 tl = center - 200;
+        int24 tu = center + 200;
+
+        // Value of one reference unit of liquidity across this exact range, 1e8 USD.
+        uint128 refLiq = 1e18;
+        (uint256 r0, uint256 r1) = LPGeometryLib.amountsForLiquidityAtTicks(sqrtP, tl, tu, refLiq);
+        uint256 refUsd = (r0 * _price("CHAINLINK_ETH_USD")) / 1e18 + (r1 * _price("CHAINLINK_BTC_USD")) / 1e8;
+        require(refUsd > 0, "reference liquidity prices to zero");
+
+        // Scale to the target, with a small headroom on the desired amounts so rounding in the
+        // NFPM's own conversion cannot leave the mint a wei short of the band.
+        uint256 amt0 = (r0 * targetUsd * 10_050) / (refUsd * 10_000);
+        uint256 amt1 = (r1 * targetUsd * 10_050) / (refUsd * 10_000);
+        return _mintMainPositionTo(recipient, amt0, amt1);
     }
 
     /// @dev Mint a real WETH/cbBTC CL position straddling spot, owned by `recipient`.
@@ -236,6 +279,30 @@ contract LPAutoBalancerV2SetupTest is Test {
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
         assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
+    }
+
+    /// @dev The allocation assertion's non-vacuity control. Same chain state, same position, same
+    ///      tolerance — only the TARGET moves, and validate() must fail. Without it, a band that
+    ///      accepts everything (a 100% tolerance, a principal read returning 0, a validate() that
+    ///      never reaches the check) is indistinguishable from a working one.
+    function test_validate_rejectsWrongAllocation() public {
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+
+        // Sanity: at the committed target it passes. If this ever fails the mint recipe drifted and
+        // the rejections below would prove nothing.
+        proposal.validate();
+
+        // 2x the real size, same 500 bps band → the position is ~50% under target.
+        proposal.setTotalAllocation(TARGET_ALLOCATION_USD * 2, 500);
+        vm.expectRevert("position under-allocated vs totalAllocationUsd");
+        proposal.validate();
+
+        // Half the real size → ~2x over target.
+        proposal.setTotalAllocation(TARGET_ALLOCATION_USD / 2, 500);
+        vm.expectRevert("position over-allocated vs totalAllocationUsd");
+        proposal.validate();
     }
 
     // ─── MOO-741: the setup proposal must leave the L2 sequencer guard ENABLED ──────────────────
