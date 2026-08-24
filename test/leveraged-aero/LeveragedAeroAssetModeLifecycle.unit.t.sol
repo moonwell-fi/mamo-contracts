@@ -1014,7 +1014,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         (uint256 collateral, uint256 debt) = _collateralAndDebt();
         assertGe((collateral * 10_000) / debt, 12_000, "the fixture must be healthy for this to mean anything");
 
-        uint256 debtBefore = mLegA.borrowBalance(address(strategy));
+        // The reverts ARE the pin: a post-revert state assertion would be inert, since the call unwinds it.
         vm.prank(makeAddr("stranger"));
         vm.expectRevert(LeveragedAerodromeCLStrategy.HealthyNoDeleverage.selector);
         strategy.deleverage(0);
@@ -1022,8 +1022,6 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(proposer); // not even the proposer gets the valve on a healthy book
         vm.expectRevert(LeveragedAerodromeCLStrategy.HealthyNoDeleverage.selector);
         strategy.deleverage(0);
-
-        assertEq(mLegA.borrowBalance(address(strategy)), debtBefore, "debt untouched by the refused calls");
     }
 
     /// @dev In the collateral-dust tail `targetDebt` floors to 0, so `repayUsd == debtBefore` would trip
@@ -1106,9 +1104,12 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         (uint256 c, uint256 d) = _collateralAndDebt();
         assertLt((d * 10_000) / c, 6500, "still inside the ceiling");
 
+        uint256 tokenIdBefore = strategy.layout().tokenId;
         vm.prank(proposer);
         strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
-        assertGt(strategy.layout().tokenId, 0, "rerange landed: the position is live, the op was not refused");
+        // `rerangeImpl` always mints a FRESH NFT, so a changed id pins that the op ran, not just that it
+        // failed to revert.
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "rerange actually reminted the position");
     }
 
     /// @dev The op is sized at target 5000 yet still refused: the gate reads the WHOLE book's post-op LTV.

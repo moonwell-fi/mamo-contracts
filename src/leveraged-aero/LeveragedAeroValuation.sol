@@ -329,7 +329,8 @@ library LeveragedAeroValuation {
     ///         `LeveragedAeroVenue.applyVenue`, which re-runs them at every `migrateVenue`.
     /// @dev L4: permissionless deleverage triggers at `LTV = 1e8 / minHealthBps`; the last two rungs bracket
     ///      it above `maxLtvBps` (grief-deleverage) and below `cfBps` (liquidation precedes the rescue), so
-    ///      the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`.
+    ///      the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`. CONFIG-TIME ONLY: a CF that Moonwell
+    ///      cuts post-init reopens that window until the next `migrateVenue` re-reads it.
     function checkLtvBand(uint16 targetLtvBps, uint16 maxLtvBps, uint16 minHealthBps, uint16 cfBps) public pure {
         if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
         if (minHealthBps < 10500) revert MinHealthTooLow();
