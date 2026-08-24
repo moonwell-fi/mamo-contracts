@@ -65,6 +65,7 @@ BTC_USD="$(addr CHAINLINK_BTC_USD)"
 resolve_vnet
 section "Verify fork is Base + protocol wiring intact"
 chain_sanity
+ensure_address_book
 [ "$(ccall "$GAUGE" 'nft()(address)')" = "$NFPM" ] || die "gauge.nft() != expected NFPM"
 ok "gauge.nft()==NFPM"
 

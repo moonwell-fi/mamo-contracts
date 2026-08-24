@@ -16,6 +16,7 @@
 # Optional knobs (with defaults):
 #   HARNESS_SLUG / HARNESS_DISPLAY   vnet naming          [resolve_vnet]
 #   EXPECTED_CHAIN=<id>              OPTIONAL hard chain assertion (unset = accept the vnet's own id)
+#   VNET_CHAIN_ID                    set by chain_sanity; drives broadcast_artifact + ensure_address_book
 #   ADDR_CHAIN=8453                 addresses/<id>.json    [addr]
 #   PHASE_MARKERS                   log lines surfaced     [run_forge_phase]
 #   FORCE_CREATE / KEEP_VNET        vnet lifecycle
@@ -90,6 +91,11 @@ teardown() {
       -H "X-Access-Key: $TENDERLY_ACCESS_KEY" >/dev/null && ok "vnet deleted" || warn "vnet delete failed (delete manually)"
   elif [ "${CREATED_VNET:-0}" = "1" ]; then
     warn "created vnet $VNET_ID kept (--keep or teardown skipped)"
+  fi
+  # Drop the chain-id-shim address book (see ensure_address_book). Only ever removes a file this
+  # run created -- TEMP_ADDRESS_BOOK is unset when the book already existed.
+  if [ -n "${TEMP_ADDRESS_BOOK:-}" ] && [ -f "$TEMP_ADDRESS_BOOK" ]; then
+    rm -f "$TEMP_ADDRESS_BOOK" && info "removed $(basename "$TEMP_ADDRESS_BOOK")"
   fi
 }
 
@@ -166,6 +172,34 @@ chain_sanity() {
 broadcast_artifact() {
   [ -n "${VNET_CHAIN_ID:-}" ] || die "broadcast_artifact called before chain_sanity"
   printf '%s' "broadcast/LPV2TenderlyHarness.s.sol/${VNET_CHAIN_ID}/${1}-latest.json"
+}
+
+# Make addresses/<VNET_CHAIN_ID>.json exist when the vnet reports an id other than ADDR_CHAIN.
+#
+# WHY A COPY AND NOT A CONSTRUCTOR ARGUMENT: the harnesses build FPS `Addresses` with
+# `chainIds[0] = block.chainid`, but that is not the part that matters -- FPS's single-argument
+# `getAddress(name)` resolves against `block.chainid` internally
+# (lib/forge-proposal-simulator/addresses/Addresses.sol:110). So on a vnet reporting 9998453 the
+# lookup is `_addresses[name][9998453]` no matter what the constructor was handed, and the only
+# fixes are to rewrite every call site to the two-argument form or to give that chain id a book.
+# The book is real-Base addresses either way -- the vnet IS a Base fork -- so the copy is faithful,
+# and FPS's isContract validation still passes because those addresses genuinely have code on it.
+#
+# Removed again by teardown: addresses/ is not gitignored and a stray book would look like a real
+# deployment record.
+ensure_address_book() {
+  [ -n "${VNET_CHAIN_ID:-}" ] || die "ensure_address_book called before chain_sanity"
+  local src="$ROOT/addresses/${ADDR_CHAIN:-8453}.json"
+  local dst="$ROOT/addresses/${VNET_CHAIN_ID}.json"
+  [ "$dst" = "$src" ] && return 0
+  [ -f "$src" ] || die "address book $src not found"
+  if [ -f "$dst" ]; then
+    info "addresses/${VNET_CHAIN_ID}.json already present; leaving it alone"
+    return 0
+  fi
+  cp "$src" "$dst"
+  TEMP_ADDRESS_BOOK="$dst"
+  ok "materialized addresses/${VNET_CHAIN_ID}.json from ${ADDR_CHAIN:-8453}.json (removed on exit)"
 }
 
 # ── cheat-RPC fund + time helpers ───────────────────────────────────────────

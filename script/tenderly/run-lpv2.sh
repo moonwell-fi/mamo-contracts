@@ -76,6 +76,7 @@ resolve_vnet
 # ── 2. sanity-check the fork + protocol wiring ─────────────────────────────────
 section "Verify fork is Base + protocol wiring intact"
 chain_sanity
+ensure_address_book
 [ "$(ccall "$GAUGE" 'nft()(address)')" = "$NFPM" ] || die "gauge.nft() != expected NFPM"
 [ "$(ccall "$GAUGE" 'rewardToken()(address)')" = "$AERO" ] || die "gauge.rewardToken() != AERO"
 ok "gauge.nft()==NFPM and gauge.rewardToken()==AERO"

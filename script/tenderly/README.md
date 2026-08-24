@@ -116,13 +116,21 @@ The harness handles each explicitly (see inline comments):
    collide, but the flag stays on either way — the cost is a few extra RPC reads, and the failure it
    prevents is silent, chain-id-dependent state corruption.
 
-   **Any chain id works.** Tenderly's dashboard defaults a Base fork to a `999`-prefixed custom id
+   **Any chain id works**, via two shims. Tenderly's dashboard defaults a Base fork to a `999`-prefixed custom id
    (`9998453`); moonwell-tenderly uses `73570 + networkId`. The harness reads the live id into
    `$VNET_CHAIN_ID` and derives forge's broadcast-artifact path from it, so nothing is pinned to
    8453. What proves the fork really is Base is the protocol-wiring assertion right after
    `chain_sanity` — `gauge.nft()` and `gauge.rewardToken()` against the real Base addresses from
    `addresses/8453.json`, which only answer correctly on a Base fork. Set `EXPECTED_CHAIN=<id>` to
    opt back into a hard assertion; `ADDR_CHAIN` is separate and still selects the address book.
+
+   The second shim is `ensure_address_book`, which copies `addresses/$ADDR_CHAIN.json` to
+   `addresses/$VNET_CHAIN_ID.json` for the run and deletes it on exit. Needed because FPS's
+   single-argument `getAddress(name)` resolves against `block.chainid` internally
+   (`Addresses.sol:110`) — so on a 9998453 vnet the lookup is `_addresses[name][9998453]` no matter
+   what chain ids the constructor was handed, and the alternative is rewriting every call site to
+   the two-argument form. The copy is faithful (the vnet *is* a Base fork, so those addresses really
+   do have the expected code), and a book that already exists is left alone rather than clobbered.
 4. **NFPM `_nextId` repair.** The vnet's packed `_nextId/_nextPoolId` slot (#14) hydrates *behind*
    real Base's counter while higher `_owners` hydrate lazily → `ERC721: token already minted`. The
    orchestrator copies real Base's authoritative slot 14 onto the vnet (+1000 id margin).
