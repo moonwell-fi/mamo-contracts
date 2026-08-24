@@ -388,7 +388,7 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 // Request tracking — read these instead of scraping logs.
 function openRequestIds() external view returns (uint256[] memory);   // ids the account is tracking
 function hasSettledRequest() external view returns (bool);            // any of them COMPLETED (fulfilled)
-function hasUnclaimedWithdrawal() external view returns (bool);       // legacy alias of the above
+function hasUnclaimedWithdrawal() external pure returns (bool);       // DEPRECATED, always false
 function syncRedeemRequests() external;                               // onlyOwner housekeeping
 ```
 
@@ -404,8 +404,10 @@ function syncRedeemRequests() external;                               // onlyOwn
 > *for how much*.
 >
 > **One consequence for ownership transfers:** the recipient is captured at request time, so a
-> `transferOwnership` while a request is outstanding still pays the address that asked. The new owner's
-> remedy is `cancelWithdraw(id)` (the shares return to the account) and a fresh `requestWithdraw`.
+> `transferOwnership` while a request is outstanding still pays the address that asked — on BOTH
+> settlement paths (`emergencyWithdraw` forwards to that same frozen recipient, not to the new owner).
+> The new owner's remedy is `cancelWithdraw(id)` (the shares return to the account) and a fresh
+> `requestWithdraw`, which re-freezes the recipient on them.
 
 ```mermaid
 sequenceDiagram
@@ -429,9 +431,11 @@ the account's idle USDC balance:
 
 1. `WithdrawRequested(id, shares, minAssetsOut)` → mark request `id` pending; offer **Cancel**
    (`cancelWithdraw(id)` returns the escrowed shares to the account, emits `WithdrawCancelled(id)`).
-2. Detect completion with `hasSettledRequest()`, or by watching the strategy's
-   `RedeemFulfilled(id, account, recipient, assetsOut)` (topic2 = the account, topic3 = the user). There
-   is still no account-side event on fulfil. `openRequestIds()` gives the live set without replaying logs.
+2. Detect completion from the account's `WithdrawSettled(id)` — emitted whenever a tracked settled id is
+   pruned, whoever prunes — or the strategy's `RedeemFulfilled(id, account, recipient, assetsOut)`
+   (topic2 = the account, topic3 = the user). `hasSettledRequest()` is a convenience poll and is
+   BEST-EFFORT: any pruning call clears it, a backend `depositIdle` included, so do not rely on catching
+   it. `openRequestIds()` gives the live set without replaying logs.
 3. **There is no step 3.** The payout is already in the user's wallet when the request settles — show it
    as complete, do not prompt for a claim. `claimWithdrawnUsdc()` remains as a sweep for USDC that
    reached the account some other way, so offer it only when `usdc.balanceOf(account) > 0`.
@@ -478,6 +482,7 @@ Account (`MamoLeveragedAeroStrategy`) — exact signatures:
 | `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | `requestWithdraw` |
 | `WithdrawCancelled(uint256 indexed id)` | `cancelWithdraw` |
 | `WithdrawEmergency(uint256 indexed id, uint256 assetsOut)` | `emergencyWithdraw` |
+| `WithdrawSettled(uint256 indexed id)` | a tracked request was observed settled and untracked — the account-side COMPLETION record |
 | `UsdcClaimed(uint256 amount)` | `claimWithdrawnUsdc` — an idle-USDC sweep, **not** a withdrawal claim |
 | `TokenRecovered(address indexed token, address indexed to, uint256 amount)` | `recoverERC20` / `recoverETH` (Settled exit) |
 

@@ -318,7 +318,7 @@ and neither does restoring the book, which is the same call at the untouched `ta
 ```solidity
 function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
 function hasSettledRequest()      external view returns (bool);   // a tracked request has COMPLETED
-function hasUnclaimedWithdrawal() external view returns (bool);   // legacy alias of the above
+function hasUnclaimedWithdrawal() external pure returns (bool);   // DEPRECATED, always false
 function openRequestIds()         external view returns (uint256[] memory);
 function syncRedeemRequests()     external;                       // owner-only housekeeping
 ```
@@ -336,11 +336,13 @@ What replaced it:
 
 - **Nothing gates the backend** beyond the caller check and the amount/balance checks. Both callers
   `_pruneSettled()` on the way through, so a completed request can never strand a tracked id.
-- **`hasSettledRequest()` is a COMPLETION SIGNAL, not a gate.** There is no account-side event when the
-  backend fulfils, so this view (and the strategy's `RedeemFulfilled`) is how you detect that a request
-  finished. It claims nothing and blocks nothing.
-- **`hasUnclaimedWithdrawal()` is retained as an alias** of `hasSettledRequest()` for ABI compatibility.
-  Its name is historical: a `true` reading means *completed*, not *money waiting*.
+- **`hasSettledRequest()` is a COMPLETION SIGNAL, not a gate**, and BEST-EFFORT: your own `depositIdle`
+  prunes, which clears it. The durable records are the account's `WithdrawSettled(id)` and the strategy's
+  `RedeemFulfilled`. It claims nothing and blocks nothing.
+- **`hasUnclaimedWithdrawal()` is retained but now returns `false` unconditionally.** Under its original
+  meaning ("a fulfilled withdrawal is unswept on the account") that is the truthful answer, so a backend
+  still following the old "skip `depositIdle` while true" rule keeps working instead of stalling forever.
+  Migrate to `hasSettledRequest()` for completion, or better to the `WithdrawSettled` event below.
 - **`recoverERC20` no longer deadlocks anything** — it can leave a stale tracked id, and that is inert.
   `syncRedeemRequests()` (owner-only) still prunes explicitly if you want the set tidy.
 - **`requestWithdraw` is capped** at `MAX_OPEN_REQUESTS` (16) simultaneously-tracked requests; it prunes
@@ -379,6 +381,7 @@ Account (`MamoLeveragedAeroStrategy`):
 | `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | pending async withdrawal — product state + SLA alerting (the `fulfillRedeem` trigger itself is the **rebalancer's**) |
 | `WithdrawCancelled(uint256 indexed id)` | request cancelled — drop it from the pending set |
 | `WithdrawEmergency(uint256 indexed id, uint256 assetsOut)` | deadman fired (backend missed SLA) |
+| `WithdrawSettled(uint256 indexed id)` | a tracked request completed and was untracked — the account-side completion record |
 | `UsdcClaimed(uint256 amount)` | owner swept idle USDC off the account (a plain transfer, or a deposit remainder) — **not** a withdrawal claim any more |
 
 Factory: `StrategyCreated(address indexed user, address indexed strategy)`.

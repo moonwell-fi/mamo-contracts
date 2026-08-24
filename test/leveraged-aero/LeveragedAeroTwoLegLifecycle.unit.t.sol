@@ -51,6 +51,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
     /// @dev Mirrored from the strategy for `vm.expectEmit`.
     event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
+    event RedeemFulfilled(uint256 indexed id, address indexed owner, address indexed recipient, uint256 assetsOut);
 
     MockToken internal usdc; // 6dp collateral / unit of account
     MockToken internal legB; // 8dp borrowed leg (token0)
@@ -1812,10 +1813,26 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 id = strategy.requestRedeem(shares, 0, payee);
         vm.stopPrank();
 
+        // The fulfil's own topic order, checked against the payout it actually made: `owner` (the
+        // requester) must stay in topic2 for account-keyed indexers, `recipient` in topic3.
         uint256 payeeBefore = usdc.balanceOf(payee);
+        vm.recordLogs();
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
-        vm.assertGt(usdc.balanceOf(payee) - payeeBefore, 0, "the recipient in topic3 is the address paid");
+        uint256 paid = usdc.balanceOf(payee) - payeeBefore;
+        assertGt(paid, 0, "premise: the fulfil paid the recipient");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool seen;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics[0] != RedeemFulfilled.selector || logs[i].emitter != address(strategy)) continue;
+            seen = true;
+            assertEq(uint256(logs[i].topics[1]), id, "topic1 = id");
+            assertEq(address(uint160(uint256(logs[i].topics[2]))), lp, "topic2 = the REQUESTER");
+            assertEq(address(uint160(uint256(logs[i].topics[3]))), payee, "topic3 = the recipient");
+            assertEq(abi.decode(logs[i].data, (uint256)), paid, "the one data word is the payout made");
+        }
+        assertTrue(seen, "RedeemFulfilled was emitted by the strategy");
     }
 
     /// @dev Full redeem clears the book with BOTH debts repaid and the flat-book invariant restored.

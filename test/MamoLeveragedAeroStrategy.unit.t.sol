@@ -27,6 +27,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     event WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut);
     event WithdrawCancelled(uint256 indexed id);
     event WithdrawEmergency(uint256 indexed id, uint256 assetsOut);
+    event WithdrawSettled(uint256 indexed id);
     event UsdcClaimed(uint256 amount);
     event StrategyCreated(address indexed user, address indexed strategy);
     event StrategyOwnerUpdated(address indexed strategy, address indexed oldOwner, address indexed newOwner);
@@ -1020,19 +1021,104 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.openRequestIds().length, 0, "disposed of");
     }
 
-    /// @dev The legacy name is retained for ABI compatibility and must keep agreeing with the accurate one.
-    function testHasUnclaimedWithdrawalIsAnAliasOfHasSettledRequest() public {
+    /// @dev The retained shim must stay FALSE even once a request settles: a backend still following the
+    ///      old "refuse depositIdle while true" rule would otherwise stall its own duty forever, since no
+    ///      claim step exists to prune and its own call is what would have pruned.
+    function testHasUnclaimedWithdrawalIsAlwaysFalseSoAnOldRuleBackendCannotStall() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
-        assertEq(strategy.hasUnclaimedWithdrawal(), strategy.hasSettledRequest(), "at rest");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "at rest");
 
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
-        assertEq(strategy.hasUnclaimedWithdrawal(), strategy.hasSettledRequest(), "outstanding");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "outstanding");
 
         sherwood.fulfillRedeem(id, 0);
-        assertTrue(strategy.hasUnclaimedWithdrawal(), "settled");
-        assertEq(strategy.hasUnclaimedWithdrawal(), strategy.hasSettledRequest(), "settled");
+        assertTrue(strategy.hasSettledRequest(), "premise: the request really did settle");
+        assertFalse(strategy.hasUnclaimedWithdrawal(), "...and the shim still reports nothing unclaimed");
+    }
+
+    /// @dev The recipient is frozen at request time, so a transfer mid-request pays the address that asked.
+    function testATransferOfTheAccountMidRequestStillPaysTheOwnerWhoAsked() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        address newOwner = makeAddr("newOwner");
+        vm.prank(user);
+        strategy.transferOwnership(newOwner);
+        assertEq(strategy.owner(), newOwner, "premise: the account changed hands mid-request");
+
+        sherwood.fulfillRedeem(id, 0);
+        assertEq(usdc.balanceOf(user), DEPOSIT, "the owner who asked was paid");
+        assertEq(usdc.balanceOf(newOwner), 0, "the new owner was not");
+    }
+
+    /// @dev BOTH settlement paths honour the same frozen recipient — otherwise a new owner could wait out
+    ///      the 2-day window to divert a payout the fulfil path would have sent to the old owner.
+    function testTheDeadmanPathAlsoPaysTheFrozenRecipientNotTheNewOwner() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        address newOwner = makeAddr("newOwner");
+        vm.prank(user);
+        strategy.transferOwnership(newOwner);
+        vm.warp(block.timestamp + 2 days + 1);
+
+        vm.prank(newOwner);
+        uint256 assetsOut = strategy.emergencyWithdraw(id, DEPOSIT);
+
+        assertEq(assetsOut, DEPOSIT);
+        assertEq(usdc.balanceOf(user), DEPOSIT, "the frozen recipient was paid");
+        assertEq(usdc.balanceOf(newOwner), 0, "the caller was not, despite owning the account");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "nothing stranded on the account");
+    }
+
+    /// @dev The new owner's documented remedy: cancel returns the shares here, and a fresh request
+    ///      re-freezes the recipient on them.
+    function testTheNewOwnerCancelsAndReRequestsToRedirectAnInFlightWithdrawal() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        address newOwner = makeAddr("newOwner");
+        vm.prank(user);
+        strategy.transferOwnership(newOwner);
+
+        vm.prank(newOwner);
+        strategy.cancelWithdraw(id);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "shares came back to the account");
+
+        vm.prank(newOwner);
+        uint256 id2 = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        assertEq(sherwood.redeemRequest(id2).recipient, newOwner, "the re-request names the new owner");
+
+        sherwood.fulfillRedeem(id2, 0);
+        assertEq(usdc.balanceOf(newOwner), DEPOSIT, "and pays them");
+        assertEq(usdc.balanceOf(user), 0, "the old owner gets nothing from the re-request");
+    }
+
+    /// @dev The account-side completion record, so a backend `depositIdle` pruning first cannot silently
+    ///      consume the only completion signal a frontend has.
+    function testPruningEmitsTheAccountSideCompletionEventWhoeverPrunes() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        uint256 id = _fulfilledRequest(strategy);
+
+        usdc.mint(address(strategy), DEPOSIT);
+        vm.expectEmit(true, false, false, false, address(strategy));
+        emit WithdrawSettled(id);
+
+        vm.prank(backend);
+        strategy.depositIdle(DEPOSIT, 0);
+        assertEq(strategy.openRequestIds().length, 0, "and the id was untracked");
     }
 
     /// @dev With no claim step to force a prune, completed requests would otherwise lock a user out at 16.
@@ -1057,7 +1143,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.openRequestIds().length, 1, "only the new, outstanding request is tracked");
     }
 
-    /// @dev (11) The hatch is OWNER-only — a backend-callable prune would clear the backend's own gate.
+    /// @dev (11) The hatch stays owner-only by convention; the backend already prunes via `depositIdle`.
     function testSyncRedeemRequestsIsOwnerOnly() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
 

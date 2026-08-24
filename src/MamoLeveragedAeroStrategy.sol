@@ -63,6 +63,10 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     /// @notice Ceiling on simultaneously-tracked async requests, bounding the gas of the scans over it.
     uint256 public constant MAX_OPEN_REQUESTS = 16;
 
+    /// @notice Emitted when a tracked async request is observed settled and untracked — the account-side
+    ///         completion record, since a fulfil pays the recipient with no callback here.
+    event WithdrawSettled(uint256 indexed id);
+
     /// @notice Emitted when USDC is deposited and vault shares are minted to this account.
     event Deposit(address indexed depositor, uint256 assets, uint256 shares);
 
@@ -224,7 +228,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      */
     function cancelWithdraw(uint256 id) external onlyOwner {
         sherwoodStrategy.cancelRedeem(id);
-        // BY ID ONLY: a cancel returns SHARES, so a blanket prune would clear the gate for other proceeds.
+        // BY ID ONLY: a cancel returns SHARES, so it must not report other ids as settled withdrawals.
         _untrack(id);
 
         emit WithdrawCancelled(id);
@@ -233,17 +237,19 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     /**
      * @notice Trustless emergency redeem of an unfulfilled request after the strategy's fulfill window,
      *         paying USDC to the owner.
-     * @dev The strategy pays this account here, not the recipient, so the amount is forwarded on — same end
-     *      payee as a fulfil, one hop more.
+     * @dev The strategy pays this account here rather than the request's recipient, so the amount is
+     *      forwarded to that SAME recipient — never to the current `owner()`, or a transfer of the account
+     *      mid-request would let the deadman path pay someone the fulfil path would not.
      * @param id Request id (owner-gated on the strategy side too).
      * @param minAssetsOut Fresh slippage floor on the net payout.
-     * @return assetsOut USDC forwarded to the owner (6dp).
+     * @return assetsOut USDC forwarded to the request's recipient (6dp).
      */
     function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external onlyOwner returns (uint256 assetsOut) {
+        address recipient = sherwoodStrategy.redeemRequest(id).recipient;
         assetsOut = sherwoodStrategy.emergencyRedeem(id, minAssetsOut);
 
-        _forwardToOwner(assetsOut);
-        // BY ID ONLY, as in {cancelWithdraw}: this pays straight through, leaving nothing unclaimed here.
+        if (assetsOut > 0) usdc.safeTransfer(recipient, assetsOut);
+        // BY ID ONLY, as in {cancelWithdraw}: this pays straight through, so a blanket prune would be wrong.
         _untrack(id);
 
         emit WithdrawEmergency(id, assetsOut);
@@ -293,13 +299,16 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         return sherwoodStrategy.state();
     }
 
-    /// @notice Deprecated alias of {hasSettledRequest}, kept for ABI compatibility. `true` means COMPLETED.
-    function hasUnclaimedWithdrawal() public view returns (bool) {
-        return hasSettledRequest();
+    /// @notice DEPRECATED, always false — kept only so an integration built against the old gate keeps
+    ///         working. Under its original meaning ("a fulfilled withdrawal is unswept here") false is now
+    ///         the truthful answer: a fulfil pays the recipient directly. Use {hasSettledRequest}.
+    function hasUnclaimedWithdrawal() public pure returns (bool) {
+        return false;
     }
 
     /// @notice True while a tracked async request has settled, i.e. completed.
-    /// @dev The completion signal a frontend polls (no account-side event on fulfil); gates nothing.
+    /// @dev Gates nothing, and BEST-EFFORT: any pruning call clears it, backend `depositIdle` included.
+    ///      {WithdrawSettled} is the durable completion record.
     function hasSettledRequest() public view returns (bool) {
         uint256 n = _openRequestIds.length;
         for (uint256 i; i < n; ++i) {
@@ -333,16 +342,19 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         }
     }
 
-    /// @dev Drop every settled tracked request. Iterates from the TAIL so swap-pop cannot skip an element.
+    /// @dev Drop every settled tracked request, emitting {WithdrawSettled} per id so completion is recorded
+    ///      whoever prunes. Iterates from the TAIL so swap-pop cannot skip an element.
     function _pruneSettled() private {
         uint256 i = _openRequestIds.length;
         while (i > 0) {
             unchecked {
                 --i;
             }
-            if (sherwoodStrategy.redeemRequest(_openRequestIds[i]).settled) {
+            uint256 id = _openRequestIds[i];
+            if (sherwoodStrategy.redeemRequest(id).settled) {
                 _openRequestIds[i] = _openRequestIds[_openRequestIds.length - 1];
                 _openRequestIds.pop();
+                emit WithdrawSettled(id);
             }
         }
     }
