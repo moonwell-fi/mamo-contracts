@@ -60,15 +60,9 @@ library LeveragedAeroVenue {
     /// @dev Re-declared with the strategy's signature (so the same `topic0`): without it an owner-staged
     ///      migration could silently restore a target the proposer had just ratcheted down.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
-    /// @notice The fund's OPERATIONAL LTV ceiling changed through the admin's standalone `setMaxLtv`.
-    /// @dev Re-declared with the strategy's signature (so the same `topic0`): `setMaxLtvImpl` is
-    ///      delegatecalled, so the log carries the STRATEGY's address. `applyVenue` writes `maxLtvBps`
-    ///      too but announces nothing there — that path is already announced as `VenueMigrated`, whose
-    ///      byte-committed params a monitor reads in full; this setter has no such envelope.
+    /// @notice The admin's standalone `setMaxLtv` / `setWidthBounds` landed. Re-declared with the strategy's
+    ///         signatures (same `topic0`); `applyVenue` rewrites both fields inside a `VenueMigrated` instead.
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
-    /// @notice The rerange width band changed through the admin's standalone `setWidthBounds`.
-    /// @dev Same delegatecall/topic0 mirroring as above; `applyVenue` rewrites the band inside a
-    ///      `VenueMigrated` and emits nothing band-specific.
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
 
     /// @notice An async-redeem request was escrowed. Re-declared with the strategy's signature (same `topic0`).
@@ -720,19 +714,10 @@ library LeveragedAeroVenue {
         $.legBIsAsset = legBIsAsset_;
     }
 
-    // ── Standalone ADMIN band setters (bodies of the strategy's `setMaxLtv` / `setWidthBounds`,
-    //    hosted here for the strategy's EIP-170 budget; delegatecalled, so they write the strategy's
-    //    storage and log from its address) ──
+    // ── Bodies of the strategy's `setMaxLtv` / `setWidthBounds`, hosted here for its EIP-170 budget ──
 
-    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setMaxLtv`: rewrite the operational LTV ceiling
-    ///         after re-running the WHOLE band ladder against the LIVE collateral factor.
-    /// @dev Validation is `LeveragedAeroValuation.checkLtvBand` — the SAME four rungs `applyVenue` and the
-    ///      init ladder run, not an ad-hoc pair of comparisons, so a rung added there is inherited here.
-    ///      The collateral factor is read FRESH from the comptroller: Moonwell governance can lower USDC's
-    ///      CF after init, and validating against the init-time snapshot could approve a ceiling that now
-    ///      sits above the live liquidation line. `$.usdcCollateralFactorBps` is deliberately NOT rewritten
-    ///      — it is the init/migration RECORD of the venue adoption, not a cache anything reads.
-    /// @param maxLtvBps_ The new ceiling in bps.
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setMaxLtv`, on the shared `checkLtvBand` ladder.
+    /// @dev The CF is read live (see the entrypoint); `$.usdcCollateralFactorBps` stays the adoption record.
     function setMaxLtvImpl(uint16 maxLtvBps_) public {
         Layout storage $ = _layout();
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
@@ -741,16 +726,8 @@ library LeveragedAeroVenue {
         $.maxLtvBps = maxLtvBps_;
     }
 
-    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setWidthBounds`: rewrite the rerange width band
-    ///         after re-running BOTH range ladders `applyVenue` runs, in the same order.
-    /// @dev `checkBands` is the band's own shape; `checkRange` then re-validates the CURRENTLY STORED
-    ///      `(width, skewBps)` inside the candidate band. The second call is load-bearing:
-    ///      `redeployImpl` / `rerangeImpl` size from the STORED width, so a band that excluded it would
-    ///      let the next redeploy place a range the band forbids. A band that excludes the live width
-    ///      therefore reverts `OutOfBounds` — the admin passes a compatible band, or the proposer
-    ///      `rerange`s into the intended one first.
-    /// @param minWidth_ New lower bound for a proposer-supplied rerange width, in ticks.
-    /// @param maxWidth_ New upper bound, in ticks.
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setWidthBounds`, on both ladders `applyVenue` runs.
+    /// @dev `checkBands` is the band's shape; `checkRange` is the stored-width containment rule.
     function setWidthBoundsImpl(uint24 minWidth_, uint24 maxWidth_) public {
         Layout storage $ = _layout();
         int24 spacing = $.tickSpacing;
