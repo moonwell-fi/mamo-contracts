@@ -283,6 +283,32 @@ contract LPAutoBalancerV2SetupTest is Test {
         assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
     }
 
+    /// @dev The PRODUCTION resolution path. Every other test injects a made-up rebalancer via
+    ///      `setRebalancerEOA`, so none of them touch `_resolveRebalancer`'s address-book fallback —
+    ///      which is the branch the real run takes, since the production proposal is executed without
+    ///      that setter. Deliberately does NOT call `setRebalancerEOA`, so a missing or wrong
+    ///      MAMO_LP_REBALANCER entry fails here rather than granting the hot key to the wrong address
+    ///      on mainnet.
+    function test_resolvesRebalancerFromAddressBook() public {
+        // Fresh proposal: no setRebalancerEOA, so the fallback is the only source.
+        LPAutoBalancerV2Setup p = new LPAutoBalancerV2Setup();
+        p.setPrimaryForkId(vm.activeFork());
+        p.setAddresses(addresses);
+        p.setTokenId(tokenId);
+        p.setTotalAllocation(TARGET_ALLOCATION_USD, 500);
+        assertEq(p.rebalancerEOA(), address(0), "no explicit rebalancer set");
+
+        p.deploy();
+        p.build();
+        p.simulate();
+        p.validate();
+
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+        address expected = addresses.getAddress("MAMO_LP_REBALANCER");
+        assertTrue(lab.hasRole(lab.REBALANCER_ROLE(), expected), "address-book rebalancer granted");
+        assertFalse(lab.hasRole(lab.REBALANCER_ROLE(), rebalancerEOA), "the test EOA was NOT granted");
+    }
+
     /// @dev The allocation assertion's non-vacuity control. Same chain state, same position, same
     ///      tolerance — only the TARGET moves, and validate() must fail. Without it, a band that
     ///      accepts everything (a 100% tolerance, a principal read returning 0, a validate() that

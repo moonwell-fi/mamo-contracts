@@ -423,5 +423,10 @@
     "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
     "name": "CHAINLINK_L2_SEQUENCER_UPTIME_FEED",
     "isContract": true
+  },
+  {
+    "addr": "0xd4669fCee3BE73b51438ad1f1debEB3505Eab308",
+    "name": "MAMO_LP_REBALANCER",
+    "isContract": false
   }
 ]
