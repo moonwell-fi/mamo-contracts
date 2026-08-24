@@ -62,7 +62,7 @@ against the code rather than assumed:
 | Backend call | Shape-dependent? | Why |
 |---|---|---|
 | `createStrategyForUser(user)` | No | Account/factory layer; never touches the fund's legs. |
-| `depositIdle(assets, minShares)` | No | USDC in, shares out. Reverts `"Unclaimed withdrawal proceeds"` when called by the BACKEND while a fulfilled async withdrawal is unswept — pre-check `hasUnclaimedWithdrawal()`. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
+| `depositIdle(assets, minShares)` | No | USDC in, shares out. No unclaimed-proceeds gate: a fulfil pays the user directly, so nothing on the account is ever withdrawal proceeds. **You pick `assets`** — it no longer sweeps the whole idle balance. Deposits land as **idle USDC on the strategy** in both shapes and are deployed later by the proposer's `deployIdle`. Reverts if `assets` exceeds the account's idle balance, or with `FundAtCapacity` if the deposit would push the fund's NAV past `vault.maxTotalAssets()` (see below). |
 | `fulfillRedeem(id, minAssetsOut)` | No | Same oracle-free proportional unwind in both shapes: remove `f = shares/supply` of **every** leg, repay `f` of **every** debt, pay the net USDC. Asset-mode does change the *internal* stayer-reservation accounting (leg B's "idle leg" balance **is** the idle USDC, so it is reserved once, not twice) — but that is inside `redeemUnwindImpl`, not on the call surface. |
 | `WithdrawRequested` → fulfill loop | No | Same events, same ids, same `FULFILL_WINDOW`. |
 
@@ -97,7 +97,7 @@ room = vault.remainingCapacity()   // USDC (6dp). type(uint256).max => cap disab
 deposit measures against `navNet` (NAV after the fee crystallisation the deposit runs first), and NAV
 moves between your read and your transaction landing. Target ~95% of `room` and treat `FundAtCapacity`
 as **retryable** (re-read and re-size, do not escalate). Leftover idle USDC stays on the account and
-the owner can claim it via `claimWithdrawnUsdc` at any time.
+the owner can sweep it via `claimWithdrawnUsdc` at any time.
 
 Three properties worth building around:
 
@@ -260,12 +260,13 @@ reason: it is out of the wrapper's surface and out of the backend's. Calling it 
 What the backend **does** own here is **observability** — the async flow is the user's slowest path, so the
 backend indexes it and drives product state / notifications off it, and escalates to the rebalancer when the
 SLA is at risk. Strategy events for that (note: `owner` here is the **Mamo account address**, i.e. the
-`msg.sender` that escrowed the shares — not the end user):
+`msg.sender` that escrowed the shares — not the end user; `recipient` is the address the fulfil PAYS,
+which for a Mamo account is the account's `owner()`, i.e. the end user):
 
 | Event | Meaning |
 |---|---|
-| `RedeemRequested(uint256 indexed id, address indexed owner, uint256 shares)` | request escrowed (owner = account) |
-| `RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)` | **rebalancer** fulfilled; USDC paid to the account |
+| `RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares)` | request escrowed (owner = account, recipient = end user) |
+| `RedeemFulfilled(uint256 indexed id, address indexed owner, address indexed recipient, uint256 assetsOut)` | **rebalancer** fulfilled; USDC paid to `recipient` — the withdrawal is COMPLETE |
 | `RedeemCancelled(uint256 indexed id, address indexed owner, uint256 shares)` | request cancelled by the account owner |
 | `RedeemEmergency(uint256 indexed id, address indexed owner, uint256 assetsOut)` | deadman self-fulfill after the window |
 
@@ -279,23 +280,24 @@ sequenceDiagram
     participant S as Strategy (LeveragedAerodromeCL)
 
     A-->>BE: WithdrawRequested(id, shares, minAssetsOut)   (account event — backend indexes it)
-    A-->>RB: RedeemRequested(id, account, shares)          (strategy event — the keeper trigger)
+    A-->>RB: RedeemRequested(id, account, owner, shares)   (strategy event — the keeper trigger)
     Note over RB: if the unwind needs it, RB runs adjustLeverage at a lower per-call target (≤ policy) — no multisig
     RB->>S: fulfillRedeem(id, minAssetsOut)                              (PROPOSER key = rebalancer)
-    S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
-    Note over A: owner then sweeps via claimWithdrawnUsdc() → UsdcClaimed(amount)
-    Note over BE: backend observes RedeemFulfilled / UsdcClaimed and updates product state
+    S-->>U: pays USDC to the request's RECIPIENT (the account's owner) + RedeemFulfilled(id, account, owner, assetsOut)
+    Note over BE: backend observes RedeemFulfilled and updates product state — the withdrawal is COMPLETE
 ```
 
 1. The backend watches each account's `WithdrawRequested(id, shares, minAssetsOut)` (equivalently the
-   strategy's `RedeemRequested(id, account, shares)`) for UX/product state — **not** to fulfil it.
+   strategy's `RedeemRequested(id, account, recipient, shares)`) for UX/product state — **not** to fulfil it.
 2. The book is optionally levered **down** first so the oracle-free proportional unwind self-funds its IL
    — a **single-actor** step: the rebalancer runs `adjustLeverage(lowerTarget, minLiq, minOut)` and then
    `fulfillRedeem(id, minAssetsOut)` — both with the **proposer** key, no multisig on the path, and the
    restore afterwards is the same call at `targetLtvBps()`.
-3. USDC lands on the account; the **owner** claims it with `claimWithdrawnUsdc()`.
-4. Confirm downstream via the account's `UsdcClaimed(amount)` (owner-initiated) or the strategy's
-   `RedeemFulfilled`.
+3. **USDC goes straight to the user.** `requestWithdraw` names the account's `owner()` as the pooled
+   request's `recipient`, so `fulfillRedeem` transfers the payout to that address. There is no second
+   claim transaction, and no USDC rests on the account.
+4. Confirm downstream via the strategy's `RedeemFulfilled(id, account, recipient, assetsOut)` — that
+   event *is* the completion, not a signal that a claim is now due.
 
 ### SLA — the 2-day deadman
 
@@ -311,43 +313,42 @@ and neither does restoring the book, which is the same call at the untouched `ta
 
 ---
 
-## `depositIdle` — the unclaimed-withdrawal gate (ENFORCED on-chain)
+## `depositIdle` — no unclaimed-withdrawal gate any more
 
 ```solidity
 function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // owner OR registry backend member 0
-function hasUnclaimedWithdrawal() external view returns (bool);   // the gate — check this FIRST
-function openRequestIds()        external view returns (uint256[] memory);
-function syncRedeemRequests()    external;                        // owner-only escape hatch
+function hasSettledRequest()      external view returns (bool);   // a tracked request has COMPLETED
+function hasUnclaimedWithdrawal() external view returns (bool);   // legacy alias of the above
+function openRequestIds()         external view returns (uint256[] memory);
+function syncRedeemRequests()     external;                       // owner-only housekeeping
 ```
 
-Idle USDC on an account is **ambiguous**: it may be funds a user plain-transferred for re-deposit, **or**
-the payout of a fulfilled async withdrawal waiting for the owner's `claimWithdrawnUsdc()`. That used to
-be a coordination rule between the two trusted actors. **It is now enforced:** a BACKEND `depositIdle`
-reverts `"Unclaimed withdrawal proceeds"` while any of the account's tracked async requests reads
-`settled` on the strategy. Without it the backend could re-lock an exit the user had already asked for,
-repeatably, and the user's withdrawal would never complete.
+Idle USDC on an account used to be **ambiguous** — funds a user plain-transferred for re-deposit, or the
+payout of a fulfilled async withdrawal awaiting `claimWithdrawnUsdc()` — so a BACKEND `depositIdle`
+reverted `"Unclaimed withdrawal proceeds"` while any tracked request read `settled`.
 
-**Pre-check, do not discover the revert:** call `hasUnclaimedWithdrawal()` before every nudge. It reads
-`settled` **live** off `sherwoodStrategy.redeemRequest(id)` for each id in `openRequestIds()`, so it
-cannot report stale. Prefer both views to scraping `WithdrawRequested` / `UsdcClaimed` logs.
+**That gate is gone, because the ambiguity is gone.** A fulfil now pays the account's `owner()` directly
+and the fast/emergency paths forward in the same transaction, so **no withdrawal proceeds ever rest on an
+account**. Idle USDC there is always money someone transferred in — exactly what `depositIdle` is for.
+`"Unclaimed withdrawal proceeds"` is no longer a reachable revert; drop any pre-check for it.
 
-What the gate does and does not do:
+What replaced it:
 
-- **An OUTSTANDING (unfulfilled) request does not block you.** It holds shares, not USDC, so there is
-  nothing unclaimed to re-lock. Only a *fulfilled-and-unswept* request gates.
-- **It is all-or-nothing on mixed idle.** If fresh re-deposit money is sitting alongside unclaimed
-  proceeds, the whole call is refused — the contract cannot tell the two apart and will not guess. The
-  owner resolves it by claiming (or by depositing themselves).
-- **The OWNER is never gated**, and an owner `depositIdle` prunes. An owner re-depositing their own
-  proceeds is a choice, not a grief; that call is also the manual unblock.
-- **It re-opens on `claimWithdrawnUsdc()`**, which prunes every settled id as the proceeds leave.
-- **`recoverERC20` does NOT prune** — it can drain the proceeds and leave the gate shut on money that is
-  no longer there. `syncRedeemRequests()` (owner-only) is the hatch for exactly that.
-- **`requestWithdraw` is capped** at `MAX_OPEN_REQUESTS` (16) simultaneously-tracked requests, so the
-  gate's scan stays bounded; a 17th reverts `"Too many open requests"` until one is disposed of.
+- **Nothing gates the backend** beyond the caller check and the amount/balance checks. Both callers
+  `_pruneSettled()` on the way through, so a completed request can never strand a tracked id.
+- **`hasSettledRequest()` is a COMPLETION SIGNAL, not a gate.** There is no account-side event when the
+  backend fulfils, so this view (and the strategy's `RedeemFulfilled`) is how you detect that a request
+  finished. It claims nothing and blocks nothing.
+- **`hasUnclaimedWithdrawal()` is retained as an alias** of `hasSettledRequest()` for ABI compatibility.
+  Its name is historical: a `true` reading means *completed*, not *money waiting*.
+- **`recoverERC20` no longer deadlocks anything** — it can leave a stale tracked id, and that is inert.
+  `syncRedeemRequests()` (owner-only) still prunes explicitly if you want the set tidy.
+- **`requestWithdraw` is capped** at `MAX_OPEN_REQUESTS` (16) simultaneously-tracked requests; it prunes
+  settled ids first, so only genuinely OUTSTANDING requests consume the budget. A 17th outstanding
+  request reverts `"Too many open requests"`.
 
-**Rule (unchanged, now backed by code):** the backend calls `depositIdle` **only on explicit
-user/product intent to re-deposit** — never as an automatic idle-USDC sweep.
+**Rule (unchanged):** the backend calls `depositIdle` **only on explicit user/product intent to
+re-deposit** — never as an automatic idle-USDC sweep.
 
 ---
 
@@ -356,7 +357,7 @@ user/product intent to re-deposit** — never as an automatic idle-USDC sweep.
 | Call | Contract | Gate | Notes |
 |---|---|---|---|
 | `createStrategyForUser(user)` | Factory | factory BACKEND_ROLE or `user` | provisioning; deterministic address |
-| `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0, **and** `!hasUnclaimedWithdrawal()` for the backend | only on explicit re-deposit intent; **you pick `assets`**; pre-check the gate |
+| `depositIdle(assets, minShares)` | Account | owner OR registry backend member 0 | only on explicit re-deposit intent; **you pick `assets`**; no unclaimed-proceeds gate any more |
 
 That is the whole backend write surface. `fulfillRedeem(id, minAssetsOut)` on the strategy clone is **not** on it —
 `onlyProposer`, i.e. the **rebalancer** (`MAMO_REBALANCER`), never `MAMO_BACKEND`.
@@ -378,7 +379,7 @@ Account (`MamoLeveragedAeroStrategy`):
 | `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | pending async withdrawal — product state + SLA alerting (the `fulfillRedeem` trigger itself is the **rebalancer's**) |
 | `WithdrawCancelled(uint256 indexed id)` | request cancelled — drop it from the pending set |
 | `WithdrawEmergency(uint256 indexed id, uint256 assetsOut)` | deadman fired (backend missed SLA) |
-| `UsdcClaimed(uint256 amount)` | owner swept fulfilled USDC |
+| `UsdcClaimed(uint256 amount)` | owner swept idle USDC off the account (a plain transfer, or a deposit remainder) — **not** a withdrawal claim any more |
 
 Factory: `StrategyCreated(address indexed user, address indexed strategy)`.
 
@@ -438,9 +439,10 @@ in the path any more. Operationally for the backend:
 > `LeveragedAeroVault` replaces Sherwood's `SyndicateVault`, so `depositsOpen()` / `setOpenDeposits` /
 > `activateStrategy` / `settleStrategy` / `redeemSettled` are all the in-repo ones, and the vault carries
 > the fund capacity cap (`maxTotalAssets()` / `remainingCapacity()`) the strategy's deposit path checks.
-> The `depositIdle` `"Unclaimed withdrawal proceeds"` gate and the two-argument
-> `fulfillRedeem(uint256,uint256)` documented above are both live here — the account-layer harness drives
-> them end to end on every run. No governor, no proposal lifecycle.
+> The direct-pay `fulfillRedeem(uint256,uint256)` documented above (the payout goes to the request's
+> `recipient`, i.e. the account's owner) is live here, and the `depositIdle` unclaimed-proceeds gate is
+> gone with the state it guarded — the account-layer harness drives both end to end on every run. No
+> governor, no proposal lifecycle.
 >
 > ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table — a harness
 > redeploy changes these addresses (and a new pooled layer invalidates the account factory, which binds the

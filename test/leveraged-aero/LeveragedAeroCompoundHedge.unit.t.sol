@@ -569,7 +569,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
 
@@ -1017,7 +1017,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
         uint256 lpBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
@@ -1068,7 +1068,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
         uint256 before = usdc.balanceOf(lp);
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);

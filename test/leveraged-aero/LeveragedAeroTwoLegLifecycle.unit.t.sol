@@ -49,6 +49,9 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     address internal proposer = makeAddr("proposer");
     address internal lp = makeAddr("lp");
 
+    /// @dev Mirrored from the strategy for `vm.expectEmit`.
+    event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
+
     MockToken internal usdc; // 6dp collateral / unit of account
     MockToken internal legB; // 8dp borrowed leg (token0)
     MockToken internal legA; // 18dp borrowed leg (token1)
@@ -623,7 +626,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), supply);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(supply, 0);
+        uint256 id = strategy.requestRedeem(supply, 0, address(0));
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
         assertEq(strategy.layout().tokenId, 0, "flat book");
@@ -1309,7 +1312,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
 
         uint256 lpBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
@@ -1401,7 +1404,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 legBBoughtBefore = router.boughtOf(address(legB));
         vm.startPrank(lp);
         vault.approve(address(strategy), shares);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
         vm.stopPrank();
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
@@ -1446,7 +1449,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
     function _requestRedeem(uint256 shares) internal returns (uint256 id) {
         vm.startPrank(lp);
         vault.approve(address(strategy), shares);
-        id = strategy.requestRedeem(shares, 0);
+        id = strategy.requestRedeem(shares, 0, address(0));
         vm.stopPrank();
     }
 
@@ -1680,7 +1683,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 shares = SUPPLY / 4;
         vm.startPrank(lp);
         vault.approve(address(strategy), shares);
-        uint256 id = strategy.requestRedeem(shares, type(uint128).max); // the requester's own huge floor
+        uint256 id = strategy.requestRedeem(shares, type(uint128).max, address(0)); // the requester's own huge floor
         vm.stopPrank();
 
         vm.prank(proposer);
@@ -1704,6 +1707,129 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertTrue(strategy.redeemRequest(id).settled, "the request is settled");
     }
 
+    // ==================== THE REQUEST'S RECIPIENT ====================
+    //
+    // A fulfilled redemption pays the END RECIPIENT named at request time, not the requesting contract.
+    // The requester keeps every authority (cancel, deadman) and the payout is the ONLY thing that moves.
+
+    /// @dev Live position + `SUPPLY` shares held by `lp`, then a request for `shares` paying `to`.
+    function _requestRedeemTo(uint256 shares, address to) internal returns (uint256 id) {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares);
+        id = strategy.requestRedeem(shares, 0, to);
+        vm.stopPrank();
+    }
+
+    /// @dev (1) THE FIX. `fulfillRedeem` pays the STORED RECIPIENT; the requester receives nothing. This is
+    ///      what lets a per-user account wrapper settle a withdrawal in ONE transaction, with no USDC
+    ///      parked on the wrapper and no second claim call.
+    function testFulfillRedeemPaysTheStoredRecipientAndNotTheRequester() public {
+        address payee = makeAddr("payee");
+        uint256 id = _requestRedeemTo(SUPPLY / 4, payee);
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 payeeBefore = usdc.balanceOf(payee);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+
+        assertGt(usdc.balanceOf(payee) - payeeBefore, 0, "the recipient was paid the whole payout");
+        assertEq(usdc.balanceOf(lp), lpBefore, "the REQUESTER received nothing");
+        assertTrue(strategy.redeemRequest(id).settled, "and the request settled");
+    }
+
+    /// @dev (2) `address(0)` MEANS "PAY ME": the default preserves the EOA / direct-requester behaviour
+    ///      exactly, so the stored recipient is never zero and the fulfil can pay it unconditionally.
+    function testRequestRedeemDefaultsTheRecipientToTheRequester() public {
+        uint256 id = _requestRedeemTo(SUPPLY / 4, address(0));
+
+        LeveragedAerodromeCLStrategy.RedeemRequest memory r = strategy.redeemRequest(id);
+        assertEq(r.recipient, lp, "a zero recipient was substituted with msg.sender");
+        assertEq(r.owner, lp, "...and the requester is unchanged");
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "so the requester is paid, as before");
+    }
+
+    /// @dev (3) SHARES BELONG TO THE REQUESTER. A cancel is the reversal of the escrow, so it returns the
+    ///      shares to `owner` even when a different address was named for the USDC payout — otherwise a
+    ///      request could hand a third party the position itself.
+    function testCancelRedeemReturnsSharesToTheRequesterEvenWhenTheRecipientDiffers() public {
+        address payee = makeAddr("payee");
+        uint256 shares = SUPPLY / 4;
+        uint256 id = _requestRedeemTo(shares, payee);
+        assertEq(vault.balanceOf(lp), SUPPLY - shares, "premise: the shares are escrowed");
+
+        vm.prank(lp);
+        strategy.cancelRedeem(id);
+
+        assertEq(vault.balanceOf(lp), SUPPLY, "the REQUESTER got the shares back");
+        assertEq(vault.balanceOf(payee), 0, "the recipient got no shares");
+        assertEq(usdc.balanceOf(payee), 0, "and no USDC");
+    }
+
+    /// @dev (4) THE DEADMAN STILL PAYS ITS CALLER. `emergencyRedeem` is owner-gated, synchronous and
+    ///      RETURNS `assetsOut`, so "pays msg.sender" is part of its contract: a contract requester
+    ///      forwards the proceeds itself in the same transaction. Routing it to `recipient` would hand
+    ///      such a requester nothing to forward, while changing no end-state — for a Mamo account the
+    ///      recipient IS the address its `emergencyWithdraw` forwards to.
+    function testEmergencyRedeemPaysTheRequesterNotTheRecipient() public {
+        address payee = makeAddr("payee");
+        uint256 id = _requestRedeemTo(SUPPLY / 4, payee);
+
+        vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed
+        uint256 lpBefore = usdc.balanceOf(lp);
+        vm.prank(lp);
+        uint256 assetsOut = strategy.emergencyRedeem(id, 0);
+
+        assertGt(assetsOut, 0, "the deadman exit completed");
+        assertEq(usdc.balanceOf(lp) - lpBefore, assetsOut, "the REQUESTER was paid, as its caller");
+        assertEq(usdc.balanceOf(payee), 0, "the recipient was not paid on this path");
+    }
+
+    /// @dev (5) THE RECIPIENT IS A PAYEE, NOT AN AUTHORITY. Naming an address must not give it any control
+    ///      over the request: it can neither cancel it nor drive the deadman exit.
+    function testTheRecipientHasNoAuthorityOverTheRequest() public {
+        address payee = makeAddr("payee");
+        uint256 id = _requestRedeemTo(SUPPLY / 4, payee);
+
+        vm.prank(payee);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotRequestOwner.selector);
+        strategy.cancelRedeem(id);
+
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.prank(payee);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotRequestOwner.selector);
+        strategy.emergencyRedeem(id, 0);
+    }
+
+    /// @dev (6) THE PAYEE IS OBSERVABLE ON-CHAIN at request and at fulfil, with the REQUESTER still in
+    ///      topic2 so an indexer keyed on the account address keeps working.
+    function testRedeemEventsExposeTheRecipientWithoutMovingTheOwnerTopic() public {
+        address payee = makeAddr("payee");
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 shares = SUPPLY / 4;
+        vm.startPrank(lp);
+        vault.approve(address(strategy), shares);
+        vm.expectEmit(true, true, true, true, address(strategy));
+        emit RedeemRequested(0, lp, payee, shares);
+        uint256 id = strategy.requestRedeem(shares, 0, payee);
+        vm.stopPrank();
+
+        uint256 payeeBefore = usdc.balanceOf(payee);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+        // Assert the emitted payout against the measured one, so the event cannot drift from the transfer.
+        vm.assertGt(usdc.balanceOf(payee) - payeeBefore, 0, "the recipient in topic3 is the address paid");
+    }
+
     /// @dev Full redeem clears the book with BOTH debts repaid and the flat-book invariant restored.
     function testFullRedeemClearsBothLegs() public {
         _execute(SEED);
@@ -1714,7 +1840,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), supply);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(supply, 0);
+        uint256 id = strategy.requestRedeem(supply, 0, address(0));
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
 
@@ -2040,7 +2166,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), supply);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(supply, 0);
+        uint256 id = strategy.requestRedeem(supply, 0, address(0));
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
 
@@ -2200,7 +2326,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        id = strategy.requestRedeem(shares, 0);
+        id = strategy.requestRedeem(shares, 0, address(0));
     }
 
     /// @dev Re-price the leg->USDC SELL direction at `bps` of the oracle mark (10000 == the fair rate); buys untouched.

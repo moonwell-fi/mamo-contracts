@@ -143,8 +143,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     uint256 private constant FULFILL_WINDOW = 2 days;
 
     // ── Async-redeem queue events ──
-    event RedeemRequested(uint256 indexed id, address indexed owner, uint256 shares);
-    event RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut);
+    // `owner` stays the SECOND, INDEXED arg on all four so an indexer keyed on the requesting account
+    // (topic2) keeps working; `recipient` is added as a third topic on the two events that involve a
+    // payout decision, so the fulfil payee is observable without decoding data.
+    event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
+    event RedeemFulfilled(uint256 indexed id, address indexed owner, address indexed recipient, uint256 assetsOut);
     event RedeemCancelled(uint256 indexed id, address indexed owner, uint256 shares);
     event RedeemEmergency(uint256 indexed id, address indexed owner, uint256 assetsOut);
 
@@ -269,6 +272,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint256 minAssetsOut; // slippage floor enforced at fulfill (fresh arg at emergencyRedeem)
         uint40 requestedAt; // request timestamp; FULFILL_WINDOW deadman clock anchor
         bool settled; // set once fulfilled / cancelled / emergency-redeemed (double-spend guard)
+        address recipient; // `fulfillRedeem` payee, fixed at request time; defaults to `owner`
     }
 
     /// @dev LEG SLOTS, not token identities: the `weth`/`mWeth`/`wethFeed`/`weth*` members are leg A
@@ -1223,19 +1227,19 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         look-back option. The pre-fulfill lever-down is ONE-PARTY: the proposer runs `adjustLeverage`
     ///         at a lower per-call target, then fulfills — no multisig inside `FULFILL_WINDOW`.
     /// @param minAssetsOut Slippage floor enforced (on the net amount) at fulfill.
-    function requestRedeem(uint256 shares, uint256 minAssetsOut) external nonReentrant returns (uint256 id) {
+    /// @param recipient Payee of the `fulfillRedeem` payout, FIXED HERE and immutable afterwards; pass
+    ///        `address(0)` for the plain "pay me" case (defaults to `msg.sender`, so an EOA requester
+    ///        need not think about it). A CONTRACT requester passes the end user, so a fulfil settles in
+    ///        ONE transaction instead of parking USDC on the requester awaiting a second claim call. It is
+    ///        NOT an authorization: the recipient can neither cancel nor `emergencyRedeem` the request —
+    ///        those stay with `owner` (see `cancelRedeem` / `emergencyRedeem`).
+    function requestRedeem(uint256 shares, uint256 minAssetsOut, address recipient)
+        external
+        nonReentrant
+        returns (uint256 id)
+    {
         if (_state != State.Executed) revert NotExecuted();
-        IERC20(vault()).safeTransferFrom(msg.sender, address(this), shares);
-        Layout storage $ = _layout();
-        id = $.nextRedeemRequestId++;
-        $.redeemRequests[id] = RedeemRequest({
-            owner: msg.sender,
-            shares: shares,
-            minAssetsOut: minAssetsOut,
-            requestedAt: uint40(block.timestamp),
-            settled: false
-        });
-        emit RedeemRequested(id, msg.sender, shares);
+        return LeveragedAeroVenue.requestRedeemImpl(shares, minAssetsOut, recipient);
     }
 
     /// @notice Fulfill an escrowed request via the oracle-free proportional unwind (the demoted everyday path,
@@ -1247,21 +1251,32 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      whoever fulfils must not be able to lower it, while the fresh one covers the up-to-2-day staleness of
     ///      the stored one — nothing else covers that (the sweep floors bound SWAPS, not the net payout). Pass 0
     ///      to defer entirely to the stored floor.
+    ///
+    ///      PAYEE IS `r.recipient`, NOT `r.owner`. A contract requester (a per-user account wrapper) fixes the
+    ///      end user at request time, so the fulfil settles in ONE transaction: no USDC parked on the requester,
+    ///      no second claim call, and no requester-side callback needed for the user to be made whole. A
+    ///      zero-`recipient` request is impossible — `requestRedeem` substitutes `msg.sender` — so this never
+    ///      burns the escrow into the zero address.
     function fulfillRedeem(uint256 id, uint256 minAssetsOut) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
         Layout storage $ = _layout();
         RedeemRequest storage r = $.redeemRequests[id];
         if (r.settled) revert RequestSettled();
         uint256 stored = r.minAssetsOut;
-        uint256 assetsOut = _proportionalRedeem(r.owner, r.shares, minAssetsOut > stored ? minAssetsOut : stored);
+        address to = r.recipient;
+        uint256 assetsOut = _proportionalRedeem(to, r.shares, minAssetsOut > stored ? minAssetsOut : stored);
         r.settled = true;
-        emit RedeemFulfilled(id, r.owner, assetsOut);
+        emit RedeemFulfilled(id, r.owner, to, assetsOut);
     }
 
     /// @notice Cancel an unsettled request and return the escrowed shares to its owner. Request owner
     ///         only, callable in ANY strategy state (no `State.Executed` gate): a request outstanding
     ///         when the strategy settles must stay cancellable so the owner can exit via the vault
     ///         normally.
+    /// @dev SHARES GO BACK TO `owner`, NEVER `recipient`: a cancel is the reversal of the escrow, and the
+    ///      escrowed shares were the OWNER's property. `recipient` only ever names who receives the USDC
+    ///      PAYOUT of a fulfil; letting it collect the un-redeemed shares would let a request hand a
+    ///      third party the position itself.
     /// @param id Request id to cancel.
     function cancelRedeem(uint256 id) external nonReentrant {
         RedeemRequest storage r = _layout().redeemRequests[id];
@@ -1281,6 +1296,14 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      by its own event. THE EXCEPTION is `redeemUnwindImpl`'s Phase 2 (`_settleShortfall`), which prices a
     ///      deficit buy at Chainlink and fails CLOSED; it is reached only on a FULL redeem with genuine deep IL
     ///      that the swept legs and raw float could not cover, and `supplyIdle` sizes that float.
+    ///
+    ///      PAYEE IS `r.owner` — deliberately NOT `r.recipient`, unlike `fulfillRedeem`. This is the ONE
+    ///      settlement path the owner drives themselves: it is owner-gated, synchronous, and RETURNS
+    ///      `assetsOut` to its caller, so "pays `msg.sender`" is part of its contract and a contract
+    ///      requester forwards the proceeds itself in the same transaction. Routing it to `recipient`
+    ///      would break every such requester (it would receive nothing to forward) while changing no
+    ///      end-state: for a Mamo account `recipient == owner()` of the account, and the account's
+    ///      `emergencyWithdraw` forwards to that same address. Only the hop differs, never the payee.
     /// @param minAssetsOut Fresh slippage floor on the net payout.
     function emergencyRedeem(uint256 id, uint256 minAssetsOut) external nonReentrant returns (uint256 assetsOut) {
         if (_state != State.Executed) revert NotExecuted();

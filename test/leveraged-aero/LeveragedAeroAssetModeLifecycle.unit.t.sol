@@ -1101,7 +1101,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
         vm.prank(proposer);
@@ -1167,7 +1167,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), shares);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0); // completes ⇒ no USDC->USDC leg was ever requested
 
@@ -1188,7 +1188,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(lp);
         vault.approve(address(strategy), supply);
         vm.prank(lp);
-        uint256 id = strategy.requestRedeem(supply, 0);
+        uint256 id = strategy.requestRedeem(supply, 0, address(0));
         vm.prank(proposer);
         strategy.fulfillRedeem(id, 0);
 

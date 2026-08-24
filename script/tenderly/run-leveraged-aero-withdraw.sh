@@ -358,7 +358,7 @@ sc_request_cancel() {
   # off the shared strategy would call this "fulfilled, money waiting". Only the ACCOUNT's
   # hasUnclaimedWithdrawal() is correct, because cancel untracks the id.
   local settled
-  settled="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool))' "$id" | grep -oE 'true|false' | tail -1)"
+  settled="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool,address))' "$id" | grep -oE 'true|false' | tail -1)"
   info "strategy.redeemRequest($id).settled after CANCEL = $settled"
   record "settledFlagAfterCancel" "$settled"
   assert_eq "account hasUnclaimedWithdrawal after cancel" "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "false"
@@ -373,7 +373,7 @@ sc_request_emergency() {
   local id requested_at
   id="$(request_withdraw "$SHARES" 1)" || return 1
   ok "requestWithdraw → id=$id"
-  requested_at="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool))' "$id" | tr -d '()' | awk -F', ' '{print $4}' | field)"
+  requested_at="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool,address))' "$id" | tr -d '()' | awk -F', ' '{print $4}' | field)"
   info "requestedAt=$requested_at → emergency opens at $((requested_at + FULFILL_WINDOW))"
   record "fulfillWindowSeconds" "$FULFILL_WINDOW"
 
@@ -405,7 +405,7 @@ sc_stuck_fulfil() {
   expect_revert "fulfillRedeem against an unreachable floor" "any" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256,uint256)' "$id" 0
 
   local settled
-  settled="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool))' "$id" | grep -oE 'true|false' | tail -1)"
+  settled="$(ccall "$STRAT" 'redeemRequest(uint256)((address,uint256,uint256,uint40,bool,address))' "$id" | grep -oE 'true|false' | tail -1)"
   assert_eq "request still unsettled after a failed fulfil" "$settled" "false"
   assert_eq "shares still escrowed"                          "$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)" "0"
   assert_eq "hasUnclaimedWithdrawal still false"             "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "false"
@@ -460,32 +460,37 @@ sc_claim_sweeps_plain_transfer() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. FULFILLED-BUT-UNCLAIMED — the state the UI has no push signal for.
-#    RedeemFulfilled is emitted by the SHARED pooled strategy, indexed by the ACCOUNT address,
-#    and the account itself emits nothing when the USDC lands.
+# 9. FULFIL PAYS THE USER DIRECTLY — no proceeds park on the account, no claim step.
+#    The account names owner() as the pooled request's RECIPIENT, so fulfillRedeem transfers the USDC
+#    to the user. RedeemFulfilled is still emitted by the SHARED pooled strategy, indexed by the
+#    ACCOUNT address in topic2 and now by the RECIPIENT in topic3; the account emits nothing.
 # ─────────────────────────────────────────────────────────────────────────────
 sc_fulfilled_unclaimed() {
-  local id ful_sig
+  local id ful_sig before after
   id="$(request_withdraw "$SHARES" 1)" || return 1
   ok "requestWithdraw → id=$id"
+  before="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
   csend "fulfillRedeem(id) [proposer stands in for the backend]" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256,uint256)' "$id" 0
+  after="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
 
-  local landed
-  landed="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)"
-  assert_gt "USDC landed on the ACCOUNT (not the user)" "$landed" "0"
-  assert_eq "hasUnclaimedWithdrawal is now true" "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "true"
-  record "fulfilledProceedsLandOn" "the account — the owner must call claimWithdrawnUsdc()"
+  assert_gt "USDC landed on the USER (not the account)" "$after" "$before"
+  assert_eq "account holds no USDC after the fulfil" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
+  record "fulfilledProceedsLandOn" "the owner directly — no claimWithdrawnUsdc() step"
 
-  # The ONLY push signal: an event on the SHARED strategy, indexed by the account address.
-  ful_sig="$(cast keccak 'RedeemFulfilled(uint256,address,uint256)')"
-  info "watch topic0=$ful_sig on $STRAT, topic2 = the account address (padded)"
+  # The push signal: an event on the SHARED strategy, indexed by both the account and the payee.
+  ful_sig="$(cast keccak 'RedeemFulfilled(uint256,address,address,uint256)')"
+  info "watch topic0=$ful_sig on $STRAT, topic2 = the account, topic3 = the paid recipient (padded)"
   record "fulfilEventEmitter" "$STRAT (shared across all users)"
   record "fulfilEventTopic0"  "$ful_sig"
-  record "fulfilEventFilter"  "topics[2] == account address, left-padded to 32 bytes"
+  record "fulfilEventFilter"  "topics[2] == account address, topics[3] == recipient, left-padded to 32 bytes"
 
-  csend "claimWithdrawnUsdc()" "$USER" "$ACCT" 'claimWithdrawnUsdc()'
-  assert_eq "hasUnclaimedWithdrawal cleared" "$(ccall "$ACCT" 'hasUnclaimedWithdrawal()(bool)')" "false"
-  assert_eq "openRequestIds pruned on claim" "$(ccall "$ACCT" 'openRequestIds()(uint256[])' | tr -d '[] ' | grep -c . || true)" "0"
+  # The request completed, so its id is stale bookkeeping the next owner call prunes — it claims nothing.
+  assert_eq "hasSettledRequest reports the completed request" "$(ccall "$ACCT" 'hasSettledRequest()(bool)')" "true"
+  expect_revert "claimWithdrawnUsdc() has nothing to sweep" "No USDC to claim" \
+    "$USER" "$ACCT" 'claimWithdrawnUsdc()'
+  csend "syncRedeemRequests()" "$USER" "$ACCT" 'syncRedeemRequests()'
+  assert_eq "openRequestIds pruned"  "$(ccall "$ACCT" 'openRequestIds()(uint256[])' | tr -d '[] ' | grep -c . || true)" "0"
+  assert_eq "hasSettledRequest cleared" "$(ccall "$ACCT" 'hasSettledRequest()(bool)')" "false"
   return 0
 }
 
