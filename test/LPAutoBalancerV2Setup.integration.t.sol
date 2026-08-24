@@ -1,1 +1,1 @@
-// SPDX-License-Identifier: BUSL-1.1
+FILE_FROM_WORKSPACE_TEST
