@@ -1348,6 +1348,81 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         );
     }
 
+    /// @dev THE LTV-PRESERVATION PROPERTY OF THE ASYNC UNWIND. `_proportionalRedeem` ->
+    ///      `LeveragedAeroManager.redeemUnwindImpl(shares, supply)` repays `f = shares/supply` of EACH
+    ///      leg's debt and redeems `f` of the collateral, so both sides of the ratio shrink by the same
+    ///      factor and post-LTV cannot exceed pre-LTV. That is why `fulfillRedeem` can never push a
+    ///      healthy book above `maxLtvBps` and so cannot be the route to a liquidation.
+    ///
+    ///      To be precise about the guarantee: `fulfillRedeem` has NO max-LTV revert of its own (unlike
+    ///      the fast path's `FastRedeemExceedsLtv`) and this PR adds none — the property is preserved BY
+    ///      MECHANISM and pinned here by test. The tolerance is one-sided on purpose: LTV may only drift
+    ///      DOWN (mulDiv floors the repay and the collateral burn independently), never up.
+    ///      MUTATION: make the repay less than pro-rata — e.g. scale step B's repay by `f/2` — and the
+    ///      post-LTV rises above the pre-LTV and this fails.
+    function testPartialFulfillRedeemNeverRaisesTheBookLtv() public {
+        _execute(SEED);
+        // A non-unit collateral basis, so `f` of the cTokens is not `f` of the underlying face value —
+        // the case where a naive "burn f of a stored underlying estimate" unwind WOULD drift the ratio.
+        // Stored == pending on purpose: no accrual fires DURING the fulfil, so `_ltvBps()` reads the
+        // same basis before and after and the delta below is the unwind's own rounding, nothing else.
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.37e18);
+        // THEN lever up NEAR the ceiling (maxLtv 6500) on that basis, so a rise of a few bps is material.
+        _retarget(6000);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        uint256 ltvBefore = _ltvBps();
+        assertApproxEqAbs(ltvBefore, 6000, 50, "premise: the book starts just under the 6500 ceiling");
+        uint256 collateralBefore = _collateralUsdc();
+
+        uint256 shares = SUPPLY / 4; // a PARTIAL fulfil — the only branch that can move the ratio
+        uint256 id = _requestRedeem(shares);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+
+        uint256 ltvAfter = _ltvBps();
+        // Non-vacuity: the unwind actually moved the book, and both legs still carry debt, so the
+        // post-read is a real levered LTV rather than a flattened 0.
+        assertLt(_collateralUsdc(), collateralBefore, "the fulfil actually withdrew collateral");
+        assertGt(mLegA.borrowBalance(address(strategy)), 0, "leg A still levered after the partial");
+        assertGt(mLegB.borrowBalance(address(strategy)), 0, "leg B still levered after the partial");
+        assertGt(ltvAfter, 0, "post-LTV is a real levered reading");
+
+        // THE PROPERTY. One-sided: no epsilon is granted upward. Measured drift on this fixture and
+        // on-chain is <= 0.02 bps and always DOWNWARD (floored repay/burn favour the stayers).
+        assertLe(ltvAfter, ltvBefore, "a partial fulfillRedeem never RAISES the book LTV");
+        assertApproxEqAbs(ltvAfter, ltvBefore, 2, "and it stays within rounding of it: a true pro-rata unwind");
+        // ... and therefore it can never walk the book up to the post-op ceiling every other op is gated on.
+        assertLe(ltvAfter, 6500, "post-fulfil LTV is still inside maxLtvBps");
+    }
+
+    /// @dev The sibling with COLLATERAL ACCRUAL landing during the fulfil (pending rate above stored, as
+    ///      F15 arms it). Accrual is a real drift source, and it moves the ratio the SAFE way: the burn
+    ///      settles at the fresh rate, so the stayers keep more collateral against unchanged debt. Only
+    ///      the one-sided property is asserted here — there is no tight bound to claim, because the basis
+    ///      itself moved. Cross-checked against the stable-basis sibling above, which owns the tight bound.
+    function testPartialFulfillRedeemUnderCollateralAccrualStillOnlyMovesTheLtvDown() public {
+        _execute(SEED);
+        _retarget(6000);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, SUPPLY);
+
+        mUsdc.setExchangeRateStored(1.37e18);
+        mUsdc.setPendingExchangeRate(1.4e18); // accrual fires inside the fulfil
+
+        uint256 ltvBefore = _ltvBps();
+        uint256 id = _requestRedeem(SUPPLY / 4);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+
+        uint256 ltvAfter = _ltvBps();
+        assertGt(ltvAfter, 0, "post-LTV is a real levered reading");
+        assertLe(ltvAfter, ltvBefore, "accrual can only move the LTV DOWN, never up");
+        assertLe(ltvAfter, 6500, "post-fulfil LTV is still inside maxLtvBps");
+    }
+
     /// @dev THE FAST PATH WITH NOTHING RAW: idle is drawn first, so a fully parked book always draws collateral and
     ///      the LTV gate is always live -- no tightening, since the supply lowers LTV before the exit.
     function testFastRedeemDrawsFromCollateralWhenNothingIsRawIdle() public {

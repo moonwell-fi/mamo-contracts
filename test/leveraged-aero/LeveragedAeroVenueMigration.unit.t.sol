@@ -1225,6 +1225,42 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _expectMigrateRevert(v, LeveragedAeroVenue.TargetLtvZero.selector);
     }
 
+    /// @dev L4 on the MIGRATE path, driven from the CF side — the case only this path can produce.
+    ///      `applyVenue` re-reads the LIVE collateral factor, so a market whose CF Moonwell has since
+    ///      LOWERED can push the permissionless-deleverage trigger (`1e8 / minHealthBps`, 8333 here) up to
+    ///      or past the liquidation line even though the same params passed at init. Rejected here rather
+    ///      than left as a book that is liquidatable before anyone can publicly rescue it.
+    function testMigrateRejectsADestinationWhoseCollateralFactorSitsUnderTheDeleverageTrigger() public {
+        _execute(SEED);
+        _flatten();
+        comptroller.setCollateralFactorMantissa(0.83e18); // cf 8300; 12000 * 8300 = 9.96e7 <= 1e8
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams(); // maxLtv 6000 < 8300, so the earlier
+        _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector); // rungs clear
+    }
+
+    /// @dev The same rung driven from the `minHealthBps` side: a migration may lower minHealth, which
+    ///      RAISES the trigger LTV. 11000 triggers at 9090, above the 8800 CF -> rejected.
+    function testMigrateRejectsAMinHealthThatLiftsTheDeleverageTriggerToTheCollateralFactor() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.minHealthBps = 11_000; // 11000 * 8800 = 9.68e7 <= 1e8
+        _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector);
+    }
+
+    /// @dev The positive twin, one bps of CF above the bound: 12000 * 8334 = 1.00008e8 > 1e8, so the
+    ///      migration lands and the venue is actually rewritten. Pins the rung as a boundary, not a ban.
+    function testMigrateAcceptsACollateralFactorOneBpsAboveTheDeleverageTrigger() public {
+        _execute(SEED);
+        _flatten();
+        comptroller.setCollateralFactorMantissa(0.8334e18); // cf 8334
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().pool, address(poolB), "venue migrated at the boundary");
+        assertEq(strategy.layout().usdcCollateralFactorBps, 8334, "the live CF was re-read and stored");
+    }
+
     // ==================== migrate: the target-LTV write is LOUD ====================
 
     /// @dev `applyVenue` persists `p.targetLtvBps`, so a migration MOVES THE FUND'S LEVERAGE POLICY.

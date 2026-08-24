@@ -897,7 +897,12 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.MinHealthTooLow.selector);
     }
 
+    /// @dev The 10500 floor is only REACHABLE in a market whose collateral factor clears the second L4
+    ///      rung: the trigger LTV at the floor is `1e8 / 10500 = 9523`, so the CF must exceed it. The
+    ///      fixture's default 8800 does NOT (that combination is `DeleverageTriggerAboveCF`, pinned
+    ///      below), so this test raises the CF to 9600 to isolate the floor itself.
     function testInitAcceptsMinHealthAtTheFloor() public {
+        comptroller.setCollateralFactorMantissa(0.96e18); // cf 9600; 10500 * 9600 = 1.008e8 > 1e8
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minHealthBps = 10_500;
         p.maxLtvBps = 6500; // 10500 * 6500 = 6.825e7 < 1e8, so the L4 conflict guard still clears
@@ -932,6 +937,57 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.minHealthBps = 12_500;
         p.maxLtvBps = 7900; // 9.875e7 < 1e8 -> accepted
         assertEq(_init(p).layout().maxLtvBps, 7900, "just under the bound accepted");
+    }
+
+    /// @dev L4, the OTHER side of the trigger LTV. `deleverage()` only unlocks at `LTV = 1e8 /
+    ///      minHealthBps`, so that trigger must also sit strictly BELOW the market's collateral factor —
+    ///      the liquidation line. Otherwise the book is already liquidatable while the public rescue still
+    ///      reverts `HealthyNoDeleverage`. Here the floor `minHealthBps` triggers at 1e8/10500 = 9523,
+    ///      ABOVE the fixture's 8800 CF, which is exactly the band this rung closes.
+    function testInitRevertsWhenTheDeleverageTriggerSitsAtOrAboveTheCollateralFactor() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 10_500; // 10500 * 8800 = 9.24e7 <= 1e8 -> trigger 9523 > CF 8800
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+    }
+
+    /// @dev The rung is a strict `>`: the product landing exactly ON 1e8 means trigger == CF, i.e. the
+    ///      rescue unlocks at the very LTV Moonwell liquidates at, and is rejected. One bps of CF more
+    ///      (the smallest step `readCollateralFactor` can resolve) is accepted.
+    function testInitDeleverageTriggerCollateralFactorBoundaryIsStrict() public {
+        // 12500 * 8000 == 1e8 exactly -> rejected. maxLtv 6500 keeps the two earlier rungs clear
+        // (6500 < 8000 and 12500 * 6500 = 8.125e7 < 1e8), so THIS rung is the one that fires.
+        comptroller.setCollateralFactorMantissa(0.8e18); // cf 8000
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 12_500;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+
+        // One bps of CF more: 12500 * 8001 = 1.000125e8 > 1e8 -> accepted.
+        comptroller.setCollateralFactorMantissa(0.8001e18); // cf 8001
+        p = _baseParams();
+        p.minHealthBps = 12_500;
+        assertEq(_init(p).layout().minHealthBps, 12_500, "one bps of CF above the bound accepted");
+    }
+
+    /// @dev The same boundary walked from the `minHealthBps` side, since either knob can be the misconfig:
+    ///      a HIGHER minHealth lowers the trigger LTV, so it moves the product the safe way.
+    function testInitDeleverageTriggerAcceptsTheSmallestMinHealthStepAboveTheBound() public {
+        comptroller.setCollateralFactorMantissa(0.8e18); // cf 8000
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 12_501; // 12501 * 8000 = 1.00008e8 > 1e8 -> accepted
+        assertEq(_init(p).layout().minHealthBps, 12_501, "one bps of minHealth above the bound accepted");
+    }
+
+    /// @dev The shipping params clear the rung with room: trigger 1e8/12000 = 8333 vs the mainnet USDC
+    ///      CF of 8800. Guards the production configuration against a silent regression in either knob.
+    function testInitAcceptsTheProductionRiskParamsUnderTheDeleverageTriggerRung() public {
+        // `_baseParams()` IS the shipping set: target 5000, maxLtv 6500, minHealth 12000; CF 8800.
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        LeveragedAerodromeCLStrategy s = _init(p);
+        assertEq(s.layout().minHealthBps, 12_000, "minHealth stored");
+        assertEq(s.layout().usdcCollateralFactorBps, 8800, "CF read from the comptroller");
+        // 12000 * 8800 = 1.056e8 > 1e8, and the full ordering holds: 5000 <= 6500 < 8333 < 8800.
+        assertLt(1e8 / uint256(s.layout().minHealthBps), uint256(s.layout().usdcCollateralFactorBps), "trigger < CF");
+        assertLt(uint256(s.layout().maxLtvBps), 1e8 / uint256(s.layout().minHealthBps), "maxLtv < trigger");
     }
 
     /// @dev A comptroller reporting a zero collateral factor is unusable — the read must fail loudly
