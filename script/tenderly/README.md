@@ -110,9 +110,19 @@ The harness handles each explicitly (see inline comments):
 2. **No simulated-return chaining across broadcast txs.** On a live fork the simulated NFPM
    `tokenId` can differ from the broadcast one. The harness mints **directly to the balancer** and
    reads the real `tokenId` from chain (`tokenOfOwnerByIndex`) before registering.
-3. **`--no-storage-caching`.** This vnet reports chain id `8453` (same as real Base), so forge's
-   fork cache would mix real-Base slots with vnet slots. (moonwell-tenderly avoids this by giving
-   vnets a unique chain id, `73570 + networkId`.)
+3. **`--no-storage-caching`.** Passed unconditionally. It is strictly required when the vnet
+   reports chain id `8453` (the same id as real Base), because forge's fork cache is keyed by chain
+   id and would otherwise mix real-Base slots with vnet slots. A vnet given a custom id does not
+   collide, but the flag stays on either way — the cost is a few extra RPC reads, and the failure it
+   prevents is silent, chain-id-dependent state corruption.
+
+   **Any chain id works.** Tenderly's dashboard defaults a Base fork to a `999`-prefixed custom id
+   (`9998453`); moonwell-tenderly uses `73570 + networkId`. The harness reads the live id into
+   `$VNET_CHAIN_ID` and derives forge's broadcast-artifact path from it, so nothing is pinned to
+   8453. What proves the fork really is Base is the protocol-wiring assertion right after
+   `chain_sanity` — `gauge.nft()` and `gauge.rewardToken()` against the real Base addresses from
+   `addresses/8453.json`, which only answer correctly on a Base fork. Set `EXPECTED_CHAIN=<id>` to
+   opt back into a hard assertion; `ADDR_CHAIN` is separate and still selects the address book.
 4. **NFPM `_nextId` repair.** The vnet's packed `_nextId/_nextPoolId` slot (#14) hydrates *behind*
    real Base's counter while higher `_owners` hydrate lazily → `ERC721: token already minted`. The
    orchestrator copies real Base's authoritative slot 14 onto the vnet (+1000 id margin).

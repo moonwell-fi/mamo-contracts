@@ -102,7 +102,7 @@ fund_sender() {
 
 capture_lab() {
   # forge names the broadcast artifact after the --sig entrypoint; the deploy happens in deployAndMint().
-  capture_created_address "broadcast/LPV2TenderlyHarness.s.sol/8453/deployAndMint-latest.json"
+  capture_created_address "$(broadcast_artifact deployAndMint)"
   HARNESS_LAB="$CREATED_ADDR"; export HARNESS_LAB
   info "deployed LPAutoBalancerV2 → $HARNESS_LAB"
 }
