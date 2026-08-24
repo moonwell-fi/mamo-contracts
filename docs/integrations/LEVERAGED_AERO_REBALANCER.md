@@ -1253,6 +1253,10 @@ same vault, same share token, same user accounts, no user action. Three new stra
 4. Rebalancer: `redeploy(minLiquidity)`; afterwards sweep old-leg unwind dust with
    `rescueToVault(oldLeg)` (former legs leave the deny-list at the rewrite; the NEW legs enter it).
 
+**Do not change LTV policy while a stage is armed.** `setMaxLtv` / `setWidthBounds` between steps 1
+and 3 clear the staged hash (re-stage to proceed), but `setTargetLtv` does not — a later
+`migrateVenue` would restore the pre-ratchet target, so clear or fire the stage before moving policy.
+
 **Trust split:** the owner alone picks the venue (hash-committed, byte-exact); the proposer alone
 sequences execution and can neither deviate from the committed config nor move funds out of the
 contract at any step.
