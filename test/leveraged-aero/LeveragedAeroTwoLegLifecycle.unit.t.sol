@@ -554,7 +554,134 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         );
     }
 
+    /**
+     * @dev THE RATCHET-DOWN STORY for the admin's `setMaxLtv`, on a LIVE levered book. Lowering the ceiling
+     *      under the book's own LTV is legal and moves nothing by itself; what changes is that every op
+     *      ending in `_assertHealthy` now fails until the book is de-levered. A lever-DOWN is the way out,
+     *      and it still works — which is the whole point of the direction being safe to take at any time.
+     */
+    function testLoweringMaxLtvBlocksDebtAddingOpsUntilTheBookDeLevers() public {
+        _execute(SEED);
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "the book opens on the init target");
+
+        // The ratchet: policy first (the band is checked from both sides, so the ceiling cannot go under
+        // the standing target), then the ceiling — DOWN THROUGH the book's live 5000 LTV.
+        vm.startPrank(owner);
+        strategy.setTargetLtv(4000);
+        strategy.setMaxLtv(4500);
+        vm.stopPrank();
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "lowering the ceiling moved no debt");
+
+        // A debt-ADDING op now fails at the POST-op gate: a 100k tranche sized at the new 4000 target still
+        // leaves the blend at ~4909 bps, above the fresh 4500 ceiling.
+        uint256 topUp = 100_000e6;
+        usdc.mint(address(strategy), topUp);
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.deployIdle(topUp, 0);
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "the refused op rolled back whole");
+
+        // The way out is a lever-DOWN, and it is NOT blocked: its own bound is the stored POLICY target, and
+        // it ends under the new ceiling.
+        vm.prank(proposer);
+        strategy.adjustLeverage(4000, 0, 0);
+        assertApproxEqAbs(_ltvBps(), 4000, 2, "the keeper de-levered to the new policy with no admin signature");
+
+        // ...and once the book is inside the band again the same tranche deploys.
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+        assertApproxEqAbs(_ltvBps(), 4000, 2, "the redeployed book sits on the new target, under the ceiling");
+    }
+
+    /// @dev A lever-UP back to the OLD level is refused for as long as the ceiling stays low — the ceiling,
+    ///      not the target, is what makes the de-risk durable against a keeper that re-raises policy... which
+    ///      it cannot do either (`setTargetLtv` is admin-only). Both halves pinned here.
+    function testLoweredMaxLtvKeepsTheKeeperFromLeveringBackUp() public {
+        _execute(SEED);
+
+        vm.startPrank(owner);
+        strategy.setTargetLtv(3000);
+        strategy.setMaxLtv(3500);
+        vm.stopPrank();
+
+        // Down to the new policy first, so the book is healthy and the ONLY thing under test is the re-lever.
+        vm.prank(proposer);
+        strategy.adjustLeverage(3000, 0, 0);
+        assertApproxEqAbs(_ltvBps(), 3000, 2, "de-levered");
+
+        // The keeper cannot pass the old 5000, because the POLICY bound bites first...
+        vm.prank(proposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LeveragedAerodromeCLStrategy.TargetLtvExceedsPolicy.selector, uint16(5000), uint16(3000)
+            )
+        );
+        strategy.adjustLeverage(5000, 0, 0);
+
+        // ...and it cannot raise the policy either.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        strategy.setTargetLtv(5000);
+
+        // Nor the ceiling that would let a future policy raise go anywhere.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        strategy.setMaxLtv(6500);
+
+        assertEq(strategy.layout().maxLtvBps, 3500, "the ceiling the admin set is the ceiling that stands");
+    }
+
     // ==================== RERANGE SKEW (two borrowed legs) ====================
+
+    /// @dev The admin's `setWidthBounds` is what BOUNDS the proposer's `rerange`, and it binds immediately:
+    ///      a width outside the fresh band is refused, one inside it mints.
+    function testSetWidthBoundsTightensWhatTheProposerMayRerangeTo() public {
+        _execute(SEED);
+
+        vm.prank(owner);
+        strategy.setWidthBounds(2000, 6000);
+
+        // 1000 was legal under the init band [200, 20000]; it is not under [2000, 6000].
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.rerange(1000, SKEW_CENTERED, 0, 0);
+
+        // ...and neither is the other side.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.rerange(8000, SKEW_CENTERED, 0, 0);
+
+        assertEq(strategy.layout().width, WIDTH, "a refused rerange stored no width");
+
+        // Inside the band the op runs normally.
+        vm.prank(proposer);
+        strategy.rerange(6000, SKEW_CENTERED, 0, 0);
+        assertEq(strategy.layout().width, 6000, "the band's own ceiling is reachable");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "and it minted a real position");
+    }
+
+    /// @dev THE CONTAINMENT RULE against a live book: the band cannot orphan the STORED width, because
+    ///      `redeploy` / `rerange` size from it. The admin's move is gated until the proposer reranges into
+    ///      the intended width — then the exact same band change lands.
+    function testSetWidthBoundsRefusesToStrandTheStoredWidthUntilARerange() public {
+        _execute(SEED);
+        assertEq(strategy.layout().width, WIDTH, "stored width is 4000");
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.setWidthBounds(5000, 8000); // would exclude the live 4000
+        assertEq(strategy.layout().minWidth, 200, "the refused band stored nothing");
+
+        // The proposer reranges into the width the admin is aiming the band at (still legal under the OLD
+        // band, which is exactly why the ordering works).
+        vm.prank(proposer);
+        strategy.rerange(6000, SKEW_CENTERED, 0, 0);
+
+        vm.prank(owner);
+        strategy.setWidthBounds(5000, 8000);
+        assertEq(strategy.layout().minWidth, 5000, "the same band change now lands");
+        assertEq(strategy.layout().maxWidth, 8000, "...both ends");
+    }
 
     /// @dev The re-range mints at the SKEWED range, not the centred one, and persists BOTH knobs.
     function testRerangeSkewedMintsTheSkewedRange() public {

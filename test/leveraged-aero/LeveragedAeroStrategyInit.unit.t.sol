@@ -36,6 +36,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev Mirrored from {LeveragedAerodromeCLStrategy} for `vm.expectEmit` / topic matching.
     event FeeCrystallizeDeferred(uint8 op, uint256 navPre);
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
+    event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
+    event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
     event ProposerUpdated(address indexed oldProposer, address indexed newProposer);
 
     /// @dev The strategy's `OP_COMPOUND` deferral code (private there).
@@ -1687,5 +1689,249 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         s.setTargetLtv(4000);
         assertEq(s.targetLtvBps(), 4000, "the target is settable before execute");
+    }
+
+    // ==================== setMaxLtv (ADMIN-ONLY OPERATIONAL CEILING) ====================
+    //
+    // The ceiling used to be writable ONLY at init and inside the owner-staged `migrateVenue` ceremony.
+    // The setter validates through the SHARED `LeveragedAeroValuation.checkLtvBand`, so every rung below
+    // is the library's, reached through the entrypoint — not an ad-hoc copy.
+    // Fixture band: target 5000, max 6500, minHealth 12000, live CF 8800.
+
+    /// @dev The admin writes the ceiling; `layout()` reads it back and the event carries (prev, new).
+    function testSetMaxLtvPersistsAndEmits() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.layout().maxLtvBps, 6500, "the init ceiling is the starting one");
+        assertEq(uint8(s.state()), uint8(BaseStrategy.State.Pending), "and NOT state-gated, like setTargetLtv");
+
+        vm.expectEmit(true, true, true, true, address(s));
+        emit MaxLtvUpdated(6500, 7000);
+        vm.prank(owner);
+        s.setMaxLtv(7000);
+
+        assertEq(s.layout().maxLtvBps, 7000, "the new ceiling persisted");
+        assertEq(s.targetLtvBps(), 5000, "the standing target is untouched: this knob is the belt, not policy");
+    }
+
+    /// @dev THE ROLES SPLIT: raising the ceiling raises the fund's reachable risk, so the keeper key —
+    ///      which may de-lever and rebalance all day — must not hold this. Admin == `vault().owner()`.
+    function testSetMaxLtvRevertsForProposerAndStrangers() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setMaxLtv(7000);
+
+        vm.prank(lp);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setMaxLtv(7000);
+
+        assertEq(s.layout().maxLtvBps, 6500, "a refused caller stores nothing");
+    }
+
+    /// @dev Rung 1, the band from BELOW: a ceiling under the STANDING target is refused with the very error
+    ///      `setTargetLtv` raises from the other side, so `target <= max` holds whichever knob moves.
+    function testSetMaxLtvRevertsBelowTheStandingTarget() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        s.setMaxLtv(4999); // targetLtvBps == 5000
+        assertEq(s.layout().maxLtvBps, 6500, "a rejected ceiling stores nothing");
+
+        vm.prank(owner);
+        s.setMaxLtv(5000); // the bound is inclusive, exactly as it is in setTargetLtv
+        assertEq(s.layout().maxLtvBps, 5000, "the target itself is a legal ceiling");
+    }
+
+    /// @dev Rung 3: the ceiling must sit STRICTLY below the collateral factor, or the op ceiling is the
+    ///      liquidation line.
+    function testSetMaxLtvRevertsAtOrAboveTheCollateralFactor() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.MaxLtvExceedsCF.selector);
+        s.setMaxLtv(8800); // CF is 8800 bps — equality is already refused
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.MaxLtvExceedsCF.selector);
+        s.setMaxLtv(9000);
+
+        assertEq(s.layout().maxLtvBps, 6500, "neither attempt stored");
+    }
+
+    /// @dev Rung 4, THE ANTI-GRIEF RUNG: the permissionless `deleverage()` triggers at
+    ///      `LTV = 1e8 / minHealthBps`, which must stay strictly ABOVE the ceiling. At minHealth 12000 that
+    ///      line is 8333.3 bps, so 8334 opens an in-band range anyone could grief-deleverage.
+    function testSetMaxLtvRevertsOnTheMinHealthConflictRung() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.MinHealthMaxLtvConflict.selector);
+        s.setMaxLtv(8334); // 12000 * 8334 == 1.00008e8 >= 1e8
+        assertEq(s.layout().maxLtvBps, 6500, "the conflicting ceiling stored nothing");
+
+        vm.prank(owner);
+        s.setMaxLtv(8333); // 12000 * 8333 == 9.9996e7 — the last legal bps below the trigger
+        assertEq(s.layout().maxLtvBps, 8333, "one bps below the conflict is accepted");
+    }
+
+    /// @dev THE POINT OF READING THE COMPTROLLER AT CALL TIME: Moonwell governance can move USDC's CF after
+    ///      init, and a setter validating against the init-time snapshot would approve a ceiling that now
+    ///      sits above the live liquidation line. Same argument, same value, both sides of a CF move.
+    function testSetMaxLtvReadsTheCollateralFactorLive() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.layout().usdcCollateralFactorBps, 8800, "init snapshot");
+
+        comptroller.setCollateralFactorMantissa(0.75e18); // Moonwell governance tightens USDC to 75%
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.MaxLtvExceedsCF.selector);
+        s.setMaxLtv(8000); // legal against the 8800 SNAPSHOT, illegal against the 7500 LIVE factor
+        assertEq(s.layout().maxLtvBps, 6500, "nothing stored");
+
+        comptroller.setCollateralFactorMantissa(0.88e18); // ...and back
+        vm.prank(owner);
+        s.setMaxLtv(8000);
+        assertEq(s.layout().maxLtvBps, 8000, "the SAME argument now clears the SAME rung");
+    }
+
+    /// @dev LOWERING is a risk ratchet-down, and it tightens the band for the OTHER setter immediately:
+    ///      `setTargetLtv` then refuses anything above the new ceiling.
+    function testSetMaxLtvLoweringTightensSetTargetLtv() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        s.setMaxLtv(5500);
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        s.setTargetLtv(5501);
+
+        vm.prank(owner);
+        s.setTargetLtv(5500); // the new ceiling is reachable, nothing above it is
+        assertEq(s.targetLtvBps(), 5500, "policy can meet the lowered ceiling");
+    }
+
+    // ==================== setWidthBounds (ADMIN-ONLY RERANGE BAND) ====================
+    //
+    // Same story as `setMaxLtv` one layer out: the band the PROPOSER's `rerange` width must land in was
+    // writable only at init / `migrateVenue`. Validated through the two ladders `applyVenue` runs —
+    // `checkBands` then `checkRange` on the STORED (width, skew) — so every rung is the shared library's.
+    // Fixture: tickSpacing 100, width 4000, skew 5000, band [200, 20000], skew band [1, 9999].
+
+    /// @dev The admin writes the band; the skew band and the live width are left alone.
+    function testSetWidthBoundsPersistsAndEmits() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.expectEmit(true, true, true, true, address(s));
+        emit WidthBoundsUpdated(200, 20_000, 400, 8000);
+        vm.prank(owner);
+        s.setWidthBounds(400, 8000);
+
+        assertEq(s.layout().minWidth, 400, "the new lower bound persisted");
+        assertEq(s.layout().maxWidth, 8000, "...and the upper");
+        assertEq(s.layout().width, 4000, "the LIVE width is untouched: moving it is the proposer's rerange");
+        assertEq(s.layout().minSkewBps, 1, "the skew band stays init-frozen");
+        assertEq(s.layout().maxSkewBps, 9999, "...both ends of it");
+    }
+
+    /// @dev THE ROLES SPLIT, sharpest form: this band is what BOUNDS the proposer's `rerange`, so an
+    ///      operator able to set it would have no bounds at all.
+    function testSetWidthBoundsRevertsForProposerAndStrangers() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setWidthBounds(400, 8000);
+
+        vm.prank(lp);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setWidthBounds(400, 8000);
+
+        assertEq(s.layout().minWidth, 200, "a refused caller stores nothing");
+        assertEq(s.layout().maxWidth, 20_000, "...at either end");
+    }
+
+    /// @dev `checkBands` rung 1: BOTH bounds must sit on the tickSpacing grid, or a legal-looking width
+    ///      could not be placed at either end of its own band.
+    function testSetWidthBoundsRevertsOnOffGridBounds() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(250, 8000); // 250 % 100 != 0
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(400, 8050); // 8050 % 100 != 0
+
+        assertEq(s.layout().minWidth, 200, "neither attempt stored");
+    }
+
+    /// @dev `checkBands` rung 2: `minWidth >= 2 x tickSpacing`, the rule that keeps an aligned range from
+    ///      being empty after both bounds round DOWN onto the grid.
+    function testSetWidthBoundsRevertsWhenMinWidthIsUnderTwoSpacings() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(100, 8000); // on-grid, but one spacing — half the floor
+
+        vm.prank(owner);
+        s.setWidthBounds(200, 8000); // exactly 2 x spacing is the floor, inclusive
+        assertEq(s.layout().minWidth, 200, "the floor itself is legal");
+    }
+
+    /// @dev `checkBands` rung 3: an inverted band admits nothing. DOUBLY refused by construction — an empty
+    ///      band cannot contain the stored width either, so `checkRange` catches it too if the shape rung
+    ///      ever moves.
+    function testSetWidthBoundsRevertsOnAnInvertedBand() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(8000, 400);
+
+        assertEq(s.layout().maxWidth, 20_000, "nothing stored");
+    }
+
+    /// @dev `checkBands` rung 4: `maxWidth` must fit the tick domain (`2 x MAX_TICK == MAX_BAND_WIDTH`) —
+    ///      `skewedTickRange` can put the WHOLE width on one side, so a wider band could not be placed at
+    ///      all. Both probes are on the SPACING grid, so it is the domain rung talking and not rung 1
+    ///      (`MAX_BAND_WIDTH` itself is off-grid at spacing 100, hence the nearest aligned width below it).
+    function testSetWidthBoundsRevertsAboveTheTickDomain() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        uint24 alignedCeiling = (MAX_BAND_WIDTH / 100) * 100; // 1_774_500
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(400, alignedCeiling + 100); // one spacing past the domain
+
+        vm.prank(owner);
+        s.setWidthBounds(400, alignedCeiling); // the widest aligned band the domain admits
+        assertEq(s.layout().maxWidth, alignedCeiling, "the domain edge is admissible");
+    }
+
+    /// @dev THE CONTAINMENT RULE. `redeploy` / `rerange` size from the STORED width, so a band excluding it
+    ///      would let the next redeploy place a range the band forbids. Excluding it from EITHER end is
+    ///      refused; the admin passes a compatible band, or the proposer reranges into it first.
+    function testSetWidthBoundsRefusesABandExcludingTheStoredWidth() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.layout().width, 4000, "the stored width the band must admit");
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(4100, 8000); // floor above the live width
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        s.setWidthBounds(400, 3900); // ceiling below it
+
+        assertEq(s.layout().minWidth, 200, "neither attempt stored");
+        assertEq(s.layout().maxWidth, 20_000, "...at either end");
+
+        vm.prank(owner);
+        s.setWidthBounds(4000, 4000); // the degenerate band that admits exactly the live width
+        assertEq(s.layout().minWidth, 4000, "a band pinned to the live width is legal");
     }
 }

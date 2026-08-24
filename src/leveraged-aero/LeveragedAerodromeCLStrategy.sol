@@ -154,6 +154,17 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      next `adjustLeverage` / `deployIdle` / `compound` sizes at the new value.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
+    /// @dev The admin re-set the fund's OPERATIONAL LTV CEILING through `setMaxLtv`. Emitted from THIS
+    ///      address by the delegatecalled `LeveragedAeroVenue.setMaxLtvImpl` (mirror-declared there with
+    ///      the same signature, so the same `topic0`). LOWERING is a risk ratchet-down and moves nothing by
+    ///      itself; the `_assertHealthy` belt and the fast-redeem LTV gate simply tighten from the next op.
+    event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
+
+    /// @dev The admin re-set the rerange WIDTH BAND through `setWidthBounds` — the governance bounds on the
+    ///      proposer's `rerange` width, not the live range. Emitted from THIS address by the delegatecalled
+    ///      `LeveragedAeroVenue.setWidthBoundsImpl` (mirror-declared there, same `topic0`).
+    event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
+
     /// @dev A best-effort fee crystallise (deposit / fast redeem / proportional redeem) reverted and was
     ///      deferred; the op proceeded. Reverts on the fee-MINT (vault paused / feeRecipient
     ///      de-whitelisted) — or, near-unreachably, on the config read inside the crystallise (see the
@@ -198,9 +209,22 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      on the vault carries the strategy's admin rights with it. The POLICY half of the split;
     ///      `onlyProposer` is the operations half, which may lower the target but never raise it and never move
     ///      tokens. Depends on the vault reverting `renounceOwnership` and being `Ownable2Step`.
+    ///      The check is a FUNCTION, not modifier-inline code: four entrypoints carry it and each inline copy
+    ///      pays for the `vault()` read plus the `owner()` staticcall and its decode — 309 bytes across the
+    ///      four, against a contract whose EIP-170 margin is in the low hundreds.
     modifier onlyAdmin() {
-        if (msg.sender != Ownable(vault()).owner()) revert NotAdmin();
+        _requireAdmin();
         _;
+    }
+
+    function _requireAdmin() private view {
+        if (msg.sender != _vaultOwner()) revert NotAdmin();
+    }
+
+    /// @dev One copy of the `vault()` read + `owner()` staticcall, shared with `stageVenue` (which raises a
+    ///      DIFFERENT error off the same authority, so it cannot share `_requireAdmin` itself).
+    function _vaultOwner() private view returns (address) {
+        return Ownable(vault()).owner();
     }
 
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
@@ -1081,6 +1105,55 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         $.targetLtvBps = targetLtvBps_;
     }
 
+    /// @notice ADMIN-ONLY POLICY: set the fund's OPERATIONAL LTV CEILING — the `maxLtvBps` belt every
+    ///         `_assertHealthy` and the fast-redeem gate measure against. Previously writable ONLY at init
+    ///         and inside the owner-staged `migrateVenue` ceremony; this is the direct knob. `onlyAdmin`
+    ///         for the same reason as `setTargetLtv`, and more sharply: raising the ceiling raises the fund's
+    ///         reachable risk, so the keeper key must never hold it. Body in
+    ///         `LeveragedAeroVenue.setMaxLtvImpl` (EIP-170 budget). NOT state-gated, like `setTargetLtv`.
+    ///
+    ///         LOWERING BELOW THE BOOK'S LIVE LTV IS LEGAL AND INTENDED — a risk ratchet-down. It moves
+    ///         nothing by itself: debt-ADDING ops (`deployIdle` / `compound` / a lever-UP `adjustLeverage`)
+    ///         then fail at their post-op `_assertHealthy` with `UnhealthyPosition` until the book is
+    ///         de-levered, while `adjustLeverage` DOWN keeps working (its own bound is the stored POLICY
+    ///         target, and a lever-down ends healthier). The fast-redeem LTV gate tightens immediately, so
+    ///         a redeemer above the new ceiling routes to `requestRedeem`. Pair it with `setTargetLtv` when
+    ///         the intent is for new tranches to size lower too.
+    ///
+    ///         RAISING is bounded by `checkLtvBand` against the LIVE collateral factor.
+    /// @dev The band is checked from BOTH sides and the two setters compose: `setTargetLtv` refuses a target
+    ///      above the stored `maxLtvBps` (`TargetLtvExceedsMax`), and `checkLtvBand`'s first rung refuses a
+    ///      ceiling below the stored target with the SAME error — so `target <= max` holds whichever knob moves.
+    /// @param maxLtvBps_ New ceiling in bps. Must be `>= targetLtvBps` (`TargetLtvExceedsMax`), strictly
+    ///        below the LIVE Moonwell USDC collateral factor (`MaxLtvExceedsCF`), and satisfy
+    ///        `minHealthBps * maxLtvBps_ < 1e8` (`MinHealthMaxLtvConflict`) — the anti-grief rung that keeps
+    ///        the permissionless deleverage trigger strictly above the ceiling.
+    function setMaxLtv(uint16 maxLtvBps_) external onlyAdmin {
+        LeveragedAeroVenue.setMaxLtvImpl(maxLtvBps_);
+    }
+
+    /// @notice ADMIN-ONLY POLICY: set the `[minWidth, maxWidth]` BAND the proposer's `rerange` width must
+    ///         land in. Previously writable ONLY at init and through `migrateVenue`; this is the direct
+    ///         knob. `onlyAdmin`, never `onlyProposer`: the band is exactly what BOUNDS the proposer, and an
+    ///         operator that can widen its own bounds has no bounds. Body in
+    ///         `LeveragedAeroVenue.setWidthBoundsImpl` (EIP-170 budget). NOT state-gated.
+    ///
+    ///         There is deliberately NO `setWidth`: the live range is the proposer's `rerange` parameter by
+    ///         design — moving it must burn a new position NFT at a calm-gated tick, which is that op, not a
+    ///         storage write. The SKEW band (`[minSkewBps, maxSkewBps]`) stays init-frozen, as decided when it
+    ///         was introduced.
+    /// @dev Validated by the two ladders `applyVenue` runs, in the same order and through the same shared
+    ///      library: `checkBands` (grid alignment, `minWidth >= 2 x tickSpacing`, `min <= max`, `max` inside
+    ///      the tick domain) then `checkRange` on the CURRENTLY STORED `(width, skewBps)`. The second is
+    ///      load-bearing: `redeploy` / `rerange` size from the stored width, so a band excluding it would let
+    ///      the next redeploy place a range this band forbids. Narrowing past the live width therefore reverts
+    ///      `OutOfBounds` — pass a compatible band, or have the proposer `rerange` into it first.
+    /// @param minWidth_ New lower bound on a rerange width, in ticks.
+    /// @param maxWidth_ New upper bound, in ticks.
+    function setWidthBounds(uint24 minWidth_, uint24 maxWidth_) external onlyAdmin {
+        LeveragedAeroVenue.setWidthBoundsImpl(minWidth_, maxWidth_);
+    }
+
     /// @notice Retarget the position's LTV to `targetBps` (borrow/repay; no new USDC enters), via
     ///         `LeveragedAeroManager.adjustLeverageImpl`: lever UP borrows the leg delta and adds it
     ///         (`minLiq`), lever DOWN unwinds the matching CL fraction and repays (residual rebalanced through
@@ -1379,7 +1452,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         the venue-selection authority, so the hot proposer key can never choose where the fund's liquidity
     ///         goes. Staging is inert until `migrateVenue` runs with the byte-exact params; re-staging replaces.
     function stageVenue(bytes32 venueHash) external {
-        if (msg.sender != Ownable(vault()).owner()) revert NotVaultOwner();
+        if (msg.sender != _vaultOwner()) revert NotVaultOwner();
         LeveragedAeroVenue.stageImpl(venueHash);
     }
 
