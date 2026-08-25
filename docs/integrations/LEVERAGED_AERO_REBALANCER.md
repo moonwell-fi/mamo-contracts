@@ -1548,7 +1548,7 @@ Three things to keep straight:
 
 ## Staging
 
-> **The live staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-18 from
+> **The live staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-25 (`6d25f5f`) from
 > the audit-remediation branch: a `LeveragedAerodromeCLStrategy` clone bound to `LeveragedAeroVault`,
 > deployed by `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue surface
 > documented above (`activateStrategy`, `settleStrategy`, `redeemSettled`), the fund
@@ -1567,11 +1567,11 @@ Three things to keep straight:
 | Network | Base fork (Tenderly Virtual TestNet), **custom** chainId `73578453` (parent Base `8453`) | `chainId` |
 | RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
-| Strategy clone (the operator target) | `0x01BF606144a56AB2e992bd96E5E4BaFdf09287F1` — width 4000 / band [200, 20000], skew 5000 / band [1000, 9000] | `pooled.strategyClone` |
-| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8D2F111794992AEF0bD4733E2af3c0F800A11E59` | `pooled.vault` |
-| Strategy template (clone source) | `0x92b37B73d51Ff44b5562Dd3e7563B5b45d1c2FB9` | `pooled.template` |
+| Strategy clone (the operator target) | `0xf72Dd040A1af43e25C3f1B330F5fbc7b909e8008` — width 4000 / band [200, 20000], skew 5000 / band [1000, 9000] | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC` | `pooled.vault` |
+| Strategy template (clone source) | `0xE559268df385ca2bb1A2649C109df0a8186CF56d` | `pooled.template` |
 | **Proposer / agent** (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
-| LP pool (Slipstream, tickSpacing 100) | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` — **twoleg WETH/cbBTC**, migrated 2026-08-21 from the asset-mode cbBTC/USDC pool. A `migrateVenue` does **not** update the manifest: read `layout()`. | `pooled.lpPool` |
+| LP pool (Slipstream, tickSpacing 100) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` — **asset mode cbBTC/USDC** (`legBIsAsset=true`) as deployed 2026-08-25. A `migrateVenue` does **not** update the manifest: read `layout()`. | `pooled.lpPool` |
 | Seed (USDC, 6dp) | `100000000000` = 100,000 USDC | `pooled.seed` |
 | Venue feeds | FreshFeed-mocked via `tenderly_setCode` — never stale, warping safe | `feeds.*` |
 

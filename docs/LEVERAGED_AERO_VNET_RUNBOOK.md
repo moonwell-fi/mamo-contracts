@@ -912,12 +912,12 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 
 ## Current live instance — vault generation 3 (audited build)
 
-> **This instance carries the AUDITED build**, redeployed **2026-08-18** by Phase B + Phase C above from
-> branch `aero-audit-2` (head `dd9dfdd`): the audit remediations plus the post-audit target-LTV refactor —
+> **This instance carries the AUDITED build**, redeployed **2026-08-25** by Phase B + Phase C above from
+> branch `aero-audit-2` (head `6d25f5f`, PRs #84/#85/#86/#87): the audit remediations plus the post-audit target-LTV refactor —
 > `lowerTargetLtv` removed, `adjustLeverage(uint16 targetBps, uint256, uint256)` (`0x9792419f`) bounded by
 > the stored `targetLtvBps` and never persisted. The strategy template, `LeveragedAeroVault` and the
 > `LeveragedAerodromeCLStrategy` clone all carry it, and the account layer was redeployed on top of them.
-> Verified on this instance after the deploy: `adjustLeverage(5001,…)` reverts
+> Verified on the 2026-08-18 clone (not re-measured on the 2026-08-25 clone): `adjustLeverage(5001,…)` reverts
 > `TargetLtvExceedsPolicy(5001, 5000)`, and a 5000 → 4000 → 5000 round trip moved leg debt
 > 51,959,105 → 40,028,007 → 50,036,587 with `targetLtvBps()` unchanged at 5000 throughout. Both harnesses finished green end
 > to end. No `SyndicateVault`, no governor, no proposal lifecycle — the getter is `depositsOpen()` and
@@ -943,21 +943,21 @@ without moving the AERO/USDC pool, which is a large, shared side effect).
 | vnet id | `769bfec9-e868-4f87-b6f7-ad3584e86eb3` (slug `mamo-leveraged-aero-pr66-1786640530`) | `vnetSlug` |
 | chainId | `73578453` — **custom** (`7357` prefix + parent 8453); harness runs need `EXPECTED_CHAIN=73578453`, forge needs `addresses/73578453.json` | `chainId` |
 | parent network | Base (`8453`) — fork state is Base; all venue addresses resolve unchanged | `parentNetworkId` |
-| fork block | `49,925,592` (instance created 2026-08-13; stack redeployed 2026-08-18 from `aero-audit-2` head `dd9dfdd`) | — |
+| fork block | `49,925,592` (instance created 2026-08-13; stack redeployed 2026-08-25 from `aero-audit-2` head `6d25f5f`) | — |
 | **Admin RPC** (writes) | **1Password** — write-capable, never committed | `adminRpc` |
 | Public RPC (reads) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | State sync | `false` — deliberate (constraint 3), not an API limit | `stateSync` |
 | Vault generation | `3` — `leveraged-aero-vault` (`depositsOpen()`, `cloneAndBind`, `redeemSettled`, **`maxTotalAssets()` / `remainingCapacity()`**) | `vaultGeneration` |
-| Vault (`LeveragedAeroVault`) | `0x8D2F111794992AEF0bD4733E2af3c0F800A11E59` | `pooled.vault` |
-| Strategy clone (operator target) | `0x01BF606144a56AB2e992bd96E5E4BaFdf09287F1` — width `4000` raw ticks, band `[200, 20000]`; skew `5000` (centered), band `[1000, 9000]` | `pooled.strategyClone` |
-| Strategy template (clone source) | `0x92b37B73d51Ff44b5562Dd3e7563B5b45d1c2FB9` | `pooled.template` |
+| Vault (`LeveragedAeroVault`) | `0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC` | `pooled.vault` |
+| Strategy clone (operator target) | `0xf72Dd040A1af43e25C3f1B330F5fbc7b909e8008` — width `4000` raw ticks, band `[200, 20000]`; skew `5000` (centered), band `[1000, 9000]` | `pooled.strategyClone` |
+| Strategy template (clone source) | `0xE559268df385ca2bb1A2649C109df0a8186CF56d` | `pooled.template` |
 | Strategy `proposer` (`MAMO_REBALANCER`, **not** `MAMO_BACKEND`) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
-| LP pool (Slipstream, tickSpacing 100; **twoleg WETH/cbBTC**) | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` | `pooled.lpPool` |
-| LP gauge | `0x41b2126661C673C2bEDd208cc72E85DC51a5320a` | `pooled.lpGauge` |
-| ⚠️ venue shape | **Migrated 2026-08-21** from asset-mode (cbBTC/USDC, pool `0x4e962BB3…`) to twoleg. Deploy-time manifest fields do **not** follow a `migrateVenue` — read `layout()` on the clone. | — |
+| LP pool (Slipstream, tickSpacing 100; **asset-mode cbBTC/USDC**) | `0x4e962BB3889Bf030368F56810A9c96B83CB3E778` | `pooled.lpPool` |
+| LP gauge | `0x6399ed6725cC163D019aA64FF55b22149D7179A8` | `pooled.lpGauge` |
+| ⚠️ venue shape | **Asset mode** as deployed 2026-08-25 (`legBIsAsset=true`, cbBTC/USDC): one borrowed leg LP'd against the fund's own USDC. Deploy-time manifest fields do **not** follow a `migrateVenue` — read `layout()` on the clone. | `pooled.venueShape` |
 | Seed | `100000000000` = 100,000 USDC (6dp) | `pooled.seed` |
-| Mamo account impl | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
-| Mamo account factory (typeId 5, latest) | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
+| Mamo account impl | `0x0EE12E97Fe2b176dB30A00bcE0cDe2699b7F4b8f` | `mamo.accountImplementation` |
+| Mamo account factory (typeId 5, latest) | `0x70707eb4337FAB8043ea737Fa16a14A90Ad1C440` | `mamo.accountFactory` |
 | Mamo strategy registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
@@ -1013,6 +1013,7 @@ no `redeemSettled`, governor-driven lifecycle).
 
 | Retired | Address | Note |
 |---|---|---|
+| Generation-3 stack on the CURRENT instance (2026-08-18) | vault `0x8D2F1117…1E59`, clone `0x01BF6061…87F1`, template `0x92b37B73…2FB9`, impl `0xC68F1419…8bf9`, factory `0x3E130404…F20b` | the `dd9dfdd` deploy, later `migrateVenue`'d to twoleg WETH/cbBTC; superseded 2026-08-25 by the `6d25f5f` asset-mode stack. Still live on the instance — do not target it |
 | Generation-3 stack on the CURRENT instance (2026-08-17) | vault `0x0B0ECF22…d6f1`, clone `0x339373E8…9c3c`, template `0x5B33a965…cdA0`, impl `0x9703a770…0E24`, factory `0x46108914…003E` | the first audited-build deploy; superseded 2026-08-18 by the `adjustLeverage` policy-bound refactor. Still live on the instance — do not target it |
 | Generation-2 stack on the CURRENT instance | vault `0xC0e7a3fF…727e`, clone `0x0039e435…41E2`, template `0xEA05B89C…5425`, impl `0xd9Fc69ff…CaD1`, factory `0x00247273…4523` | the 2026-08-13 deploy from PR #66 head `d347b68`, superseded 2026-08-17 by the audited generation-3 stack. Its vault predates `maxTotalAssets()`, so a current strategy bound to it reverts on every deposit with empty returndata — the account harness's generation probe exists to catch exactly this. Per the redeploy-hygiene note in Phase C the retired impl is **still whitelisted** and the retired factory **still holds `BACKEND_ROLE`**; `latestImplementationById(5)` routes to the new pair, so this is cosmetic on a vnet |
 | Previous vnet instance (chainId `8453`) | vnet `8975a20b-5cf0-4399-9165-08e2b19229db`, public RPC `…/70a4990f-6686-4536-8237-ad9103acd11b` | superseded 2026-08-13 by the `73578453` custom-chain-id instance; still running, not deleted. Its stack: vault `0x8343b356…22D7`, clone `0xA26557fA…49da`, template `0xafcA85Df…8943`, impl `0xC68F1419…8bf9`, factory `0x3E130404…F20b` |

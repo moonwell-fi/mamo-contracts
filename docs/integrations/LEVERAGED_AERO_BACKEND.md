@@ -438,7 +438,7 @@ in the path any more. Operationally for the backend:
 
 ## Staging
 
-> **The staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-18:
+> **The staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-25 (`6d25f5f`):
 > `LeveragedAeroVault` replaces Sherwood's `SyndicateVault`, so `depositsOpen()` / `setOpenDeposits` /
 > `activateStrategy` / `settleStrategy` / `redeemSettled` are all the in-repo ones, and the vault carries
 > the fund capacity cap (`maxTotalAssets()` / `remainingCapacity()`) the strategy's deposit path checks.
@@ -457,12 +457,12 @@ in the path any more. Operationally for the backend:
 | Network | Base fork (Tenderly Virtual TestNet), **custom** chainId `73578453` (parent Base `8453`) | `chainId` |
 | RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
-| Factory | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
-| Account implementation | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
+| Factory | `0x70707eb4337FAB8043ea737Fa16a14A90Ad1C440` | `mamo.accountFactory` |
+| Account implementation | `0x0EE12E97Fe2b176dB30A00bcE0cDe2699b7F4b8f` | `mamo.accountImplementation` |
 | Registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
-| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8D2F111794992AEF0bD4733E2af3c0F800A11E59` | `pooled.vault` |
-| Strategy clone | `0x01BF606144a56AB2e992bd96E5E4BaFdf09287F1` | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC` | `pooled.vault` |
+| Strategy clone | `0xf72Dd040A1af43e25C3f1B330F5fbc7b909e8008` | `pooled.strategyClone` |
 | Strategy `proposer` (rebalancer — fulfils redeems) | `0x73f6B456d063F78129113D42DBC315b9eEee8FAf` | `pooled.proposer` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
 
