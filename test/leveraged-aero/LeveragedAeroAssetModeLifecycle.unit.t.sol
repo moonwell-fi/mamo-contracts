@@ -1007,6 +1007,23 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGe(healthAfter, 12_000, "health restored above the minimum");
     }
 
+    /// @dev L4's other half: the valve is a BACKSTOP — neither a stranger nor the proposer may force-delever.
+    function testDeleverageRefusesAHealthyBookForAnyCaller() public {
+        _execute(SEED);
+
+        (uint256 collateral, uint256 debt) = _collateralAndDebt();
+        assertGe((collateral * 10_000) / debt, 12_000, "the fixture must be healthy for this to mean anything");
+
+        // The reverts ARE the pin: a post-revert state assertion would be inert, since the call unwinds it.
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert(LeveragedAerodromeCLStrategy.HealthyNoDeleverage.selector);
+        strategy.deleverage(0);
+
+        vm.prank(proposer); // not even the proposer gets the valve on a healthy book
+        vm.expectRevert(LeveragedAerodromeCLStrategy.HealthyNoDeleverage.selector);
+        strategy.deleverage(0);
+    }
+
     /// @dev In the collateral-dust tail `targetDebt` floors to 0, so `repayUsd == debtBefore` would trip
     ///      `_leverDown`'s orphaned-NFT guard and switch the PERMISSIONLESS valve off exactly where it is
     ///      needed; the `repayUsd = debtBefore - 1` clamp keeps ≥1 liquidity and the re-stake alive.
@@ -1063,6 +1080,59 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         vm.prank(makeAddr("keeper"));
         vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
         strategy.deleverage(0);
+    }
+
+    // ============ LAYER 2: THE POST-OP HEALTH GATE (`_assertHealthy`) ============
+    // The collateral basis is the lever below (prices untouched), so the LP stays two-sided.
+
+    /// @dev Rerange is debt-neutral, so it reads the gate alone: the book is ALREADY above `maxLtvBps`.
+    function testRerangeRevertsUnhealthyPositionWhenTheBookSitsAboveMaxLtv() public {
+        _execute(SEED);
+        mUsdc.setExchangeRateStored(0.7e18); // LTV 5000 -> ~7142, above maxLtv 6500
+        (uint256 c, uint256 d) = _collateralAndDebt();
+        assertGt((d * 10_000) / c, 6500, "the arm must actually breach maxLtv");
+
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+    }
+
+    /// @dev Non-vacuity: the same op inside the ceiling succeeds, so the revert above is the gate firing.
+    function testRerangeSucceedsWhenTheSameCollateralMoveKeepsTheBookInsideMaxLtv() public {
+        _execute(SEED);
+        mUsdc.setExchangeRateStored(0.9e18); // LTV 5000 -> ~5555, still under maxLtv 6500
+        (uint256 c, uint256 d) = _collateralAndDebt();
+        assertLt((d * 10_000) / c, 6500, "still inside the ceiling");
+
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+        // `rerangeImpl` always mints a FRESH NFT, so a changed id pins that the op ran, not just that it
+        // failed to revert.
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "rerange actually reminted the position");
+    }
+
+    /// @dev The op is sized at target 5000 yet still refused: the gate reads the WHOLE book's post-op LTV.
+    function testDeployIdleRevertsUnhealthyPositionOnABookAlreadyAboveMaxLtv() public {
+        _execute(SEED);
+        mUsdc.setExchangeRateStored(0.5e18); // LTV 5000 -> ~10000, far above maxLtv 6500
+
+        usdc.mint(address(strategy), 10_000e6); // fresh idle to deploy
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.deployIdle(10_000e6, 0);
+    }
+
+    /// @dev The Moonwell belt binds ops too, not just `deleverage` — the Chainlink LTV here is in-ceiling.
+    function testRerangeRevertsOnAMoonwellShortfallEvenWhileTheChainlinkLtvIsInsideTheCeiling() public {
+        _execute(SEED);
+        (uint256 c, uint256 d) = _collateralAndDebt();
+        assertLt((d * 10_000) / c, 6500, "Chainlink-priced LTV is inside the ceiling");
+
+        comptroller.setShortfall(1e18);
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
     }
 
     // ==================== THE CRUX INVARIANT ====================

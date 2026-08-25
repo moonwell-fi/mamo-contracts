@@ -91,6 +91,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error PerformanceFeeTooHigh();
     error ManagementFeeTooHigh();
     error MinHealthMaxLtvConflict();
+    error DeleverageTriggerAboveCF(); // minHealthBps * cfBps <= 1e8 — trigger LTV at or above the CF
     error AssetMismatch();
     error UnexpectedAssetDecimals();
     error UnexpectedFeedDecimals(); // AERO/USD aggregator not 8dp (L9 oracle-floor scaling assumption)

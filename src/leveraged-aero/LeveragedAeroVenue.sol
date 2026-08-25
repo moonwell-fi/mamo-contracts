@@ -672,7 +672,7 @@ library LeveragedAeroVenue {
         );
 
         // Risk invariants against the LIVE collateral factor (fresher than init's); both the read and the
-        // four rungs are the Valuation copies shared with the init ladder.
+        // five rungs are the Valuation copies shared with the init ladder.
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, mUsdc);
         // The lower bound is the only rung not mirrored in that ladder, and `applyVenue` is the shared route
         // for init and migrate, so it closes every path to a stored zero target — a fund that can never lever.

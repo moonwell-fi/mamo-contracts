@@ -897,7 +897,9 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.MinHealthTooLow.selector);
     }
 
+    /// @dev The floor triggers at `1e8 / 10500 = 9523`, so it needs a CF above that — hence the raise here.
     function testInitAcceptsMinHealthAtTheFloor() public {
+        comptroller.setCollateralFactorMantissa(0.96e18); // cf 9600; 10500 * 9600 = 1.008e8 > 1e8
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
         p.minHealthBps = 10_500;
         p.maxLtvBps = 6500; // 10500 * 6500 = 6.825e7 < 1e8, so the L4 conflict guard still clears
@@ -932,6 +934,44 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.minHealthBps = 12_500;
         p.maxLtvBps = 7900; // 9.875e7 < 1e8 -> accepted
         assertEq(_init(p).layout().maxLtvBps, 7900, "just under the bound accepted");
+    }
+
+    /// @dev L4's other side: trigger below CF, else the book is liquidatable while `deleverage()` reverts.
+    function testInitRevertsWhenTheDeleverageTriggerSitsAtOrAboveTheCollateralFactor() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 10_500; // 10500 * 8800 = 9.24e7 <= 1e8 -> trigger 9523 > CF 8800
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+    }
+
+    /// @dev Strict `>`: product == 1e8 means trigger == CF and is rejected; one bps of CF more is accepted.
+    function testInitDeleverageTriggerCollateralFactorBoundaryIsStrict() public {
+        comptroller.setCollateralFactorMantissa(0.8e18); // cf 8000
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 12_500;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+
+        comptroller.setCollateralFactorMantissa(0.8001e18); // cf 8001; 12500 * 8001 = 1.000125e8 > 1e8
+        p = _baseParams();
+        p.minHealthBps = 12_500;
+        assertEq(_init(p).layout().minHealthBps, 12_500, "one bps of CF above the bound accepted");
+    }
+
+    /// @dev The same boundary from the other knob: a HIGHER minHealth lowers the trigger LTV.
+    function testInitDeleverageTriggerAcceptsTheSmallestMinHealthStepAboveTheBound() public {
+        comptroller.setCollateralFactorMantissa(0.8e18); // cf 8000
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.minHealthBps = 12_501; // 12501 * 8000 = 1.00008e8 > 1e8 -> accepted
+        assertEq(_init(p).layout().minHealthBps, 12_501, "one bps of minHealth above the bound accepted");
+    }
+
+    /// @dev `_baseParams()` IS the shipping set, so this pins the ordering `5000 <= 6500 < 8333 < 8800`.
+    function testInitAcceptsTheProductionRiskParamsUnderTheDeleverageTriggerRung() public {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        LeveragedAerodromeCLStrategy s = _init(p);
+        assertEq(s.layout().minHealthBps, 12_000, "minHealth stored");
+        assertEq(s.layout().usdcCollateralFactorBps, 8800, "CF read from the comptroller");
+        assertLt(1e8 / uint256(s.layout().minHealthBps), uint256(s.layout().usdcCollateralFactorBps), "trigger < CF");
+        assertLt(uint256(s.layout().maxLtvBps), 1e8 / uint256(s.layout().minHealthBps), "maxLtv < trigger");
     }
 
     /// @dev A comptroller reporting a zero collateral factor is unusable — the read must fail loudly

@@ -128,6 +128,8 @@ library LeveragedAeroValuation {
     error MaxLtvExceedsCF();
     /// @notice `minHealthBps × maxLtvBps >= 1e8` — the deleverage trigger LTV would sit inside the band (L4).
     error MinHealthMaxLtvConflict();
+    /// @notice `minHealthBps × cfBps <= 1e8` — the deleverage trigger LTV would sit at or above the CF (L4).
+    error DeleverageTriggerAboveCF();
     /// @notice A non-zero fee rate with a zero recipient.
     error FeeRecipientRequired();
     /// @notice Performance fee above the protocol-wide cap.
@@ -322,16 +324,19 @@ library LeveragedAeroValuation {
         if (minSkewBps_ == 0 || minSkewBps_ > maxSkewBps_ || maxSkewBps_ >= 10000) revert OutOfBounds();
     }
 
-    /// @notice The four VENUE-SCOPED risk invariants: the LTV band's own shape and its relationship to the
+    /// @notice The five VENUE-SCOPED risk invariants: the LTV band's own shape and its relationship to the
     ///         destination market's collateral factor (bps). Shared by `checkRiskParams` and
     ///         `LeveragedAeroVenue.applyVenue`, which re-runs them at every `migrateVenue`.
-    /// @dev L4: permissionless deleverage triggers at `LTV = 1e8 / minHealthBps`, which MUST sit strictly
-    ///      above `maxLtvBps` or there is an in-band range anyone can grief-deleverage.
+    /// @dev L4: permissionless deleverage triggers at `LTV = 1e8 / minHealthBps`; the last two rungs bracket
+    ///      it above `maxLtvBps` (grief-deleverage) and below `cfBps` (liquidation precedes the rescue), so
+    ///      the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`. CONFIG-TIME ONLY: a CF that Moonwell
+    ///      cuts post-init reopens that window until the next `migrateVenue` re-reads it.
     function checkLtvBand(uint16 targetLtvBps, uint16 maxLtvBps, uint16 minHealthBps, uint16 cfBps) public pure {
         if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
         if (minHealthBps < 10500) revert MinHealthTooLow();
         if (maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
         if (uint256(minHealthBps) * uint256(maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
+        if (uint256(minHealthBps) * uint256(cfBps) <= 1e8) revert DeleverageTriggerAboveCF();
     }
 
     /// @notice The INIT-ONLY numeric ladder over the risk and oracle params, in the strategy's original

@@ -1225,6 +1225,37 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _expectMigrateRevert(v, LeveragedAeroVenue.TargetLtvZero.selector);
     }
 
+    /// @dev Only this path can produce it: `applyVenue` re-reads the LIVE CF, so a CF Moonwell has since
+    ///      LOWERED lifts the trigger past the liquidation line post-init.
+    function testMigrateRejectsADestinationWhoseCollateralFactorSitsUnderTheDeleverageTrigger() public {
+        _execute(SEED);
+        _flatten();
+        comptroller.setCollateralFactorMantissa(0.83e18); // cf 8300; 12000 * 8300 = 9.96e7 <= 1e8
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams(); // maxLtv 6000 < 8300: earlier rungs clear
+        _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector);
+    }
+
+    /// @dev The other knob: a migration may lower minHealth, which RAISES the trigger (11000 -> 9090 > 8800).
+    function testMigrateRejectsAMinHealthThatLiftsTheDeleverageTriggerToTheCollateralFactor() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.minHealthBps = 11_000; // 11000 * 8800 = 9.68e7 <= 1e8
+        _expectMigrateRevert(v, LeveragedAeroValuation.DeleverageTriggerAboveCF.selector);
+    }
+
+    /// @dev The positive twin, one bps of CF above the bound: the migration lands. A boundary, not a ban.
+    function testMigrateAcceptsACollateralFactorOneBpsAboveTheDeleverageTrigger() public {
+        _execute(SEED);
+        _flatten();
+        comptroller.setCollateralFactorMantissa(0.8334e18); // cf 8334
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().pool, address(poolB), "venue migrated at the boundary");
+        assertEq(strategy.layout().usdcCollateralFactorBps, 8334, "the live CF was re-read and stored");
+    }
+
     // ==================== migrate: the target-LTV write is LOUD ====================
 
     /// @dev `applyVenue` persists `p.targetLtvBps`, so a migration MOVES THE FUND'S LEVERAGE POLICY.
