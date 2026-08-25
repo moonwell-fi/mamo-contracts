@@ -154,6 +154,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      next `adjustLeverage` / `deployIdle` / `compound` sizes at the new value.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
 
+    /// @dev `setMaxLtv` / `setWidthBounds`, and `applyVenue` (init + `migrateVenue`) inequality-guarded;
+    ///      emitted from THIS address by the delegatecalled `LeveragedAeroVenue`, which mirror-declares them.
+    event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
+    event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
+
     /// @dev A best-effort fee crystallise (deposit / fast redeem / proportional redeem) reverted and was
     ///      deferred; the op proceeded. Reverts on the fee-MINT (vault paused / feeRecipient
     ///      de-whitelisted) — or, near-unreachably, on the config read inside the crystallise (see the
@@ -198,9 +203,19 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      on the vault carries the strategy's admin rights with it. The POLICY half of the split;
     ///      `onlyProposer` is the operations half, which may lower the target but never raise it and never move
     ///      tokens. Depends on the vault reverting `renounceOwnership` and being `Ownable2Step`.
+    ///      A function, not modifier-inline code: four entrypoints carry it, and each inline copy costs bytes.
     modifier onlyAdmin() {
-        if (msg.sender != Ownable(vault()).owner()) revert NotAdmin();
+        _requireAdmin();
         _;
+    }
+
+    function _requireAdmin() private view {
+        if (msg.sender != _vaultOwner()) revert NotAdmin();
+    }
+
+    /// @dev Shared with `stageVenue`, which raises a DIFFERENT error off the same authority.
+    function _vaultOwner() private view returns (address) {
+        return Ownable(vault()).owner();
     }
 
     // ── Initialisation params (ABI-encoded → BaseStrategy.initialize → _initialize) ──
@@ -1073,12 +1088,33 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `deployIdle` / `compound` / `adjustLeverage` sizes at the new value. NOT state-gated: legal in
     ///         `Pending` (how a multisig corrects an init-time target) and a no-op post-`Settled`.
     /// @param targetLtvBps_ New standing target in bps; must be non-zero (`TargetLtvZero`) and `≤ maxLtvBps`.
+    /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old policy.
     function setTargetLtv(uint16 targetLtvBps_) external onlyAdmin {
-        Layout storage $ = _layout();
-        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
-        if (targetLtvBps_ == 0) revert TargetLtvZero();
-        emit TargetLtvUpdated($.targetLtvBps, targetLtvBps_);
-        $.targetLtvBps = targetLtvBps_;
+        LeveragedAeroVenue.setTargetLtvImpl(targetLtvBps_);
+    }
+
+    /// @notice ADMIN-ONLY POLICY: set the OPERATIONAL LTV CEILING — the `maxLtvBps` belt `_assertHealthy`
+    ///         and the fast-redeem gate measure against. Not state-gated, like `setTargetLtv`.
+    /// @dev Lowering BELOW the book's live LTV is intended (a risk ratchet-down): debt-adding ops then fail
+    ///      their post-op `_assertHealthy` until a lever-DOWN brings the book back inside.
+    /// @dev Lowering below the STANDING TARGET needs `setTargetLtv` first — rung 1 refuses it otherwise.
+    /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old policy.
+    /// @param maxLtvBps_ New ceiling in bps, validated by the shared `checkLtvBand` against the LIVE
+    ///        collateral factor: Moonwell governance can move CF after init, and the init-time snapshot
+    ///        could approve a ceiling now above the liquidation line.
+    function setMaxLtv(uint16 maxLtvBps_) external onlyAdmin {
+        LeveragedAeroVenue.setMaxLtvImpl(maxLtvBps_);
+    }
+
+    /// @notice ADMIN-ONLY POLICY: set the `[minWidth, maxWidth]` band a proposer `rerange` width must land
+    ///         in — `onlyAdmin` because this band is what BOUNDS the proposer. Not state-gated.
+    /// @dev The band must still admit the STORED width: `redeploy` / `rerange` size from it, so narrowing
+    ///      past it reverts `OutOfBounds` — rerange into the intended width first.
+    /// @dev No `setWidth` (the live range moves only by minting at a calm-gated tick, i.e. `rerange`), and
+    ///      the SKEW band stays init-frozen by design.
+    /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old band.
+    function setWidthBounds(uint24 minWidth_, uint24 maxWidth_) external onlyAdmin {
+        LeveragedAeroVenue.setWidthBoundsImpl(minWidth_, maxWidth_);
     }
 
     /// @notice Retarget the position's LTV to `targetBps` (borrow/repay; no new USDC enters), via
@@ -1379,7 +1415,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         the venue-selection authority, so the hot proposer key can never choose where the fund's liquidity
     ///         goes. Staging is inert until `migrateVenue` runs with the byte-exact params; re-staging replaces.
     function stageVenue(bytes32 venueHash) external {
-        if (msg.sender != Ownable(vault()).owner()) revert NotVaultOwner();
+        if (msg.sender != _vaultOwner()) revert NotVaultOwner();
         LeveragedAeroVenue.stageImpl(venueHash);
     }
 

@@ -36,6 +36,7 @@ library LeveragedAeroVenue {
     // strategy's selectors), so they are not re-declared; `TargetLtvZero` is a lower bound `applyVenue`
     // alone enforces and so lives here.
     error TargetLtvZero(); // targetLtvBps == 0 — a standing target of zero can never lever
+    error TargetLtvExceedsMax(); // selector mirrors the strategy's / the valuation's
     error VenueNotStaged(); // migrate without a staged hash, or params that do not match it
     error BookNotFlat(); // migrate while a CL position, hedged basis, or leg debt is still live
     error PositionAlreadyOpen(); // redeploy on a book that already has a CL position (use deployIdle)
@@ -60,6 +61,11 @@ library LeveragedAeroVenue {
     /// @dev Re-declared with the strategy's signature (so the same `topic0`): without it an owner-staged
     ///      migration could silently restore a target the proposer had just ratcheted down.
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
+    /// @notice The ceiling / width band moved — through the admin's standalone setters, or through
+    ///         `applyVenue`, which emits the same pair inequality-guarded. Re-declared with the strategy's
+    ///         signatures (same `topic0`), since both routes log from the strategy's address.
+    event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
+    event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
 
     /// @notice An async-redeem request was escrowed. Re-declared with the strategy's signature (same `topic0`).
     event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
@@ -694,12 +700,19 @@ library LeveragedAeroVenue {
         $.wethSwapTickSpacing = p.wethSwapTickSpacing;
         $.wethDeliversNative = p.wethDeliversNative;
         $.width = p.width;
+        // MUST precede the two persists below — the guard reads the OUTGOING band.
+        if ($.minWidth != p.minWidth || $.maxWidth != p.maxWidth) {
+            emit WidthBoundsUpdated($.minWidth, $.maxWidth, p.minWidth, p.maxWidth);
+        }
         $.minWidth = p.minWidth;
         $.maxWidth = p.maxWidth;
         // The target LTV is the one venue field that is also POLICY, so announce it or a migration becomes
         // the one route that moves leverage policy in silence. Guarded on inequality, so the event means
         // "policy moved", not "a migration happened"; at init it is trivially true, announcing the opener.
+        // Same argument for the ceiling and the band above: `VenueMigrated` carries only the two pools, so
+        // without these a migration moves them in silence past a monitor keyed on the setters' events.
         if ($.targetLtvBps != p.targetLtvBps) emit TargetLtvUpdated($.targetLtvBps, p.targetLtvBps);
+        if ($.maxLtvBps != p.maxLtvBps) emit MaxLtvUpdated($.maxLtvBps, p.maxLtvBps);
         $.targetLtvBps = p.targetLtvBps;
         $.maxLtvBps = p.maxLtvBps;
         $.minHealthBps = p.minHealthBps;
@@ -708,6 +721,57 @@ library LeveragedAeroVenue {
         $.wethDecimals = wethDec;
         $.wethIsToken0 = wethIsToken0_;
         $.legBIsAsset = legBIsAsset_;
+    }
+
+    // ── Bodies of the strategy's three admin policy setters, hosted here for its EIP-170 budget ──
+
+    /// @dev A staged hash authorises a venue whose params carry a `maxLtvBps` / width band / target the
+    ///      owner picked under the policy standing AT STAGE TIME. An admin write moves that policy, so the
+    ///      authorization is consumed here for the same reason `redeployImpl` consumes it: a stale
+    ///      `migrateVenue` must not be firable into a context the owner did not stage it for. The owner
+    ///      re-stages against the new policy.
+    function _clearStagedVenue(Layout storage $) private {
+        if ($.stagedVenueHash != bytes32(0)) {
+            $.stagedVenueHash = bytes32(0);
+            emit VenueStaged(bytes32(0));
+        }
+    }
+
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setTargetLtv` — validation, persist and emit
+    ///         verbatim from the strategy, relocated for its EIP-170 budget and to share the stage clear.
+    function setTargetLtvImpl(uint16 targetLtvBps_) public {
+        Layout storage $ = _layout();
+        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
+        if (targetLtvBps_ == 0) revert TargetLtvZero();
+        emit TargetLtvUpdated($.targetLtvBps, targetLtvBps_);
+        $.targetLtvBps = targetLtvBps_;
+        _clearStagedVenue($);
+    }
+
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setMaxLtv`, on the shared `checkLtvBand` ladder.
+    /// @dev The CF is read live (see the entrypoint); `$.usdcCollateralFactorBps` stays the adoption record.
+    function setMaxLtvImpl(uint16 maxLtvBps_) public {
+        Layout storage $ = _layout();
+        uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps);
+        emit MaxLtvUpdated($.maxLtvBps, maxLtvBps_);
+        $.maxLtvBps = maxLtvBps_;
+        _clearStagedVenue($);
+    }
+
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setWidthBounds`, on both ladders `applyVenue` runs.
+    /// @dev `checkBands` is the band's shape; `checkRange` is the stored-width containment rule.
+    function setWidthBoundsImpl(uint24 minWidth_, uint24 maxWidth_) public {
+        Layout storage $ = _layout();
+        int24 spacing = $.tickSpacing;
+        uint16 minSkew = $.minSkewBps;
+        uint16 maxSkew = $.maxSkewBps;
+        LeveragedAeroValuation.checkBands(spacing, minWidth_, maxWidth_, minSkew, maxSkew);
+        LeveragedAeroValuation.checkRange($.width, $.skewBps, spacing, minWidth_, maxWidth_, minSkew, maxSkew);
+        emit WidthBoundsUpdated($.minWidth, $.maxWidth, minWidth_, maxWidth_);
+        $.minWidth = minWidth_;
+        $.maxWidth = maxWidth_;
+        _clearStagedVenue($);
     }
 
     /// @notice The strategy's full `LayoutView` read out of diamond storage — the BODY of

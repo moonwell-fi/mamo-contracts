@@ -1253,6 +1253,9 @@ same vault, same share token, same user accounts, no user action. Three new stra
 4. Rebalancer: `redeploy(minLiquidity)`; afterwards sweep old-leg unwind dust with
    `rescueToVault(oldLeg)` (former legs leave the deny-list at the rewrite; the NEW legs enter it).
 
+**Any admin policy setter clears an armed stage.** `setTargetLtv` / `setMaxLtv` / `setWidthBounds`
+between steps 1 and 3 consume the staged hash — re-stage to proceed.
+
 **Trust split:** the owner alone picks the venue (hash-committed, byte-exact); the proposer alone
 sequences execution and can neither deviate from the committed config nor move funds out of the
 contract at any step.

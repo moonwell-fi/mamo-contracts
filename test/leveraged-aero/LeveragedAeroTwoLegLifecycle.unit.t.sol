@@ -554,7 +554,175 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         );
     }
 
+    /// @dev THE RATCHET-DOWN, on a live levered book: the ceiling drops under the book's own LTV, ops that
+    ///      end in `_assertHealthy` fail until a lever-DOWN — which is not blocked — brings it back inside.
+    function testLoweringMaxLtvBlocksDebtAddingOpsUntilTheBookDeLevers() public {
+        _execute(SEED);
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "the book opens on the init target");
+
+        // Policy first (the band is checked from both sides), then the ceiling, through the live 5000 LTV.
+        vm.startPrank(owner);
+        strategy.setTargetLtv(4000);
+        strategy.setMaxLtv(4500);
+        vm.stopPrank();
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "lowering the ceiling moved no debt");
+
+        // A 100k tranche at the new 4000 target still blends to ~4909 bps, above the fresh 4500 ceiling.
+        uint256 topUp = 100_000e6;
+        usdc.mint(address(strategy), topUp);
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.deployIdle(topUp, 0);
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "the refused op rolled back whole");
+
+        // The way out: a lever-DOWN, bounded by the stored POLICY target, ending under the new ceiling.
+        vm.prank(proposer);
+        strategy.adjustLeverage(4000, 0, 0);
+        assertApproxEqAbs(_ltvBps(), 4000, 2, "the keeper de-levered to the new policy with no admin signature");
+
+        vm.prank(proposer);
+        strategy.deployIdle(topUp, 0);
+        assertApproxEqAbs(_ltvBps(), 4000, 2, "the redeployed book sits on the new target, under the ceiling");
+    }
+
+    /// @dev `compound` is the OTHER debt-adding op the ceiling gates: its redeployed harvest borrows at the
+    ///      target, and the blended book is still over the fresh ceiling, so the same post-op gate fires.
+    function testLoweringMaxLtvAlsoBlocksCompoundUntilTheBookDeLevers() public {
+        _execute(SEED);
+
+        vm.startPrank(owner);
+        strategy.setTargetLtv(4000);
+        strategy.setMaxLtv(4500);
+        vm.stopPrank();
+
+        _armAeroRouter();
+        _armHarvest(40_000e6);
+
+        vm.prank(proposer);
+        vm.expectPartialRevert(LeveragedAerodromeCLStrategy.UnhealthyPosition.selector);
+        strategy.compound(1, 0);
+        assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 2, "the refused harvest rolled back whole");
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(4000, 0, 0);
+        vm.prank(proposer);
+        strategy.compound(1, 0); // inside the band the same harvest lands
+        assertLe(_ltvBps(), 4500, "the compounded book sits under the ceiling");
+    }
+
+    /// @dev The FAST-REDEEM gate reads `$.maxLtvBps` LIVE: the same draw flips from allowed to refused when
+    ///      the admin lowers the ceiling under it, and back when the ceiling is raised again. An init-cached
+    ///      copy would give the same answer all three times.
+    function testLoweringMaxLtvTightensTheFastRedeemGateImmediately() public {
+        _execute(SEED);
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        vm.prank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 shares = supply / 10; // a draw that lands the post-redeem LTV around 5263 bps
+
+        uint256 snapA = vm.snapshotState();
+        vm.prank(lp);
+        strategy.redeem(shares, 0); // ceiling 6500: the fast path is open
+        vm.revertToState(snapA);
+
+        vm.prank(owner);
+        strategy.setMaxLtv(5100); // still above the book's live 5000, below the POST-draw LTV
+        uint256 snapB = vm.snapshotState();
+        vm.prank(lp);
+        vm.expectPartialRevert(LeveragedAeroVenue.FastRedeemExceedsLtv.selector);
+        strategy.redeem(shares, 0);
+
+        // ...and the documented fallback is open: the same shares still queue.
+        vm.prank(lp);
+        strategy.requestRedeem(shares, 0, address(0)); // recipient 0 == the redeemer
+        vm.revertToState(snapB);
+
+        vm.prank(owner);
+        strategy.setMaxLtv(5500); // back above the post-draw LTV
+        vm.prank(lp);
+        strategy.redeem(shares, 0);
+    }
+
+    /// @dev The keeper's three closed doors after a ratchet-down: re-lever, raise policy, raise the ceiling.
+    function testLoweredMaxLtvKeepsTheKeeperFromLeveringBackUp() public {
+        _execute(SEED);
+
+        vm.startPrank(owner);
+        strategy.setTargetLtv(3000);
+        strategy.setMaxLtv(3500);
+        vm.stopPrank();
+
+        // Down to the new policy first, so only the re-lever is under test.
+        vm.prank(proposer);
+        strategy.adjustLeverage(3000, 0, 0);
+        assertApproxEqAbs(_ltvBps(), 3000, 2, "de-levered");
+
+        vm.prank(proposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LeveragedAerodromeCLStrategy.TargetLtvExceedsPolicy.selector, uint16(5000), uint16(3000)
+            )
+        );
+        strategy.adjustLeverage(5000, 0, 0);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        strategy.setTargetLtv(5000);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        strategy.setMaxLtv(6500);
+
+        assertEq(strategy.layout().maxLtvBps, 3500, "the ceiling the admin set is the ceiling that stands");
+    }
+
     // ==================== RERANGE SKEW (two borrowed legs) ====================
+
+    /// @dev A tightened band binds the proposer's `rerange` immediately, at both ends.
+    function testSetWidthBoundsTightensWhatTheProposerMayRerangeTo() public {
+        _execute(SEED);
+
+        vm.prank(owner);
+        strategy.setWidthBounds(2000, 6000);
+
+        // 1000 was legal under the init band [200, 20000]; it is not under [2000, 6000].
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.rerange(1000, SKEW_CENTERED, 0, 0);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.rerange(8000, SKEW_CENTERED, 0, 0);
+
+        assertEq(strategy.layout().width, WIDTH, "a refused rerange stored no width");
+
+        vm.prank(proposer);
+        strategy.rerange(6000, SKEW_CENTERED, 0, 0);
+        assertEq(strategy.layout().width, 6000, "the band's own ceiling is reachable");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "and it minted a real position");
+    }
+
+    /// @dev THE CONTAINMENT RULE on a live book: gated until the proposer reranges into the target width.
+    function testSetWidthBoundsRefusesToStrandTheStoredWidthUntilARerange() public {
+        _execute(SEED);
+        assertEq(strategy.layout().width, WIDTH, "stored width is 4000");
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.setWidthBounds(5000, 8000); // would exclude the live 4000
+        assertEq(strategy.layout().minWidth, 200, "the refused band stored nothing");
+
+        // Still legal under the OLD band — which is why the ordering works and this is not a deadlock.
+        vm.prank(proposer);
+        strategy.rerange(6000, SKEW_CENTERED, 0, 0);
+
+        vm.prank(owner);
+        strategy.setWidthBounds(5000, 8000);
+        assertEq(strategy.layout().minWidth, 5000, "the same band change now lands");
+        assertEq(strategy.layout().maxWidth, 8000, "...both ends");
+    }
 
     /// @dev The re-range mints at the SKEWED range, not the centred one, and persists BOTH knobs.
     function testRerangeSkewedMintsTheSkewedRange() public {
