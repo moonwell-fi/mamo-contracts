@@ -636,7 +636,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         // ...and the documented fallback is open: the same shares still queue.
         vm.prank(lp);
-        strategy.requestRedeem(shares, 0);
+        strategy.requestRedeem(shares, 0, address(0)); // recipient 0 == the redeemer
         vm.revertToState(snapB);
 
         vm.prank(owner);
