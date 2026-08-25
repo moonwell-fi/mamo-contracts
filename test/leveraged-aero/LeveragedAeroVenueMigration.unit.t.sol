@@ -1299,7 +1299,9 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "target unchanged");
     }
 
-    /// @dev THE SCENARIO THE EVENT EXISTS FOR: a migration RESTORING a target the admin lowered.
+    /// @dev THE SCENARIO THE EVENT EXISTS FOR: a migration RESTORING a target the admin lowered. The stage
+    ///      is armed AFTER the ratchet on purpose — a stage predating it is consumed by `setTargetLtv`, so
+    ///      this is the owner deliberately re-authorising the restore, which is the only way to reach it.
     function testMigrateAnnouncesRestoringALoweredTarget() public {
         _execute(SEED);
         vm.prank(owner);
@@ -1308,7 +1310,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
         _flatten();
         LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // same venue, target back to 5000
-        _stage(v);
+        _stage(v); // AFTER the ratchet: a fresh, deliberate owner authorisation
         vm.expectEmit(false, false, false, true, address(strategy));
         emit LeveragedAerodromeCLStrategy.TargetLtvUpdated(3000, TARGET_LTV_BPS);
         vm.prank(proposer);
@@ -1395,6 +1397,30 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _stage(v);
         _migrate(v);
         assertEq(strategy.layout().maxLtvBps, 6500, "a FRESH owner stage migrates as before");
+    }
+
+    /// @dev The THIRD policy setter closes the same way: an armed stage carries a target the owner picked
+    ///      under the old policy, so moving policy consumes it.
+    function testSetTargetLtvConsumesAStaleVenueStageSoAMigrationCannotUndoTheRatchet() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 5000 target
+        _stage(v);
+        assertEq(strategy.layout().stagedVenueHash, keccak256(abi.encode(v)), "owner authorization armed");
+
+        vm.prank(owner);
+        strategy.setTargetLtv(3000);
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the ratchet consumed the stale authorization");
+
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().targetLtvBps, 3000, "the target the admin set still stands");
+
+        // The owner can still re-authorize deliberately, under the policy now standing.
+        _stage(v);
+        _migrate(v);
+        assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "a FRESH owner stage migrates as before");
     }
 
     /// @dev Same close on the band setter.

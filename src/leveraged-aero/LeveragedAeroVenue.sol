@@ -36,6 +36,7 @@ library LeveragedAeroVenue {
     // strategy's selectors), so they are not re-declared; `TargetLtvZero` is a lower bound `applyVenue`
     // alone enforces and so lives here.
     error TargetLtvZero(); // targetLtvBps == 0 — a standing target of zero can never lever
+    error TargetLtvExceedsMax(); // selector mirrors the strategy's / the valuation's
     error VenueNotStaged(); // migrate without a staged hash, or params that do not match it
     error BookNotFlat(); // migrate while a CL position, hedged basis, or leg debt is still live
     error PositionAlreadyOpen(); // redeploy on a book that already has a CL position (use deployIdle)
@@ -734,6 +735,17 @@ library LeveragedAeroVenue {
             $.stagedVenueHash = bytes32(0);
             emit VenueStaged(bytes32(0));
         }
+    }
+
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setTargetLtv` — validation, persist and emit
+    ///         verbatim from the strategy, relocated for its EIP-170 budget and to share the stage clear.
+    function setTargetLtvImpl(uint16 targetLtvBps_) public {
+        Layout storage $ = _layout();
+        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
+        if (targetLtvBps_ == 0) revert TargetLtvZero();
+        emit TargetLtvUpdated($.targetLtvBps, targetLtvBps_);
+        $.targetLtvBps = targetLtvBps_;
+        _clearStagedVenue($);
     }
 
     /// @notice The BODY of `LeveragedAerodromeCLStrategy.setMaxLtv`, on the shared `checkLtvBand` ladder.

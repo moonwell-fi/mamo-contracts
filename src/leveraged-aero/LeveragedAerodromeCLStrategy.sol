@@ -1088,12 +1088,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `deployIdle` / `compound` / `adjustLeverage` sizes at the new value. NOT state-gated: legal in
     ///         `Pending` (how a multisig corrects an init-time target) and a no-op post-`Settled`.
     /// @param targetLtvBps_ New standing target in bps; must be non-zero (`TargetLtvZero`) and `≤ maxLtvBps`.
+    /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old policy.
     function setTargetLtv(uint16 targetLtvBps_) external onlyAdmin {
-        Layout storage $ = _layout();
-        if (targetLtvBps_ > $.maxLtvBps) revert TargetLtvExceedsMax();
-        if (targetLtvBps_ == 0) revert TargetLtvZero();
-        emit TargetLtvUpdated($.targetLtvBps, targetLtvBps_);
-        $.targetLtvBps = targetLtvBps_;
+        LeveragedAeroVenue.setTargetLtvImpl(targetLtvBps_);
     }
 
     /// @notice ADMIN-ONLY POLICY: set the OPERATIONAL LTV CEILING — the `maxLtvBps` belt `_assertHealthy`
