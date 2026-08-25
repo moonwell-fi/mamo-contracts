@@ -219,7 +219,7 @@ assert_eq "isUserStrategy(user,acct)" "$(ccall "$REG" 'isUserStrategy(address,ad
 assert_eq "account.owner()"           "$(ccall "$ACCT" 'owner()(address)' | field | tr A-Z a-z)" "$(echo "$USER" | tr A-Z a-z)"
 info "account = $ACCT"
 
-# deposit 5,000 USDC (minShares from the vendored formula shares=assets*(supply+1e6)/(navNet+1), 1% tol)
+# deposit 5,000 USDC (minShares from the vendored formula shares=assets*(supply+1e6)/(nav+1), 1% tol)
 NAV="$(ccall "$STRAT" 'nav()(uint256)' | field)"; SUP="$(ccall "$VAULT" 'totalSupply()(uint256)' | field)"
 MINSH="$(python3 -c "print(($DEPOSIT*($SUP+10**6)//($NAV+1))*99//100)")"
 csend "approve(account,5000 USDC)" "$USER" "$USDC" 'approve(address,uint256)' "$ACCT" "$DEPOSIT"

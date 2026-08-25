@@ -28,7 +28,7 @@ Delta against the baseline:
 | Any-pool init + validation | Leg decimals read from the tokens at init and bounded `[2, 18]` (were `CBBTC_DECIMALS` / `WETH_DECIMALS` constants); pool token ordering derived from `pool.token0()` (`wethIsToken0`, mapped through `_tokens01` / `_amounts01`) instead of the manager's hardwired `token0 == WETH`; per-leg swap-pool `tickSpacing` inputs replace three hardcoded `int24(100)` literals; native-ETH borrow wrap made conditional (`wethDeliversNative`); init venue guards (pool `tickSpacing` + token-set match, Moonwell `underlying()` binding, reject USDC-as-leg and reward-token-as-leg) | `978e5af` |
 | Per-cycle rerange width | `rerange(uint24 width, uint256 minLiq0, uint256 minLiq1)` validated against an init-time `[minWidth, maxWidth]` band on the `tickSpacing` grid and persisted; `RANGE_TICK_SPACINGS` deleted; genesis mints at the init width; `WidthOutOfBounds()` = `0x1f9f54af` | `978e5af` |
 | Per-cycle rerange **skew** | `rerange` grew a second argument — `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)`. `skewBps` is the fraction of `width` placed **below** the current tick (bps, `10000` = 1.00; `5000` = centered, the previous fixed behaviour and the genesis/ops default). `lowerSpan = width × skewBps / 10000`, `upperSpan = width − lowerSpan`, both bounds still aligned DOWN to `tickSpacing`. Stored in `Layout` and surfaced on `layout()` exactly like `width`, so a flat-book `rerange` persists both and the next genesis mint re-mints at the stored pair. `centeredTickRange` → `skewedTickRange(pool, tickSpacing, width, skewBps)`; `rerangeImpl` narrowed to `(minLiq0, minLiq1)` and reads both knobs from storage (the persists moved to the strategy). **`WidthOutOfBounds()` renamed `OutOfBounds()` = `0xb4120f14`** and reused for both knobs | *this change* |
-| Skew governance band + validation relocation | Two new fields, `minSkewBps` / `maxSkewBps`, **inserted** into `InitParams` and `Layout` immediately after `skewBps` (so `hedgedDebtA`/`hedgedDebtB` shift from `layout()` tuple positions 48/49 to 50/51). Validated once at init and re-checked on **every** `rerange`, raising the existing `OutOfBounds()` — no new selector. Width **and** skew validation moved out of the strategy's private `_checkWidth`/`_checkSkew` into `LeveragedAeroValuation.checkRange(width, skewBps, tickSpacing, minWidth, maxWidth, minSkewBps, maxSkewBps)`; behaviour is identical to the previous checks plus the band. Harness defaults `MIN_SKEW_BPS=1000` / `MAX_SKEW_BPS=9000` | *this change* |
+| Skew governance band + validation relocation | Two new fields, `minSkewBps` / `maxSkewBps`, **inserted** into `InitParams` and `Layout` immediately after `skewBps` (which shifted `hedgedDebtA`/`hedgedDebtB` down two; they sit at `layout()` tuple positions 49/50 after the protocol-fee removal). Validated once at init and re-checked on **every** `rerange`, raising the existing `OutOfBounds()` — no new selector. Width **and** skew validation moved out of the strategy's private `_checkWidth`/`_checkSkew` into `LeveragedAeroValuation.checkRange(width, skewBps, tickSpacing, minWidth, maxWidth, minSkewBps, maxSkewBps)`; behaviour is identical to the previous checks plus the band. Harness defaults `MIN_SKEW_BPS=1000` / `MAX_SKEW_BPS=9000` | *this change* |
 | Review remediation — asset-mode `rerangeImpl` idle draw | `rerangeImpl` **snapshots the leg-B balance before the unwind** and offers the mint only what the unwind itself collected. Previously it passed the whole leg-B slot balance as `amountDesired`, and in asset-mode that slot **is** USDC — so a rerange could pull stayers' idle USDC, including the redeemers' cover reserve, into the LP. Value-conserving but not the operator's intent, and it silently shrank the fast-redeem buffer. Now structurally impossible | *this change* |
 | Review remediation — need-sized `_rebalanceCover` | The lever-down / `deleverage` cover swap now sells **only the surplus required to cover the shortfall** and keeps the remainder, instead of selling the whole surplus leg balance. Shrinks the swapped notional (less realized slippage and venue fee on every lever-down) and leaves the unsold surplus as an idle leg balance that `nav()` prices and that still hedges its own debt | *this change* |
 | Review remediation — `nav()` prices the gauge reward (held balance **and** `earned()`) | `LeveragedAeroValuation.netEquityUsdc` gained a `reward` term covering BOTH halves of the claim: the reward token already claimed into the strategy (every `_unwindLiquidity`'s `gauge.withdraw` auto-claims one) **and** the still-unclaimed `gauge.earned(strategy, tokenId)`, both priced on `Layout.aeroUsdFeed` — the same feed the sale floor uses and the same field a venue migration rewrites, threaded through three new `Config` members (`gauge`, `tokenId`, `rewardFeed`). Previously unpriced, so a deposit placed before the next `compound()` captured a pro-rata slice of the harvest step (~4.5% of a 100k deposit, post-fee, in one block with only the held half priced). `earned()` is reached through a **`try/catch`** — the gauge is a separate contract, so its `"NA"` revert on an unstaked tokenId is catchable, and catching to 0 is *correct*: that state is exactly when the tranche has just been auto-claimed into the held half. The feed read is gated on `held + earned > 0`. **Accepted consequences:** with live emissions the reward feed becomes a standing `nav()` dependency (a stale feed fail-closes deposits and the priced fast redeem; the async queue is unaffected), and the performance fee now accrues against unrealised, unclaimed rewards continuously. The marked `earned()` is mildly tick-influenced (`rewardGrowthInside`) — second-order, bounded by the calm gate | *this change* |
@@ -90,7 +90,7 @@ after `978e5af`.
 **Supporting context — `src/leveraged-aero/sherwood/`:** the framework pieces the strategy compiles
 against (`BaseStrategy`, interfaces, `ChainlinkReader` / `TickMath` / `LiquidityAmounts`,
 `FeeConstants`). The interface names are preserved because the strategy imports those paths/types
-verbatim; the bodies have been trimmed to the consumed surface (`ISyndicateVault` is now three
+verbatim; the bodies have been trimmed to the consumed surface (`ISyndicateVault` is now two
 functions, implemented by `LeveragedAeroVault`). `BaseStrategy` was **rewritten** in `ea822be` for the
 vanilla lifecycle — it is fork-local code, not vendored context.
 
@@ -192,27 +192,20 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
 4. **LTV-gate bypass attempts** — fast `redeem` predicts post-withdraw LTV on pre-withdraw prices;
    `_assertHealthy` as belt; permissionless `deleverage` repays only to `minHealthBps × 1.05`.
 5. **Donation / inflation on strategy-side mint** — `nav()` excludes vault float but counts
-   strategy-held idle USDC and out-of-position legs; `NavUnpriceable` guards only the `navNet == 0`
+   strategy-held idle USDC and out-of-position legs; `NavUnpriceable` guards only the `nav() == 0`
    case. The backstop is now in scope: `LeveragedAeroVault.strategyMint` performs no pricing of its own
    and takes the strategy's share count on faith, gated solely on `msg.sender == strategy` (set-once)
    and `depositsOpen`.
 6. **IL-shortfall handling on full redeem** — the lone oracle dependency on the otherwise oracle-free
    proportional path; partial redeems cap IL cover at the redeemer's own budget.
-7. **Fee paths** — fees crystallize on pre-action NAV (phantom-fee guard); protocol fee accrues as the
-   `protocolFeeOwed` USDC liability netted out of `nav()`; crystallize is best-effort on the deposit and
-   user-exit paths (`FeeCrystallizeDeferred`) and hard-reverting on `compound` — the asymmetry is
-   intentional. `_settle` does NOT crystallize: it unwinds, discharges `min(protocolFeeOwed, balance)` to
-   the live recipient, and pushes the rest to the vault, so an unpayable fee cannot block settlement.
-   The protocol-fee lookup is now a two-hop through the vault (`vault.factory()` → `.protocolConfig()`);
-   `LeveragedAeroVault` returns `address(0)` on the first hop until the owner sets `feeConfig`, so the
-   **protocol-fee leg is OFF at launch** and the strategy short-circuits before the second hop. The
-   management/performance fee legs are strategy-local and unaffected. Note the fork-local interaction
-   with item 5: a fee-share crystallize mints through `strategyMint`, so it also reverts while
-   `depositsOpen == false`. Tolerated on the best-effort paths; on `compound` it is fatal whenever fee
-   shares are actually due (`feeShares > 0` — nonzero fee bps and elapsed time or a fresh HWM), so
-   closing deposits can make `compound` un-callable until the owner reopens them. It is masked entirely
-   if both fee bps are initialized to 0; the init params for this deployment are not in-repo, so this
-   cannot be checked from the source alone. Confirm the coupling is intended.
+7. **Fee paths** — the management and performance fees are the only fee legs, both strategy-local and
+   crystallized on pre-action NAV (phantom-fee guard) by minting vault shares to `feeRecipient`. The
+   Sherwood protocol-fee leg was removed as unused, so there is no fee liability in `Layout` and no
+   config lookup through the vault. Crystallize is best-effort at EVERY site — deposit, compound and
+   both exit paths — so a fee-mint revert defers with `FeeCrystallizeDeferred` and the op completes; only
+   the PRICE leg (`nav()`, read outside the try) hard-reverts. `_settle` does NOT crystallize: it unwinds
+   and pushes the proceeds to the vault. Note the fork-local interaction with item 5: a fee-share
+   crystallize mints through `strategyMint`, so it defers while `depositsOpen == false`.
 8. **`compound` reward swap** — routes through a hardcoded Aerodrome v2 router; the hardened reward/USD
    oracle floor (`BelowOracleFloor`) is the honesty-independent guard. Init asserts the reward feed is
    8-decimal and rejects a leg token that equals the gauge reward token.
@@ -297,9 +290,9 @@ Pre-declared so auditors don't re-report them; each is a deliberate, reviewed ch
   practice: both functions are `nonReentrant` under `ReentrancyGuardTransient`, USDC has no transfer
   hooks, and the vault is trusted (now in-repo and in scope — see below), so no reentrant path can
   observe `settled == false` and re-enter. Accepted.
-- **`Syndicate`-prefixed interface names.** `ISyndicateVault` / `ISyndicateFactory` retain their upstream
-  names and import paths so the strategy source stays diff-able against the baseline commit. They are
-  implemented by `LeveragedAeroVault`; there is no Sherwood contract in the deployment.
+- **`Syndicate`-prefixed interface names.** `ISyndicateVault` retains its upstream name and import path
+  so the strategy source stays diff-able against the baseline commit. It is implemented by
+  `LeveragedAeroVault`; there is no Sherwood contract in the deployment.
 - **`Layout` leg field names.** `cbBTC` / `weth` / `mCbBTC` / `mWeth` / `wethIsToken0` are leg-slot
   names, kept because renaming them would break the byte-identical `Layout` parity across two files for
   no behavioral gain. Documented as leg B / leg A in the source.
@@ -326,8 +319,8 @@ Pre-declared so auditors don't re-report them; each is a deliberate, reviewed ch
 ### Trusted-vault note
 
 The strategy trusts its vault: it takes `vault()` as its share ledger, calls `strategyMint` /
-`strategyBurn` unconditionally, resolves its rescue authority as `Ownable(vault()).owner()`, and reads
-the fee config through `vault.factory()`. That trust now rests on **`src/LeveragedAeroVault.sol`, which
+`strategyBurn` unconditionally, and resolves its rescue authority as `Ownable(vault()).owner()`. That
+trust now rests on **`src/LeveragedAeroVault.sol`, which
 is in this repo and in this review** — not on an upstream contract reviewed elsewhere. Conversely the
 vault trusts the strategy completely for share pricing. The pair must be reviewed together; neither
 half's guarantees survive on its own.
@@ -397,9 +390,9 @@ Last verified locally 2026-07-27: **459 passed / 0 failed / 0 skipped**. Relevan
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `test/LeveragedAeroVault.unit.t.sol` | 45 | The vault end-to-end against a mock strategy: `strategyMint`/`strategyBurn` gating, set-once `cloneAndBind` (the only wiring path), `depositsOpen`, decimals coupling, `activateStrategy`/`settleStrategy`, `redeemSettled` pro-rata + rounding, `rescueERC20` asset carve-out, fee-config hops |
-| `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 31 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band, `skewBps` bounds) and `rerange` width/skew/auth — **including both pool orderings at init** |
-| `test/MamoLeveragedAeroStrategy.unit.t.sol` | 51 | The per-user account wrapper (adjacent, not in this package's scope) |
+| `test/LeveragedAeroVault.unit.t.sol` | 80 | The vault end-to-end against a mock strategy: `strategyMint`/`strategyBurn` gating, set-once `cloneAndBind` (the only wiring path), `depositsOpen`, decimals coupling, `activateStrategy`/`settleStrategy`, `redeemSettled` pro-rata + rounding, `rescueERC20` asset carve-out, `previewSharesForAssets` |
+| `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 138 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band, `skewBps` bounds) and `rerange` width/skew/auth — **including both pool orderings at init** — plus the `LeveragedAeroFees` closed forms (management dilution, performance shares, both degenerate guards) |
+| `test/MamoLeveragedAeroStrategy.unit.t.sol` | 80 | The per-user account wrapper (adjacent, not in this package's scope) |
 | `test/leveraged-aero/LayoutParity.t.sol` | 4 | The `Layout` / `RedeemRequest` / `STORAGE_SLOT` tripwire. **Not part of the 459** — it is not a `*.unit.t.sol` file; it runs under `make test` and under the `test/leveraged-aero/*` match-path above. 4/4 green. |
 
 **Upstream (behavioral, baseline only)** — the strategy's fork harness in the origin repo deploys the

@@ -448,7 +448,6 @@ assert_eq "vault.decimals()"     "$(ccall "$VAULT" 'decimals()(uint8)' | field)"
 # Left CLOSED here on purpose: proposal 012's build() flips it, which is what makes the vnet
 # a faithful rehearsal of the mainnet proposal (the account harness replays that).
 assert_eq "vault.depositsOpen()" "$(ccall "$VAULT" 'depositsOpen()(bool)')" "false"
-assert_eq "vault.feeConfig()"    "$(ccall "$VAULT" 'feeConfig()(address)' | field)" "0x0000000000000000000000000000000000000000"
 assert_eq "vault.settled()"      "$(ccall "$VAULT" 'settled()(bool)')" "false"
 # Genesis mint: seed x 10^(12-6).
 SEED_SHARES="$(python3 -c "print($SEED * 10**6)")"

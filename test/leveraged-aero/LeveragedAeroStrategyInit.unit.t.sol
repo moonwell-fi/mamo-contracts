@@ -2,6 +2,8 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+
+import {LeveragedAeroFees} from "@contracts/leveraged-aero/LeveragedAeroFees.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
 import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
 
@@ -82,8 +84,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      `keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))`.
     bytes32 internal constant STORAGE_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
 
-    /// @dev Counted off `Layout`: the packed tail is slot 26, so the hedged principals share slot 27.
-    uint256 internal constant TAIL_SLOT_OFFSET = 26;
+    /// @dev Counted off `Layout`: the packed tail is slot 25, so the hedged principals share slot 26.
+    uint256 internal constant TAIL_SLOT_OFFSET = 25;
 
     /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation`, etched below for the probe.
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
@@ -1455,8 +1457,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     /**
      * @dev A `compound` WITH NOTHING TO HARVEST MUST HAVE NO SIDE EFFECTS. `compound` is a
-     *      keeper-polled entrypoint, and crystallisation is not free: it mints fee-shares, accrues the
-     *      protocol slice and ratchets the HWM. This fixture is the maximally-armed no-op — a flat book
+     *      keeper-polled entrypoint, and crystallisation is not free: it mints fee-shares and ratchets
+     *      the HWM. This fixture is the maximally-armed no-op — a flat book
      *      (`tokenId == 0`), shares outstanding, a 1%/yr management fee and 30 days of `dt` — so the
      *      management leg alone WOULD mint if the entrypoint crystallised before checking. It must not:
      *      the genuine-no-op probe in `compound` runs ahead of every state write.
@@ -1912,5 +1914,65 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         s.setWidthBounds(4000, 4000); // the degenerate band that admits exactly the live width
         assertEq(s.layout().minWidth, 4000, "a band pinned to the live width is legal");
+    }
+
+    // ==================== LeveragedAeroFees: THE FEE MATHS, PINNED EXACTLY ====================
+    //
+    // The library's only direct coverage. Every expected value is an independently computed literal,
+    // not a re-application of the library's own formula. Fixture: a $1.1M book (6dp) over 1e6 shares
+    // (12dp) against the unit-rate mark `WAD / SHARES_VIRTUAL_OFFSET`, i.e. a clean $100k gain.
+    uint256 internal constant FEE_NAV = 1_100_000e6;
+    uint256 internal constant FEE_SUPPLY = 1_000_000e12;
+    uint256 internal constant FEE_HWM = 1e12;
+    /// @dev `FEE_NAV x 1e18 / FEE_SUPPLY` -- where the HWM lands after any priced crystallise.
+    uint256 internal constant FEE_NAV_PER_SHARE = 1.1e12;
+
+    /// @dev 1%/yr over exactly 365 days must dilute to 1% of the POST-mint supply:
+    ///      `1e18 x 0.01 / 0.99 = 10_101_010_101_010_101` shares. Driven through `crystallize` so the
+    ///      wiring is covered too; the HWM starts AT the current level, so the perf leg contributes 0.
+    ///      MUTATION: dropping the `WAD - feeRateX` denominator gives 1e16; an off-by-10_000 in
+    ///      `feeRateX` pushes it past WAD and the absurd-dt guard returns 0. Both fail here.
+    function testManagementFeeDilutesExactlyTheAnnualRate() public pure {
+        (uint256 feeShares, uint256 newHwm, uint256 newLast) = LeveragedAeroFees.crystallize(
+            FEE_NAV, FEE_SUPPLY, FEE_NAV_PER_SHARE, 1_000_000, 1_000_000 + 365 days, 100, 1000
+        );
+
+        assertEq(feeShares, 10_101_010_101_010_101, "1%/yr for a year, in post-mint dilution form");
+        assertEq(newHwm, FEE_NAV_PER_SHARE, "at the mark: the perf leg adds nothing");
+        assertEq(newLast, 1_000_000 + 365 days, "the clock advanced to nowTs");
+    }
+
+    /// @dev A $100k gain at 10% is a $10k fee, minted as `fee x supply / (navPre - fee)` so the
+    ///      recipient's POST-mint value is exactly the fee: `1e10 x 1e18 / 1.09e12`.
+    ///      MUTATION: netting the fee off the numerator instead of the denominator, or charging on
+    ///      `navPre` rather than the gain, both miss this literal.
+    function testPerformanceFeeSharesMatchTheDilutionAlgebra() public pure {
+        (uint256 feeShares, uint256 newHwm) = LeveragedAeroFees.performanceFeeShares(FEE_NAV, FEE_SUPPLY, FEE_HWM, 1000);
+
+        assertEq(feeShares, 9_174_311_926_605_504, "10% of the $100k gain, in dilution form");
+        assertEq(newHwm, FEE_NAV_PER_SHARE, "the HWM ratchets to the new peak");
+    }
+
+    /// @dev The absurd-dt guard: at `feeRate >= 100%` the `WAD - feeRateX` denominator would underflow,
+    ///      so the library returns 0 (LP-favourable) rather than bricking. A BOUNDARY, not a blanket
+    ///      zero -- one bp under still charges. MUTATION: deleting the guard panics on the denominator.
+    function testManagementFeeReturnsZeroWhenTheRateReachesOneHundredPercent() public pure {
+        assertEq(LeveragedAeroFees.managementFeeShares(FEE_SUPPLY, 10_000, 365 days), 0, "exactly 100%/yr");
+        assertEq(
+            LeveragedAeroFees.managementFeeShares(FEE_SUPPLY, 9999, 365 days),
+            9999e18,
+            "one bp under the ceiling still charges"
+        );
+    }
+
+    /// @dev The degenerate perf guard: a fee at or above `navPre` would make the dilution denominator
+    ///      non-positive, so the library charges nothing and still ratchets the HWM. Defensive only --
+    ///      `_initialize` caps `performanceFeeBps` at 1500, so a 200% rate is unreachable in production.
+    ///      MUTATION: deleting the guard panics 0x11 on `navPre - feeValueUsdc`.
+    function testPerformanceFeeDefersWhenTheFeeWouldExceedNav() public pure {
+        (uint256 feeShares, uint256 newHwm) = LeveragedAeroFees.performanceFeeShares(FEE_NAV, FEE_SUPPLY, 1, 20_000);
+
+        assertEq(feeShares, 0, "no shares minted when the fee cannot be diluted");
+        assertEq(newHwm, FEE_NAV_PER_SHARE, "...but the HWM still advances, so the gain is charged once");
     }
 }

@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 /// @title ISyndicateVault
 /// @notice The vault surface the vendored `LeveragedAerodromeCLStrategy` calls. Trimmed from the
-///         upstream Sherwood interface to exactly the three functions the strategy uses.
+///         upstream Sherwood interface to exactly the two functions the strategy uses.
 /// @dev Implemented in this repo by `src/LeveragedAeroVault.sol`. The name is preserved because the
 ///      audited strategy imports this path/type verbatim; everything the strategy does NOT call
 ///      (governor batches, depositor whitelist, agent registry, async queue, ERC-4626 entrypoints)
@@ -15,7 +15,4 @@ interface ISyndicateVault {
 
     /// @notice Burn `shares` from the calling strategy's own balance. Active-strategy-only.
     function strategyBurn(uint256 shares) external;
-
-    /// @notice First hop of the protocol-fee config lookup; `address(0)` == no protocol fee.
-    function factory() external view returns (address);
 }

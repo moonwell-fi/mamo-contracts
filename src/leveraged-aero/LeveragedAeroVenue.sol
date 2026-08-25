@@ -154,7 +154,6 @@ library LeveragedAeroVenue {
         address feeRecipient;
         uint256 hwmPerShare; // HWM nav-per-share (1e18 WAD), 0 until first deposit
         uint256 lastFeeAccrualTimestamp;
-        uint256 protocolFeeOwed; // accrued protocol-fee USDC liability (6dp); discharged in redeem/compound/settle
         // ── appended for the L9 compound oracle floor (keep byte-identical in the strategy/manager) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
         // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
@@ -268,9 +267,9 @@ library LeveragedAeroVenue {
     function fastRedeemImpl(uint256 assetsOut, uint256 idleShare, bool isFullRedeem) public returns (uint256 payout) {
         Layout storage $ = _layout();
         payout = assetsOut;
-        // A FULL fast redeem is ONLY served on a FLAT book: with a live LP and ZERO debt (reachable —
-        // `repayBorrowBehalf` is permissionless) a large enough `protocolFeeOwed` shrinks `fromCollateral`
-        // inside the collateral and the gate PASSES, burning the last shares with the LP NFT still live.
+        // A FULL fast redeem is ONLY served on a FLAT book: the fast path never touches the LP, so on a
+        // live position with ZERO debt (reachable — `repayBorrowBehalf` is permissionless) a payout that
+        // under-states the LP passes the gate below and burns the last shares with the NFT still live.
         if (isFullRedeem && $.tokenId != 0) revert FastRedeemExceedsLtv(type(uint256).max, uint256($.maxLtvBps));
         // Idle-first: at most the redeemer's `f×idle` share, clamped to the live balance.
         uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, IERC20($.usdc).balanceOf(address(this)));
@@ -291,8 +290,8 @@ library LeveragedAeroVenue {
         // THE FULL-REDEEM BURN: `redeemUnderlying(amt)` accrues then burns `amt / freshRate`, while `amt`
         // was sized off `exchangeRateStored`, leaving `cBal x (1 - stored/fresh)` behind — assets with no
         // shares. Burn the whole cToken balance instead and pay the redeemer the surplus, measured against
-        // `collateralUsdc` (GROSS of `protocolFeeOwed`) so the fee stays funded. Gated on a flat, zero-debt
-        // book — the state where mUSDC collateral is the whole non-idle book.
+        // `collateralUsdc`. Gated on a flat, zero-debt book — the state where mUSDC collateral is the whole
+        // non-idle book.
         if (isFullRedeem && debtUsdc == 0 && $.tokenId == 0) {
             uint256 before = IERC20($.usdc).balanceOf(address(this));
             _redeemCTokens($.mUsdc, ICToken($.mUsdc).balanceOf(address(this)));
@@ -349,7 +348,7 @@ library LeveragedAeroVenue {
     /// @notice Advisory preview of the fast-path exit — the body of the strategy's `previewRedeem`. See
     ///         that entrypoint's docs for the full quote/`fastOk` contract.
     /// @dev The fail-closed hops go through the STRATEGY's own external self-views, so a down oracle or a
-    ///      reverting config read degrades to `(0,false)`/`(assetsOut,false)`.
+    ///      degrades to `(0,false)`/`(assetsOut,false)`.
     function previewRedeemImpl(uint256 shares) public view returns (uint256 assetsOut, bool fastOk) {
         LeveragedAerodromeCLStrategy self = LeveragedAerodromeCLStrategy(payable(address(this)));
         uint256 supply = IERC20(self.vault()).totalSupply();
@@ -360,17 +359,15 @@ library LeveragedAeroVenue {
         } catch {
             return (0, false);
         }
-        // Simulate the pending crystallise the executed `redeem` performs, in a try/catch so a reverting
-        // ProtocolConfig read degrades to `(0, false)` symmetrically with the other preview failure modes.
-        uint256 navNet;
+        // Simulate the pending crystallise the executed `redeem` performs, in a try/catch so a revert
+        // degrades to `(0, false)` symmetrically with the other preview failure modes.
         uint256 supplyPost;
-        try self.simulateCrystallizeSelf(navPre, supply) returns (uint256 nn, uint256 sp) {
-            navNet = nn;
+        try self.simulateCrystallizeSelf(navPre, supply) returns (uint256 sp) {
             supplyPost = sp;
         } catch {
             return (0, false);
         }
-        assetsOut = Math.mulDiv(shares, navNet, supplyPost);
+        assetsOut = Math.mulDiv(shares, navPre, supplyPost);
         // Mirror `redeem`'s `ZeroAssetsOut` guard: never quote a payout the executed path would revert on.
         if (assetsOut == 0) return (0, false);
         // Mirror the executed full-redeem flat-book guard, on the same post-crystallise predicate the
@@ -451,8 +448,7 @@ library LeveragedAeroVenue {
 
     /// @notice Unwind the WHOLE book to idle USDC without settling — `LeveragedAeroManager.settleImpl`'s
     ///         exact unwind, then zero the hedged-principal bases the way `_settle` does. UNLIKE `_settle`:
-    ///         no protocol-fee discharge (the liability persists, `nav()` stays net of it), no push-to-vault
-    ///         and no state transition — the strategy stays `Executed`, so deposits/redeems keep working
+    ///         no push-to-vault and no state transition — the strategy stays `Executed`, so deposits/redeems keep working
     ///         against the flat book (NAV == idle USDC, no oracle).
     /// @dev Unwind-swap slippage is Chainlink-floored inside `settleImpl` via `maxSlippageBps`, so a down
     ///      oracle fail-closes the flatten. Idempotent on an already-flat book.
@@ -776,7 +772,7 @@ library LeveragedAeroVenue {
 
     /// @notice The strategy's full `LayoutView` read out of diamond storage — the BODY of
     ///         `LeveragedAerodromeCLStrategy.layout()`, hosted here for the strategy's EIP-170 budget.
-    /// @dev Field-by-field, not a struct literal: a 52-field literal overflows the 16-live-variable stack
+    /// @dev Field-by-field, not a struct literal: a 51-field literal overflows the 16-live-variable stack
     ///      window under via_ir. Solc emits no library call-protection guard for views, so a direct call on
     ///      the deployed library reads the LIBRARY's own all-zero slot — reach it via `strategy.layout()`.
     function layoutView() public view returns (LeveragedAerodromeCLStrategy.LayoutView memory v) {
@@ -814,7 +810,6 @@ library LeveragedAeroVenue {
         v.feeRecipient = $.feeRecipient;
         v.hwmPerShare = $.hwmPerShare;
         v.lastFeeAccrualTimestamp = $.lastFeeAccrualTimestamp;
-        v.protocolFeeOwed = $.protocolFeeOwed;
         v.aeroUsdFeed = $.aeroUsdFeed;
         v.nextRedeemRequestId = $.nextRedeemRequestId;
         v.cbBTCDecimals = $.cbBTCDecimals;

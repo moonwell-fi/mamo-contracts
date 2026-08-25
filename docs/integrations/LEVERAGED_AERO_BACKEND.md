@@ -93,9 +93,9 @@ room = vault.remainingCapacity()   // USDC (6dp). type(uint256).max => cap disab
                                    // 0 => fund is full, do not call
 ```
 
-**Leave headroom — do not size to the exact edge.** `remainingCapacity()` reads raw `nav()`, while the
-deposit measures against `navNet` (NAV after the fee crystallisation the deposit runs first), and NAV
-moves between your read and your transaction landing. Target ~95% of `room` and treat `FundAtCapacity`
+**Leave headroom — do not size to the exact edge.** Both sides now read the same `nav()` and the guard
+is strict (`navPre + assets > cap`), so a same-block deposit of exactly `room` passes — but NAV moves
+between your read and your transaction landing. Target ~95% of `room` and treat `FundAtCapacity`
 as **retryable** (re-read and re-size, do not escalate). Leftover idle USDC stays on the account and
 the owner can sweep it via `claimWithdrawnUsdc` at any time.
 

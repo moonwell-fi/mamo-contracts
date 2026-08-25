@@ -291,9 +291,7 @@ constructor sets `_initialized = true`, permanently locking `initialize` on the 
 > (`shares = assets × (supply + 1e6) / (nav + 1)`), which is exactly a 6-decimal step up from a 6dp
 > asset. Any other offset makes the advertised denomination disagree with what the strategy mints.
 
-State after deploy: `strategy == address(0)`, `depositsOpen == false`, `feeConfig == address(0)`
-(**fees OFF at launch** — `factory()` returns `address(0)` and the strategy's fee lookup
-short-circuits). Non-upgradeable by design.
+State after deploy: `strategy == address(0)`, `depositsOpen == false`. Non-upgradeable by design.
 
 ### B.2 — vault ownership: nothing to accept
 
@@ -389,10 +387,10 @@ vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — 
 > re-pointed. Re-derive rather than copy: `cast sig 'OutOfBounds()'`,
 > `cast sig 'rerange(uint24,uint16,uint256,uint256)'`.
 >
-> **A third break landed with the skew band: two fields were INSERTED, not appended.** `minSkewBps` /
-> `maxSkewBps` sit immediately after `skewBps` in both `InitParams` and `Layout`/`layout()`, so every
-> later field shifted by two (`hedgedDebtA`/`hedgedDebtB` moved from tuple positions 48/49 to 50/51).
-> Any hand-rolled `abi.encode` of `InitParams`, and any positional decode of `layout()`, must be
+> **Two more breaks moved `layout()` positions.** The skew band (`minSkewBps` / `maxSkewBps`) was
+> INSERTED after `skewBps`, not appended; the protocol-fee removal then DELETED `protocolFeeOwed` at
+> position 34. `layout()` is 51 fields now and `hedgedDebtA`/`hedgedDebtB` sit at 49/50. Any hand-rolled
+> `abi.encode` of `InitParams`, and any positional decode of `layout()`, must be
 > regenerated against the current ABI — `buildInitData()` is generated from the struct and needs no
 > change, but a copied calldata blob from an earlier run will initialize the wrong fields.
 
@@ -496,7 +494,6 @@ cast call "$VAULT" 'pendingOwner()(address)' --rpc-url "$PUB"   # 0x0
 cast call "$VAULT" 'asset()(address)'     --rpc-url "$PUB"   # == USDC
 cast call "$VAULT" 'depositsOpen()(bool)' --rpc-url "$PUB"   # false  (Phase C flips it to true)
 cast call "$VAULT" 'settled()(bool)'      --rpc-url "$PUB"   # false
-cast call "$VAULT" 'feeConfig()(address)' --rpc-url "$PUB"   # 0x0    (protocol fees off at launch)
 cast call "$VAULT" 'decimals()(uint8)'    --rpc-url "$PUB"   # 12     (USDC 6dp + 6)
 cast call "$VAULT" 'totalSupply()(uint256)' --rpc-url "$PUB" # == SEED * 1e6 (the genesis mint)
 cast call "$VAULT" 'balanceOf(address)(uint256)' "$MULTISIG" --rpc-url "$PUB"   # == SEED * 1e6
@@ -512,7 +509,7 @@ cast call "$VAULT" 'balanceOf(address)(uint256)' "$MULTISIG" --rpc-url "$PUB"   
 | `vault.owner()` | `MAMO_MULTISIG`, with `pendingOwner() == 0x0` |
 | `vault.asset()` | `USDC` |
 | `vault.depositsOpen()` | `false` (Phase C flips it) |
-| `vault.settled()` / `feeConfig()` | `false` / `0x0` (fees off at launch) |
+| `vault.settled()` | `false` |
 | `vault.decimals()` | `12` |
 | `vault.totalSupply()` = `balanceOf(MAMO_MULTISIG)` | `SEED × 1e6` — the genesis mint |
 | all 5 venue feeds | FreshFeed'd (`updatedAt` within seconds of `block.timestamp`) |
@@ -566,7 +563,7 @@ Phase B run they normally need no override; pass them to target a different vnet
 |---|---|
 | **2 — deploy** | Funds `DEPLOYER_EOA` with ETH, then runs `LeveragedAeroAccountHarness.deploy()` — the real `LeveragedAeroAccountDeployer.deployImplementationAndFactory()` path (the **same** deploy code the 012 multisig proposal calls). Deploys the `MamoLeveragedAeroStrategy` UUPS impl + the `MamoLeveragedAeroStrategyFactory` (wired to registry, admin=`MAMO_MULTISIG`, backend=`MAMO_BACKEND`, impl, `strategyTypeId=5`, strategy clone, USDC). Parses `HARNESS_IMPL` / `HARNESS_FACTORY` from the log. |
 | **3 — multisig `build()`** | As impersonated `MAMO_MULTISIG`: `registry.whitelistImplementation(impl, 5)`, `registry.grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`. Then `validate()` asserts: `whitelistedImplementations(impl)==true`, `implementationToId(impl)==5`, `latestImplementationById(5)==impl`, factory `hasRole(BACKEND_ROLE)`, `vault.depositsOpen()==true`, `factory.strategyTypeId()==5`, `factory.sherwoodStrategy()==$STRAT`, `factory.usdc()==USDC`. |
-| **4 — e2e lifecycle** | Fresh throwaway user, funded ETH + 10,000 USDC. `createStrategyForUser` → `computeStrategyAddress` (assert `isUserStrategy` + `account.owner()==user`); `deposit(5,000 USDC, minShares)` (minShares from the strategy's `shares=assets*(supply+1e6)/(navNet+1)` formula, 1% tol) → assert shares minted & mirrored on the vault; fast `withdraw(half, minOut)` → assert USDC lands on user, account USDC==0; `requestWithdraw` → `fulfillRedeem` (impersonated `proposer`) → assert the USDC landed on the USER directly (account USDC==0, no claim tx) → `syncRedeemRequests` prunes; `depositIdle` gate (a third party reverts "Not owner or backend"; `registry.getBackendAddress()` succeeds); `withdrawAll` cleanup; final clean-state asserts (shares==0, account USDC==0) + net user delta. |
+| **4 — e2e lifecycle** | Fresh throwaway user, funded ETH + 10,000 USDC. `createStrategyForUser` → `computeStrategyAddress` (assert `isUserStrategy` + `account.owner()==user`); `deposit(5,000 USDC, minShares)` (minShares from the strategy's `shares=assets*(supply+1e6)/(nav+1)` formula, 1% tol) → assert shares minted & mirrored on the vault; fast `withdraw(half, minOut)` → assert USDC lands on user, account USDC==0; `requestWithdraw` → `fulfillRedeem` (impersonated `proposer`) → assert the USDC landed on the USER directly (account USDC==0, no claim tx) → `syncRedeemRequests` prunes; `depositIdle` gate (a third party reverts "Not owner or backend"; `registry.getBackendAddress()` succeeds); `withdrawAll` cleanup; final clean-state asserts (shares==0, account USDC==0) + net user delta. |
 
 > **Why the vault/strategy keys are runtime-injected, never committed to `addresses/8453.json`:** FPS
 > `Addresses` validates `isContract` **eagerly** in its constructor (`_checkAddress`, gated on
@@ -665,7 +662,6 @@ cast call "$VAULT" 'strategy()(address)' --rpc-url "$PUB"        # == $STRAT
 cast call "$VAULT" 'owner()(address)'    --rpc-url "$PUB"        # == $MULTISIG
 cast call "$VAULT" 'asset()(address)'    --rpc-url "$PUB"        # == $USDC
 cast call "$VAULT" 'decimals()(uint8)'   --rpc-url "$PUB"        # 12
-cast call "$VAULT" 'factory()(address)'  --rpc-url "$PUB"        # 0x0 while feeConfig == 0 (fees off)
 cast call "$VAULT" 'totalSupply()(uint256)' --rpc-url "$PUB"     # == SEED * 1e6 (genesis mint)
 ```
 

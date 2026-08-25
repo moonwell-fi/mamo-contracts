@@ -2126,71 +2126,51 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(out - quotedAtStoredRate, (pot * 3) / 100, "surplus == pot x (fresh - stored)");
     }
 
-    /// @dev ERC-7201 base of the strategy's diamond storage, used to arm `protocolFeeOwed` directly -- there is no
-    ///      setter. The write is asserted through `layout()` before it is relied on.
-    bytes32 internal constant LAYOUT_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
-
-    /// @dev THE FEE MUST STAY FUNDED ACROSS THE FULL-REDEEM BURN -- why the surplus is baselined on `collateralUsdc`
-    ///      and not `fromCollateral`, which is already NET of `protocolFeeOwed`: baselining there pays out
-    ///      `(C_fresh - C) + owed` and the liability survives pointing at an empty book. `nav()` floors at 0 anyway.
-    function testFastFullRedeemKeepsTheProtocolFeeFunded() public {
-        uint256 pot = _flatBookHeldEntirelyAsCollateral();
-        uint256 supply = 1_000_000e12;
-        vm.prank(address(strategy));
-        vault.strategyMint(lp, supply);
-
-        mUsdc.setExchangeRateStored(1.37e18);
-        mUsdc.setPendingExchangeRate(1.4e18);
-
-        uint256 owed = 50_000e6;
-        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 22), bytes32(owed));
-        assertEq(strategy.layout().protocolFeeOwed, owed, "precondition: the fee liability is armed");
-        assertEq(usdc.balanceOf(address(strategy)), 0, "precondition: nothing raw - the fee is not funded yet");
-
-        vm.startPrank(lp);
-        vault.approve(address(strategy), supply);
-        uint256 out = strategy.redeem(supply, 0);
-        vm.stopPrank();
-
-        // The whole book at the FRESH rate, minus the fee the fund still owes.
-        uint256 freshBook = (pot * 140) / 100;
-        assertEq(out, freshBook - owed, "redeemer paid the fresh-rate book MINUS the protocol fee");
-        assertEq(usdc.balanceOf(address(strategy)), owed, "the fee stays funded in raw USDC, to the wei");
-        assertEq(strategy.layout().protocolFeeOwed, owed, "...and the liability still points at real USDC");
-        assertEq(mUsdc.balanceOf(address(strategy)), 0, "no cToken dust either");
-        assertEq(strategy.nav(), 0, "book net of the fee is exactly zero");
-    }
-
-    /// @dev THE EARLY-RETURN HOLE, closed: at `owed >= collateral` the raw balance covers the whole fee-netted payout,
-    ///      `fromCollateral == 0`, and the old early return skipped the burn -- stranding 100% of the cToken balance.
-    function testFastFullRedeemSweepsTheParkedResidueWhenOwedExceedsTheCollateral() public {
+    /// @dev THE `fromCollateral == 0` ESCAPE, re-pinned fee-free: a cToken balance whose STORED value floors
+    ///      to 0 makes `nav()` the idle pot alone, so a full redeem is funded entirely from idle and
+    ///      `fromCollateral == 0` — yet the balance is real and must not be stranded on a zero-share book.
+    ///      MUTATION: deleting or inverting the `!(isFullRedeem && cToken balance > 0)` conjunct early-returns
+    ///      before the burn and leaves the dust behind.
+    function testFastFullRedeemSweepsDustWhoseStoredValueFloorsToZero() public {
         _execute(SEED);
         vm.prank(proposer);
         strategy.flatten(0, 1);
+        // A sub-unit exchange rate (one cToken worth less than one USDC unit -- the REAL Compound shape;
+        // 1e18 is the mock's simplification), so a 1-unit park prices at 0 while minting live cTokens.
+        mUsdc.setExchangeRateStored(0.4e18);
         uint256 pot = usdc.balanceOf(address(strategy));
-        uint256 parked = 10_000e6;
         vm.prank(proposer);
-        strategy.supplyIdle(parked); // small park; the rest stays raw
+        strategy.supplyIdle(1);
+
         uint256 supply = 1_000_000e12;
         vm.prank(address(strategy));
         vault.strategyMint(lp, supply);
-
-        mUsdc.setExchangeRateStored(1.37e18); // C = 13,700e6 at the stored rate
-        mUsdc.setPendingExchangeRate(1.4e18); // C_fresh = 14,000e6
-        uint256 owed = 20_000e6; // owed > C: the early-return state
-        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 22), bytes32(owed));
+        assertGt(mUsdc.balanceOf(address(strategy)), 0, "precondition: the cToken balance is live");
+        assertEq(_collateralUsdc(), 0, "...but its stored value floors to 0");
+        assertEq(strategy.nav(), pot - 1, "so nav() is the idle pot alone");
 
         vm.startPrank(lp);
         vault.approve(address(strategy), supply);
         uint256 out = strategy.redeem(supply, 0);
         vm.stopPrank();
 
-        uint256 raw = pot - parked;
-        assertEq(out, raw + (parked * 140) / 100 - owed, "paid the raw float + the FRESH-rate park, minus the fee");
-        assertEq(mUsdc.balanceOf(address(strategy)), 0, "the parked residue was swept, not stranded");
-        assertEq(usdc.balanceOf(address(strategy)), owed, "the fee liability stays funded to the wei");
+        assertEq(out, pot - 1, "the redeemer is paid the whole priced book");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "the dust was swept, not stranded on a zero-share book");
         assertEq(vault.totalSupply(), 0, "the last shares are burnt");
-        assertEq(strategy.nav(), 0, "no assets-with-no-shares fund survives, even after the accrual lands");
+    }
+
+    /// @dev `vault.previewSharesForAssets` is documented as THE canonical assets->shares conversion, and the
+    ///      strategy's `deposit` mints from an expression-identical formula. Nothing pinned the two together.
+    ///      MUTATION: a changed offset or rounding direction on either side breaks this equality.
+    function testPreviewSharesForAssetsEqualsTheSharesDepositMints() public {
+        _execute(SEED);
+        uint256 assets = 25_000e6;
+
+        uint256 quoted = vault.previewSharesForAssets(assets);
+        uint256 minted = _deposit(assets); // same block, so no management-fee dt intervenes
+
+        assertGt(quoted, 0, "the preview quotes a real number");
+        assertEq(minted, quoted, "the vault's canonical conversion is what deposit actually mints");
     }
 
     /// @dev THE `isFullRedeem` CONJUNCT, mutation-pinned: a PARTIAL redeem at a non-unit rate must pay the
@@ -2216,9 +2196,10 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         );
     }
 
-    /// @dev MIXED FUNDING on the burn branch -- the realistic shape both siblings skip. Pins that the idle draw, the
-    ///      collateral burn and the fee retention compose: retained == owed to the wei.
-    function testFastFullRedeemWithMixedFundingRetainsExactlyTheFee() public {
+    /// @dev MIXED FUNDING on the burn branch -- the realistic shape the sibling skips. Pins that the idle draw
+    ///      and the collateral burn compose: the redeemer takes the raw float plus the FRESH-rate park, nothing
+    ///      is retained and no cToken dust is left.
+    function testFastFullRedeemWithMixedFundingPaysTheWholeBook() public {
         _execute(SEED);
         vm.prank(proposer);
         strategy.flatten(0, 1);
@@ -2232,16 +2213,14 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         mUsdc.setExchangeRateStored(1.37e18);
         mUsdc.setPendingExchangeRate(1.4e18);
-        uint256 owed = 50_000e6;
-        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 22), bytes32(owed));
 
         vm.startPrank(lp);
         vault.approve(address(strategy), supply);
         uint256 out = strategy.redeem(supply, 0);
         vm.stopPrank();
 
-        assertEq(out, (pot - parked) + (parked * 140) / 100 - owed, "raw float + fresh-rate park - fee");
-        assertEq(usdc.balanceOf(address(strategy)), owed, "retained == the fee liability, to the wei");
+        assertEq(out, (pot - parked) + (parked * 140) / 100, "raw float + fresh-rate park");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "nothing retained");
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "no cToken dust");
         assertEq(strategy.nav(), 0, "zero-share fund prices at zero");
     }
@@ -3007,7 +2986,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
         assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
 
-        // REOPEN. `navNet == 0` and `supply == 0`, so the depositor mints at `assets x SHARES_VIRTUAL_OFFSET` == 1e12.
+        // REOPEN. `nav() == 0` and `supply == 0`, so the depositor mints at `assets x SHARES_VIRTUAL_OFFSET` == 1e12.
         _deposit(100_000e6);
         assertEq(strategy.layout().hwmPerShare, 0, "the dead cycle's mark did not survive the empty book");
 
