@@ -257,8 +257,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
 
     /**
      * @notice Sweep this account's entire idle USDC balance to the owner.
-     * @dev NOT the withdrawal claim (a fulfil pays `owner()` directly): sweeps only USDC that arrived some
-     *      other way, e.g. a plain transfer.
+     * @dev NOT the withdrawal claim (a fulfil pays the frozen recipient): sweeps only USDC that arrived
+     *      some other way, e.g. a plain transfer.
      * @return amount USDC swept to the owner (6dp).
      */
     function claimWithdrawnUsdc() external onlyOwner returns (uint256 amount) {
