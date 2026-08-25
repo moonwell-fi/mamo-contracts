@@ -45,6 +45,12 @@ source "$SCRIPT_DIR/lib/market.sh"
 _CFG="$ROOT/script/tenderly/leveraged-aero-vnet.json"
 FINDINGS="${HARNESS_FINDINGS:-$ROOT/script/tenderly/leveraged-aero-withdraw-findings.json}"
 
+# maxLtvBps has no dedicated getter — it is layout() word 22. Build the tuple signature from the
+# compiled ABI rather than pasting the 51 types: a struct field added anywhere but the end would
+# silently misalign a hardcoded copy (compound-cycle.sh keeps one and has had to be re-synced).
+LAYOUT_SIG="$(forge inspect LeveragedAerodromeCLStrategy abi --json 2>/dev/null \
+  | jq -r '"layout()((" + ([.[] | select(.name=="layout") | .outputs[0].components[].type] | join(",")) + "))"')"
+
 _cfg() { jq -r --arg a "$1" --arg k "$2" '.[$a][$k] // empty' "$_CFG" 2>/dev/null; }
 STRAT="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-$(_cfg pooled strategyClone)}"
 VAULT="${SHERWOOD_SYNDICATE_VAULT:-$(_cfg pooled vault)}"
@@ -93,7 +99,10 @@ build_error_table() {
   : > "$ERR_TABLE"
   # `find`, not a glob: NotExecuted() is declared in src/leveraged-aero/sherwood/BaseStrategy.sol,
   # two levels down, and a one-level glob silently left the most common async revert unnamed.
-  python3 "$SCRIPT_DIR/lib/solidity-error-sigs.py" $(find src -name '*.sol' | sort) > "$ERR_TABLE.sigs"
+  # OZ's IERC6093 too: the vault's shares are an OZ ERC20, so a share-accounting revert surfaces as
+  # ERC20InsufficientBalance — declared outside src/ and therefore previously "unknown".
+  python3 "$SCRIPT_DIR/lib/solidity-error-sigs.py" \
+    $(find src lib/openzeppelin-contracts/contracts/interfaces -name '*.sol' | sort) > "$ERR_TABLE.sigs"
   local sig sel
   while read -r sig; do
     [ -n "$sig" ] || continue
@@ -107,7 +116,13 @@ build_error_table() {
 # Turn cast's stderr into something a human (and the artifact) can read.
 decode_revert() {
   local raw="$1" hex sel name
-  hex="$(echo "$raw" | grep -oE '0x[0-9a-fA-F]{8,}' | tail -1)"
+  # Take the `data: "0x…"` blob SPECIFICALLY. cast appends its own decode after it
+  # (`data: "0x…": ERC20InsufficientBalance(0xACCOUNT, 0, …)`), so a bare "last hex run" grab
+  # picks up that trailing ADDRESS and truncates it to a 4-byte "selector" — which is how a real
+  # ERC20InsufficientBalance was reported as "unknown custom error 0xb413e6ac", the first 4 bytes
+  # of the sample account's own address. Fall back to the old heuristic only when there is no blob.
+  hex="$(echo "$raw" | grep -oE 'data: "0x[0-9a-fA-F]+"' | tail -1 | grep -oE '0x[0-9a-fA-F]+')"
+  [ -n "$hex" ] || hex="$(echo "$raw" | grep -oE '0x[0-9a-fA-F]{8,}' | tail -1)"
   if [ -z "$hex" ]; then echo "$raw" | tr '\n' ' ' | sed -E 's/  +/ /g' | cut -c1-160; return; fi
   case "$hex" in
     0x08c379a0*)  # Error(string) — a plain require message
@@ -331,11 +346,11 @@ sc_fastok_is_authoritative() {
     record "withdrawHalfResult" "reverts: $SOFT_ERR"
     info "the fast path is closed at HALF the position too - async is the only exit in this book state"
   fi
-  # The gate's own inputs, so the finding stays interpretable once the book state moves on.
-  # NOTE maxLtvBps() is NOT exposed: the strategy publishes targetLtvBps() only, so a frontend
-  # cannot precompute whether the fast path will clear — it has to try and read the revert args.
+  # The gate's own inputs, so the finding stays interpretable once the book state moves on. Both are
+  # readable: targetLtvBps() has its own getter, and maxLtvBps is layout() word 22 — a frontend CAN
+  # precompute the gate rather than probing for the FastRedeemExceedsLtv revert.
   record "targetLtvBps" "$(ccall "$STRAT" 'targetLtvBps()(uint16)' 2>/dev/null | field || echo unknown)"
-  record "maxLtvBpsReadable" "NO public getter — only observable in the FastRedeemExceedsLtv revert args"
+  record "maxLtvBps" "$(ccall "$STRAT" "$LAYOUT_SIG" 2>/dev/null | tr ',' '\n' | sed -n 22p | tr -d ' ()' | sed 's/\[.*//' || echo unknown)"
   return 0
 }
 

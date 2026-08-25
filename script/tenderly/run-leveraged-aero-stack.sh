@@ -166,6 +166,7 @@ case "$SHAPE" in
   twoleg)
     # WETH/cbBTC at tickSpacing 100 — the original two-borrowed-legs shape.
     export LP_POOL="${LP_POOL:-0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1}"
+    export GAUGE="${GAUGE:-0x41b2126661C673C2beDd208cC72E85DC51a5320a}"
     export LEG_A_FEED="${LEG_A_FEED:-0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70}" # ETH/USD  8dp
     export LEG_B_FEED="${LEG_B_FEED:-0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F}" # BTC/USD  8dp
     ;;
@@ -482,7 +483,12 @@ info "  SHERWOOD_SYNDICATE_VAULT=$VAULT make tenderly-leveraged-aero-account"
 # "this recorded layer is out of date, redeploy before use" marker describes the PREVIOUS
 # pooled layer, and `$prev * {…}` would carry it forward onto the layer that just replaced it.
 # A successful run of THIS script is exactly the event that retires the marker, so it clears it.
-PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(jq 'del(.STALE)' "$CONFIG_JSON")"
+#
+# `venueNote` is deleted for the same reason: it is a hand-written description of the PREVIOUS
+# clone's venue (and of any migrateVenue applied to it), so carrying it forward mislabels the
+# clone that just replaced it. lpGauge and venueShape are now EMITTED (below) rather than
+# hand-maintained, which is what let a stale twoleg gauge survive an asset-mode redeploy.
+PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(jq 'del(.STALE) | del(.venueNote)' "$CONFIG_JSON")"
 jq -n \
   --argjson prev "$PREV" \
   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -491,7 +497,8 @@ jq -n \
   --arg vault "$VAULT" --arg clone "$CLONE" --arg template "$TEMPLATE" \
   --arg proposer "$MAMO_REBALANCER" --arg seed "$SEED" \
   --arg usdc "$USDC" --arg registry "$(addr MAMO_STRATEGY_REGISTRY)" \
-  --arg pool "$LP_POOL" \
+  --arg pool "$LP_POOL" --arg gauge "$GAUGE" --arg shape "$SHAPE" \
+  --arg tickSpacing "${TICK_SPACING:-100}" \
   --arg legAFeed "$LEG_A_FEED" --arg legBFeed "$LEG_B_FEED" --arg usdcFeed "$USDC_FEED" \
   --arg aeroFeed "$AERO_FEED" --arg seqFeed "$SEQ_FEED" \
   '$prev * {
@@ -515,7 +522,9 @@ jq -n \
       template: $template,
       proposer: $proposer,
       seed: $seed,
-      lpPool: $pool
+      lpPool: $pool,
+      lpGauge: $gauge,
+      venueShape: ($shape + " (tickSpacing " + $tickSpacing + ") — legBIsAsset=" + (if $shape == "asset" then "true" else "false" end) + ". DEPLOY-TIME: a later migrateVenue does not update this — read layout() on the clone.")
     },
     sherwood: { strategyClone: $clone, syndicateVault: $vault },
     usdc: $usdc,
