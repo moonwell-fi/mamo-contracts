@@ -283,6 +283,36 @@ contract LPAutoBalancerV2SetupTest is Test {
         assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
     }
 
+    /// @dev The PRODUCTION input path. A `forge script` invocation cannot call setTokenId /
+    ///      setTotalAllocation -- those exist for this test, which builds the proposal in-process --
+    ///      so run() reads them from the environment. Without that plumbing a mainnet
+    ///      `--broadcast` reverts "tokenId not set" and the proposal is un-runnable from the CLI.
+    ///      Every DO_* stage is switched off here: this pins the INPUT WIRING, not the lifecycle,
+    ///      which the other tests already cover.
+    function test_runLoadsInputsFromEnv() public {
+        vm.setEnv("DO_DEPLOY", "false");
+        vm.setEnv("DO_BUILD", "false");
+        vm.setEnv("DO_SIMULATE", "false");
+        vm.setEnv("DO_VALIDATE", "false");
+        vm.setEnv("DO_PRINT", "false");
+        vm.setEnv("INIT_TOKEN_ID", "424242");
+        vm.setEnv("TOTAL_ALLOCATION_USD", "1234500000000"); // $12,345 at 1e8
+        vm.setEnv("ALLOCATION_TOLERANCE_BPS", "250");
+
+        LPAutoBalancerV2Setup p = new LPAutoBalancerV2Setup();
+        p.setPrimaryForkId(vm.activeFork());
+        // Non-vacuity: these must NOT already hold the values we are about to assert.
+        assertEq(p.tokenId(), 0, "tokenId starts unset");
+        assertTrue(p.totalAllocationUsd() != 1_234_500_000_000, "allocation default differs from the env value");
+        assertTrue(p.allocationToleranceBps() != 250, "tolerance default differs from the env value");
+
+        p.run();
+
+        assertEq(p.tokenId(), 424_242, "tokenId read from INIT_TOKEN_ID");
+        assertEq(p.totalAllocationUsd(), 1_234_500_000_000, "allocation read from TOTAL_ALLOCATION_USD");
+        assertEq(p.allocationToleranceBps(), 250, "tolerance read from ALLOCATION_TOLERANCE_BPS");
+    }
+
     /// @dev The PRODUCTION resolution path. Every other test injects a made-up rebalancer via
     ///      `setRebalancerEOA`, so none of them touch `_resolveRebalancer`'s address-book fallback —
     ///      which is the branch the real run takes, since the production proposal is executed without

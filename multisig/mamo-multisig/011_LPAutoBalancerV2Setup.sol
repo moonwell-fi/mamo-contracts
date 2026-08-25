@@ -204,6 +204,18 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         maxOracleDelay1 = delay1_;
     }
 
+    /// @dev Pull the per-run inputs from the environment, leaving anything already set by a setter
+    ///      alone. Kept out of the field initializers deliberately: those run at construction, which
+    ///      would force the fork test to define these vars too.
+    function _loadRunInputs() internal {
+        if (tokenId == 0) tokenId = vm.envOr("INIT_TOKEN_ID", uint256(0));
+        totalAllocationUsd = vm.envOr("TOTAL_ALLOCATION_USD", totalAllocationUsd);
+        uint256 tol = vm.envOr("ALLOCATION_TOLERANCE_BPS", uint256(allocationToleranceBps));
+        require(tol <= 10_000, "ALLOCATION_TOLERANCE_BPS > 100%");
+        allocationToleranceBps = uint16(tol);
+        require(totalAllocationUsd != 0, "TOTAL_ALLOCATION_USD must be non-zero");
+    }
+
     function _initializeAddresses() internal {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -212,8 +224,23 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         vm.makePersistent(address(addresses));
     }
 
+    /// @notice Production entrypoint. Reads the per-run inputs from the ENVIRONMENT, because a
+    ///         `forge script` invocation cannot call the setters below — those exist for the fork
+    ///         test, which instantiates this contract in-process.
+    ///
+    ///         Without this, a mainnet `forge script ... --broadcast` runs `build()` with
+    ///         `tokenId == 0` and reverts "tokenId not set". (Safely: forge simulates the whole
+    ///         script before sending anything, so the revert costs nothing but a wasted run.)
+    ///
+    ///         INIT_TOKEN_ID          required — the WETH/cbBTC NFT the Safe minted in Phase B2.
+    ///         TOTAL_ALLOCATION_USD   optional, 8-dec USD; defaults to the field's $50k.
+    ///         ALLOCATION_TOLERANCE_BPS optional; defaults to the field's 500.
+    ///
+    ///         Values already set via the setters win, so the fork test is unaffected: it never sets
+    ///         these env vars, and `vm.envOr` returns the default it passes.
     function run() public override {
         _initializeAddresses();
+        _loadRunInputs();
 
         if (DO_DEPLOY) {
             deploy();
