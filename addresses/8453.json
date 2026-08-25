@@ -428,5 +428,15 @@
     "addr": "0xd4669fCee3BE73b51438ad1f1debEB3505Eab308",
     "name": "MAMO_LP_REBALANCER",
     "isContract": false
+  },
+  {
+    "addr": "0x9CDBe7DB9F967E793E7261e0ffd546E5D29b476f",
+    "name": "MAMO_LP_AUTO_BALANCER_V2",
+    "isContract": true
+  },
+  {
+    "addr": "0x699318E0641518eF39418a8D86F93BF8b0715c88",
+    "name": "MAMO_LP_COMPOUND_MODULE",
+    "isContract": true
   }
 ]
