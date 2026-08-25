@@ -438,5 +438,15 @@
     "addr": "0x699318E0641518eF39418a8D86F93BF8b0715c88",
     "name": "MAMO_LP_COMPOUND_MODULE",
     "isContract": true
+  },
+  {
+    "addr": "0x9f548228A41d18e2DC736ceF048cfBeC8fFC55E6",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_TEST",
+    "isContract": true
+  },
+  {
+    "addr": "0x7B3690d05eDB4305a7F66d52b4BBe9f89F503eF3",
+    "name": "MAMO_LP_COMPOUND_MODULE_TEST",
+    "isContract": true
   }
 ]
