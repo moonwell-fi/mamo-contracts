@@ -453,8 +453,8 @@ function fulfillRedeem(uint256 id, uint256 minAssetsOut) external onlyProposer n
 
 Runs the **oracle-free proportional unwind** for request `id`, paying `request.recipient` (for a Mamo
 account, the end user's own wallet — so the fulfil COMPLETES the withdrawal with no follow-up claim,
-rather than parking USDC on the account) net of its pro-rata protocol-fee skim, enforcing
-**`max(stored, fresh)`** on the net payout, then burning the escrowed shares. See §C for the full loop.
+rather than parking USDC on the account), enforcing **`max(stored, fresh)`** on the payout, then
+burning the escrowed shares. See §C for the full loop.
 
 **The `minAssetsOut` argument is YOUR floor, layered on top of the requester's — never instead of it.**
 The stored floor was fixed at `requestRedeem` and can be up to the 2-day `FULFILL_WINDOW` stale by the
@@ -527,12 +527,14 @@ own at settle; this strategy collects fees itself:
   (`managementFeeBps` / `performanceFeeBps` / `feeRecipient` in `layout()`) and are live iff they were
   init'd non-zero. Read the three values rather than assuming a schedule.
 - **Fee-share mints are gated on the vault's `depositsOpen`.** Crystallized management/performance fees are
-  minted via `strategyMint`, which reverts `"LAV: deposits closed"` while issuance is frozen. On the
-  best-effort paths that surfaces as `FeeCrystallizeDeferred`; on `compound` / `deposit` it hard-reverts.
-  Closing deposits therefore also stalls `compound` until fees can mint again.
-- **Crystallization triggers.** `deposit` (hard, fail-closed pre-deposit NAV), `compound` (hard,
-  pre-compound NAV), fast `redeem` and the async `fulfillRedeem`/`emergencyRedeem` (best-effort, may
-  emit `FeeCrystallizeDeferred`). `rerange`, `adjustLeverage`, `deleverage` **do not** crystallize.
+  minted via `strategyMint`, which reverts `"LAV: deposits closed"` while issuance is frozen. EVERY
+  crystallise site is best-effort, so that surfaces as `FeeCrystallizeDeferred` and the op completes —
+  closing deposits does **not** stall `compound`.
+- **Crystallization triggers.** `deposit`, `compound`, fast `redeem` and the async
+  `fulfillRedeem`/`emergencyRedeem` — all best-effort on the MINT (may emit `FeeCrystallizeDeferred`).
+  What does hard-revert is the PRICE leg: `nav()` is read outside the try on `deposit` / `compound` /
+  fast `redeem`, so a down oracle reverts those. `rerange`, `adjustLeverage`, `deleverage` **do not**
+  crystallize.
 - Fee ceilings at init: `performanceFeeBps ≤ 1500` (15%, `FeeConstants.MAX_PERFORMANCE_FEE_BPS`),
   `managementFeeBps ≤ 500` (5%/yr). Performance fee is HWM-gated (only charged on gains above the
   high-water mark per share).
@@ -739,7 +741,7 @@ floor      = operator policy (e.g. 2500 bps)      // stop here
 | The **stored** floor | `redeemRequest(id).minAssetsOut` — the **third** field of `(owner, shares, minAssetsOut, requestedAt, settled, recipient)`. **The strategy's `RedeemRequested(id, owner, recipient, shares)` does NOT carry it** — only the account's `WithdrawRequested(id, shares, minAssetsOut)` does. Read the struct; do not reconstruct it from strategy logs. |
 | What the chain enforces | `max(stored, fresh)`. Your fresh floor can only **tighten** the requester's, never loosen it — `0` is the identity. |
 | Getting the **fresh** number | `fulfillRedeem` has **no return value**, so a plain `eth_call` yields `0x`. The realised payout lives solely in **`RedeemFulfilled(uint256 indexed id, address indexed owner, address indexed recipient, uint256 assetsOut)`** — `assetsOut` is still the only non-indexed field, so it is the whole `data` word, but the **`topic0` changed** with the added `recipient` topic. Simulate, decode that log, send with `minAssetsOut = assetsOut × (1 − tolerance)`. |
-| **Do NOT quote with `previewRedeem`** | It is the **fast-path** quote — `shares × navNet / supplyPost`, oracle-priced — and does not model the async unwind's swap costs, so it **over-quotes**. Used raw as a floor it reverts `InsufficientAssetsOut` against itself. |
+| **Do NOT quote with `previewRedeem`** | It is the **fast-path** quote — `shares × nav() / supplyPost`, oracle-priced — and does not model the async unwind's swap costs, so it **over-quotes**. Used raw as a floor it reverts `InsufficientAssetsOut` against itself. |
 
 Measured on the live staging clone — 10% of supply, calm book, LP in range:
 
@@ -1064,7 +1066,7 @@ Strategy events that exist today:
 | Strategy event | Use |
 |---|---|
 | `RedeemRequested / RedeemFulfilled / RedeemCancelled / RedeemEmergency` | withdraw-queue tracking (§C) |
-| `FeeCrystallizeDeferred(uint8 op, uint256 navPre)` | a best-effort crystallize deferred (`op`: 0=deposit, 1=fast redeem, 2=proportional redeem). The fee-share mint failed — on the vanilla vault the realistic cause is `depositsOpen == false` (`"LAV: deposits closed"`); investigate. |
+| `FeeCrystallizeDeferred(uint8 op, uint256 navPre)` | a best-effort crystallize deferred (`op`: 0=deposit, 1=fast redeem, 2=proportional redeem, 3=compound). The fee-share mint failed — on the vanilla vault the realistic cause is `depositsOpen == false` (`"LAV: deposits closed"`); investigate. |
 | `SettleRewardSaleDeferred()` | the **terminal settle**'s best-effort reward-tranche sale was skipped (stale/paused AERO feed, broken AERO→USDC route, or a fill under the L9 floor). The settle completed; the tranche is left on the now-`Settled` strategy and needs the owner's `rescueToVault(rewardToken)` → `vault.rescueERC20`. **Check the strategy's AERO balance after any settle.** |
 | `RedeemRewardSaleDeferred()` | an **async redeem**'s sale of the tranche its own unwind auto-claimed was skipped, same causes. The redeem completed and paid, but that redeemer got `f × (assets − reward)` and the tranche stayed with the stayers — the one residual of the pre-fix behaviour (§C). Clear it with `compound` once the feed/route recovers; a *recurring* one means every redeemer is being short-paid, so treat it as a feed/route incident, not noise. |
 | `RedeemSweepFloorsDegraded()` | an **async redeem**'s closing leg→USDC sweeps ran with their Chainlink min-out floors at **zero** — the derivation reverted (stale feed / down sequencer, or an out-of-gas: the `catch` cannot tell them apart). Deliberately fail-open so the `emergencyRedeem` deadman still completes, but those swaps were **unbounded** for that call. Expect it only alongside a real oracle outage; seeing it while feeds are healthy is a gas/venue problem worth investigating before the next fulfill. |
@@ -1126,11 +1128,11 @@ Strategy events that exist today:
   slippage surface on every lever-down. That raised floor is handed to the router, so a breach surfaces as the **router's own
   `amountOutMinimum` revert**, not as `BelowOracleFloor`, which has exactly one raise site: `compound`'s
   AERO→USDC sell. Alert on both.)
-- **Fee-path asymmetry (audit item 7).** Crystallize is **best-effort** on user-exit paths (defers +
-  emits `FeeCrystallizeDeferred`) but **hard-reverts** on `compound`/`settle`/the redeem skim. A persistent
-  `FeeCrystallizeDeferred` on deposits/redeems while `compound` reverts points at a **frozen vault**
-  (`depositsOpen == false` → the fee-share mint reverts `"LAV: deposits closed"`) — an ops issue to clear.
-  Note the vanilla vault has **no pause and no depositor whitelist**; that one flag is the whole gate.
+- **Fee-path signal (audit item 7).** Crystallize is **best-effort everywhere** — a failed fee-share mint
+  defers and emits `FeeCrystallizeDeferred` (including `op == 3`, compound) and the op still completes.
+  A persistent stream of them points at a **frozen vault** (`depositsOpen == false` → the mint reverts
+  `"LAV: deposits closed"`) — an ops issue to clear, not an outage. Note the vanilla vault has **no pause
+  and no depositor whitelist**; that one flag is the whole gate.
 - **`deleverage` accepted residual (audit item 9).** Our-feed staleness can block `deleverage` in a window
   where Moonwell's own oracle is fresh enough to liquidate; documented and accepted. Monitor Moonwell
   account liquidity independently.
@@ -1315,12 +1317,12 @@ mechanism protecting the fund from being rebalanced at a manipulated price — a
 | `tickSpacing` | 20 | 100 | LP pool spacing |
 | `maxSlippageBps` | 24 | 100 | 1 % — also the oracle-floor tolerance on swaps |
 | `posTickLower` / `posTickUpper` | 27 / 28 | −66300 / −63300 | current range (width 3000 ≈ 35 % span, centered — `skewBps` 5000) |
-| width band | 44 / 45 | [200, 20000] | `rerange` width bounds (`OutOfBounds` outside) |
-| `legBIsAsset` | 46 | `true` | asset mode: leg B **is** USDC |
-| `skewBps` | 47 | **5000** | fraction of `width` placed BELOW spot; 5000 = centered (`OutOfBounds` outside `(0, 10000)`, outside the skew band below, or if either span < `tickSpacing`). **Appended after `legBIsAsset`, not next to the width band** — decode by name, not by eyeballing the group |
-| skew band (`minSkewBps` / `maxSkewBps`) | 48 / 49 | [1000, 9000] (harness default) | init-immutable governance band on `skewBps`, checked at init **and** every `rerange` → the same `OutOfBounds` |
-| `hedgedDebtA` / `hedgedDebtB` | 50 / 51 | — | hedged borrow principal per leg; **these moved from 48/49** when the skew band was inserted |
-| `stagedVenueHash` | 52 | `0x00…0` | `keccak256(abi.encode(VenueParams))` the vault owner has staged as the migration destination; `0` == nothing staged. Appended **last**, so it shifts nothing |
+| width band | 43 / 44 | [200, 20000] | `rerange` width bounds (`OutOfBounds` outside) |
+| `legBIsAsset` | 45 | `true` | asset mode: leg B **is** USDC |
+| `skewBps` | 46 | **5000** | fraction of `width` placed BELOW spot; 5000 = centered (`OutOfBounds` outside `(0, 10000)`, outside the skew band below, or if either span < `tickSpacing`). **Appended after `legBIsAsset`, not next to the width band** — decode by name, not by eyeballing the group |
+| skew band (`minSkewBps` / `maxSkewBps`) | 47 / 48 | [1000, 9000] (harness default) | init-immutable governance band on `skewBps`, checked at init **and** every `rerange` → the same `OutOfBounds` |
+| `hedgedDebtA` / `hedgedDebtB` | 49 / 50 | — | hedged borrow principal per leg |
+| `stagedVenueHash` | 51 | `0x00…0` | `keccak256(abi.encode(VenueParams))` the vault owner has staged as the migration destination; `0` == nothing staged. Appended **last**, so it shifts nothing |
 
 > **The two skew-band fields were INSERTED after `skewBps`, not appended**, so every field below them
 > shifted by two — `hedgedDebtA`/`hedgedDebtB` were 48/49 and are now 50/51. Anything decoding `layout()`

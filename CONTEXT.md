@@ -88,10 +88,6 @@ _Avoid_: execute/settle unqualified (those are the strategy-side calls), propose
 The vault's permissionless post-settle exit `redeemSettled(shares)`: pro-rata against the vault's settled asset balance, priced on pre-burn supply. The only exit once the strategy is Settled — the strategy's own redeem paths require `Executed`.
 _Avoid_: withdraw, redeem (reserved for the strategy's in-position `redeem`)
 
-**Fee-config hops**:
-The two-call protocol-fee lookup the strategy inherits (`vault.factory()` → `.protocolConfig()`). The vault plays both roles and returns `address(0)` on the first hop while `feeConfig` is unset — the launch default, meaning the protocol-fee leg is off.
-_Avoid_: factory (nothing is deployed by it), ProtocolConfig as a contract we ship
-
 **Width band**:
 The init-time `[minWidth, maxWidth]` bounds, on the `tickSpacing` grid, that every rerange width must satisfy — the genesis width included. Enforced by `LeveragedAeroValuation.checkRange` (which validates width and skew together), rejected with `OutOfBounds()`.
 _Avoid_: range (that is the resulting tickLower/tickUpper), tick spacing (the grid the band sits on), `WidthOutOfBounds()` (renamed — that name still belongs to `LPAutoBalancerV2`, a different contract)

@@ -2126,6 +2126,53 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(out - quotedAtStoredRate, (pot * 3) / 100, "surplus == pot x (fresh - stored)");
     }
 
+    /// @dev THE `fromCollateral == 0` ESCAPE, re-pinned fee-free: a cToken balance whose STORED value floors
+    ///      to 0 makes `nav()` the idle pot alone, so a full redeem is funded entirely from idle and
+    ///      `fromCollateral == 0` — yet the balance is real and must not be stranded on a zero-share book.
+    ///      MUTATION: deleting or inverting the `!(isFullRedeem && cToken balance > 0)` conjunct early-returns
+    ///      before the burn and leaves the dust behind.
+    function testFastFullRedeemSweepsDustWhoseStoredValueFloorsToZero() public {
+        _execute(SEED);
+        vm.prank(proposer);
+        strategy.flatten(0, 1);
+        // A sub-unit exchange rate (one cToken worth less than one USDC unit -- the REAL Compound shape;
+        // 1e18 is the mock's simplification), so a 1-unit park prices at 0 while minting live cTokens.
+        mUsdc.setExchangeRateStored(0.4e18);
+        uint256 pot = usdc.balanceOf(address(strategy));
+        vm.prank(proposer);
+        strategy.supplyIdle(1);
+
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        assertGt(mUsdc.balanceOf(address(strategy)), 0, "precondition: the cToken balance is live");
+        assertEq(_collateralUsdc(), 0, "...but its stored value floors to 0");
+        assertEq(strategy.nav(), pot - 1, "so nav() is the idle pot alone");
+
+        vm.startPrank(lp);
+        vault.approve(address(strategy), supply);
+        uint256 out = strategy.redeem(supply, 0);
+        vm.stopPrank();
+
+        assertEq(out, pot - 1, "the redeemer is paid the whole priced book");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "the dust was swept, not stranded on a zero-share book");
+        assertEq(vault.totalSupply(), 0, "the last shares are burnt");
+    }
+
+    /// @dev `vault.previewSharesForAssets` is documented as THE canonical assets->shares conversion, and the
+    ///      strategy's `deposit` mints from an expression-identical formula. Nothing pinned the two together.
+    ///      MUTATION: a changed offset or rounding direction on either side breaks this equality.
+    function testPreviewSharesForAssetsEqualsTheSharesDepositMints() public {
+        _execute(SEED);
+        uint256 assets = 25_000e6;
+
+        uint256 quoted = vault.previewSharesForAssets(assets);
+        uint256 minted = _deposit(assets); // same block, so no management-fee dt intervenes
+
+        assertGt(quoted, 0, "the preview quotes a real number");
+        assertEq(minted, quoted, "the vault's canonical conversion is what deposit actually mints");
+    }
+
     /// @dev THE `isFullRedeem` CONJUNCT, mutation-pinned: a PARTIAL redeem at a non-unit rate must pay the
     ///      stored-rate quote and NOTHING more. Deleting the conjunct passed the whole suite before this test.
     function testPartialFastRedeemAtANonUnitRatePaysTheStoredRateQuoteOnly() public {
@@ -2939,7 +2986,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         vm.stopPrank();
         assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
 
-        // REOPEN. `navNet == 0` and `supply == 0`, so the depositor mints at `assets x SHARES_VIRTUAL_OFFSET` == 1e12.
+        // REOPEN. `nav() == 0` and `supply == 0`, so the depositor mints at `assets x SHARES_VIRTUAL_OFFSET` == 1e12.
         _deposit(100_000e6);
         assertEq(strategy.layout().hwmPerShare, 0, "the dead cycle's mark did not survive the empty book");
 

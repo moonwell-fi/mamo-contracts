@@ -47,6 +47,6 @@ interface IStrategy {
     ///         it for off-chain consumers.
     function positions() external view returns (Position[] memory);
 
-    /// @notice true ⇒ the strategy crystallises its own management/performance/protocol fees.
+    /// @notice true ⇒ the strategy crystallises its own management/performance fees.
     function selfManagesFees() external view returns (bool);
 }

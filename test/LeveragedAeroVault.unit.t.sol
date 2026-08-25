@@ -14,7 +14,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  * @notice Fork-free unit suite (runs under `make test-unit` / `make leveraged-aero-vault`) for the
  *         vanilla share ledger the vendored leveraged-Aero strategy binds to. The strategy itself is
  *         stubbed by {MockVaultStrategy} — the vault's own surface (decimals offset, share hooks,
- *         fee-config hops, lifecycle, settled exit, rescue) is what is under test.
+ *         lifecycle, settled exit, rescue) is what is under test.
  */
 contract LeveragedAeroVaultUnitTest is Test {
     // ---- events mirrored from LeveragedAeroVault (for vm.expectEmit) ----

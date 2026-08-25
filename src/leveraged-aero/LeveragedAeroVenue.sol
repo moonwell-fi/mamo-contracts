@@ -348,7 +348,7 @@ library LeveragedAeroVenue {
     /// @notice Advisory preview of the fast-path exit — the body of the strategy's `previewRedeem`. See
     ///         that entrypoint's docs for the full quote/`fastOk` contract.
     /// @dev The fail-closed hops go through the STRATEGY's own external self-views, so a down oracle or a
-    ///      reverting config read degrades to `(0,false)`/`(assetsOut,false)`.
+    ///      degrades to `(0,false)`/`(assetsOut,false)`.
     function previewRedeemImpl(uint256 shares) public view returns (uint256 assetsOut, bool fastOk) {
         LeveragedAerodromeCLStrategy self = LeveragedAerodromeCLStrategy(payable(address(this)));
         uint256 supply = IERC20(self.vault()).totalSupply();
@@ -448,8 +448,7 @@ library LeveragedAeroVenue {
 
     /// @notice Unwind the WHOLE book to idle USDC without settling — `LeveragedAeroManager.settleImpl`'s
     ///         exact unwind, then zero the hedged-principal bases the way `_settle` does. UNLIKE `_settle`:
-    ///         no protocol-fee discharge (the liability persists, `nav()` stays net of it), no push-to-vault
-    ///         and no state transition — the strategy stays `Executed`, so deposits/redeems keep working
+    ///         no push-to-vault and no state transition — the strategy stays `Executed`, so deposits/redeems keep working
     ///         against the flat book (NAV == idle USDC, no oracle).
     /// @dev Unwind-swap slippage is Chainlink-floored inside `settleImpl` via `maxSlippageBps`, so a down
     ///      oracle fail-closes the flatten. Idempotent on an already-flat book.
@@ -773,7 +772,7 @@ library LeveragedAeroVenue {
 
     /// @notice The strategy's full `LayoutView` read out of diamond storage — the BODY of
     ///         `LeveragedAerodromeCLStrategy.layout()`, hosted here for the strategy's EIP-170 budget.
-    /// @dev Field-by-field, not a struct literal: a 52-field literal overflows the 16-live-variable stack
+    /// @dev Field-by-field, not a struct literal: a 51-field literal overflows the 16-live-variable stack
     ///      window under via_ir. Solc emits no library call-protection guard for views, so a direct call on
     ///      the deployed library reads the LIBRARY's own all-zero slot — reach it via `strategy.layout()`.
     function layoutView() public view returns (LeveragedAerodromeCLStrategy.LayoutView memory v) {

@@ -159,8 +159,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
     /// @dev A best-effort fee crystallise (deposit / fast redeem / proportional redeem) reverted and was
     ///      deferred; the op proceeded. Reverts on the fee-MINT (vault paused / feeRecipient
-    ///      de-whitelisted) — or, near-unreachably, on the config read inside the crystallise (see the
-    ///      per-op docstrings). `op` (see `OP_*`) tells a monitor which entrypoint deferred; `navPre` is
+    ///      de-whitelisted). `op` (see `OP_*`) tells a monitor which entrypoint deferred; `navPre` is
     ///      the NAV at risk (0 on an oracle-out proportional redeem).
     event FeeCrystallizeDeferred(uint8 op, uint256 navPre);
 
@@ -772,8 +771,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         supplyPost = supply + feeShares;
     }
 
-    /// @dev Self-only external view wrapper so `previewRedeem` can `try/catch` `_simulateCrystallize`
-    ///      and degrade to `(0, false)` symmetrically with its other failure modes.
+    /// @dev Self-only external view wrapper: `previewRedeemImpl` runs in a LIBRARY frame, so it needs
+    ///      this hop to reach the private simulate. `redeem` calls `_simulateCrystallize` directly.
     function simulateCrystallizeSelf(uint256 navPre, uint256 supply) external view returns (uint256 supplyPost) {
         if (msg.sender != address(this)) revert OnlySelf();
         return _simulateCrystallize(navPre, supply);
@@ -896,8 +895,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///
     ///         A GENUINE NO-OP HAS NO SIDE EFFECTS. `compound` is a keeper-polled entrypoint, so a call
     ///         with nothing to harvest — a flat book, or a staked position with zero claimable AERO —
-    ///         returns BEFORE crystallising. Crystallisation is not free: it mints fee-shares, accrues the
-    ///         protocol slice and RATCHETS THE HWM, so a poll that moved no funds used to still dilute
+    ///         returns BEFORE crystallising. Crystallisation is not free: it mints fee-shares and RATCHETS
+    ///         THE HWM, so a poll that moved no funds used to still dilute
     ///         holders and advance the fee clock. The probe reads `earned + held AERO` (held, so a stray
     ///         AERO balance from a previous partial fill or a donation is still a real harvest) and is
     ///         ahead of every state write. The manager repeats the same two bail-outs as belts.
@@ -1103,11 +1102,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         //     while issuance is shut would otherwise walk with the whole pending fee. Same pair `previewRedeem`
         //     quotes. RESIDUAL: a FULL redeem funds via the whole-cToken burn and pays the fresh-rate surplus
         //     regardless — value cannot be retained on a book with no shares left.
-        if (!crystallized) {
-            try this.simulateCrystallizeSelf(navPre, supply) returns (uint256 sp) {
-                supply = sp;
-            } catch {}
-        }
+        if (!crystallized) supply = _simulateCrystallize(navPre, supply);
 
         assetsOut = Math.mulDiv(shares, navPre, supply); // rounds down, LP-favourable
         if (assetsOut < minAssetsOut) revert InsufficientAssetsOut();
@@ -1296,8 +1291,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @notice Unwind the WHOLE book to idle USDC while staying `Executed` — the migration's first leg, and a
     ///         general proposer de-risk lever. Runs `settleImpl`'s exact unwind (exit gauge + CL, repay both
     ///         legs self-funding any shortfall, redeem all collateral, sweep residual legs to USDC, slippage
-    ///         floored by `maxSlippageBps`) but does NOT settle: no state transition, no push-to-vault, no
-    ///         protocol-fee discharge. Deposits and redeems keep working against the flat book (NAV == idle
+    ///         floored by `maxSlippageBps`) but does NOT settle: no state transition and no push-to-vault.
+    ///         Deposits and redeems keep working against the flat book (NAV == idle
     ///         USDC, oracle-free); the proposer re-enters via `redeploy`. Idempotent on an already-flat book.
     ///         TWO GUARDS `settle` does not need, because `flatten` is repeatable: the pool is CALM-GATED before
     ///         the burn (the unwind's mins come off the same `slot0()` it burns at), and the auto-claimed reward

@@ -78,16 +78,16 @@ AERO_V2_FACTORY=0x420DD381b31aEf6683db6B902084cB0FFECe40Da
 NPM=0x827922686190790b37229fd06084350E74485b72
 
 # NB: keep in lockstep with LeveragedAerodromeCLStrategy.LayoutView — BOTH arity and field ORDER.
-# b9ea6ac appended `uint128 hedgedDebtA` + `uint128 hedgedDebtB` for the borrow-interest hedge; the
-# rerange-skew change appended `uint16 skewBps` AFTER `legBIsAsset` — i.e. field 47, NOT next to the
-# width band (`width`/`minWidth`/`maxWidth`, 43/44/45) where you would expect it — and the skew
-# GOVERNANCE BAND (`uint16 minSkewBps`, `uint16 maxSkewBps`) follows it at 48/49, pushing the two
-# hedgedDebt fields to 50/51. The venue-migration change then appended `bytes32 stagedVenueHash` LAST,
-# at field 52. A short or mis-ordered signature here makes `cast call` fail to decode and every
-# `lay N` read comes back empty — if `lay` starts returning nothing, check this line FIRST.
-# (`lay N` is 1-BASED over the comma-split tuple, so field N == LayoutView member N-1. Every append
-# lands at the END, which is why no existing `lay N` index above ever had to move.)
-LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
+# 51 fields. `uint16 skewBps` sits AFTER `legBIsAsset` — field 46, NOT next to the width band
+# (`width`/`minWidth`/`maxWidth`, 42/43/44) where you would expect it — and the skew GOVERNANCE BAND
+# (`uint16 minSkewBps`, `uint16 maxSkewBps`) follows it at 47/48, ahead of the two hedgedDebt fields
+# at 49/50 and `bytes32 stagedVenueHash` LAST at 51. A short or mis-ordered signature here makes
+# `cast call` fail to decode and every `lay N` read comes back empty — if `lay` starts returning
+# nothing, check this line FIRST; `forge inspect LeveragedAerodromeCLStrategy abi` is the authority.
+# (`lay N` is 1-BASED over the comma-split tuple, so field N == LayoutView member N-1. Appends land
+# at the END, but a REMOVAL shifts every later index down — dropping `protocolFeeOwed`, once field
+# 34, is why the tail numbers above are one lower than they used to be.)
+LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
 
 c() { cast call --rpc-url "$RPC" "$@" 2>/dev/null; }
 num() { echo "${1%% *}"; }

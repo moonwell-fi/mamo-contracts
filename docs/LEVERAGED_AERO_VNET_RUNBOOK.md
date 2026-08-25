@@ -387,10 +387,10 @@ vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — 
 > re-pointed. Re-derive rather than copy: `cast sig 'OutOfBounds()'`,
 > `cast sig 'rerange(uint24,uint16,uint256,uint256)'`.
 >
-> **A third break landed with the skew band: two fields were INSERTED, not appended.** `minSkewBps` /
-> `maxSkewBps` sit immediately after `skewBps` in both `InitParams` and `Layout`/`layout()`, so every
-> later field shifted by two (`hedgedDebtA`/`hedgedDebtB` moved from tuple positions 48/49 to 50/51).
-> Any hand-rolled `abi.encode` of `InitParams`, and any positional decode of `layout()`, must be
+> **Two more breaks moved `layout()` positions.** The skew band (`minSkewBps` / `maxSkewBps`) was
+> INSERTED after `skewBps`, not appended; the protocol-fee removal then DELETED `protocolFeeOwed` at
+> position 34. `layout()` is 51 fields now and `hedgedDebtA`/`hedgedDebtB` sit at 49/50. Any hand-rolled
+> `abi.encode` of `InitParams`, and any positional decode of `layout()`, must be
 > regenerated against the current ABI — `buildInitData()` is generated from the struct and needs no
 > change, but a copied calldata blob from an earlier run will initialize the wrong fields.
 
@@ -563,7 +563,7 @@ Phase B run they normally need no override; pass them to target a different vnet
 |---|---|
 | **2 — deploy** | Funds `DEPLOYER_EOA` with ETH, then runs `LeveragedAeroAccountHarness.deploy()` — the real `LeveragedAeroAccountDeployer.deployImplementationAndFactory()` path (the **same** deploy code the 012 multisig proposal calls). Deploys the `MamoLeveragedAeroStrategy` UUPS impl + the `MamoLeveragedAeroStrategyFactory` (wired to registry, admin=`MAMO_MULTISIG`, backend=`MAMO_BACKEND`, impl, `strategyTypeId=5`, strategy clone, USDC). Parses `HARNESS_IMPL` / `HARNESS_FACTORY` from the log. |
 | **3 — multisig `build()`** | As impersonated `MAMO_MULTISIG`: `registry.whitelistImplementation(impl, 5)`, `registry.grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`. Then `validate()` asserts: `whitelistedImplementations(impl)==true`, `implementationToId(impl)==5`, `latestImplementationById(5)==impl`, factory `hasRole(BACKEND_ROLE)`, `vault.depositsOpen()==true`, `factory.strategyTypeId()==5`, `factory.sherwoodStrategy()==$STRAT`, `factory.usdc()==USDC`. |
-| **4 — e2e lifecycle** | Fresh throwaway user, funded ETH + 10,000 USDC. `createStrategyForUser` → `computeStrategyAddress` (assert `isUserStrategy` + `account.owner()==user`); `deposit(5,000 USDC, minShares)` (minShares from the strategy's `shares=assets*(supply+1e6)/(navNet+1)` formula, 1% tol) → assert shares minted & mirrored on the vault; fast `withdraw(half, minOut)` → assert USDC lands on user, account USDC==0; `requestWithdraw` → `fulfillRedeem` (impersonated `proposer`) → assert the USDC landed on the USER directly (account USDC==0, no claim tx) → `syncRedeemRequests` prunes; `depositIdle` gate (a third party reverts "Not owner or backend"; `registry.getBackendAddress()` succeeds); `withdrawAll` cleanup; final clean-state asserts (shares==0, account USDC==0) + net user delta. |
+| **4 — e2e lifecycle** | Fresh throwaway user, funded ETH + 10,000 USDC. `createStrategyForUser` → `computeStrategyAddress` (assert `isUserStrategy` + `account.owner()==user`); `deposit(5,000 USDC, minShares)` (minShares from the strategy's `shares=assets*(supply+1e6)/(nav+1)` formula, 1% tol) → assert shares minted & mirrored on the vault; fast `withdraw(half, minOut)` → assert USDC lands on user, account USDC==0; `requestWithdraw` → `fulfillRedeem` (impersonated `proposer`) → assert the USDC landed on the USER directly (account USDC==0, no claim tx) → `syncRedeemRequests` prunes; `depositIdle` gate (a third party reverts "Not owner or backend"; `registry.getBackendAddress()` succeeds); `withdrawAll` cleanup; final clean-state asserts (shares==0, account USDC==0) + net user delta. |
 
 > **Why the vault/strategy keys are runtime-injected, never committed to `addresses/8453.json`:** FPS
 > `Addresses` validates `isContract` **eagerly** in its constructor (`_checkAddress`, gated on

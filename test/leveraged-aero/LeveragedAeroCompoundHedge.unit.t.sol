@@ -32,7 +32,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  * @notice The first suite in this tree that drives a REAL `compound` end to end (the pre-existing ones
  *         only reached the flat-book bail, because the AERO→USDC leg routes through a hardcoded mainnet
  *         Aerodrome-v2 router address). `MockAeroV2Router` is etched at that address, so the whole
- *         claim → swap → skim → re-hedge → redeploy sequence runs against custodial venue mocks.
+ *         claim → swap → re-hedge → redeploy sequence runs against custodial venue mocks.
  *
  *         THE THREE THINGS UNDER TEST:
  *
@@ -1399,6 +1399,42 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
             if (logs[i].topics[0] == LeveragedAerodromeCLStrategy.FeeCrystallizeDeferred.selector) deferred = true;
         }
         assertTrue(deferred, "...and the deferral was marked, not silent");
+    }
+
+    /// @dev THE FULL-REDEEM SURPLUS BASELINE: on the whole-cToken-burn branch the redeemer is paid the
+    ///      fresh-rate surplus measured against `collateralUsdc`, NOT against their own fee-netted draw. A
+    ///      DEFERRED crystallise is the only state where the two differ (`fromCollateral < collateralUsdc`),
+    ///      and the difference is exactly the pending fee. MUTATION: baselining on `fromCollateral` pays the
+    ///      redeemer the whole fresh book, so nothing is retained and the deferred fee walks out.
+    function testTheFullRedeemSurplusIsBaselinedOnTheCollateralNotTheFeeNettedDraw() public {
+        _armAPendingPerformanceFee();
+        // `MockNpm` custodies only what it was minted and the post-compound re-price leaves it a wei short on
+        // both legs; float it as other LPs do (same workaround as the atomic-redeploy test below).
+        usdc.mint(address(npm), 1_000e6);
+        legA.mint(address(npm), 1_000e8);
+        vm.prank(proposer);
+        strategy.flatten(0, 1); // flat, zero debt -- the burn branch's gate
+        uint256 pot = usdc.balanceOf(address(strategy));
+        vm.prank(proposer);
+        strategy.supplyIdle(pot); // whole pot as collateral, nothing raw
+
+        uint256 cBal = mUsdc.balanceOf(address(strategy));
+        mUsdc.setExchangeRateStored(1.37e18); // C at the stored rate -- the surplus baseline
+        mUsdc.setPendingExchangeRate(1.4e18); // ...which the burn accrues past
+        uint256 cStored = (cBal * 1.37e18) / 1e18;
+        uint256 cFresh = (cBal * 1.4e18) / 1e18;
+
+        vm.prank(owner);
+        vault.setOpenDeposits(false); // the fee-share mint fails -> the crystallise defers
+        (uint256 quoted,) = strategy.previewRedeem(SHARES);
+        assertLt(quoted, cStored, "the quote is netted by the deferred fee");
+
+        uint256 out = _fastRedeem(SHARES);
+
+        assertEq(out, quoted + (cFresh - cStored), "paid the fee-netted draw plus the rate gap, nothing more");
+        assertEq(usdc.balanceOf(address(strategy)), cFresh - out, "the deferred fee slice stays with the fund");
+        assertGt(usdc.balanceOf(address(strategy)), 0, "...and it is a real amount, not dust");
+        assertEq(mUsdc.balanceOf(address(strategy)), 0, "no cToken residue either");
     }
 
     /// @dev The re-pricing is CONDITIONAL: with issuance open the crystallise lands and the branch never runs.
