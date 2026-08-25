@@ -115,10 +115,16 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
         usdc.safeTransfer(msg.sender, assetsOut);
     }
 
-    function requestRedeem(uint256 shares, uint256 minAssetsOut) external override returns (uint256 id) {
+    function requestRedeem(uint256 shares, uint256 minAssetsOut, address recipient)
+        external
+        override
+        returns (uint256 id)
+    {
         require(state == State.Executed, "MockSherwood: not executed");
 
         IERC20(address(vaultToken)).safeTransferFrom(msg.sender, address(this), shares);
+
+        if (recipient == address(0)) recipient = msg.sender;
 
         id = nextRequestId++;
         requests[id] = RedeemRequest({
@@ -126,7 +132,8 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
             shares: shares,
             minAssetsOut: minAssetsOut,
             requestedAt: uint40(block.timestamp), // uint40 to match the real strategy's struct
-            settled: false
+            settled: false,
+            recipient: recipient
         });
     }
 
@@ -171,8 +178,8 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     // ==================== TEST-ONLY HELPER ====================
 
     /**
-     * @notice Burns the escrowed shares and pays USDC to the request owner; no proposer gate (test
-     *         helper). Enforces the real `max(stored, fresh)` floor, never lowerable by the fulfiller.
+     * @notice Burns the escrowed shares and pays USDC to the request's RECIPIENT (not its owner), as the
+     *         real one does; no proposer gate (test helper). Enforces the real `max(stored, fresh)` floor.
      */
     function fulfillRedeem(uint256 id, uint256 minAssetsOut) external returns (uint256 assetsOut) {
         RedeemRequest storage req = requests[id];
@@ -184,6 +191,6 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
         req.settled = true;
         vaultToken.strategyBurn(req.shares);
-        usdc.safeTransfer(req.owner, assetsOut);
+        usdc.safeTransfer(req.recipient, assetsOut);
     }
 }

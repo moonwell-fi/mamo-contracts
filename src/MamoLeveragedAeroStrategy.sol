@@ -35,6 +35,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *        other Mamo strategies); its intended use here is the Settled terminal state, where the owner
  *        pulls the raw shares out and burns them for their pro-rata slice of the settled USDC via the
  *        vault's `redeemSettled`.
+ *      - EVERY withdrawal path pays `owner()` in the transaction that settles it (the async path by naming
+ *        `owner()` as the pooled request's RECIPIENT), so no proceeds ever rest on this account.
  *      - The fast {withdraw}/{withdrawAll} paths are oracle-dependent and LTV-gated: they revert when the
  *        oracle is down or the LTV gate trips, in which case the owner should route through the async
  *        {requestWithdraw} flow instead.
@@ -54,12 +56,16 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     /// @notice The USDC token (6dp): the deposit asset and the withdrawal payout token.
     IERC20 public usdc;
 
-    /// @dev Async redeem ids opened and not yet disposed of; a tracked id whose `settled` reads true LIVE
-    ///      off the strategy means "unclaimed USDC". Ids leave only on OWNER actions, never backend ones.
+    /// @dev Open async redeem ids. A tracked id reading `settled` is a COMPLETED request, not unclaimed
+    ///      money — stale bookkeeping, pruned by every path that touches the set.
     uint256[] private _openRequestIds;
 
-    /// @notice Ceiling on simultaneously-tracked async requests, bounding the gas of the gate's scan.
+    /// @notice Ceiling on simultaneously-tracked async requests, bounding the gas of the scans over it.
     uint256 public constant MAX_OPEN_REQUESTS = 16;
+
+    /// @notice Emitted when a tracked async request is observed settled and untracked — the account-side
+    ///         completion record, since a fulfil pays the recipient with no callback here.
+    event WithdrawSettled(uint256 indexed id);
 
     /// @notice Emitted when USDC is deposited and vault shares are minted to this account.
     event Deposit(address indexed depositor, uint256 assets, uint256 shares);
@@ -143,20 +149,15 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      * @dev Users can plain-transfer USDC to their account; the backend then nudges it in via this call
      *      (mirrors `depositIdleTokens` in MamoMultiMarketStrategy). Reverts if there is no idle USDC.
      *      The CALLER sizes the amount to `vault.remainingCapacity()`, since
-     *      {LeveragedAeroVault.maxTotalAssets} rejects rather than trims. The BACKEND is additionally gated
-     *      on {hasUnclaimedWithdrawal}, or it could repeatably re-lock a withdrawal the owner asked for.
+     *      {LeveragedAeroVault.maxTotalAssets} rejects rather than trims. NO unclaimed-proceeds gate on the
+     *      backend: no proceeds can rest here, so idle USDC is always money sent in. Both callers prune.
      * @param assets    Idle USDC to deposit (6dp); must be non-zero and at most the balance held.
      * @param minShares Minimum vault shares to accept (slippage guard).
      * @return shares Vault shares minted to this account (12dp).
      */
     function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares) {
-        bool isOwner = msg.sender == owner();
-        require(isOwner || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
-        if (isOwner) {
-            _pruneSettled();
-        } else {
-            require(!hasUnclaimedWithdrawal(), "Unclaimed withdrawal proceeds");
-        }
+        require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
+        _pruneSettled();
 
         require(assets > 0, "Amount must be greater than 0");
         require(assets <= usdc.balanceOf(address(this)), "Insufficient idle USDC");
@@ -202,20 +203,20 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     /**
      * @notice Create an async redeem request for `shares` (the exit for sizes the fast path can't serve,
      *         or when the oracle is down).
-     * @dev Approves the exact share amount to the strategy and escrows the shares there. The backend
-     *      later fulfills the request; the resulting USDC lands on this account with no callback and is
-     *      swept to the owner via {claimWithdrawnUsdc}.
+     * @dev The recipient is captured HERE and immutable pooled-side, so a `transferOwnership` before the
+     *      fulfil still pays the address that asked; the new owner's remedy is {cancelWithdraw} + re-request.
+     *      Prunes first, so a completed request cannot consume the {MAX_OPEN_REQUESTS} budget.
      * @param shares Vault shares to escrow (12dp).
      * @param minAssetsOut Slippage floor enforced at fulfill.
      * @return id The request id.
      */
     function requestWithdraw(uint256 shares, uint256 minAssetsOut) external onlyOwner returns (uint256 id) {
         require(shares > 0, "Amount must be greater than 0");
+        _pruneSettled();
         require(_openRequestIds.length < MAX_OPEN_REQUESTS, "Too many open requests");
 
         vaultShares.forceApprove(address(sherwoodStrategy), shares);
-        id = sherwoodStrategy.requestRedeem(shares, minAssetsOut);
-        // No prune here: a tracked-and-settled id IS the unclaimed-proceeds signal the backend gate reads.
+        id = sherwoodStrategy.requestRedeem(shares, minAssetsOut, owner());
         _openRequestIds.push(id);
 
         emit WithdrawRequested(id, shares, minAssetsOut);
@@ -227,7 +228,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      */
     function cancelWithdraw(uint256 id) external onlyOwner {
         sherwoodStrategy.cancelRedeem(id);
-        // BY ID ONLY: a cancel returns SHARES, so a blanket prune would clear the gate for other proceeds.
+        // BY ID ONLY: a cancel returns SHARES, so it must not report other ids as settled withdrawals.
         _untrack(id);
 
         emit WithdrawCancelled(id);
@@ -236,17 +237,19 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     /**
      * @notice Trustless emergency redeem of an unfulfilled request after the strategy's fulfill window,
      *         paying USDC to the owner.
-     * @dev The strategy pays USDC directly to `msg.sender` (this account); the received amount is then
-     *      forwarded to the owner.
+     * @dev The strategy pays this account here rather than the request's recipient, so the amount is
+     *      forwarded to that SAME recipient — never to the current `owner()`, or a transfer of the account
+     *      mid-request would let the deadman path pay someone the fulfil path would not.
      * @param id Request id (owner-gated on the strategy side too).
      * @param minAssetsOut Fresh slippage floor on the net payout.
-     * @return assetsOut USDC forwarded to the owner (6dp).
+     * @return assetsOut USDC forwarded to the request's recipient (6dp).
      */
     function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external onlyOwner returns (uint256 assetsOut) {
+        address recipient = sherwoodStrategy.redeemRequest(id).recipient;
         assetsOut = sherwoodStrategy.emergencyRedeem(id, minAssetsOut);
 
-        _forwardToOwner(assetsOut);
-        // BY ID ONLY, as in {cancelWithdraw}: this pays straight through, leaving nothing unclaimed here.
+        if (assetsOut > 0) usdc.safeTransfer(recipient, assetsOut);
+        // BY ID ONLY, as in {cancelWithdraw}: this pays straight through, so a blanket prune would be wrong.
         _untrack(id);
 
         emit WithdrawEmergency(id, assetsOut);
@@ -254,8 +257,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
 
     /**
      * @notice Sweep this account's entire idle USDC balance to the owner.
-     * @dev Fulfilment lands USDC here with no callback; this is the owner's explicit claim. It sweeps the
-     *      WHOLE idle balance, so pruning every settled request here is what re-opens the backend's gate.
+     * @dev NOT the withdrawal claim (a fulfil pays the frozen recipient): sweeps only USDC that arrived
+     *      some other way, e.g. a plain transfer.
      * @return amount USDC swept to the owner (6dp).
      */
     function claimWithdrawnUsdc() external onlyOwner returns (uint256 amount) {
@@ -296,9 +299,10 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         return sherwoodStrategy.state();
     }
 
-    /// @notice True while any tracked async request has been fulfilled and its USDC not yet claimed.
-    /// @dev The gate the backend's {depositIdle} is subject to. `settled` is read LIVE off the strategy.
-    function hasUnclaimedWithdrawal() public view returns (bool) {
+    /// @notice True while a tracked async request has settled, i.e. completed.
+    /// @dev Gates nothing, and BEST-EFFORT: any pruning call clears it, backend `depositIdle` included.
+    ///      {WithdrawSettled} is the durable completion record.
+    function hasSettledRequest() public view returns (bool) {
         uint256 n = _openRequestIds.length;
         for (uint256 i; i < n; ++i) {
             if (sherwoodStrategy.redeemRequest(_openRequestIds[i]).settled) return true;
@@ -306,14 +310,13 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         return false;
     }
 
-    /// @notice The async request ids this account is tracking — the set {hasUnclaimedWithdrawal} scans.
+    /// @notice The async request ids this account is tracking — the set {hasSettledRequest} scans.
     function openRequestIds() external view returns (uint256[] memory) {
         return _openRequestIds;
     }
 
     /// @notice Owner escape hatch: drop every tracked request that has settled.
-    /// @dev The inherited `recoverERC20` can also drain the USDC without pruning, which would gate the
-    ///      backend forever on proceeds no longer here. Owner-only, so the backend cannot clear its gate.
+    /// @dev Explicit housekeeping only — {requestWithdraw}, {depositIdle} and {claimWithdrawnUsdc} prune too.
     function syncRedeemRequests() external onlyOwner {
         _pruneSettled();
     }
@@ -332,16 +335,19 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         }
     }
 
-    /// @dev Drop every settled tracked request. Iterates from the TAIL so swap-pop cannot skip an element.
+    /// @dev Drop every settled tracked request, emitting {WithdrawSettled} per id so completion is recorded
+    ///      whoever prunes. Iterates from the TAIL so swap-pop cannot skip an element.
     function _pruneSettled() private {
         uint256 i = _openRequestIds.length;
         while (i > 0) {
             unchecked {
                 --i;
             }
-            if (sherwoodStrategy.redeemRequest(_openRequestIds[i]).settled) {
+            uint256 id = _openRequestIds[i];
+            if (sherwoodStrategy.redeemRequest(id).settled) {
                 _openRequestIds[i] = _openRequestIds[_openRequestIds.length - 1];
                 _openRequestIds.pop();
+                emit WithdrawSettled(id);
             }
         }
     }

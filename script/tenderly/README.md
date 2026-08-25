@@ -141,7 +141,7 @@ picks them up as its defaults (env vars still win).
 |---|---|
 | **2 — deploy** | `LeveragedAeroAccountHarness.deploy()` runs the real `LeveragedAeroAccountDeployer` (the same code proposal 012 calls) to deploy the impl + factory as `DEPLOYER_EOA`. |
 | **3 — multisig** | As `MAMO_MULTISIG`: `whitelistImplementation(impl,5)`, `grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`; then reproduces every `validate()` assert via `cast` reads. |
-| **4 — e2e** | Fresh throwaway user: `createStrategyForUser` → `deposit` → fast `withdraw(half)` → `requestWithdraw` → proposer `fulfillRedeem` → `claimWithdrawnUsdc` → `depositIdle` gate (third-party reverts, registry backend succeeds) → `withdrawAll` cleanup → clean-state asserts + net-delta report. |
+| **4 — e2e** | Fresh throwaway user: `createStrategyForUser` → `deposit` → fast `withdraw(half)` → `requestWithdraw` → proposer `fulfillRedeem` (pays the USER directly — no claim step) → `syncRedeemRequests` → `depositIdle` gate (third-party reverts, registry backend succeeds) → `withdrawAll` cleanup → clean-state asserts + net-delta report. |
 
 **Why `--reuse` is forced.** The vault + strategy clone exist only on the shared persistent vnet, so
 this harness ALWAYS reuses `TENDERLY_VNET_RPC_URL` (point it at the vnet's **Admin RPC** — it accepts

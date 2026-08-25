@@ -91,6 +91,7 @@ library LeveragedAeroManager {
         uint256 minAssetsOut; // slippage floor enforced at fulfill (fresh arg at emergencyRedeem)
         uint40 requestedAt; // request timestamp; FULFILL_WINDOW deadman clock anchor
         bool settled; // set once fulfilled / cancelled / emergency-redeemed (double-spend guard)
+        address recipient; // `fulfillRedeem` payee, fixed at request time; defaults to `owner`
     }
 
     /// @dev LEG SLOTS, not token identities: the `weth`/`mWeth`/`wethFeed`/`weth*` members are leg A

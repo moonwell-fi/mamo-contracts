@@ -172,9 +172,10 @@ function owner() external view returns (address);
 - **`fastOk`:** `true` iff the fast withdraw path would currently price and clear the LTV gate. It is
   **advisory only** — execution can still revert even when `fastOk == true` (prices move between the
   preview call and the tx). Use it to choose the default UX path, not as a guarantee.
-- **Idle / claimable USDC:** `IERC20(usdc).balanceOf(account)`. After an async withdrawal is fulfilled,
-  the payout lands here as idle USDC awaiting `claimWithdrawnUsdc()` (see async flow). Surface it as a
-  "claimable" balance.
+- **Idle / sweepable USDC:** `IERC20(usdc).balanceOf(account)`. This is **not** where withdrawal payouts
+  land — a fulfilled async withdrawal pays the user's wallet directly (see async flow). It holds only USDC
+  that arrived some other way (a plain transfer to the account, a deposit remainder), and
+  `claimWithdrawnUsdc()` sweeps it. Normally zero; surface it only when non-zero.
 
 > **Never cache a quote across blocks.** Fees crystallize inside user transactions and supply/NAV move,
 > so `previewWithdraw` and any derived `minShares` / `minAssetsOut` must come from a fresh read in the
@@ -386,8 +387,8 @@ function claimWithdrawnUsdc() external returns (uint256 amount);                
 
 // Request tracking — read these instead of scraping logs.
 function openRequestIds() external view returns (uint256[] memory);   // ids the account is tracking
-function hasUnclaimedWithdrawal() external view returns (bool);       // any of them fulfilled + unswept
-function syncRedeemRequests() external;                               // onlyOwner escape hatch
+function hasSettledRequest() external view returns (bool);            // any of them COMPLETED (fulfilled)
+function syncRedeemRequests() external;                               // onlyOwner housekeeping
 ```
 
 > **Value floats until fulfill.** `requestWithdraw` escrows the shares but does **not** freeze a price —
@@ -395,10 +396,17 @@ function syncRedeemRequests() external;                               // onlyOwn
 > ultimately receives is priced at fulfill time, not request time. Surface this clearly (e.g. "amount
 > finalizes when processed") and do not display the request-time preview as a locked payout.
 
-> **The rebalancer cannot redirect a fulfillment.** `fulfillRedeem(id, minAssetsOut)` takes no recipient argument — the
-> payee is `redeemRequests[id].owner`, fixed to the user's account at `requestRedeem` and immutable
-> thereafter. The floor is the user's own stored `minAssetsOut`. The rebalancer chooses *when* a request
-> settles, never *to whom* or *for how much*.
+> **The rebalancer cannot redirect a fulfillment.** `fulfillRedeem(id, minAssetsOut)` takes no recipient
+> argument — the payee is `redeemRequests[id].recipient`, which the account fixed to **the user's own
+> wallet** (`account.owner()`) at `requestRedeem` and which is immutable thereafter. The floor is the
+> user's own stored `minAssetsOut`. The rebalancer chooses *when* a request settles, never *to whom* or
+> *for how much*.
+>
+> **One consequence for ownership transfers:** the recipient is captured at request time, so a
+> `transferOwnership` while a request is outstanding still pays the address that asked — on BOTH
+> settlement paths (`emergencyWithdraw` forwards to that same frozen recipient, not to the new owner).
+> The new owner's remedy is `cancelWithdraw(id)` (the shares return to the account) and a fresh
+> `requestWithdraw`, which re-freezes the recipient on them.
 
 ```mermaid
 sequenceDiagram
@@ -408,15 +416,13 @@ sequenceDiagram
     participant B as Mamo rebalancer (proposer)
 
     U->>A: requestWithdraw(shares, minAssetsOut)
-    A->>S: forceApprove(shares) + requestRedeem
+    A->>S: forceApprove(shares) + requestRedeem(shares, minAssetsOut, recipient = user)
     S-->>A: id
     A-->>U: WithdrawRequested(id, shares, minAssetsOut)
     Note over U: state = PENDING — show request + offer cancelWithdraw(id)
     B->>S: fulfillRedeem(id, minAssetsOut)  (rebalancer, off-frontend)
-    S-->>A: USDC lands ON the account (idle)
-    Note over U,A: poll usdc.balanceOf(account) → claimable
-    U->>A: claimWithdrawnUsdc()
-    A-->>U: sweeps idle USDC to owner + UsdcClaimed(amount)
+    S-->>U: USDC paid DIRECTLY to the user's wallet + RedeemFulfilled(id, account, user, assetsOut)
+    Note over U: state = DONE — no claim transaction to prompt for
 ```
 
 **Pending-state UX.** Track pending requests from `WithdrawRequested` / `WithdrawCancelled` events and
@@ -424,16 +430,20 @@ the account's idle USDC balance:
 
 1. `WithdrawRequested(id, shares, minAssetsOut)` → mark request `id` pending; offer **Cancel**
    (`cancelWithdraw(id)` returns the escrowed shares to the account, emits `WithdrawCancelled(id)`).
-2. Detect fulfillment with `hasUnclaimedWithdrawal()` — there is no fulfill callback or event on the
-   account, and this is the same on-chain state the backend's `depositIdle` gate reads, so it cannot
-   disagree with it. Prefer it to polling the raw USDC balance, which cannot tell proceeds apart from a
-   plain transfer. `openRequestIds()` gives the live set without replaying logs.
-3. `claimWithdrawnUsdc()` sweeps the idle USDC to the owner and emits `UsdcClaimed(amount)`.
+2. Detect completion from the account's `WithdrawSettled(id)` — emitted whenever a tracked settled id is
+   pruned, whoever prunes — or the strategy's `RedeemFulfilled(id, account, recipient, assetsOut)`
+   (topic2 = the account, topic3 = the user). `hasSettledRequest()` is a convenience poll and is
+   BEST-EFFORT: any pruning call clears it, a backend `depositIdle` included, so do not rely on catching
+   it. `openRequestIds()` gives the live set without replaying logs.
+3. **There is no step 3.** The payout is already in the user's wallet when the request settles — show it
+   as complete, do not prompt for a claim. `claimWithdrawnUsdc()` remains as a sweep for USDC that
+   reached the account some other way, so offer it only when `usdc.balanceOf(account) > 0`.
 
-> **The backend cannot re-lock a fulfilled withdrawal.** While `hasUnclaimedWithdrawal()` is true a
-> backend `depositIdle` reverts, so a pending claim cannot be pushed back into the position. The
-> **owner** is not gated (re-depositing your own proceeds is a choice), and doing so clears the flag.
-> `MAX_OPEN_REQUESTS` (16) bounds how many requests can be tracked at once.
+> **The backend cannot re-lock a fulfilled withdrawal**, because there is nothing on the account to
+> re-lock: the payout went straight to the user. (The old `"Unclaimed withdrawal proceeds"` gate on the
+> backend's `depositIdle` is gone with the state it guarded.) `MAX_OPEN_REQUESTS` (16) bounds how many
+> requests can be tracked at once; settled ids are pruned automatically, so only genuinely OUTSTANDING
+> requests count against it.
 
 ---
 
@@ -471,7 +481,8 @@ Account (`MamoLeveragedAeroStrategy`) — exact signatures:
 | `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | `requestWithdraw` |
 | `WithdrawCancelled(uint256 indexed id)` | `cancelWithdraw` |
 | `WithdrawEmergency(uint256 indexed id, uint256 assetsOut)` | `emergencyWithdraw` |
-| `UsdcClaimed(uint256 amount)` | `claimWithdrawnUsdc` |
+| `WithdrawSettled(uint256 indexed id)` | a tracked request was observed settled and untracked — the account-side COMPLETION record |
+| `UsdcClaimed(uint256 amount)` | `claimWithdrawnUsdc` — an idle-USDC sweep, **not** a withdrawal claim |
 | `TokenRecovered(address indexed token, address indexed to, uint256 amount)` | `recoverERC20` / `recoverETH` (Settled exit) |
 
 Factory:
@@ -498,11 +509,10 @@ Account (`require` strings):
 | `"Amount must be greater than 0"` | `deposit`/`withdraw`/`requestWithdraw` with 0 | Validate amount > 0 client-side |
 | `"Insufficient idle USDC"` | `depositIdle` for more than the account holds | Cap the input at the idle balance |
 | `"Not owner or backend"` | `depositIdle` from a non-owner | Hide/disable for non-owner |
-| `"Unclaimed withdrawal proceeds"` | BACKEND `depositIdle` while a fulfilled withdrawal is unswept | Not a user error — prompt the owner to `claimWithdrawnUsdc()` first (or deposit as the owner) |
-| `"Too many open requests"` | `requestWithdraw` with `MAX_OPEN_REQUESTS` (16) already tracked | Claim or cancel an existing request first |
+| `"Too many open requests"` | `requestWithdraw` with `MAX_OPEN_REQUESTS` (16) OUTSTANDING requests already tracked | Cancel an existing request, or wait for one to be fulfilled |
 | `FundAtCapacity(navAfter, cap)` (custom error) | `deposit`/`depositIdle` that would push the FUND past its capacity ceiling | Show remaining capacity and cap the input (see below); retryable, and not the user's fault |
 | `"No shares to withdraw"` | `withdrawAll` with 0 shares | Empty position |
-| `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle | Nothing claimable yet |
+| `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle — the NORMAL state, since fulfils pay the user directly | Hide the sweep unless `usdc.balanceOf(account) > 0` |
 | `OwnableUnauthorizedAccount(address)` (OZ custom error) | any `onlyOwner` call from non-owner | Wrong wallet connected |
 
 Factory (`require` strings):
@@ -541,6 +551,7 @@ Settled exit:
 - [ ] Show position value from `previewWithdraw(sharesBalance())`; never cache the quote across blocks.
 - [ ] Derive position copy from the clone (`layout().legBIsAsset` + the leg-slot addresses) rather than hardcoding "cbBTC + ETH"; both shapes are USDC-in / USDC-out and every flow below is shape-invariant.
 - [ ] Fast withdraw: preflight `previewWithdraw`, default to async when `fastOk == false`, and catch `FastRedeemExceedsLtv` / oracle reverts as an async fallback.
-- [ ] Async withdraw: surface pending requests from `openRequestIds()` (not log scraping), offer `cancelWithdraw`, detect fulfillment with `hasUnclaimedWithdrawal()`, and expose `claimWithdrawnUsdc`.
+- [ ] Async withdraw: surface pending requests from `openRequestIds()` (not log scraping), offer `cancelWithdraw`, and detect completion with `hasSettledRequest()` / `RedeemFulfilled` — the payout is already in the user's wallet, so do NOT prompt for a claim.
+- [ ] Offer `claimWithdrawnUsdc` only when `usdc.balanceOf(account) > 0` (a plain transfer or deposit remainder, never withdrawal proceeds).
 - [ ] Warn that async payout value floats until fulfill (no price freeze at request time).
 - [ ] Enable `emergencyWithdraw` only after `requestedAt + 2 days`.

@@ -27,6 +27,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     event WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut);
     event WithdrawCancelled(uint256 indexed id);
     event WithdrawEmergency(uint256 indexed id, uint256 assetsOut);
+    event WithdrawSettled(uint256 indexed id);
     event UsdcClaimed(uint256 amount);
     event StrategyCreated(address indexed user, address indexed strategy);
     event StrategyOwnerUpdated(address indexed strategy, address indexed oldOwner, address indexed newOwner);
@@ -459,31 +460,24 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.depositIdle(DEPOSIT, 0);
     }
 
-    /// @notice Regression: an anonymous third party must NOT be able to force a fulfilled async
-    ///         withdrawal back into the leveraged position (repeatable re-lock griefing) by front-running
-    ///         the owner's {claimWithdrawnUsdc} with depositIdle(0). The owner's claim then succeeds.
-    function testDepositIdleReLockGriefingBlocked() public {
+    /// @dev The re-lock grief is structurally impossible now: a fulfil pays the owner in the same
+    ///      transaction, so there is no window in which proceeds sit here waiting to be re-locked.
+    function testAFulfilledWithdrawalCannotBeReLockedBecauseItNeverRestsHere() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
 
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        // Backend/keeper fulfills off-band; the withdrawal USDC lands idle on the wrapper.
         sherwood.fulfillRedeem(id, 0);
-        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "fulfilled USDC idle on wrapper");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "no window: nothing rests on the wrapper");
+        assertEq(usdc.balanceOf(user), DEPOSIT, "the owner already has it");
+        assertEq(strategy.sharesBalance(), 0, "and the position is gone");
 
-        // Attacker front-runs the owner's claim to re-lock the funds — must revert.
+        usdc.mint(address(strategy), DEPOSIT);
         vm.prank(thirdParty);
         vm.expectRevert("Not owner or backend");
         strategy.depositIdle(DEPOSIT, 0);
-
-        // Owner still claims the fulfilled withdrawal.
-        vm.prank(user);
-        uint256 amount = strategy.claimWithdrawnUsdc();
-        assertEq(amount, DEPOSIT);
-        assertEq(usdc.balanceOf(user), DEPOSIT, "owner claimed the fulfilled withdrawal");
-        assertEq(strategy.sharesBalance(), 0, "not re-locked into the position");
     }
 
     // ==================== WITHDRAW (FAST PATH) ====================
@@ -651,25 +645,49 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "shares returned to wrapper");
     }
 
-    function testFulfillThenClaimWithdrawnUsdc() public {
+    /// @dev THE FIX: `requestWithdraw` names `owner()` as recipient, so the fulfil pays the user directly
+    ///      and `claimWithdrawnUsdc` has nothing left to sweep.
+    function testFulfillPaysTheOwnerDirectlyWithNoClaimStep() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
 
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        // Backend/keeper fulfills off-band; USDC lands on the wrapper with no callback.
         sherwood.fulfillRedeem(id, 0);
-        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "USDC on wrapper");
 
-        vm.expectEmit(false, false, false, true, address(strategy));
-        emit UsdcClaimed(DEPOSIT);
+        assertEq(usdc.balanceOf(user), DEPOSIT, "owner paid by the fulfil itself");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "nothing parked on the account");
 
         vm.prank(user);
-        uint256 amount = strategy.claimWithdrawnUsdc();
+        vm.expectRevert("No USDC to claim");
+        strategy.claimWithdrawnUsdc();
+    }
 
-        assertEq(amount, DEPOSIT);
-        assertEq(usdc.balanceOf(user), DEPOSIT, "owner swept");
+    /// @dev The payee is observable off the pooled strategy, not just the account's own bookkeeping.
+    function testRequestWithdrawStoresTheOwnerAsTheRecipient() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        ILeveragedAeroCLStrategy.RedeemRequest memory r = sherwood.redeemRequest(id);
+        assertEq(r.owner, address(strategy), "the ACCOUNT is the requester (it can cancel)");
+        assertEq(r.recipient, user, "...and the USER is the payee");
+    }
+
+    /// @dev Shares leave at request time and the payout skips the account, so it is left fully flat.
+    function testFulfillLeavesTheAccountCompletelyFlat() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        sherwood.fulfillRedeem(id, 0);
+
+        assertEq(strategy.sharesBalance(), 0, "no shares");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "no USDC");
     }
 
     function testClaimWithdrawnUsdcEmptyReverts() public {
@@ -827,7 +845,8 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(address(strategy), predicted);
     }
 
-    // ============ THE BACKEND CANNOT RE-LOCK UNCLAIMED WITHDRAWAL PROCEEDS (F11) ============
+    // ====== THE BACKEND GATE, AFTER DIRECT-PAY FULFILS (F11's precondition is gone) ======
+    // No withdrawal proceeds ever rest here, so idle USDC is always money the backend may deposit.
 
     function _fulfilledRequest(MamoLeveragedAeroStrategy strategy) internal returns (uint256 id) {
         vm.prank(user);
@@ -835,19 +854,21 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         sherwood.fulfillRedeem(id, 0);
     }
 
-    /// @dev (1) THE FINDING. The backend cannot push a fulfilled withdrawal back into the position.
-    function testBackendCannotRedepositUnclaimedProceeds() public {
+    /// @dev (1) A fulfil leaves the backend nothing to re-lock.
+    function testAFulfilLeavesNoProceedsForTheBackendToRedeposit() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
         _fulfilledRequest(strategy);
 
-        assertTrue(strategy.hasUnclaimedWithdrawal(), "the gate reports the state before the revert");
+        assertEq(usdc.balanceOf(user), DEPOSIT, "the owner was paid by the fulfil");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "nothing here for the backend to reach");
+
         vm.prank(backend);
-        vm.expectRevert("Unclaimed withdrawal proceeds");
-        strategy.depositIdle(DEPOSIT, 0);
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.depositIdle(0, 0);
     }
 
-    /// @dev (2) An OUTSTANDING request holds shares, not USDC, so it must not gate the backend.
+    /// @dev (2) An OUTSTANDING request escrows shares the backend cannot reach, so it must not gate it.
     function testAnOutstandingRequestDoesNotBlockTheBackend() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
@@ -855,43 +876,44 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
         usdc.mint(address(strategy), DEPOSIT);
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing is unclaimed yet");
+        assertFalse(strategy.hasSettledRequest(), "nothing has settled yet");
 
         vm.prank(backend);
         uint256 shares = strategy.depositIdle(DEPOSIT, 0);
         assertEq(shares, EXPECTED_SHARES, "the backend's ordinary duty still works");
     }
 
-    /// @dev (3) The owner's claim is what re-opens the gate.
-    function testClaimingUnblocksTheBackend() public {
+    /// @dev (3) THE GATE-DEADLOCK REGRESSION: with no claim step to wait for, a `settled`-keyed gate
+    ///      would shut permanently.
+    function testASettledRequestDoesNotPermanentlyBlockTheBackend() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
         _fulfilledRequest(strategy);
 
-        vm.prank(user);
-        strategy.claimWithdrawnUsdc();
+        assertEq(strategy.openRequestIds().length, 1, "the completed id is still tracked");
+        assertTrue(strategy.hasSettledRequest(), "...and reads settled");
 
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "claim pruned the settled id");
-        assertEq(strategy.openRequestIds().length, 0, "...and untracked it");
-
-        usdc.mint(address(strategy), DEPOSIT);
+        usdc.mint(address(strategy), DEPOSIT); // fresh money, plain-transferred in
         vm.prank(backend);
-        strategy.depositIdle(DEPOSIT, 0);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
+
+        assertEq(shares, EXPECTED_SHARES, "the backend was not blocked");
+        assertEq(strategy.openRequestIds().length, 0, "and its call pruned the stale id");
+        assertFalse(strategy.hasSettledRequest(), "nothing settled is tracked any more");
     }
 
-    /// @dev (4) The owner re-depositing their own proceeds is a choice, not a grief: not gated, and it prunes.
-    function testTheOwnerMayRedepositTheirOwnProceedsAndThatUnblocks() public {
+    /// @dev (4) The owner's own nudge behaves identically.
+    function testTheOwnerMayDepositIdleAfterAFulfilAndThatPrunes() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
         _fulfilledRequest(strategy);
 
+        usdc.mint(address(strategy), DEPOSIT);
         vm.prank(user);
         strategy.depositIdle(DEPOSIT, 0);
 
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "the owner's call pruned the settled id");
-        vm.prank(backend);
-        vm.expectRevert("Amount must be greater than 0"); // past the gate, stopped by the amount check
-        strategy.depositIdle(0, 0);
+        assertFalse(strategy.hasSettledRequest(), "the owner's call pruned the settled id");
+        assertEq(strategy.openRequestIds().length, 0, "...and untracked it");
     }
 
     /// @dev (5) A cancel returns SHARES, not USDC, so its id must stop being tracked — by id only.
@@ -905,7 +927,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.cancelWithdraw(id);
 
         assertEq(strategy.openRequestIds().length, 0, "cancelled id untracked");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "and it never counted as unclaimed");
+        assertFalse(strategy.hasSettledRequest(), "and the pooled settled flag is not reported");
     }
 
     /// @dev (6) The emergency path pays the owner straight through, so its id is disposed of too.
@@ -921,40 +943,38 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.emergencyWithdraw(id, DEPOSIT);
 
         assertEq(strategy.openRequestIds().length, 0, "emergency-redeemed id untracked");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing unclaimed: the owner was paid directly");
+        assertFalse(strategy.hasSettledRequest(), "untracked, so its pooled settled flag is not reported");
     }
 
-    /// @dev (7) `recoverERC20` drains the proceeds without pruning, so the gate stays shut; sync clears it.
-    function testRecoverERC20DeadlockIsClearedBySync() public {
+    /// @dev (7) The `recoverERC20`-without-pruning deadlock is gone with the gate it deadlocked.
+    function testRecoverERC20LeavesAStaleIdThatBlocksNothing() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
         _fulfilledRequest(strategy);
 
+        usdc.mint(address(strategy), DEPOSIT); // unrelated idle USDC for the hatch to drain
         vm.prank(user);
         strategy.recoverERC20(address(usdc), user, DEPOSIT);
-        assertEq(usdc.balanceOf(address(strategy)), 0, "proceeds gone, gate still shut");
-        assertTrue(strategy.hasUnclaimedWithdrawal(), "...precisely the deadlock");
+        assertTrue(strategy.hasSettledRequest(), "the completed id is still tracked");
 
-        vm.prank(user);
-        strategy.syncRedeemRequests();
-
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "the hatch cleared it");
         usdc.mint(address(strategy), DEPOSIT);
         vm.prank(backend);
         strategy.depositIdle(DEPOSIT, 0);
+        assertFalse(strategy.hasSettledRequest(), "pruned in passing");
     }
 
-    /// @dev (8) All-or-nothing on mixed idle: the gate cannot tell proceeds from fresh money, so it refuses.
-    function testMixedIdleBlocksTheBackendEntirely() public {
+    /// @dev (8) No all-or-nothing rule needed: none of the idle USDC can be withdrawal proceeds.
+    function testMixedIdleNoLongerBlocksTheBackend() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
         _fulfilledRequest(strategy);
 
-        usdc.mint(address(strategy), DEPOSIT); // fresh money for re-deposit, alongside the proceeds
+        usdc.mint(address(strategy), DEPOSIT * 2);
 
         vm.prank(backend);
-        vm.expectRevert("Unclaimed withdrawal proceeds");
-        strategy.depositIdle(DEPOSIT, 0);
+        uint256 shares = strategy.depositIdle(DEPOSIT, 0);
+        assertEq(shares, EXPECTED_SHARES, "the requested slice went in");
+        assertEq(usdc.balanceOf(address(strategy)), DEPOSIT, "the rest stays idle and owner-withdrawable");
     }
 
     function testPruneKeepsUnsettledIdsAndDropsSettledOnes() public {
@@ -977,7 +997,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         uint256[] memory left = strategy.openRequestIds();
         assertEq(left.length, 1, "only the unsettled one survives");
         assertEq(left[0], b, "...and it is the right one");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "nothing settled is tracked any more");
+        assertFalse(strategy.hasSettledRequest(), "nothing settled is tracked any more");
     }
 
     function testOpenRequestIdsTracksTheLifecycle() public {
@@ -990,18 +1010,123 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         uint256[] memory open = strategy.openRequestIds();
         assertEq(open.length, 1, "tracked on request");
         assertEq(open[0], id, "the id it returned");
-        assertFalse(strategy.hasUnclaimedWithdrawal(), "outstanding != unclaimed");
+        assertFalse(strategy.hasSettledRequest(), "outstanding != settled");
 
         sherwood.fulfillRedeem(id, 0);
-        assertTrue(strategy.hasUnclaimedWithdrawal(), "fulfilled and unswept == unclaimed");
-        assertEq(strategy.openRequestIds().length, 1, "still tracked until disposed of");
+        assertTrue(strategy.hasSettledRequest(), "fulfilled == settled: the frontend's completion signal");
+        assertEq(strategy.openRequestIds().length, 1, "still tracked until the next call prunes");
 
         vm.prank(user);
-        strategy.claimWithdrawnUsdc();
+        strategy.syncRedeemRequests();
         assertEq(strategy.openRequestIds().length, 0, "disposed of");
     }
 
-    /// @dev (11) The hatch is OWNER-only — a backend-callable prune would clear the backend's own gate.
+    /// @dev The recipient is frozen at request time, so a transfer mid-request pays the address that asked.
+    function testATransferOfTheAccountMidRequestStillPaysTheOwnerWhoAsked() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        address newOwner = makeAddr("newOwner");
+        vm.prank(user);
+        strategy.transferOwnership(newOwner);
+        assertEq(strategy.owner(), newOwner, "premise: the account changed hands mid-request");
+
+        sherwood.fulfillRedeem(id, 0);
+        assertEq(usdc.balanceOf(user), DEPOSIT, "the owner who asked was paid");
+        assertEq(usdc.balanceOf(newOwner), 0, "the new owner was not");
+    }
+
+    /// @dev BOTH settlement paths honour the same frozen recipient — otherwise a new owner could wait out
+    ///      the 2-day window to divert a payout the fulfil path would have sent to the old owner.
+    function testTheDeadmanPathAlsoPaysTheFrozenRecipientNotTheNewOwner() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        address newOwner = makeAddr("newOwner");
+        vm.prank(user);
+        strategy.transferOwnership(newOwner);
+        vm.warp(block.timestamp + 2 days + 1);
+
+        vm.prank(newOwner);
+        uint256 assetsOut = strategy.emergencyWithdraw(id, DEPOSIT);
+
+        assertEq(assetsOut, DEPOSIT);
+        assertEq(usdc.balanceOf(user), DEPOSIT, "the frozen recipient was paid");
+        assertEq(usdc.balanceOf(newOwner), 0, "the caller was not, despite owning the account");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "nothing stranded on the account");
+    }
+
+    /// @dev The new owner's documented remedy: cancel returns the shares here, and a fresh request
+    ///      re-freezes the recipient on them.
+    function testTheNewOwnerCancelsAndReRequestsToRedirectAnInFlightWithdrawal() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+
+        vm.prank(user);
+        uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+
+        address newOwner = makeAddr("newOwner");
+        vm.prank(user);
+        strategy.transferOwnership(newOwner);
+
+        vm.prank(newOwner);
+        strategy.cancelWithdraw(id);
+        assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "shares came back to the account");
+
+        vm.prank(newOwner);
+        uint256 id2 = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
+        assertEq(sherwood.redeemRequest(id2).recipient, newOwner, "the re-request names the new owner");
+
+        sherwood.fulfillRedeem(id2, 0);
+        assertEq(usdc.balanceOf(newOwner), DEPOSIT, "and pays them");
+        assertEq(usdc.balanceOf(user), 0, "the old owner gets nothing from the re-request");
+    }
+
+    /// @dev The account-side completion record, so a backend `depositIdle` pruning first cannot silently
+    ///      consume the only completion signal a frontend has.
+    function testPruningEmitsTheAccountSideCompletionEventWhoeverPrunes() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        _deposit(strategy, user, DEPOSIT);
+        uint256 id = _fulfilledRequest(strategy);
+
+        usdc.mint(address(strategy), DEPOSIT);
+        vm.expectEmit(true, false, false, false, address(strategy));
+        emit WithdrawSettled(id);
+
+        vm.prank(backend);
+        strategy.depositIdle(DEPOSIT, 0);
+        assertEq(strategy.openRequestIds().length, 0, "and the id was untracked");
+    }
+
+    /// @dev With no claim step to force a prune, completed requests would otherwise lock a user out at 16.
+    function testSettledRequestsDoNotConsumeTheOpenRequestBudget() public {
+        MamoLeveragedAeroStrategy strategy = _createStrategy(user);
+        uint256 max = strategy.MAX_OPEN_REQUESTS();
+        _deposit(strategy, user, DEPOSIT * (max + 1));
+
+        // Fill the budget, THEN fulfil all of them — no owner call in between, so nothing prunes.
+        uint256[] memory ids = new uint256[](max);
+        for (uint256 i; i < max; ++i) {
+            vm.prank(user);
+            ids[i] = strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        }
+        for (uint256 i; i < max; ++i) {
+            sherwood.fulfillRedeem(ids[i], 0);
+        }
+        assertEq(strategy.openRequestIds().length, max, "all still tracked, all settled");
+
+        vm.prank(user);
+        strategy.requestWithdraw(EXPECTED_SHARES, 0);
+        assertEq(strategy.openRequestIds().length, 1, "only the new, outstanding request is tracked");
+    }
+
+    /// @dev (11) The hatch stays owner-only by convention; the backend already prunes via `depositIdle`.
     function testSyncRedeemRequestsIsOwnerOnly() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
 

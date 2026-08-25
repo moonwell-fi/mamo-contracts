@@ -238,7 +238,7 @@ UAFT="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
 [ "$UAFT" -gt "$UBEF" ] 2>/dev/null && ok "USDC landed on USER (+$((UAFT-UBEF)))" || die "fast withdraw did not pay the user"
 assert_eq "account USDC after fast withdraw" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
 
-# async request → fulfill (proposer) → claim
+# async request → fulfill (proposer), which pays the USER directly — there is no claim step
 REM="$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)"
 REQSIG="$(cast keccak 'WithdrawRequested(uint256,uint256,uint256)')"
 # Raw send rather than csend: the request id is only recoverable from the receipt logs. Same
@@ -252,11 +252,15 @@ assert_eq "account sharesBalance escrowed" "$(ccall "$ACCT" 'sharesBalance()(uin
 
 PROPOSER="$(ccall "$STRAT" 'proposer()(address)' | field)"
 fund_eth "$PROPOSER" "$ETH_FUND_HEX"
+UBEF2="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
 csend "fulfillRedeem(id) [proposer]" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256,uint256)' "$ID" 0
-FA="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)"
-[ "$FA" -gt 0 ] 2>/dev/null && ok "fulfill landed USDC on ACCOUNT (+$FA)" || die "fulfill did not land USDC on account"
-csend "claimWithdrawnUsdc() [user]" "$USER" "$ACCT" 'claimWithdrawnUsdc()'
-assert_eq "account USDC after claim" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
+UAFT2="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
+# The account named owner() as the request's RECIPIENT, so the pooled strategy pays the user directly.
+[ "$UAFT2" -gt "$UBEF2" ] 2>/dev/null && ok "fulfill paid the USER directly (+$((UAFT2-UBEF2)))" || die "fulfill did not pay the user"
+assert_eq "account USDC after fulfill" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
+# Nothing to claim; the completed id is pruned by the next owner call that touches the tracked set.
+csend "syncRedeemRequests() [user]" "$USER" "$ACCT" 'syncRedeemRequests()'
+assert_eq "openRequestIds pruned" "$(ccall "$ACCT" 'openRequestIds()(uint256[])' | tr -d '[] ' | grep -c . || true)" "0"
 
 # depositIdle gate: third address reverts; registry backend succeeds
 section "Phase 4 — depositIdle gate"

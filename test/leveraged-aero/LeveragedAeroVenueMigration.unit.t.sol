@@ -1585,7 +1585,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         usdc.approve(address(strategy), 100_000e6);
         uint256 shares = strategy.deposit(100_000e6, 0);
         vault.approve(address(strategy), shares);
-        uint256 id = strategy.requestRedeem(shares, 0);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
         vm.stopPrank();
 
         _flatten();

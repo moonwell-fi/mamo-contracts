@@ -451,8 +451,9 @@ function adjustLeverage(uint16 targetBps, uint256 minLiq, uint256 minOut)
 function fulfillRedeem(uint256 id, uint256 minAssetsOut) external onlyProposer nonReentrant;
 ```
 
-Runs the **oracle-free proportional unwind** for request `id`, paying `request.owner` (the Mamo
-account that escrowed the shares) net of its pro-rata protocol-fee skim, enforcing
+Runs the **oracle-free proportional unwind** for request `id`, paying `request.recipient` (for a Mamo
+account, the end user's own wallet — so the fulfil COMPLETES the withdrawal with no follow-up claim,
+rather than parking USDC on the account) net of its pro-rata protocol-fee skim, enforcing
 **`max(stored, fresh)`** on the net payout, then burning the escrowed shares. See §C for the full loop.
 
 **The `minAssetsOut` argument is YOUR floor, layered on top of the requester's — never instead of it.**
@@ -470,7 +471,7 @@ is ignored, so the requester's guarantee is not lowerable by whoever fulfils.
 | Guards | Enforces `max(stored, fresh) minAssetsOut` → `InsufficientAssetsOut()`; rejects a burn-for-zero → `ZeroAssetsOut()`. The two residual leg→USDC sweeps that END the unwind now carry a **Chainlink min-out floor** — `oracleValue(amount actually sold) × (1 − maxSlippageBps)` per leg — so a hostile router / sandwiched fill reverts the fulfill instead of silently short-paying the redeemer. Preview it with `redeemSweepFloors(cbAmt, wethAmt)` (§E). The reward tranche the unwind auto-claims is sold on the same L9 oracle floor (best-effort — see §C) and split `f / (1−f)`. |
 | Oracle posture | Still **oracle-free in the sense that matters**: the floor is derived behind a catchable call and falls back to **0** when the feeds are unreadable, so a down oracle/sequencer never blocks a fulfill or the `emergencyRedeem` deadman — it only removes the floor. A sandwicher cannot *make* a feed stale, so the floor binds whenever it can bind. Consequence for the agent: a fulfill that reverts on the sweep's min-out is a **venue-liquidity/pricing** signal (thin leg↔USDC pool, or someone shoving it), not an oracle problem — retry, or lever down first to shrink the residual being sold. |
 | Fee interaction | Best-effort crystallize (never blocks the exit): on an oracle outage `navPre = 0`, so the price-free **management** fee still accrues while the **performance** fee defers; a fee-mint revert emits `FeeCrystallizeDeferred(2, navPre)` and proceeds. |
-| Events | `RedeemFulfilled(id, owner, assetsOut)`. |
+| Events | `RedeemFulfilled(id, owner, recipient, assetsOut)` — `owner` is the account that escrowed, `recipient` is the address PAID. |
 | When to call | On every `RedeemRequested`, after ensuring the unwind self-funds (deleverage first if needed). |
 
 ### `deleverage` — permissionless safety valve
@@ -567,8 +568,8 @@ Queue events (on the strategy; `owner` is the **Mamo account** that escrowed, no
 
 | Event | Meaning |
 |---|---|
-| `RedeemRequested(uint256 indexed id, address indexed owner, uint256 shares)` | request escrowed — **the keeper trigger** |
-| `RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)` | agent fulfilled; USDC paid to the account |
+| `RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares)` | request escrowed — **the keeper trigger** |
+| `RedeemFulfilled(uint256 indexed id, address indexed owner, address indexed recipient, uint256 assetsOut)` | agent fulfilled; USDC paid to `recipient` (for a Mamo account, its owner — the end user) |
 | `RedeemCancelled(uint256 indexed id, address indexed owner, uint256 shares)` | request owner cancelled (any state); escrow returned |
 | `RedeemEmergency(uint256 indexed id, address indexed owner, uint256 assetsOut)` | deadman self-fulfill after the window — **a missed SLA** |
 
@@ -668,15 +669,15 @@ sequenceDiagram
     participant M as MAMO multisig (admin == vault owner)
     participant S as Strategy (LeveragedAerodromeCL)
 
-    A->>S: requestRedeem(shares, minAssetsOut)
-    S-->>K: RedeemRequested(id, account, shares)
+    A->>S: requestRedeem(shares, minAssetsOut, recipient = the account's owner)
+    S-->>K: RedeemRequested(id, account, recipient, shares)
     Note over K: read redeemRequest(id); assess if unwind self-funds
     opt shortfall likely (non-trivial size)
         K->>S: adjustLeverage(lowerTarget, minLiq, minOut)   (PROPOSER, ≤ policy — no multisig)
     end
     K->>S: fulfillRedeem(id, minAssetsOut)
     alt payout ≥ requester minAssetsOut
-        S-->>A: pays USDC to the account (idle) + RedeemFulfilled(id, account, assetsOut)
+        S-->>A: pays USDC to the request's RECIPIENT (the end user) + RedeemFulfilled(id, account, recipient, assetsOut)
     else InsufficientAssetsOut
         Note over K: deleverage/adjust more, or wait, then retry (never lower the floor)
     end
@@ -742,9 +743,9 @@ floor      = operator policy (e.g. 2500 bps)      // stop here
 
 | | |
 |---|---|
-| The **stored** floor | `redeemRequest(id).minAssetsOut` — the **third** field of `(owner, shares, minAssetsOut, requestedAt, settled)`. **The strategy's `RedeemRequested(id, owner, shares)` does NOT carry it** — only the account's `WithdrawRequested(id, shares, minAssetsOut)` does. Read the struct; do not reconstruct it from strategy logs. |
+| The **stored** floor | `redeemRequest(id).minAssetsOut` — the **third** field of `(owner, shares, minAssetsOut, requestedAt, settled, recipient)`. **The strategy's `RedeemRequested(id, owner, recipient, shares)` does NOT carry it** — only the account's `WithdrawRequested(id, shares, minAssetsOut)` does. Read the struct; do not reconstruct it from strategy logs. |
 | What the chain enforces | `max(stored, fresh)`. Your fresh floor can only **tighten** the requester's, never loosen it — `0` is the identity. |
-| Getting the **fresh** number | `fulfillRedeem` has **no return value**, so a plain `eth_call` yields `0x`. The realised payout lives solely in **`RedeemFulfilled(uint256 indexed id, address indexed owner, uint256 assetsOut)`**. Simulate, decode that log, send with `minAssetsOut = assetsOut × (1 − tolerance)`. |
+| Getting the **fresh** number | `fulfillRedeem` has **no return value**, so a plain `eth_call` yields `0x`. The realised payout lives solely in **`RedeemFulfilled(uint256 indexed id, address indexed owner, address indexed recipient, uint256 assetsOut)`** — `assetsOut` is still the only non-indexed field, so it is the whole `data` word, but the **`topic0` changed** with the added `recipient` topic. Simulate, decode that log, send with `minAssetsOut = assetsOut × (1 − tolerance)`. |
 | **Do NOT quote with `previewRedeem`** | It is the **fast-path** quote — `shares × navNet / supplyPost`, oracle-priced — and does not model the async unwind's swap costs, so it **over-quotes**. Used raw as a floor it reverts `InsufficientAssetsOut` against itself. |
 
 Measured on the live staging clone — 10% of supply, calm book, LP in range:
@@ -1050,7 +1051,7 @@ function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns
 **Events for ops dashboards.** The event coverage is asymmetric, and the asymmetry matters:
 
 - **The user-flow events the rebalancer depends on already exist.** Most importantly
-  `RedeemRequested(id, owner, shares)` — the withdraw-request trigger that drives the entire SLA loop —
+  `RedeemRequested(id, owner, recipient, shares)` — the withdraw-request trigger that drives the whole SLA loop —
   plus the rest of the queue set (`RedeemFulfilled`/`RedeemCancelled`/`RedeemEmergency`) and
   `FeeCrystallizeDeferred`. Nothing needs to be added for the keeper's core watch-and-fulfill duty.
 - **Position-management ops emit nothing** — `deployIdle`, `compound`, `rerange`, `adjustLeverage`, and
