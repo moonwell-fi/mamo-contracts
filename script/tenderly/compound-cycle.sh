@@ -600,7 +600,6 @@ cmd_snap() {
   echo "nav (USDC 6dp)        $(num "$(c "$STRAT" 'nav()(uint256)')")"
   echo "idle USDC             $(num "$(c "$USDC" 'balanceOf(address)(uint256)' "$STRAT")")"
   echo "idle AERO             $(num "$(c "$AERO" 'balanceOf(address)(uint256)' "$STRAT")")"
-  echo "protocolFeeOwed       $(num "$(lay 34)")"
   echo "hwmPerShare           $(num "$(lay 32)")"
   echo "lastFeeAccrual        $(num "$(lay 33)")"
   echo "targetLtvBps          $(num "$(lay 21)")"

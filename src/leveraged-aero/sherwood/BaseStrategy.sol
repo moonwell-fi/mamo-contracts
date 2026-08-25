@@ -144,9 +144,8 @@ abstract contract BaseStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Default: fees are not self-managed. Self-fee'd strategies override to `true` and MUST
-    ///      then collect the protocol fee themselves (see `LeveragedAerodromeCLStrategy`'s
-    ///      `protocolFeeOwed` leg).
+    /// @dev Default: fees are not self-managed. Self-fee'd strategies override to `true` and collect
+    ///      their fees themselves (see `LeveragedAerodromeCLStrategy`).
     function selfManagesFees() external view virtual returns (bool) {
         return false;
     }

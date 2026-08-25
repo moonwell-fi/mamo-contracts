@@ -33,17 +33,6 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
  *      distinct cross-pair venue reusing A's prices and tick; venue C is asset-mode (`cbBTC` slot ==
  *      usdc), migrate-only. Fees off.
  */
-/// @dev Minimal ProtocolConfig. The protocol slice is the only fee leg that moves `navNet` off `nav()`.
-contract MockProtocolConfig {
-    uint256 public protocolFeeBps;
-    address public protocolFeeRecipient;
-
-    constructor(uint256 bps, address recipient) {
-        protocolFeeBps = bps;
-        protocolFeeRecipient = recipient;
-    }
-}
-
 contract LeveragedAeroVenueMigrationUnitTest is Test {
     address internal owner = makeAddr("owner");
     address internal proposer = makeAddr("proposer");
@@ -434,7 +423,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev `navNet + assets > cap` is strict, so exactly on the ceiling passes. MUTATION: `>=` fails that.
+    /// @dev `navPre + assets > cap` is strict, so exactly on the ceiling passes. MUTATION: `>=` fails that.
     function testCapacityBoundaryIsStrictlyGreaterThan() public {
         _execute(SEED);
 
@@ -479,64 +468,6 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.redeem(slice, 0);
         vm.stopPrank();
         assertGt(usdc.balanceOf(lp), lpUsdcBefore, "exit unaffected by the ceiling");
-    }
-
-    /// @dev The recipe "deposit exactly `remainingCapacity()`" must hold WITH A FEE PENDING: room is
-    ///      priced on raw `nav()` while the guard enforces on `navNet`, which is only ever <= it.
-    function testDepositingExactlyRemainingCapacitySucceedsWithAFeePending() public {
-        _execute(SEED);
-
-        // A live protocol fee, taken off the GAIN ABOVE THE HWM rather than elapsed time.
-        MockProtocolConfig cfg = new MockProtocolConfig(1000, makeAddr("protocolFeeRecipient"));
-        vm.prank(owner);
-        vault.setFeeConfig(address(cfg));
-
-        // Flatten so NAV is the idle USDC balance — face value, oracle-free and directly controllable.
-        _flatten();
-
-        // TWO warm-up deposits: the crystallise runs pre-deposit, so only the second one seeds the HWM.
-        usdc.mint(lp, 20_000e6);
-        vm.startPrank(lp);
-        usdc.approve(address(strategy), 20_000e6);
-        strategy.deposit(10_000e6, 0); // supply 0 -> crystallise bails, shares minted
-        strategy.deposit(10_000e6, 0); // supply > 0, hwm unset -> HWM seeded here
-        vm.stopPrank();
-
-        // Appreciate above the HWM. `_execute` seeds USDC with no genesis shares, so this must be seed-sized.
-        usdc.mint(address(strategy), SEED * 2);
-
-        uint256 navNow = strategy.nav();
-        vm.prank(owner);
-        vault.setMaxTotalAssets(navNow + 250_000e6);
-
-        uint256 room = vault.remainingCapacity();
-        assertEq(room, 250_000e6, "room == cap - nav");
-
-        // PASS 1 — the documented recipe: deposit exactly the reported room. This must always work.
-        uint256 snap = vm.snapshotState();
-        usdc.mint(lp, room);
-        vm.startPrank(lp);
-        usdc.approve(address(strategy), room);
-        uint256 shares = strategy.deposit(room, 0);
-        vm.stopPrank();
-        assertGt(shares, 0, "the exact-room deposit minted");
-        assertLe(strategy.nav(), vault.maxTotalAssets(), "book never crossed the ceiling");
-
-        // ANTI-VACUITY: `nav()` is net of `protocolFeeOwed`, so sub-deposit growth proves the slice was taken.
-        uint256 slice = (navNow + room) - strategy.nav();
-        assertGt(slice, 0, "protocol fee actually accrued (test is not vacuous)");
-
-        // PASS 2 pins the DIRECTION: an exact-room deposit passes under either basis, so only the window
-        // `(room, room + slice]` separates them. MUTATION: the `navPre` mutant survives pass 1, fails here.
-        vm.revertToState(snap);
-        uint256 overRoom = room + slice;
-        usdc.mint(lp, overRoom);
-        vm.startPrank(lp);
-        usdc.approve(address(strategy), overRoom);
-        uint256 shares2 = strategy.deposit(overRoom, 0);
-        vm.stopPrank();
-        assertGt(shares2, 0, "room is under-reported by exactly the protocol slice, and that slack is real");
-        assertLe(strategy.nav(), vault.maxTotalAssets(), "even the slack deposit stays within the ceiling");
     }
 
     /// @dev The guard approached from ABOVE: a ceiling lowered under a live book must still refuse deposits.
@@ -1668,7 +1599,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
     /// @dev Same, for the packed `hedgedDebtA | hedgedDebtB` slot.
     function _writeHedgedDebt(uint128 a, uint128 b) internal {
-        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 27), bytes32((uint256(b) << 128) | uint256(a)));
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 26), bytes32((uint256(b) << 128) | uint256(a)));
         (uint128 ra, uint128 rb) = strategy.hedgedDebt();
         assertEq(ra, a, "hedgedDebtA slot offset drifted");
         assertEq(rb, b, "hedgedDebtB slot offset drifted");

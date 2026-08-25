@@ -20,7 +20,6 @@ contract LeveragedAeroVaultUnitTest is Test {
     // ---- events mirrored from LeveragedAeroVault (for vm.expectEmit) ----
     event StrategySet(address indexed strategy);
     event OpenDepositsUpdated(bool open);
-    event FeeConfigUpdated(address indexed feeConfig);
     event StrategyActivated(address indexed strategy, uint256 seedAmount);
     event StrategySettled(address indexed strategy);
     event SettledRedeem(address indexed owner, uint256 shares, uint256 assetsOut);
@@ -30,7 +29,6 @@ contract LeveragedAeroVaultUnitTest is Test {
     address public thirdParty = makeAddr("thirdParty");
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
-    address public feeConfig = makeAddr("feeConfig");
 
     MockToken public usdc;
     MockToken public stray;
@@ -85,7 +83,6 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.strategy(), address(0), "strategy unset");
         assertFalse(vault.depositsOpen(), "deposits closed by default");
         assertFalse(vault.settled(), "not settled");
-        assertEq(vault.feeConfig(), address(0), "fee config unset");
     }
 
     function testConstructorZeroAssetReverts() public {
@@ -325,40 +322,6 @@ contract LeveragedAeroVaultUnitTest is Test {
         vm.stopPrank();
 
         assertEq(strategy.proposer(), third, "the latest rotation wins");
-    }
-
-    // ==================== FEE CONFIG ====================
-
-    function testFeeConfigUnsetShortCircuits() public view {
-        assertEq(vault.factory(), address(0), "factory hop off");
-        assertEq(vault.protocolConfig(), address(0), "config off");
-    }
-
-    function testFeeConfigSetPointsFactoryAtSelf() public {
-        vm.expectEmit(true, false, false, false, address(vault));
-        emit FeeConfigUpdated(feeConfig);
-
-        vm.prank(owner);
-        vault.setFeeConfig(feeConfig);
-
-        assertEq(vault.factory(), address(vault), "factory hop -> self");
-        assertEq(vault.protocolConfig(), feeConfig, "config");
-    }
-
-    function testFeeConfigCanBeCleared() public {
-        vm.startPrank(owner);
-        vault.setFeeConfig(feeConfig);
-        vault.setFeeConfig(address(0));
-        vm.stopPrank();
-
-        assertEq(vault.factory(), address(0), "factory hop off again");
-        assertEq(vault.protocolConfig(), address(0), "config cleared");
-    }
-
-    function testSetFeeConfigOnlyOwner() public {
-        vm.prank(thirdParty);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
-        vault.setFeeConfig(feeConfig);
     }
 
     // ==================== ACTIVATE ====================
@@ -1068,7 +1031,7 @@ contract LeveragedAeroVaultUnitTest is Test {
 
     /// @dev REGRESSION — `nav()` FLOORS to 0 instead of reverting and the preview had no matching guard, so
     ///      it divided by `nav() + 1 == 1` and over-reported by ~1e12x, making a `minShares` floor sized off
-    ///      it unsatisfiable. Reachable: post-`settleStrategy`, or whenever `protocolFeeOwed >= gross`.
+    ///      it unsatisfiable. Reachable post-`settleStrategy`.
     function testPreviewSharesForAssetsRevertsWhenNavIsZeroWithSupplyOutstanding() public {
         _bindAndMint(alice, 1_000e12);
         strategy.setNav(0); // flat/worthless book, holders still present

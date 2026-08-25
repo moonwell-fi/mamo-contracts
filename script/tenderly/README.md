@@ -92,7 +92,7 @@ make tenderly-leveraged-aero-stack
 | `vault.owner()` / `pendingOwner()` | `MAMO_MULTISIG` / `0x0` |
 | `vault.strategy()` | the clone (both directions bound) |
 | `vault.asset()` / `decimals()` | USDC / `12` (6dp asset + the load-bearing 6-decimal offset) |
-| `vault.depositsOpen()` / `feeConfig()` / `settled()` | `false` / `0x0` / `false` — deposits are flipped by proposal 012 in Phase C, fees are off at launch |
+| `vault.depositsOpen()` / `settled()` | `false` / `false` — deposits are flipped by proposal 012 in Phase C |
 | `vault.balanceOf(MAMO_MULTISIG)` / `totalSupply()` | `SEED × 1e6` (the genesis mint) |
 | `strategy.state()` | `1` — Executed |
 | `strategy.nav()` | `> 0` |

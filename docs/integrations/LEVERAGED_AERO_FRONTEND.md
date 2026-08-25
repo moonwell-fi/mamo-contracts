@@ -181,10 +181,9 @@ function owner() external view returns (address);
 > so `previewWithdraw` and any derived `minShares` / `minAssetsOut` must come from a fresh read in the
 > same UX step as the tx.
 
-> **Fees at launch — don't promise what isn't charged.** The vault deploys with
-> `feeConfig == address(0)`, so the **protocol-fee** leg is **off** (enableable later by the vault owner
-> without touching the strategy). The **management** and **performance** fees are the strategy clone's own
-> init params — read `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
+> **Fees at launch — don't promise what isn't charged.** The **management** and **performance** fees
+> are the only fee legs, and they are the strategy clone's own init params — read
+> `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
 > hardcoding a schedule in copy, and treat any "APY net of fees" display as moot for whichever legs read
 > zero.
 

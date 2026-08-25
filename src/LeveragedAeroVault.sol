@@ -28,8 +28,8 @@ interface IStrategyProposer {
  * @notice Minimal share token + lifecycle driver for ONE vendored
  *         {LeveragedAerodromeCLStrategy} clone. Replaces the Sherwood `SyndicateVault` the vendored
  *         strategy was written against, exposing only the surface that strategy actually consumes:
- *         `asset()`, `owner()`, `totalSupply()`/`transferFrom` (ERC20), `strategyMint`,
- *         `strategyBurn`, and `factory()`.
+ *         `asset()`, `owner()`, `totalSupply()`/`transferFrom` (ERC20), `strategyMint` and
+ *         `strategyBurn`.
  * @dev Deliberately NOT ERC-4626 and NOT upgradeable. Deposits and redemptions are serviced by the
  *      STRATEGY (custody model): LPs call `strategy.deposit` / `strategy.redeem` / `requestRedeem`,
  *      the strategy prices them off its own oracle NAV and mints/burns vault shares through the two
@@ -62,14 +62,10 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice Set by {settleStrategy}; unlocks {redeemSettled}. One-way.
     bool public settled;
 
-    /// @notice Optional protocol-fee config, surfaced to the strategy via {protocolConfig}.
-    ///         `address(0)` (the deploy default) == fees OFF.
-    address public feeConfig;
-
     /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp), over the whole book,
     ///         not a per-user limit. `0` (the deploy default) == UNLIMITED; {depositsOpen} freezes.
-    /// @dev Enforced in the strategy's `deposit` (pre-deposit, against post-crystallise net NAV;
-    ///      crossing deposits rejected, not trimmed), NOT in {strategyMint} — that also serves
+    /// @dev Enforced in the strategy's `deposit` (pre-deposit, against the pre-deposit NAV; crossing
+    ///      deposits rejected, not trimmed), NOT in {strategyMint} — that also serves
     ///      best-effort FEE-SHARE mints, which capacity must never gate or fees defer forever.
     uint256 public maxTotalAssets;
 
@@ -78,7 +74,6 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     event StrategySet(address indexed strategy);
     event OpenDepositsUpdated(bool open);
     event MaxTotalAssetsSet(uint256 maxAssets);
-    event FeeConfigUpdated(address indexed feeConfig);
     event StrategyActivated(address indexed strategy, uint256 seedAmount);
     event StrategySettled(address indexed strategy);
     event SettledRedeem(address indexed owner, uint256 shares, uint256 assetsOut);
@@ -148,25 +143,6 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     function strategyBurn(uint256 shares) external {
         require(msg.sender == strategy, "LAV: only strategy");
         _burn(msg.sender, shares);
-    }
-
-    // ==================== FEE CONFIG ====================
-
-    /**
-     * @notice Sherwood-shaped fee-config discovery hop. The strategy resolves the protocol-fee
-     *         config as `ISyndicateFactory(vault.factory()).protocolConfig()`; this vault plays both
-     *         roles, so it points the first hop back at itself once a {feeConfig} exists.
-     * @return `address(this)` when a fee config is set, `address(0)` otherwise (fees off — the
-     *         strategy's null-check short-circuits before the second hop).
-     */
-    function factory() external view returns (address) {
-        return feeConfig == address(0) ? address(0) : address(this);
-    }
-
-    /// @notice Second hop of the fee-config lookup. The returned contract must implement
-    ///         `protocolFeeBps()` + `protocolFeeRecipient()`; `address(0)` == protocol fee off.
-    function protocolConfig() external view returns (address) {
-        return feeConfig;
     }
 
     // ==================== OWNER: WIRING ====================
@@ -241,34 +217,19 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice ADVISORY: the shares a deposit of `assets` USDC (6dp) would mint at CURRENT pricing —
     ///         the canonical assets->shares conversion for UI and slippage (`minShares`) sizing.
     /// @dev Point-in-time, not a peg; reverts when NAV is unpriceable, like the deposit's own
-    ///      `NavUnpriceable`. A LOWER bound, not upper: `deposit` prices off post-crystallise
-    ///      `navNet <= nav()`, so the real mint is `>=` this figure.
+    ///      `NavUnpriceable`. A LOWER bound, not upper: `deposit`'s post-crystallise supply is `>=`
+    ///      this one, so the real mint is `>=` this figure.
     function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
         require(strategy != address(0), "LAV: strategy unset");
         uint256 supply = totalSupply();
         uint256 navNow = IStrategyNav(strategy).nav();
         // Fail closed: `nav()` FLOORS to 0 instead of reverting, so without this the denominator
-        // collapses to 1 and the preview overstates by ~1e9-1e12x. Reachable post-`settleStrategy` and
-        // whenever `protocolFeeOwed >= gross`. `supply == 0` legitimately prices at nav 0, as in deposit.
+        // collapses to 1 and the preview overstates by ~1e9-1e12x. Reachable post-`settleStrategy`.
+        // `supply == 0` legitimately prices at nav 0, as in deposit.
         require(navNow > 0 || supply == 0, "LAV: nav unpriceable");
         // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy: the same 6-decimal step `decimals()` documents.
         uint256 offset = 10 ** (decimals() - IERC20Metadata(asset).decimals());
         shares = Math.mulDiv(assets, supply + offset, navNow + 1);
-    }
-
-    /// @notice Point the strategy's protocol-fee lookup at a config contract, or clear it
-    ///         (`address(0)` → fees off). Read live by the strategy on every crystallise.
-    /// @dev OWNER-TRUSTED, and deliberately unvalidated + mutable. The pointed-at contract supplies
-    ///      both `protocolFeeBps()` and `protocolFeeRecipient()` LIVE on every crystallise — no cap,
-    ///      no timelock, no snapshot — so an owner may raise the protocol fee or redirect the
-    ///      recipient with effect from the next accrual. The management + performance ceilings are
-    ///      enforced at strategy init and are NOT affected; this is the protocol leg only. The owner
-    ///      is expected to be MAMO_MULTISIG. Blast radius the other way too: a config whose reads
-    ///      REVERT hard-reverts `compound()` / `_settle()` / the redeem skim (those reads are
-    ///      deliberately un-try'd), so point this only at a contract known to answer.
-    function setFeeConfig(address feeConfig_) external onlyOwner {
-        feeConfig = feeConfig_;
-        emit FeeConfigUpdated(feeConfig_);
     }
 
     // ==================== OWNER: LIFECYCLE ====================

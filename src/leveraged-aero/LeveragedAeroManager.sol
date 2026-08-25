@@ -137,7 +137,6 @@ library LeveragedAeroManager {
         address feeRecipient;
         uint256 hwmPerShare; // HWM nav-per-share (1e18 WAD), 0 until first deposit
         uint256 lastFeeAccrualTimestamp;
-        uint256 protocolFeeOwed; // accrued protocol-fee USDC liability (6dp); discharged in redeem/compound/settle
         // ── appended for the L9 compound oracle floor (keep byte-identical in the strategy) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
         // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
@@ -382,21 +381,17 @@ library LeveragedAeroManager {
 
     /// @notice Compound AERO rewards (body of the strategy's `compound`): claim AERO → swap ALL to
     ///         USDC via the Aerodrome v2 volatile pool (deepest AERO/USDC on Base, bounded by
-    ///         `minUsdcOut`) → skim up to `skimCap` of the realized USDC for the protocol fee →
-    ///         redeploy the remainder at target leverage via `deployIdleImpl`. No-op when there's no
-    ///         position or no AERO. Fee crystallisation + the external skim transfer live in the
-    ///         strategy entrypoint, NOT here — this only sets aside `pay` so it isn't redeployed.
+    ///         `minUsdcOut`) → redeploy the proceeds at target leverage via `deployIdleImpl`. No-op
+    ///         when there's no position or no AERO. Fee crystallisation lives in the strategy
+    ///         entrypoint, NOT here.
     /// @dev The redeploy is ATOMIC with the harvest: anything that fails the deploy path reverts the whole
-    ///      call, claim and sale included — see step 6 for why that costs nothing, and for the recovery.
+    ///      call, claim and sale included — see step 5 for why that costs nothing, and for the recovery.
     /// @param minUsdcOut   Minimum USDC out of the AERO→USDC swap (slippage guard, on GROSS usdcOut).
     /// @param minLiquidity Minimum CL liquidity on the redeploy (slippage guard).
-    /// @param skimCap      Max USDC to withhold from redeploy for the protocol fee (owed, or 0).
-    /// @return pay         USDC withheld = `min(skimCap, usdcOut)` (0 when no yield). The strategy
-    ///                     transfers this to the protocol-fee recipient and decrements owed.
-    function compoundImpl(uint256 minUsdcOut, uint256 minLiquidity, uint256 skimCap) public returns (uint256 pay) {
+    function compoundImpl(uint256 minUsdcOut, uint256 minLiquidity) public {
         Layout storage $ = _layout();
         uint256 tokenId_ = $.tokenId;
-        if (tokenId_ == 0) return 0; // flat book — nothing staked, nothing to compound
+        if (tokenId_ == 0) return; // flat book — nothing staked, nothing to compound
         if (minUsdcOut == 0) revert ZeroMinOut(); // belt: caller must pass a nonzero floor (see BelowOracleFloor)
 
         // 1. Claim AERO for the staked NFT. The reward token is read from the gauge
@@ -405,7 +400,7 @@ library LeveragedAeroManager {
         address aero = ICLGauge(gauge_).rewardToken();
         ICLGauge(gauge_).getReward(tokenId_);
         uint256 aeroBal = IERC20(aero).balanceOf(address(this));
-        if (aeroBal == 0) return 0; // no rewards accrued — clean no-op
+        if (aeroBal == 0) return; // no rewards accrued — clean no-op
 
         // 2. Derive the on-chain oracle floor from a hardened AERO/USD read (8dp, fail-closed): a
         //    stale/broken feed reverts the whole compound (defer the harvest, intended posture).
@@ -417,7 +412,7 @@ library LeveragedAeroManager {
         //    DUST NO-OP, as `LeveragedAeroVenue._sellRewardBalance`: a balance worth under one micro-USD
         //    floors to 0 and the router fills it at 0, which the nonzero `minUsdcOut` would then revert —
         //    so reward-token dust donated to a gauge with no live emissions would brick `compound`.
-        if (floor == 0) return 0;
+        if (floor == 0) return;
 
         // 3. Swap ALL claimed AERO → USDC via the Aerodrome v2 volatile pool, passing the caller's
         //    minUsdcOut to the router. The measured-fill floor below is the robust guard (router-honesty
@@ -427,14 +422,11 @@ library LeveragedAeroManager {
         //    so the post-check below is unchanged and still independent of what the router claims.
         uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(aero, $.usdc, aeroBal, minUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor(); // post-check on the measured fill (L9)
-        if (usdcOut == 0) return 0; // unreachable when floor > 0 (aeroBal > 0), kept as defence
+        if (usdcOut == 0) return; // unreachable when floor > 0 (aeroBal > 0), kept as defence
 
-        // 4. Withhold up to `skimCap` of the realized yield for the protocol fee (the strategy pays
-        //    it out); redeploy only the remainder.
-        pay = skimCap < usdcOut ? skimCap : usdcOut;
-        uint256 redeploy = usdcOut - pay;
+        uint256 redeploy = usdcOut;
 
-        // 5. RE-HEDGE ACCRUED BORROW INTEREST out of the harvest, BEFORE the redeploy. Interest grows the
+        // 4. RE-HEDGE ACCRUED BORROW INTEREST out of the harvest, BEFORE the redeploy. Interest grows the
         //    debt leg without growing the LP leg, so without this step every harvest left the book a
         //    little more SHORT and nothing ever removed it (the fund is sold as delta-neutral on leg A).
         //    Buying that interest back and repaying it lands the financing cost as NAV DRAG — less
@@ -445,9 +437,9 @@ library LeveragedAeroManager {
         //    debt and the post-op `_assertHealthy` sees the final book.
         redeploy -= _hedgeInterestDrift(redeploy);
 
-        // 6. Redeploy the net yield into the position at target leverage (supply → borrow →
+        // 5. Redeploy the net yield into the position at target leverage (supply → borrow →
         //    increaseLiquidity → restake → _assertHealthy). Any pre-existing idle USDC is left
-        //    untouched — compound deploys the AERO yield, nothing else. Skip if all was skimmed.
+        //    untouched — compound deploys the AERO yield, nothing else.
         //    THE REDEPLOY IS ATOMIC WITH THE HARVEST, DELIBERATELY: `DegenerateRange`, the calm gate,
         //    `minLiquidity`, a Moonwell error code or the closing health assert each unwind the WHOLE
         //    `compound`, claim and AERO sale included. Waiting costs nothing (the tranche keeps accruing,

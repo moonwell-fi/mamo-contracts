@@ -198,15 +198,13 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
    and `depositsOpen`.
 6. **IL-shortfall handling on full redeem** — the lone oracle dependency on the otherwise oracle-free
    proportional path; partial redeems cap IL cover at the redeemer's own budget.
-7. **Fee paths** — fees crystallize on pre-action NAV (phantom-fee guard); protocol fee accrues as the
-   `protocolFeeOwed` USDC liability netted out of `nav()`; crystallize is best-effort on the deposit and
-   user-exit paths (`FeeCrystallizeDeferred`) and hard-reverting on `compound` — the asymmetry is
-   intentional. `_settle` does NOT crystallize: it unwinds, discharges `min(protocolFeeOwed, balance)` to
-   the live recipient, and pushes the rest to the vault, so an unpayable fee cannot block settlement.
-   The protocol-fee lookup is now a two-hop through the vault (`vault.factory()` → `.protocolConfig()`);
-   `LeveragedAeroVault` returns `address(0)` on the first hop until the owner sets `feeConfig`, so the
-   **protocol-fee leg is OFF at launch** and the strategy short-circuits before the second hop. The
-   management/performance fee legs are strategy-local and unaffected. Note the fork-local interaction
+7. **Fee paths** — the management and performance fees are the only fee legs, both strategy-local and
+   crystallized on pre-action NAV (phantom-fee guard) by minting vault shares to `feeRecipient`. The
+   Sherwood protocol-fee leg was removed as unused, so there is no fee liability in `Layout` and no
+   config lookup through the vault. Crystallize is best-effort on the deposit and user-exit paths
+   (`FeeCrystallizeDeferred`) and hard-reverting on `compound` — the asymmetry is intentional.
+   `_settle` does NOT crystallize: it unwinds and pushes the proceeds to the vault. Note the fork-local
+   interaction
    with item 5: a fee-share crystallize mints through `strategyMint`, so it also reverts while
    `depositsOpen == false`. Tolerated on the best-effort paths; on `compound` it is fatal whenever fee
    shares are actually due (`feeShares > 0` — nonzero fee bps and elapsed time or a fresh HWM), so
@@ -297,9 +295,9 @@ Pre-declared so auditors don't re-report them; each is a deliberate, reviewed ch
   practice: both functions are `nonReentrant` under `ReentrancyGuardTransient`, USDC has no transfer
   hooks, and the vault is trusted (now in-repo and in scope — see below), so no reentrant path can
   observe `settled == false` and re-enter. Accepted.
-- **`Syndicate`-prefixed interface names.** `ISyndicateVault` / `ISyndicateFactory` retain their upstream
-  names and import paths so the strategy source stays diff-able against the baseline commit. They are
-  implemented by `LeveragedAeroVault`; there is no Sherwood contract in the deployment.
+- **`Syndicate`-prefixed interface names.** `ISyndicateVault` retains its upstream name and import path
+  so the strategy source stays diff-able against the baseline commit. It is implemented by
+  `LeveragedAeroVault`; there is no Sherwood contract in the deployment.
 - **`Layout` leg field names.** `cbBTC` / `weth` / `mCbBTC` / `mWeth` / `wethIsToken0` are leg-slot
   names, kept because renaming them would break the byte-identical `Layout` parity across two files for
   no behavioral gain. Documented as leg B / leg A in the source.

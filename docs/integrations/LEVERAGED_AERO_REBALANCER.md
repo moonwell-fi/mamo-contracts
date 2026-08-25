@@ -275,12 +275,12 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 |---|---|
 | `minUsdcOut` | Minimum USDC out of the AERO→USDC swap. **Must be non-zero** — `ZeroMinOut()` otherwise. |
 | `minLiquidity` | Minimum CL liquidity on the redeploy of the net yield. |
-| Position effect | claim AERO from the gauge → swap **all** AERO → USDC via the Aerodrome v2 volatile pool → skim the protocol-fee slice → **re-hedge accrued borrow interest out of what's left** (below) → redeploy the remainder at `targetLtvBps` (same path as `deployIdle`, so asset-mode redeploys through `assetModeSplit`). No-op if flat book (`tokenId == 0`) or no AERO accrued/held. |
-| **Redeploy size — read this before predicting it** | The redeploy is **not** `usdcOut − protocolFeeSkim`. In order: `pay = min(skimCap, usdcOut)`; `redeploy = usdcOut − pay`; then `redeploy -= _hedgeInterestDrift(redeploy)`. The hedge step spends part of the harvest **buying back and repaying accrued borrow interest** before anything is redeployed, so the CL add is smaller than the gross yield by that amount. |
+| Position effect | claim AERO from the gauge → swap **all** AERO → USDC via the Aerodrome v2 volatile pool → **re-hedge accrued borrow interest out of the proceeds** (below) → redeploy the remainder at `targetLtvBps` (same path as `deployIdle`, so asset-mode redeploys through `assetModeSplit`). No-op if flat book (`tokenId == 0`) or no AERO accrued/held. |
+| **Redeploy size — read this before predicting it** | The redeploy is **not** `usdcOut`: `redeploy = usdcOut − _hedgeInterestDrift(usdcOut)`. The hedge step spends part of the harvest **buying back and repaying accrued borrow interest** before anything is redeployed, so the CL add is smaller than the gross yield by that amount. |
 | Interest re-hedge (what it spends) | Per borrowed leg, drift = `borrowBalanceCurrent(market) − hedgedDebt*` — the market is **accrued first** (`borrowBalanceCurrent`, not `…Stored`), so it sees interest that has not yet been capitalised. That drift is priced to USDC on the hardened leg + USDC feeds, bought on the Slipstream leg↔USDC pool with an oracle-floored min-out, and repaid to Moonwell. |
 | Interest re-hedge (how the budget is split) | **Measure both legs, then allocate pro-rata by USD cost**: each leg gets `budget × costᵢ / (costA + costB)`, with leg B taking the exact complement of leg A's allocation so division strands no dust. A budget that covers everything neutralises both legs fully (each leg's spend is capped at its own cost). Asset-mode has one drifting leg — leg B is the unit of account and never borrows, so its drift is structurally 0 and leg A takes the whole budget, unchanged. **What to expect when the harvest is thin:** both legs' drifts shrink by the *same fraction*, so a partial hedge keeps the residual short spread across the book instead of concentrating it on one leg. (Previously leg A was served the whole budget first and leg B got the leftover — so whenever leg A's drift alone exceeded the harvest, leg B was hedged by exactly 0 harvest after harvest.) |
 | Interest re-hedge (bounds) | Hard-bounded by the harvest's own proceeds: it **never** touches stayers' idle USDC or the collateral. A budget too small for the whole drift hedges what it can — **on both legs** — and carries the remainder to the next harvest; it does **not** revert for insufficiency. Drift priced below 1 USDC unit is left to accumulate. Effect on the book: financing cost lands as **NAV drag** (less yield reinvested) instead of accumulating as unintended short leg exposure, and leverage dips slightly (the safe direction). |
-| Fee interaction | Crystallizes management + HWM **performance** fees on the **pre-compound** NAV first (fail-closed on the price — a stale oracle reverts, so the harvest defers rather than mis-prices), so realized yield can't escape the performance fee. Then discharges `protocolFeeOwed` out of the swapped USDC before the hedge and the redeploy. |
+| Fee interaction | Crystallizes management + HWM **performance** fees on the **pre-compound** NAV first (fail-closed on the price — a stale oracle reverts, so the harvest defers rather than mis-prices), so realized yield can't escape the performance fee. |
 | Guards | Effective swap floor = `max(minUsdcOut, oracleFloor)` where `oracleFloor = aeroBal × AERO/USD(8dp) / 1e20 × (1 − maxSlippageBps)`, post-checked on the measured fill → `BelowOracleFloor()`. The hedge's USDC→leg buy is separately floored at the oracle-implied leg amount haircut by `maxSlippageBps`. Redeploy runs `_assertHealthy()`. |
 | Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`; **`MoonwellRepayFailed(errCode)` from the interest re-hedge**; `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `InsufficientLiquidity` and (asset-mode) `DegenerateRange()` from the redeploy. A stale/mismatched feed fail-closes the whole call — the AERO feed at the swap floor, and the leg + USDC feeds at the hedge (`compound` already fail-closes on those via the pre-compound `nav()`, so the hedge widens no oracle exposure). |
 | **The redeploy is ATOMIC with the harvest** | Any of the redeploy errors above unwinds the **whole** call — the `getReward` claim, the AERO sale and the interest hedge included. Nothing is half-done and there is no partial-harvest state to reconcile. It is also **free to wait**: an unclaimed tranche keeps accruing in the gauge rather than decaying, an out-of-range position accrues no new emissions anyway, and the hedge measure is cumulative, so the drift carries to the next harvest. Do not read a reverted `compound` as lost yield. |
@@ -523,11 +523,7 @@ is unchanged. Shares escrowed on the STRATEGY are external and still hold the ga
 The strategy is self-fee'd (`selfManagesFees() == true`) — the vault performs no fee distribution of its
 own at settle; this strategy collects fees itself:
 
-- **Launch state: the protocol-fee leg is OFF.** The strategy resolves it live through
-  `vault.factory()` → `.protocolConfig()`, and `LeveragedAeroVault` returns `address(0)` on the first hop
-  while its `feeConfig` is unset — the deploy default. So `protocolFeeOwed` stays 0 and the protocol skim
-  never fires until the vault owner calls `setFeeConfig(...)` (no strategy change needed). The
-  **management** and **performance** fees are separate: they are the clone's own init params
+- **The management and performance fees are the only fee legs.** They are the clone's own init params
   (`managementFeeBps` / `performanceFeeBps` / `feeRecipient` in `layout()`) and are live iff they were
   init'd non-zero. Read the three values rather than assuming a schedule.
 - **Fee-share mints are gated on the vault's `depositsOpen`.** Crystallized management/performance fees are
@@ -537,9 +533,6 @@ own at settle; this strategy collects fees itself:
 - **Crystallization triggers.** `deposit` (hard, fail-closed pre-deposit NAV), `compound` (hard,
   pre-compound NAV), fast `redeem` and the async `fulfillRedeem`/`emergencyRedeem` (best-effort, may
   emit `FeeCrystallizeDeferred`). `rerange`, `adjustLeverage`, `deleverage` **do not** crystallize.
-- **`protocolFeeOwed`** is a USDC (6dp) liability accrued at crystallization, **netted out of `nav()`**
-  (floored at 0), and discharged during `compound` (skim from swapped yield), `redeem`/fulfill (pro-rata
-  skim), and `_settle`. It persists across ops until a protocol-fee recipient exists.
 - Fee ceilings at init: `performanceFeeBps ≤ 1500` (15%, `FeeConstants.MAX_PERFORMANCE_FEE_BPS`),
   `managementFeeBps ≤ 500` (5%/yr). Performance fee is HWM-gated (only charged on gains above the
   high-water mark per share).
@@ -946,7 +939,7 @@ Both are policy dials, deliberately — §B (`supplyIdle`) has the trade-off in 
 ## E. Monitoring & reads for the keeper
 
 ```solidity
-function nav() public view returns (uint256);                                   // USDC 6dp, net of protocolFeeOwed
+function nav() public view returns (uint256);                                   // USDC 6dp
 function previewRedeem(uint256 shares) external view returns (uint256 assetsOut, bool fastOk);
 function state() external view returns (State);                                 // Pending/Executed/Settled
 function layout() external view returns (LayoutView memory);                    // full config/risk/fee/position state
@@ -1031,7 +1024,7 @@ function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns
 - **`layout()`** (memory-returnable `LayoutView`, minus the `redeemRequests` mapping) is the single read
   for **risk caps** (`targetLtvBps`, `maxLtvBps`, `minHealthBps`, `maxSlippageBps`,
   `usdcCollateralFactorBps`), **fees** (`managementFeeBps`, `performanceFeeBps`, `feeRecipient`,
-  `hwmPerShare`, `lastFeeAccrualTimestamp`, `protocolFeeOwed`), **venue/feed addresses** (pool, npm,
+  `hwmPerShare`, `lastFeeAccrualTimestamp`), **venue/feed addresses** (pool, npm,
   gauge, swapRouter, comptroller, the Moonwell markets, the Chainlink feeds incl. `aeroUsdFeed`,
   `sequencerFeed`), **oracle config** (`maxDelay`, `gracePeriod`, `calmDeviationTicks`, `twapWindow`,
   `tickSpacing`), **position state** (`tokenId`, `posTickLower`, `posTickUpper`, `nextRedeemRequestId`),
@@ -1555,8 +1548,8 @@ Three things to keep straight:
 
 > **The live staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-18 from
 > the audit-remediation branch: a `LeveragedAerodromeCLStrategy` clone bound to `LeveragedAeroVault`,
-> deployed by `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue / fee-config surface
-> documented above (`activateStrategy`, `settleStrategy`, `redeemSettled`, `setFeeConfig`), the fund
+> deployed by `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue surface
+> documented above (`activateStrategy`, `settleStrategy`, `redeemSettled`), the fund
 > capacity cap (`maxTotalAssets` / `remainingCapacity`), the per-cycle rerange skew and the any-pool init
 > + per-leg swap spacings. Everything on this page — the `fulfillRedeem(uint256,uint256)` signature, the
 > `OutOfBounds` / `NothingToRerange` selectors, `setProposer` rotation — matches the code that is live

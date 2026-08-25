@@ -291,9 +291,7 @@ constructor sets `_initialized = true`, permanently locking `initialize` on the 
 > (`shares = assets × (supply + 1e6) / (nav + 1)`), which is exactly a 6-decimal step up from a 6dp
 > asset. Any other offset makes the advertised denomination disagree with what the strategy mints.
 
-State after deploy: `strategy == address(0)`, `depositsOpen == false`, `feeConfig == address(0)`
-(**fees OFF at launch** — `factory()` returns `address(0)` and the strategy's fee lookup
-short-circuits). Non-upgradeable by design.
+State after deploy: `strategy == address(0)`, `depositsOpen == false`. Non-upgradeable by design.
 
 ### B.2 — vault ownership: nothing to accept
 
@@ -496,7 +494,6 @@ cast call "$VAULT" 'pendingOwner()(address)' --rpc-url "$PUB"   # 0x0
 cast call "$VAULT" 'asset()(address)'     --rpc-url "$PUB"   # == USDC
 cast call "$VAULT" 'depositsOpen()(bool)' --rpc-url "$PUB"   # false  (Phase C flips it to true)
 cast call "$VAULT" 'settled()(bool)'      --rpc-url "$PUB"   # false
-cast call "$VAULT" 'feeConfig()(address)' --rpc-url "$PUB"   # 0x0    (protocol fees off at launch)
 cast call "$VAULT" 'decimals()(uint8)'    --rpc-url "$PUB"   # 12     (USDC 6dp + 6)
 cast call "$VAULT" 'totalSupply()(uint256)' --rpc-url "$PUB" # == SEED * 1e6 (the genesis mint)
 cast call "$VAULT" 'balanceOf(address)(uint256)' "$MULTISIG" --rpc-url "$PUB"   # == SEED * 1e6
@@ -512,7 +509,7 @@ cast call "$VAULT" 'balanceOf(address)(uint256)' "$MULTISIG" --rpc-url "$PUB"   
 | `vault.owner()` | `MAMO_MULTISIG`, with `pendingOwner() == 0x0` |
 | `vault.asset()` | `USDC` |
 | `vault.depositsOpen()` | `false` (Phase C flips it) |
-| `vault.settled()` / `feeConfig()` | `false` / `0x0` (fees off at launch) |
+| `vault.settled()` | `false` |
 | `vault.decimals()` | `12` |
 | `vault.totalSupply()` = `balanceOf(MAMO_MULTISIG)` | `SEED × 1e6` — the genesis mint |
 | all 5 venue feeds | FreshFeed'd (`updatedAt` within seconds of `block.timestamp`) |
@@ -665,7 +662,6 @@ cast call "$VAULT" 'strategy()(address)' --rpc-url "$PUB"        # == $STRAT
 cast call "$VAULT" 'owner()(address)'    --rpc-url "$PUB"        # == $MULTISIG
 cast call "$VAULT" 'asset()(address)'    --rpc-url "$PUB"        # == $USDC
 cast call "$VAULT" 'decimals()(uint8)'   --rpc-url "$PUB"        # 12
-cast call "$VAULT" 'factory()(address)'  --rpc-url "$PUB"        # 0x0 while feeConfig == 0 (fees off)
 cast call "$VAULT" 'totalSupply()(uint256)' --rpc-url "$PUB"     # == SEED * 1e6 (genesis mint)
 ```
 

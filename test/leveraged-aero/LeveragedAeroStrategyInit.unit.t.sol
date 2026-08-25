@@ -82,8 +82,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      `keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))`.
     bytes32 internal constant STORAGE_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
 
-    /// @dev Counted off `Layout`: the packed tail is slot 26, so the hedged principals share slot 27.
-    uint256 internal constant TAIL_SLOT_OFFSET = 26;
+    /// @dev Counted off `Layout`: the packed tail is slot 25, so the hedged principals share slot 26.
+    uint256 internal constant TAIL_SLOT_OFFSET = 25;
 
     /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation`, etched below for the probe.
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
