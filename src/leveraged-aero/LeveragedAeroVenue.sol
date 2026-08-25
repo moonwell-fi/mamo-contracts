@@ -723,7 +723,7 @@ library LeveragedAeroVenue {
         $.legBIsAsset = legBIsAsset_;
     }
 
-    // ── Bodies of the strategy's `setMaxLtv` / `setWidthBounds`, hosted here for its EIP-170 budget ──
+    // ── Bodies of the strategy's three admin policy setters, hosted here for its EIP-170 budget ──
 
     /// @dev A staged hash authorises a venue whose params carry a `maxLtvBps` / width band / target the
     ///      owner picked under the policy standing AT STAGE TIME. An admin write moves that policy, so the
