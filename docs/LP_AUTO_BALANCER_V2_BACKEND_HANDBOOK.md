@@ -24,12 +24,12 @@ Aerodrome Slipstream CL, Base. Verified onchain 2026-08-24.
 
 | Thing | Address / value |
 | --- | --- |
-| WETH/cbBTC CL pool | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` |
-| **tickSpacing** | **`100`** |
-| Swap fee (`fee()`, pips) | `2505` → ~0.25% (dynamic, from the factory's swap-fee module) |
-| `unstakedFee` | `50000` → 5% cut on unstaked-position fees |
-| CL gauge (`rewardToken` = AERO, alive) | `0x41b2126661C673C2beDd208cC72E85DC51a5320a` |
-| Gauge `nft()` | `0x827922686190790b37229fd06084350E74485b72` — the Slipstream NFPM the balancer uses |
+| WETH/cbBTC CL pool | `0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b` |
+| **tickSpacing** | **`10`** |
+| Swap fee (`fee()`, pips) | `250` → 0.025% (dynamic, from the factory's swap-fee module) |
+| `unstakedFee` | `100000` → 10% cut on unstaked-position fees |
+| CL gauge (`rewardToken` = AERO, alive) | `0x61E0B10423a0009C3f83ab4313813d29437d0817` |
+| Gauge `nft()` | `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` — the Slipstream NFPM the balancer uses |
 | WETH — **token0**, **18 dp** | `0x4200000000000000000000000000000000000006` |
 | cbBTC — **token1**, **8 dp** | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` |
 | Chainlink ETH/USD — **oracle0**, 8 dp | `0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70` |
@@ -46,7 +46,7 @@ Two things that bite if assumed rather than read:
 - **Token order is by address: WETH (`0x4200…`) < cbBTC (`0xcbB7…`), so WETH is token0.** Every `token0`/`token1`, `oracle0`/`oracle1`, `amount0`/`amount1`, `maxOracleDelay0`/`maxOracleDelay1` follows.
 - **The legs have different decimals — WETH 18, cbBTC 8.** Any USD conversion, min-amount computation or allocation check must carry both. A helper that assumes symmetric decimals is off by 1e10 on one leg and will still look plausible.
 
-The position manager the **gauge accepts** is `0x827922…`, registered as `UNISWAP_V3_POSITION_MANAGER_AERODROME` — **not** `AERODROME_POSITION_MANAGER` (`0xc741be…`, a different contract).
+The position manager the **gauge accepts** is `0xe1f8cd…`, registered as `AERODROME_SLIPSTREAM_NFPM_V2` — **not** `AERODROME_POSITION_MANAGER` (`0xc741be…`, a different contract).
 
 ### 1.1 Oracle heartbeats — measured, not assumed
 
@@ -91,7 +91,7 @@ proposal.setTotalAllocation(50_000e8, 500);   // target, tolerance bps
 
 ### 2.1 Sizing the mint
 
-**Do not split the target 50/50 by value.** That is only correct when spot sits exactly at the range's centre, and at `tickSpacing 100` the aligned centre can be up to 99 ticks from spot. At that offset the legs bind roughly 25/75, the NFPM refunds about a third of the intended size, and the mint lands well outside a 500 bps band.
+**Do not split the target 50/50 by value.** That is only correct when spot sits exactly at the range's centre; at `tickSpacing 10` the aligned centre can sit up to 9 ticks from spot, which still skews the legs enough for the NFPM to refund part of the intended size. Size from geometry, not from a naive value split.
 
 Size from the range geometry instead — price one reference unit of liquidity across the actual `[tickLower, tickUpper]` at the live `sqrtPriceX96`, then scale:
 
@@ -124,10 +124,10 @@ How income works on this pool. **The numbers are the backend's job** — it read
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `tickSpacing` | `100` | The pool's. Legal widths are multiples of `2 × tickSpacing` = **200**. |
-| `minWidth` | `200` | The floor the contract allows (`2 × tickSpacing`). **Note this does NOT close the R7 branch-collision residual** — see §4.1. |
+| `tickSpacing` | `10` | The pool's. Legal widths are multiples of `tickSpacing`, floor `minWidth = 200`. |
+| `minWidth` | `200` | Config floor (20 spacings, well above the contract's `2 × tickSpacing` minimum). Closes the R7 branch-collision residual at config level — see §4.1. |
 | `maxWidth` | `20000` | Operator headroom. |
-| `maxTickDeviation` | `100` | Calm gate, one full spacing (~1%). |
+| `maxTickDeviation` | `100` | Calm gate, 10 spacings (~1%). |
 | `maxCenterDeviation` | `200` | Backstop on minted-range centre vs spot. |
 | `twapWindow` | `1800` | Pool observation cardinality is 11,000 — window comfortably covered. |
 | `maxRebalanceLossBps` | `100` | 1%. Sanity guard on the atomic no-swap path. |
@@ -138,13 +138,13 @@ How income works on this pool. **The numbers are the backend's job** — it read
 | module `rebalanceSlippageBps` | `50` | The binding price floor on approved principal while `rebalanceInFlight`, since EIP-1271 placement is permissionless. |
 | module `allowedSlippageInBps` | `200` | AERO → underlying compound orders (reward-only). |
 
-### 4.1 R7 is live at `minWidth` — submit width ≥ 400
+### 4.1 R7 closed at config level on this pool
 
-`minWidth` is exactly `2 × tickSpacing`, and at `width == 2 × tickSpacing` the balanced tick pair and the token1-single-sided tick pair **collide**: they are the same `(tickLower, tickUpper)` at different anchors. A spot push *inside* the calm gate can therefore turn a committed two-sided mint into a single-sided one with a zeroed mint minimum, and the tick commitment cannot detect it — it pins the pair, not the branch that produced it.
+R7: at `width == 2 × tickSpacing` the balanced tick pair and the token1-single-sided tick pair **collide** — same `(tickLower, tickUpper)` at different anchors — so a spot push inside the calm gate could turn a committed two-sided mint into a single-sided one with a zeroed mint minimum.
 
-011 deliberately did not close this at config level (raising `minWidth` to 400 would double the minimum position width against a backtest whose edge is tight ranges). **So the mitigation is the backend's, per cycle: submit `width ≥ 4 × tickSpacing = 400`.** At `maxTickDeviation` 100 that is immune, because the collision would require the anchor to move `width/2 ≥ 2` spacings — a ≥ 101-tick push the calm gate rejects.
+On the `tickSpacing = 10` pool the collision width is **20 ticks**, and `minWidth = 200` forbids any width below 200 — the collision is unreachable by config. (On the retired `tickSpacing = 100` pool, `minWidth == 2 × tickSpacing` made R7 live at the floor and the mitigation was backend discipline.)
 
-**Operating width: `400`** (`MOONWELL_LP_WIDTH_TICKS=400`). Legal — a multiple of 200, inside `[200, 20000]`. Never submit 200 in production. Until this is in force, do not treat a committed pair as proof of a balanced mint; check the realized `amount0Min`/`amount1Min` forwarding.
+**Operating width: `400`** (`MOONWELL_LP_WIDTH_TICKS=400`) remains the recommended default. Legal widths are multiples of 10 inside `[200, 20000]`.
 
 ---
 
@@ -213,13 +213,13 @@ One action per tick, first match wins:
 `rebalanceUsingAlt` (12 fields) and `rebuildAfterSwap` (8) both end in `expectedTickLower` / `expectedTickUpper` and revert `TickMismatch()` unless the range the contract derives from live spot matches. Reproduce `_mainRange` exactly (spec §2.2 is normative):
 
 ```text
-floor = floorAlign(spotTick, 100)                 // largest aligned tick <= spot, floors toward -inf
+floor = floorAlign(spotTick, 10)                 // largest aligned tick <= spot, floors toward -inf
 v0 = usd(WETH balance), v1 = usd(cbBTC balance)   // 1e8, per-leg feeds, 18dp and 8dp
 
 if min(v0, v1) >= MIN_MAIN_LEG_USD ($0.01):       // balanced straddle
-    tickLower = floorAlign(spotTick - width/2, 100) ;  tickUpper = tickLower + width
+    tickLower = floorAlign(spotTick - width/2, 10) ;  tickUpper = tickLower + width
 elif v0 >= v1:                                    // WETH-majority, single-sided ABOVE spot
-    tickLower = floor + 100 ;                          tickUpper = tickLower + width
+    tickLower = floor + 10 ;                          tickUpper = tickLower + width
 else:                                             // cbBTC-majority, single-sided AT/BELOW spot
     tickUpper = floor ;                                tickLower = tickUpper - width
 ```

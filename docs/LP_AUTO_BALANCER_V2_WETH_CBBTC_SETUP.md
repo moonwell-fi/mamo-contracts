@@ -22,9 +22,9 @@ This is the step-by-step to stand up the **first** managed position: a **WETH/cb
 
 | Thing | Address |
 | --- | --- |
-| WETH/cbBTC Slipstream CL pool (`tickSpacing = 100`) | `0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1` |
-| CL gauge (rewardToken = AERO) | `0x41b2126661C673C2beDd208cC72E85DC51a5320a` |
-| **Slipstream NonfungiblePositionManager** (the one the gauge accepts) | `0x827922686190790b37229fd06084350E74485b72` |
+| WETH/cbBTC Slipstream CL pool (`tickSpacing = 10`) | `0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b` |
+| CL gauge (rewardToken = AERO) | `0x61E0B10423a0009C3f83ab4313813d29437d0817` |
+| **Slipstream NonfungiblePositionManager** (the one the gauge accepts) | `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` |
 | WETH (**token0**) | `0x4200000000000000000000000000000000000006` |
 | cbBTC (**token1**) | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` |
 | AERO | `0x940181a94A35A4569E4529A3CDfB74e38FD98631` |
@@ -35,14 +35,14 @@ This is the step-by-step to stand up the **first** managed position: a **WETH/cb
 | feeCollector (drop sink) | `DROP_AUTOMATION` (from `addresses/8453.json`) |
 
 > **Two gotchas, both confirmed on-chain:**
-> 1. The position manager the **gauge accepts** is `0x827922…`, registered in `addresses/8453.json` as **`UNISWAP_V3_POSITION_MANAGER_AERODROME`** — **not** `AERODROME_POSITION_MANAGER` (`0xc741be…`, a different address). Deploy and mint against `0x827922…` / `UNISWAP_V3_POSITION_MANAGER_AERODROME`.
+> 1. The position manager the **gauge accepts** is `0xe1f8cd…`, registered in `addresses/8453.json` as **`AERODROME_SLIPSTREAM_NFPM_V2`** — **not** `AERODROME_POSITION_MANAGER` (`0xc741be…`, a different address). Deploy and mint against `0xe1f8cd…` / `AERODROME_SLIPSTREAM_NFPM_V2`.
 > 2. Token order is by address: **WETH = token0, cbBTC = token1** (`0x42…` < `0xcb…`). Every `token0`/`token1`/`oracle0`/`oracle1`/`amount0`/`amount1` field follows this order.
 
 ---
 
 ## Phase 0 — Deploy `LPAutoBalancerV2`
 
-Deploy via `script/DeployLPAutoBalancerV2.s.sol` (`deployLPAutoBalancerV2(Addresses)` / `run()`) — it reads `F-MAMO` (admin+guardian), `UNISWAP_V3_POSITION_MANAGER_AERODROME`, `AERO`, passes `manager_ = rebalancer_ = address(0)`, and records `MAMO_LP_AUTO_BALANCER_V2`. Or deploy via the FPS proposal's `deploy()` (Phase B). Constructor (6 args, **no swap router / no quoter**):
+Deploy via `script/DeployLPAutoBalancerV2.s.sol` (`deployLPAutoBalancerV2(Addresses)` / `run()`) — it reads `F-MAMO` (admin+guardian), `AERODROME_SLIPSTREAM_NFPM_V2`, `AERO`, passes `manager_ = rebalancer_ = address(0)`, and records `MAMO_LP_AUTO_BALANCER_V2`. Or deploy via the FPS proposal's `deploy()` (Phase B). Constructor (6 args, **no swap router / no quoter**):
 
 ```solidity
 new LPAutoBalancerV2(
@@ -50,7 +50,7 @@ new LPAutoBalancerV2(
     manager_         = MANAGER_EOA,          // MANAGER_ROLE (bounds tuning within caps); may be address(0)
     rebalancer_      = address(0),           // grant LATER, in Phase C (do NOT wire the backend key at deploy)
     guardian_        = GUARDIAN_EOA_OR_SAFE, // pause()
-    positionManager_ = 0x827922686190790b37229fd06084350E74485b72, // Slipstream NFPM
+    positionManager_ = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53, // Slipstream NFPM
     aero_            = 0x940181a94A35A4569E4529A3CDfB74e38FD98631
 );
 ```
@@ -83,8 +83,8 @@ Withdraw liquidity from the Phase-A NFTs and swap the proceeds into **WETH + cbB
 End state: the Safe holds `X` WETH + `Y` cbBTC (small phase-1 size — keep TVL-at-risk low while proving the rebalancer).
 
 ### B2. Mint the initial WETH/cbBTC CL position
-Mint via the Slipstream NFPM (`0x827922…`), recipient = **Safe**:
-- `token0 = WETH`, `token1 = cbBTC`, `tickSpacing = 100`.
+Mint via the Slipstream NFPM (`0xe1f8cd…`), recipient = **Safe**:
+- `token0 = WETH`, `token1 = cbBTC`, `tickSpacing = 10`.
 - Initial range: centered on current spot, width a multiple of `tickSpacing` and **≥ 2·tickSpacing = 200** (the contract rejects narrower — see B4). A wider initial range (e.g. a few thousand ticks) is fine; the agent re-ranges later.
 - `amount0Desired / amount1Desired` = the WETH/cbBTC from B1; set sane `amount{0,1}Min`.
 
@@ -94,17 +94,17 @@ Record the returned `tokenId` → call it `INIT_TOKEN_ID`.
 Safe transfers the position NFT into `LPAutoBalancerV2` **via the position manager** (its `onERC721Received` only accepts the NFPM as `msg.sender`):
 
 ```
-INFPM(0x827922…).safeTransferFrom(SAFE, MAMO_LP_AUTO_BALANCER_V2, INIT_TOKEN_ID)
+INFPM(0xe1f8cd…).safeTransferFrom(SAFE, MAMO_LP_AUTO_BALANCER_V2, INIT_TOKEN_ID)
 ```
 
 ### B4. `registerPosition(config)` — Safe (`DEFAULT_ADMIN_ROLE`)
 Call `registerPosition` with the `ManagedPositionV2` config. The contract **validates** the config and reverts if any of these fail — get them right:
 
 - `mainTokenId = INIT_TOKEN_ID` and the NFT is **already held** by the contract (B3 done first).
-- `pool = 0x70aCDF…` and **`pool.token0()/token1()/tickSpacing()` must equal** `token0=WETH`, `token1=cbBTC`, `tickSpacing=100` (`PoolMismatch` otherwise).
+- `pool = 0x42d4a2…` and **`pool.token0()/token1()/tickSpacing()` must equal** `token0=WETH`, `token1=cbBTC`, `tickSpacing=10` (`PoolMismatch` otherwise).
 - `gauge = 0x41b2…` and **`gauge.rewardToken()` must equal `AERO`** (`GaugeRewardMismatch` otherwise).
 - `oracle0 = ETH/USD (0x71041d…)`, `oracle1 = BTC/USD (0x64c911…)` — both must return a **fresh, non-zero** answer at call time. Each leg is bounded SEPARATELY: `maxOracleDelay0` for `oracle0`, `maxOracleDelay1` for `oracle1` (constructor seeds `DEFAULT_MAX_ORACLE_DELAY` = 1h, hard cap `MAX_ORACLE_DELAY` = 1 day). Proposal 011 arms both at 3600s — 3x the feeds' ~20-minute heartbeat.
-- `minWidth ≥ 2·tickSpacing = 200`, `minWidth % 100 == 0`, `maxWidth ≥ minWidth` (`WidthTooNarrow` / `InvalidWidth`).
+- `minWidth ≥ 2·tickSpacing = 20`, `minWidth % 10 == 0`, `maxWidth ≥ minWidth` (`WidthTooNarrow` / `InvalidWidth`).
 - `maxRebalanceLossBps ≤ MAX_LOSS_CAP_BPS`, `maxTickDeviation > 0`, `maxCenterDeviation > 0`, `twapWindow > 0`.
 - `feeCollector = DROP_AUTOMATION`.
 
@@ -112,9 +112,9 @@ Suggested phase-1 config values (conservative; manager can tune within caps late
 
 | Field | Value | Note |
 | --- | --- | --- |
-| `pool` | `0x70aCDF…` | WETH/cbBTC |
+| `pool` | `0x42d4a2…` | WETH/cbBTC |
 | `token0 / token1` | WETH / cbBTC | address order |
-| `tickSpacing` | `100` | |
+| `tickSpacing` | `10` | |
 | `gauge` | `0x41b2…` | rewardToken == AERO |
 | `feeCollector` | `DROP_AUTOMATION` | drop sink |
 | `oracle0 / oracle1` | ETH/USD / BTC/USD | 8-dec feeds |

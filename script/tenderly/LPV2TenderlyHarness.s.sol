@@ -49,9 +49,9 @@ state and its assertions hold against it.
 Addresses are the SAME real Base mainnet addresses the integration test pins, and
 are re-verified live by run-harness.sh before any tx is sent.
 
-  POOL    0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1  WETH/cbBTC CL, tickSpacing=100
-  GAUGE   0x41b2126661C673C2beDd208cC72E85DC51a5320a  CL gauge (rewardToken = AERO)
-  NFPM    0x827922686190790b37229fd06084350E74485b72  Slipstream NFPM (gauge.nft())
+  POOL    0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b  WETH/cbBTC CL, tickSpacing = 10
+  GAUGE   0x61E0B10423a0009C3f83ab4313813d29437d0817  CL gauge (rewardToken = AERO)
+  NFPM    0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53  Slipstream NFPM (gauge.nft())
   WETH    0x4200000000000000000000000000000000000006  token0
   cbBTC   0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf  token1
   AERO    0x940181a94A35A4569E4529A3CDfB74e38FD98631  gauge reward token
@@ -82,7 +82,7 @@ contract LPV2TenderlyHarness is Script {
     // measured here are exactly what reset()/exit() forwarded.
     address constant FEE_COLLECTOR = 0x000000000000000000000000000000000000Fee5;
 
-    int24 constant TICK_SPACING = 100;
+    int24 constant TICK_SPACING = 10;
     uint24 constant WIDTH = 400; // 4 * tickSpacing
     int24 constant HALF = 200; // WIDTH / 2
 
@@ -135,7 +135,7 @@ contract LPV2TenderlyHarness is Script {
         vm.makePersistent(address(addresses));
         POOL = addresses.getAddress("WETH_CBBTC_CL_POOL");
         GAUGE = addresses.getAddress("WETH_CBBTC_CL_GAUGE");
-        NFPM = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        NFPM = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
         WETH = addresses.getAddress("WETH");
         CBBTC = addresses.getAddress("cbBTC");
         AERO = addresses.getAddress("AERO");

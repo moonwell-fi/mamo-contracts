@@ -43,13 +43,13 @@ interface ICLPoolSwap {
 
 contract LPAutoBalancerV2SetupTest is Test {
     // Real Base addresses (resolved on-chain at the pinned block; identical to the V2 integration test).
-    address constant POOL = 0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1;
-    address constant NFPM = 0x827922686190790b37229fd06084350E74485b72;
+    address constant POOL = 0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b;
+    address constant NFPM = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53;
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
     uint256 constant PINNED_BLOCK = 47_600_000;
-    int24 constant TICK_SPACING = 100;
+    int24 constant TICK_SPACING = 10;
 
     /// @dev The allocation this run commits. A ROUND NUMBER chosen up front, not read back from the
     ///      minted position — the point of the parameter is that the position has to match the
