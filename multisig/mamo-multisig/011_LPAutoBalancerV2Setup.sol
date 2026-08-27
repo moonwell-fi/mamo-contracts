@@ -82,10 +82,10 @@ import {console} from "forge-std/console.sol";
 ///         action — this is a documented manual follow-up, not a missing on-chain step.
 contract LPAutoBalancerV2Setup is MultisigProposal {
     // ─── phase-1 position config (WETH/cbBTC, tickSpacing 100) ──────────────────
-    int24 public constant TICK_SPACING = 100;
-    /// @notice Floor width (ticks). R7 is live at this floor: balanced vs token1-single-sided tick
-    ///         pairs collide at 2*tickSpacing. 011 does not raise minWidth; backend must submit
-    ///         width >= 400 (handbook §4.1).
+    int24 public constant TICK_SPACING = 10;
+    /// @notice Floor width (ticks). At tickSpacing 10 this is 20 spacings, well above the R7
+    ///         branch-collision width (2*tickSpacing = 20 ticks), so R7 is unreachable at config
+    ///         level on this pool (handbook §4.1).
     uint24 public constant MIN_WIDTH = 200;
     uint24 public constant MAX_WIDTH = 20_000;
     uint24 public constant MAX_CENTER_DEVIATION = 200;
@@ -307,7 +307,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         // Steps 1-3 in a block so the config struct + locals free before _wireModule inlines
         // (keeps build() under the via_ir stack limit — position config has 21 fields).
         {
-            address nfpm = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+            address nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
             address safe = addresses.getAddress("F-MAMO");
 
             require(tokenId != 0, "tokenId not set: mint the WETH/cbBTC NFT to the Safe and call setTokenId");
@@ -472,7 +472,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(oracle1, addresses.getAddress("CHAINLINK_BTC_USD"), "oracle1 == BTC/USD");
 
         assertEq(
-            INonfungiblePositionManager(addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME")).ownerOf(
+            INonfungiblePositionManager(addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2")).ownerOf(
                 mainTokenId
             ),
             address(lab),
@@ -523,7 +523,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
 
         // Leg decimals are NOT symmetric on this pair: WETH (token0) is 18dp, cbBTC (token1) is 8dp.
         uint256 principalUsd = LPValuationLib.principalValue(
-            addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME"), mainTokenId, sqrtP, cfg, 18, 8
+            addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2"), mainTokenId, sqrtP, cfg, 18, 8
         );
 
         uint256 lo = (totalAllocationUsd * (10_000 - allocationToleranceBps)) / 10_000;

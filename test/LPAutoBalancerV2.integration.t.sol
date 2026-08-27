@@ -25,9 +25,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 // at the fork timestamp and the WETH/cbBTC tickSpacing-100 pool holds real liquidity.
 //
 // Real Base mainnet addresses (resolved on-chain at block 47_600_000):
-//   POOL    0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1  WETH/cbBTC CL, tickSpacing=100
-//   GAUGE   0x41b2126661C673C2beDd208cC72E85DC51a5320a  CL gauge for that pool (rewardToken = AERO)
-//   NFPM    0x827922686190790b37229fd06084350E74485b72  Slipstream NonfungiblePositionManager
+//   POOL    0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b  WETH/cbBTC CL, tickSpacing = 10
+//   GAUGE   0x61E0B10423a0009C3f83ab4313813d29437d0817  CL gauge for that pool (rewardToken = AERO)
+//   NFPM    0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53  Slipstream NonfungiblePositionManager
 //                                                        (this is the NFPM the gauge accepts —
 //                                                         gauge.nft() == this address, NOT the
 //                                                         0xc741... entry in addresses/8453.json)
@@ -59,9 +59,9 @@ contract ForceEtherFork {
 
 contract LPAutoBalancerV2Integration is Test {
     // ─── real addresses ──────────────────────────────────────────────────────
-    address constant POOL = 0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1;
-    address constant GAUGE = 0x41b2126661C673C2beDd208cC72E85DC51a5320a;
-    address constant NFPM = 0x827922686190790b37229fd06084350E74485b72;
+    address constant POOL = 0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b;
+    address constant GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817;
+    address constant NFPM = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53;
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
@@ -69,7 +69,7 @@ contract LPAutoBalancerV2Integration is Test {
     address constant BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
 
     uint256 constant PINNED_BLOCK = 47_600_000;
-    int24 constant TICK_SPACING = 100;
+    int24 constant TICK_SPACING = 10;
 
     // Uniswap V3 sqrtPrice bounds (TickMath MIN/MAX +/- 1) for effectively-unbounded swaps.
     uint160 constant MIN_SQRT_RATIO_PLUS_ONE = 4_295_128_740;
@@ -324,14 +324,16 @@ contract LPAutoBalancerV2Integration is Test {
         // (skimmed fees + AERO + sub-threshold dust). Those outflows must be a tiny fraction of the
         // deposited principal, never the bulk of a leg (which would mean principal escaped as "dust").
         //
-        // Bounds are fee/dust-sized, calibrated against observed values at pinned block 47_600_000:
-        //   balanced rebuild:     WETH = 182 wei,     cbBTC = 0 sat
-        //   single-sided rebuild: WETH = 11_940 wei,  cbBTC = 0 sat
-        // 50_000 wei WETH (~4.2x headroom over 11_940) and 5_000 sat cbBTC absorb minor rounding
-        // shifts across forge versions without masking any principal-sized outflow.
+        // Bounds are fee/dust-sized. The largest INTENDED outflow per leg is a sub-threshold
+        // remainder below MIN_ALT_VALUE_USD / MIN_MAIN_LEG_USD ($0.01), forwarded as dust, plus
+        // skimmed fees. Observed on the tickSpacing-10 pool at pinned block 47_600_000:
+        //   balanced rebuild:     WETH = 298_491_577_440 wei (~$0.001), cbBTC = 0 sat
+        //   single-sided rebuild: WETH = 3_526_056_283_972 wei (~$0.015), cbBTC = 0 sat
+        // 2e13 wei WETH (~$0.08, ~5.7x headroom) and 5_000 sat cbBTC (~$5) are still 5+ orders of
+        // magnitude below the 2e18-wei principal, so a principal-sized escape cannot hide in them.
         uint256 toFeeColl0 = IERC20(WETH).balanceOf(feeCollector) - feeColl0Before;
         uint256 toFeeColl1 = IERC20(CBBTC).balanceOf(feeCollector) - feeColl1Before;
-        assertLt(toFeeColl0, 50_000, "WETH to feeCollector is fees/dust only, not principal");
+        assertLt(toFeeColl0, 2e13, "WETH to feeCollector is fees/dust only, not principal");
         assertLt(toFeeColl1, 5_000, "cbBTC to feeCollector is fees/dust only, not principal");
 
         // AERO emissions forwarded to feeCollector (position was staked ~2h).

@@ -50,7 +50,7 @@ contract DeployLPAutoBalancerV2Test is Script {
         address manager = vm.envOr("LP_TEST_MANAGER", address(0));
         address rebalancer = vm.envOr("LP_TEST_REBALANCER", address(0));
 
-        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        address positionManager = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
         address aero = addresses.getAddress("AERO");
 
         vm.startBroadcast();
