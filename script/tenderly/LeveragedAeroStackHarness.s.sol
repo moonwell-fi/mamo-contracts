@@ -49,6 +49,14 @@ runner exports the subset it also needs itself (the 5 feeds, USDC, LP_POOL), so 
 `run-leveraged-aero-stack.sh` is the single source of truth for those; the defaults here
 keep this script runnable standalone and MUST stay in lockstep with the runner's.
 
+MAINNET USES A DIFFERENT SOURCE. The Base-mainnet book is COMMITTED, as address-book keys, in
+`config/strategies/LeveragedAeroPoolConfig.json`, and proposal
+`multisig/mamo-multisig/015_DeployLeveragedAeroPooledSystem.sol` builds `InitParams` from it via
+`DeployLeveragedAeroPoolConfig`. This harness's env defaults are the VNET book and are deliberately
+kept separate (a vnet overrides feeds with FreshFeed and rotates the proposer keypair), but the
+NUMERIC risk / oracle / width+skew / fee values are meant to agree with that JSON — if you change
+one, change both.
+
   LP_POOL is deliberately a PARAMETER, not a constant — the final pool choice is a pending
   product decision. The default is the WETH/cbBTC CL pool at tickSpacing 100. Note that
   USDC can never be a leg (`_initialize` reverts `UnsupportedLeg`, since USDC is the unit of

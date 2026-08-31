@@ -15,7 +15,7 @@
     "isContract": true
   },
   {
-    "addr": "0x73D8A3bF62aACa6690791E57EBaEE4e1d875d8Fe",
+    "addr": "0xfBb21d0380beE3312B33c4353c8936a0F13EF26C",
     "name": "MOONWELL_COMPTROLLER",
     "isContract": true
   },
@@ -417,6 +417,21 @@
   {
     "addr": "0x41b2126661C673C2beDd208cC72E85DC51a5320a",
     "name": "WETH_CBBTC_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0x4e962BB3889Bf030368F56810A9c96B83CB3E778",
+    "name": "AERODROME_CL_POOL_CBBTC_USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0x6399ed6725cC163D019aA64FF55b22149D7179A8",
+    "name": "AERODROME_CL_GAUGE_CBBTC_USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
+    "name": "CHAINLINK_BASE_SEQUENCER_UPTIME",
     "isContract": true
   }
 ]
