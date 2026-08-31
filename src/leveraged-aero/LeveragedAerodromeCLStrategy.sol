@@ -9,17 +9,18 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
+import {BaseStrategy} from "./BaseStrategy.sol";
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAeroVenue} from "./LeveragedAeroVenue.sol";
-import {BaseStrategy} from "./sherwood/BaseStrategy.sol";
-import {Position} from "./sherwood/interfaces/IPriceRouter.sol";
-import {ICLGauge, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
-import {IStrategy} from "./sherwood/interfaces/IStrategy.sol";
-import {ISyndicateVault} from "./sherwood/interfaces/ISyndicateVault.sol";
+
+import {ILeveragedAeroVault} from "./interfaces/ILeveragedAeroVault.sol";
+import {Position} from "./interfaces/IPriceRouter.sol";
+import {ICLGauge, INonfungiblePositionManager} from "./interfaces/ISlipstream.sol";
+import {IStrategy} from "./interfaces/IStrategy.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @dev The vault's fund-capacity ceiling, read by `deposit`; declared locally, not on `ISyndicateVault`.
+/// @dev The vault's fund-capacity ceiling, read by `deposit`; declared locally, not on `ILeveragedAeroVault`.
 interface ILeveragedAeroVaultCapacity {
     function maxTotalAssets() external view returns (uint256);
 }
@@ -715,7 +716,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // fall through and take the USDC for no claim.
         if (shares == 0) revert ZeroShares();
         if (shares < minShares) revert InsufficientShares();
-        ISyndicateVault(vault_).strategyMint(msg.sender, shares);
+        ILeveragedAeroVault(vault_).strategyMint(msg.sender, shares);
     }
 
     /// @notice Supply `amount` of the strategy's RAW idle USDC to Moonwell as collateral, so it earns supply
@@ -949,7 +950,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
 
         // 5. Pay out + burn.
         IERC20(_layout().usdc).safeTransfer(msg.sender, assetsOut);
-        ISyndicateVault(vault_).strategyBurn(shares);
+        ILeveragedAeroVault(vault_).strategyBurn(shares);
     }
 
     /// @notice Advisory preview of the fast-path exit — mirrors `redeem` EXACTLY: `nav()` over the live
@@ -1066,7 +1067,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         if (assetsOut == 0) revert ZeroAssetsOut();
         if (assetsOut < minOut) revert InsufficientAssetsOut();
         IERC20(_layout().usdc).safeTransfer(recipient, assetsOut);
-        ISyndicateVault(vault()).strategyBurn(shares);
+        ILeveragedAeroVault(vault()).strategyBurn(shares);
     }
 
     /// @notice Sweep a STRAY ERC-20 (airdrop / accidental send) back to the vault. ADMIN-ONLY (§8) — the vault

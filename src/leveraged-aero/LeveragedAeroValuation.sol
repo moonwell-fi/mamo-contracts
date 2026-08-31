@@ -5,12 +5,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {ICToken} from "./sherwood/interfaces/ICToken.sol";
-import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLGauge, ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
-import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
-import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
+import {ICToken} from "./interfaces/ICToken.sol";
+import {IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICLGauge, ICLPool, ICLSwapRouter} from "./interfaces/ISlipstream.sol";
+import {ChainlinkReader} from "./libraries/ChainlinkReader.sol";
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
+import {TickMath} from "./libraries/TickMath.sol";
 
 /// @dev Minimal Aerodrome v2 (AMM) Router — used for the `compound` AERO→USDC reward swap (see
 ///      `swapAeroToUsdc`). The Slipstream CL SwapRouter only serves CL pools, so the reward leg needs

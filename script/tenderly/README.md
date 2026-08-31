@@ -154,11 +154,9 @@ constructor on every real-Base-mainnet CI run (no code lives there). They are su
 (documented defaults = current vnet values) and injected at runtime inside
 `LeveragedAeroAccountHarness.s.sol` with `addresses.addAddress(...)`.
 
-The env-var / key names are **stale but real**: the strategy is `SHERWOOD_LEVERAGED_AERO_STRATEGY`
-(also `factory.sherwoodStrategy()`) and the vault is passed as `SHERWOOD_SYNDICATE_VAULT` even though
-proposal 012 now resolves it under the `LEVERAGED_AERO_VAULT` key. Use the names as written or lookups
-fail; dropping the `SHERWOOD_` prefix is a pending cleanup and implies no remaining Sherwood
-dependency.
+The env-var names match the address-book keys proposal 012 resolves exactly: the strategy is
+`LEVERAGED_AERO_STRATEGY` (also `factory.leveragedAeroStrategy()`) and the vault is
+`LEVERAGED_AERO_VAULT`.
 
 **Feed freshness.** A Base fork's Chainlink answers are frozen, so `updatedAt` recedes as the clock
 advances and every priced path bricks with `StaleOracle` in ~1 day. The fix is the **FreshFeed**
@@ -179,11 +177,10 @@ required), never committed. Set
 
 Both harnesses **merge-write** the file (`jq '$prev * {…}'`) rather than overwriting it, so they can run
 in either order: the stack harness owns `pooled` + `feeds`, the account harness owns `mamo`. The pooled
-layer is published under `pooled.{vault, strategyClone, template, proposer, seed, lpPool}`; the old
-`sherwood.{syndicateVault, strategyClone}` object is kept as a **deprecated alias** of the vault + clone
-so existing consumers keep working, and will be dropped. `vaultGeneration` is a **number** — `2` for the
-in-repo `LeveragedAeroVault`, `1` for the legacy Sherwood `SyndicateVault` — probed at run time from
-whether the vault answers `depositsOpen()`, with the human-readable form in `vaultGenerationName`.
+layer is published under `pooled.{vault, strategyClone, template, proposer, seed, lpPool}`.
+`vaultGeneration` is a **number** — `2` for the in-repo `LeveragedAeroVault`, `1` for the legacy
+Sherwood `SyndicateVault` — probed at run time from whether the vault answers `depositsOpen()`, with
+the human-readable form in `vaultGenerationName`.
 
 ### Future reference — redeploying / vnet ops crib
 
@@ -349,7 +346,7 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   (`run-price-checker.sh`): `checkPriceGating`, `checkStalePrice`.
 - `LeveragedAeroAccountHarness.s.sol` — the MamoLeveragedAeroStrategy account deploy runner
   (`run-leveraged-aero-account.sh`): `deploy()` wraps the real `LeveragedAeroAccountDeployer` and
-  injects the vnet-only vault / strategy-clone keys at runtime (env vars still named `SHERWOOD_*`).
+  injects the vnet-only vault / strategy-clone keys at runtime (`LEVERAGED_AERO_{STRATEGY,VAULT}`).
 - `LeveragedAeroStackHarness.s.sol` — the leveraged-Aero **pooled**-layer script
   (`run-leveraged-aero-stack.sh`): `deployTemplate()` (strategy template + vault, libraries linked by
   the broadcast) and `buildInitData()` (env venue book → ABI-encoded `InitParams`). The clone/init/bind

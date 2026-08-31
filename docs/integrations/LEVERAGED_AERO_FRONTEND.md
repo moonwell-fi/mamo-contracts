@@ -41,10 +41,10 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
   can precompute before it exists.
 - `account.owner() == user`. Every state-changing user action is `onlyOwner`; the user's wallet signs
   directly against their own account.
-- **Legacy naming, unchanged ABI:** the account's strategy pointer is still the public getter
-  `sherwoodStrategy()` (and the initializer guard `"Invalid sherwoodStrategy address"`). The name is
-  historical — it points at the in-repo `LeveragedAerodromeCLStrategy` clone. Keep it as-is in
-  ABIs/typings; nothing on the account's integration surface was renamed.
+- **Naming (renamed pre-mainnet):** the account's strategy pointer is the public getter
+  `leveragedAeroStrategy()` (initializer guard `"Invalid leveragedAeroStrategy address"`). It points at
+  the in-repo `LeveragedAerodromeCLStrategy` clone. Regenerate ABIs/typings if you pinned the former
+  `sherwoodStrategy()` spelling — that break landed before the first mainnet deployment.
 
 ---
 

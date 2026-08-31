@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {MockSyndicateVault} from "./MockSyndicateVault.sol";
+import {MockLeveragedAeroVault} from "./MockLeveragedAeroVault.sol";
 import {ILeveragedAeroCLStrategy} from "@interfaces/ILeveragedAeroCLStrategy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title MockLeveragedAeroCLStrategy
- * @notice Simple-accounting stand-in for the vendored Sherwood LeveragedAerodromeCLStrategy, used by
+ * @notice Simple-accounting stand-in for the vendored LeveragedAerodromeCLStrategy, used by
  *         the MamoLeveragedAeroStrategy wrapper unit tests. Implements the full
  *         {ILeveragedAeroCLStrategy} surface plus a couple of test-only helpers.
  *
@@ -31,7 +31,7 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     uint256 private constant DECIMAL_GAP = 1e6; // 12dp shares vs 6dp USDC
     uint256 private constant PRICE_SCALE = 1e18;
 
-    MockSyndicateVault public immutable vaultToken;
+    MockLeveragedAeroVault public immutable vaultToken;
     IERC20 public immutable usdc;
 
     /// @notice Lifecycle state; defaults to Executed so deposit/redeem work out of the box. The
@@ -57,7 +57,7 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     uint256 public nextRequestId;
 
     constructor(address vault_, address usdc_) {
-        vaultToken = MockSyndicateVault(vault_);
+        vaultToken = MockLeveragedAeroVault(vault_);
         usdc = IERC20(usdc_);
     }
 
@@ -88,21 +88,21 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
     // ==================== ILeveragedAeroCLStrategy ====================
 
     function deposit(uint256 assets, uint256 minShares) external override returns (uint256 shares) {
-        require(state == State.Executed, "MockSherwood: not executed");
+        require(state == State.Executed, "MockLeveragedAero: not executed");
 
         // Fund capacity as the real strategy does it: pre-transfer, post-deposit book, `0` == unlimited.
         uint256 cap = vaultToken.maxTotalAssets();
-        require(cap == 0 || nav + assets <= cap, "MockSherwood: fund at capacity");
+        require(cap == 0 || nav + assets <= cap, "MockLeveragedAero: fund at capacity");
 
         usdc.safeTransferFrom(msg.sender, address(this), assets);
         shares = _sharesForAssets(assets);
-        require(shares >= minShares, "MockSherwood: min shares");
+        require(shares >= minShares, "MockLeveragedAero: min shares");
 
         vaultToken.strategyMint(msg.sender, shares);
     }
 
     function redeem(uint256 shares, uint256 minAssetsOut) external override returns (uint256 assetsOut) {
-        require(state == State.Executed, "MockSherwood: not executed");
+        require(state == State.Executed, "MockLeveragedAero: not executed");
         require(!fastPathBlocked, "FastRedeemExceedsLtv");
 
         // Pull the shares in and burn them (mirrors the wrapper approving shares to us first).
@@ -110,7 +110,7 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
         vaultToken.strategyBurn(shares);
 
         assetsOut = _assetsForShares(shares);
-        require(assetsOut >= minAssetsOut, "MockSherwood: min assets out");
+        require(assetsOut >= minAssetsOut, "MockLeveragedAero: min assets out");
 
         usdc.safeTransfer(msg.sender, assetsOut);
     }
@@ -120,7 +120,7 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
         override
         returns (uint256 id)
     {
-        require(state == State.Executed, "MockSherwood: not executed");
+        require(state == State.Executed, "MockLeveragedAero: not executed");
 
         IERC20(address(vaultToken)).safeTransferFrom(msg.sender, address(this), shares);
 
@@ -139,23 +139,23 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
 
     function cancelRedeem(uint256 id) external override {
         RedeemRequest storage req = requests[id];
-        require(req.owner == msg.sender, "MockSherwood: not request owner");
-        require(!req.settled, "MockSherwood: already settled");
+        require(req.owner == msg.sender, "MockLeveragedAero: not request owner");
+        require(!req.settled, "MockLeveragedAero: already settled");
 
         req.settled = true;
         IERC20(address(vaultToken)).safeTransfer(req.owner, req.shares);
     }
 
     function emergencyRedeem(uint256 id, uint256 minAssetsOut) external override returns (uint256 assetsOut) {
-        require(state == State.Executed, "MockSherwood: not executed");
+        require(state == State.Executed, "MockLeveragedAero: not executed");
 
         RedeemRequest storage req = requests[id];
-        require(req.owner == msg.sender, "MockSherwood: not request owner");
-        require(!req.settled, "MockSherwood: already settled");
-        require(block.timestamp > req.requestedAt + 2 days, "MockSherwood: fulfill window not elapsed");
+        require(req.owner == msg.sender, "MockLeveragedAero: not request owner");
+        require(!req.settled, "MockLeveragedAero: already settled");
+        require(block.timestamp > req.requestedAt + 2 days, "MockLeveragedAero: fulfill window not elapsed");
 
         assetsOut = _assetsForShares(req.shares);
-        require(assetsOut >= minAssetsOut, "MockSherwood: min assets out");
+        require(assetsOut >= minAssetsOut, "MockLeveragedAero: min assets out");
 
         req.settled = true;
         vaultToken.strategyBurn(req.shares);
@@ -183,11 +183,11 @@ contract MockLeveragedAeroCLStrategy is ILeveragedAeroCLStrategy {
      */
     function fulfillRedeem(uint256 id, uint256 minAssetsOut) external returns (uint256 assetsOut) {
         RedeemRequest storage req = requests[id];
-        require(!req.settled, "MockSherwood: already settled");
+        require(!req.settled, "MockLeveragedAero: already settled");
 
         assetsOut = _assetsForShares(req.shares);
         uint256 floor = minAssetsOut > req.minAssetsOut ? minAssetsOut : req.minAssetsOut;
-        require(assetsOut >= floor, "MockSherwood: min assets out");
+        require(assetsOut >= floor, "MockLeveragedAero: min assets out");
 
         req.settled = true;
         vaultToken.strategyBurn(req.shares);

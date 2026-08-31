@@ -4,9 +4,9 @@ pragma solidity 0.8.28;
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "./LeveragedAerodromeCLStrategy.sol";
-import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
-import {ICToken, IComptroller, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
+import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
+import {ICToken, IComptroller, IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICLFactory, ICLGauge, ICLPool} from "./interfaces/ISlipstream.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 

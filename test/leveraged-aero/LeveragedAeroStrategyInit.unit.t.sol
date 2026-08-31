@@ -3,8 +3,8 @@ pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 
+import {BaseStrategy} from "@contracts/leveraged-aero/BaseStrategy.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
-import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";

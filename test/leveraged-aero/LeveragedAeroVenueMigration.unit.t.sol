@@ -2,12 +2,13 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+
+import {BaseStrategy} from "@contracts/leveraged-aero/BaseStrategy.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAeroVenue} from "@contracts/leveraged-aero/LeveragedAeroVenue.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
-import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
-import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
-import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
+import {ChainlinkReader} from "@contracts/leveraged-aero/libraries/ChainlinkReader.sol";
+import {TickMath} from "@contracts/leveraged-aero/libraries/TickMath.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";

@@ -8,7 +8,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
-import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy.sol";
+import {IStrategy} from "@contracts/leveraged-aero/interfaces/IStrategy.sol";
 import {DeployLeveragedAeroAccountConfig} from "@script/DeployLeveragedAeroAccountConfig.sol";
 import {LeveragedAeroAccountDeployer} from "@script/LeveragedAeroAccountDeployer.s.sol";
 
@@ -26,7 +26,7 @@ import {LeveragedAeroAccountDeployer} from "@script/LeveragedAeroAccountDeployer
  *
  *      NOT-YET-DEPLOYED DEPENDENCIES: the {LeveragedAeroVault} and its vendored
  *      {LeveragedAerodromeCLStrategy} clone are deployed separately — Tenderly vnet Base fork first,
- *      Base mainnet after. Until then the address book has no `SHERWOOD_LEVERAGED_AERO_STRATEGY` /
+ *      Base mainnet after. Until then the address book has no `LEVERAGED_AERO_STRATEGY` /
  *      `LEVERAGED_AERO_VAULT` entries, so this proposal COMPILES but cannot be run end-to-end: either
  *      `addresses.getAddress(...)` lookup reverts until those keys are added at that deploy time. The vault
  *      referenced by `LEVERAGED_AERO_VAULT` MUST be owned by MAMO_MULTISIG at execution time for the
@@ -34,7 +34,7 @@ import {LeveragedAeroAccountDeployer} from "@script/LeveragedAeroAccountDeployer
  *      must have ACCEPTED ownership, not merely been nominated).
  *
  *      RUNBOOK — WIND-DOWN: before `settleStrategy()` is called on the vault, every outstanding
- *      `requestRedeem` escrow on the Sherwood strategy must be drained (`fulfillRedeem`) or its owner
+ *      `requestRedeem` escrow on the pooled strategy must be drained (`fulfillRedeem`) or its owner
  *      told to `cancelRedeem`. Escrowed shares are held BY THE STRATEGY and still count toward
  *      `totalSupply()`, but post-settle `fulfillRedeem` / `emergencyRedeem` revert `NotExecuted` and
  *      the strategy has no path to the vault's `redeemSettled`. An abandoned escrow therefore FREEZES
@@ -49,7 +49,7 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
 
     string public strategyImplementationKey;
     string public strategyFactoryKey;
-    string public sherwoodStrategyKey;
+    string public leveragedAeroStrategyKey;
     string public vaultKey;
 
     constructor() {
@@ -63,7 +63,7 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         strategyTypeId = cfg.strategyTypeId;
         strategyImplementationKey = cfg.strategyImplementation;
         strategyFactoryKey = cfg.strategyFactory;
-        sherwoodStrategyKey = cfg.sherwoodStrategy;
+        leveragedAeroStrategyKey = cfg.leveragedAeroStrategy;
         vaultKey = cfg.vault;
     }
 
@@ -166,14 +166,14 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         LeveragedAeroVault vault = LeveragedAeroVault(addresses.getAddress(vaultKey));
         assertTrue(vault.depositsOpen(), "LeveragedAeroVault deposits should be open");
 
-        // The vault <-> Sherwood-strategy binding is what the whole account system rests on: the
+        // The vault <-> pooled-strategy binding is what the whole account system rests on: the
         // accounts deposit into the strategy and the strategy mints/burns THIS vault's shares. Assert
         // it in both directions plus the unit of account, so a vault pointed at the wrong (or an
         // unbound) strategy fails here rather than at the first user deposit.
-        address sherwoodStrategy = addresses.getAddress(sherwoodStrategyKey);
-        assertEq(vault.strategy(), sherwoodStrategy, "Vault should be bound to the configured Sherwood strategy");
+        address leveragedAeroStrategy = addresses.getAddress(leveragedAeroStrategyKey);
+        assertEq(vault.strategy(), leveragedAeroStrategy, "Vault should be bound to the configured leveraged-Aero strategy");
         assertEq(
-            IStrategy(vault.strategy()).vault(), address(vault), "Sherwood strategy should point back at the vault"
+            IStrategy(vault.strategy()).vault(), address(vault), "Leveraged-Aero strategy should point back at the vault"
         );
         assertEq(
             vault.asset(),
@@ -202,7 +202,7 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         );
         assertEq(factory.strategyTypeId(), strategyTypeId, "Factory strategyTypeId mismatch");
         assertEq(
-            factory.sherwoodStrategy(), addresses.getAddress(cfg.sherwoodStrategy), "Factory sherwoodStrategy mismatch"
+            factory.leveragedAeroStrategy(), addresses.getAddress(cfg.leveragedAeroStrategy), "Factory leveragedAeroStrategy mismatch"
         );
         assertEq(factory.usdc(), addresses.getAddress(cfg.token), "Factory usdc mismatch");
 

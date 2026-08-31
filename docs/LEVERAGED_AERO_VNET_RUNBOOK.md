@@ -22,12 +22,12 @@ Audience: Mamo engineers with a checkout of **this repo only**.
 > - There is **no governance lifecycle**: no `createSyndicate`, no `SyndicateGovernor`, no
 >   propose → vote → execute, no WOOD/sWOOD voting power, no guardian review window, no ~73 h vote
 >   warp, no strategy duration ceiling. `ISyndicateGovernor` and `BatchExecutorLib` are deleted;
->   `ISyndicateVault` is down to three functions.
+>   `ILeveragedAeroVault` is down to three functions.
 > - The strategy lifecycle is **owner-driven**: `Pending → Executed → Settled` via
 >   `vault.activateStrategy(seed)` and `vault.settleStrategy()`. The `proposer` role **survives** for
 >   the tunable-params / operator surface (`onlyProposer`, `state()` unchanged).
-> - Paths and type names under `src/leveraged-aero/sherwood/` are preserved **only** so the vendored
->   strategy's imports still compile. They are shims. Nothing calls Sherwood.
+> - The vendored framework shims (`BaseStrategy`, `interfaces/`, `libraries/`) sit at the
+>   `src/leveraged-aero/` root; the old `sherwood/` subdirectory is gone. Nothing calls Sherwood.
 > - The post-settlement exit is the vault's **permissionless** `redeemSettled(shares)`.
 > - The strategy now initializes against **any** Aerodrome Slipstream pool, and `rerange` is in-repo —
 >   in its 4-arg `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` form, which
@@ -57,13 +57,12 @@ Two keys are **created by this runbook** and are deliberately **not** committed 
 | Key | What it points at |
 |---|---|
 | `LEVERAGED_AERO_VAULT` | the `LeveragedAeroVault` from Phase B |
-| `SHERWOOD_LEVERAGED_AERO_STRATEGY` | the `LeveragedAerodromeCLStrategy` clone from Phase B |
+| `LEVERAGED_AERO_STRATEGY` | the `LeveragedAerodromeCLStrategy` clone from Phase B |
 
-> **Stale-but-real naming.** `config/strategies/LeveragedAeroAccountConfig.json` still calls the
-> strategy key `sherwoodStrategy` / `SHERWOOD_LEVERAGED_AERO_STRATEGY`, and the factory getter is
-> `factory.sherwoodStrategy()`. That is the live, current naming — use it verbatim or lookups fail.
-> Renaming it to `LEVERAGED_AERO_STRATEGY` is a **pending cleanup**; the `SHERWOOD_` prefix does not
-> imply any remaining Sherwood dependency.
+> **Naming.** `config/strategies/LeveragedAeroAccountConfig.json` calls the strategy key
+> `leveragedAeroStrategy` / `LEVERAGED_AERO_STRATEGY`, and the factory getter is
+> `factory.leveragedAeroStrategy()`. The former `SHERWOOD_*` / `sherwoodStrategy` spellings were
+> retired pre-mainnet — use the names above verbatim or lookups fail.
 
 > On a vnet, all privileged roles are driven by **unlocked impersonation** through the admin RPC — no
 > private keys. Throwaway EOAs are used only for simulated end users.
@@ -545,24 +544,21 @@ broadcaster key — everything is unlocked impersonation.
 
 A CLI-supplied `TENDERLY_VNET_RPC_URL` wins over the `.env` value (the `.env` one may point at an older
 vnet without the stack). The two pooled-address env vars
-(`SHERWOOD_LEVERAGED_AERO_STRATEGY` / `SHERWOOD_SYNDICATE_VAULT`) resolve **env → the `pooled` object
+(`LEVERAGED_AERO_STRATEGY` / `LEVERAGED_AERO_VAULT`) resolve **env → the `pooled` object
 Phase B just wrote into `script/tenderly/leveraged-aero-vnet.json` → a hardcoded fallback**, so after a
 Phase B run they normally need no override; pass them to target a different vnet.
 
-> **Env-var name vs address-book key — known skew.** Proposal 012 resolves the vault under the
-> `LEVERAGED_AERO_VAULT` key, but `LeveragedAeroAccountHarness.s.sol` still injects the env var
-> `SHERWOOD_SYNDICATE_VAULT` under the *old* key name. This is currently harmless: the shared deploy
-> path (`LeveragedAeroAccountDeployer`) resolves only `config.sherwoodStrategy` + `config.token` and
-> never touches `config.vault`, and the bash phase-3 replay sends to the raw `$VAULT` address rather
-> than via the address book. It will bite the first time 012 itself is run against a vnet — the harness
-> must then inject `LEVERAGED_AERO_VAULT`. Until then, pass `SHERWOOD_SYNDICATE_VAULT`.
+> **Env-var names now match the address-book keys.** `LeveragedAeroAccountHarness.s.sol` injects
+> `LEVERAGED_AERO_STRATEGY` and `LEVERAGED_AERO_VAULT` — the exact keys proposal 012 resolves, so
+> running 012 itself against a vnet resolves both. (Before the rename the harness injected
+> `SHERWOOD_SYNDICATE_VAULT` under the old key name, which 012's `vaultKey` lookup would have missed.)
 
 ### What it does
 
 | Phase | Actions |
 |---|---|
 | **2 — deploy** | Funds `DEPLOYER_EOA` with ETH, then runs `LeveragedAeroAccountHarness.deploy()` — the real `LeveragedAeroAccountDeployer.deployImplementationAndFactory()` path (the **same** deploy code the 012 multisig proposal calls). Deploys the `MamoLeveragedAeroStrategy` UUPS impl + the `MamoLeveragedAeroStrategyFactory` (wired to registry, admin=`MAMO_MULTISIG`, backend=`MAMO_BACKEND`, impl, `strategyTypeId=5`, strategy clone, USDC). Parses `HARNESS_IMPL` / `HARNESS_FACTORY` from the log. |
-| **3 — multisig `build()`** | As impersonated `MAMO_MULTISIG`: `registry.whitelistImplementation(impl, 5)`, `registry.grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`. Then `validate()` asserts: `whitelistedImplementations(impl)==true`, `implementationToId(impl)==5`, `latestImplementationById(5)==impl`, factory `hasRole(BACKEND_ROLE)`, `vault.depositsOpen()==true`, `factory.strategyTypeId()==5`, `factory.sherwoodStrategy()==$STRAT`, `factory.usdc()==USDC`. |
+| **3 — multisig `build()`** | As impersonated `MAMO_MULTISIG`: `registry.whitelistImplementation(impl, 5)`, `registry.grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`. Then `validate()` asserts: `whitelistedImplementations(impl)==true`, `implementationToId(impl)==5`, `latestImplementationById(5)==impl`, factory `hasRole(BACKEND_ROLE)`, `vault.depositsOpen()==true`, `factory.strategyTypeId()==5`, `factory.leveragedAeroStrategy()==$STRAT`, `factory.usdc()==USDC`. |
 | **4 — e2e lifecycle** | Fresh throwaway user, funded ETH + 10,000 USDC. `createStrategyForUser` → `computeStrategyAddress` (assert `isUserStrategy` + `account.owner()==user`); `deposit(5,000 USDC, minShares)` (minShares from the strategy's `shares=assets*(supply+1e6)/(nav+1)` formula, 1% tol) → assert shares minted & mirrored on the vault; fast `withdraw(half, minOut)` → assert USDC lands on user, account USDC==0; `requestWithdraw` → `fulfillRedeem` (impersonated `proposer`) → assert the USDC landed on the USER directly (account USDC==0, no claim tx) → `syncRedeemRequests` prunes; `depositIdle` gate (a third party reverts "Not owner or backend"; `registry.getBackendAddress()` succeeds); `withdrawAll` cleanup; final clean-state asserts (shares==0, account USDC==0) + net user delta. |
 
 > **Why the vault/strategy keys are runtime-injected, never committed to `addresses/8453.json`:** FPS
@@ -625,7 +621,7 @@ whole sequence is Mamo's to execute:
    `latestImplementationById(5) == address(0)` and `nextStrategyTypeId() <= 5` before whitelisting (the
    stale-counter-safe check).
 5. **Commit the address keys.** At that point `LEVERAGED_AERO_VAULT` and
-   `SHERWOOD_LEVERAGED_AERO_STRATEGY` **are** added to `addresses/8453.json` — safe then, because the
+   `LEVERAGED_AERO_STRATEGY` **are** added to `addresses/8453.json` — safe then, because the
    code genuinely exists on mainnet and the eager `isContract` check passes.
 
 Open gates before a mainnet deploy, from `docs/LEVERAGED_AERO_CL_AUDIT.md`: the
@@ -675,7 +671,7 @@ BR=$(cast call "$REG" 'BACKEND_ROLE()(bytes32)' --rpc-url "$PUB")
 cast call "$REG" 'hasRole(bytes32,address)(bool)' "$BR" "$FACTORY"        --rpc-url "$PUB"  # true
 cast call "$VAULT"   'depositsOpen()(bool)'                               --rpc-url "$PUB"  # true
 cast call "$FACTORY" 'strategyTypeId()(uint256)'                          --rpc-url "$PUB"  # 5
-cast call "$FACTORY" 'sherwoodStrategy()(address)'                        --rpc-url "$PUB"  # == $STRAT
+cast call "$FACTORY" 'leveragedAeroStrategy()(address)'                   --rpc-url "$PUB"  # == $STRAT
 cast call "$FACTORY" 'usdc()(address)'                                    --rpc-url "$PUB"  # == $USDC
 ```
 

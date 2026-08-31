@@ -1,6 +1,6 @@
 {
   "token": "USDC",
-  "sherwoodStrategy": "SHERWOOD_LEVERAGED_AERO_STRATEGY",
+  "leveragedAeroStrategy": "LEVERAGED_AERO_STRATEGY",
   "vault": "LEVERAGED_AERO_VAULT",
   "strategyTypeId": 5,
   "strategyImplementation": "MAMO_LEVERAGED_AERO_STRATEGY_IMPL",

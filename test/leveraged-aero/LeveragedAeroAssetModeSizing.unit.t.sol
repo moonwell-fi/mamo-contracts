@@ -2,8 +2,8 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
-import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
+import {LiquidityAmounts} from "@contracts/leveraged-aero/libraries/LiquidityAmounts.sol";
+import {TickMath} from "@contracts/leveraged-aero/libraries/TickMath.sol";
 
 import {MockCLPool} from "../mocks/MockCLPool.sol";
 

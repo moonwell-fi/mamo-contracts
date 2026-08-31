@@ -7,10 +7,10 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
-import {ICToken, IComptroller, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLGauge, ICLPool, INonfungiblePositionManager} from "./sherwood/interfaces/ISlipstream.sol";
-import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
+import {ICToken, IComptroller, IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICLGauge, ICLPool, INonfungiblePositionManager} from "./interfaces/ISlipstream.sol";
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
+import {TickMath} from "./libraries/TickMath.sol";
 
 /// @dev Minimal WETH9 interface — wraps native ETH into ERC-20 WETH.
 interface IWETH9 {

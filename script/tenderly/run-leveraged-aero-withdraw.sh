@@ -52,8 +52,8 @@ LAYOUT_SIG="$(forge inspect LeveragedAerodromeCLStrategy abi --json 2>/dev/null 
   | jq -r '"layout()((" + ([.[] | select(.name=="layout") | .outputs[0].components[].type] | join(",")) + "))"')"
 
 _cfg() { jq -r --arg a "$1" --arg k "$2" '.[$a][$k] // empty' "$_CFG" 2>/dev/null; }
-STRAT="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-$(_cfg pooled strategyClone)}"
-VAULT="${SHERWOOD_SYNDICATE_VAULT:-$(_cfg pooled vault)}"
+STRAT="${LEVERAGED_AERO_STRATEGY:-$(_cfg pooled strategyClone)}"
+VAULT="${LEVERAGED_AERO_VAULT:-$(_cfg pooled vault)}"
 FACTORY="${ACCOUNT_FACTORY:-$(_cfg mamo accountFactory)}"
 
 REUSE_VNET=1
@@ -97,7 +97,7 @@ build_error_table() {
   # to nothing and silently degrades every PARAMETERISED error to "unknown" — which is exactly how
   # FastRedeemExceedsLtv, the most important revert in this flow, first showed up unnamed.
   : > "$ERR_TABLE"
-  # `find`, not a glob: NotExecuted() is declared in src/leveraged-aero/sherwood/BaseStrategy.sol,
+  # `find`, not a glob: NotExecuted() is declared in src/leveraged-aero/BaseStrategy.sol,
   # two levels down, and a one-level glob silently left the most common async revert unnamed.
   # OZ's IERC6093 too: the vault's shares are an OZ ERC20, so a share-accounting revert surfaces as
   # ERC20InsufficientBalance — declared outside src/ and therefore previously "unknown".
