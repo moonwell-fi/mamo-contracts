@@ -56,7 +56,7 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice The single bound {LeveragedAerodromeCLStrategy} clone. Set once, never rotated.
     address public strategy;
 
-    /// @notice Gates {strategyMint}. False blocks all new share issuance (deposits + fee-shares).
+    /// @notice Gates {strategyMint}. False blocks all new share issuance.
     bool public depositsOpen;
 
     /// @notice Set by {settleStrategy}; unlocks {redeemSettled}. One-way.
@@ -65,8 +65,10 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp), over the whole book,
     ///         not a per-user limit. `0` (the deploy default) == UNLIMITED; {depositsOpen} freezes.
     /// @dev Enforced in the strategy's `deposit` (pre-deposit, against the pre-deposit NAV; crossing
-    ///      deposits rejected, not trimmed), NOT in {strategyMint} — that also serves
-    ///      best-effort FEE-SHARE mints, which capacity must never gate or fees defer forever.
+    ///      deposits rejected, not trimmed), NOT in {strategyMint} — a fund ceiling belongs on the one
+    ///      path that takes capital, not on the issuance primitive.
+    /// @dev The strategy's fee is an IN-KIND skim of the harvested reward tranche, so no fee path mints
+    ///      shares and the ceiling has no fee interaction to reason about.
     uint256 public maxTotalAssets;
 
     // ==================== EVENTS ====================

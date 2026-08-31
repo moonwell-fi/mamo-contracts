@@ -47,16 +47,19 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  *            with ZERO interest accrued and pins that `compound` buys nothing — the whole point of using
  *            an accounting basis rather than the live LP composition.
  *
- *         3. NO-OP + FEE TIMING. A keeper-polled `compound` with nothing to harvest must not crystallise
- *            (it would mint fee-shares and ratchet the HWM for free), and a real harvest's performance
- *            fee is DEFERRED to the next crystallisation point by design — proven here, not assumed.
+ *         3. NO-OP + THE IN-KIND HARVEST SKIM. A keeper-polled `compound` with nothing to harvest must
+ *            move nothing at all, and a real harvest must skim exactly `compoundFeeBps` of the tranche to
+ *            `feeRecipient` IN KIND, ahead of the sale, so both min-out floors bind the post-skim amount.
  *
  * @dev Fixture: the asset-as-a-leg shape (leg A is an 8dp volatile token, the pair is legA/USDC), the
  *      shape the live fork run that produced these findings was running. The pool `sqrtP` and the leg-A
- *      Chainlink price are kept mutually consistent by deriving the price from `sqrtP`. Management fee
- *      is OFF and the performance fee is ON, so every fee assertion here is about the HWM leg only.
+ *      Chainlink price are kept mutually consistent by deriving the price from `sqrtP`. The harvest skim
+ *      is OFF in the shared fixture so the hedge arithmetic stays exact; the skim block re-arms it.
  */
 contract LeveragedAeroCompoundHedgeUnitTest is Test {
+    /// @dev Mirrored from {LeveragedAeroManager}, which emits it from the STRATEGY's address.
+    event CompoundFeePaid(address indexed recipient, uint256 aeroAmount);
+
     // ── Roles ──
     address internal owner = makeAddr("owner");
     address internal proposer = makeAddr("proposer");
@@ -96,7 +99,11 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     uint24 internal constant WIDTH = 4000;
     uint16 internal constant TARGET_LTV_BPS = 5000;
     uint16 internal constant MAX_SLIPPAGE_BPS = 100;
-    uint16 internal constant PERF_FEE_BPS = 1000; // 10% — the only fee armed
+    /// @dev OFF in the shared fixture (every hedge assertion pins exact AERO amounts); `_rearmWithSkim`
+    ///      rebuilds the pair with a live skim for the block that tests it.
+    uint16 internal constant COMPOUND_FEE_BPS = 0;
+    /// @dev The production skim the fee block arms: 5% of each harvested tranche.
+    uint16 internal constant SKIM_BPS = 500;
     uint8 internal constant LEG_A_DECIMALS = 8;
     uint256 internal constant P_USDC = 1e8;
     uint256 internal constant P_AERO = 1e8; // $1/AERO, so USDC out == AERO in / 1e12
@@ -229,13 +236,26 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
         p.maxSlippageBps = MAX_SLIPPAGE_BPS;
-        p.managementFeeBps = 0; // OFF — every fee assertion here is about the HWM leg
-        p.performanceFeeBps = PERF_FEE_BPS;
+        p.compoundFeeBps = COMPOUND_FEE_BPS;
         p.feeRecipient = feeRecipient;
     }
 
-    /// @dev Open the position AND put vault shares outstanding, so `_crystallizeFees` is live (it
-    ///      early-returns on a zero supply).
+    /// @dev Rebuild the vault + strategy pair with `bps` armed as the harvest skim and `recipient` as its
+    ///      payee. Every venue mock is shared, so the rebuilt book is the fixture's twin apart from the fee.
+    function _rearmWithSkim(uint16 bps, address recipient) internal {
+        LeveragedAerodromeCLStrategy.InitParams memory p = _params();
+        p.compoundFeeBps = bps;
+        p.feeRecipient = recipient;
+        vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
+        vm.startPrank(owner);
+        strategy = LeveragedAerodromeCLStrategy(
+            payable(vault.cloneAndBind(address(new LeveragedAerodromeCLStrategy()), proposer, abi.encode(p)))
+        );
+        vault.setOpenDeposits(true);
+        vm.stopPrank();
+    }
+
+    /// @dev Open the position AND put vault shares outstanding, so the book prices like a live fund.
     function _armBook() internal {
         usdc.mint(address(strategy), SEED);
         vm.prank(address(vault));
@@ -610,14 +630,12 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     // ==================== 2. THE GENUINE NO-OP ====================
 
     /**
-     * @dev A no-AERO `compound` must be a TRUE no-op. Live, it minted fee-shares and ratcheted the HWM
-     *      while moving no funds — a keeper polling the entrypoint was silently diluting holders and
-     *      advancing the fee clock. Armed here in the state where the old code was guaranteed to charge:
-     *      HWM already seeded by a real harvest, NAV grown above it, and a positive `dt`.
+     * @dev A no-AERO `compound` must be a TRUE no-op. It is a keeper-polled entrypoint, so a poll that
+     *      finds nothing to harvest must leave the whole book byte-identical — no claim, no skim, no
+     *      redeploy. Armed after a real harvest so every piece of state it could touch is non-trivial.
      */
     function testNoAeroCompoundIsATrueNoOp() public {
         _armBook();
-        // Harvest #1: seeds the HWM and grows NAV above it — so a crystallise now WOULD mint.
         _armRewards(20_000e18);
         _compound(1);
         _clearRewards();
@@ -626,24 +644,16 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
 
         uint256 navBefore = strategy.nav();
         uint256 supplyBefore = vault.totalSupply();
-        uint256 feeSharesBefore = vault.balanceOf(feeRecipient);
-        uint256 hwmBefore = strategy.layout().hwmPerShare;
-        uint256 lastAccrualBefore = strategy.layout().lastFeeAccrualTimestamp;
         uint256 lpLiqBefore = npm.liquidityOf(strategy.layout().tokenId);
         uint256 debtBefore = _debtLegA();
         uint256 idleBefore = usdc.balanceOf(address(strategy));
         uint256 collateralBefore = _collateralUsdc();
         (uint128 hedgedBefore,) = strategy.hedgedDebt();
 
-        // Sanity: a crystallise at this point would genuinely have charged something.
-        assertGt(Math.mulDiv(navBefore, 1e18, supplyBefore), hwmBefore, "NAV/share is above the HWM");
-
         _compound(1);
 
-        assertEq(vault.totalSupply(), supplyBefore, "no fee-shares minted");
-        assertEq(vault.balanceOf(feeRecipient), feeSharesBefore, "fee recipient untouched");
-        assertEq(strategy.layout().hwmPerShare, hwmBefore, "HWM NOT ratcheted");
-        assertEq(strategy.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "fee clock NOT advanced");
+        assertEq(vault.totalSupply(), supplyBefore, "no shares minted");
+        assertEq(aero.balanceOf(feeRecipient), 0, "fee recipient untouched");
         assertEq(strategy.nav(), navBefore, "NAV byte-identical");
         assertEq(npm.liquidityOf(strategy.layout().tokenId), lpLiqBefore, "LP byte-identical");
         assertEq(_debtLegA(), debtBefore, "debt byte-identical");
@@ -695,6 +705,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
 
         assertEq(aero.balanceOf(address(strategy)), 1e6, "dust left in place, not force-sold at a loss");
         assertEq(_collateralUsdc(), collateralBefore, "no redeploy: the harvest cleanly no-oped");
+        assertEq(aero.balanceOf(feeRecipient), 0, "...and the dust skip precedes the skim, so nothing was paid");
     }
 
     /// @dev The skip must NOT widen the guard: the smallest balance whose POST-haircut floor is nonzero is
@@ -710,134 +721,116 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertEq(aero.balanceOf(address(strategy)), 0, "above-dust balance is sold, not skipped");
     }
 
-    // ==================== 3. FEE TIMING (findings 3 + 4) ====================
+    // ==================== 3. THE IN-KIND HARVEST SKIM ====================
+    // The fund's ONLY fee: `compoundFeeBps` of each harvested AERO tranche, transferred to `feeRecipient`
+    // as AERO before the sale. `_rearmWithSkim` rebuilds the fixture with it live.
 
-    /**
-     * @dev THE FEE-TIMING CONSEQUENCE OF PRICING `earned()`, accepted deliberately: the reward is in NAV from
-     *      the moment it accrues, so every crystallisation point charges the fee on UNCLAIMED reward value.
-     */
-    function testThePerformanceFeeAccruesAgainstUnclaimedGaugeRewards() public {
+    /// @dev The tranche this block harvests, and the exact split a 5% skim produces.
+    uint256 internal constant SKIM_TRANCHE = 20_000e18;
+    uint256 internal constant SKIM_AMOUNT = 1_000e18; // 5% of SKIM_TRANCHE
+    uint256 internal constant SKIM_SELL = 19_000e18; // what actually reaches the router
+
+    /// @dev THE AMOUNT, THE RECIPIENT AND THE BASE, all pinned to literals. MUTATIONS this kills: skimming
+    ///      off `usdcOut` instead of the AERO tranche, paying anyone but `feeRecipient`, minting fee-SHARES
+    ///      instead of moving tokens, and taking the fee after the sale (the router would receive 20k).
+    function testCompoundSkimsExactlyTheConfiguredShareToTheRecipient() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
         _armBook();
+        _armRewards(SKIM_TRANCHE);
 
-        uint256 supply0 = vault.totalSupply();
-        uint256 nav0 = strategy.nav();
-        assertEq(strategy.layout().hwmPerShare, 0, "HWM unset before the first crystallise");
+        uint256 supplyBefore = vault.totalSupply();
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
 
-        // ── A tranche accrues in the gauge. It is in NAV IMMEDIATELY — nothing was claimed. ──
-        _armRewards(20_000e18);
-        uint256 navWithEarned = strategy.nav();
-        assertEq(navWithEarned, nav0 + _usdcFromAero(20_000e18), "unclaimed rewards are priced at once");
-        assertEq(aero.balanceOf(address(strategy)), 0, "...and none of it has been claimed");
-
-        // ── Harvest #1: the preceding crystallise SEES that value, so the HWM seeds INCLUSIVE of it. ──
+        vm.expectEmit(true, false, false, true, address(strategy));
+        emit CompoundFeePaid(feeRecipient, SKIM_AMOUNT);
         _compound(1);
 
-        assertEq(vault.totalSupply(), supply0, "the SEEDING crystallise charges nothing (no prior HWM)");
-        assertEq(vault.balanceOf(feeRecipient), 0, "fee recipient paid nothing yet");
-        uint256 hwm1 = strategy.layout().hwmPerShare;
-        assertEq(hwm1, Math.mulDiv(navWithEarned, 1e18, supply0), "HWM seeded INCLUSIVE of the unclaimed tranche");
-
-        // ── THE CONSEQUENCE: a second tranche, never harvested, is charged a fee through a deposit. ──
-        _armRewards(20_000e18);
-        uint256 navPending = strategy.nav();
-        assertGt(Math.mulDiv(navPending, 1e18, supply0), hwm1, "the gain over the HWM is entirely unrealised");
-
-        address newLp = makeAddr("newLp");
-        usdc.mint(newLp, 1_000e6);
-        vm.prank(newLp);
-        usdc.approve(address(strategy), 1_000e6);
-        vm.prank(newLp);
-        strategy.deposit(1_000e6, 0);
-
-        assertGt(vault.balanceOf(feeRecipient), 0, "fee charged against rewards STILL SITTING IN THE GAUGE");
-        assertEq(gauge.earnedAmount(), 20_000e18, "...which are demonstrably still unclaimed");
-        assertGt(strategy.layout().hwmPerShare, hwm1, "HWM ratcheted on an unrealised gain");
-
-        // ~10% of the unrealised gain, one harvest earlier than before. Nothing is double-charged.
-        uint256 gain = navPending - navWithEarned;
-        uint256 feeValue = Math.mulDiv(vault.balanceOf(feeRecipient), strategy.nav(), vault.totalSupply());
-        assertApproxEqRel(feeValue, (gain * PERF_FEE_BPS) / 10_000, 5e16, "fee ~= perfBps x the unrealised gain");
+        assertEq(aero.balanceOf(feeRecipient), SKIM_AMOUNT, "5% of the tranche, in AERO");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_SELL, "...and only the 95% was sold");
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing of the tranche is left behind");
+        assertEq(vault.totalSupply(), supplyBefore, "an in-kind fee dilutes nobody");
     }
 
-    /// @dev A DEPOSIT is also a crystallisation point, and it runs BEFORE the new shares are minted —
-    ///      which is what makes the deferral fair. The entering depositor must not be diluted by the
-    ///      performance fee on a gain that accrued before they arrived.
-    function testADepositCrystallisesTheDeferredFeeBeforeMintingTheNewShares() public {
+    /// @dev THE CALLER'S FLOOR BINDS THE POST-SKIM SELL. A proposer quotes what the router will actually
+    ///      receive, so the exact post-skim proceeds clear and a gross-basis quote cannot.
+    function testTheCallerMinOutIsQuotedOnThePostSkimAmount() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
         _armBook();
-        _armRewards(20_000e18); // harvest #1: seeds the HWM, adds un-fee'd yield
+        _armRewards(SKIM_TRANCHE);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        vm.expectRevert(MockAeroV2Router.MockAeroRouterMinOut.selector);
+        strategy.compound(_usdcFromAero(SKIM_TRANCHE), 0); // the GROSS quote: 5% too high
+        vm.revertToState(snap);
+
+        _compound(_usdcFromAero(SKIM_SELL)); // the post-skim quote: exact, and it clears
+        assertEq(aero.balanceOf(feeRecipient), SKIM_AMOUNT, "the skim was paid on the clearing call");
+    }
+
+    /// @dev THE ORACLE FLOOR IS ALSO ON THE POST-SKIM AMOUNT. A perfect fill at the fixture's $1 mark pays
+    ///      `SKIM_SELL` USDC, which a GROSS-basis floor (`0.99 x 20_000`) would reject outright — so the
+    ///      call clearing at the default rate is itself the mutation guard. The boundary is pinned too:
+    ///      exactly `0.99 x post-skim` clears, one wei of rate under it does not.
+    function testTheOracleFloorIsDerivedFromThePostSkimAmount() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armRewards(SKIM_TRANCHE);
+
+        // `MAX_SLIPPAGE_BPS` is 1%, so the floor sits at 990_000 of the mock router's 1e18-scaled rate.
+        uint256 snap = vm.snapshotState();
+        _setAeroRouterRate(989_999);
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroManager.BelowOracleFloor.selector);
+        strategy.compound(1, 0);
+        vm.revertToState(snap);
+
+        _setAeroRouterRate(990_000);
         _compound(1);
-        uint256 hwm1 = strategy.layout().hwmPerShare;
-
-        address newLp = makeAddr("newLp");
-        usdc.mint(newLp, 100_000e6);
-        vm.prank(newLp);
-        usdc.approve(address(strategy), 100_000e6);
-        vm.prank(newLp);
-        uint256 minted = strategy.deposit(100_000e6, 0);
-
-        assertGt(vault.balanceOf(feeRecipient), 0, "the deferred fee crystallised ON the deposit");
-        assertGt(strategy.layout().hwmPerShare, hwm1, "HWM ratcheted at the deposit");
-        // The depositor's shares were priced against the POST-crystallise book, so their per-share value
-        // is (within rounding) exactly what they paid — no phantom fee.
-        uint256 lpValue = Math.mulDiv(minted, strategy.nav(), vault.totalSupply());
-        assertApproxEqRel(lpValue, 100_000e6, 1e15, "depositor did not pay a fee on a pre-arrival gain");
+        assertEq(aero.balanceOf(address(strategy)), 0, "a fill exactly at the post-skim floor clears");
     }
 
-    /// @dev Why the F09 sampling posture is acceptable: the sampler never profits and the peak is one-shot.
-    function testAnOutsiderCanSampleThePeakButPaysForItAndOnlyOnce() public {
+    /// @dev A ZERO-SKIM CLONE IS SILENT: the whole tranche is sold, nothing is transferred, and no event is
+    ///      emitted (an indexer must not see a 0-AERO fee).
+    function testAZeroSkimMovesNothingAndEmitsNothing() public {
+        _rearmWithSkim(0, feeRecipient);
         _armBook();
-        _armRewards(20_000e18);
-        _compound(1); // seeds the HWM
-        uint256 hwm1 = strategy.layout().hwmPerShare;
+        _armRewards(SKIM_TRANCHE);
 
-        // A peak forms: unrealised reward value carries `navPerShare` above the mark.
-        _armRewards(20_000e18);
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
+        vm.recordLogs();
+        _compound(1);
 
-        address sampler = makeAddr("sampler");
-        uint256 dust = 1e6; // 1 USDC against a $1M book
-        usdc.mint(sampler, dust);
-        vm.startPrank(sampler);
-        usdc.approve(address(strategy), dust);
-        uint256 minted = strategy.deposit(dust, 0);
-        vm.stopPrank();
-
-        assertGt(strategy.layout().hwmPerShare, hwm1, "the dust deposit sampled the peak");
-        uint256 feeSharesAfterSample = vault.balanceOf(feeRecipient);
-        assertGt(feeSharesAfterSample, 0, "...and the fee it triggered went to the fee RECIPIENT");
-
-        assertEq(vault.balanceOf(sampler), minted, "the sampler received no fee shares");
-        assertLe(Math.mulDiv(minted, strategy.nav(), vault.totalSupply()), dust, "the sampler pays, never profits");
-
-        // ONE-SHOT: the HWM ratcheted with the sample, so the same peak is not chargeable again.
-        usdc.mint(sampler, dust);
-        vm.startPrank(sampler);
-        usdc.approve(address(strategy), dust);
-        strategy.deposit(dust, 0);
-        vm.stopPrank();
-        assertEq(vault.balanceOf(feeRecipient), feeSharesAfterSample, "the same peak cannot be charged twice");
+        assertEq(aero.balanceOf(feeRecipient), 0, "no skim at 0 bps");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_TRANCHE, "the whole tranche was sold");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != CompoundFeePaid.selector, "a zero skim emits nothing");
+        }
     }
 
-    /// @dev `compound` still defers the fee (rather than bricking the harvest) when share issuance is
-    ///      closed — the H3 best-effort path, now proven on a REAL harvest instead of a flat book.
-    function testCompoundDefersFeeCrystalliseWhenIssuanceIsClosed() public {
+    /// @dev THE SKIM IS EXCLUSIVE TO THE HARVEST. `flatten` sells the tranche its own unwind auto-claims
+    ///      through `LeveragedAeroVenue._sellRewardBalance`, an EXIT path — it must skim nothing, or the
+    ///      same tranche would be charged twice (once on the way in, once on the way out).
+    function testAnExitTrancheSaleDoesNotSkim() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
         _armBook();
-        _armRewards(20_000e18);
-        _compound(1); // seeds the HWM, adds un-fee'd yield
-        uint256 hwm1 = strategy.layout().hwmPerShare;
-        uint256 lastAccrual1 = strategy.layout().lastFeeAccrualTimestamp;
-        uint256 supply1 = vault.totalSupply();
+        _armWithdrawAutoClaim(SKIM_TRANCHE);
+        // `MockNpm` custodies only what it was minted; float the re-priced remainder as other LPs do.
+        usdc.mint(address(npm), 1_000e6);
+        legA.mint(address(npm), 1_000e8);
 
-        vm.prank(owner);
-        vault.setOpenDeposits(false);
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.flatten(1, 0);
 
-        uint256 collateralBefore = _collateralUsdc();
-        _armRewards(20_000e18);
-        _compound(1); // must NOT revert — the harvest proceeds, the fee defers
-
-        assertEq(vault.totalSupply(), supply1, "no fee-shares minted (issuance shut)");
-        assertEq(strategy.layout().hwmPerShare, hwm1, "HWM unmoved (fee deferred, not lost)");
-        assertEq(strategy.layout().lastFeeAccrualTimestamp, lastAccrual1, "accrual clock unmoved");
-        assertGt(_collateralUsdc(), collateralBefore, "...but the HARVEST itself went through");
+        assertEq(aero.balanceOf(feeRecipient), 0, "an exit sale pays no fee");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_TRANCHE, "the WHOLE tranche was sold");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != CompoundFeePaid.selector, "...and no fee event was emitted");
+        }
     }
 
     // ====== 4. nav() PRICES THE GAUGE REWARD: HELD BALANCE **AND** earned() (review finding 3) ======
@@ -1339,10 +1332,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertGt(_collateralUsdc(), collateralBefore, "...and the harvest redeployed");
     }
 
-    // ====== 8. A DEFERRED CRYSTALLISE CANNOT LET AN EXIT ESCAPE THE PENDING FEE (F16) ======
-    // `strategyMint` is gated on the vault's issuance switch, `strategyBurn` is not, so with issuance shut the
-    // crystallise defers while the exit proceeds and the redeemer used to walk with their whole share of the
-    // pending fee (the leak lands on the fee recipient). `redeem` now prices on the SIMULATED post-fee book.
+    // ====== 8. THE FULL-REDEEM cTOKEN BURN PAYS THE FRESH-RATE SURPLUS (F16) ======
 
     /// @dev Fast-path exit of `shares` for `lp`; returns the USDC they were paid.
     function _fastRedeem(uint256 shares) internal returns (uint256 paid) {
@@ -1354,62 +1344,13 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         return usdc.balanceOf(lp) - before;
     }
 
-    /// @dev Arm a REAL pending fee: seed the HWM, then carry `navPerShare` above it without crystallising.
-    function _armAPendingPerformanceFee() internal {
+    /// @dev `redeemUnderlying(amt)` accrues, then burns `amt / freshRate` — leaving `cBal x (1 − stored/fresh)`
+    ///      behind as assets with no shares. The full-redeem branch burns the whole cTOKEN balance instead and
+    ///      pays the surplus over `collateralUsdc`. MUTATION: `redeemUnderlying` on this branch strands the
+    ///      rate gap in the strategy and leaves a cToken residue; both are pinned below.
+    function testTheFullRedeemBurnsTheWholeCTokenBalanceAndPaysTheRateGap() public {
         _armBook();
-        _armRewards(20_000e18);
-        _compound(1);
-        _armRewards(20_000e18);
-    }
-
-    function testADeferredCrystalliseCannotLetAnExitEscapeThePendingFee() public {
-        _armAPendingPerformanceFee();
-        uint256 exitShares = SHARES / 100;
-
-        // Baseline: the same exit with issuance OPEN, i.e. the crystallise succeeds.
-        uint256 snap = vm.snapshotState();
-        uint256 openPayout = _fastRedeem(exitShares);
-        assertGt(vault.balanceOf(feeRecipient), 0, "control: the open-issuance exit really did crystallise");
-        vm.revertToState(snap);
-
-        // The un-fee'd price the exiter used to be paid — the mutant's answer.
-        uint256 rawPrice = Math.mulDiv(exitShares, strategy.nav(), vault.totalSupply());
-
-        vm.prank(owner);
-        vault.setOpenDeposits(false);
-        uint256 hwmBefore = strategy.layout().hwmPerShare;
-        uint256 accrualBefore = strategy.layout().lastFeeAccrualTimestamp;
-        (uint256 quoted,) = strategy.previewRedeem(exitShares);
-
-        vm.recordLogs();
-        uint256 closedPayout = _fastRedeem(exitShares);
-
-        assertEq(closedPayout, openPayout, "a deferred crystallise pays exactly what a successful one pays");
-        assertEq(closedPayout, quoted, "...and the preview still matches execution to the wei");
-        assertLt(closedPayout, rawPrice, "...and it is STRICTLY less than the un-fee'd price");
-
-        // Deferred, not charged: no shares minted and no HWM ratchet, so the gain is still measurable.
-        assertEq(vault.balanceOf(feeRecipient), 0, "no fee shares could be minted (issuance shut)");
-        assertEq(strategy.layout().hwmPerShare, hwmBefore, "HWM unmoved");
-        assertEq(strategy.layout().lastFeeAccrualTimestamp, accrualBefore, "accrual clock unmoved");
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        bool deferred;
-        for (uint256 i; i < logs.length; ++i) {
-            if (logs[i].topics[0] == LeveragedAerodromeCLStrategy.FeeCrystallizeDeferred.selector) deferred = true;
-        }
-        assertTrue(deferred, "...and the deferral was marked, not silent");
-    }
-
-    /// @dev THE FULL-REDEEM SURPLUS BASELINE: on the whole-cToken-burn branch the redeemer is paid the
-    ///      fresh-rate surplus measured against `collateralUsdc`, NOT against their own fee-netted draw. A
-    ///      DEFERRED crystallise is the only state where the two differ (`fromCollateral < collateralUsdc`),
-    ///      and the difference is exactly the pending fee. MUTATION: baselining on `fromCollateral` pays the
-    ///      redeemer the whole fresh book, so nothing is retained and the deferred fee walks out.
-    function testTheFullRedeemSurplusIsBaselinedOnTheCollateralNotTheFeeNettedDraw() public {
-        _armAPendingPerformanceFee();
-        // `MockNpm` custodies only what it was minted and the post-compound re-price leaves it a wei short on
-        // both legs; float it as other LPs do (same workaround as the atomic-redeploy test below).
+        // `MockNpm` custodies only what it was minted; float the re-priced remainder as other LPs do.
         usdc.mint(address(npm), 1_000e6);
         legA.mint(address(npm), 1_000e8);
         vm.prank(proposer);
@@ -1419,37 +1360,20 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         strategy.supplyIdle(pot); // whole pot as collateral, nothing raw
 
         uint256 cBal = mUsdc.balanceOf(address(strategy));
-        mUsdc.setExchangeRateStored(1.37e18); // C at the stored rate -- the surplus baseline
+        mUsdc.setExchangeRateStored(1.37e18); // C at the stored rate -- what the quote prices
         mUsdc.setPendingExchangeRate(1.4e18); // ...which the burn accrues past
         uint256 cStored = (cBal * 1.37e18) / 1e18;
         uint256 cFresh = (cBal * 1.4e18) / 1e18;
 
-        vm.prank(owner);
-        vault.setOpenDeposits(false); // the fee-share mint fails -> the crystallise defers
         (uint256 quoted,) = strategy.previewRedeem(SHARES);
-        assertLt(quoted, cStored, "the quote is netted by the deferred fee");
+        assertEq(quoted, cStored, "the quote prices the stored rate");
 
         uint256 out = _fastRedeem(SHARES);
 
-        assertEq(out, quoted + (cFresh - cStored), "paid the fee-netted draw plus the rate gap, nothing more");
-        assertEq(usdc.balanceOf(address(strategy)), cFresh - out, "the deferred fee slice stays with the fund");
-        assertGt(usdc.balanceOf(address(strategy)), 0, "...and it is a real amount, not dust");
+        assertEq(out, cFresh, "the redeemer was paid the whole fresh-rate book, quote plus the gap");
+        assertEq(out, quoted + (cFresh - cStored), "...which is exactly the surplus formula");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "nothing stranded behind the last shares");
         assertEq(mUsdc.balanceOf(address(strategy)), 0, "no cToken residue either");
-    }
-
-    /// @dev The re-pricing is CONDITIONAL: with issuance open the crystallise lands and the branch never runs.
-    function testAHappyPathExitIsUnaffectedByTheDeferredRePricing() public {
-        _armAPendingPerformanceFee();
-        uint256 exitShares = SHARES / 100;
-        uint256 hwmBefore = strategy.layout().hwmPerShare;
-        uint256 rawPrice = Math.mulDiv(exitShares, strategy.nav(), vault.totalSupply());
-
-        uint256 payout = _fastRedeem(exitShares);
-
-        assertGt(vault.balanceOf(feeRecipient), 0, "the fee was actually charged, not deferred");
-        assertGt(strategy.layout().hwmPerShare, hwmBefore, "the HWM ratcheted");
-        assertGt(payout, 0, "and the exit paid out");
-        assertLt(payout, rawPrice, "priced on the real POST-crystallise book, not the pre-fee one");
     }
 
     // ====== 9. THE REDEPLOY IS ATOMIC WITH THE HARVEST (F20) ======

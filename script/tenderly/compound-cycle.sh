@@ -87,7 +87,7 @@ NPM=0x827922686190790b37229fd06084350E74485b72
 # (`lay N` is 1-BASED over the comma-split tuple, so field N == LayoutView member N-1. Appends land
 # at the END, but a REMOVAL shifts every later index down — dropping `protocolFeeOwed`, once field
 # 34, is why the tail numbers above are one lower than they used to be.)
-LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
+LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,address,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
 
 c() { cast call --rpc-url "$RPC" "$@" 2>/dev/null; }
 num() { echo "${1%% *}"; }
@@ -600,12 +600,11 @@ cmd_snap() {
   echo "nav (USDC 6dp)        $(num "$(c "$STRAT" 'nav()(uint256)')")"
   echo "idle USDC             $(num "$(c "$USDC" 'balanceOf(address)(uint256)' "$STRAT")")"
   echo "idle AERO             $(num "$(c "$AERO" 'balanceOf(address)(uint256)' "$STRAT")")"
-  echo "hwmPerShare           $(num "$(lay 32)")"
-  echo "lastFeeAccrual        $(num "$(lay 33)")"
+  echo "compoundFeeBps        $(num "$(lay 29)")"
   echo "targetLtvBps          $(num "$(lay 21)")"
   echo "-- vault shares (12dp) --"
   echo "totalSupply           $(num "$(c "$VAULT" 'totalSupply()(uint256)')")"
-  echo "feeRecipient shares   $(num "$(c "$VAULT" 'balanceOf(address)(uint256)' "$(lay 31)")")"
+  echo "feeRecipient AERO     $(num "$(c "$AERO" 'balanceOf(address)(uint256)' "$(lay 30)")")"
   echo "-- venue --"
   echo "collateral/debt USDC  $(c --from "$STRAT" "$STRAT" 'previewCollateralDebt()(uint256,uint256)' | tr '\n' ' ')"
   local dbtA hedA hedB

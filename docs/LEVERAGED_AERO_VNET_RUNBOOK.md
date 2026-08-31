@@ -263,7 +263,7 @@ an already-overridden feed yields the same answer).
 (`--unlocked --sender DEPLOYER_EOA --gas-estimate-multiplier 200`).
 
 **The template.** `LeveragedAerodromeCLStrategy`'s three libraries (`LeveragedAeroManager`,
-`LeveragedAeroValuation`, `LeveragedAeroFees`) have external functions and are `delegatecall`ed — a
+`LeveragedAeroValuation`, `LeveragedAeroVenue`) have external functions and are `delegatecall`ed — a
 `forge script` broadcast deploys and links them automatically; a raw `cast` deploy does not, which is
 why B.1 is a forge script at all. Each library is its own tx, so the Base per-tx gas cap
 (16,777,216) applies per `CREATE` and the 200% multiplier clears all of them. The template's

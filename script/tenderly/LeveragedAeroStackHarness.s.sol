@@ -95,7 +95,7 @@ contract LeveragedAeroStackHarness is Script {
     ///      passes `--unlocked --sender DEPLOYER_EOA`).
     ///
     ///      The template links THREE delegatecall libraries (`LeveragedAeroManager`,
-    ///      `LeveragedAeroValuation`, `LeveragedAeroFees`). A `forge script` broadcast deploys and links
+    ///      `LeveragedAeroValuation`, `LeveragedAeroVenue`). A `forge script` broadcast deploys and links
     ///      them automatically — a raw `cast` CREATE cannot, which is the whole reason this entrypoint
     ///      exists. Each library is its own tx, so the Base per-tx gas cap (16,777,216) applies per
     ///      CREATE and `--gas-estimate-multiplier 200` clears all of them.
@@ -149,7 +149,7 @@ contract LeveragedAeroStackHarness is Script {
         console.log("  pool     :", p.pool);
         console.log("  legA/legB:", p.weth, p.cbBTC);
         console.log("  feeRecip :", p.feeRecipient);
-        console.log("  mgmt/perf fee bps:", uint256(p.managementFeeBps), uint256(p.performanceFeeBps));
+        console.log("  compound fee bps (in-kind AERO skim):", uint256(p.compoundFeeBps));
         console.log("  width band min/width/max:", uint256(p.minWidth), uint256(p.width), uint256(p.maxWidth));
         // Separate line: console.log tops out at 4 args. Keep the "width band" prefix — Phase B.2 greps it.
         console.log(
@@ -214,9 +214,8 @@ contract LeveragedAeroStackHarness is Script {
         p.maxLtvBps = uint16(vm.envOr("MAX_LTV_BPS", uint256(6500)));
         p.minHealthBps = uint16(vm.envOr("MIN_HEALTH_BPS", uint256(12_000)));
         p.maxSlippageBps = uint16(vm.envOr("MAX_SLIPPAGE_BPS", uint256(100)));
-        // ── fees: recipient defaults to the proposer (the rebalancer ops address) ──
-        p.managementFeeBps = uint16(vm.envOr("MGMT_FEE_BPS", uint256(100))); // 1%/yr
-        p.performanceFeeBps = uint16(vm.envOr("PERF_FEE_BPS", uint256(1000))); // 10% over HWM
+        // ── fee: the in-kind harvest skim; recipient defaults to the proposer (the rebalancer ops address) ──
+        p.compoundFeeBps = uint16(vm.envOr("COMPOUND_FEE_BPS", uint256(500))); // 5% of each AERO tranche
         p.feeRecipient = vm.envOr("FEE_RECIPIENT", vm.envOr("MAMO_REBALANCER", DEF_REBALANCER));
     }
 

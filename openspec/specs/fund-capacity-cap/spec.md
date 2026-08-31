@@ -64,16 +64,16 @@ the fund is back under the ceiling.
 - **THEN** the freed capacity is immediately available to any depositor, because the ceiling is
   measured against live NAV rather than a high-water mark
 
-### Requirement: Fee-share issuance is never gated on capacity
+### Requirement: The fee is never gated on capacity
 
-Share issuance for protocol / performance / management fees SHALL NOT be subject to the capacity
-ceiling. Fees are an accounting event rather than new capital, and the strategy mints them
-best-effort, so a capacity-blocked fee mint would defer fees indefinitely instead of reverting.
+The strategy's fee SHALL NOT be subject to the capacity ceiling. The fee is an in-kind skim of the
+harvested reward tranche, paid in the reward token rather than issued as shares, so it adds no capital
+to the fund and the ceiling has nothing to measure it against.
 
-#### Scenario: A fee crystallisation succeeds against a full fund
+#### Scenario: A harvest pays its fee against a full fund
 
-- **WHEN** the fund is at or above its capacity ceiling and a fee crystallisation mints fee-shares
-- **THEN** the mint succeeds
+- **WHEN** the fund is at or above its capacity ceiling and a harvest skims its in-kind fee
+- **THEN** the skim succeeds
 
 ### Requirement: The remaining capacity is readable
 

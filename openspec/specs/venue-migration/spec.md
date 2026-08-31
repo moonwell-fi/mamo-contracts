@@ -86,7 +86,7 @@ The migration SHALL apply every venue validation enforced at strategy initializa
 
 ### Requirement: Share-ledger continuity across migration
 
-A venue migration SHALL NOT change the vault, the share token, users' share balances, the high-water mark, or any pending redeem request. Because migration requires a flat book, the strategy's NAV immediately before and immediately after the venue rewrite SHALL be identical (its idle USDC balance), so share pricing is continuous across the migration. Deposits SHALL remain permitted throughout the flatten–migrate–redeploy sequence.
+A venue migration SHALL NOT change the vault, the share token, users' share balances, the fee configuration, or any pending redeem request. Because migration requires a flat book, the strategy's NAV immediately before and immediately after the venue rewrite SHALL be identical (its idle USDC balance), so share pricing is continuous across the migration. Deposits SHALL remain permitted throughout the flatten–migrate–redeploy sequence.
 
 #### Scenario: Pending redeem request survives migration
 

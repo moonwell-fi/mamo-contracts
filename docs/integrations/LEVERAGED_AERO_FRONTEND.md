@@ -177,15 +177,15 @@ function owner() external view returns (address);
   that arrived some other way (a plain transfer to the account, a deposit remainder), and
   `claimWithdrawnUsdc()` sweeps it. Normally zero; surface it only when non-zero.
 
-> **Never cache a quote across blocks.** Fees crystallize inside user transactions and supply/NAV move,
-> so `previewWithdraw` and any derived `minShares` / `minAssetsOut` must come from a fresh read in the
-> same UX step as the tx.
+> **Never cache a quote across blocks.** NAV and supply move every block, so `previewWithdraw` and any
+> derived `minShares` / `minAssetsOut` must come from a fresh read in the same UX step as the tx.
 
-> **Fees at launch — don't promise what isn't charged.** The **management** and **performance** fees
-> are the only fee legs, and they are the strategy clone's own init params — read
-> `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
-> hardcoding a schedule in copy, and treat any "APY net of fees" display as moot for whichever legs read
-> zero.
+> **Fees at launch — don't promise what isn't charged.** There is exactly ONE fee leg: a **5% in-kind
+> skim of the AERO harvested at each `compound`**, paid to `feeRecipient` in AERO. It never touches a
+> user transaction — no deposit, withdrawal or quote is fee-adjusted, and no fee shares are ever minted,
+> so a share balance is never diluted by a fee. Read `compoundFeeBps` off the strategy's `layout()`
+> instead of hardcoding a schedule in copy (`0` means a fee-free clone), and describe it as a haircut on
+> **yield**, which is what "APY net of fees" already reflects.
 
 ### Describing the position — don't hardcode "cbBTC + ETH"
 

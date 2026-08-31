@@ -73,7 +73,8 @@
 #     expected-error list below needs no new entry. Immutable per clone: widening it means redeploying.
 #   TARGET_LTV_BPS/MAX_LTV_BPS/MIN_HEALTH_BPS/MAX_SLIPPAGE_BPS
 #   MAX_DELAY/GRACE_PERIOD/TWAP_WINDOW/CALM_DEVIATION_TICKS
-#   MGMT_FEE_BPS (100) / PERF_FEE_BPS (1000) / FEE_RECIPIENT (= MAMO_REBALANCER)
+#   COMPOUND_FEE_BPS (500) — the in-kind AERO skim taken at compound; cap 1000. / FEE_RECIPIENT
+#     (= MAMO_REBALANCER)
 #   VAULT_NAME / VAULT_SYMBOL
 #   TENDERLY_VNET_PUBLIC_RPC_URL  recorded into leveraged-aero-vnet.json
 #

@@ -148,12 +148,9 @@ library LeveragedAeroVenue {
         uint256 tokenId; // active CL position; 0 == flat book
         int24 posTickLower;
         int24 posTickUpper;
-        // fee params + state
-        uint16 managementFeeBps;
-        uint16 performanceFeeBps;
+        // fee params
+        uint16 compoundFeeBps; // in-kind skim of each harvested AERO tranche, bps
         address feeRecipient;
-        uint256 hwmPerShare; // HWM nav-per-share (1e18 WAD), 0 until first deposit
-        uint256 lastFeeAccrualTimestamp;
         // ── appended for the L9 compound oracle floor (keep byte-identical in the strategy/manager) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
         // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
@@ -359,23 +356,15 @@ library LeveragedAeroVenue {
         } catch {
             return (0, false);
         }
-        // Simulate the pending crystallise the executed `redeem` performs, in a try/catch so a revert
-        // degrades to `(0, false)` symmetrically with the other preview failure modes.
-        uint256 supplyPost;
-        try self.simulateCrystallizeSelf(navPre, supply) returns (uint256 sp) {
-            supplyPost = sp;
-        } catch {
-            return (0, false);
-        }
-        assetsOut = Math.mulDiv(shares, navPre, supplyPost);
+        assetsOut = Math.mulDiv(shares, navPre, supply);
         // Mirror `redeem`'s `ZeroAssetsOut` guard: never quote a payout the executed path would revert on.
         if (assetsOut == 0) return (0, false);
-        // Mirror the executed full-redeem flat-book guard, on the same post-crystallise predicate the
-        // strategy computes: a full fast redeem of a book with a live LP is always refused, so advise async.
-        if (shares == supplyPost && _layout().tokenId != 0) return (assetsOut, false);
+        // Mirror the executed full-redeem flat-book guard: a full fast redeem of a book with a live LP is
+        // always refused, so advise async.
+        if (shares == supply && _layout().tokenId != 0) return (assetsOut, false);
         // Idle-first (mirror `fastRedeemImpl`): the gate only sees the collateral-funded remainder.
         uint256 idle = IERC20(_layout().usdc).balanceOf(address(this));
-        uint256 idleShare = Math.mulDiv(idle, shares, supplyPost);
+        uint256 idleShare = Math.mulDiv(idle, shares, supply);
         uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, idle);
         if (fromCollateral == 0) return (assetsOut, true); // idle alone covers it — no LTV constraint
         // Predict the executed gate by RUNNING it: `_fastGate` is the same function `fastRedeemImpl`
@@ -805,11 +794,8 @@ library LeveragedAeroVenue {
         v.tokenId = $.tokenId;
         v.posTickLower = $.posTickLower;
         v.posTickUpper = $.posTickUpper;
-        v.managementFeeBps = $.managementFeeBps;
-        v.performanceFeeBps = $.performanceFeeBps;
+        v.compoundFeeBps = $.compoundFeeBps;
         v.feeRecipient = $.feeRecipient;
-        v.hwmPerShare = $.hwmPerShare;
-        v.lastFeeAccrualTimestamp = $.lastFeeAccrualTimestamp;
         v.aeroUsdFeed = $.aeroUsdFeed;
         v.nextRedeemRequestId = $.nextRedeemRequestId;
         v.cbBTCDecimals = $.cbBTCDecimals;

@@ -257,8 +257,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
         p.maxSlippageBps = 100;
-        p.managementFeeBps = 0;
-        p.performanceFeeBps = 0;
+        p.compoundFeeBps = 0;
         p.feeRecipient = address(0);
     }
 
@@ -1373,7 +1372,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
     // ==================== migrate: happy paths ====================
 
-    function testMigratePreservesNavSharesAndHwm() public {
+    function testMigratePreservesNavAndShares() public {
         _execute(SEED);
         usdc.mint(lp, 100_000e6);
         vm.startPrank(lp);
@@ -1385,7 +1384,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _stage(_venueBParams());
 
         uint256 navBefore = strategy.nav();
-        uint256 hwmBefore = strategy.layout().hwmPerShare;
+        uint16 skimBefore = strategy.layout().compoundFeeBps;
 
         vm.expectEmit(true, true, false, true, address(strategy));
         emit LeveragedAeroVenue.VenueMigrated(address(pool), address(poolB));
@@ -1394,7 +1393,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         // NAV + share ledger continuity across the rewrite.
         assertEq(strategy.nav(), navBefore, "NAV identical across the venue rewrite");
         assertEq(vault.balanceOf(lp), lpShares, "share balances untouched");
-        assertEq(strategy.layout().hwmPerShare, hwmBefore, "HWM untouched");
+        assertEq(strategy.layout().compoundFeeBps, skimBefore, "the fee config is not venue state");
         assertEq(strategy.layout().stagedVenueHash, bytes32(0), "staged hash consumed");
     }
 
@@ -1599,7 +1598,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
 
     /// @dev Same, for the packed `hedgedDebtA | hedgedDebtB` slot.
     function _writeHedgedDebt(uint128 a, uint128 b) internal {
-        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 26), bytes32((uint256(b) << 128) | uint256(a)));
+        vm.store(address(strategy), bytes32(uint256(LAYOUT_SLOT) + 24), bytes32((uint256(b) << 128) | uint256(a)));
         (uint128 ra, uint128 rb) = strategy.hedgedDebt();
         assertEq(ra, a, "hedgedDebtA slot offset drifted");
         assertEq(rb, b, "hedgedDebtB slot offset drifted");

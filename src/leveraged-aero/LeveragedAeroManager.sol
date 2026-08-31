@@ -75,6 +75,9 @@ library LeveragedAeroManager {
     ///         fail-opens: `…Degraded` = a GUARD fell back, `…Deferred` = an optional ACTION was skipped.
     event RedeemSweepFloorsDegraded();
 
+    /// @notice `compoundImpl` skimmed `aeroAmount` of the harvested tranche to `recipient`, in AERO (18dp).
+    event CompoundFeePaid(address indexed recipient, uint256 aeroAmount);
+
     // ── Constants (compile-time literals, duplicated from the strategy) ──
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
     ///      minimum so a rescue doesn't land on the threshold and immediately re-trigger.
@@ -131,12 +134,9 @@ library LeveragedAeroManager {
         uint256 tokenId; // active CL position; 0 == flat book
         int24 posTickLower;
         int24 posTickUpper;
-        // fee params + state
-        uint16 managementFeeBps;
-        uint16 performanceFeeBps;
+        // fee params
+        uint16 compoundFeeBps; // in-kind skim of each harvested AERO tranche, bps
         address feeRecipient;
-        uint256 hwmPerShare; // HWM nav-per-share (1e18 WAD), 0 until first deposit
-        uint256 lastFeeAccrualTimestamp;
         // ── appended for the L9 compound oracle floor (keep byte-identical in the strategy) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
         // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
@@ -379,14 +379,17 @@ library LeveragedAeroManager {
         _assertHealthy();
     }
 
-    /// @notice Compound AERO rewards (body of the strategy's `compound`): claim AERO → swap ALL to
-    ///         USDC via the Aerodrome v2 volatile pool (deepest AERO/USDC on Base, bounded by
-    ///         `minUsdcOut`) → redeploy the proceeds at target leverage via `deployIdleImpl`. No-op
-    ///         when there's no position or no AERO. Fee crystallisation lives in the strategy
-    ///         entrypoint, NOT here.
+    /// @notice Compound AERO rewards (body of the strategy's `compound`): claim AERO → skim the in-kind
+    ///         harvest fee → swap the REMAINDER to USDC via the Aerodrome v2 volatile pool (deepest
+    ///         AERO/USDC on Base, bounded by `minUsdcOut`) → redeploy the proceeds at target leverage via
+    ///         `deployIdleImpl`. No-op when there's no position or no AERO.
     /// @dev The redeploy is ATOMIC with the harvest: anything that fails the deploy path reverts the whole
-    ///      call, claim and sale included — see step 5 for why that costs nothing, and for the recovery.
-    /// @param minUsdcOut   Minimum USDC out of the AERO→USDC swap (slippage guard, on GROSS usdcOut).
+    ///      call, claim, skim and sale included — see step 6 for why that costs nothing, and the recovery.
+    /// @dev THE SKIM IS EXCLUSIVE TO THE HARVEST: the settle / flatten / async-redeem tranche sales route
+    ///      through `LeveragedAeroVenue._sellRewardBalance` and skim nothing — they are EXITS, and a fee
+    ///      there would charge the same tranche twice.
+    /// @param minUsdcOut   Minimum USDC out of the AERO→USDC swap — quoted on the POST-SKIM sell amount,
+    ///                     which is what the router actually receives.
     /// @param minLiquidity Minimum CL liquidity on the redeploy (slippage guard).
     function compoundImpl(uint256 minUsdcOut, uint256 minLiquidity) public {
         Layout storage $ = _layout();
@@ -402,31 +405,43 @@ library LeveragedAeroManager {
         uint256 aeroBal = IERC20(aero).balanceOf(address(this));
         if (aeroBal == 0) return; // no rewards accrued — clean no-op
 
-        // 2. Derive the on-chain oracle floor from a hardened AERO/USD read (8dp, fail-closed): a
+        // 2. THE FUND'S FEE, IN KIND. Sized (rounding DOWN) ahead of every bound below, so both the
+        //    caller's `minUsdcOut` and the oracle floor price only what really reaches the router.
+        uint256 feeAmt = Math.mulDiv(aeroBal, uint256($.compoundFeeBps), 10_000);
+        uint256 sellAmt = aeroBal - feeAmt;
+
+        // 3. Derive the on-chain oracle floor from a hardened AERO/USD read (8dp, fail-closed): a
         //    stale/broken feed reverts the whole compound (defer the harvest, intended posture).
         //    THE PEG LEG IS PART OF THE FLOOR, not an assumed 1.00: the floor is post-checked against
         //    `usdcOut`, a USDC-FACE amount, so a bare `/1e20` goes lax below peg and bricks `compound`
         //    above it. `_tokenToUsdc` is the basis the debt, health and settle-sweep paths already use.
-        uint256 floor = _tokenToUsdc(aeroBal, 18, _readUsd8($.aeroUsdFeed), _readUsd8($.usdcFeed))
+        uint256 floor = _tokenToUsdc(sellAmt, 18, _readUsd8($.aeroUsdFeed), _readUsd8($.usdcFeed))
             * (10000 - uint256($.maxSlippageBps)) / 10000;
         //    DUST NO-OP, as `LeveragedAeroVenue._sellRewardBalance`: a balance worth under one micro-USD
         //    floors to 0 and the router fills it at 0, which the nonzero `minUsdcOut` would then revert —
         //    so reward-token dust donated to a gauge with no live emissions would brick `compound`.
+        //    Kept ahead of the skim: a dust no-op must pay nothing, or the recipient drains the unsellable
+        //    balance a cent at a time.
         if (floor == 0) return;
 
-        // 3. Swap ALL claimed AERO → USDC via the Aerodrome v2 volatile pool, passing the caller's
-        //    minUsdcOut to the router. The measured-fill floor below is the robust guard (router-honesty
-        //    independent); the effective bound is max(minUsdcOut, floor), enforced independently.
-        //    The venue mechanics (Route[] + the v2 router interface) live in
+        // 4. Pay the skim, then swap the REMAINDER → USDC via the Aerodrome v2 volatile pool, passing the
+        //    caller's minUsdcOut to the router. The measured-fill floor below is the robust guard
+        //    (router-honesty independent); the effective bound is max(minUsdcOut, floor), enforced
+        //    independently. The venue mechanics (Route[] + the v2 router interface) live in
         //    `LeveragedAeroValuation.swapAeroToUsdc` for EIP-170 headroom; it returns the MEASURED fill,
         //    so the post-check below is unchanged and still independent of what the router claims.
-        uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(aero, $.usdc, aeroBal, minUsdcOut);
+        if (feeAmt > 0) {
+            address recipient = $.feeRecipient;
+            IERC20(aero).safeTransfer(recipient, feeAmt);
+            emit CompoundFeePaid(recipient, feeAmt);
+        }
+        uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(aero, $.usdc, sellAmt, minUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor(); // post-check on the measured fill (L9)
         if (usdcOut == 0) return; // unreachable when floor > 0 (aeroBal > 0), kept as defence
 
         uint256 redeploy = usdcOut;
 
-        // 4. RE-HEDGE ACCRUED BORROW INTEREST out of the harvest, BEFORE the redeploy. Interest grows the
+        // 5. RE-HEDGE ACCRUED BORROW INTEREST out of the harvest, BEFORE the redeploy. Interest grows the
         //    debt leg without growing the LP leg, so without this step every harvest left the book a
         //    little more SHORT and nothing ever removed it (the fund is sold as delta-neutral on leg A).
         //    Buying that interest back and repaying it lands the financing cost as NAV DRAG — less
@@ -437,7 +452,7 @@ library LeveragedAeroManager {
         //    debt and the post-op `_assertHealthy` sees the final book.
         redeploy -= _hedgeInterestDrift(redeploy);
 
-        // 5. Redeploy the net yield into the position at target leverage (supply → borrow →
+        // 6. Redeploy the net yield into the position at target leverage (supply → borrow →
         //    increaseLiquidity → restake → _assertHealthy). Any pre-existing idle USDC is left
         //    untouched — compound deploys the AERO yield, nothing else.
         //    THE REDEPLOY IS ATOMIC WITH THE HARVEST, DELIBERATELY: `DegenerateRange`, the calm gate,

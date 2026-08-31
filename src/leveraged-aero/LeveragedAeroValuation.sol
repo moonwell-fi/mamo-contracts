@@ -5,7 +5,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {FeeConstants} from "./sherwood/FeeConstants.sol";
 import {ICToken} from "./sherwood/interfaces/ICToken.sol";
 import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
 import {ICLGauge, ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
@@ -132,10 +131,8 @@ library LeveragedAeroValuation {
     error DeleverageTriggerAboveCF();
     /// @notice A non-zero fee rate with a zero recipient.
     error FeeRecipientRequired();
-    /// @notice Performance fee above the protocol-wide cap.
-    error PerformanceFeeTooHigh();
-    /// @notice Management fee above the factory's cap.
-    error ManagementFeeTooHigh();
+    /// @notice Harvest skim above `MAX_COMPOUND_FEE_BPS`.
+    error CompoundFeeTooHigh();
     /// @notice `Comptroller.markets()` failed, returned short, or reported a zero collateral factor.
     error ComptrollerCallFailed();
 
@@ -148,8 +145,9 @@ library LeveragedAeroValuation {
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
 
-    /// @dev Annual management-fee ceiling (bps) for `checkFeeParams`; mirrors `SyndicateFactory` (5%/yr).
-    uint16 private constant MAX_MANAGEMENT_FEE_BPS = 500;
+    /// @notice Ceiling on the in-kind harvest skim, in bps (10%) — mirrors `MamoMultiMarketStrategy`'s
+    ///         `MAX_COMPOUND_FEE`, the same shape this fee copies. Enforced at init by `checkFeeParams`.
+    uint16 internal constant MAX_COMPOUND_FEE_BPS = 1000;
 
     /// @dev Reference liquidity for the `assetModeSplit` ratio probe. Only the RATIO of the two
     ///      required amounts matters (both are linear in L for a fixed range + sqrtP, so L cancels),
@@ -365,13 +363,11 @@ library LeveragedAeroValuation {
         if (maxSlippageBps == 0 || maxSlippageBps > 1000) revert OracleParamOutOfRange();
     }
 
-    /// @notice The INIT-ONLY fee rungs: a non-zero rate needs a recipient, and M3 caps both rates.
-    function checkFeeParams(uint16 managementFeeBps, uint16 performanceFeeBps, address feeRecipient) public pure {
-        if ((managementFeeBps != 0 || performanceFeeBps != 0) && feeRecipient == address(0)) {
-            revert FeeRecipientRequired();
-        }
-        if (performanceFeeBps > FeeConstants.MAX_PERFORMANCE_FEE_BPS) revert PerformanceFeeTooHigh();
-        if (managementFeeBps > 500) revert ManagementFeeTooHigh();
+    /// @notice The INIT-ONLY fee rung: a non-zero skim needs a recipient, and the skim is capped.
+    /// @dev A zero skim with a zero recipient stays legal (a fee-free clone).
+    function checkFeeParams(uint16 compoundFeeBps, address feeRecipient) public pure {
+        if (compoundFeeBps != 0 && feeRecipient == address(0)) revert FeeRecipientRequired();
+        if (compoundFeeBps > MAX_COMPOUND_FEE_BPS) revert CompoundFeeTooHigh();
     }
 
     /// @notice THE ONE PREDICATE validating a `(width, skewBps)` pair before `skewedTickRange` consumes it

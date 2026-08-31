@@ -203,8 +203,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
         p.maxSlippageBps = 100;
-        p.managementFeeBps = 0; // fees off — these tests are about token flows
-        p.performanceFeeBps = 0;
+        p.compoundFeeBps = 0; // fee off — these tests are about token flows
         p.feeRecipient = address(0);
     }
 
