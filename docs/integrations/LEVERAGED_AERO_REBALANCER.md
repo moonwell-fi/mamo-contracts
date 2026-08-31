@@ -286,7 +286,7 @@ function compound(uint256 minUsdcOut, uint256 minLiquidity) external onlyPropose
 | Errors | `ZeroMinOut`, `BelowOracleFloor`, `UnhealthyPosition`; **`MoonwellRepayFailed(errCode)` from the interest re-hedge**; `MoonwellMintFailed`/`MoonwellBorrowFailed(errCode)`, `InsufficientLiquidity` and (asset-mode) `DegenerateRange()` from the redeploy. A stale/mismatched feed fail-closes the whole call — the AERO + USDC feeds at the swap floor, and the leg + USDC feeds at the hedge. |
 | **The redeploy is ATOMIC with the harvest** | Any of the redeploy errors above unwinds the **whole** call — the `getReward` claim, the fee skim, the AERO sale and the interest hedge included. Nothing is half-done and there is no partial-harvest state to reconcile. It is also **free to wait**: an unclaimed tranche keeps accruing in the gauge rather than decaying, an out-of-range position accrues no new emissions anyway, and the hedge measure is cumulative, so the drift carries to the next harvest. Do not read a reverted `compound` as lost yield. |
 | Recovery when the redeploy is what blocks | `DegenerateRange()` means spot has left the stored range. Either `rerange` (see its row for what that does and does not fix once spot is fully outside the band) or `flatten` + `redeploy`, which claims and sells the tranche and repays the legs on its way through. `InsufficientLiquidity` / calm-gate reverts are ordinary retries. |
-| When to call | On a yield/gas cadence. NAV no longer *steps* at `compound` (§E — `nav()` prices the held tranche **and** `gauge.earned()`), so harvesting is a conversion, not a re-pricing event, and there is no front-run window to close by harvesting promptly. A stale AERO feed intentionally blocks it — defer and retry; that same stale feed also fail-closes `nav()` whenever the gauge has reward value, which with live emissions is essentially always. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
+| When to call | On a yield/gas cadence. NAV no longer *steps* at `compound` (§E — `nav()` prices the held tranche **and** `gauge.earned()`, both net of `compoundFeeBps`), so harvesting is a conversion, not a re-pricing event, and there is no front-run window to close by harvesting promptly — in either direction. A stale AERO feed intentionally blocks it — defer and retry; that same stale feed also fail-closes `nav()` whenever the gauge has reward value, which with live emissions is essentially always. Use `hedgedDebt()` vs. the markets' `borrowBalanceStored` (§E) to see how much drift a harvest will have to buy back, and to verify it went to ~0 afterwards. |
 
 ### `rerange` — reposition the CL range: re-width, re-skew, re-anchor (no swap)
 
@@ -990,15 +990,19 @@ function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns
   2. the **still-unclaimed `gauge.earned(strategy, tokenId)`** on the staked NFT — where a harvest spends
      most of its life, and therefore the larger of the two.
 
-  Both are marked on the same `aeroUsdFeed` (8dp) the sale floor uses. `earned()` is read through a
+  Both are marked on the same `aeroUsdFeed` (8dp) the sale floor uses, and both are marked **net of
+  `compoundFeeBps`** — `amt × (1e4 − compoundFeeBps) / 1e4`, floored — because `compound` skims the
+  tranche in kind before selling, so only that fraction can ever reach the book. `earned()` is read through a
   `try/catch`: the gauge reverts `"NA"` for a tokenId it does not have staked, and that state is exactly
   the state where the tranche has just been auto-claimed into (1) — so the catch-to-0 is correct, not an
   understatement, and the sum is continuous across the unstake. A flat book (`tokenId == 0`) skips the call.
   Three operator consequences:
-  - **NAV no longer steps at `compound`.** Reward value is priced where it sits, so a `compound` is a
-    conversion (AERO → USDC at the same mark), not a jump. There is no longer a window in which a deposit
-    buys in below the true book and collects a slice of someone else's harvest — that was worth ~4.5% of a
-    100k deposit, post-fee, in a single block before this change.
+  - **NAV no longer steps at `compound`.** Reward value is priced where it sits and at the net-to-the-fund
+    amount, so a `compound` is a conversion (AERO → USDC at the same mark), not a jump. There is no longer a
+    window in which a deposit buys in below the true book and collects a slice of someone else's harvest —
+    that was worth ~4.5% of a 100k deposit, post-fee, in a single block before this change — and no window
+    on the way out either: an exit timed just before a harvest pays its pro-rata share of the pending skim
+    instead of leaving it to the stayers.
   - **The reward feed is now a standing `nav()` dependency whenever the gauge is live.** The feed read is
     gated on `heldBalance + earned() > 0`, and with live emissions that sum is essentially always positive —
     so a stale `aeroUsdFeed` **fail-closes `nav()`**: deposits and the priced fast redeem are denied until
@@ -1006,8 +1010,11 @@ function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns
     intentional — a NAV that cannot be computed honestly must not price a deposit — and the async queue is
     unaffected: `fulfillRedeem` never reads `nav()`, so the exit stays open throughout. `compound` clears
     the held half; the `earned()` half returns as soon as the feed does.
-  - **The fee is NOT affected by any of this.** It is an in-kind skim taken at `compound` off the AERO
-    actually claimed, so it is charged on REALISED reward only and is independent of what `nav()` marks.
+  - **The fee is CHARGED on realised reward but MARKED on pending reward.** The skim itself only moves at
+    `compound`, off the AERO actually claimed; `nav()` merely anticipates it by marking the pending tranche
+    net, which is what makes the two timing windows above symmetric. The one residual asymmetry is in
+    holders' favour: the exit paths (`settle`, `flatten`, the async-redeem sweep) sell the tranche **gross**,
+    so they realise slightly more than the mark, never less.
   - **Second-order, accepted:** Slipstream accrues emissions on `rewardGrowthInside`, so the marked
     `earned()` is mildly **tick-influenced**. It is bounded by the calm gate — `nav()` runs the
     spot-vs-TWAP check before pricing anything, so a shove beyond `calmDeviationTicks` fail-closes the whole

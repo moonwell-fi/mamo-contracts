@@ -421,12 +421,12 @@
   },
   {
     "addr": "0x4e962BB3889Bf030368F56810A9c96B83CB3E778",
-    "name": "AERODROME_CL_POOL_CBBTC_USDC",
+    "name": "CBBTC_USDC_CL_POOL",
     "isContract": true
   },
   {
     "addr": "0x6399ed6725cC163D019aA64FF55b22149D7179A8",
-    "name": "AERODROME_CL_GAUGE_CBBTC_USDC",
+    "name": "CBBTC_USDC_CL_GAUGE",
     "isContract": true
   },
   {

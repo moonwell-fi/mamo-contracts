@@ -54,6 +54,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     error TargetLtvExceedsMax();
     error MinHealthTooLow(); // minHealthBps < 10500 (1.05x floor)
     error FeeRecipientRequired();
+    error FeeRecipientIsStrategy(); // feeRecipient == this clone — the skim would never leave
     error MaxLtvExceedsCF(); // maxLtvBps >= Moonwell USDC collateral factor
     error ComptrollerCallFailed();
     error UnhealthyPosition(uint256 ltvBps, uint256 limitBps);
@@ -1172,5 +1173,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         c.gracePeriod = $.gracePeriod;
         c.calmDeviationTicks = $.calmDeviationTicks;
         c.twapWindow = $.twapWindow;
+        // The reward term is marked NET of this skim — only the post-skim fraction can reach the book.
+        c.compoundFeeBps = $.compoundFeeBps;
     }
 }

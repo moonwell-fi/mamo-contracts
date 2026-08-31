@@ -47,6 +47,7 @@ interface IStrategy {
     ///         it for off-chain consumers.
     function positions() external view returns (Position[] memory);
 
-    /// @notice true ⇒ the strategy crystallises its own management/performance fees.
+    /// @notice true ⇒ the strategy takes its own fees internally, so a vault-side settle-fee
+    ///         distribution MUST be skipped or the same profit is charged twice.
     function selfManagesFees() external view returns (bool);
 }

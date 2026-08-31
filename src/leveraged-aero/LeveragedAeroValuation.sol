@@ -71,7 +71,8 @@ interface IAeroV2Factory {
 ///                             Chainlink on the SAME basis as `debt` — so a borrowed leg is
 ///                             never uncounted and a single-position recenter is NAV-neutral.
 ///         - `reward`        = the reward already claimed into the strategy wallet PLUS the unclaimed
-///                             `gauge.earned()`, both priced via the venue's reward feed (`_rewardUsdc`).
+///                             `gauge.earned()`, both priced via the venue's reward feed and marked
+///                             NET of the `compoundFeeBps` harvest skim (`_rewardUsdc`).
 ///
 ///         The CL-leg split uses the oracle sqrtP (the Gamma/Arrakis technique) so the
 ///         mint mark cannot be tick-shoved; the same two feeds price the debt, so the
@@ -133,6 +134,9 @@ library LeveragedAeroValuation {
     error FeeRecipientRequired();
     /// @notice Harvest skim above `MAX_COMPOUND_FEE_BPS`.
     error CompoundFeeTooHigh();
+    /// @notice `feeRecipient` is the clone itself — the skim would be a self-transfer, i.e. a silent
+    ///         no-op on an init-only field with no setter to fix it.
+    error FeeRecipientIsStrategy();
     /// @notice `Comptroller.markets()` failed, returned short, or reported a zero collateral factor.
     error ComptrollerCallFailed();
 
@@ -183,6 +187,7 @@ library LeveragedAeroValuation {
         uint256 gracePeriod; // sequencer grace period (seconds)
         uint16 calmDeviationTicks; // max |spotTick − twapTick| before fail-closed
         uint32 twapWindow; // calm-gate TWAP lookback (seconds)
+        uint16 compoundFeeBps; // `Layout.compoundFeeBps` — haircuts the reward term (see `_rewardUsdc`)
     }
 
     /// @notice The net-equity oracle NAV of the whole levered book, in USDC (6dp).
@@ -363,11 +368,16 @@ library LeveragedAeroValuation {
         if (maxSlippageBps == 0 || maxSlippageBps > 1000) revert OracleParamOutOfRange();
     }
 
-    /// @notice The INIT-ONLY fee rung: a non-zero skim needs a recipient, and the skim is capped.
-    /// @dev A zero skim with a zero recipient stays legal (a fee-free clone).
-    function checkFeeParams(uint16 compoundFeeBps, address feeRecipient) public pure {
+    /// @notice The INIT-ONLY fee rung: a non-zero skim needs a recipient, the skim is capped, and the
+    ///         recipient is not the clone itself.
+    /// @dev A zero skim with a zero recipient stays legal (a fee-free clone). This runs under
+    ///      `initialize`'s DELEGATECALL, so `address(this)` IS the clone: a recipient equal to it would
+    ///      make every skim a self-transfer — the fee silently never leaves, on a field with no setter.
+    ///      `view`, not `pure`, only because of that `address(this)` read.
+    function checkFeeParams(uint16 compoundFeeBps, address feeRecipient) public view {
         if (compoundFeeBps != 0 && feeRecipient == address(0)) revert FeeRecipientRequired();
         if (compoundFeeBps > MAX_COMPOUND_FEE_BPS) revert CompoundFeeTooHigh();
+        if (feeRecipient == address(this)) revert FeeRecipientIsStrategy();
     }
 
     /// @notice THE ONE PREDICATE validating a `(width, skewBps)` pair before `skewedTickRange` consumes it
@@ -989,17 +999,23 @@ library LeveragedAeroValuation {
     ///      revert on a reward probe) and `_earnedRead` / `rewardReadOk` make it observable.
     ///      Gated on the SUM, since `earned()` is non-zero with a zero balance in the steady state.
     ///      FAIL-CLOSED on a stale reward feed while there IS reward value — valuing it at 0 would re-create
-    ///      the mis-pricing this term closes. Accepted consequences: a stale reward feed blocks deposits and
-    ///      the priced fast redeem until `compound` clears both halves (the async queue never reads `nav()`),
-    ///      and the performance fee accrues against unrealised reward value.
+    ///      the mis-pricing this term closes. Accepted consequence: a stale reward feed blocks deposits and
+    ///      the priced fast redeem until `compound` clears both halves (the async queue never reads `nav()`).
     ///      DECIMALS are pinned at 18, matching the `1e18` divisor `compoundImpl` / `_sellRewardBalance`
     ///      apply; `applyVenue` enforces that at init and at every migration and rejects a reward token
     ///      equal to either leg. `c.rewardFeed` is the SAME `Layout.aeroUsdFeed` the sale floor uses.
+    ///
+    ///      MARKED NET OF `compoundFeeBps` (floored, as `compoundImpl`'s own skim rounds): `compound` is
+    ///      the realization path and it skims in kind first, so only that fraction can reach the book.
+    ///      Gross made navPerShare step DOWN at each harvest — an exit timed just before one dodged its
+    ///      share of the fee onto the stayers. Residual asymmetry, deliberately in the holders' favour:
+    ///      the exit paths (`_sellRewardBalance`) realize GROSS, so they beat this mark, never miss it.
     function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
         uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
         (uint256 e,) = _earnedRead(c.gauge, strategy, c.tokenId);
         amt += e;
         if (amt == 0) return 0;
+        amt = Math.mulDiv(amt, 10_000 - uint256(c.compoundFeeBps), 10_000);
         return _usdcValue(amt, 18, _readUsd8(c, c.rewardFeed), pUsdc);
     }
 

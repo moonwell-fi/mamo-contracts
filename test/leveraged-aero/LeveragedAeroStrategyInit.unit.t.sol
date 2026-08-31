@@ -1088,6 +1088,38 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(_init(p).layout().compoundFeeBps, 1000, "ceiling accepted");
     }
 
+    /// @dev THE CLONE MAY NOT PAY ITSELF. `feeRecipient` has no setter, so a recipient equal to the clone
+    ///      would make every skim a self-transfer — the fee silently never leaves, unfixably. The rung
+    ///      reads `address(this)` under `initialize`'s delegatecall into `LeveragedAeroValuation`, which is
+    ///      the CLONE and not the library, so this test is also the proof of that call convention.
+    function testInitRevertsWhenTheCloneIsItsOwnFeeRecipient() public {
+        LeveragedAerodromeCLStrategy s = _clone();
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.feeRecipient = address(s);
+        vm.prank(address(vault));
+        vm.expectRevert(LeveragedAerodromeCLStrategy.FeeRecipientIsStrategy.selector);
+        s.initialize(address(vault), proposer, abi.encode(p));
+
+        // Not a blanket ban on a self-ish recipient: another clone, and the template, are both fine.
+        p.feeRecipient = address(_clone());
+        LeveragedAerodromeCLStrategy ok = _clone();
+        vm.prank(address(vault));
+        ok.initialize(address(vault), proposer, abi.encode(p));
+        assertEq(ok.layout().feeRecipient, p.feeRecipient, "a sibling clone is a legal payee");
+    }
+
+    /// @dev The rung is unconditional — a ZERO skim to the clone is rejected too. `compoundFeeBps` is
+    ///      init-only, so "harmless while the skim is off" is a state that can never be repaired.
+    function testTheSelfRecipientRungBindsEvenWithTheSkimOff() public {
+        LeveragedAerodromeCLStrategy s = _clone();
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.compoundFeeBps = 0;
+        p.feeRecipient = address(s);
+        vm.prank(address(vault));
+        vm.expectRevert(LeveragedAerodromeCLStrategy.FeeRecipientIsStrategy.selector);
+        s.initialize(address(vault), proposer, abi.encode(p));
+    }
+
     /// @dev The production value survives init verbatim — a mutation that stored the wrong field, or
     ///      dropped the store, changes this number.
     function testInitPersistsTheProductionSkim() public {
@@ -1410,12 +1442,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(uint256(legBHedged), 7, "hedgedDebtB is STILL slot+1 offset 16 (high 16 bytes)");
     }
 
-    // ==================== COMPOUND FEE-CRYSTALLISE ROUTING ====================
+    // ==================== COMPOUND ON A FLAT BOOK ====================
     //
     // `compound` runs against a FLAT book here: `nav()` reads its `tokenId == 0` branch (face value
-    // of idle USDC, no oracle) and `compoundImpl` returns immediately on the same condition. That
-    // leaves the fee crystallise — the part under test — as the only thing that executes, so the
-    // routing can be exercised without Slipstream/Moonwell venues.
+    // of idle USDC, no oracle) and `compoundImpl` returns immediately on the same condition — so the
+    // keeper-poll no-op can be pinned without Slipstream/Moonwell venues.
 
     /// @dev Force the lifecycle state without running `_execute()` / `_settle()` (both of which need
     ///      live Slipstream + Moonwell venues). `_state` shares slot 1 with `_proposer` (offset 0)

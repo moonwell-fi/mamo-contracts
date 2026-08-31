@@ -28,14 +28,15 @@ Delta against the baseline:
 | Any-pool init + validation | Leg decimals read from the tokens at init and bounded `[2, 18]` (were `CBBTC_DECIMALS` / `WETH_DECIMALS` constants); pool token ordering derived from `pool.token0()` (`wethIsToken0`, mapped through `_tokens01` / `_amounts01`) instead of the manager's hardwired `token0 == WETH`; per-leg swap-pool `tickSpacing` inputs replace three hardcoded `int24(100)` literals; native-ETH borrow wrap made conditional (`wethDeliversNative`); init venue guards (pool `tickSpacing` + token-set match, Moonwell `underlying()` binding, reject USDC-as-leg and reward-token-as-leg) | `978e5af` |
 | Per-cycle rerange width | `rerange(uint24 width, uint256 minLiq0, uint256 minLiq1)` validated against an init-time `[minWidth, maxWidth]` band on the `tickSpacing` grid and persisted; `RANGE_TICK_SPACINGS` deleted; genesis mints at the init width; `WidthOutOfBounds()` = `0x1f9f54af` | `978e5af` |
 | Per-cycle rerange **skew** | `rerange` grew a second argument — `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)`. `skewBps` is the fraction of `width` placed **below** the current tick (bps, `10000` = 1.00; `5000` = centered, the previous fixed behaviour and the genesis/ops default). `lowerSpan = width × skewBps / 10000`, `upperSpan = width − lowerSpan`, both bounds still aligned DOWN to `tickSpacing`. Stored in `Layout` and surfaced on `layout()` exactly like `width`, so a flat-book `rerange` persists both and the next genesis mint re-mints at the stored pair. `centeredTickRange` → `skewedTickRange(pool, tickSpacing, width, skewBps)`; `rerangeImpl` narrowed to `(minLiq0, minLiq1)` and reads both knobs from storage (the persists moved to the strategy). **`WidthOutOfBounds()` renamed `OutOfBounds()` = `0xb4120f14`** and reused for both knobs | *this change* |
-| Skew governance band + validation relocation | Two new fields, `minSkewBps` / `maxSkewBps`, **inserted** into `InitParams` and `Layout` immediately after `skewBps` (which shifted `hedgedDebtA`/`hedgedDebtB` down two; they sit at `layout()` tuple positions 49/50 after the protocol-fee removal). Validated once at init and re-checked on **every** `rerange`, raising the existing `OutOfBounds()` — no new selector. Width **and** skew validation moved out of the strategy's private `_checkWidth`/`_checkSkew` into `LeveragedAeroValuation.checkRange(width, skewBps, tickSpacing, minWidth, maxWidth, minSkewBps, maxSkewBps)`; behaviour is identical to the previous checks plus the band. Harness defaults `MIN_SKEW_BPS=1000` / `MAX_SKEW_BPS=9000` | *this change* |
+| Skew governance band + validation relocation | Two new fields, `minSkewBps` / `maxSkewBps`, **inserted** into `InitParams` and `Layout` immediately after `skewBps` (which shifted `hedgedDebtA`/`hedgedDebtB` down two; they sit at `layout()` tuple positions 46/47 after the fee replacement below). Validated once at init and re-checked on **every** `rerange`, raising the existing `OutOfBounds()` — no new selector. Width **and** skew validation moved out of the strategy's private `_checkWidth`/`_checkSkew` into `LeveragedAeroValuation.checkRange(width, skewBps, tickSpacing, minWidth, maxWidth, minSkewBps, maxSkewBps)`; behaviour is identical to the previous checks plus the band. Harness defaults `MIN_SKEW_BPS=1000` / `MAX_SKEW_BPS=9000` | *this change* |
 | Review remediation — asset-mode `rerangeImpl` idle draw | `rerangeImpl` **snapshots the leg-B balance before the unwind** and offers the mint only what the unwind itself collected. Previously it passed the whole leg-B slot balance as `amountDesired`, and in asset-mode that slot **is** USDC — so a rerange could pull stayers' idle USDC, including the redeemers' cover reserve, into the LP. Value-conserving but not the operator's intent, and it silently shrank the fast-redeem buffer. Now structurally impossible | *this change* |
 | Review remediation — need-sized `_rebalanceCover` | The lever-down / `deleverage` cover swap now sells **only the surplus required to cover the shortfall** and keeps the remainder, instead of selling the whole surplus leg balance. Shrinks the swapped notional (less realized slippage and venue fee on every lever-down) and leaves the unsold surplus as an idle leg balance that `nav()` prices and that still hedges its own debt | *this change* |
-| Review remediation — `nav()` prices the gauge reward (held balance **and** `earned()`) | `LeveragedAeroValuation.netEquityUsdc` gained a `reward` term covering BOTH halves of the claim: the reward token already claimed into the strategy (every `_unwindLiquidity`'s `gauge.withdraw` auto-claims one) **and** the still-unclaimed `gauge.earned(strategy, tokenId)`, both priced on `Layout.aeroUsdFeed` — the same feed the sale floor uses and the same field a venue migration rewrites, threaded through three new `Config` members (`gauge`, `tokenId`, `rewardFeed`). Previously unpriced, so a deposit placed before the next `compound()` captured a pro-rata slice of the harvest step (~4.5% of a 100k deposit, post-fee, in one block with only the held half priced). `earned()` is reached through a **`try/catch`** — the gauge is a separate contract, so its `"NA"` revert on an unstaked tokenId is catchable, and catching to 0 is *correct*: that state is exactly when the tranche has just been auto-claimed into the held half. The feed read is gated on `held + earned > 0`. **Accepted consequences:** with live emissions the reward feed becomes a standing `nav()` dependency (a stale feed fail-closes deposits and the priced fast redeem; the async queue is unaffected), and the performance fee now accrues against unrealised, unclaimed rewards continuously. The marked `earned()` is mildly tick-influenced (`rewardGrowthInside`) — second-order, bounded by the calm gate | *this change* |
+| Review remediation — `nav()` prices the gauge reward (held balance **and** `earned()`) | `LeveragedAeroValuation.netEquityUsdc` gained a `reward` term covering BOTH halves of the claim: the reward token already claimed into the strategy (every `_unwindLiquidity`'s `gauge.withdraw` auto-claims one) **and** the still-unclaimed `gauge.earned(strategy, tokenId)`, both priced on `Layout.aeroUsdFeed` — the same feed the sale floor uses and the same field a venue migration rewrites, threaded through three new `Config` members (`gauge`, `tokenId`, `rewardFeed`). Previously unpriced, so a deposit placed before the next `compound()` captured a pro-rata slice of the harvest step (~4.5% of a 100k deposit, post-fee, in one block with only the held half priced). `earned()` is reached through a **`try/catch`** — the gauge is a separate contract, so its `"NA"` revert on an unstaked tokenId is catchable, and catching to 0 is *correct*: that state is exactly when the tranche has just been auto-claimed into the held half. The feed read is gated on `held + earned > 0`. **Accepted consequences:** with live emissions the reward feed becomes a standing `nav()` dependency (a stale feed fail-closes deposits and the priced fast redeem; the async queue is unaffected). The marked claim is priced NET OF THE HARVEST SKIM (see the fee row below), so the mark is what the book can actually realize. The marked `earned()` is mildly tick-influenced (`rewardGrowthInside`) — second-order, bounded by the calm gate | *this change* |
 | Review remediation — oracle floors on the redeem leg sweeps | `redeemUnwindImpl` step E's two residual leg→USDC sweeps were the last `minOut == 0` swaps in the system (loss borne by the redeemer; stayers insulated by the pre-unwind snapshot). Each now clears `oracleValue(amount ACTUALLY SOLD) × (1 − maxSlippageBps)` — the `_rebalanceCover` / `_sweepAtOracleFloor` idiom, in `LeveragedAeroValuation.sweepFloors` off the existing `Config`. **DEADMAN-PRESERVING:** the derivation is reached through a try-able external hop (`LeveragedAerodromeCLStrategy.redeemSweepFloors`, the `try this.nav()` idiom — the manager runs under DELEGATECALL, so its own reads are internal and uncatchable), and the manager treats a revert as floor = 0, so `emergencyRedeem` still completes with the oracle down. A sandwicher cannot force a feed stale, so the floor binds whenever it can | *this change* |
 | Review remediation — the async redeem sells the tranche its own unwind claims | `redeemUnwindImpl` → `_unwindLiquidity` → `gauge.withdraw` auto-claims the whole accrued reward tranche DURING the redeem — on **every** async redeem, since the redeem's own unwind creates the balance — and step E sweeps only the two leg tokens, so the redeemer was paid `f × (assets − reward)` while 100% of the tranche stayed with the stayers. With `nav()` pricing that reward this was a payout that did not match the NAV the shares were measured against, not merely an unfairness. The redeem now runs the same best-effort, oracle-floored sale the terminal `settle` uses — reached through the strategy's new `sellRedeemRewardSelf(shares, supply)` wrapper (the manager is at the EIP-170 cap, so the measure + split live on the strategy, and it holds the `try/catch` itself) — and returns `(1−f)` of the proceeds for `stayersIdle` to reserve, so the redeemer gets exactly their pro-rata slice and the stayers keep theirs. `sellSettleRewardSelf`/`sellSettleRewardImpl` renamed `sellRewardSelf`/`sellRewardImpl` now that two paths share them. **Fail-open**, for the same deadman reason as the sweep floors: the sale fails closed inside its own frame (swap rolls back whole, never sold blind), the redeem swallows it, and the residual is exactly the pre-fix behaviour. `flattenImpl` is untouched — it reuses `settleImpl`, not `redeemUnwindImpl`, and keeps its fail-closed proposer floor | *this change* |
 | Review remediation — the fail-opens are marked on chain | The three deliberate `catch {}` fail-opens this stack added left **no on-chain trace**, and none of them can distinguish its expected cause (stale feed, paused aggregator, broken route) from an out-of-gas or any other revert. Two new events close that: `RedeemSweepFloorsDegraded()` (declared on `LeveragedAeroManager`, emitted from the strategy address via delegatecall and mirrored in its ABI — the redeem's closing leg sweeps ran with zero min-out floors, i.e. unbounded) and `RedeemRewardSaleDeferred()` (the async redeem's reward sale was skipped, so that redeemer got `f × (assets − reward)`). Both join the existing `SettleRewardSaleDeferred()` under one naming rule: **`…Deferred`** = an optional ACTION was skipped, **`…Degraded`** = a GUARD fell back and the op ran with less protection. Behaviour is unchanged — nothing reverts that did not revert before | *this change* |
 | Review remediation — pro-rata interest-hedge allocation | `LeveragedAeroValuation.hedgeBorrowInterest` split into a MEASURE phase (`_measureLeg`, both legs, `borrowBalanceCurrent` read once per leg) and a SPEND phase (`_spendLeg`), with the shared harvest budget allocated `budget × costᵢ / (costA + costB)` and leg B taking the exact complement of leg A's share. Previously leg A got the whole budget and leg B the remainder, and the spend path returned on `budget == 0` **before** reading its market — so whenever leg A's drift priced at or above the harvest, leg B was never measured and the residual short concentrated 100% on one leg. Nothing was lost (the remainder persists in `debt − hedged`), but a partial hedge rotated the exposure instead of shrinking it evenly. Full-budget behaviour is unchanged (each leg's spend is capped at its own cost) and asset-mode (`marketB == 0`) keeps its single-leg path | *this change* |
+| **Fund fee replaced — one in-kind harvest skim** | The Sherwood-era fund fee is **gone**: `LeveragedAeroFees.sol` (streaming management fee + high-water-mark performance fee) and `sherwood/FeeConstants.sol` are deleted, along with the `managementFeeBps` / `performanceFeeBps` / `hwmPerShare` / `lastFeeAccrualTimestamp` fields and the entire crystallise plumbing (`_crystallizeFees` / `_simulateCrystallize` / `crystallizeFeesSelf` / `_crystallizeBestEffort`, the `FeeCrystallizeDeferred` event and its `OP_*` codes, and the four best-effort call sites in deposit / compound / fast redeem / `_proportionalRedeem`). In its place: **one init-only `compoundFeeBps`** (bps, `500` = 5%, capped at `LeveragedAeroValuation.MAX_COMPOUND_FEE_BPS` = 1000, validated by `checkFeeParams`), taken **in kind and PRE-SWAP** off each harvested AERO tranche in `compoundImpl` and logged as `CompoundFeePaid(recipient, aeroAmount)`; both the caller's `minUsdcOut` and the oracle floor price the POST-skim amount, and the dust `floor == 0` no-op sits ahead of the transfer. **Exits are unfee'd** — `settleImpl` / `flattenImpl` / the async-redeem residual sweeps sell through `LeveragedAeroVenue._sellRewardBalance` and skim nothing. `nav()` now marks the pending claim **net of the skim** (`_rewardUsdc`), which flattens navPerShare across a harvest and closes the exit-timing arb. There is **no fee-share mint anywhere**, so closing deposits is a clean issuance freeze with no fee side effect and `_proportionalRedeem` no longer reads `nav()` at all. `layout()` 51 → 48 fields | *this change* (2026-08-31) |
 | Comment hygiene | Three comment-only hunks in the strategy retiring stale Sherwood rationale (`selfManagesFees`, `_protocolConfig`, `rescueToVault`); new docstring on the manager's trimmed `_config()` | `ea822be`, `978e5af` |
 
 > **Selector break in the skew row, called out deliberately.** The width row above records
@@ -84,15 +85,18 @@ after `978e5af`.
 | `LeveragedAerodromeCLStrategy.sol` | Thin entrypoints + `nav()` + init/validation + ERC-7201 `Layout`; owns everything touching the vault / shares / fees. ERC-1167 clone. |
 | `LeveragedAeroManager.sol` | All venue logic (supply/borrow/mint/stake/unwind/repay/swap/rerange), **delegatecalled** by the strategy. |
 | `LeveragedAeroValuation.sol` | Oracle net-equity NAV; fail-closed. |
-| `LeveragedAeroFees.sol` | Streaming management + high-water-mark performance fee math (`pure`). |
+| `LeveragedAeroVenue.sol` | Venue validation shared by `_initialize` and the owner-staged migration (`stageImpl` / `flattenImpl` / `migrateImpl`), plus the `layoutView` / `applyVenueFromInit` relocations bought for EIP-170 headroom. **Delegatecalled** like the manager, so it carries the same storage triplet. |
 | `LeveragedAeroVault.sol` | **In scope as of `ea822be`.** The share ledger (ERC-20, `asset.decimals() + 6`) + `Ownable2Step` lifecycle driver. Owns the `strategyMint` / `strategyBurn` hooks that are the only thing standing between the strategy and arbitrary share inflation — the backstop named in focus area 5. Non-upgradeable, holds no position, computes no price. |
 
-**Supporting context — `src/leveraged-aero/sherwood/`:** the framework pieces the strategy compiles
-against (`BaseStrategy`, interfaces, `ChainlinkReader` / `TickMath` / `LiquidityAmounts`,
-`FeeConstants`). The interface names are preserved because the strategy imports those paths/types
-verbatim; the bodies have been trimmed to the consumed surface (`ISyndicateVault` is now two
-functions, implemented by `LeveragedAeroVault`). `BaseStrategy` was **rewritten** in `ea822be` for the
-vanilla lifecycle — it is fork-local code, not vendored context.
+**Supporting context — `src/leveraged-aero/BaseStrategy.sol`, `src/leveraged-aero/interfaces/` and
+`src/leveraged-aero/libraries/`:** the framework pieces the strategy compiles against (`BaseStrategy`,
+the venue / vault / token interfaces, `ChainlinkReader` / `TickMath` / `LiquidityAmounts`). The vendored
+`sherwood/` subdirectory is **gone** — `5b8cb8a` dissolved it into `src/leveraged-aero/` (it only ever
+existed to keep the vendored import paths byte-identical to upstream, and those imports are ours now) and
+retired the Sherwood-era names with it, so `ISyndicateVault` is now `ILeveragedAeroVault`, trimmed to the
+two functions the strategy actually calls and implemented by `LeveragedAeroVault`. `FeeConstants` was
+deleted with the fund-fee layer (see the fee row above). `BaseStrategy` was **rewritten** in `ea822be`
+for the vanilla lifecycle — it is fork-local code, not vendored context.
 
 **Adjacent, not in this package:** `src/MamoLeveragedAeroStrategy.sol` (per-user account wrapper) and
 `ILeveragedAeroCLStrategy`, reviewed with PR #64. Neither has a code change across the two commits —
@@ -135,9 +139,15 @@ manager" vs "…in the strategy" — while every storage-relevant token, the `Re
 tripwire is green on both files. **This change touches `Layout` again**, and this time by **insertion**
 rather than append: `minSkewBps` / `maxSkewBps` go in immediately after `skewBps`, so every field after
 them shifts. The parity tripwire is exactly the control for that — the insert must be byte-identical in
-both files or the two halves of the delegatecall read different slots. Note the tripwire proves the two
-files **agree**, not that the new ordering is compatible with anything already deployed: it is not, and
-these are pre-launch clones, so a redeploy (not an upgrade) is the only path.
+both files or the two halves of the delegatecall read different slots. **The fee replacement moves
+`Layout` a third time**, by DELETION plus one insert: the four fee-accrual fields
+(`managementFeeBps` / `performanceFeeBps` / `hwmPerShare` / `lastFeeAccrualTimestamp`) are gone and a
+single `uint16 compoundFeeBps` sits ahead of the surviving `feeRecipient`, so `layout()` went from 51
+fields to 48 — indices 1–28 unchanged, 29 = `compoundFeeBps`, 30 = `feeRecipient`, everything from
+`aeroUsdFeed` onward shifted DOWN by 3. Current positions worth pinning: width band 39/40/41,
+`skewBps` 43, skew band 44/45, `hedgedDebtA`/`hedgedDebtB` 46/47, `stagedVenueHash` 48. Note the
+tripwire proves the two files **agree**, not that the new ordering is compatible with anything already
+deployed: it is not, and these are pre-launch clones, so a redeploy (not an upgrade) is the only path.
 
 **Bytecode margin note:** under this repo's optimizer profile (via_ir, `optimizer_runs = 200`, cancun):
 
@@ -198,19 +208,38 @@ for the strategy internals at the baseline commit. Items 10–12 are fork-local.
    and `depositsOpen`.
 6. **IL-shortfall handling on full redeem** — the lone oracle dependency on the otherwise oracle-free
    proportional path; partial redeems cap IL cover at the redeemer's own budget.
-7. **Fee paths** — the management and performance fees are the only fee legs, both strategy-local and
-   crystallized on pre-action NAV (phantom-fee guard) by minting vault shares to `feeRecipient`. The
-   Sherwood protocol-fee leg was removed as unused, so there is no fee liability in `Layout` and no
-   config lookup through the vault. Crystallize is best-effort at EVERY site — deposit, compound and
-   both exit paths — so a fee-mint revert defers with `FeeCrystallizeDeferred` and the op completes; only
-   the PRICE leg (`nav()`, read outside the try) hard-reverts. `_settle` does NOT crystallize: it unwinds
-   and pushes the proceeds to the vault. Note the fork-local interaction with item 5: a fee-share
-   crystallize mints through `strategyMint`, so it defers while `depositsOpen == false`.
+7. **Fee paths** — the fund's **only** fee is the in-kind harvest skim: `compoundFeeBps` of each harvested
+   AERO tranche to `feeRecipient`, **pre-swap, as AERO**, logged as `CompoundFeePaid`. No fee shares, no
+   fee liability in `Layout`, no accrual clock, no config lookup through the vault. Attack surface, in the
+   order it executes: (a) **init-only params** — `compoundFeeBps` and `feeRecipient` are written once by
+   `_initialize` and never movable (not even by the vault owner's `setProposer`), through
+   `LeveragedAeroValuation.checkFeeParams`: `CompoundFeeTooHigh` above `MAX_COMPOUND_FEE_BPS` (1000 = 10%,
+   production value 500), `FeeRecipientRequired` for a non-zero skim with a zero recipient, and
+   `FeeRecipientIsStrategy` when the recipient is the clone itself — `checkFeeParams` runs under
+   delegatecall inside `initialize`, so `address(this)` IS the clone, and a self-skim would be a silent
+   no-op burned into an unfixable field. `(0, address(0))` stays legal (a fee-free clone). (b) **Sizing
+   ahead of every bound** in `compoundImpl`: `feeAmt = tranche × compoundFeeBps / 1e4` (floor), so both the
+   caller's `minUsdcOut` and the oracle floor (`BelowOracleFloor`) are derived from the post-skim `sellAmt`
+   that actually reaches the router — confirm neither bound can be satisfied by the gross amount.
+   (c) **Ordering**: the dust `floor == 0` no-op returns *before* the transfer, so an unsellable donated
+   reward balance cannot be drained a cent at a time. (d) **Exits deliberately skim nothing** — `settleImpl`,
+   `flattenImpl` and the async-redeem residual sweeps sell via `LeveragedAeroVenue._sellRewardBalance`;
+   fee'ing an exit would charge the same tranche twice. (e) **The NAV haircut**:
+   `LeveragedAeroValuation._rewardUsdc` marks the pending claim (held balance + `gauge.earned()`) at
+   `amt × (10000 − compoundFeeBps) / 10000` (floor), because `compound` is the realization path and only the
+   post-skim fraction can ever reach the book. Un-haircut, `navPerShare` ran HIGH by the pending fee and
+   stepped DOWN at each harvest — a redeemer exiting just before a `compound` dodged their share of the fee
+   (stayers ate it) and a post-harvest depositor paid none. **Accepted asymmetry, deliberately in holders'
+   favour:** exits realize the tranche GROSS, so an exit can only come out slightly *ahead* of the mark,
+   never behind. Note the item-5 interaction is now gone: with no fee mint anywhere,
+   `setOpenDeposits(false)` is a clean issuance freeze with no fee side effect, and `_proportionalRedeem`
+   does not read `nav()` at all.
 8. **`compound` reward swap** — routes through a hardcoded Aerodrome v2 router; the hardened reward/USD
    oracle floor (`BelowOracleFloor`) is the honesty-independent guard. Init asserts the reward feed is
    8-decimal and rejects a leg token that equals the gauge reward token.
-9. **Accepted residuals** — `deleverage` oracle-staleness window vs Moonwell's own oracle; pending
-   unclaimed gauge rewards not in NAV; `selfManagesFees()` self-attestation (there is no guardian review
+9. **Accepted residuals** — `deleverage` oracle-staleness window vs Moonwell's own oracle; the gauge-reward
+   NAV term's own fail-open (a failing `earned()` read degrades to 0 and is surfaced only by
+   `rewardReadOk()`, not by a revert); `selfManagesFees()` self-attestation (there is no guardian review
    or owner veto in this fork — the mitigation is simply that `LeveragedAeroVault` has no fee path at
    all, so there is nothing for a lying strategy to double-charge against); **open-ended position
    duration** (the 3650-day governance ceiling is gone — the position runs until the owner calls
@@ -285,14 +314,15 @@ Pre-declared so auditors don't re-report them; each is a deliberate, reviewed ch
   not the deadline. Accepted.
 - **CEI ordering in `fulfillRedeem` / `emergencyRedeem`.** Both settle via `_proportionalRedeem`, which
   makes external calls — `IERC20(usdc).safeTransfer(recipient, assetsOut)` then
-  `ISyndicateVault(vault()).strategyBurn(shares)` — *before* the caller writes `r.settled = true`, so the
+  `ILeveragedAeroVault(vault()).strategyBurn(shares)` — *before* the caller writes `r.settled = true`, so the
   double-spend flag is set after the effects rather than before (a CEI-ordering deviation). Safe in
   practice: both functions are `nonReentrant` under `ReentrancyGuardTransient`, USDC has no transfer
   hooks, and the vault is trusted (now in-repo and in scope — see below), so no reentrant path can
   observe `settled == false` and re-enter. Accepted.
-- **`Syndicate`-prefixed interface names.** `ISyndicateVault` retains its upstream name and import path
-  so the strategy source stays diff-able against the baseline commit. It is implemented by
-  `LeveragedAeroVault`; there is no Sherwood contract in the deployment.
+- **`Syndicate`-prefixed interface names are retired.** `ISyndicateVault` became `ILeveragedAeroVault`
+  in `5b8cb8a`, with its file and with the whole `sherwood/` directory, so the source no longer diffs
+  path-for-path against the baseline commit — deliberate, pre-mainnet, and nothing live is affected. It is
+  implemented by `LeveragedAeroVault`; there is no Sherwood contract in the deployment.
 - **`Layout` leg field names.** `cbBTC` / `weth` / `mCbBTC` / `mWeth` / `wethIsToken0` are leg-slot
   names, kept because renaming them would break the byte-identical `Layout` parity across two files for
   no behavioral gain. Documented as leg B / leg A in the source.
@@ -384,14 +414,17 @@ forge build --sizes                  # EIP-170 margins (table above)
 
 Last verified locally 2026-07-27: **459 passed / 0 failed / 0 skipped**. Relevant breakdown:
 
-> **These counts predate this change.** The skew-band validation and the two review remediations landed
-> with their own tests after that run, so the totals below are a floor, not the current figure. Re-run
+> **These counts predate this change, and they move in BOTH directions.** The skew-band validation and the
+> review remediations landed with their own tests after that run, and the fee replacement *deleted* the
+> `LeveragedAeroFees` closed-form cases while adding the skim, init-rung and NAV-haircut ones — so the
+> per-suite numbers below are source-counted (`function test…` declarations), not a re-run total. Re-run
 > `make test-unit` and the `test/leveraged-aero/*` match-path before quoting a number.
 
 | Suite | Tests | Covers |
 |---|---|---|
 | `test/LeveragedAeroVault.unit.t.sol` | 80 | The vault end-to-end against a mock strategy: `strategyMint`/`strategyBurn` gating, set-once `cloneAndBind` (the only wiring path), `depositsOpen`, decimals coupling, `activateStrategy`/`settleStrategy`, `redeemSettled` pro-rata + rounding, `rescueERC20` asset carve-out, `previewSharesForAssets` |
-| `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 138 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band, `skewBps` bounds) and `rerange` width/skew/auth — **including both pool orderings at init** — plus the `LeveragedAeroFees` closed forms (management dilution, performance shares, both degenerate guards) |
+| `test/leveraged-aero/LeveragedAeroStrategyInit.unit.t.sol` | 134 | Init validation (venue guards, leg decimals band, USDC/reward-token leg rejection, width band, `skewBps` bounds) and `rerange` width/skew/auth — **including both pool orderings at init** — plus the *FEE PARAMS* block, which is now the whole init-side fee gate: `FeeRecipientRequired` on a non-zero skim with a zero recipient, the `CompoundFeeTooHigh` ceiling pinned at both 1000 and 1001, the legal `(0, address(0))` fee-free clone, the production 500 bps surviving init verbatim, and — new with the fee replacement — the `FeeRecipientIsStrategy` rung rejecting a clone that would skim to itself. The former `LeveragedAeroFees` closed-form cases (management dilution, performance shares, degenerate guards) are **gone with the library** |
+| `test/leveraged-aero/LeveragedAeroCompoundHedge.unit.t.sol` | 46 | **Where the fee itself is covered.** Block 3, *the in-kind harvest skim*, pins amount / recipient / base to literals (20k AERO tranche at 5% → 1k skimmed, 19k reaches the router) and kills the mutations that matter: skimming off `usdcOut` instead of the tranche, paying anyone but `feeRecipient`, minting fee-shares instead of moving tokens, skimming after the sale. It also pins that the caller's `minUsdcOut` **and** the oracle floor are each quoted on the post-skim amount, that a zero skim moves nothing and emits no `CompoundFeePaid`, and that an **exit** tranche sale skims nothing. Block 4 covers the `nav()` reward term, and the fee replacement adds the haircut cases there: the closed-form net mark, `navPerShare` flat across a `compound`, exit-timing parity either side of a harvest, and the zero-fee no-op. Also in this suite: the interest re-hedge, the dust `floor == 0` no-op, the async-redeem tranche split, `rewardReadOk()`, the peg-aware reward floor, and harvest/redeploy atomicity |
 | `test/MamoLeveragedAeroStrategy.unit.t.sol` | 80 | The per-user account wrapper (adjacent, not in this package's scope) |
 | `test/leveraged-aero/LayoutParity.t.sol` | 4 | The `Layout` / `RedeemRequest` / `STORAGE_SLOT` tripwire. **Not part of the 459** — it is not a `*.unit.t.sol` file; it runs under `make test` and under the `test/leveraged-aero/*` match-path above. 4/4 green. |
 
@@ -410,7 +443,9 @@ oracle-NAV invariance under a pool tick-shove; fail-closed valuation on sequence
 redeems still working; IL-shortfall cover at settle; performance fee on compounded yield. An invariant
 suite (`test/invariants/LeveragedAeroCL.invariant.t.sol`) covers stayer per-share NAV non-decreasing,
 health/LTV bounds after every op, `totalSupply` conservation across the mint/burn hooks, no-exfil, and
-`protocolFeeOwed` monotonicity.
+`protocolFeeOwed` monotonicity. **Two of those legs no longer exist here:** the performance fee and
+`protocolFeeOwed` were both removed in this fork (see the fee row), so that coverage is history, not
+evidence — the in-kind skim's only coverage is the unit blocks named above.
 
 **Read that evidence narrowly.** It exercises the strategy internals **at the baseline commit**, on the
 Sherwood host, with the legacy cbBTC/WETH config. It does NOT cover: the `LeveragedAeroVault` host swap,

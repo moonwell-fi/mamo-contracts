@@ -1043,6 +1043,99 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         strategy.nav(); // no revert: nothing held, so nothing reads the reward feed
     }
 
+    // ====== 4b. nav() MARKS THE PENDING TRANCHE **NET OF THE SKIM** (fee-review finding 1) ======
+    // Only `(1 − compoundFeeBps/1e4)` of anything pending can reach the book, because `compound` is the
+    // realization path and it skims in kind first. Marking it gross made navPerShare high by the pending
+    // fee and step DOWN at each harvest — so an exit timed just before one dodged its share onto the
+    // stayers. The block below pins the closed form, the flatness, and the closed arb.
+
+    /// @dev USDC face (6dp) the reward term should credit for `aeroAmt` pending at `bps` of skim.
+    function _netAeroValueUsdc(uint256 aeroAmt, uint16 bps) internal pure returns (uint256) {
+        return _heldAeroValueUsdc((aeroAmt * (10_000 - uint256(bps))) / 10_000);
+    }
+
+    /// @dev THE CLOSED FORM, both halves of the term, pinned to literals: 50k AERO at $1 with the 5% skim
+    ///      armed marks 47_500 USDC, not 50_000. Deleting the haircut restores the 50_000 and fails here.
+    function testNavMarksAPendingTrancheNetOfTheSkim() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        uint256 navFlat = strategy.nav();
+        assertEq(_netAeroValueUsdc(TRANCHE, SKIM_BPS), 47_500e6, "closed form: 95% of $50k");
+
+        // (a) the UNCLAIMED half — the tranche still sitting in `gauge.earned()`.
+        _armRewards(TRANCHE);
+        assertEq(strategy.nav(), navFlat + 47_500e6, "earned() marks net of the skim");
+        assertEq(strategy.nav() + 2_500e6, navFlat + _heldAeroValueUsdc(TRANCHE), "gross would be 2_500e6 higher");
+
+        // (b) the CLAIMED half — the same haircut, so the claim moment stays continuous.
+        _clearRewards();
+        aero.mint(address(strategy), TRANCHE);
+        assertEq(strategy.nav(), navFlat + 47_500e6, "the held balance marks net on the same basis");
+    }
+
+    /// @dev THE RATE IS READ, NOT ASSUMED. A fee-free clone marks the tranche GROSS (the haircut is a
+    ///      no-op, i.e. the pre-fix behaviour every other nav pin in this file relies on), and the 10%
+    ///      ceiling marks 90% of it. Kills a hardcoded 500, an inverted numerator, and a stuck rate.
+    function testTheRewardHaircutTracksTheConfiguredRate() public {
+        _rearmWithSkim(0, feeRecipient);
+        _armBook();
+        uint256 navFlat = strategy.nav();
+        _armRewards(TRANCHE);
+        assertEq(strategy.nav(), navFlat + 50_000e6, "0 bps: the haircut is a no-op and the mark is gross");
+
+        _clearRewards();
+        _rearmWithSkim(1000, feeRecipient); // `MAX_COMPOUND_FEE_BPS`
+        _armBook();
+        navFlat = strategy.nav();
+        _armRewards(TRANCHE);
+        assertEq(strategy.nav(), navFlat + 45_000e6, "1000 bps: 90% of the tranche");
+    }
+
+    /// @dev THE STEP IS GONE. Harvesting the marked tranche realises exactly what nav already carried, so
+    ///      `nav()` is flat across `compound` — no free lunch for the depositor arriving one block later.
+    ///      The residual delta is the fill-vs-mark basis and CL rounding on the redeploy; the step the
+    ///      gross mark produced was the whole `2_500e6` skim, three orders of magnitude larger.
+    function testNavIsFlatAcrossACompound() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armRewards(TRANCHE);
+
+        uint256 navPre = strategy.nav();
+        _compound(1);
+        uint256 navPost = strategy.nav();
+
+        assertEq(aero.balanceOf(feeRecipient), TRANCHE * SKIM_BPS / 10_000, "the skim really was taken");
+        // 1e4 == one hundredth of a USDC on a ~$1.05M book. The gross mark stepped `2_500e6` here.
+        assertApproxEqAbs(navPost, navPre, 1e4, "nav does not step across the harvest");
+    }
+
+    /// @dev THE ARB, CLOSED. The same holder exits the same shares in two worlds — one block BEFORE the
+    ///      harvest and one block AFTER it — and is paid the same. Under the gross mark the pre-harvest
+    ///      exit was paid its pro-rata slice of a fee it never contributed to, and the stayers ate it.
+    function testAFastExitJustBeforeAHarvestPaysItsShareOfThePendingFee() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armRewards(TRANCHE);
+
+        uint256 shares = SHARES / 10;
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(lp);
+        uint256 paidBefore = strategy.redeem(shares, 0);
+        vm.revertToState(snap);
+
+        _compound(1);
+        vm.prank(lp);
+        uint256 paidAfter = strategy.redeem(shares, 0);
+
+        // 1e4 == one hundredth of a USDC on a ~$105k payout. The gross mark handed the early exit an extra
+        // `250e6` here — its 10% slice of the pending fee, taken out of the stayers.
+        assertGt(paidBefore, 0, "the exit paid");
+        assertApproxEqAbs(paidBefore, paidAfter, 1e4, "the exit is timing-neutral across the harvest");
+    }
+
     // ====== 5. THE ASYNC REDEEM SELLS THE TRANCHE ITS OWN UNWIND CLAIMS (review round 2, item 2) ======
     // The redeem's own unwind auto-claims a tranche through `gauge.withdraw`, and step E sweeps only the two
     // LEG tokens — so the redeemer used to be paid `f × (assets − reward)` while 100% of the tranche stayed
@@ -1254,6 +1347,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     function testRewardReadOkIsFalseWhenTheGaugeHasNoCode() public {
         _armBook();
         assertTrue(strategy.rewardReadOk(), "healthy to begin with");
+        assertGt(strategy.nav(), 0, "...and nav() prices the book while the venue is there");
 
         _emptyTheGauge();
         assertEq(address(gauge).code.length, 0, "the venue is gone");
@@ -1261,8 +1355,12 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
 
         // The ORDER of the two reward reads: `nav()` is unaffected here not because anything absorbed the
         // failure, but because `_rewardUsdc`'s earlier `rewardToken()` read already fail-closes the call.
-        vm.expectRevert(bytes(""));
-        strategy.nav();
+        // Asserted on the RAW call rather than `vm.expectRevert`, and WITHOUT pinning the revert payload:
+        // solc's codeless-target guards revert untyped, and whether the extcodesize or the returndatasize
+        // rung fires is an optimizer decision foundry surfaces with two different labels. The before/after
+        // pair is the invariant; the payload is not.
+        (bool ok,) = address(strategy).staticcall(abi.encodeWithSignature("nav()"));
+        assertFalse(ok, "nav() fail-closes once the gauge has no code");
     }
 
     /// @dev THE BEHAVIOUR-NEUTRALITY CONTRACT, both directions: a REVERTING `earned()` still catches to 0 and
