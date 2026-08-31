@@ -119,8 +119,11 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         // The template must be permanently locked against `initialize`: its constructor sets
         // `_initialized`, and clones — which skip constructors — are what stay initializable. A template
         // deployed some other way (e.g. cloned itself) would let someone else's init win the race.
+        // Resolve BEFORE arming the cheatcode: `getAddress` is itself an external call and would
+        // consume the expectation.
+        address template = addresses.getAddress(templateKey);
         vm.expectRevert(BaseStrategy.AlreadyInitialized.selector);
-        IStrategy(addresses.getAddress(templateKey)).initialize(address(this), address(this), "");
+        IStrategy(template).initialize(address(this), address(this), "");
 
         // Fund the seed for SIMULATION only: on mainnet the multisig genuinely holds the USDC, and this
         // `deal` is a no-op there in the sense that it overwrites a balance that is already sufficient.
