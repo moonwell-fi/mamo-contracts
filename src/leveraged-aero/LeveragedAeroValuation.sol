@@ -402,6 +402,26 @@ library LeveragedAeroValuation {
         if (lowerSpan < spacing || upperSpan < spacing) revert OutOfBounds();
     }
 
+    /// @notice `checkRange`'s twin for an EXPLICIT `(tickLower, tickUpper)`: on the grid, ordered, inside
+    ///         the aligned tick domain, span inside `[minWidth_, maxWidth_]`.
+    /// @dev The SKEW band deliberately does NOT apply — explicit placement IS the feature, and a skew only
+    ///      means anything for a band derived from spot. The width band still bounds the proposer.
+    function checkExplicitRange(
+        int24 tickLower,
+        int24 tickUpper,
+        int24 tickSpacing_,
+        uint24 minWidth_,
+        uint24 maxWidth_
+    ) public pure {
+        if (tickSpacing_ <= 0) revert OutOfBounds();
+        if (tickLower % tickSpacing_ != 0 || tickUpper % tickSpacing_ != 0) revert OutOfBounds();
+        if (tickLower >= tickUpper) revert OutOfBounds();
+        int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing_);
+        if (tickLower < -maxAligned || tickUpper > maxAligned) revert OutOfBounds();
+        uint24 w = uint24(uint256(int256(tickUpper - tickLower)));
+        if (w < minWidth_ || w > maxWidth_) revert OutOfBounds();
+    }
+
     /// @notice The tickSpacing-aligned range around `pool`'s current tick, SKEWED by `skewBps`: that
     ///         fraction of `width` (1e4 scale) is placed BELOW the current tick and the EXACT COMPLEMENT
     ///         above, so 5000 is centred and 3500 puts 35% of the width below spot.
@@ -1199,6 +1219,26 @@ library LeveragedAeroValuation {
         if (wethAmt > 0) {
             wethFloor = _usdcValue(wethAmt, c.wethDecimals, _readUsd8(c, c.wethFeed), pUsdc) * (10000 - slipBps) / 10000;
         }
+    }
+
+    /// @notice The min-out a LEG↔LEG swap must clear (`LeveragedAeroManager.remintRangeImpl`):
+    ///         `max(minOut, amountIn at the two legs' Chainlink CROSS rate × (1 − slipBps))`. Pure — the
+    ///         caller supplies the hardened prices, as `coverBounds` does.
+    /// @dev THE ORACLE HALF IS LOAD-BEARING: `remintRange` is the only path that swaps PRINCIPAL between
+    ///      the legs under the PROPOSER key, so a `minOut` of 0 must still bound the fill.
+    /// @param slipBps `maxSlippageBps`; bounded to (0, 1000] at init so `10000 - slipBps` can't underflow.
+    function legSwapFloor(
+        uint256 amountIn,
+        uint8 decIn,
+        uint256 pIn,
+        uint8 decOut,
+        uint256 pOut,
+        uint256 slipBps,
+        uint256 minOut
+    ) public pure returns (uint256) {
+        uint256 usd8 = Math.mulDiv(amountIn, pIn, 10 ** uint256(decIn));
+        uint256 fl = Math.mulDiv(usd8, 10 ** uint256(decOut), pOut) * (10000 - slipBps) / 10000;
+        return fl > minOut ? fl : minOut;
     }
 
     /// @dev Spot-vs-TWAP calm-gate (fail-closed). Reverts `CalmGateBreached` when the pool

@@ -504,21 +504,9 @@ library LeveragedAeroManager {
         Layout storage $ = _layout();
         if ($.tokenId == 0) return; // flat book — nothing to re-range (width/skew already stored)
 
-        // 1. Calm-gate BEFORE touching the pool — never recenter at a manipulated tick.
-        LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
-
-        // 2. Unstake + remove 100% liquidity + collect (num==den → no restake). The old NFT is
-        //    left empty + unstaked; a recenter needs a fresh range == fresh tokenId.
-        //    ASSET-MODE: snapshot leg B BEFORE the unwind (as `redeemUnwindImpl` does `idleUsdcBefore`) —
-        //    it IS the unit of account there, so its raw balance is idle deposits, not what this op
-        //    collected; only the DELTA is this op's own principal. Zero in the two-borrowed-legs shape.
-        uint256 legBBefore = $.legBIsAsset ? IERC20($.cbBTC).balanceOf(address(this)) : 0;
-        _unwindLiquidity(1, 1);
-
-        // 3. SIZE FIRST: the legs THIS op collected — full leg A, leg B net of the pre-unwind snapshot.
-        //    Raw balances would let unlevered idle USDC count as a populated side in asset-mode (F05).
-        (uint256 amt0, uint256 amt1) =
-            _amounts01(IERC20($.cbBTC).balanceOf(address(this)) - legBBefore, IERC20($.weth).balanceOf(address(this)));
+        // 1-3. Calm-gate, snapshot leg B, unwind 100% + collect, size — shared with `remintRangeImpl`.
+        (, uint256 cbAmt, uint256 wethAmt) = _calmUnwindAll();
+        (uint256 amt0, uint256 amt1) = _amounts01(cbAmt, wethAmt);
 
         // 4. Derive the range from the stored width/skew AND what the unwind collected: two-sided → the
         //    ordinary skewed band around spot; ONE-SIDED → a band wholly on the populated side, the only
@@ -538,6 +526,82 @@ library LeveragedAeroManager {
 
         // 7. Debt + collateral untouched by rerange → health preserved; assert as a belt.
         _assertHealthy();
+    }
+
+    /// @notice Body of the strategy's `remintRange`: the shared re-range prologue → an optional `swapBps`
+    ///         swap between the legs → mint at `[tickLower, tickUpper]` → restake → assert health. At
+    ///         `swapBps == 0` this IS `rerangeImpl` at a caller-chosen band. Params: see `remintRange`.
+    function remintRangeImpl(
+        int24 tickLower,
+        int24 tickUpper,
+        bool zeroForOne,
+        uint16 swapBps,
+        uint256 minSwapOut,
+        uint256 minLiquidity
+    ) public {
+        Layout storage $ = _layout();
+        // DELIBERATE DEVIATION from `rerangeImpl`'s silent flat-book return: that exists to persist
+        // width/skew, and here there is nothing to persist — a silent success would mislead the keeper.
+        if ($.tokenId == 0) revert LeveragedAeroValuation.NothingToRerange();
+
+        (uint256 legBBefore, uint256 cbAmt, uint256 wethAmt) = _calmUnwindAll();
+
+        // `zeroForOne` is POOL order, so the input is leg A exactly when it agrees with `wethIsToken0`.
+        if (swapBps != 0) {
+            bool inIsLegA = zeroForOne == $.wethIsToken0;
+            _remintSwap(zeroForOne, inIsLegA, (inIsLegA ? wethAmt : cbAmt) * uint256(swapBps) / 10000, minSwapOut);
+            // The output landed in the balance and IS this op's inventory, so the same snapshot rule
+            // re-derives both legs — this is how the swap feeds the mint.
+            (cbAmt, wethAmt) = _collectedLegs(legBBefore);
+        }
+
+        _mintAndStake(cbAmt, wethAmt, tickLower, tickUpper, minLiquidity);
+
+        // `width` IS rewritten — `setWidthBounds` / venue migration re-check the STORED width, and the span
+        // was validated in-band. `skewBps` stays UNTOUCHED: explicit ticks carry no skew, and the stored
+        // value remains inside its init-frozen band for later `checkRange` calls.
+        $.width = uint24(uint256(int256(tickUpper - tickLower)));
+        _assertHealthy(); // debt + collateral untouched ⇒ health preserved; belt only
+    }
+
+    /// @dev Sell `amountIn` of one LP leg into the other at `max(minOut, oracle cross rate − slippage)`.
+    ///      The swap venue's tickSpacing is the LP POOL's — the legA/legB pair IS that pool — NOT
+    ///      `_legSwapSpacing`, which serves the leg↔USDC pools. Prices come off the SHARED
+    ///      `_readAllPrices` bundle, so this fails closed on a stale feed exactly as the debt/health/sweep
+    ///      paths do. `amountIn == 0` is a clean no-op.
+    function _remintSwap(bool zeroForOne, bool inIsLegA, uint256 amountIn, uint256 minOut) private {
+        if (amountIn == 0) return;
+        Layout storage $ = _layout();
+        (uint256 pB, uint256 pA,) = _readAllPrices();
+        (uint256 pIn, uint256 pOut) = inIsLegA ? (pA, pB) : (pB, pA);
+        (uint8 decIn, uint8 decOut) = inIsLegA ? ($.wethDecimals, $.cbBTCDecimals) : ($.cbBTCDecimals, $.wethDecimals);
+        uint256 floor =
+            LeveragedAeroValuation.legSwapFloor(amountIn, decIn, pIn, decOut, pOut, uint256($.maxSlippageBps), minOut);
+        (address tok0, address tok1) = _tokens01();
+        (address tokenIn, address tokenOut) = zeroForOne ? (tok0, tok1) : (tok1, tok0);
+        LeveragedAeroValuation.swapExactIn($.swapRouter, tokenIn, tokenOut, $.tickSpacing, amountIn, floor);
+    }
+
+    /// @dev The shared re-range prologue: calm-gate BEFORE touching the pool (never recenter, or swap, at a
+    ///      manipulated tick) → snapshot leg B → unstake + remove 100% liquidity + collect (num==den ⇒ no
+    ///      restake; a fresh range needs a fresh tokenId) → size. `legBBefore` is returned so
+    ///      `remintRangeImpl` can re-derive the legs against the same snapshot after its swap.
+    function _calmUnwindAll() private returns (uint256 legBBefore, uint256 cbAmt, uint256 wethAmt) {
+        Layout storage $ = _layout();
+        LeveragedAeroValuation.calmGate($.pool, $.twapWindow, $.calmDeviationTicks);
+        // ASSET-MODE (F05): leg B IS the unit of account, so its raw balance is idle deposits and the
+        // redeem-cover float — only the DELTA across the unwind is this op's own principal (as
+        // `redeemUnwindImpl` does with `idleUsdcBefore`). Zero in the two-borrowed-legs shape.
+        legBBefore = $.legBIsAsset ? IERC20($.cbBTC).balanceOf(address(this)) : 0;
+        _unwindLiquidity(1, 1);
+        (cbAmt, wethAmt) = _collectedLegs(legBBefore);
+    }
+
+    /// @dev What the unwind collected, in LEG order: leg B NET of the snapshot, and the FULL leg A balance —
+    ///      a pre-existing idle leg A is a previous rerange's remainder, deliberately folded back in.
+    function _collectedLegs(uint256 legBBefore) private view returns (uint256 cbAmt, uint256 wethAmt) {
+        Layout storage $ = _layout();
+        return (IERC20($.cbBTC).balanceOf(address(this)) - legBBefore, IERC20($.weth).balanceOf(address(this)));
     }
 
     /// @notice Retarget the position's LTV to `targetLtvBps_` (body of the strategy's `adjustLeverage`,
