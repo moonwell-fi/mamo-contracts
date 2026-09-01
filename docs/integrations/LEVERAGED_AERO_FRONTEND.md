@@ -181,7 +181,10 @@ function owner() external view returns (address);
 > derived `minShares` / `minAssetsOut` must come from a fresh read in the same UX step as the tx.
 
 > **Fees at launch — don't promise what isn't charged.** There is exactly ONE fee leg: a **5% in-kind
-> skim of the AERO harvested at each `compound`**, paid to `feeRecipient` in AERO. Nothing is deducted
+> skim of each AERO tranche the fund realizes**, paid to `feeRecipient` in AERO and logged as
+> `RewardFeePaid(recipient, aeroAmount)`. It is charged wherever the tranche is actually converted —
+> `compound`, `flatten`, and the async-redeem fulfilment, whose own unwind auto-claims it — and waived only
+> on the fund's terminal `settle`. Nothing is deducted
 > from a deposit or a payout, and no fee shares are ever minted, so a share balance is never diluted by a
 > fee. The one place it reaches a user-facing number is NAV, which marks *pending* AERO net of the skim so
 > that neither entering nor exiting around a harvest is worth timing — quotes are therefore already

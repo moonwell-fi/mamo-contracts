@@ -75,8 +75,9 @@ library LeveragedAeroManager {
     ///         fail-opens: `…Degraded` = a GUARD fell back, `…Deferred` = an optional ACTION was skipped.
     event RedeemSweepFloorsDegraded();
 
-    /// @notice `compoundImpl` skimmed `aeroAmount` of the harvested tranche to `recipient`, in AERO (18dp).
-    event CompoundFeePaid(address indexed recipient, uint256 aeroAmount);
+    /// @notice `aeroAmount` of a realized reward tranche was skimmed to `recipient`, in AERO (18dp) — here by
+    ///         `compoundImpl`, and with the identical signature by `LeveragedAeroVenue._sellRewardBalance`.
+    event RewardFeePaid(address indexed recipient, uint256 aeroAmount);
 
     // ── Constants (compile-time literals, duplicated from the strategy) ──
     /// @dev `deleverage()` repays down to `minHealthBps × (1 + this/1e4)` — a small buffer above the
@@ -385,9 +386,11 @@ library LeveragedAeroManager {
     ///         `deployIdleImpl`. No-op when there's no position or no AERO.
     /// @dev The redeploy is ATOMIC with the harvest: anything that fails the deploy path reverts the whole
     ///      call, claim, skim and sale included — see step 6 for why that costs nothing, and the recovery.
-    /// @dev THE SKIM IS EXCLUSIVE TO THE HARVEST: the settle / flatten / async-redeem tranche sales route
-    ///      through `LeveragedAeroVenue._sellRewardBalance` and skim nothing — they are EXITS, and a fee
-    ///      there would charge the same tranche twice.
+    /// @dev EVERY REALIZATION PATH SKIMS, ONE EXCEPTION. `flatten` and the async redeem realize their tranche
+    ///      through `LeveragedAeroVenue._sellRewardBalance`, which skims on the same basis and emits the same
+    ///      `RewardFeePaid`: `gauge.withdraw` is all-or-nothing per NFT, so either one converts 100% of the
+    ///      book's accrual and leaves no later harvest to charge it. Charging the same tranche twice is not
+    ///      possible — a sale consumes it. The TERMINAL `_settle` alone waives the fee: the fund is ending.
     /// @param minUsdcOut   Minimum USDC out of the AERO→USDC swap — quoted on the POST-SKIM sell amount,
     ///                     which is what the router actually receives.
     /// @param minLiquidity Minimum CL liquidity on the redeploy (slippage guard).
@@ -433,7 +436,7 @@ library LeveragedAeroManager {
         if (feeAmt > 0) {
             address recipient = $.feeRecipient;
             IERC20(aero).safeTransfer(recipient, feeAmt);
-            emit CompoundFeePaid(recipient, feeAmt);
+            emit RewardFeePaid(recipient, feeAmt);
         }
         uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(aero, $.usdc, sellAmt, minUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor(); // post-check on the measured fill (L9)

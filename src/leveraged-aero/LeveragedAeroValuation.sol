@@ -1005,11 +1005,14 @@ library LeveragedAeroValuation {
     ///      apply; `applyVenue` enforces that at init and at every migration and rejects a reward token
     ///      equal to either leg. `c.rewardFeed` is the SAME `Layout.aeroUsdFeed` the sale floor uses.
     ///
-    ///      MARKED NET OF `compoundFeeBps` (floored, as `compoundImpl`'s own skim rounds): `compound` is
-    ///      the realization path and it skims in kind first, so only that fraction can reach the book.
+    ///      MARKED NET OF `compoundFeeBps` (floored, as `compoundImpl`'s own skim rounds): every path that
+    ///      realizes a tranche skims in kind first, so only that fraction can reach the book.
     ///      Gross made navPerShare step DOWN at each harvest — an exit timed just before one dodged its
-    ///      share of the fee onto the stayers. Residual asymmetry, deliberately in the holders' favour:
-    ///      the exit paths (`_sellRewardBalance`) realize GROSS, so they beat this mark, never miss it.
+    ///      share of the fee onto the stayers.
+    ///      THE MARK MATCHES REALIZATION ON EVERY LIVE PATH: `compound`, `flatten` and the async redeem all
+    ///      skim (`LeveragedAeroVenue._sellRewardBalance`), so an understated navPre can no longer over-mint
+    ///      a depositor against a gross realization. The only residual asymmetry is the TERMINAL settle,
+    ///      which realizes gross — holder-favourable, and the fund is ending.
     function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
         uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
         (uint256 e,) = _earnedRead(c.gauge, strategy, c.tokenId);

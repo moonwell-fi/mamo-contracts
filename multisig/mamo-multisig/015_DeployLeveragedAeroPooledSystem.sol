@@ -173,6 +173,12 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         assertEq(IStrategy(clone).vault(), address(vault), "Clone should point back at the vault");
         assertEq(vault.owner(), addresses.getAddress("MAMO_MULTISIG"), "Vault owner should be MAMO_MULTISIG");
 
+        // The share-token identity. Constructor-only (`LeveragedAeroPoolDeployer` passes them straight into
+        // `new LeveragedAeroVault`) with no setter, so a typo is only fixable by redeploying the vault.
+        DeployLeveragedAeroPoolConfig.Config memory cfg = deployConfig.getConfig();
+        assertEq(vault.name(), cfg.vaultName, "Vault name should be the configured vaultName");
+        assertEq(vault.symbol(), cfg.vaultSymbol, "Vault symbol should be the configured vaultSymbol");
+
         // Genesis state: Executed, seeded, and the seeder holds the genesis shares.
         this.validateGenesis(vault, clone);
 

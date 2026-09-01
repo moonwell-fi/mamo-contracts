@@ -35,7 +35,7 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
  */
 contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev Mirrored from {LeveragedAerodromeCLStrategy} for `vm.expectEmit` / topic matching.
-    event CompoundFeePaid(address indexed recipient, uint256 aeroAmount);
+    event RewardFeePaid(address indexed recipient, uint256 aeroAmount);
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
@@ -1499,7 +1499,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; ++i) {
-            assertTrue(logs[i].topics[0] != CompoundFeePaid.selector, "a no-op skims nothing");
+            assertTrue(logs[i].topics[0] != RewardFeePaid.selector, "a no-op skims nothing");
         }
     }
 

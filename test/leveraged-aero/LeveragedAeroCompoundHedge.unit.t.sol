@@ -47,9 +47,11 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  *            with ZERO interest accrued and pins that `compound` buys nothing — the whole point of using
  *            an accounting basis rather than the live LP composition.
  *
- *         3. NO-OP + THE IN-KIND HARVEST SKIM. A keeper-polled `compound` with nothing to harvest must
- *            move nothing at all, and a real harvest must skim exactly `compoundFeeBps` of the tranche to
- *            `feeRecipient` IN KIND, ahead of the sale, so both min-out floors bind the post-skim amount.
+ *         3. NO-OP + THE IN-KIND REWARD SKIM. A keeper-polled `compound` with nothing to harvest must
+ *            move nothing at all, and every path that REALIZES a tranche — `compound`, `flatten`, an
+ *            async-redeem fulfilment — must skim exactly `compoundFeeBps` of it to `feeRecipient` IN KIND
+ *            ahead of the sale, so both min-out floors bind the post-skim amount. Terminal `settle` alone
+ *            waives the fee (§3b).
  *
  * @dev Fixture: the asset-as-a-leg shape (leg A is an 8dp volatile token, the pair is legA/USDC), the
  *      shape the live fork run that produced these findings was running. The pool `sqrtP` and the leg-A
@@ -57,8 +59,9 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  *      is OFF in the shared fixture so the hedge arithmetic stays exact; the skim block re-arms it.
  */
 contract LeveragedAeroCompoundHedgeUnitTest is Test {
-    /// @dev Mirrored from {LeveragedAeroManager}, which emits it from the STRATEGY's address.
-    event CompoundFeePaid(address indexed recipient, uint256 aeroAmount);
+    /// @dev Mirrored from {LeveragedAeroManager} and {LeveragedAeroVenue}, which both emit it from the
+    ///      STRATEGY's address with the same signature.
+    event RewardFeePaid(address indexed recipient, uint256 aeroAmount);
 
     // ── Roles ──
     address internal owner = makeAddr("owner");
@@ -742,7 +745,7 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
 
         vm.expectEmit(true, false, false, true, address(strategy));
-        emit CompoundFeePaid(feeRecipient, SKIM_AMOUNT);
+        emit RewardFeePaid(feeRecipient, SKIM_AMOUNT);
         _compound(1);
 
         assertEq(aero.balanceOf(feeRecipient), SKIM_AMOUNT, "5% of the tranche, in AERO");
@@ -805,14 +808,47 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_TRANCHE, "the whole tranche was sold");
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; ++i) {
-            assertTrue(logs[i].topics[0] != CompoundFeePaid.selector, "a zero skim emits nothing");
+            assertTrue(logs[i].topics[0] != RewardFeePaid.selector, "a zero skim emits nothing");
         }
     }
 
-    /// @dev THE SKIM IS EXCLUSIVE TO THE HARVEST. `flatten` sells the tranche its own unwind auto-claims
-    ///      through `LeveragedAeroVenue._sellRewardBalance`, an EXIT path — it must skim nothing, or the
-    ///      same tranche would be charged twice (once on the way in, once on the way out).
-    function testAnExitTrancheSaleDoesNotSkim() public {
+    // ── 3b. EVERY REALIZATION PATH SKIMS; ONLY THE TERMINAL SETTLE WAIVES (external review, Medium) ──
+    // `_unwindLiquidity`'s `gauge.withdraw` is all-or-nothing per NFT, so an async redeem or a `flatten`
+    // auto-claims 100% of the book's `earned()` and converts it in the same call. While those sales were
+    // fee-free there was no later `compound` left to charge the tranche, so a fund with a steady async-exit
+    // flow realized ~none of the nominal skim. Both now skim on `compoundImpl`'s exact basis and ordering.
+
+    /// @dev THE ASYNC REDEEM. Amount, recipient, base and event all pinned: a wrong-basis skim (off the USDC
+    ///      fill, or off the redeemer's `f` slice rather than the whole realized tranche) and a wrong
+    ///      recipient both fail here, as does dropping the skim on this path entirely.
+    function testAnAsyncRedeemSkimsTheTrancheItsOwnUnwindRealizes() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armGaugeAccrual(SKIM_TRANCHE);
+
+        uint256 shares = SHARES / 4; // f = 25%, so a partial exit realizes the WHOLE book's accrual
+        vm.prank(lp);
+        vault.approve(address(strategy), shares);
+        vm.prank(lp);
+        uint256 id = strategy.requestRedeem(shares, 0, address(0));
+
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
+        uint256 lpBefore = usdc.balanceOf(lp);
+        vm.expectEmit(true, false, false, true, address(strategy));
+        emit RewardFeePaid(feeRecipient, SKIM_AMOUNT);
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+
+        assertGt(usdc.balanceOf(lp) - lpBefore, 0, "the redeem still paid");
+        assertEq(aero.balanceOf(feeRecipient), SKIM_AMOUNT, "5% of the realized tranche, in AERO");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_SELL, "...and only the 95% was sold");
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing of the tranche is left behind");
+    }
+
+    /// @dev `flatten` — the other live realization path. The fill clearing at the fixture's fair $1 rate is
+    ///      itself the mutation guard on the FLOOR's basis: a gross-derived floor (`0.99 x 20_000`) rejects
+    ///      the honest post-skim fill of `19_000`, exactly as on the harvest path.
+    function testFlattenSkimsTheTrancheItsOwnUnwindRealizes() public {
         _rearmWithSkim(SKIM_BPS, feeRecipient);
         _armBook();
         _armWithdrawAutoClaim(SKIM_TRANCHE);
@@ -821,15 +857,36 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         legA.mint(address(npm), 1_000e8);
 
         uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
-        vm.recordLogs();
+        vm.expectEmit(true, false, false, true, address(strategy));
+        emit RewardFeePaid(feeRecipient, SKIM_AMOUNT);
         vm.prank(proposer);
         strategy.flatten(1, 0);
 
-        assertEq(aero.balanceOf(feeRecipient), 0, "an exit sale pays no fee");
+        assertEq(aero.balanceOf(feeRecipient), SKIM_AMOUNT, "5% of the realized tranche, in AERO");
+        assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_SELL, "...and only the 95% was sold");
+        assertEq(aero.balanceOf(address(strategy)), 0, "nothing of the tranche is left behind");
+    }
+
+    /// @dev THE ONE CARVE-OUT, PINNED. The TERMINAL settle sells gross: the fund is ending, so no stayer is
+    ///      left for the fee to protect and the waiver is holder-favourable. Extending the skim here would
+    ///      fail this test.
+    function testTheTerminalSettleTrancheSaleWaivesTheSkim() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armWithdrawAutoClaim(SKIM_TRANCHE);
+        usdc.mint(address(npm), 1_000e6);
+        legA.mint(address(npm), 1_000e8);
+
+        uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
+        vm.recordLogs();
+        vm.prank(address(vault));
+        strategy.settle();
+
+        assertEq(aero.balanceOf(feeRecipient), 0, "the terminal exit pays no fee");
         assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, SKIM_TRANCHE, "the WHOLE tranche was sold");
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; ++i) {
-            assertTrue(logs[i].topics[0] != CompoundFeePaid.selector, "...and no fee event was emitted");
+            assertTrue(logs[i].topics[0] != RewardFeePaid.selector, "...and no fee event was emitted");
         }
     }
 
@@ -1136,6 +1193,43 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertApproxEqAbs(paidBefore, paidAfter, 1e4, "the exit is timing-neutral across the harvest");
     }
 
+    /// @dev THE DILUTION, CLOSED (external review, Low). `nav()` marks a pending tranche NET, so while the
+    ///      exit paths realized it GROSS the pre-deposit NAV was understated by the fee slice and a depositor
+    ///      arriving alongside an async exit was over-minted out of the stayers. With the redeem skimming,
+    ///      mark == realization: the same deposit buys the same shares per USDC whether the tranche is still
+    ///      pending or was just converted through an exit. PRE-FIX the realized world's NAV/share is ~24 bps
+    ///      higher (the unpaid `2_500e6` on a ~$1.05M book) — well past this tolerance.
+    function testADepositMintsTheSameSharesEitherSideOfARedeemRealization() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armGaugeAccrual(TRANCHE);
+
+        uint256 snap = vm.snapshotState();
+        uint256 ppsPending = Math.mulDiv(strategy.nav(), 1e18, vault.totalSupply());
+        uint256 sharesPending = _depositAsFreshLp(100_000e6);
+        vm.revertToState(snap);
+
+        _asyncRedeem(SHARES / 4); // realizes — and now skims — the whole pending tranche
+        uint256 ppsRealized = Math.mulDiv(strategy.nav(), 1e18, vault.totalSupply());
+        uint256 sharesRealized = _depositAsFreshLp(100_000e6);
+
+        // The parity assertions come FIRST, so a gross-realizing mutant is caught by the dilution claim
+        // itself rather than by the sanity check below it.
+        assertApproxEqRel(ppsRealized, ppsPending, 1e15, "the net mark == what the exit actually realized");
+        assertApproxEqRel(sharesRealized, sharesPending, 1e15, "so the deposit is not over-minted: no dilution");
+        assertEq(aero.balanceOf(feeRecipient), TRANCHE * SKIM_BPS / 10_000, "sanity: the exit paid the skim");
+    }
+
+    /// @dev A fresh depositor putting `assets` USDC in; returns the shares minted.
+    function _depositAsFreshLp(uint256 assets) internal returns (uint256) {
+        address freshLp = makeAddr("freshLp");
+        usdc.mint(freshLp, assets);
+        vm.prank(freshLp);
+        usdc.approve(address(strategy), assets);
+        vm.prank(freshLp);
+        return strategy.deposit(assets, 0);
+    }
+
     // ====== 5. THE ASYNC REDEEM SELLS THE TRANCHE ITS OWN UNWIND CLAIMS (review round 2, item 2) ======
     // The redeem's own unwind auto-claims a tranche through `gauge.withdraw`, and step E sweeps only the two
     // LEG tokens — so the redeemer used to be paid `f × (assets − reward)` while 100% of the tranche stayed
@@ -1198,8 +1292,11 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
     }
 
     /// @dev THE DEADMAN + THE RESIDUAL: a stale reward feed fails the sale CLOSED in its own frame and the
-    ///      redeem still completes — the residual stays with the stayers, MARKED rather than silent.
+    ///      redeem still completes — the residual stays with the stayers, MARKED rather than silent. THE SKIM
+    ///      ARMED, because it must not add a revert path to a must-complete exit and must charge only what
+    ///      actually sold: nothing sold here, so nothing is paid.
     function testAStaleRewardFeedDefersTheRedeemSaleWithoutBlockingTheRedeem() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
         _armBook();
         _armGaugeAccrual(TRANCHE);
         uint256 shares = SHARES / 4;
@@ -1212,9 +1309,36 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
 
         assertGt(paid, 0, "the redeem completed and paid - the deadman is intact");
         assertEq(aero.balanceOf(address(strategy)), TRANCHE, "THE RESIDUAL: the tranche stayed, unsold");
+        assertEq(aero.balanceOf(feeRecipient), 0, "...and an unsold tranche is never skimmed");
         assertTrue(
             _sawFrom(address(strategy), LeveragedAerodromeCLStrategy.RedeemRewardSaleDeferred.selector),
             "the deferral is MARKED on chain, from the strategy address"
+        );
+    }
+
+    /// @dev THE OTHER DEGRADED SHAPE, and the one the skim has to survive: the LEG feed is stale, so the
+    ///      redeem's own sweep floors fall back to 0 (`RedeemSweepFloorsDegraded`) while the reward feed is
+    ///      still readable. The exit completes at floor 0 AND the skim is taken, on the amount actually
+    ///      sold — a plain ERC-20 transfer, so it reads no oracle and adds no revert path here.
+    function testAFloorZeroRedeemStillCompletesAndStillSkims() public {
+        _rearmWithSkim(SKIM_BPS, feeRecipient);
+        _armBook();
+        _armGaugeAccrual(SKIM_TRANCHE);
+        legA.mint(address(strategy), 1e8); // a rerange-remainder-shaped idle leg, so the sweep is real
+
+        legAFeed.setUpdatedAt(block.timestamp - 2 hours); // reward + asset feeds stay fresh
+        vm.expectRevert(ChainlinkReader.StaleOracle.selector);
+        strategy.nav(); // the priced paths really are down
+
+        vm.recordLogs();
+        uint256 paid = _asyncRedeem(SHARES / 4);
+
+        assertGt(paid, 0, "the exit completed with the leg oracle down");
+        assertEq(aero.balanceOf(feeRecipient), SKIM_AMOUNT, "...and the skim was still taken on what sold");
+        assertEq(aero.balanceOf(address(strategy)), 0, "the tranche was sold, not stranded");
+        assertTrue(
+            _sawFrom(address(strategy), LeveragedAerodromeCLStrategy.RedeemSweepFloorsDegraded.selector),
+            "the floor-0 fallback really fired"
         );
     }
 

@@ -157,9 +157,11 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
 
-    /// @dev Mirror of `LeveragedAeroManager.CompoundFeePaid` (delegatecalled, so it logs from THIS address).
-    ///      `compound` skimmed `aeroAmount` of the harvested tranche to `recipient`, in AERO (18dp).
-    event CompoundFeePaid(address indexed recipient, uint256 aeroAmount);
+    /// @dev Mirror of `LeveragedAeroManager.RewardFeePaid` / `LeveragedAeroVenue.RewardFeePaid` (both
+    ///      delegatecalled, so both log from THIS address). `aeroAmount` of a realized reward tranche was
+    ///      skimmed to `recipient`, in AERO (18dp) — by `compound`, `flatten`, or the async-redeem sale.
+    ///      TERMINAL `settle` alone waives it.
+    event RewardFeePaid(address indexed recipient, uint256 aeroAmount);
 
     // ── Degradation markers for the DELIBERATE fail-opens in this stack. Naming: `…Deferred` = an optional
     //    ACTION was skipped; `…Degraded` = a GUARD fell back and the op ran with less protection. ──
@@ -647,7 +649,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         // BEST-EFFORT, and that is the asymmetry with `flatten` (which sells the same tranche FAIL-CLOSED):
         // `settle()` is TERMINAL, so a stale reward feed must not block the fund's only exit. The sale still
         // fails closed in its own frame, so a caught revert leaves the tranche rescuable, never sold blind.
-        try this.sellRewardSelf() {}
+        // `skim == false`: THE ONE REALIZATION PATH THAT WAIVES THE FEE — no stayer is left to protect.
+        try this.sellRewardSelf(false) {}
         catch {
             emit SettleRewardSaleDeferred();
         }
@@ -663,9 +666,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      `try/catch` (H3): its own frame is what rolls back ONLY the sale on a stale reward feed / bad route.
     ///      Two callers: the terminal `_settle`, and `LeveragedAeroManager.redeemUnwindImpl` (which runs under
     ///      DELEGATECALL and cannot `try` its own internal reverts). Not `nonReentrant`: the entry points are.
-    function sellRewardSelf() external {
+    /// @param skim Pay the fund's fee: TRUE from the async redeem, FALSE from the terminal `_settle`.
+    function sellRewardSelf(bool skim) external {
         if (msg.sender != address(this)) revert OnlySelf();
-        LeveragedAeroVenue.sellRewardImpl();
+        LeveragedAeroVenue.sellRewardImpl(skim);
     }
 
     /// @dev THE ASYNC-REDEEM SIDE OF THE SAME SALE, plus the accounting it needs.
@@ -675,12 +679,14 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///      nav-vs-payout inconsistency. `gauge.withdraw` is all-or-nothing per NFT, so `(1−f)·proceeds` is
     ///      RETURNED for the manager to add to `stayersIdle`. BEST-EFFORT (the deadman routes through here, so a
     ///      stale reward feed must not block it), still failing closed inside `sellRewardSelf`'s own frame.
+    /// @dev THE SALE SKIMS. All-or-nothing per NFT means it realizes 100% of the book's accrual with no
+    ///      later `compound` left to charge it, and realizing NET is what keeps `nav()`'s mark honest.
     /// @return stayersShare `(1−f)` of the realised USDC proceeds; 0 when nothing sold.
     function sellRedeemRewardSelf(uint256 shares, uint256 supply) external returns (uint256 stayersShare) {
         if (msg.sender != address(this)) revert OnlySelf();
         IERC20 usdc_ = IERC20(_layout().usdc);
         uint256 sold = usdc_.balanceOf(address(this));
-        try this.sellRewardSelf() {}
+        try this.sellRewardSelf(true) {}
         catch {
             emit RedeemRewardSaleDeferred();
         }
@@ -767,8 +773,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         sandwich or a careless/compromised proposer can't realise emissions below the bound. A
     ///         stale AERO feed fail-closes → `compound` reverts (defer the harvest, intended posture).
     ///
-    ///         THE FUND'S ONLY FEE IS TAKEN HERE: `compoundFeeBps` of each tranche goes to `feeRecipient`
-    ///         IN KIND before the sale, so both floors bind only what is sold. The exit paths skim nothing.
+    ///         THE FUND'S ONLY FEE IS TAKEN HERE, and on the OTHER TWO REALIZATION PATHS: `compoundFeeBps`
+    ///         of each tranche goes to `feeRecipient` IN KIND before the sale, so both floors bind only what
+    ///         is sold. `flatten` and the async redeem sell on the same terms (their own unwind auto-claims
+    ///         the whole book's accrual); the terminal `settle` alone waives it.
     ///
     ///         A GENUINE NO-OP HAS NO SIDE EFFECTS. `compound` is a keeper-polled entrypoint, so a call with
     ///         nothing to harvest — a flat book, or a staked position with zero claimable AERO — returns
@@ -1110,7 +1118,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         TWO GUARDS `settle` does not need, because `flatten` is repeatable: the pool is CALM-GATED before
     ///         the burn (the unwind's mins come off the same `slot0()` it burns at), and the auto-claimed reward
     ///         tranche is SOLD here, FAIL-CLOSED under `max(minRewardUsdcOut, L9 oracle floor)` — a reverted
-    ///         `flatten` is just a retry.
+    ///         `flatten` is just a retry. That sale SKIMS `compoundFeeBps` in kind first, as `compound` does,
+    ///         so quote `minRewardUsdcOut` on the POST-SKIM amount.
     /// @param minIdleUsdcOut Aggregate floor on the strategy's idle USDC once the unwind completes, over and
     ///                       above the per-swap `maxSlippageBps` floors.
     function flatten(uint256 minRewardUsdcOut, uint256 minIdleUsdcOut) external onlyProposer nonReentrant {

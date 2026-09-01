@@ -828,7 +828,7 @@ band edge.
 | 6 | yield was redeployed | `supply` + `borrow` + pool `Mint` legs in the receipt; NPM `liquidity` up |
 | 7 | NFT still staked, same `tokenId` | `gauge.stakedContains` `true`; `tokenId` unchanged (this is `increaseLiquidity`, not a re-mint — only `rerange` mints a new id) |
 | 8 | `nav()` does **not** step across the compound | the pending claim was already marked (net of the skim) in `nav()`'s reward term, so the harvest only *realizes* it. The delta is the realized Moonwell carry plus the small venue-fill-vs-oracle-mark basis — **not** `usdcOut` (see the decomposition note below) |
-| 9 | the skim was paid, in kind | `feeRecipient` AERO balance up by exactly `aeroClaimed × compoundFeeBps / 10000` (floor), and exactly one `CompoundFeePaid(recipient, aeroAmount)` log from the **strategy** address (the manager is delegatecalled). `vault.totalSupply()` **unchanged** — nothing mints |
+| 9 | the skim was paid, in kind | `feeRecipient` AERO balance up by exactly `aeroClaimed × compoundFeeBps / 10000` (floor), and exactly one `RewardFeePaid(recipient, aeroAmount)` log from the **strategy** address (the manager is delegatecalled). `vault.totalSupply()` **unchanged** — nothing mints |
 | 10 | delta-neutrality | LP leg-A amount vs leg-A debt (expect a small short by the *accrued borrow interest* — see below) |
 | 11 | LTV | moves **toward the stored `targetLtvBps`**, not toward the book's current LTV |
 
@@ -855,8 +855,9 @@ band edge.
 > **2026-08-31 — every fee reading in this section records the RETIRED management/performance fee
 > model.** That layer (`LeveragedAeroFees`, the high-water mark, the crystallise machinery and its
 > fee-share mints) is **deleted**. The fund's only fee is now a single in-kind skim: `compoundFeeBps`
-> (500 = 5 %, cap 1000) of each harvested AERO tranche, transferred to `feeRecipient` **pre-swap** and
-> logged as `CompoundFeePaid`. Read the numbers below as history; read *What to assert after a
+> (500 = 5 %, cap 1000) of each AERO tranche the fund realizes — `compound`, `flatten` and the
+> async-redeem fulfilment, everything but the terminal `settle` — transferred to `feeRecipient`
+> **pre-swap** and logged as `RewardFeePaid`. Read the numbers below as history; read *What to assert after a
 > `compound`* above for current behaviour.
 
 Asset-mode cbBTC/USDC clone, `state() == 1`, proposer `0x73f6…8FAf`, tokenId `73341624`,
@@ -952,15 +953,16 @@ Behaviours worth knowing (observed, **not** defects to fix from this runbook):
    a dead gauge cannot be drained a cent at a time. Nothing is paid, nothing is minted, nothing moves.
 4. **A `compound` WITH AERO pays exactly one fee, in kind, up front.** `compoundFeeBps` of the tranche
    (rounding down) is transferred to `feeRecipient` as **AERO** before the swap, logged
-   `CompoundFeePaid(recipient, aeroAmount)` from the strategy address; both `minUsdcOut` and the oracle
+   `RewardFeePaid(recipient, aeroAmount)` from the strategy address; both `minUsdcOut` and the oracle
    floor then price only the remainder. **Nothing is ever deferred** — there is no HWM to wait for and
    no next accrual point. And `nav()` does **not step** across the harvest: the reward term already
    marks the pending `gauge.earned()` net of the skim, which is what closes the exit-timing arb (a
    redeemer leaving just before a harvest pays their pro-rata share of the pending fee instead of
-   dodging it). The one accepted asymmetry runs in holders' favour: the exit paths
-   (`settle` / `flatten` / the async-redeem residual sweeps, all via
-   `LeveragedAeroVenue._sellRewardBalance`) skim **nothing** and sell the tranche gross, so an exit
-   realizes slightly more than the mark. Charging there would bill the same tranche twice.
+   dodging it). `flatten` and the async-redeem fulfilment skim on the SAME basis, through
+   `LeveragedAeroVenue._sellRewardBalance`: their own `gauge.withdraw` is all-or-nothing per NFT, so each
+   realizes 100 % of the book's accrual and leaves no later harvest to charge it. Assert row 9 on those
+   two as well. The one accepted asymmetry runs in holders' favour: the **terminal** `settle` sells the
+   tranche gross, so the fund's last exit realizes slightly more than the mark.
 
 Could not be verified on this instance: nothing in the harvest path. `BelowOracleFloor` was proven
 only by `eth_call` state override (a genuine venue dislocation > `maxSlippageBps` cannot be induced
