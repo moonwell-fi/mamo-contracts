@@ -36,8 +36,7 @@ this single position. This doc completes the backend picture: everything the acc
 > This guide documents the **strategy-facing** behavior the agent observes; manager internals are cited
 > only where they explain a guard or a failure mode. **This repo is the authority.** The
 > `src/leveraged-aero/` package is an in-repo fork: upstream Sherwood at the vendoring pin is a historical
-> baseline useful only for diffing, and where the two disagree the code here wins (see
-> [`docs/LEVERAGED_AERO_CL_AUDIT.md`](../LEVERAGED_AERO_CL_AUDIT.md)). There is no upstream doc set to
+> baseline useful only for diffing, and where the two disagree the code here wins. There is no upstream doc set to
 > defer to for fund-ops procedure any more — rebalance policy, monitoring cadence and incident playbooks
 > are Mamo's to define.
 
@@ -1152,8 +1151,6 @@ Strategy events that exist today:
   **set-once** (`_bind`, no rotation). Treat "supply went to zero" as an incident that ends the fund's
   life, not as an idle state to redeploy from — and keep a non-zero stake in the book if you want the
   option to continue.
-
-See [`docs/LEVERAGED_AERO_CL_AUDIT.md`](../LEVERAGED_AERO_CL_AUDIT.md) for the full audit focus-area list.
 
 ---
 

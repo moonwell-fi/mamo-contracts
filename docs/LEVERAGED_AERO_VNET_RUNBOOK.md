@@ -203,7 +203,8 @@ The tooling:
 | `script/tenderly/LeveragedAeroStackHarness.s.sol` | `deployTemplate()` (B.1) and `buildInitData()` (B.2) |
 | `script/tenderly/FreshFeed.sol` | the B.0 aggregator stand-in |
 
-Reference implementation contract for this phase: `docs/LEVERAGED_AERO_CL_AUDIT.md`, *Deploy flow*.
+Reference implementation for this phase: `multisig/mamo-multisig/015_DeployLeveragedAeroPooledSystem.sol`
+(the mainnet proposal — same deploy/bind/activate sequence, minus the vnet cheat-RPCs).
 
 Everything is env-driven; the venue book's Base defaults live in the two script files (kept in
 lockstep) and are documented in `script/tenderly/README.md`. The snippets in B.0–B.5 are the
@@ -642,10 +643,10 @@ whole sequence is Mamo's to execute:
    `LEVERAGED_AERO_STRATEGY` **are** added to `addresses/8453.json` — safe then, because the
    code genuinely exists on mainnet and the eager `isContract` check passes.
 
-Open gates before a mainnet deploy, from `docs/LEVERAGED_AERO_CL_AUDIT.md`: the
-`wethIsToken0 == false` ordering has never been driven through a full lifecycle, and
-`IMoonwellMarket.underlying()` must be confirmed on the live markets (the new init guard bricks
-initialization if it is absent). Both are Base-fork-verifiable — this runbook is the vehicle.
+The two once-open mainnet gates are closed by `test/LeveragedAeroSystemSetup.integration.t.sol`
+(`make leveraged-aero-setup`): the chosen pool has USDC as token0, so the rehearsal drives the
+`wethIsToken0 == false` ordering through a full lifecycle, and running 015 against the real
+markets exercises the `IMoonwellMarket.underlying()` init guard.
 
 ---
 
