@@ -531,6 +531,74 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the recenter still minted real liquidity");
     }
 
+    // ============ REMINT RANGE MUST NOT DRAW IDLE USDC EITHER (F05, asset-mode) ============
+    // The new hazard `remintRange` adds over `rerange` is the SWAP: it is sized off the collected inventory,
+    // and in asset-mode leg B (USDC) is also user deposits. Both the swap sizing AND the mint must ignore them.
+
+    /// @dev The centred band this fixture's `rerange` would derive — used as the explicit band below.
+    int24 internal constant REMINT_LOWER = TICK - int24(uint24(WIDTH)) / 2;
+    int24 internal constant REMINT_UPPER = TICK + int24(uint24(WIDTH)) / 2;
+
+    /// @dev `zeroForOne == true` sells token0, which IS the unit of account here (USDC is token0) — the
+    ///      leaking shape. A pre-existing idle balance must change the outcome by EXACTLY itself.
+    function testRemintRangeSwapDoesNotDrawIdleUsdc() public {
+        _execute(SEED);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, true, 5000, 0, 0);
+        uint256 baselineIdle = usdc.balanceOf(address(strategy));
+        uint256 baselineLegABought = router.boughtOf(address(legA));
+        vm.revertToState(snap);
+        assertGt(baselineLegABought, 0, "the baseline actually swapped, or the equality below is vacuous");
+
+        uint256 idleSeed = 400_000e6;
+        usdc.mint(address(strategy), idleSeed);
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+
+        vm.prank(proposer);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, true, 5000, 0, 0);
+
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            baselineIdle + idleSeed,
+            "the idle USDC was neither swapped nor drawn into the LP"
+        );
+        assertEq(
+            router.boughtOf(address(legA)),
+            baselineLegABought,
+            "the swap was sized off the COLLECTED USDC only, not the raw balance"
+        );
+        assertTrue(strategy.layout().tokenId != tokenIdBefore, "the re-mint still minted a fresh position");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "...with real liquidity in it");
+    }
+
+    /// @dev The mirror direction (selling leg A INTO the unit of account) adds USDC to the balance. Only that
+    ///      swap output may reach the mint — the reservation still holds off the PRE-unwind snapshot.
+    function testRemintRangeSwapIntoTheAssetLegStillReservesIdleUsdc() public {
+        _execute(SEED);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 5000, 0, 0);
+        uint256 baselineIdle = usdc.balanceOf(address(strategy));
+        vm.revertToState(snap);
+
+        uint256 idleSeed = 250_000e6;
+        usdc.mint(address(strategy), idleSeed);
+
+        vm.prank(proposer);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 5000, 0, 0);
+
+        assertEq(
+            usdc.balanceOf(address(strategy)),
+            baselineIdle + idleSeed,
+            "idle USDC untouched: only the swap's own output fed the mint"
+        );
+        assertGt(router.boughtOf(address(usdc)), 0, "a leg-A -> USDC swap really ran");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the re-mint minted real liquidity");
+    }
+
     // ============ RERANGE WITH SPOT OUTSIDE THE BAND: THE ONE-SIDED REOPEN (F06) ============
     // A rerange swaps nothing, so once spot leaves the old band the position is 100% one leg and the
     // straddling band's mint reverted on zero liquidity. `rerangeTickRange` now anchors the populated side.

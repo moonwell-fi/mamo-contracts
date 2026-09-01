@@ -986,6 +986,34 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         LeveragedAeroManager.rerangeImpl(minLiq0, minLiq1);
     }
 
+    /// @notice Re-mint the CL position at EXPLICIT ticks with an OPTIONAL partial swap between the LP legs,
+    ///         via `LeveragedAeroManager.remintRangeImpl()`. Where `rerange` derives its band from
+    ///         `(width, skew)` around spot and swaps nothing, this takes the band and may move part of the
+    ///         collected inventory ACROSS the legs, so the mint can be balanced at a range spot has left.
+    ///         Calm-gated FIRST; debt + collateral untouched. NO fee crystallisation, for `rerange`'s reason:
+    ///         neither supply nor NAV changes, so the fee defers and the HWM is unaffected.
+    /// @param tickUpper  `tickUpper - tickLower` must land inside `[minWidth, maxWidth]`; the SKEW band does
+    ///                   NOT apply, and the validated span is PERSISTED as `width` (`skewBps` untouched).
+    /// @param zeroForOne Swap direction in POOL TOKEN ORDER (true = token0 → token1).
+    /// @param swapBps    Fraction of the collected input side to swap, 1e4 scale; 10000 is a one-sided mint.
+    /// @param minSwapOut May only TIGHTEN the always-on Chainlink cross-rate floor, so `0` is safe.
+    /// @param minLiquidity Minimum CL liquidity, in liquidity units — a swap makes `rerange`'s two per-amount
+    ///                   floors a moving target.
+    function remintRange(
+        int24 tickLower,
+        int24 tickUpper,
+        bool zeroForOne,
+        uint16 swapBps,
+        uint256 minSwapOut,
+        uint256 minLiquidity
+    ) external onlyProposer nonReentrant {
+        if (_state != State.Executed) revert NotExecuted();
+        Layout storage $ = _layout();
+        LeveragedAeroValuation.checkExplicitRange(tickLower, tickUpper, $.tickSpacing, $.minWidth, $.maxWidth);
+        if (swapBps > 10000) revert OutOfBounds();
+        LeveragedAeroManager.remintRangeImpl(tickLower, tickUpper, zeroForOne, swapBps, minSwapOut, minLiquidity);
+    }
+
     /// @notice ADMIN-ONLY POLICY: set the fund's STANDING target LTV, in EITHER direction. Only the admin can
     ///         RAISE it, which is the point of `onlyAdmin`: a compromised rebalancer key can rebalance and
     ///         de-lever, but cannot lever the fund up toward the cap. Sets policy ONLY — the next `execute` /
