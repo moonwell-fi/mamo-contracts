@@ -54,8 +54,7 @@ contract DeployLPAutoBalancerV2Test is Script {
         address aero = addresses.getAddress("AERO");
 
         vm.startBroadcast();
-        LPAutoBalancerV2 lab =
-            new LPAutoBalancerV2(admin, manager, rebalancer, guardian, positionManager, aero);
+        LPAutoBalancerV2 lab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, positionManager, aero);
         LPCompoundModule module = new LPCompoundModule(address(lab), aero, admin);
         vm.stopBroadcast();
 
