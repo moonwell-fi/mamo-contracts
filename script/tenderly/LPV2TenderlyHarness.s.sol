@@ -49,9 +49,9 @@ state and its assertions hold against it.
 Addresses are the SAME real Base mainnet addresses the integration test pins, and
 are re-verified live by run-harness.sh before any tx is sent.
 
-  POOL    0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1  WETH/cbBTC CL, tickSpacing=100
-  GAUGE   0x41b2126661C673C2beDd208cC72E85DC51a5320a  CL gauge (rewardToken = AERO)
-  NFPM    0x827922686190790b37229fd06084350E74485b72  Slipstream NFPM (gauge.nft())
+  POOL    0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b  WETH/cbBTC CL, tickSpacing = 10
+  GAUGE   0x61E0B10423a0009C3f83ab4313813d29437d0817  CL gauge (rewardToken = AERO)
+  NFPM    0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53  Slipstream NFPM (gauge.nft())
   WETH    0x4200000000000000000000000000000000000006  token0
   cbBTC   0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf  token1
   AERO    0x940181a94A35A4569E4529A3CDfB74e38FD98631  gauge reward token
@@ -82,7 +82,7 @@ contract LPV2TenderlyHarness is Script {
     // measured here are exactly what reset()/exit() forwarded.
     address constant FEE_COLLECTOR = 0x000000000000000000000000000000000000Fee5;
 
-    int24 constant TICK_SPACING = 100;
+    int24 constant TICK_SPACING = 10;
     uint24 constant WIDTH = 400; // 4 * tickSpacing
     int24 constant HALF = 200; // WIDTH / 2
 
@@ -135,7 +135,7 @@ contract LPV2TenderlyHarness is Script {
         vm.makePersistent(address(addresses));
         POOL = addresses.getAddress("WETH_CBBTC_CL_POOL");
         GAUGE = addresses.getAddress("WETH_CBBTC_CL_GAUGE");
-        NFPM = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        NFPM = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
         WETH = addresses.getAddress("WETH");
         CBBTC = addresses.getAddress("cbBTC");
         AERO = addresses.getAddress("AERO");
@@ -348,11 +348,23 @@ contract LPV2TenderlyHarness is Script {
     // uses one all-roles EOA.
     function checkRoleGating() public {
         vm.fee(0);
+        // _resolve() is REQUIRED even though this entrypoint deploys nothing: each forge --sig
+        // invocation is a fresh process, so POOL/NFPM/... start at address(0), and _resetParams()
+        // now reads the pool's slot0 to build the tick commitment. Without this the phase dies
+        // "call to non-contract address 0x0" before it tests anything.
+        _resolve();
         LPAutoBalancerV2 lab = _lab();
         address rando = address(0xBAD);
 
+        // HOISTED out of argument position: _resetParams() makes an external slot0()
+        // staticcall, and a call in ARGUMENT position is evaluated FIRST -- consuming the
+        // one-shot vm.prank below it, so the call under test would run as this script
+        // instead of the pranked address. Verified: with it inline the target sees the
+        // script address, not the prank target.
+        LPAutoBalancerV2.RebalanceParams memory rp = _resetParams();
+
         vm.prank(rando);
-        (bool ok0, bytes memory r0) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
+        (bool ok0, bytes memory r0) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (rp)));
         require(!ok0, "reset must revert for non-REBALANCER");
         require(bytes4(r0) == ACCESS_CONTROL_UNAUTHORIZED, "reset revert must be AccessControl");
 
@@ -382,9 +394,17 @@ contract LPV2TenderlyHarness is Script {
     // storage. `maxTickDeviation` here must have been tightened by setPositionConfig first.
     function checkCalmGate() public {
         vm.fee(0);
+        _resolve(); // see checkRoleGating: fresh process, and _resetParams() reads the pool
         LPAutoBalancerV2 lab = _lab();
+        // HOISTED out of argument position: _resetParams() makes an external slot0()
+        // staticcall, and a call in ARGUMENT position is evaluated FIRST -- consuming the
+        // one-shot vm.prank below it, so the call under test would run as this script
+        // instead of the pranked address. Verified: with it inline the target sees the
+        // script address, not the prank target.
+        LPAutoBalancerV2.RebalanceParams memory rp = _resetParams();
+
         vm.prank(_sender()); // REBALANCER
-        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (rp)));
         require(!ok, "reset must revert when spot deviates from TWAP");
         require(bytes4(ret) == LPAutoBalancerV2.TwapDeviation.selector, "revert must be TwapDeviation");
         console.log("calmGate.reset_reverted_TwapDeviation:", true);
@@ -445,8 +465,12 @@ contract LPV2TenderlyHarness is Script {
         // ── INVARIANT 4: cooldown gates an immediate re-reset (simulation-only, not broadcast) ──
         // reset() just set lastRebalance = now; minRebalanceInterval = 3600 > elapsed, so a second
         // reset by the same REBALANCER must revert Cooldown.
+        // HOISTED — see checkRoleGating. Inline, the slot0() staticcall would consume the prank and
+        // this call would run as the script (no REBALANCER_ROLE), reverting AccessControl instead of
+        // Cooldown and failing the assertion below for the wrong reason.
+        LPAutoBalancerV2.RebalanceParams memory rpCd = _resetParams();
         vm.prank(_sender());
-        (bool okCd, bytes memory rCd) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
+        (bool okCd, bytes memory rCd) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (rpCd)));
         require(!okCd, "reset: immediate 2nd reset must hit cooldown");
         require(bytes4(rCd) == LPAutoBalancerV2.Cooldown.selector, "reset: 2nd-reset revert must be Cooldown");
 
@@ -598,9 +622,17 @@ contract LPV2TenderlyHarness is Script {
     /// @notice Assert reset() reverts StaleOracle (orchestrator advanced the clock past maxOracleDelay).
     function checkStaleOracle() public {
         vm.fee(0);
+        _resolve(); // see checkRoleGating: fresh process, and _resetParams() reads the pool
         LPAutoBalancerV2 lab = _lab();
+        // HOISTED out of argument position: _resetParams() makes an external slot0()
+        // staticcall, and a call in ARGUMENT position is evaluated FIRST -- consuming the
+        // one-shot vm.prank below it, so the call under test would run as this script
+        // instead of the pranked address. Verified: with it inline the target sees the
+        // script address, not the prank target.
+        LPAutoBalancerV2.RebalanceParams memory rp = _resetParams();
+
         vm.prank(_sender());
-        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (_resetParams())));
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(lab.rebalanceUsingAlt, (rp)));
         require(!ok, "checkStaleOracle: reset must revert when feeds are stale");
         require(bytes4(ret) == LPAutoBalancerV2.StaleOracle.selector, "checkStaleOracle: revert must be StaleOracle");
         console.log("checkStaleOracle.reset_reverted_StaleOracle :", true);

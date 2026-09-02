@@ -410,18 +410,38 @@
     "isContract": true
   },
   {
-    "addr": "0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1",
+    "addr": "0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b",
     "name": "WETH_CBBTC_CL_POOL",
     "isContract": true
   },
   {
-    "addr": "0x41b2126661C673C2beDd208cC72E85DC51a5320a",
+    "addr": "0x61E0B10423a0009C3f83ab4313813d29437d0817",
     "name": "WETH_CBBTC_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
+    "name": "AERODROME_SLIPSTREAM_NFPM_V2",
     "isContract": true
   },
   {
     "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
     "name": "CHAINLINK_L2_SEQUENCER_UPTIME_FEED",
+    "isContract": true
+  },
+  {
+    "addr": "0xd4669fCee3BE73b51438ad1f1debEB3505Eab308",
+    "name": "MAMO_LP_REBALANCER",
+    "isContract": false
+  },
+  {
+    "addr": "0x6E5d79C41a358BE46D919c87F03683E9D8f48c36",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_TEST",
+    "isContract": true
+  },
+  {
+    "addr": "0xEA05B89CA6045f65E5040519354aBca93b695425",
+    "name": "MAMO_LP_COMPOUND_MODULE_TEST",
     "isContract": true
   }
 ]

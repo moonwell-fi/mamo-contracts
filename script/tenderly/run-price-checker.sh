@@ -46,6 +46,7 @@ trap teardown EXIT
 resolve_vnet
 section "Verify fork is Base"
 chain_sanity
+ensure_address_book
 
 section "SlippagePriceChecker gate (live checker, real Chainlink config)"
 info "→ checkPriceGating() [fair minOut passes, under-priced minOut fails]"

@@ -6,6 +6,7 @@ import {LPAutoBalancerV2Setup} from "../multisig/mamo-multisig/011_LPAutoBalance
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {Test} from "@forge-std/Test.sol";
 
+import {LPGeometryLib} from "@contracts/libraries/LPGeometryLib.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -18,7 +19,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 // ─────────────────────────────────────────────────────────────────────────────
 // LPAutoBalancerV2SetupTest — REAL Base-fork exercise of the FPS phase-1 setup proposal.
 //
-// Mirrors LPAutoBalancerV2.integration.t.sol: PINNED fork at block 47_600_000 + the vm.fee(0)
+// Mirrors LPAutoBalancerV2.integration.t.sol: PINNED fork at block 50_600_000 + the vm.fee(0)
 // op-revm Isthmus workaround. setUp mints a REAL WETH/cbBTC Slipstream NFT to the F-MAMO Safe
 // (the off-chain Phase-B precondition), then wires the proposal and injects tokenId + a test
 // rebalancer EOA. test_proposal_lifecycle runs deploy/build/simulate/validate and then proves
@@ -42,13 +43,21 @@ interface ICLPoolSwap {
 
 contract LPAutoBalancerV2SetupTest is Test {
     // Real Base addresses (resolved on-chain at the pinned block; identical to the V2 integration test).
-    address constant POOL = 0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1;
-    address constant NFPM = 0x827922686190790b37229fd06084350E74485b72;
+    address constant POOL = 0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b;
+    address constant NFPM = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53;
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
-    uint256 constant PINNED_BLOCK = 47_600_000;
-    int24 constant TICK_SPACING = 100;
+    uint256 constant PINNED_BLOCK = 50_600_000;
+    /// @dev Lower tick of the main position minted in setUp; the lifecycle test asserts spot is pushed below it.
+    int24 internal mainTickLower;
+    int24 constant TICK_SPACING = 10;
+
+    /// @dev The allocation this run commits. A ROUND NUMBER chosen up front, not read back from the
+    ///      minted position — the point of the parameter is that the position has to match the
+    ///      target, not the other way round. Set explicitly (rather than relying on the proposal's
+    ///      $50k default) so the setter itself is exercised.
+    uint256 constant TARGET_ALLOCATION_USD = 25_000e8;
 
     uint160 constant MIN_SQRT_RATIO_PLUS_ONE = 4_295_128_740;
 
@@ -74,8 +83,9 @@ contract LPAutoBalancerV2SetupTest is Test {
 
         safe = addresses.getAddress("F-MAMO");
 
-        // Mint a REAL WETH/cbBTC Slipstream position owned by the F-MAMO Safe (Phase-B precondition).
-        tokenId = _mintMainPositionTo(safe, 2 ether, 0.05e8);
+        // Mint a REAL WETH/cbBTC Slipstream position owned by the F-MAMO Safe (Phase-B precondition),
+        // sized via the range-geometry recipe (not 50/50-by-value).
+        tokenId = _mintAllocationTo(safe, TARGET_ALLOCATION_USD);
 
         // Instantiate + wire the proposal.
         proposal = new LPAutoBalancerV2Setup();
@@ -83,6 +93,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         proposal.setAddresses(addresses);
         proposal.setTokenId(tokenId);
         proposal.setRebalancerEOA(rebalancerEOA);
+        proposal.setTotalAllocation(TARGET_ALLOCATION_USD, 500);
     }
 
     // ─── helpers ─────────────────────────────────────────────────────────────
@@ -93,6 +104,40 @@ contract LPAutoBalancerV2SetupTest is Test {
         return q * TICK_SPACING;
     }
 
+    /// @dev Chainlink answer, 8-decimal, for a feed name in the address book.
+    function _price(string memory feedName) internal view returns (uint256) {
+        (, int256 answer,,,) = IPriceFeed(addresses.getAddress(feedName)).latestRoundData();
+        require(answer > 0, "feed answer non-positive");
+        return uint256(answer);
+    }
+
+    /// @dev Mint a real WETH/cbBTC CL position worth ~`targetUsd` (1e8) straddling spot.
+    /// @dev Sized from the RANGE GEOMETRY, not from a 50/50 value split. A 50/50 split is only right
+    ///      when spot sits at the range's centre, and at `tickSpacing` 100 the aligned centre can be
+    ///      up to 99 ticks away from spot — at which point the legs bind ~25/75 and the NFPM refunds
+    ///      a third of the intended size, putting the mint far outside the proposal's 500 bps band.
+    ///      So: price one unit of liquidity across the actual `[tl, tu]` at the live `sqrtPriceX96`,
+    ///      then scale to the target. Both legs bind together by construction.
+    ///      NOTE the asymmetric decimals — WETH (token0) is 18dp, cbBTC (token1) is 8dp.
+    function _mintAllocationTo(address recipient, uint256 targetUsd) internal returns (uint256 id) {
+        (uint160 sqrtP, int24 spotTick,,,,) = ICLPool(POOL).slot0();
+        int24 center = _align(spotTick);
+        int24 tl = center - 200;
+        int24 tu = center + 200;
+
+        // Value of one reference unit of liquidity across this exact range, 1e8 USD.
+        uint128 refLiq = 1e18;
+        (uint256 r0, uint256 r1) = LPGeometryLib.amountsForLiquidityAtTicks(sqrtP, tl, tu, refLiq);
+        uint256 refUsd = (r0 * _price("CHAINLINK_ETH_USD")) / 1e18 + (r1 * _price("CHAINLINK_BTC_USD")) / 1e8;
+        require(refUsd > 0, "reference liquidity prices to zero");
+
+        // Scale to the target, with a small headroom on the desired amounts so rounding in the
+        // NFPM's own conversion cannot leave the mint a wei short of the band.
+        uint256 amt0 = (r0 * targetUsd * 10_050) / (refUsd * 10_000);
+        uint256 amt1 = (r1 * targetUsd * 10_050) / (refUsd * 10_000);
+        return _mintMainPositionTo(recipient, amt0, amt1);
+    }
+
     /// @dev Mint a real WETH/cbBTC CL position straddling spot, owned by `recipient`.
     function _mintMainPositionTo(address recipient, uint256 amt0, uint256 amt1) internal returns (uint256 id) {
         (, int24 spotTick,,,,) = ICLPool(POOL).slot0();
@@ -100,6 +145,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         int24 tl = center - 200;
         int24 tu = center + 200;
         require(tl < spotTick && spotTick < tu, "setup: main must straddle spot");
+        mainTickLower = tl;
 
         deal(WETH, address(this), amt0);
         deal(CBBTC, address(this), amt1);
@@ -114,6 +160,8 @@ contract LPAutoBalancerV2SetupTest is Test {
             tickUpper: tu,
             amount0Desired: amt0,
             amount1Desired: amt1,
+            // Fork-only convenience: zeros skip slippage protection. The production Safe mint
+            // must set real mins (handbook §6.4).
             amount0Min: 0,
             amount1Min: 0,
             recipient: recipient,
@@ -203,7 +251,8 @@ contract LPAutoBalancerV2SetupTest is Test {
         _pushTickDown(2_000 ether);
         (, int24 spotOut,,,,) = ICLPool(POOL).slot0();
         assertTrue(spotOut < spotBefore, "swap pushed spot down");
-        assertTrue(spotOut < int24(-266600), "main fully out of range, single-sided WETH");
+        // Bound derived from the minted range, not a constant: spot at the pinned block moves on re-pin.
+        assertTrue(spotOut < mainTickLower, "main fully out of range, single-sided WETH");
 
         // Let the TWAP catch up to the new spot (skip >> twapWindow so the post-swap tick dominates).
         skip(2 hours);
@@ -236,6 +285,96 @@ contract LPAutoBalancerV2SetupTest is Test {
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
         assertGt(s.mainLiquidity, 0, "rebuilt main has real liquidity (operable, no swap)");
         assertTrue(s.mainStaked, "main restaked after rebalanceUsingAlt (was staked before)");
+    }
+
+    /// @dev The PRODUCTION input path. A `forge script` invocation cannot call setTokenId /
+    ///      setTotalAllocation -- those exist for this test, which builds the proposal in-process --
+    ///      so run() reads them from the environment. Without that plumbing a mainnet
+    ///      `--broadcast` reverts "tokenId not set" and the proposal is un-runnable from the CLI.
+    ///      Every DO_* stage is switched off here: this pins the INPUT WIRING, not the lifecycle,
+    ///      which the other tests already cover.
+    function test_runLoadsInputsFromEnv() public {
+        vm.setEnv("DO_DEPLOY", "false");
+        vm.setEnv("DO_BUILD", "false");
+        vm.setEnv("DO_SIMULATE", "false");
+        vm.setEnv("DO_VALIDATE", "false");
+        vm.setEnv("DO_PRINT", "false");
+        vm.setEnv("INIT_TOKEN_ID", "424242");
+        vm.setEnv("TOTAL_ALLOCATION_USD", "1234500000000"); // $12,345 at 1e8
+        vm.setEnv("ALLOCATION_TOLERANCE_BPS", "250");
+
+        LPAutoBalancerV2Setup p = new LPAutoBalancerV2Setup();
+        p.setPrimaryForkId(vm.activeFork());
+        // Non-vacuity: these must NOT already hold the values we are about to assert.
+        assertEq(p.tokenId(), 0, "tokenId starts unset");
+        assertTrue(p.totalAllocationUsd() != 1_234_500_000_000, "allocation default differs from the env value");
+        assertTrue(p.allocationToleranceBps() != 250, "tolerance default differs from the env value");
+
+        p.run();
+
+        assertEq(p.tokenId(), 424_242, "tokenId read from INIT_TOKEN_ID");
+        assertEq(p.totalAllocationUsd(), 1_234_500_000_000, "allocation read from TOTAL_ALLOCATION_USD");
+        assertEq(p.allocationToleranceBps(), 250, "tolerance read from ALLOCATION_TOLERANCE_BPS");
+
+        // `vm.setEnv` is PROCESS-global, not test-scoped: it outlives this test and this suite.
+        // Left at "false", every proposal built by a later suite in the same `forge test` run
+        // skips deploy()/build() and dies on a missing address (MultiMarketStrategyTest:
+        // "MARKET_REGISTRY not set on chain: 8453"). Restore the simulator's defaults.
+        vm.setEnv("DO_DEPLOY", "true");
+        vm.setEnv("DO_BUILD", "true");
+        vm.setEnv("DO_SIMULATE", "true");
+        vm.setEnv("DO_VALIDATE", "true");
+        vm.setEnv("DO_PRINT", "true");
+    }
+
+    /// @dev The PRODUCTION resolution path. Every other test injects a made-up rebalancer via
+    ///      `setRebalancerEOA`, so none of them touch `_resolveRebalancer`'s address-book fallback —
+    ///      which is the branch the real run takes, since the production proposal is executed without
+    ///      that setter. Deliberately does NOT call `setRebalancerEOA`, so a missing or wrong
+    ///      MAMO_LP_REBALANCER entry fails here rather than granting the hot key to the wrong address
+    ///      on mainnet.
+    function test_resolvesRebalancerFromAddressBook() public {
+        // Fresh proposal: no setRebalancerEOA, so the fallback is the only source.
+        LPAutoBalancerV2Setup p = new LPAutoBalancerV2Setup();
+        p.setPrimaryForkId(vm.activeFork());
+        p.setAddresses(addresses);
+        p.setTokenId(tokenId);
+        p.setTotalAllocation(TARGET_ALLOCATION_USD, 500);
+        assertEq(p.rebalancerEOA(), address(0), "no explicit rebalancer set");
+
+        p.deploy();
+        p.build();
+        p.simulate();
+        p.validate();
+
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+        address expected = addresses.getAddress("MAMO_LP_REBALANCER");
+        assertTrue(lab.hasRole(lab.REBALANCER_ROLE(), expected), "address-book rebalancer granted");
+        assertFalse(lab.hasRole(lab.REBALANCER_ROLE(), rebalancerEOA), "the test EOA was NOT granted");
+    }
+
+    /// @dev The allocation assertion's non-vacuity control. Same chain state, same position, same
+    ///      tolerance — only the TARGET moves, and validate() must fail. Without it, a band that
+    ///      accepts everything (a 100% tolerance, a principal read returning 0, a validate() that
+    ///      never reaches the check) is indistinguishable from a working one.
+    function test_validate_rejectsWrongAllocation() public {
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+
+        // Sanity: at the committed target it passes. If this ever fails the mint recipe drifted and
+        // the rejections below would prove nothing.
+        proposal.validate();
+
+        // 2x the real size, same 500 bps band → the position is ~50% under target.
+        proposal.setTotalAllocation(TARGET_ALLOCATION_USD * 2, 500);
+        vm.expectRevert("position under-allocated vs totalAllocationUsd");
+        proposal.validate();
+
+        // Half the real size → ~2x over target.
+        proposal.setTotalAllocation(TARGET_ALLOCATION_USD / 2, 500);
+        vm.expectRevert("position over-allocated vs totalAllocationUsd");
+        proposal.validate();
     }
 
     // ─── MOO-741: the setup proposal must leave the L2 sequencer guard ENABLED ──────────────────

@@ -1,0 +1,54 @@
+{
+  "_comment": [
+    "STAGING MANIFEST for the LPAutoBalancerV2 Tenderly harness run. NOT a deployment record.",
+    "Every address here exists ONLY on the Tenderly Virtual TestNet named by chainId below. None of",
+    "them have code on Base mainnet, and a fresh vnet reassigns them on the next run.",
+    "",
+    "Deliberately NOT in addresses/8453.json: proposal 011 gates deployment on",
+    "`if (!addresses.isAddressSet(\"MAMO_LP_AUTO_BALANCER_V2\"))`, so registering a vnet address there",
+    "would make the production Safe run SKIP the deploy and wire itself to a contract that does not",
+    "exist on mainnet.",
+    "",
+    "The vnet RPC endpoint is NOT recorded here. A Tenderly vnet URL is effectively a bearer",
+    "credential -- it grants the cheat RPCs (tenderly_setBalance, tenderly_setStorageAt, evm_*) to",
+    "anyone holding it. Read it from TENDERLY_VNET_RPC_URL in .env, which is gitignored."
+  ],
+  "chainId": 9998453,
+  "parentNetwork": "base-mainnet",
+  "forkBlock": 50408613,
+  "rpcUrl": "see TENDERLY_VNET_RPC_URL in .env (never committed)",
+  "harness": "script/tenderly/LPV2TenderlyHarness.s.sol",
+  "runCommand": "make tenderly-harness",
+  "runAt": "2026-08-24",
+  "commit": "8a23617",
+  "libraries": {
+    "LPGeometryLib": "0x54823d912575bAF4831a0E7a3173321429209a49",
+    "LPValuationLib": "0x8A30d89B720F61c0fF8F1f3558CBFd4e5cCc6368",
+    "LPPositionLib": "0xC8fB25B6769ea283e6aeF5896A0CD70e9BAd5cE6"
+  },
+  "scenarios": {
+    "balanced": {
+      "lpAutoBalancerV2": "0x30fA6E5648bDa78c905dad6f0F5394148aD171DA",
+      "positionTokenId": 75488225,
+      "note": "main minted straddling spot; staked into the gauge before reset()"
+    },
+    "singlesided": {
+      "lpAutoBalancerV2": "0x137657991e04EC3e87b3705559052DcBdeE68E6F",
+      "positionTokenId": 75488227,
+      "note": "main minted entirely above spot (100% WETH); exercises the _mainRange single-sided branch"
+    }
+  },
+  "notDeployed": {
+    "lpCompoundModule": "The harness does not deploy LPCompoundModule -- it exercises the balancer's no-swap path only. The CowSwap compound/swap-rebalance legs are covered by the unit suite and gated on the checker-owner tx (handbook 7.1)."
+  },
+  "measurements": {
+    "resetLiquidityBefore": 179715587681210,
+    "resetLiquidityAfter": 179715587681209,
+    "resetWethDustToFeeCollector": 11127,
+    "resetCbbtcDustToFeeCollector": 0,
+    "cooldownBlockedSecondReset": true,
+    "roleGatingBlockedResetExitStake": true,
+    "exitWethReturnedToSafe": "1999999999999982368",
+    "exitSlotInactive": true
+  }
+}
