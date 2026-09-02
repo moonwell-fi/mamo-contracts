@@ -315,6 +315,16 @@ contract LPAutoBalancerV2SetupTest is Test {
         assertEq(p.tokenId(), 424_242, "tokenId read from INIT_TOKEN_ID");
         assertEq(p.totalAllocationUsd(), 1_234_500_000_000, "allocation read from TOTAL_ALLOCATION_USD");
         assertEq(p.allocationToleranceBps(), 250, "tolerance read from ALLOCATION_TOLERANCE_BPS");
+
+        // `vm.setEnv` is PROCESS-global, not test-scoped: it outlives this test and this suite.
+        // Left at "false", every proposal built by a later suite in the same `forge test` run
+        // skips deploy()/build() and dies on a missing address (MultiMarketStrategyTest:
+        // "MARKET_REGISTRY not set on chain: 8453"). Restore the simulator's defaults.
+        vm.setEnv("DO_DEPLOY", "true");
+        vm.setEnv("DO_BUILD", "true");
+        vm.setEnv("DO_SIMULATE", "true");
+        vm.setEnv("DO_VALIDATE", "true");
+        vm.setEnv("DO_PRINT", "true");
     }
 
     /// @dev The PRODUCTION resolution path. Every other test injects a made-up rebalancer via
