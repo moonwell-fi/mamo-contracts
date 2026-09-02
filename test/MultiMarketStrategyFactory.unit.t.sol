@@ -38,7 +38,7 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
         backendRole = registry.BACKEND_ROLE();
         marketRegistry = new MarketRegistry(admin, backend, guardian);
 
-        implementation = new MamoMultiMarketStrategy();
+        implementation = new MamoMultiMarketStrategy(address(marketRegistry));
         vm.prank(admin);
         strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
 
@@ -504,7 +504,7 @@ contract MultiMarketStrategyFactoryUnitTest is Test {
     function testWhitelistNewImplementationThenCreateStillWorks() public {
         MultiMarketStrategyFactory factory = _createGrantedFactory();
 
-        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy(address(marketRegistry));
         vm.prank(admin);
         registry.whitelistImplementation(address(newImplementation), strategyTypeId);
 

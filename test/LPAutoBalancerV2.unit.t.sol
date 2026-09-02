@@ -8,6 +8,7 @@ import {MockCLGauge} from "./mocks/MockCLGauge.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
+import {LPPositionLib} from "@contracts/libraries/LPPositionLib.sol";
 import {Test} from "@forge-std/Test.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
@@ -574,6 +575,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     {
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
+            altWidth: 200,
             amount0MinMain: 0,
             amount1MinMain: 0,
             amount0MinAlt: 0,
@@ -605,6 +607,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         LPAutoBalancerV2.RebalanceParams memory p = _defaultRebalanceParams();
         return LPAutoBalancerV2.RebuildParams({
             width: p.width,
+            altWidth: p.altWidth,
             amount0MinMain: p.amount0MinMain,
             amount1MinMain: p.amount1MinMain,
             amount0MinAlt: p.amount0MinAlt,
@@ -1146,6 +1149,40 @@ contract LPAutoBalancerV2UnitTest is Test {
         // (OLD raw code would have chosen token1-surplus => range BELOW: [mainTl - spacing, mainTl].)
         assertEq(dPM.lastMintTickLower(), OLD_TU, "alt on token0 side: lower == mainTu");
         assertEq(dPM.lastMintTickUpper(), OLD_TU + 200, "alt on token0 side: upper == mainTu + spacing");
+    }
+
+    /// @notice Sherlock: the alt width is caller-supplied, not pinned to one tickSpacing. Same fixture
+    ///         as above with altWidth = 2 spacings: the anchor stays put, the far bound moves.
+    function test_mintAlt_usesCallerAltWidth() public {
+        _setupMixed(500);
+        _stageMixedPrincipal(1e5, 1e16);
+
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.altWidth = 400;
+        vm.prank(rebalancer);
+        dLab.rebalanceUsingAlt(params);
+
+        (, uint256 altId,) = _readMixedMainAlt();
+        assertEq(altId, D_ALT_ID, "alt minted");
+        assertEq(dPM.lastMintTickLower(), OLD_TU, "anchor unchanged: lower == floor + spacing");
+        assertEq(dPM.lastMintTickUpper(), OLD_TU + 400, "upper == lower + altWidth");
+    }
+
+    /// @notice altWidth must be a nonzero multiple of tickSpacing, else the alt bounds fall off the grid.
+    function test_mintAlt_revertsOnMisalignedOrZeroAltWidth() public {
+        _setupMixed(500);
+        _stageMixedPrincipal(1e5, 1e16);
+
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.altWidth = 300; // spacing is 200
+        vm.prank(rebalancer);
+        vm.expectRevert(LPPositionLib.InvalidAltWidth.selector);
+        dLab.rebalanceUsingAlt(params);
+
+        params.altWidth = 0;
+        vm.prank(rebalancer);
+        vm.expectRevert(LPPositionLib.InvalidAltWidth.selector);
+        dLab.rebalanceUsingAlt(params);
     }
 
     /// @dev DEFECT 3 (the floor bypass). The value floor must count LOOSE contract balances. We stage

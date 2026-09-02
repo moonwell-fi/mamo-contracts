@@ -966,8 +966,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         p.mainStaked = false;
         p.lastRebalance = block.timestamp;
 
-        p.altTokenId =
-            _mintAlt(p, cfg, spotTick, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
+        p.altTokenId = _mintAlt(
+            p, cfg, spotTick, dec0, dec1, params.altWidth, params.amount0MinAlt, params.amount1MinAlt, params.deadline
+        );
 
         uint256 valueAfter = _totalValue(p, cfg, sqrtP, dec0, dec1);
         // Swap round trip gets the extra swapLossAllowanceBps tolerance on top of maxRebalanceLossBps.
@@ -989,8 +990,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///        same meaning and the same TickMismatch enforcement as on `RebuildParams` — see the TICK
     ///        COMMITMENT note on `rebuildAfterSwap`.
     /// @param expectedTickUpper the main range's upper bound the CALLER committed to.
+    /// @param altWidth tick width of the single-sided `alt`; a nonzero multiple of tickSpacing. Its
+    ///        anchor is pinned by the main commitment (floorAlign(spot)), its width by this field.
     struct RebalanceParams {
         uint24 width;
+        uint24 altWidth;
         uint256 amount0MinMain;
         uint256 amount1MinMain;
         uint256 amount0MinAlt;
@@ -1014,8 +1018,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///        aligned straddle when both legs clear MIN_MAIN_LEG_USD, otherwise the single-sided
     ///        range on the majority side adjacent to spot.
     /// @param expectedTickUpper the main range's upper bound the CALLER committed to.
+    /// @param altWidth tick width of the single-sided `alt`; see RebalanceParams.
     struct RebuildParams {
         uint24 width;
+        uint24 altWidth;
         uint256 amount0MinMain;
         uint256 amount1MinMain;
         uint256 amount0MinAlt;
@@ -1131,8 +1137,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // MIN_ALT_VALUE_USD, and — critically — does NOT forward dust. The value floor below must
         // see all value the contract controls BEFORE anything is shipped out as "dust".
         // Set altTokenId BEFORE the value-floor read so _totalValue sees the new alt.
-        p.altTokenId =
-            _mintAlt(p, cfg, spotTick, dec0, dec1, params.amount0MinAlt, params.amount1MinAlt, params.deadline);
+        p.altTokenId = _mintAlt(
+            p, cfg, spotTick, dec0, dec1, params.altWidth, params.amount0MinAlt, params.amount1MinAlt, params.deadline
+        );
 
         // value AFTER: new main principal + alt principal at the same sqrtP snapshot, PLUS the
         // USD value of any loose token0/token1 still held by this contract (_contractPairValue).
@@ -1267,6 +1274,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         int24 spotTick,
         uint8 dec0,
         uint8 dec1,
+        uint24 altWidth,
         uint256 amount0MinAlt,
         uint256 amount1MinAlt,
         uint256 deadline
@@ -1279,6 +1287,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
                 holder: address(this),
                 spotTick: spotTick,
                 tickSpacing: p.tickSpacing,
+                altWidth: altWidth,
                 dec0: dec0,
                 dec1: dec1,
                 amount0Min: amount0MinAlt,

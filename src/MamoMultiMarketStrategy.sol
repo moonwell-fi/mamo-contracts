@@ -124,6 +124,11 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     // Slot 60: marketRegistry
     IMarketRegistry public marketRegistry;
 
+    /// @notice The only registry {migrateV1ToMarketRegistry} accepts. Pinned in the implementation
+    ///         (whitelisted by the admin) so a v1 owner cannot supply a fake registry that lists the
+    ///         reward token as a market and slips it past the compound fee as "principal".
+    address public immutable MIGRATION_MARKET_REGISTRY;
+
     // Slot 61: per-market splits keyed by market address
     mapping(address => uint256) public marketSplitBps;
 
@@ -186,7 +191,9 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     /// @dev Without this the first caller of {initialize} on the implementation becomes its owner
     ///      (initialize takes the owner from caller-supplied params) and gains the inherited
     ///      recoverERC20/recoverETH. Proxies are unaffected — they initialize their own storage.
-    constructor() {
+    constructor(address _marketRegistry) {
+        require(_marketRegistry != address(0), "Invalid market registry address");
+        MIGRATION_MARKET_REGISTRY = _marketRegistry;
         _disableInitializers();
     }
 
@@ -261,6 +268,7 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
         // (market set, active flags, and therefore _getTotalBalance) for that strategy. Migration is
         // by definition a one-way move off the v1 layout, so it may only run before a registry is set.
         require(address(marketRegistry) == address(0), "Market registry already set");
+        require(_marketRegistry == MIGRATION_MARKET_REGISTRY, "Unexpected market registry");
 
         marketRegistry = IMarketRegistry(_marketRegistry);
 

@@ -309,7 +309,7 @@ contract MultiMarketStrategyUnitTest is Test {
         internal
         returns (MamoMultiMarketStrategy)
     {
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy(address(marketRegistry));
         bytes memory data = _initCalldata(splits, strategyRegistry);
 
         return MamoMultiMarketStrategy(payable(address(new ERC1967Proxy(address(implementation), data))));
@@ -349,9 +349,9 @@ contract MultiMarketStrategyUnitTest is Test {
         splits[0] = 5000;
         splits[1] = 5000;
 
-        // Hoisted: `new MamoMultiMarketStrategy()` inside the helper would consume the one-shot
+        // Hoisted: `new MamoMultiMarketStrategy(address(marketRegistry))` inside the helper would consume the one-shot
         // expectRevert before the proxy is ever constructed.
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy(address(marketRegistry));
         bytes memory data = _initCalldata(splits, address(wrongRegistry));
 
         vm.expectRevert("Registry BACKEND_ROLE mismatch");
@@ -388,7 +388,7 @@ contract MultiMarketStrategyUnitTest is Test {
 
         // Hoisted for the same reason as above: constructing the implementation inside the helper
         // would consume the one-shot expectRevert.
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy(address(marketRegistry));
         bytes memory data = _initCalldata(splits, muteRegistry);
 
         vm.expectRevert("Registry BACKEND_ROLE unreadable");
@@ -1052,6 +1052,29 @@ contract MultiMarketStrategyUnitTest is Test {
         strategy.migrateV1ToMarketRegistry(address(hostile));
 
         assertEq(address(strategy.marketRegistry()), address(marketRegistry), "registry unchanged");
+    }
+
+    /// @notice Sherlock: in the un-migrated v1 window the owner could migrate onto a FAKE registry that
+    ///         lists the reward token as a market, making `_isMarketTarget` call it principal and
+    ///         skipping the compound fee. Only the registry pinned in the implementation is accepted.
+    function test_migrateV1_rejectsAnyRegistryButThePinnedOne() public {
+        // Reproduce the window: registry unset (slot 60), legacy market slots populated (50, 51).
+        vm.store(address(strategy), bytes32(uint256(60)), bytes32(0));
+        vm.store(address(strategy), bytes32(uint256(50)), bytes32(uint256(uint160(address(mToken)))));
+        vm.store(address(strategy), bytes32(uint256(51)), bytes32(uint256(uint160(address(vault)))));
+        assertEq(address(strategy.marketRegistry()), address(0), "un-migrated v1 state");
+
+        MarketRegistry hostile = new MarketRegistry(owner, owner, owner);
+        vm.prank(owner);
+        vm.expectRevert("Unexpected market registry");
+        strategy.migrateV1ToMarketRegistry(address(hostile));
+        assertEq(address(strategy.marketRegistry()), address(0), "hostile registry rejected");
+
+        // Control: the pinned registry still migrates.
+        assertEq(strategy.MIGRATION_MARKET_REGISTRY(), address(marketRegistry), "pin is the real registry");
+        vm.prank(owner);
+        strategy.migrateV1ToMarketRegistry(address(marketRegistry));
+        assertEq(address(strategy.marketRegistry()), address(marketRegistry), "pinned registry accepted");
     }
 
     // ==================== claimRewards SKIPS WHAT IT CANNOT SETTLE ====================

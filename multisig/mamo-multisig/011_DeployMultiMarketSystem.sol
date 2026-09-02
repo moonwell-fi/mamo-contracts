@@ -134,7 +134,7 @@ contract DeployMultiMarketSystem is MultisigProposal {
     function _deployAsset(DeployAssetConfig.Config memory cfg, AssetKeys memory keys) internal {
         // Deploy new strategy implementation (one per asset/type)
         if (!addresses.isAddressSet(keys.implKey)) {
-            address newImpl = address(new MamoMultiMarketStrategy());
+            address newImpl = address(new MamoMultiMarketStrategy(addresses.getAddress("MARKET_REGISTRY")));
             addresses.addAddress(keys.implKey, newImpl, true);
         }
 
