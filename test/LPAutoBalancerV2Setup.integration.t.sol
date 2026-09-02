@@ -19,7 +19,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 // ─────────────────────────────────────────────────────────────────────────────
 // LPAutoBalancerV2SetupTest — REAL Base-fork exercise of the FPS phase-1 setup proposal.
 //
-// Mirrors LPAutoBalancerV2.integration.t.sol: PINNED fork at block 47_600_000 + the vm.fee(0)
+// Mirrors LPAutoBalancerV2.integration.t.sol: PINNED fork at block 50_600_000 + the vm.fee(0)
 // op-revm Isthmus workaround. setUp mints a REAL WETH/cbBTC Slipstream NFT to the F-MAMO Safe
 // (the off-chain Phase-B precondition), then wires the proposal and injects tokenId + a test
 // rebalancer EOA. test_proposal_lifecycle runs deploy/build/simulate/validate and then proves
@@ -48,7 +48,9 @@ contract LPAutoBalancerV2SetupTest is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
-    uint256 constant PINNED_BLOCK = 47_600_000;
+    uint256 constant PINNED_BLOCK = 50_600_000;
+    /// @dev Lower tick of the main position minted in setUp; the lifecycle test asserts spot is pushed below it.
+    int24 internal mainTickLower;
     int24 constant TICK_SPACING = 10;
 
     /// @dev The allocation this run commits. A ROUND NUMBER chosen up front, not read back from the
@@ -143,6 +145,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         int24 tl = center - 200;
         int24 tu = center + 200;
         require(tl < spotTick && spotTick < tu, "setup: main must straddle spot");
+        mainTickLower = tl;
 
         deal(WETH, address(this), amt0);
         deal(CBBTC, address(this), amt1);
@@ -248,7 +251,8 @@ contract LPAutoBalancerV2SetupTest is Test {
         _pushTickDown(2_000 ether);
         (, int24 spotOut,,,,) = ICLPool(POOL).slot0();
         assertTrue(spotOut < spotBefore, "swap pushed spot down");
-        assertTrue(spotOut < int24(-266600), "main fully out of range, single-sided WETH");
+        // Bound derived from the minted range, not a constant: spot at the pinned block moves on re-pin.
+        assertTrue(spotOut < mainTickLower, "main fully out of range, single-sided WETH");
 
         // Let the TWAP catch up to the new spot (skip >> twapWindow so the post-swap tick dominates).
         skip(2 hours);

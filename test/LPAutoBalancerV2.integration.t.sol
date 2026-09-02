@@ -20,11 +20,11 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 // only way principal moves is in/out of the position manager, never sold).
 //
 // PINNED BLOCK (mandatory): an unpinned `latest` fork drifts live spot, which breaks
-// the slippage floors / value floor non-deterministically. Block 47_600_000 was
+// the slippage floors / value floor non-deterministically. Block 50_600_000 was
 // selected because its WETH/USD + cbBTC/USD Chainlink feeds are fresh (< maxOracleDelay)
-// at the fork timestamp and the WETH/cbBTC tickSpacing-100 pool holds real liquidity.
+// at the fork timestamp and the WETH/cbBTC tickSpacing-10 pool holds real liquidity.
 //
-// Real Base mainnet addresses (resolved on-chain at block 47_600_000):
+// Real Base mainnet addresses (resolved on-chain at block 50_600_000):
 //   POOL    0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b  WETH/cbBTC CL, tickSpacing = 10
 //   GAUGE   0x61E0B10423a0009C3f83ab4313813d29437d0817  CL gauge for that pool (rewardToken = AERO)
 //   NFPM    0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53  Slipstream NonfungiblePositionManager
@@ -68,7 +68,7 @@ contract LPAutoBalancerV2Integration is Test {
     address constant ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
     address constant BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
 
-    uint256 constant PINNED_BLOCK = 47_600_000;
+    uint256 constant PINNED_BLOCK = 50_600_000;
     int24 constant TICK_SPACING = 10;
 
     // Uniswap V3 sqrtPrice bounds (TickMath MIN/MAX +/- 1) for effectively-unbounded swaps.
@@ -326,7 +326,7 @@ contract LPAutoBalancerV2Integration is Test {
         //
         // Bounds are fee/dust-sized. The largest INTENDED outflow per leg is a sub-threshold
         // remainder below MIN_ALT_VALUE_USD / MIN_MAIN_LEG_USD ($0.01), forwarded as dust, plus
-        // skimmed fees. Observed on the tickSpacing-10 pool at pinned block 47_600_000:
+        // skimmed fees. Observed on the tickSpacing-10 pool at pinned block 50_600_000:
         //   balanced rebuild:     WETH = 298_491_577_440 wei (~$0.001), cbBTC = 0 sat
         //   single-sided rebuild: WETH = 3_526_056_283_972 wei (~$0.015), cbBTC = 0 sat
         // 2e13 wei WETH (~$0.08, ~5.7x headroom) and 5_000 sat cbBTC (~$5) are still 5+ orders of
