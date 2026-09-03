@@ -370,7 +370,11 @@ Init guards that will bite during a first deploy against a new pool:
   `UnexpectedAssetDecimals`.
 - `aeroUsdFeed.decimals() == 8` → `UnexpectedFeedDecimals`.
 - Risk/oracle bands: `targetLtvBps ≤ maxLtvBps < usdcCollateralFactorBps`, `minHealthBps ≥ 10500`,
-  `minHealthBps × maxLtvBps < 1e8`, `maxDelay ∈ (0, 7 days]`, `gracePeriod ≤ 1 day`,
+  `minHealthBps × maxLtvBps < 1e8`, **`minHealthBps × cfBps > 1e8`** (`DeleverageTriggerAboveCF` — the
+  deleverage trigger LTV `1e8/minHealthBps` must sit strictly below the CF, so the real `minHealthBps`
+  floor is `1e8/cfBps`: **11364** at the live CF of 8800, not 10500 — and it binds at init and at every
+  `migrateVenue` **only**, so a Moonwell CF cut afterwards reopens the liquidatable-but-locked window
+  until the next migration), `maxDelay ∈ (0, 7 days]`, `gracePeriod ≤ 1 day`,
   `twapWindow ∈ (0, 1 day]`, `calmDeviationTicks ∈ (0, 5000]`, `maxSlippageBps ∈ (0, 1000]`.
 - The fee bound: `compoundFeeBps ≤ 1000` (`MAX_COMPOUND_FEE_BPS`, 10 %) → `CompoundFeeTooHigh`, and a
   nonzero `feeRecipient` whenever `compoundFeeBps != 0` → `FeeRecipientRequired`. Both init-only and
