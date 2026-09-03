@@ -39,6 +39,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
+    event MinHealthUpdated(uint16 previousBps, uint16 newBps);
     event ProposerUpdated(address indexed oldProposer, address indexed newProposer);
 
     address public owner = makeAddr("owner");
@@ -1791,6 +1792,101 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         s.setTargetLtv(5500); // the new ceiling is reachable, nothing above it is
         assertEq(s.targetLtvBps(), 5500, "policy can meet the lowered ceiling");
+    }
+
+    // ==================== setMinHealth (ADMIN-ONLY DELEVERAGE TRIGGER) ====================
+    // Same fixture band: target 5000, max 6500, minHealth 12000, live CF 8800. The trigger LTV is
+    // `1e8 / minHealthBps`, so at 12000 it is 8333.3 bps and rungs 4/5 bracket it in (6500, 8800).
+
+    /// @dev The admin writes the floor in EITHER direction; `layout()` reads it back, event carries (prev, new).
+    function testSetMinHealthPersistsAndEmits() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.layout().minHealthBps, 12_000, "the init health floor is the starting one");
+        assertEq(uint8(s.state()), uint8(BaseStrategy.State.Pending), "and NOT state-gated, like setMaxLtv");
+
+        vm.expectEmit(true, true, true, true, address(s));
+        emit MinHealthUpdated(12_000, 13_000);
+        vm.prank(owner);
+        s.setMinHealth(13_000); // RAISE: trigger 8333 -> 7692, further below the CF
+        assertEq(s.layout().minHealthBps, 13_000, "the raised floor persisted");
+
+        vm.prank(owner);
+        s.setMinHealth(11_500); // LOWER, still inside the ladder: 11500 * 8800 = 1.012e8 > 1e8
+        assertEq(s.layout().minHealthBps, 11_500, "and the other direction");
+        assertEq(s.layout().maxLtvBps, 6500, "the ceiling is untouched: this knob is the valve, not the belt");
+    }
+
+    /// @dev THE ROLES SPLIT: only the multisig may move the backstop the permissionless valve fires at.
+    function testSetMinHealthRevertsForProposerAndStrangers() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setMinHealth(13_000);
+
+        vm.prank(lp);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.NotAdmin.selector);
+        s.setMinHealth(13_000);
+
+        assertEq(s.layout().minHealthBps, 12_000, "a refused caller stores nothing");
+    }
+
+    /// @dev Rung 2, the 1.05x hard floor — the one rung that is a constant, not a relationship.
+    function testSetMinHealthRevertsBelowTheHardFloor() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.MinHealthTooLow.selector);
+        s.setMinHealth(10_499);
+        assertEq(s.layout().minHealthBps, 12_000, "the sub-floor value stored nothing");
+    }
+
+    /// @dev Rung 4, ANTI-GRIEF from the other knob: the trigger must stay strictly ABOVE `maxLtvBps`.
+    function testSetMinHealthRevertsOnTheMaxLtvConflictRung() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.MinHealthMaxLtvConflict.selector);
+        s.setMinHealth(15_385); // 15385 * 6500 == 1.000025e8 >= 1e8
+        assertEq(s.layout().minHealthBps, 12_000, "the conflicting floor stored nothing");
+
+        vm.prank(owner);
+        s.setMinHealth(15_384); // 15384 * 6500 == 9.9996e7 — the last legal bps
+        assertEq(s.layout().minHealthBps, 15_384, "one bps below the conflict is accepted");
+    }
+
+    /// @dev Rung 5 IS the dangerous direction: LOWERING the floor RAISES the trigger, and past the live CF
+    ///      Moonwell would liquidate before the valve is even callable. Refused, live-CF-measured.
+    function testSetMinHealthRevertsWhenTheTriggerWouldReachTheCollateralFactor() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+        s.setMinHealth(11_363); // 11363 * 8800 == 9.99944e7 <= 1e8 — trigger at 8800, the CF itself
+        assertEq(s.layout().minHealthBps, 12_000, "nothing stored");
+
+        vm.prank(owner);
+        s.setMinHealth(11_364); // 11364 * 8800 == 1.000032e8 — one bps of floor above the bound
+        assertEq(s.layout().minHealthBps, 11_364, "the boundary itself is legal");
+    }
+
+    /// @dev THE POINT OF THE SETTER: it repairs a post-init CF cut in ONE admin write — no flatten, no
+    ///      proposer, no re-stage — and that write is what un-freezes the ceiling knob.
+    function testSetMinHealthUnfreezesSetMaxLtvAfterACollateralFactorCut() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        comptroller.setCollateralFactorMantissa(0.83e18); // cf 8300; 12000 * 8300 = 9.96e7 <= 1e8
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+        s.setMaxLtv(7000); // the stored floor fails rung 5, so the ceiling cannot be re-pitched at all
+
+        vm.prank(owner);
+        s.setMinHealth(12_100); // 12100 * 8300 = 1.0043e8 > 1e8
+        assertEq(s.layout().minHealthBps, 12_100, "the floor is repaired against the cut CF");
+
+        vm.prank(owner);
+        s.setMaxLtv(7000);
+        assertEq(s.layout().maxLtvBps, 7000, "one admin write, no flatten, no proposer");
     }
 
     // ==================== setWidthBounds (ADMIN-ONLY RERANGE BAND) ====================

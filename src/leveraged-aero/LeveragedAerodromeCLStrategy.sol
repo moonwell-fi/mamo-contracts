@@ -157,6 +157,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
 
+    /// @dev `setMinHealth`, and `applyVenue` (init + `migrateVenue`) inequality-guarded.
+    event MinHealthUpdated(uint16 previousBps, uint16 newBps);
+
     /// @dev Mirror of `LeveragedAeroManager.RewardFeePaid` / `LeveragedAeroVenue.RewardFeePaid` (both
     ///      delegatecalled, so both log from THIS address). `aeroAmount` of a realized reward tranche was
     ///      skimmed to `recipient`, in AERO (18dp) — by `compound`, `flatten`, or the async-redeem sale.
@@ -857,6 +860,15 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///        could approve a ceiling now above the liquidation line.
     function setMaxLtv(uint16 maxLtvBps_) external onlyAdmin {
         LeveragedAeroVenue.setMaxLtvImpl(maxLtvBps_);
+    }
+
+    /// @notice ADMIN-ONLY POLICY: the health floor the permissionless `deleverage()` valve arms below — its
+    ///         trigger LTV is `1e8 / minHealthBps`, so RAISING this LOWERS it. Not state-gated, and it
+    ///         CONSUMES ANY STAGED VENUE HASH, on `setMaxLtv`'s `checkLtvBand` ladder against the LIVE CF.
+    /// @dev Reads no position state: a raise past CURRENT health arms the permissionless `deleverage()` in
+    ///      the same block — read health first. Rung 4 bounds that to a book already above `maxLtvBps`.
+    function setMinHealth(uint16 minHealthBps_) external onlyAdmin {
+        LeveragedAeroVenue.setMinHealthImpl(minHealthBps_);
     }
 
     /// @notice ADMIN-ONLY POLICY: set the `[minWidth, maxWidth]` band a proposer `rerange` width must land

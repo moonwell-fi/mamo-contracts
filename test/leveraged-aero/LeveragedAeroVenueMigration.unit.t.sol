@@ -1370,6 +1370,64 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertTrue(sawMigrated, "the migration itself did run -- the assertions above are not vacuous");
     }
 
+    /// @dev The health floor is the last policy field a migration rewrites, and it sets the LTV the
+    ///      permissionless valve arms at (`1e8 / minHealthBps`) — so it gets the same announcement.
+    function testMigrateAnnouncesTheHealthFloorItRewrites() public {
+        _execute(SEED);
+        _flatten();
+        assertEq(strategy.layout().minHealthBps, 12_000, "the init health floor");
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.minHealthBps = 11_500; // 11500 * 8800 = 1.012e8 > 1e8 and 11500 * 6000 < 1e8: all rungs clear
+        _stage(v);
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.MinHealthUpdated(12_000, 11_500);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().minHealthBps, 11_500, "the staged floor won, loudly");
+    }
+
+    /// @dev The inequality half: an unchanged floor is quiet, so the event means "the trigger moved".
+    function testMigrateStaysQuietWhenTheHealthFloorIsUnchanged() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // minHealthBps == the live 12000
+        _stage(v);
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool sawMigrated;
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.MinHealthUpdated.selector,
+                "an unchanged health floor must not announce a change"
+            );
+            if (logs[i].topics[0] == LeveragedAeroVenue.VenueMigrated.selector) sawMigrated = true;
+        }
+        assertTrue(sawMigrated, "the migration itself did run -- the assertion above is not vacuous");
+        assertEq(strategy.layout().minHealthBps, 12_000, "health floor unchanged");
+    }
+
+    /// @dev The stage a migration CONSUMES is announced like every other clear, so an indexer tracking
+    ///      "is a stage armed?" from `VenueStaged` alone does not show a phantom one afterwards.
+    function testMigrateAnnouncesTheStagedHashItConsumes() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams();
+        _stage(v);
+
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.VenueStaged(bytes32(0));
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "...and the storage matches the log");
+    }
+
     /// @dev THE STALE-AUTHORIZATION CLOSE. An owner stage carries a ceiling picked under the policy standing
     ///      at stage time; an admin ratchet-down moves that policy, so the setter consumes the stage exactly
     ///      as `redeploy` does. Without it the proposer alone could restore the pre-ratchet ceiling.
@@ -1425,6 +1483,24 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _stage(v);
         _migrate(v);
         assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "a FRESH owner stage migrates as before");
+    }
+
+    /// @dev And on the health-floor setter: an armed stage carries a floor the owner picked under the old
+    ///      policy, so a repair of that floor consumes it too.
+    function testSetMinHealthConsumesAStaleVenueStage() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 12000 floor
+        _stage(v);
+
+        vm.prank(owner);
+        strategy.setMinHealth(13_000);
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the repair consumed the stale authorization");
+
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().minHealthBps, 13_000, "the floor the admin set still stands");
     }
 
     /// @dev Same close on the band setter.
