@@ -1344,6 +1344,76 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertApproxEqAbs(_ltvBps(), uint256(TARGET_LTV_BPS), 3, "post-degrade LTV pinned at the standing target");
     }
 
+    /// @dev THE DEGRADED LINE IS PEG-INDEPENDENT. `getAccountLiquidity` prices the collateral leg at
+    ///      Moonwell's USDC price, so recovering the debt with USDC pinned at $1 loosened the bound above peg
+    ///      (and over-tightened below it). Dividing by the venue's OWN price cancels the peg factor, so the
+    ///      degraded bound equals the primary one at any peg.
+    ///      MUTATION: put `liquidity / 1e12` back in `_unleveredAtVenueOracle` and the two diverge by 0.76·ε·C.
+    function testDegradedWithdrawIdleHoldsTheTargetLineAboveTheUsdcPeg() public {
+        _assertTheDegradedBoundMatchesThePrimaryBound((P_USDC * 10_050) / 10_000); // USDC at $1.005
+    }
+
+    /// @dev The below-peg twin: the pin over-tightened here, so the fix must not silently loosen it either.
+    function testDegradedWithdrawIdleHoldsTheTargetLineBelowTheUsdcPeg() public {
+        _assertTheDegradedBoundMatchesThePrimaryBound((P_USDC * 9_950) / 10_000); // USDC at $0.995
+    }
+
+    /// @dev Largest `withdrawIdle` the standing bound accepts, probed under snapshots so nothing persists.
+    function _maxWithdrawIdle(uint256 ceiling) internal returns (uint256 lo) {
+        uint256 hi = ceiling + 1; // first REFUSED amount
+        while (hi > lo + 1) {
+            uint256 mid = (lo + hi) / 2;
+            if (_withdrawIdleAccepted(mid)) lo = mid;
+            else hi = mid;
+        }
+        assertTrue(_withdrawIdleAccepted(lo), "the reported max is an amount that was actually accepted");
+    }
+
+    /// @dev One `withdrawIdle` probe, reverted afterwards. ONLY `InsufficientIdle` is the bound refusing:
+    ///      treating any other revert as a refusal would let the search converge on the wrong number.
+    function _withdrawIdleAccepted(uint256 amount) internal returns (bool ok) {
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        try strategy.withdrawIdle(amount) {
+            ok = true;
+        } catch (bytes memory err) {
+            assertEq(bytes4(err), LeveragedAerodromeCLStrategy.InsufficientIdle.selector, "not the bound");
+        }
+        vm.revertToState(snap);
+    }
+
+    /// @dev Canonical LTV at a non-unit peg: the legs' USD debt in USDC FACE, the basis `targetLtvBps` is
+    ///      measured on (`_ltvBps` prices USDC at $1).
+    function _ltvBpsAt(uint256 pUsdc8) internal view returns (uint256) {
+        return (_ltvBps() * P_USDC) / pUsdc8;
+    }
+
+    function _assertTheDegradedBoundMatchesThePrimaryBound(uint256 pUsdc8) internal {
+        _execute(SEED);
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, 1_000_000e12);
+        uint256 top = 250_000e6;
+        _deposit(top);
+        vm.prank(proposer);
+        strategy.supplyIdle(top);
+        usdcFeed.setAnswer(int256(pUsdc8)); // our hardened read and Moonwell's own oracle see ONE price
+        uint256 ceiling = _collateralUsdc();
+
+        uint256 snap = vm.snapshotState();
+        uint256 primary = _maxWithdrawIdle(ceiling); // the Chainlink-priced policy bound
+        vm.revertToState(snap);
+
+        vm.warp(block.timestamp + 2 days + 1); // every hardened feed refuses; Moonwell's raw oracle does not
+        uint256 degraded = _maxWithdrawIdle(ceiling);
+        assertApproxEqAbs(degraded, primary, 10, "the degraded bound holds the same line at a non-unit peg");
+
+        vm.expectEmit(false, false, false, false, address(strategy));
+        emit LeveragedAerodromeCLStrategy.WithdrawIdleBoundDegraded();
+        vm.prank(proposer);
+        strategy.withdrawIdle(degraded);
+        assertApproxEqAbs(_ltvBpsAt(pUsdc8), uint256(TARGET_LTV_BPS), 3, "...and never leaves target, at any peg");
+    }
+
     /// @dev If even the VENUE cannot answer (a comptroller error code), the degraded path fails closed.
     function testDegradedWithdrawIdleFailsClosedWhenTheComptrollerErrors() public {
         _execute(SEED);
