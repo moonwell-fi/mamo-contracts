@@ -1870,6 +1870,35 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt cleared");
     }
 
+    /// @dev PHASE 2 PRICES ONLY THE LEGS THAT STILL OWE. The covers below are per-leg gated, so a leg with no
+    ///      residual debt has no cover to size -- and must not drag its feed's liveness into the deadman exit.
+    ///      MUTATION: read all three prices unconditionally in `_settleShortfall` and this reverts `StaleOracle`.
+    function testSettleShortfallIgnoresTheZeroDebtLegFeed() public {
+        uint256 shares = _armLegBIlShortfall();
+        uint256 id = _requestRedeem(shares);
+        assertGt(mLegB.borrowBalance(address(strategy)), 0, "premise: leg B still owes");
+
+        vm.warp(block.timestamp + 2 days + 1); // deadman window elapsed; every feed now stale
+        // Refresh every feed the cover genuinely needs; leave ONLY leg A's -- the leg the unwind repays in
+        // full, so it reaches Phase 2 with zero residual -- stale.
+        usdcFeed.setUpdatedAt(block.timestamp);
+        legBFeed.setUpdatedAt(block.timestamp);
+        aeroFeed.setUpdatedAt(block.timestamp);
+
+        uint256 lpBefore = usdc.balanceOf(lp);
+        uint256 boughtBefore = router.boughtOf(address(legB));
+        vm.prank(lp);
+        uint256 assetsOut = strategy.emergencyRedeem(id, 0);
+
+        // Reachability: Phase 1 alone cannot clear leg B, so a leg-B buy is the proof Phase 2 ran at all.
+        assertGt(router.boughtOf(address(legB)) - boughtBefore, 0, "premise: the Phase-2 cover really ran");
+        assertGt(assetsOut, 0, "the deadman exit completed with only the zero-debt leg's feed stale");
+        assertEq(usdc.balanceOf(lp) - lpBefore, assetsOut, "...and the redeemer was paid");
+        assertEq(mLegB.borrowBalance(address(strategy)), 0, "leg-B debt cleared via the Phase-2 cover");
+        assertEq(mLegA.borrowBalance(address(strategy)), 0, "leg-A debt was already clear at Phase 2");
+        assertEq(strategy.layout().tokenId, 0, "flat-book invariant restored");
+    }
+
     /// @dev F23 (c). THE HOIST STRANDS NOTHING, but only because Phase 2 now buys EXACTLY the debt (F08): the old
     ///      exact-INPUT settle over-bought by its 10% buffer and relied on the sweep running LAST to recover it.
     function testHoistedSweepStrandsNoLegTokens() public {
