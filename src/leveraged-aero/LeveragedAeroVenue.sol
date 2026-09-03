@@ -183,7 +183,7 @@ library LeveragedAeroVenue {
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
         // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
-        bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
+        bytes32 stagedVenueHash; // keccak256(abi.encode(paramsHash, stagingOwner)); 0 == none; owner move suspends
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -433,10 +433,14 @@ library LeveragedAeroVenue {
 
     // ── Migration ops (auth + state gates live in the strategy's entry points) ──
 
-    /// @notice Stage `venueHash` as the committed destination venue (0 clears). Staging is inert — no
-    ///         live venue state, position or share pricing changes until `migrateImpl` consumes it.
-    function stageImpl(bytes32 venueHash) public {
-        _layout().stagedVenueHash = venueHash;
+    /// @notice Stage `venueHash` as the committed destination venue (0 clears), BOUND to `stagingOwner`
+    ///         so a vault-owner rotation SUSPENDS it (re-arms if ownership returns — `stageVenue(0)`
+    ///         before a handover). Inert: no venue state, position or pricing change until `migrateImpl`.
+    /// @dev `0` must stay the "nothing staged" sentinel, so the clear path is NOT bound. The event
+    ///      carries the RAW hash: off-chain, recompute the stored value with the live vault owner.
+    function stageImpl(bytes32 venueHash, address stagingOwner) public {
+        _layout().stagedVenueHash =
+            venueHash == bytes32(0) ? bytes32(0) : keccak256(abi.encode(venueHash, stagingOwner));
         emit VenueStaged(venueHash);
     }
 
@@ -543,10 +547,12 @@ library LeveragedAeroVenue {
     ///         field touches, so share pricing is continuous across it.
     /// @dev The flat-book gate is deliberately NOT extended to residual collateral or token balances, which
     ///      are rescuable and where a 1-wei donation must not brick a migration.
-    function migrateImpl(VenueParams memory p) public {
+    function migrateImpl(VenueParams memory p, address currentOwner) public {
         Layout storage $ = _layout();
         bytes32 staged = $.stagedVenueHash;
-        if (staged == bytes32(0) || keccak256(abi.encode(p)) != staged) revert VenueNotStaged();
+        if (staged == bytes32(0) || keccak256(abi.encode(keccak256(abi.encode(p)), currentOwner)) != staged) {
+            revert VenueNotStaged();
+        }
         if ($.tokenId != 0 || $.hedgedDebtA != 0 || $.hedgedDebtB != 0) revert BookNotFlat();
         if (IMoonwellMarket($.mCbBTC).borrowBalanceStored(address(this)) != 0) revert BookNotFlat();
         if (IMoonwellMarket($.mWeth).borrowBalanceStored(address(this)) != 0) revert BookNotFlat();
