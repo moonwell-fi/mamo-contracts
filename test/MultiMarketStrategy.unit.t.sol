@@ -1064,17 +1064,35 @@ contract MultiMarketStrategyUnitTest is Test {
         vm.store(address(strategy), bytes32(uint256(51)), bytes32(uint256(uint160(address(vault)))));
         assertEq(address(strategy.marketRegistry()), address(0), "un-migrated v1 state");
 
+        // The hostile registry MIRRORS the real markets, so _validateTotalSplit passes on it and the
+        // pin is the only thing that rejects it. It additionally lists the reward token as a market,
+        // which is the payoff: a market target is principal, so recoverERC20 never taxes it.
         MarketRegistry hostile = new MarketRegistry(owner, owner, owner);
+        vm.startPrank(owner);
+        hostile.addMarket(address(underlying), address(mToken), MarketType.MTOKEN);
+        hostile.addMarket(address(underlying), address(vault), MarketType.ERC4626);
+        hostile.addMarket(address(underlying), address(rewardToken), MarketType.ERC4626);
+        vm.stopPrank();
+
+        uint256 reward = 1000e18;
+        rewardToken.mint(address(strategy), reward);
+
         vm.prank(owner);
         vm.expectRevert("Unexpected market registry");
         strategy.migrateV1ToMarketRegistry(address(hostile));
         assertEq(address(strategy.marketRegistry()), address(0), "hostile registry rejected");
 
-        // Control: the pinned registry still migrates.
+        // Control: the pinned registry still migrates, and the reward stays taxable through it.
         assertEq(strategy.MIGRATION_MARKET_REGISTRY(), address(marketRegistry), "pin is the real registry");
         vm.prank(owner);
         strategy.migrateV1ToMarketRegistry(address(marketRegistry));
         assertEq(address(strategy.marketRegistry()), address(marketRegistry), "pinned registry accepted");
+
+        uint256 expectedFee = (reward * COMPOUND_FEE) / 10000;
+        vm.prank(owner);
+        strategy.recoverERC20(address(rewardToken), owner, reward - expectedFee);
+        assertEq(rewardToken.balanceOf(feeRecipient), expectedFee, "the compound fee is still settled");
+        assertEq(rewardToken.balanceOf(owner), reward - expectedFee, "owner gets the net, not the gross");
     }
 
     // ==================== claimRewards SKIPS WHAT IT CANNOT SETTLE ====================

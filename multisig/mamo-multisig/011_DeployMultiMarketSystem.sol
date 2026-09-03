@@ -320,6 +320,14 @@ contract DeployMultiMarketSystem is MultisigProposal {
             assertEq(
                 factory.marketRegistry(), addresses.getAddress("MARKET_REGISTRY"), "Factory market registry mismatch"
             );
+
+            // The pin is the migration's security anchor: a misdeployed impl is otherwise invisible
+            // until a v1 migration fails.
+            assertEq(
+                MamoMultiMarketStrategy(payable(impl)).MIGRATION_MARKET_REGISTRY(),
+                addresses.getAddress("MARKET_REGISTRY"),
+                "Implementation migration registry pin mismatch"
+            );
         }
 
         // Verify multisig no longer has BACKEND_ROLE on MarketRegistry

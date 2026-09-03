@@ -1183,6 +1183,26 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         vm.expectRevert(LPPositionLib.InvalidAltWidth.selector);
         dLab.rebalanceUsingAlt(params);
+
+        // Aligned to spacing 200 but past int24: without the upper bound the cast reinterprets and
+        // yields altTu = -8_388_216, which only the pool's own checkTicks would have caught.
+        params.altWidth = 8_388_800;
+        vm.prank(rebalancer);
+        vm.expectRevert(LPPositionLib.InvalidAltWidth.selector);
+        dLab.rebalanceUsingAlt(params);
+    }
+
+    /// @notice The width check is TOTAL: it runs before the dust early-return, so a sub-threshold
+    ///         surplus cannot carry an invalid width through silently.
+    function test_mintAlt_widthValidationRunsBeforeTheDustEarlyReturn() public {
+        _register(false);
+        _stagePrincipal(1e18, 1e18); // balanced => leftover is dust, mintAlt would return 0
+
+        LPAutoBalancerV2.RebalanceParams memory params = _defaultRebalanceParams();
+        params.altWidth = 0;
+        vm.prank(rebalancer);
+        vm.expectRevert(LPPositionLib.InvalidAltWidth.selector);
+        lab.rebalanceUsingAlt(params);
     }
 
     /// @dev DEFECT 3 (the floor bypass). The value floor must count LOOSE contract balances. We stage

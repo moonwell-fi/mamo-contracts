@@ -61,8 +61,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         sitting one spacing off spot could place the opposite-side alt straddling spot: an
     ///         in-range two-sided "single-sided" mint whose in-range leg's min is forced to 0, hence
     ///         sandwichable. Spot anchoring makes that unreachable by construction — a token0 alt is
-    ///         `[floor + spacing, floor + 2*spacing]`, whose tickLower is strictly above spot, and a
-    ///         token1 alt is `[floor - spacing, floor]`, whose tickUpper is at or below spot. Neither
+    ///         `[floor + spacing, floor + spacing + altWidth]`, whose tickLower is strictly above spot,
+    ///         and a token1 alt is `[floor - altWidth, floor]`, whose tickUpper is at or below spot.
+    ///         Neither
     ///         can contain spot, whatever the main did. See `LPPositionLib.mintAlt`.
     ///
     ///         What the ordering buys NOW is only a dust-vs-deploy choice: it keeps any leg too small
@@ -886,8 +887,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         not uniquely recoverable from it. Closed by config with zero bytecode: any
     ///         `width >= 4 * tickSpacing` (equivalently `minWidth > 2 * maxTickDeviation`) makes the
     ///         collision arithmetically unreachable. Under that condition — and only then — the alt's
-    ///         two candidate ranges, [floor + spacing, floor + 2*spacing] and
-    ///         [floor - spacing, floor], are pinned to exact ticks.
+    ///         two candidate ranges, [floor + spacing, floor + spacing + altWidth] and
+    ///         [floor - altWidth, floor], are pinned to exact ticks (`altWidth` is calldata, so it is
+    ///         itself committed).
     ///
     ///         It does NOT pin WHICH of the two is minted. That choice is `_mintAlt`'s
     ///         `surplus0 = value0 >= value1`, computed from the balances left AFTER `_mintBalanced`,
