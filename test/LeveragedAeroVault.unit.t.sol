@@ -14,13 +14,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  * @notice Fork-free unit suite (runs under `make test-unit` / `make leveraged-aero-vault`) for the
  *         vanilla share ledger the vendored leveraged-Aero strategy binds to. The strategy itself is
  *         stubbed by {MockVaultStrategy} — the vault's own surface (decimals offset, share hooks,
- *         fee-config hops, lifecycle, settled exit, rescue) is what is under test.
+ *         lifecycle, settled exit, rescue) is what is under test.
  */
 contract LeveragedAeroVaultUnitTest is Test {
     // ---- events mirrored from LeveragedAeroVault (for vm.expectEmit) ----
     event StrategySet(address indexed strategy);
     event OpenDepositsUpdated(bool open);
-    event FeeConfigUpdated(address indexed feeConfig);
     event StrategyActivated(address indexed strategy, uint256 seedAmount);
     event StrategySettled(address indexed strategy);
     event SettledRedeem(address indexed owner, uint256 shares, uint256 assetsOut);
@@ -30,11 +29,13 @@ contract LeveragedAeroVaultUnitTest is Test {
     address public thirdParty = makeAddr("thirdParty");
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
-    address public feeConfig = makeAddr("feeConfig");
 
     MockToken public usdc;
     MockToken public stray;
     LeveragedAeroVault public vault;
+    /// @dev Deployed with `new`, never bound — the {LeveragedAeroVault.cloneAndBind} source.
+    MockVaultStrategy public template;
+    /// @dev The BOUND clone. Only valid after {_bind} (or {_bindAndMint}) has run.
     MockVaultStrategy public strategy;
 
     uint256 internal constant SEED = 10_000e6; // 10k USDC
@@ -43,14 +44,14 @@ contract LeveragedAeroVaultUnitTest is Test {
         usdc = new MockToken("USD Coin", "USDC", 6);
         stray = new MockToken("Stray", "STRAY", 18);
         vault = new LeveragedAeroVault(address(usdc), owner, "Leveraged Aero Vault", "lvAERO");
-        strategy = new MockVaultStrategy(address(vault), address(usdc));
+        template = new MockVaultStrategy(address(vault), address(usdc));
     }
 
     // ==================== HELPERS ====================
 
     function _bind() internal {
         vm.prank(owner);
-        vault.setStrategy(address(strategy));
+        strategy = MockVaultStrategy(vault.cloneAndBind(address(template), thirdParty, ""));
     }
 
     function _openDeposits() internal {
@@ -82,7 +83,6 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.strategy(), address(0), "strategy unset");
         assertFalse(vault.depositsOpen(), "deposits closed by default");
         assertFalse(vault.settled(), "not settled");
-        assertEq(vault.feeConfig(), address(0), "fee config unset");
     }
 
     function testConstructorZeroAssetReverts() public {
@@ -107,69 +107,27 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(wethVault.decimals(), 24, "18dp asset -> 24dp shares");
     }
 
-    // ==================== SET STRATEGY ====================
-
-    function testSetStrategy() public {
-        vm.expectEmit(true, false, false, false, address(vault));
-        emit StrategySet(address(strategy));
-
-        vm.prank(owner);
-        vault.setStrategy(address(strategy));
-
-        assertEq(vault.strategy(), address(strategy), "strategy");
-    }
-
-    function testSetStrategyOnlyOwner() public {
-        vm.prank(thirdParty);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
-        vault.setStrategy(address(strategy));
-    }
-
-    function testSetStrategyIsSetOnce() public {
-        _bind();
-
-        vm.prank(owner);
-        vm.expectRevert("LAV: strategy already set");
-        vault.setStrategy(makeAddr("otherStrategy"));
-    }
-
-    function testSetStrategyZeroReverts() public {
-        vm.prank(owner);
-        vm.expectRevert("LAV: invalid strategy");
-        vault.setStrategy(address(0));
-    }
-
-    /// @dev A clone initialized against ANOTHER vault must not be bindable here: it would hand this
-    ///      ledger's mint/burn hooks to a contract pricing a different book.
-    function testSetStrategyRejectsForeignVaultBinding() public {
-        LeveragedAeroVault otherVault = new LeveragedAeroVault(address(usdc), owner, "other", "OTH");
-        MockVaultStrategy foreign = new MockVaultStrategy(address(otherVault), address(usdc));
-
-        vm.prank(owner);
-        vm.expectRevert("LAV: strategy not bound to this vault");
-        vault.setStrategy(address(foreign));
-    }
-
     // ==================== CLONE AND BIND ====================
+    // `setStrategy` is gone (F13): `initialize` requires `msg.sender == vault_`, so only this path binds.
 
     function testCloneAndBindHappyPath() public {
         vm.expectEmit(false, false, false, false, address(vault));
         emit StrategySet(address(0)); // topic-only check; the clone address is asserted below
 
         vm.prank(owner);
-        address clone = vault.cloneAndBind(address(strategy), thirdParty, "");
+        address clone = vault.cloneAndBind(address(template), thirdParty, "");
 
         assertEq(vault.strategy(), clone, "bound to the fresh clone");
         assertEq(MockVaultStrategy(clone).vault(), address(vault), "clone initialized against this vault");
         assertEq(MockVaultStrategy(clone).proposer(), thirdParty, "proposer wired atomically");
-        assertTrue(clone != address(strategy), "a clone, not the template");
+        assertTrue(clone != address(template), "a clone, not the template");
     }
 
     /// @dev The bound clone is immediately usable — no second wiring transaction, no window in which
     ///      the vault points at an un-initialized strategy.
     function testCloneAndBindProducesAUsableStrategy() public {
         vm.startPrank(owner);
-        address clone = vault.cloneAndBind(address(strategy), thirdParty, "");
+        address clone = vault.cloneAndBind(address(template), thirdParty, "");
         vault.setOpenDeposits(true);
         vm.stopPrank();
 
@@ -180,11 +138,10 @@ contract LeveragedAeroVaultUnitTest is Test {
     function testCloneAndBindOnlyOwner() public {
         vm.prank(thirdParty);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
-        vault.cloneAndBind(address(strategy), thirdParty, "");
+        vault.cloneAndBind(address(template), thirdParty, "");
     }
 
-    /// @dev `_bind` guards BOTH entrypoints: a template whose `initialize` ignores the vault argument
-    ///      still cannot slip a foreign binding through the atomic path.
+    /// @dev `_bind` re-checks: a template whose `initialize` ignores the vault cannot slip a foreign binding.
     function testCloneAndBindRejectsForeignVaultBinding() public {
         MisboundStrategyStub stub = new MisboundStrategyStub(makeAddr("someOtherVault"));
 
@@ -193,25 +150,15 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.cloneAndBind(address(stub), thirdParty, "");
     }
 
-    /// @dev Set-once holds across the two paths in both orders.
-    function testBindIsSetOnceAcrossBothPaths() public {
+    /// @dev Set-once: the ledger rests on `msg.sender == strategy`, so a rotatable pointer would let a
+    ///      future owner mint freely against existing holders.
+    function testBindIsSetOnce() public {
         vm.startPrank(owner);
-        vault.cloneAndBind(address(strategy), thirdParty, "");
+        vault.cloneAndBind(address(template), thirdParty, "");
 
         vm.expectRevert("LAV: strategy already set");
-        vault.cloneAndBind(address(strategy), thirdParty, "");
-
-        vm.expectRevert("LAV: strategy already set");
-        vault.setStrategy(address(strategy));
+        vault.cloneAndBind(address(template), thirdParty, "");
         vm.stopPrank();
-    }
-
-    function testSetStrategyThenCloneAndBindReverts() public {
-        _bind();
-
-        vm.prank(owner);
-        vm.expectRevert("LAV: strategy already set");
-        vault.cloneAndBind(address(strategy), thirdParty, "");
     }
 
     // ==================== STRATEGY MINT ====================
@@ -326,38 +273,55 @@ contract LeveragedAeroVaultUnitTest is Test {
         assertEq(vault.balanceOf(alice), 1_000e12, "alice untouched");
     }
 
-    // ==================== FEE CONFIG ====================
+    // ==================== SET PROPOSER (F26) ====================
+    // Without rotation a compromised keeper key forces `settleStrategy`; only the OPERATOR rotates.
 
-    function testFeeConfigUnsetShortCircuits() public view {
-        assertEq(vault.factory(), address(0), "factory hop off");
-        assertEq(vault.protocolConfig(), address(0), "config off");
-    }
-
-    function testFeeConfigSetPointsFactoryAtSelf() public {
-        vm.expectEmit(true, false, false, false, address(vault));
-        emit FeeConfigUpdated(feeConfig);
+    function testSetProposerRotatesTheOperator() public {
+        _bind();
+        address newProposer = makeAddr("newProposer");
 
         vm.prank(owner);
-        vault.setFeeConfig(feeConfig);
+        vault.setProposer(newProposer);
 
-        assertEq(vault.factory(), address(vault), "factory hop -> self");
-        assertEq(vault.protocolConfig(), feeConfig, "config");
+        assertEq(strategy.proposer(), newProposer, "operator rotated on the bound strategy");
+        assertEq(vault.strategy(), address(strategy), "the STRATEGY pointer did not move");
     }
 
-    function testFeeConfigCanBeCleared() public {
-        vm.startPrank(owner);
-        vault.setFeeConfig(feeConfig);
-        vault.setFeeConfig(address(0));
-        vm.stopPrank();
+    function testSetProposerIsOwnerOnly() public {
+        _bind();
 
-        assertEq(vault.factory(), address(0), "factory hop off again");
-        assertEq(vault.protocolConfig(), address(0), "config cleared");
-    }
-
-    function testSetFeeConfigOnlyOwner() public {
         vm.prank(thirdParty);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
-        vault.setFeeConfig(feeConfig);
+        vault.setProposer(makeAddr("newProposer"));
+    }
+
+    function testSetProposerBeforeBindReverts() public {
+        vm.prank(owner);
+        vm.expectRevert("LAV: strategy not set");
+        vault.setProposer(makeAddr("newProposer"));
+    }
+
+    /// @dev Clearing the role would disable every keeper op short of settlement, so the strategy refuses it.
+    function testSetProposerRejectsZero() public {
+        _bind();
+
+        vm.prank(owner);
+        vm.expectRevert("MockStrategy: zero proposer");
+        vault.setProposer(address(0));
+    }
+
+    /// @dev NOT set-once, unlike the strategy pointer: an operator key can be lost more than once.
+    function testSetProposerCanRotateRepeatedly() public {
+        _bind();
+        address second = makeAddr("second");
+        address third = makeAddr("third");
+
+        vm.startPrank(owner);
+        vault.setProposer(second);
+        vault.setProposer(third);
+        vm.stopPrank();
+
+        assertEq(strategy.proposer(), third, "the latest rotation wins");
     }
 
     // ==================== ACTIVATE ====================
@@ -385,12 +349,12 @@ contract LeveragedAeroVaultUnitTest is Test {
     function testActivateStrategyMintsAtTheDecimalsOffset() public {
         MockToken weth = new MockToken("Wrapped Ether", "WETH", 18);
         LeveragedAeroVault wethVault = new LeveragedAeroVault(address(weth), owner, "n", "s");
-        MockVaultStrategy wethStrategy = new MockVaultStrategy(address(wethVault), address(weth));
+        MockVaultStrategy wethTemplate = new MockVaultStrategy(address(wethVault), address(weth));
 
         weth.mint(owner, 5e18);
         vm.startPrank(owner);
         weth.approve(address(wethVault), 5e18);
-        wethVault.setStrategy(address(wethStrategy));
+        wethVault.cloneAndBind(address(wethTemplate), thirdParty, "");
         wethVault.activateStrategy(5e18);
         vm.stopPrank();
 
@@ -844,6 +808,65 @@ contract LeveragedAeroVaultUnitTest is Test {
         vault.rescueERC20(address(usdc), thirdParty, 1);
     }
 
+    // ---- F24: a donated share must not disable the asset rescue permanently ----
+    // Shares reaching this contract are dead weight nothing can burn, so the gate compares EXTERNAL supply
+    // (`totalSupply() == balanceOf(address(this))`). A donation LOWERS that quantity, but only by the donor's
+    // own shares — every other holder's claim stays external and holds the gate shut.
+
+    /// @dev Everyone exits, one wei was donated along the way, and the leftover dust is still rescuable.
+    /// MUTATION: restore `totalSupply() == 0` and this reverts.
+    function testRescueAssetSucceedsAfterAllExitsDespiteADonatedShare() public {
+        _settledBook();
+
+        vm.prank(alice);
+        vault.transfer(address(vault), 1);
+
+        vm.prank(alice);
+        vault.redeemSettled(1e12 - 1);
+        vm.prank(bob);
+        vault.redeemSettled(2e12);
+
+        assertEq(vault.totalSupply(), 1, "the donated wei is all that is left, and nothing can burn it");
+        assertEq(vault.balanceOf(address(vault)), 1, "...and it is held right here");
+
+        uint256 dust = usdc.balanceOf(address(vault));
+        assertGt(dust, 0, "there IS a rounding remainder to rescue");
+
+        vm.prank(owner);
+        vault.rescueERC20(address(usdc), thirdParty, dust);
+        assertEq(usdc.balanceOf(thirdParty), dust, "recovered, not stranded forever");
+    }
+
+    /// @dev The other direction: a donor sheds only their own claim, so a real holder still blocks.
+    function testADonationDoesNotOpenTheRescueGateEarly() public {
+        _settledBook();
+
+        vm.prank(alice);
+        vault.transfer(address(vault), 5e11);
+
+        assertGt(vault.totalSupply(), vault.balanceOf(address(vault)), "bob and alice's remainder are external");
+        vm.prank(owner);
+        vm.expectRevert("LAV: asset reserved for redemptions");
+        vault.rescueERC20(address(usdc), thirdParty, 1);
+    }
+
+    /// @dev Shares escrowed on the STRATEGY are external claims, not dead weight, and hold the gate shut.
+    function testStrategyHeldSharesStillBlockTheAssetRescue() public {
+        _settledBook();
+
+        vm.prank(alice);
+        vault.transfer(address(strategy), 1e12);
+        vm.prank(bob);
+        vault.redeemSettled(2e12);
+
+        assertEq(vault.balanceOf(address(vault)), 0, "nothing was donated to the vault itself");
+        assertEq(vault.balanceOf(address(strategy)), 1e12, "the escrow-shaped balance is still outstanding");
+
+        vm.prank(owner);
+        vm.expectRevert("LAV: asset reserved for redemptions");
+        vault.rescueERC20(address(usdc), thirdParty, 1);
+    }
+
     // ==================== OWNERSHIP ====================
 
     /// @dev Ownable2Step: the strategy's `rescueToVault` reads `Ownable(vault).owner()`, so a
@@ -917,13 +940,119 @@ contract LeveragedAeroVaultUnitTest is Test {
         vm.expectRevert("LAV: renounce disabled");
         vault.renounceOwnership();
     }
+
+    // ==================== FUND CAPACITY CAP ====================
+
+    /// @dev The ceiling defaults to 0 == UNLIMITED, so a fresh deployment is never bricked before the owner acts.
+    function testMaxTotalAssetsDefaultsToUnlimited() public view {
+        assertEq(vault.maxTotalAssets(), 0, "0 == unlimited on a fresh deploy");
+    }
+
+    function testSetMaxTotalAssetsByOwner() public {
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LeveragedAeroVault.MaxTotalAssetsSet(5_000_000e6);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000_000e6);
+        assertEq(vault.maxTotalAssets(), 5_000_000e6, "capacity stored");
+
+        vm.prank(owner);
+        vault.setMaxTotalAssets(0);
+        assertEq(vault.maxTotalAssets(), 0, "capacity cleared");
+    }
+
+    function testSetMaxTotalAssetsRevertsForNonOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thirdParty));
+        vm.prank(thirdParty);
+        vault.setMaxTotalAssets(1);
+        assertEq(vault.maxTotalAssets(), 0, "unchanged");
+    }
+
+    /// @dev `0` would be ambiguous (full vs unlimited), so an unlimited fund reports `type(uint256).max`.
+    function testRemainingCapacityReportsMaxWhenUnlimited() public {
+        _bind();
+        assertEq(vault.remainingCapacity(), type(uint256).max, "unlimited reads as max, not 0");
+    }
+
+    function testRemainingCapacityShrinksAsTheFundFills() public {
+        _bindAndMint(alice, 1_000e12);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000e6);
+
+        strategy.setNav(1_000e6);
+        assertEq(vault.remainingCapacity(), 4_000e6, "room == cap - nav");
+
+        strategy.setNav(4_500e6);
+        assertEq(vault.remainingCapacity(), 500e6, "room shrinks as the book grows");
+    }
+
+    /// @dev NAV can drift ABOVE the ceiling on gains alone, so the subtraction must floor at 0, not underflow.
+    function testRemainingCapacityIsZeroAtAndAboveTheCeiling() public {
+        _bindAndMint(alice, 1_000e12);
+        vm.prank(owner);
+        vault.setMaxTotalAssets(5_000e6);
+
+        strategy.setNav(5_000e6);
+        assertEq(vault.remainingCapacity(), 0, "exactly full");
+
+        strategy.setNav(6_000e6); // drifted over on gains
+        assertEq(vault.remainingCapacity(), 0, "over the ceiling floors to 0, no underflow");
+    }
+
+    /// @dev Advisory only, but the sanctioned way to size a `minShares` floor across the 6dp/12dp gap.
+    function testPreviewSharesForAssetsAtPar() public {
+        _bind();
+        assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "par pricing on an empty book");
+    }
+
+    /// @dev Accepted drift: as the book earns, each dollar buys FEWER shares, so a fixed share cap admits more.
+    function testPreviewSharesForAssetsFallsAsNavGrows() public {
+        _bindAndMint(alice, 1_000e12);
+        strategy.setNav(1_000e6);
+        uint256 atPar = vault.previewSharesForAssets(1_000e6);
+
+        strategy.setNav(1_200e6); // +20% NAV, supply unchanged
+        uint256 afterGain = vault.previewSharesForAssets(1_000e6);
+
+        assertLt(afterGain, atPar, "a richer book mints fewer shares per dollar");
+    }
+
+    /// @dev Fail-closed like a real deposit: an unpriceable strategy must not hand back an actionable number.
+    function testPreviewSharesForAssetsRevertsWhenNavUnpriceable() public {
+        _bind();
+        strategy.setNavReverts(true);
+        vm.expectRevert("MockStrategy: nav unpriceable");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    function testPreviewSharesForAssetsRevertsBeforeStrategyIsBound() public {
+        vm.expectRevert("LAV: strategy unset");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    /// @dev REGRESSION — `nav()` FLOORS to 0 instead of reverting and the preview had no matching guard, so
+    ///      it divided by `nav() + 1 == 1` and over-reported by ~1e12x, making a `minShares` floor sized off
+    ///      it unsatisfiable. Reachable post-`settleStrategy`.
+    function testPreviewSharesForAssetsRevertsWhenNavIsZeroWithSupplyOutstanding() public {
+        _bindAndMint(alice, 1_000e12);
+        strategy.setNav(0); // flat/worthless book, holders still present
+
+        vm.expectRevert("LAV: nav unpriceable");
+        vault.previewSharesForAssets(1_000e6);
+    }
+
+    /// @dev The guard keys on SUPPLY, so a genuinely empty book still prices at nav 0 (the genesis deposit).
+    function testPreviewSharesForAssetsStillPricesAnEmptyBookAtNavZero() public {
+        _bind();
+        strategy.setNav(0);
+        assertEq(vault.previewSharesForAssets(1_000e6), 1_000e12, "genesis pricing unaffected");
+    }
 }
 
 /**
  * @title MisboundStrategyStub
  * @notice A deliberately misbehaving strategy template: its `initialize` IGNORES the vault argument
- *         and it keeps reporting a foreign vault. Proves `LeveragedAeroVault._bind` guards the
- *         atomic {LeveragedAeroVault.cloneAndBind} path too, not just {setStrategy}.
+ *         and keeps reporting a foreign vault, proving `LeveragedAeroVault._bind` asks the clone where it
+ *         points. Its `initialize` is ungated: it is only ever reached through `cloneAndBind`, as the vault.
  */
 contract MisboundStrategyStub {
     address public immutable vault;

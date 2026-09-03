@@ -5,12 +5,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {ICToken} from "./sherwood/interfaces/ICToken.sol";
-import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
-import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
-import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
+import {ICToken} from "./interfaces/ICToken.sol";
+import {IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICLGauge, ICLPool, ICLSwapRouter} from "./interfaces/ISlipstream.sol";
+import {ChainlinkReader} from "./libraries/ChainlinkReader.sol";
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
+import {TickMath} from "./libraries/TickMath.sol";
 
 /// @dev Minimal Aerodrome v2 (AMM) Router — used for the `compound` AERO→USDC reward swap (see
 ///      `swapAeroToUsdc`). The Slipstream CL SwapRouter only serves CL pools, so the reward leg needs
@@ -32,6 +32,11 @@ interface IAeroRouter {
     ) external returns (uint256[] memory amounts);
 }
 
+/// @dev Aerodrome v2 (AMM) PoolFactory — proves a reward→USDC route exists before a venue is adopted.
+interface IAeroV2Factory {
+    function getPool(address tokenA, address tokenB, bool stable) external view returns (address pool);
+}
+
 /// @title  LeveragedAeroValuation
 /// @notice Net-equity **oracle** NAV for the leveraged Aerodrome CL strategy. This is
 ///         the single safety-critical computation — it prices DEPOSITS, so a wrong
@@ -41,7 +46,7 @@ interface IAeroRouter {
 ///         manipulated price can only *deny* a deposit, never mint cheap shares.
 ///
 ///         ```
-///         NAV = idleStrategy + collateral + clLegs + idleLegs − debt  (USDC, 6dp)
+///         NAV = idleStrategy + collateral + clLegs + idleLegs + reward − debt  (USDC, 6dp)
 ///         ```
 ///
 ///         The strategy prices/redeems against strategy-controlled value only; any vault float
@@ -65,6 +70,9 @@ interface IAeroRouter {
 ///                             remainder a no-swap `rerange` recenter leaves), each priced via
 ///                             Chainlink on the SAME basis as `debt` — so a borrowed leg is
 ///                             never uncounted and a single-position recenter is NAV-neutral.
+///         - `reward`        = the reward already claimed into the strategy wallet PLUS the unclaimed
+///                             `gauge.earned()`, both priced via the venue's reward feed and marked
+///                             NET of the `compoundFeeBps` harvest skim (`_rewardUsdc`).
 ///
 ///         The CL-leg split uses the oracle sqrtP (the Gamma/Arrakis technique) so the
 ///         mint mark cannot be tick-shoved; the same two feeds price the debt, so the
@@ -93,6 +101,8 @@ library LeveragedAeroValuation {
     ///         to 0 / the whole deposit. Fail-closed — opening an unhedged or unlevered leg would
     ///         silently break the delta-hedge premise.
     error DegenerateRange();
+    /// @notice `rerangeTickRange` was asked to place a range for a position holding NEITHER leg.
+    error NothingToRerange();
     /// @notice ASSET-MODE lever-up needs `needed` USDC from idle to pair with the borrowed leg A, but the
     ///         book only holds `available` (see `assetModeLeverUpPair`). Fail-closed and LOUD: a partial
     ///         fill or a silent cap would leave the position under-levered and, worse, mis-hedged. The
@@ -104,9 +114,44 @@ library LeveragedAeroValuation {
     ///         same-signature declarations in `LeveragedAeroManager` / `LeveragedAerodromeCLStrategy`,
     ///         so a test may expect it off any of the three.
     error MoonwellRepayFailed(uint256 errCode);
+    /// @notice A range pair failed `checkRange`: an off-grid or out-of-band width, or a skew outside
+    ///         `(0, 1e4)` / the governance band / one that starves a side below a single tickSpacing.
+    error OutOfBounds();
+    /// @notice An oracle / calm-gate config value is outside the band a guard needs to stay meaningful.
+    error OracleParamOutOfRange();
+    // The selectors below match same-signature declarations in `LeveragedAerodromeCLStrategy`.
+    /// @notice `targetLtvBps > maxLtvBps` at init.
+    error TargetLtvExceedsMax();
+    /// @notice `minHealthBps` below the 10500 floor.
+    error MinHealthTooLow();
+    /// @notice `maxLtvBps` at or above the Moonwell USDC collateral factor.
+    error MaxLtvExceedsCF();
+    /// @notice `minHealthBps × maxLtvBps >= 1e8` — the deleverage trigger LTV would sit inside the band (L4).
+    error MinHealthMaxLtvConflict();
+    /// @notice `minHealthBps × cfBps <= 1e8` — the deleverage trigger LTV would sit at or above the CF (L4).
+    error DeleverageTriggerAboveCF();
+    /// @notice A non-zero fee rate with a zero recipient.
+    error FeeRecipientRequired();
+    /// @notice Harvest skim above `MAX_COMPOUND_FEE_BPS`.
+    error CompoundFeeTooHigh();
+    /// @notice `feeRecipient` is the clone itself — the skim would be a self-transfer, i.e. a silent
+    ///         no-op on an init-only field with no setter to fix it.
+    error FeeRecipientIsStrategy();
+    /// @notice `Comptroller.markets()` failed, returned short, or reported a zero collateral factor.
+    error ComptrollerCallFailed();
+
+    // ── Events (DELEGATECALLED, so they log from the STRATEGY's address; mirrored in its ABI) ──
+
+    /// @notice `_measureLeg` could not read `market`'s accrued debt — the Moonwell accrual reverted — so
+    ///         that leg's drift was taken as ZERO and the leg went UNHEDGED until the next harvest.
+    event HedgeLegMeasureDegraded(address market);
 
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
+
+    /// @notice Ceiling on the in-kind harvest skim, in bps (10%) — mirrors `MamoMultiMarketStrategy`'s
+    ///         `MAX_COMPOUND_FEE`, the same shape this fee copies. Enforced at init by `checkFeeParams`.
+    uint16 internal constant MAX_COMPOUND_FEE_BPS = 1000;
 
     /// @dev Reference liquidity for the `assetModeSplit` ratio probe. Only the RATIO of the two
     ///      required amounts matters (both are linear in L for a fixed range + sqrtP, so L cancels),
@@ -131,14 +176,18 @@ library LeveragedAeroValuation {
         uint8 cbBTCDecimals; // cbBTC decimals (8 on Base)
         uint8 wethDecimals; // WETH decimals (18)
         address pool; // Aerodrome Slipstream CL pool (cbBTC/WETH)
+        address gauge; // Slipstream CL gauge — read for `rewardToken()` + `earned()` (the reward term)
+        uint256 tokenId; // `Layout.tokenId` — the staked CL NFT `earned()` is asked about; 0 ⇒ flat book
         address cbBTCFeed; // Chainlink BTC/USD feed (8dp)
         address wethFeed; // Chainlink ETH/USD feed (8dp)
         address usdcFeed; // Chainlink USDC/USD feed (8dp)
+        address rewardFeed; // Chainlink reward/USD feed (8dp) — `Layout.aeroUsdFeed`, the venue-migrated one
         address sequencerFeed; // Chainlink L2 sequencer-uptime feed
         uint256 maxDelay; // per-feed max staleness (seconds)
         uint256 gracePeriod; // sequencer grace period (seconds)
         uint16 calmDeviationTicks; // max |spotTick − twapTick| before fail-closed
         uint32 twapWindow; // calm-gate TWAP lookback (seconds)
+        uint16 compoundFeeBps; // `Layout.compoundFeeBps` — haircuts the reward term (see `_rewardUsdc`)
     }
 
     /// @notice The net-equity oracle NAV of the whole levered book, in USDC (6dp).
@@ -147,10 +196,10 @@ library LeveragedAeroValuation {
     /// @param tickLower  Lower tick of the CL position (from `NPM.positions`).
     /// @param tickUpper  Upper tick of the CL position.
     /// @param liquidity  CL liquidity (from `NPM.positions`); 0 ⇒ no CL legs.
-    /// @return navUsdc   USDC value of `idle + collateral + clLegs + idleLegs − debt` (vault float
-    ///                   excluded — M2 deposit/redeem symmetry; strategy-controlled terms only).
-    /// @dev Fail-closed: reverts on any oracle/calm failure (via `ChainlinkReader` and the
-    ///      calm-gate) and on non-positive equity. Used to price deposits only.
+    /// @return navUsdc   `idle + collateral + clLegs + idleLegs + reward − debt` in USDC 6dp (vault float
+    ///                   excluded — M2 deposit/redeem symmetry).
+    /// @dev Fail-closed: reverts on any oracle/calm failure and on non-positive equity. Prices deposits
+    ///      only; the reward feed is read only when there IS reward value (`_rewardUsdc`).
     function netEquityUsdc(Config memory c, address strategy, int24 tickLower, int24 tickUpper, uint128 liquidity)
         public
         view
@@ -190,6 +239,9 @@ library LeveragedAeroValuation {
             assets += _usdcValue(IERC20(c.cbBTC).balanceOf(strategy), c.cbBTCDecimals, pCbBTC, pUsdc);
         }
         assets += _usdcValue(IERC20(c.weth).balanceOf(strategy), c.wethDecimals, pWeth, pUsdc);
+
+        // --- gauge reward: claimed-but-unsold balance + still-unclaimed `earned()` ---
+        assets += _rewardUsdc(c, strategy, pUsdc);
 
         // --- debt (same Chainlink basis) ---
         uint256 debt = _debtUsdc(c, strategy, pCbBTC, pWeth, pUsdc);
@@ -242,41 +294,178 @@ library LeveragedAeroValuation {
     // Range geometry + ASSET-MODE deploy sizing
     // ---------------------------------------------------------------------------
 
-    /// @notice The tickSpacing-aligned range centred on `pool`'s current tick, spanning `width/2` ticks
-    ///         each side. Lives here (rather than in `LeveragedAeroManager`, which is at the EIP-170
-    ///         margin) alongside `assetModeSplit`, the sizing math that consumes it.
-    ///
-    /// @dev "Centred" is grid-approximate, not exact. Both bounds round DOWN onto the grid, so the
-    ///      realised centre can sit up to one `tickSpacing` below the current tick and the realised
-    ///      width can differ from `width` by up to one spacing; when `width / tickSpacing` is ODD the
-    ///      half-span is itself off-grid, which is where the skew is largest. Accepted: the band is
-    ///      orders of magnitude wider than one spacing, and re-centring exactly would need an align-up
-    ///      on one side, silently widening the range past the band validated at init.
-    ///
-    ///      Both bounds are clamped into the aligned tick domain: `width` is capped at `2 × MAX_TICK` at
-    ///      init so the arithmetic cannot wrap int24, but a wide band near either end of the domain
-    ///      still pushes a bound past ±MAX_TICK, where `getSqrtRatioAtTick` would revert unhelpfully
-    ///      deep inside TickMath. `maxAligned` sits ON the spacing grid by construction, so clamping
-    ///      keeps the range mintable rather than merely non-panicking.
-    ///
-    ///      The returned range always STRICTLY BRACKETS the current tick (`tickLower <= tick <
-    ///      tickUpper`) whenever `width >= 2 × tickSpacing`, which init enforces — this is what makes a
-    ///      freshly centred range two-sided, and therefore always sizeable by `assetModeSplit`.
-    ///
+    /// @notice The Moonwell USDC collateral factor in bps, read from `Comptroller.markets(mUsdc_)` at init.
+    /// @dev Fail-closed on a failed/short call or a zero factor; the 2nd returned word is 1e18-scaled.
+    function readCollateralFactor(address comptroller_, address mUsdc_) public view returns (uint16 cfBps) {
+        (bool ok, bytes memory ret) = comptroller_.staticcall(abi.encodeWithSignature("markets(address)", mUsdc_));
+        if (!ok || ret.length < 64) revert ComptrollerCallFailed();
+        uint256 cfMantissa;
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            cfMantissa := mload(add(ret, 0x40))
+        }
+        cfBps = uint16(cfMantissa / 1e14); // 0.88e18 / 1e14 = 8800
+        if (cfBps == 0) revert ComptrollerCallFailed();
+    }
+
+    /// @notice The INIT-ONLY shape check on the two governance bands every later `checkRange` is measured
+    ///         against, fixed for the clone's life.
+    /// @dev Width bounds on the `tickSpacing_` grid, `minWidth_ >= 2 × spacing` (an aligned range is never
+    ///      empty), `min <= max`, `maxWidth_` inside the tick domain (`skewedTickRange` can put the whole
+    ///      width on ONE side). Skew `0 < min <= max < 10000`, so the band can only TIGHTEN `checkRange`'s
+    ///      open `(0, 1e4)` interval.
+    function checkBands(int24 tickSpacing_, uint24 minWidth_, uint24 maxWidth_, uint16 minSkewBps_, uint16 maxSkewBps_)
+        public
+        pure
+    {
+        if (tickSpacing_ <= 0) revert OutOfBounds();
+        uint24 spacing = uint24(tickSpacing_);
+        if (minWidth_ % spacing != 0 || maxWidth_ % spacing != 0) revert OutOfBounds();
+        if (uint256(minWidth_) < 2 * uint256(spacing)) revert OutOfBounds();
+        if (minWidth_ > maxWidth_) revert OutOfBounds();
+        if (uint256(maxWidth_) > 2 * uint256(uint24(TickMath.MAX_TICK))) revert OutOfBounds();
+        if (minSkewBps_ == 0 || minSkewBps_ > maxSkewBps_ || maxSkewBps_ >= 10000) revert OutOfBounds();
+    }
+
+    /// @notice The five VENUE-SCOPED risk invariants: the LTV band's own shape and its relationship to the
+    ///         destination market's collateral factor (bps). Shared by `checkRiskParams` and
+    ///         `LeveragedAeroVenue.applyVenue`, which re-runs them at every `migrateVenue`.
+    /// @dev L4: permissionless deleverage triggers at `LTV = 1e8 / minHealthBps`; the last two rungs bracket
+    ///      it above `maxLtvBps` (grief-deleverage) and below `cfBps` (liquidation precedes the rescue), so
+    ///      the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`. CONFIG-TIME ONLY: a CF that Moonwell
+    ///      cuts post-init reopens that window until the next `migrateVenue` re-reads it.
+    function checkLtvBand(uint16 targetLtvBps, uint16 maxLtvBps, uint16 minHealthBps, uint16 cfBps) public pure {
+        if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
+        if (minHealthBps < 10500) revert MinHealthTooLow();
+        if (maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
+        if (uint256(minHealthBps) * uint256(maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
+        if (uint256(minHealthBps) * uint256(cfBps) <= 1e8) revert DeleverageTriggerAboveCF();
+    }
+
+    /// @notice The INIT-ONLY numeric ladder over the risk and oracle params, in the strategy's original
+    ///         rung order — observable, since each rung has its own typed error.
+    /// @dev The oracle rungs bound each knob so a misconfig cannot silently disable a guard: `maxDelay ∈
+    ///      (0, 7 days]`, `gracePeriod ∈ [0, 1 days]`, `twapWindow ∈ (0, 1 days]` (0 disables the
+    ///      calm-gate), `calmDeviationTicks ∈ (0, 5000]`, `maxSlippageBps ∈ (0, 1000]`. The fee rungs are a
+    ///      separate call because a 12-argument version overflowed the Yul stack allocator's reach.
+    /// @param cfBps The Moonwell USDC collateral factor (bps) the caller read at init.
+    function checkRiskParams(
+        uint16 targetLtvBps,
+        uint16 maxLtvBps,
+        uint16 minHealthBps,
+        uint16 cfBps,
+        uint256 maxDelay,
+        uint256 gracePeriod,
+        uint32 twapWindow,
+        uint16 calmDeviationTicks,
+        uint16 maxSlippageBps
+    ) public pure {
+        checkLtvBand(targetLtvBps, maxLtvBps, minHealthBps, cfBps);
+        if (maxDelay == 0 || maxDelay > 7 days) revert OracleParamOutOfRange();
+        if (gracePeriod > 1 days) revert OracleParamOutOfRange();
+        if (twapWindow == 0 || twapWindow > 1 days) revert OracleParamOutOfRange();
+        if (calmDeviationTicks == 0 || calmDeviationTicks > 5000) revert OracleParamOutOfRange();
+        if (maxSlippageBps == 0 || maxSlippageBps > 1000) revert OracleParamOutOfRange();
+    }
+
+    /// @notice The INIT-ONLY fee rung: a non-zero skim needs a recipient, the skim is capped, and the
+    ///         recipient is not the clone itself.
+    /// @dev A zero skim with a zero recipient stays legal (a fee-free clone). This runs under
+    ///      `initialize`'s DELEGATECALL, so `address(this)` IS the clone: a recipient equal to it would
+    ///      make every skim a self-transfer — the fee silently never leaves, on a field with no setter.
+    ///      `view`, not `pure`, only because of that `address(this)` read.
+    function checkFeeParams(uint16 compoundFeeBps, address feeRecipient) public view {
+        if (compoundFeeBps != 0 && feeRecipient == address(0)) revert FeeRecipientRequired();
+        if (compoundFeeBps > MAX_COMPOUND_FEE_BPS) revert CompoundFeeTooHigh();
+        if (feeRecipient == address(this)) revert FeeRecipientIsStrategy();
+    }
+
+    /// @notice THE ONE PREDICATE validating a `(width, skewBps)` pair before `skewedTickRange` consumes it
+    ///         — shared by `_initialize` (genesis) and `rerange` (per-cycle), so the two cannot drift.
+    /// @dev `skewBps_` is the fraction of `width_` placed BELOW the pool tick on a 1e4 scale (5000 =
+    ///      centred). Width on the `tickSpacing_` grid and inside `[minWidth_, maxWidth_]`; skew inside the
+    ///      OPEN `(0, 10000)` and the governance band. The span guard (BOTH sides at least one
+    ///      `tickSpacing`) is span-based, not a flat bps band, because it is what keeps the DOWN-aligned
+    ///      range STRICTLY BRACKETING the pool tick — the invariant `assetModeSplit` needs to size a fresh
+    ///      range two-sided. So at the `2 × tickSpacing_` floor only the centred geometry passes.
+    function checkRange(
+        uint24 width_,
+        uint16 skewBps_,
+        int24 tickSpacing_,
+        uint24 minWidth_,
+        uint24 maxWidth_,
+        uint16 minSkewBps_,
+        uint16 maxSkewBps_
+    ) public pure {
+        if (tickSpacing_ <= 0) revert OutOfBounds();
+        if (width_ % uint24(tickSpacing_) != 0) revert OutOfBounds();
+        if (width_ < minWidth_ || width_ > maxWidth_) revert OutOfBounds();
+        if (skewBps_ == 0 || skewBps_ >= 10000) revert OutOfBounds();
+        if (skewBps_ < minSkewBps_ || skewBps_ > maxSkewBps_) revert OutOfBounds();
+        uint256 lowerSpan = (uint256(width_) * uint256(skewBps_)) / 10000;
+        uint256 upperSpan = uint256(width_) - lowerSpan; // exact complement, matching `skewedTickRange`
+        uint256 spacing = uint256(uint24(tickSpacing_));
+        if (lowerSpan < spacing || upperSpan < spacing) revert OutOfBounds();
+    }
+
+    /// @notice The tickSpacing-aligned range around `pool`'s current tick, SKEWED by `skewBps`: that
+    ///         fraction of `width` (1e4 scale) is placed BELOW the current tick and the EXACT COMPLEMENT
+    ///         above, so 5000 is centred and 3500 puts 35% of the width below spot.
+    /// @dev Placement is grid-approximate: both bounds round DOWN, so the realised split and width can each
+    ///      drift up to one `tickSpacing` (aligning up would silently widen past the init band). Both are
+    ///      clamped into the aligned tick domain — `width` is capped at `2 × MAX_TICK` at init so
+    ///      `currentTick ± width` cannot wrap int24, and `maxAligned` is on the grid so a clamped range
+    ///      stays mintable. The result STRICTLY BRACKETS the current tick whenever both spans are at least
+    ///      one `tickSpacing`, which is what `checkRange` enforces.
     ///      Callers must calm-gate BEFORE this: it reads the manipulable spot tick.
-    function centeredTickRange(address pool, int24 tickSpacing, uint24 width)
+    function skewedTickRange(address pool, int24 tickSpacing, uint24 width, uint16 skewBps)
         public
         view
         returns (int24 tickLower, int24 tickUpper)
     {
         (, int24 currentTick,,,,) = ICLPool(pool).slot0();
-        int24 span = int24(width / 2);
-        tickLower = _alignTick(currentTick - span, tickSpacing);
-        tickUpper = _alignTick(currentTick + span, tickSpacing);
+        uint256 lowerSpan = (uint256(width) * uint256(skewBps)) / 10000;
+        uint256 upperSpan = uint256(width) - lowerSpan; // exact complement — no double rounding
+        tickLower = _alignTick(currentTick - int24(uint24(lowerSpan)), tickSpacing);
+        tickUpper = _alignTick(currentTick + int24(uint24(upperSpan)), tickSpacing);
         int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing);
         if (tickLower < -maxAligned) tickLower = -maxAligned;
         if (tickUpper > maxAligned) tickUpper = maxAligned;
         if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing;
+    }
+
+    /// @notice The range a RE-RANGE should open, given the legs the unwind actually collected: two-sided
+    ///         input → exactly `skewedTickRange`; one-sided input → a band of the full `width` placed
+    ///         wholly on the side the surviving leg can fill (token0-only strictly ABOVE spot, token1-only
+    ///         AT/BELOW it), so the mint cannot demand a leg the book does not hold and `skewBps` has no
+    ///         meaning there. NOT a recentre — the band abuts spot and only becomes two-sided if price
+    ///         returns; recentring a departed book needs `flatten` + `redeploy`.
+    /// @dev Reads the manipulable spot tick — the caller calm-gates first, as for `skewedTickRange`.
+    function rerangeTickRange(address pool, int24 tickSpacing, uint24 width, uint16 skewBps, uint256 amt0, uint256 amt1)
+        public
+        view
+        returns (int24 tickLower, int24 tickUpper)
+    {
+        if (amt0 != 0 && amt1 != 0) return skewedTickRange(pool, tickSpacing, width, skewBps);
+        if (amt0 == 0 && amt1 == 0) revert NothingToRerange();
+        (, int24 currentTick,,,,) = ICLPool(pool).slot0();
+        int24 anchor = _alignTick(currentTick, tickSpacing);
+        int24 maxAligned = _alignTick(TickMath.MAX_TICK, tickSpacing);
+        if (amt1 == 0) {
+            // token0 only → strictly ABOVE spot.
+            tickLower = anchor + tickSpacing;
+            if (tickLower > maxAligned) tickLower = maxAligned;
+            tickUpper = tickLower + int24(uint24(width));
+            if (tickUpper > maxAligned) tickUpper = maxAligned;
+            if (tickUpper <= tickLower) tickLower = tickUpper - tickSpacing;
+        } else {
+            // token1 only → AT/BELOW spot.
+            tickUpper = anchor;
+            if (tickUpper < -maxAligned) tickUpper = -maxAligned;
+            tickLower = tickUpper - int24(uint24(width));
+            if (tickLower < -maxAligned) tickLower = -maxAligned;
+            if (tickUpper <= tickLower) tickUpper = tickLower + tickSpacing;
+        }
     }
 
     /// @dev Align `tick` down to the nearest multiple of `spacing` (handles negatives).
@@ -404,77 +593,67 @@ library LeveragedAeroValuation {
         legABorrow = _legABorrow(collateralUsdc * targetLtvBps / 10000, unit, legAPrice8);
     }
 
-    /// @notice ASSET-MODE **lever-up** sizing, closed form. Given a debt delta `borrowUsd6` (USDC face,
-    ///         6dp) that a `adjustLeverage` retarget wants to add against UNCHANGED collateral, returns
-    ///         the leg-A units to borrow and the USDC that must pair with them in the range
-    ///         `[tickLower, tickUpper]` — reverting `InsufficientIdleForLeverUp` if the book's idle USDC
-    ///         (`idleUsdc`, passed by the caller) cannot fund that pairing.
-    ///
-    /// @dev THE PAIRING RELATION IS THE SAME ONE `assetModeSplit` SOLVES — only the unknown differs.
-    ///      `assetModeSplit` is handed a total `amount` and solves for the split point `C` such that the
-    ///      borrow against `C` pairs with `amount − C`. A lever-up has NO new deposit to split: the debt
-    ///      delta is already fixed by `targetLtvBps_ × collateral` (collateral is untouched by contract),
-    ///      so `A` is determined outright and `U′` is simply read off the same range ratio:
-    ///
-    ///        A  = borrowUsd6 · 100 · 10^dA / pA                (the un-halved `_borrowHalfEach` convert)
-    ///        U′ = A · needU / needA                            (the range's required (legA : USDC) ratio)
-    ///
-    ///      Both `needA:needU` and the `A` conversion come from the SAME helpers `assetModeSplit` uses
-    ///      (`_rangeRatio`, `_legABorrow`), so the two entrypoints cannot drift apart. Substituting
-    ///      `A(C·ltv)` into `U′` reproduces `assetModeSplit`'s `U = amount − C` exactly, which is the
-    ///      algebraic statement that a lever-up to `targetLtvBps` lands the same leg ratio genesis does.
-    ///
-    ///      `U′` IS DRAWN FROM IDLE USDC, and this is where that requirement is ENFORCED (the bound lives
-    ///      with the arithmetic that produced `U′`, and the manager calls this BEFORE its borrow, so a
-    ///      short book reverts with nothing touched). See `LeveragedAeroManager._leverUp` for WHY the
-    ///      pairing must be idle-funded rather than funded by swapping part of the borrow, and for the
-    ///      operator consequence (idle moves into the LP, shrinking the redeem cover budget).
-    ///      Deliberately NOT a partial fill and NOT a silent cap — a quietly under-levered position is
-    ///      worse for a rebalancer than a loud, diagnosable `(needed, available)` refusal.
-    ///
-    ///      Ratio basis / overflow / one-sided-range behaviour are exactly `assetModeSplit`'s (shared
-    ///      `_rangeRatio`): the pool's live `sqrtP` (calm-gate is the caller's job), `Math.mulDiv` for
-    ///      the 512-bit intermediate, and `DegenerateRange` when the stored range is one-sided.
-    /// @param pool         The Slipstream CL pool (read for the live `sqrtP`).
-    /// @param tickLower    Lower tick of the STORED range the add will target.
-    /// @param tickUpper    Upper tick of that range.
-    /// @param borrowUsd6   The debt delta to add, USDC face (6dp).
-    /// @param idleUsdc     The strategy's live idle USDC balance — the only funding source for `U′`.
-    /// @param legADecimals Leg-A token decimals.
-    /// @param legAIsToken0 True when leg A sorts as the pool's token0 (`Layout.wethIsToken0`).
-    /// @param legAPrice8   Leg-A USD price, 8dp, from a hardened Chainlink read.
-    /// @return legABorrow  `A` — leg-A units to borrow.
-    /// @return lpUsdc      `U′` — USDC that must pair with `A` in the range (≤ `idleUsdc`).
+    /// @notice ASSET-MODE **lever-up** sizing, closed form. Given the NAIVE debt delta `borrowUsd6` (USDC
+    ///         face, 6dp) an `adjustLeverage` retarget wants to add against unchanged collateral, returns the
+    ///         leg-A units to borrow and the USDC that must pair with them in the stored range — reverting
+    ///         `InsufficientIdleForLeverUp(needed, available)` when the book cannot fund that pairing.
+    /// @dev The pairing relation is `assetModeSplit`'s, with `A` fixed instead of the split point:
+    ///      `A = borrowUsd6 · 100 · 10^dA / pA` and `U′ = A · needU / needA`, through the SAME
+    ///      `_rangeRatio` / `_legABorrow` helpers, so genesis and lever-up cannot drift.
+    ///      `U′` may have to come out of COLLATERAL (`supplyIdle` parks idle USDC in Moonwell), which
+    ///      shrinks the base the LTV is measured against: the naive delta lands the book at
+    ///      `Δ / (C − U′) > ltv` and can trip `maxLtvBps`. So the delta is a FIXED POINT — with `U′ = m·Δ`
+    ///      and a raw balance `R` that costs no collateral, `Δ = (borrowUsd6 + ltv·R) / (1 + ltv·m)`, which
+    ///      the two `mulDiv`s below compute. `A` and `U′` scale by the same factor, so the range ratio is
+    ///      untouched, and `R ≥ U′` clamps the factor to 1 — the uncorrected, pre-correction behaviour.
+    /// @param borrowUsd6     The NAIVE debt delta (`ltv·C − D`, USDC face 6dp), corrected below.
+    /// @param availableUsdc  USDC `U′` may be funded from — raw balance PLUS redeemable mUSDC collateral
+    ///                       (`usdcAvailable`); the caller materialises the raw shortfall before borrowing.
+    /// @param rawUsdc        The raw ERC-20 balance alone — the part of `U′` that costs no collateral.
     function assetModeLeverUpPair(
         address pool,
         int24 tickLower,
         int24 tickUpper,
         uint256 borrowUsd6,
-        uint256 idleUsdc,
+        uint256 availableUsdc,
+        uint256 rawUsdc,
+        uint256 targetLtvBps,
         uint8 legADecimals,
         bool legAIsToken0,
         uint256 legAPrice8
     ) public view returns (uint256 legABorrow, uint256 lpUsdc) {
         (uint256 needA, uint256 needU) = _rangeRatio(pool, tickLower, tickUpper, legAIsToken0);
-        legABorrow = _legABorrow(borrowUsd6, 10 ** uint256(legADecimals), legAPrice8);
-        lpUsdc = Math.mulDiv(legABorrow, needU, needA);
-        if (lpUsdc > idleUsdc) revert InsufficientIdleForLeverUp(lpUsdc, idleUsdc);
+        // The naive probe: `A0` for the un-corrected delta, and the `U′0` the range demands beside it.
+        uint256 a0 = _legABorrow(borrowUsd6, 10 ** uint256(legADecimals), legAPrice8);
+        uint256 u0 = Math.mulDiv(a0, needU, needA);
+        // Fixed-point rescale by `(b + ltv·R) / (b + ltv·u0)` (see the @dev; `10_000` carries the bps
+        // scale). `den > 0` — the manager only levers UP on a positive delta; the clamp is the `R ≥ U′` arm.
+        uint256 den = 10_000 * borrowUsd6 + targetLtvBps * u0;
+        uint256 num = 10_000 * borrowUsd6 + targetLtvBps * rawUsdc;
+        if (num > den) num = den;
+        legABorrow = Math.mulDiv(a0, num, den);
+        lpUsdc = Math.mulDiv(u0, num, den);
+        if (lpUsdc > availableUsdc) revert InsufficientIdleForLeverUp(lpUsdc, availableUsdc);
+    }
+
+    /// @notice USDC the strategy can spend RIGHT NOW without touching the LP: its raw ERC-20 balance PLUS
+    ///         what its Moonwell mUSDC collateral is worth (both 6dp face).
+    /// @dev THE FUNDING BASIS every site that used to bound itself by `balanceOf(this)` must use, since
+    ///      `supplyIdle` can park the whole raw balance in Moonwell; the caller then materialises the raw
+    ///      shortfall via `redeemUnderlying`. Oracle-free by construction. ALSO the flat-book NAV term —
+    ///      pricing a `tokenId == 0` book off the raw balance alone would value the fund at 0. Debt is
+    ///      deliberately NOT subtracted: a flat book has none.
+    function usdcAvailable(address usdc, address mUsdc, address who) public view returns (uint256) {
+        return IERC20(usdc).balanceOf(who) + _collateralUnderlying(mUsdc, who);
     }
 
     // ── Slipstream swap plumbing ──
 
     /// @notice Slipstream `exactInputSingle` (plus the approval), as ONE definition.
-    /// @dev VENUE PLUMBING ONLY — every decision stays with the caller: which token, how much (and the
-    ///      caps that bound it), and what `minOut` bound applies. `LeveragedAeroManager` calls this from
-    ///      `_swapUsdcExactIn` and `_sweepLegToUsdc` AFTER their identity guards / balance caps, and
-    ///      `_hedgeLeg` below calls it for the interest-drift buy, so the `ExactInputSingleParams`
-    ///      construction exists once instead of three times. Relocated out of the manager for EIP-170
-    ///      headroom; a 6-argument flat surface is why it is a net saving there.
-    /// @param router      Slipstream CL SwapRouter.
+    /// @dev VENUE PLUMBING ONLY — every decision stays with the caller: which token, how much, and what
+    ///      `minOut` bound applies.
     /// @param tokenIn     Token sold. Never equal to `tokenOut` — callers guard the identity case.
-    /// @param tokenOut    Token bought.
     /// @param tickSpacing tickSpacing of the `tokenIn`↔`tokenOut` SWAP pool (NOT any LP pool's).
-    /// @param amountIn    Exact input (callers have already capped this against a live balance).
     /// @param minOut      Minimum output; 0 only where an aggregate guard covers the caller.
     function swapExactIn(
         address router,
@@ -500,39 +679,48 @@ library LeveragedAeroValuation {
     }
 
     /// @notice Slipstream `exactOutputSingle` (approve, swap, then RESET the approval to 0).
-    /// @dev The mirror of `swapExactIn`, same division of labour: this is plumbing, and the caller owns
-    ///      the decisions — `LeveragedAeroManager._redeemCoverShortfall` derives `amountInMax` (the
-    ///      redeemer's own budget, an oracle+slippage ceiling, or unbounded on a full redeem) and does the
-    ///      repay. The trailing `forceApprove(router, 0)` is load-bearing and part of the primitive: an
-    ///      exact-output swap generally spends LESS than `amountInMax`, so the residue would otherwise be
-    ///      left standing as an allowance to the router.
-    /// @param router      Slipstream CL SwapRouter.
-    /// @param tokenIn     Token sold (the unit of account, at every current call site).
+    /// @dev The mirror of `swapExactIn`: the caller derives `amountInMax` and does the repay. The trailing
+    ///      `forceApprove(router, 0)` is load-bearing and must run on BOTH branches — an exact-output swap
+    ///      generally spends LESS than `amountInMax` (a swallowed failure, none of it), so the residue
+    ///      would otherwise stand as an allowance to the router.
+    ///      `bestEffort` exists because an exact-output swap has NO partial fill: an unaffordable
+    ///      `amountOut` REVERTS rather than buying what it can, which on the OPPORTUNISTIC full-redeem
+    ///      Phase 1 cover bricked the whole redeem (`emergencyRedeem` included) across the band
+    ///      `0 < budget < needed`. Callers whose cover is MANDATORY pass `false` and keep the revert. The
+    ///      `try` lives HERE because the delegatecalled manager cannot catch this library's frames.
     /// @param tokenOut    Token bought. Never equal to `tokenIn` — callers guard the identity case.
     /// @param tickSpacing tickSpacing of the `tokenIn`↔`tokenOut` SWAP pool.
-    /// @param amountOut   Exact output required.
     /// @param amountInMax Ceiling on the input; the swap reverts rather than exceeding it.
+    /// @param bestEffort  When true an unfillable swap returns `false` instead of reverting.
+    /// @return filled     True iff `amountOut` was bought (always true when `bestEffort` is false).
     function swapExactOut(
         address router,
         address tokenIn,
         address tokenOut,
         int24 tickSpacing,
         uint256 amountOut,
-        uint256 amountInMax
-    ) public {
+        uint256 amountInMax,
+        bool bestEffort
+    ) public returns (bool filled) {
         IERC20(tokenIn).forceApprove(router, amountInMax);
-        ICLSwapRouter(router).exactOutputSingle(
-            ICLSwapRouter.ExactOutputSingleParams({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                tickSpacing: tickSpacing,
-                recipient: address(this),
-                deadline: block.timestamp + 600,
-                amountOut: amountOut,
-                amountInMaximum: amountInMax,
-                sqrtPriceLimitX96: 0
-            })
-        );
+        ICLSwapRouter.ExactOutputSingleParams memory p = ICLSwapRouter.ExactOutputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            tickSpacing: tickSpacing,
+            recipient: address(this),
+            deadline: block.timestamp + 600,
+            amountOut: amountOut,
+            amountInMaximum: amountInMax,
+            sqrtPriceLimitX96: 0
+        });
+        if (bestEffort) {
+            try ICLSwapRouter(router).exactOutputSingle(p) returns (uint256) {
+                filled = true;
+            } catch {}
+        } else {
+            ICLSwapRouter(router).exactOutputSingle(p);
+            filled = true;
+        }
         IERC20(tokenIn).forceApprove(router, 0);
     }
 
@@ -545,6 +733,14 @@ library LeveragedAeroValuation {
     address private constant AERO_V2_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     /// @dev Aerodrome v2 PoolFactory on Base (`router.defaultFactory()`), required by the Route.
     address private constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
+    /// @notice The Aerodrome v2 VOLATILE pool `swapAeroToUsdc` would route `reward → usdc` through, or
+    ///         `address(0)` when no such pool is registered — the venue-validation probe for the reward leg.
+    /// @dev Byte-for-byte the route `swapAeroToUsdc` builds. Reads the factory, not the router's CREATE2
+    ///      predictor, which answers nonzero for pairs that were never deployed.
+    function aeroV2VolatilePool(address tokenA, address tokenB) public view returns (address) {
+        return IAeroV2Factory(AERO_V2_FACTORY).getPool(tokenA, tokenB, false);
+    }
 
     /// @notice Swap `amountIn` AERO to USDC through the Aerodrome v2 volatile pool and report the
     ///         MEASURED fill (balance delta, not the router's own return value).
@@ -605,149 +801,135 @@ library LeveragedAeroValuation {
         uint256 hedgedB; // `Layout.hedgedDebtB`
     }
 
-    /// @notice Neutralise the ACCRUED BORROW INTEREST on one borrowed leg by buying exactly that much of
-    ///         the leg with harvest proceeds and repaying it to Moonwell — turning a financing cost that
+    /// @notice Neutralise the ACCRUED BORROW INTEREST on the borrowed legs by buying exactly that much of
+    ///         each leg with harvest proceeds and repaying it to Moonwell — turning a financing cost that
     ///         would otherwise accumulate as unintended SHORT exposure into plain NAV drag.
-    ///
-    /// @dev WHY THE MEASURE IS `debt − hedged` AND NOT `debt − lpLeg`.
-    ///      A concentrated-liquidity position's leg composition MOVES WITH PRICE BY DESIGN: as the leg
-    ///      appreciates the LP sells into the rise and `lpLeg` falls, while `debt` is roughly constant.
-    ///      So `debt − lpLeg` is the SUM of two unrelated things — (a) accrued borrow interest, which is
-    ///      an unintended short we want gone, and (b) a price-driven component that is the LP mechanism
-    ///      working as intended. Closing the whole of `debt − lpLeg` on every harvest would make
-    ///      `compound` a momentum-chasing delta rebalancer (buying the leg precisely as the leg rises),
-    ///      fighting the LP's own mechanics and bleeding fees. It would also mis-handle a post-`rerange`
-    ///      book, where part of the hedge sits as an IDLE leg remainder rather than inside `lpLeg`.
-    ///
+    /// @dev THE MEASURE IS `debt − hedged`, NOT `debt − lpLeg`: a CL position's leg composition moves with
+    ///      price by design, so `debt − lpLeg` mixes interest with the LP mechanism working as intended and
+    ///      closing all of it every harvest would make `compound` a momentum-chasing delta rebalancer.
     ///      `Layout.hedgedDebtA/B` is instead a pure ACCOUNTING quantity — the borrowed principal the LP
-    ///      side was funded with — maintained at the two chokepoints that can change it
-    ///      (`LeveragedAeroManager._borrowLegA`/`_borrowHalfEach` add the borrow; `_repay` clamps it down
-    ///      to the post-repay debt; `redeemUnwindImpl` scales it pro-rata). It is PRICE-INDEPENDENT by
-    ///      construction, so `debt − hedged` isolates component (a) exactly and contains none of (b).
-    ///      Every borrow of `x` grows the debt by `x` and the LP leg by `x` simultaneously, so the
-    ///      difference can only be moved by interest.
-    ///
-    ///      EXACTNESS vs. Moonwell's own accounting. Compound-fork markets CAPITALISE interest into the
-    ///      account's `principal` on every `borrow`/`repayBorrow` (`principal = borrowBalanceStored ± amt;
-    ///      interestIndex = borrowIndex`), so the market's `principal` is NOT an interest-free basis and
-    ///      the per-account `interestIndex` has no public getter. `borrowBalanceStored` immediately after
-    ///      a borrow/repay IS that capitalised principal, which is exactly what the manager's chokepoints
-    ///      track — making `debt − hedged` the market's own "interest accrued since our last touch",
-    ///      obtained with no `borrowIndex()` read and no extra Layout field per leg beyond the basis
-    ///      itself. The `debt` side of that subtraction is read with `borrowBalanceCurrent`, i.e. AFTER
-    ///      accruing the market — see `_hedgeLeg` for why the stored index is not good enough here.
-    ///
-    ///      WHY REPAY RATHER THAN BUY-AND-ADD. Adding the interest amount into the LP would keep leverage
-    ///      constant, but a CL add needs PAIRED USDC at the live range ratio, so it re-levers the book and
-    ///      needs the asset-mode pairing solve — more moving parts on a path whose only job is to remove
-    ///      an unintended exposure. Repaying uses plumbing that already exists, moves the DEBT side back
-    ///      onto the LP instead of the other way round, and lands the cost exactly where it belongs: less
-    ///      harvest reinvested, i.e. clean NAV drag, with leverage dipping slightly (the safe direction).
-    ///
-    ///      BOUNDED AND GRACEFUL. `budgetUsdc` is a hard ceiling and is the HARVEST's own USDC — never
-    ///      stayers' idle USDC and never collateral (funding a hedge from either would be the same class
-    ///      of mistake as a swap-funded lever-up: it would silently rewrite the book's delta profile).
-    ///      A budget too small to cover the whole drift buys and repays what it can and the remainder
-    ///      STAYS in `debt − hedged`, so the next harvest resumes exactly where this one stopped — the
-    ///      call never reverts the harvest for insufficiency. Only the leg BALANCE DELTA of this call's
-    ///      own swap is repaid, so a pre-existing idle leg remainder (which is already hedging the debt)
-    ///      is never consumed.
-    ///
-    ///      ASSET-MODE. The manager calls this for leg A only when `legBIsAsset` (leg B is the unit of
-    ///      account there and structurally carries no debt), so `h.leg != h.usdc` always holds and the
-    ///      identity swap that `_swapUsdcExactIn` guards against is unreachable from here.
-    /// @param b       The whole book's inputs; see `HedgeBook`.
-    /// @return spent  Total USDC spent across both legs (0 when there is no drift or no budget).
+    ///      side was funded with, maintained at the chokepoints that change it (`_borrowLegA`/
+    ///      `_borrowHalfEach` add, `_repay` clamps down, `redeemUnwindImpl` scales pro-rata) — and is
+    ///      PRICE-INDEPENDENT, so the difference isolates interest exactly. Compound-fork markets capitalise
+    ///      interest into `principal` on every borrow/repay, so `borrowBalanceStored` right after one IS
+    ///      that basis; `debt` is read AFTER accruing — see `_measureLeg`. Repaying rather than
+    ///      buying-and-adding avoids re-levering the book and lands the cost as NAV drag.
+    ///      BOUNDED AND GRACEFUL: `budgetUsdc` is a hard ceiling and is the HARVEST's own USDC — never
+    ///      stayers' idle, never collateral. A short budget hedges what it can, the remainder stays in
+    ///      `debt − hedged` for the next harvest, and this never reverts the harvest for insufficiency.
+    ///      Only this call's own swap delta is repaid, so an existing idle leg remainder is never consumed.
+    ///      In asset-mode (`marketB == 0`) leg B is the unit of account, carries no debt, and is not hedged.
+    ///      PRO-RATA: both drifts are MEASURED first, then the budget is split `budget × costᵢ / total` with
+    ///      leg B taking the exact complement. Measuring first is what stops a leg going unhedged, and its
+    ///      residual short concentrating, whenever the other leg's drift exceeded the whole harvest — a
+    ///      touch that is fail-open per leg, see `_measureLeg`.
     function hedgeBorrowInterest(HedgeBook memory b) public returns (uint256 spent) {
         if (b.budgetUsdc == 0) return 0;
         uint256 pUsdc = readUsd8(b.usdcFeed, b.sequencerFeed, b.maxDelay, b.gracePeriod);
-        spent = _hedgeLeg(b, b.marketA, b.legA, b.feedA, b.spacingA, b.decimalsA, b.hedgedA, b.budgetUsdc, pUsdc);
+
+        // ── MEASURE (both legs, before a single USDC is committed) ──
+        LegDrift memory dA = _measureLeg(b, b.marketA, b.feedA, b.decimalsA, b.hedgedA, pUsdc);
         // Leg B drifts too whenever it is BORROWED — the two-borrowed-legs shape LPs both borrows against
-        // each other, so both accrue interest the LP never grows to match. `marketB == 0` is the
-        // asset-mode book, where leg B IS the unit of account, is never borrowed, and cannot drift.
+        // each other. `marketB == 0` is the asset-mode book, where leg B IS the unit of account, is never
+        // borrowed, and cannot drift: `dB` stays zero ⇒ leg A is allocated the whole budget.
+        LegDrift memory dB;
         if (b.marketB != address(0)) {
-            // `budgetUsdc - spent`: leg A already committed its share of the one shared ceiling.
-            spent += _hedgeLeg(
-                b, b.marketB, b.legB, b.feedB, b.spacingB, b.decimalsB, b.hedgedB, b.budgetUsdc - spent, pUsdc
-            );
+            dB = _measureLeg(b, b.marketB, b.feedB, b.decimalsB, b.hedgedB, pUsdc);
+        }
+
+        uint256 total = dA.costUsdc + dB.costUsdc;
+        if (total == 0) return 0; // no drift on either leg, or both priced below 1 USDC unit
+
+        // ── ALLOCATE pro-rata by USD cost (`_spendLeg` caps each leg at its own cost) ──
+        uint256 budgetA = Math.mulDiv(b.budgetUsdc, dA.costUsdc, total);
+
+        // ── SPEND ──
+        spent = _spendLeg(b, b.marketA, b.legA, b.spacingA, dA, budgetA);
+        if (b.marketB != address(0)) {
+            // The EXACT complement, not a second `mulDiv`: leg A's rounding lands here, not stranded.
+            spent += _spendLeg(b, b.marketB, b.legB, b.spacingB, dB, b.budgetUsdc - budgetA);
         }
     }
 
-    /// @dev One leg of `hedgeBorrowInterest`. See that function's header for the measure, the
-    ///      repay-vs-add decision, the budget bound and the graceful-degradation contract.
-    ///
-    ///      ACCRUE, *THEN* MEASURE — `borrowBalanceCurrent`, never `borrowBalanceStored`.
-    ///      `borrowBalanceStored` is `principal × borrowIndex / interestIndex` on the market's LAST-ACCRUED
-    ///      `borrowIndex`, and nothing earlier in a `compound` transaction accrues a borrow leg: `nav()` is
-    ///      a view, the gauge `getReward` and the AERO→USDC swap never touch Moonwell. So the interest
-    ///      accrued since the market's last accrual is un-capitalised and INVISIBLE to a stored read — and
-    ///      it gets capitalised moments later, by this function's own `repayBorrow` and by
-    ///      `deployIdleImpl`'s borrow, i.e. strictly AFTER the point where it needed to be measured.
-    ///
-    ///      Measured on a live fork run (7-day warp, single-borrower book, then pre-`compound` reads on the
-    ///      leg market): `borrowBalanceStored` 76,853,210 vs `borrowBalanceCurrent` 76,868,617 — a TRUE
-    ///      drift of 15,412 sats of which only 5 were visible to the stored read. That harvest hedged 4
-    ///      sats. The residual was bounded (harvest #2 saw the by-then-capitalised interest and hedged it
-    ///      exactly, so it did not accumulate without bound) but the intended "drift ≈ 0 after a harvest"
-    ///      did not hold, and the first harvest after any quiet period hedged essentially nothing.
-    ///
-    ///      The MAGNITUDE above is fork-amplified: on a fork nobody else transacts, so `borrowIndex` sits
-    ///      frozen for the whole warp, whereas a live Moonwell market is accrued by other borrowers'
-    ///      supply/borrow/repay/liquidate txs constantly and the stale window is short. That is exactly why
-    ///      the stored read must not be relied on: correctness of our own hedge cannot be a function of
-    ///      third-party transaction flow.
-    ///
-    ///      COST is not an extra call — it is the SAME single call, promoted from a staticcall to a
-    ///      state-changing one, on a path that is already state-changing (it swaps and repays). The accrual
-    ///      also leaves the leg market fresh for everything later in the same tx. `borrowBalanceCurrent`
-    ///      rather than a bare `accrueInterest()` for a correctness reason, not a gas one: `accrueInterest`
-    ///      RETURNS a Compound MATH_ERROR code on its failure branches *without* writing the new index, so a
-    ///      caller that dropped the code would carry on reading the stale index — the very failure being
-    ///      fixed. Moonwell wraps it in `require(... == NO_ERROR)`, so using their wrapper makes the
-    ///      fail-closed behaviour structural and un-droppable (see `IMoonwellMarket`).
-    ///
-    ///      `budgetUsdc == 0` is checked BEFORE the call so a leg whose share of the shared ceiling was
-    ///      already spent by the other leg does not pay for an accrual it cannot act on.
-    function _hedgeLeg(
+    /// @dev One leg's MEASURED state, carried into `hedgeBorrowInterest`'s spend phase, so
+    ///      `borrowBalanceCurrent` is read once per leg and feeds both the allocation and the buy/repay.
+    struct LegDrift {
+        uint256 amount; // unhedged accrued interest in LEG units (`debt − hedged`); the repay cap
+        uint256 costUsdc; // what closing ALL of `amount` would cost (USDC 6dp); the allocation weight
+        uint256 num; // `price8 × 1e6` — the `_tokenToUsdc` numerator, kept as a factor
+        uint256 den; // `10^decimals × pUsdc` — ...and its denominator, so the INVERSE is the same numbers
+    }
+
+    /// @dev THE MEASURE PHASE for one leg of `hedgeBorrowInterest`: no USDC is committed, and the result is
+    ///      the ONLY view of this leg the spend phase gets.
+    ///      ACCRUE, *THEN* MEASURE — `borrowBalanceCurrent`, never `borrowBalanceStored`. Nothing earlier in
+    ///      a `compound` accrues a borrow leg, so interest since the market's last accrual is un-capitalised
+    ///      and INVISIBLE to a stored read, then capitalised moments later by this function's own repay: on
+    ///      a 7-day fork warp a true 15,412-sat drift showed as 5 sats stored, so the harvest hedged 4. It
+    ///      costs no extra call, and Moonwell's `require(... == NO_ERROR)` wrapper makes the fail-closed
+    ///      behaviour structural where a bare `accrueInterest()` returns a code without writing the index.
+    ///      Measuring is UNCONDITIONAL — an early budget gate is what let a starved leg go unmeasured and
+    ///      therefore unhedged — which makes this state-changing touch a liveness dependency of `compound`
+    ///      on BOTH legs, so it is `try`/`catch`ed: a failure degrades THIS leg's drift to zero, the other
+    ///      leg gets the whole budget, `compound` completes, and the unmeasured interest stays in
+    ///      `debt − hedged` exactly as a budget shortfall does. Never silent
+    ///      (`HedgeLegMeasureDegraded`), though the `catch` cannot tell the expected causes from an
+    ///      out-of-gas. A leg with no drift reads no feed, so a quiet book adds no oracle dependency.
+    function _measureLeg(
+        HedgeBook memory b,
+        address market,
+        address feed,
+        uint8 legDecimals,
+        uint256 hedged,
+        uint256 pUsdc
+    ) private returns (LegDrift memory d) {
+        uint256 debt;
+        try IMoonwellMarket(market).borrowBalanceCurrent(address(this)) returns (uint256 accrued) {
+            debt = accrued;
+        } catch {
+            emit HedgeLegMeasureDegraded(market);
+            return d; // zero drift ⇒ zero allocation ⇒ `_spendLeg` no-ops on this leg
+        }
+        if (debt <= hedged) return d;
+        d.amount = debt - hedged;
+
+        // The `_tokenToUsdc` basis kept as its two factors, so the INVERSE (USDC→leg, for the min-out) is
+        // the same numbers read the other way.
+        d.num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
+        d.den = (10 ** uint256(legDecimals)) * pUsdc;
+        d.costUsdc = Math.mulDiv(d.amount, d.num, d.den);
+    }
+
+    /// @dev THE SPEND PHASE for one leg: buy `min(cost, budget)` USDC worth of the leg and repay it. Uses
+    ///      only the `LegDrift` the measure phase produced — never a second market read — and a short
+    ///      budget hedges what it can, leaving the remainder in `debt − hedged` for the next harvest.
+    function _spendLeg(
         HedgeBook memory b,
         address market,
         address leg,
-        address feed,
         int24 spacing,
-        uint8 legDecimals,
-        uint256 hedged,
-        uint256 budgetUsdc,
-        uint256 pUsdc
+        LegDrift memory d,
+        uint256 budgetUsdc
     ) private returns (uint256 spentUsdc) {
-        if (budgetUsdc == 0) return 0;
-        uint256 debt = IMoonwellMarket(market).borrowBalanceCurrent(address(this));
-        if (debt <= hedged) return 0;
-        uint256 drift = debt - hedged;
-
-        // `num/den` is the manager's `_tokenToUsdc` basis, kept as its two factors so the INVERSE
-        // (USDC→leg, for the min-out) is the same numbers read the other way and the two cannot drift.
-        uint256 num = readUsd8(feed, b.sequencerFeed, b.maxDelay, b.gracePeriod) * 1e6;
-        uint256 den = (10 ** uint256(legDecimals)) * pUsdc;
-        uint256 spend = Math.mulDiv(drift, num, den);
-        if (spend > budgetUsdc) spend = budgetUsdc; // graceful: partial hedge, remainder carries
-        if (spend == 0) return 0; // drift priced below 1 USDC unit — leave it to accumulate
+        uint256 spend = d.costUsdc > budgetUsdc ? budgetUsdc : d.costUsdc;
+        if (spend == 0) return 0; // no drift, no allocation, or drift priced below 1 USDC unit
 
         // Oracle-floored exact-IN buy (the `_settleShortfall` posture, not the exact-OUT one): exact-out
         // would REVERT the whole harvest the moment `budgetUsdc` could not cover the drift, and this path
         // must degrade instead. The min-out is the oracle-implied leg amount for `spend`, haircut by
         // `maxSlippageBps`, so a sandwiched buy reverts rather than overpaying.
-        uint256 minOut = (Math.mulDiv(spend, den, num) * (10000 - b.maxSlippageBps)) / 10000;
+        uint256 minOut = (Math.mulDiv(spend, d.den, d.num) * (10000 - b.maxSlippageBps)) / 10000;
         uint256 legBefore = IERC20(leg).balanceOf(address(this));
         swapExactIn(b.swapRouter, b.usdc, leg, spacing, spend, minOut);
         spentUsdc = spend;
 
-        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `drift` is what
+        // Repay ONLY this swap's own proceeds, capped at the measured drift. Capping at `d.amount` is what
         // keeps `Layout.hedgedDebtA/B` untouched by this repay: post-repay debt is `hedged + (drift −
         // repaid) >= hedged`, so the manager's `_repay` clamp is provably a no-op here and the basis
         // discipline stays single-sited. Any tiny overshoot of the buy stays as an idle leg balance,
         // which is NAV-counted and redeployable.
         uint256 got = IERC20(leg).balanceOf(address(this)) - legBefore;
-        uint256 repaid = got < drift ? got : drift;
+        uint256 repaid = got < d.amount ? got : d.amount;
         if (repaid > 0) {
             IERC20(leg).forceApprove(market, repaid);
             uint256 err = IMoonwellMarket(market).repayBorrow(repaid);
@@ -761,9 +943,9 @@ library LeveragedAeroValuation {
     ///      reference cancels out of the ratio.
     ///
     ///      One-sided range (`sqrtP` at or outside a bound) ⇒ one required amount is 0 and the ratio
-    ///      degenerates: a 0 `needU` would demand a borrow with no USDC to pair, a 0 `needA` would demand
-    ///      no borrow at all (an unhedged USDC-only add). Both fail closed — `rerange` recentres on the
-    ///      current tick, which is always two-sided.
+    ///      degenerates: a 0 `needU` would demand a borrow with no USDC to pair, a 0 `needA` no borrow at
+    ///      all (an unhedged USDC-only add). Both fail closed. A rerange only unblocks this while spot is
+    ///      still INSIDE the stored band; once it has left, the cure is `flatten` + `redeploy`.
     function _rangeRatio(address pool, int24 tickLower, int24 tickUpper, bool legAIsToken0)
         private
         view
@@ -795,10 +977,83 @@ library LeveragedAeroValuation {
     ///      `exchangeRateStored` (last-accrued, view) is used — never the mutating
     ///      `balanceOfUnderlying`. USDC is the unit, so the result is already face-valued.
     function _collateralUsdc(Config memory c, address strategy) private view returns (uint256) {
-        uint256 cBal = ICToken(c.mUsdc).balanceOf(strategy);
+        return _collateralUnderlying(c.mUsdc, strategy);
+    }
+
+    /// @dev The `Config`-free form of the above, so the NAV term and `usdcAvailable` share ONE expression.
+    function _collateralUnderlying(address mUsdc, address who) private view returns (uint256) {
+        uint256 cBal = ICToken(mUsdc).balanceOf(who);
         if (cBal == 0) return 0;
-        uint256 rate = ICToken(c.mUsdc).exchangeRateStored();
-        return (cBal * rate) / 1e18;
+        return (cBal * ICToken(mUsdc).exchangeRateStored()) / 1e18;
+    }
+
+    /// @dev THE WHOLE GAUGE-REWARD CLAIM, in USDC face (6dp): the balance ALREADY CLAIMED into the strategy
+    ///      wallet (every `_unwindLiquidity` auto-claims a tranche via `gauge.withdraw`) PLUS the
+    ///      still-UNCLAIMED `gauge.earned(strategy, tokenId)`. The unclaimed half is the bigger one — a
+    ///      harvest spends MOST of its life in the gauge, so pricing only the held balance left the
+    ///      deposit-before-`compound` capture open (~4.5% of a 100k deposit, post-fee, in one block).
+    ///      The two terms hand off cleanly: Slipstream reverts `"NA"` on `earned()` for an unstaked tokenId,
+    ///      which is exactly when the tranche has just landed in the held balance. But `catch {}` is
+    ///      indiscriminate — an out-of-gas, a gauge upgrade or a non-Slipstream migration silently drops the
+    ///      earned term to zero, restoring the pre-fix mis-pricing; that trade stands (`nav()` must not
+    ///      revert on a reward probe) and `_earnedRead` / `rewardReadOk` make it observable.
+    ///      Gated on the SUM, since `earned()` is non-zero with a zero balance in the steady state.
+    ///      FAIL-CLOSED on a stale reward feed while there IS reward value — valuing it at 0 would re-create
+    ///      the mis-pricing this term closes. Accepted consequence: a stale reward feed blocks deposits and
+    ///      the priced fast redeem until `compound` clears both halves (the async queue never reads `nav()`).
+    ///      DECIMALS are pinned at 18, matching the `1e18` divisor `compoundImpl` / `_sellRewardBalance`
+    ///      apply; `applyVenue` enforces that at init and at every migration and rejects a reward token
+    ///      equal to either leg. `c.rewardFeed` is the SAME `Layout.aeroUsdFeed` the sale floor uses.
+    ///
+    ///      MARKED NET OF `compoundFeeBps` (floored, as `compoundImpl`'s own skim rounds): every path that
+    ///      realizes a tranche skims in kind first, so only that fraction can reach the book.
+    ///      Gross made navPerShare step DOWN at each harvest — an exit timed just before one dodged its
+    ///      share of the fee onto the stayers.
+    ///      THE MARK MATCHES REALIZATION ON EVERY LIVE PATH: `compound`, `flatten` and the async redeem all
+    ///      skim (`LeveragedAeroVenue._sellRewardBalance`), so an understated navPre can no longer over-mint
+    ///      a depositor against a gross realization. The only residual asymmetry is the TERMINAL settle,
+    ///      which realizes gross — holder-favourable, and the fund is ending.
+    function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
+        uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
+        (uint256 e,) = _earnedRead(c.gauge, strategy, c.tokenId);
+        amt += e;
+        if (amt == 0) return 0;
+        amt = Math.mulDiv(amt, 10_000 - uint256(c.compoundFeeBps), 10_000);
+        return _usdcValue(amt, 18, _readUsd8(c, c.rewardFeed), pUsdc);
+    }
+
+    /// @dev THE gauge-side `earned()` read — the amount AND whether it answered — as ONE definition, so
+    ///      the priced term (`_rewardUsdc`) and the monitoring flag (`rewardReadOk`) cannot drift apart.
+    ///      `tokenId == 0` → `(0, true)`: a flat book has nothing to read, and `false` would make the
+    ///      marker scream through every `settle`→`execute` gap. `gauge.code.length == 0` → `(0, false)`
+    ///      WITHOUT the call, and that branch is LOAD-BEARING because a `try` does NOT catch it: solc emits
+    ///      its `extcodesize` guard OUTSIDE the protected region, so an empty-code gauge reverts
+    ///      UNCATCHABLY (`nav()` is unaffected — `_rewardUsdc`'s `rewardToken()` read fail-closes first).
+    ///      Otherwise the `try`: any revert is `(0, false)`, benign `"NA"` and real outages alike, since
+    ///      they are indistinguishable onchain and `"NA"` is transient.
+    function _earnedRead(address gauge, address strategy, uint256 tokenId) private view returns (uint256 e, bool ok) {
+        if (tokenId == 0) return (0, true);
+        if (gauge.code.length == 0) return (0, false);
+        try ICLGauge(gauge).earned(strategy, tokenId) returns (uint256 e_) {
+            return (e_, true);
+        } catch {
+            return (0, false);
+        }
+    }
+
+    /// @notice MONITORING MARKER for the single fail-open on the NAV path: `false` while the gauge-side
+    ///         `earned()` read that `nav()` prices is FAILING, `true` when it answers or there is nothing
+    ///         to read. `false` means `nav()` understates the book by the unclaimed reward accrual.
+    /// @dev State, not an event: `nav()` is `view` and cannot emit, and this fail-open is a CONDITION that
+    ///      recurs on every deposit until someone intervenes. Strictly behaviour-neutral — nothing in the
+    ///      pricing path reads it, and it must not revert. Two scalars rather than a `Config` for the
+    ///      caller's ~230 bytes of EIP-170 headroom, read from the same `Layout` slots `_config()` uses.
+    ///      The subject is `address(this)`, i.e. the strategy clone under delegatecall — called on the
+    ///      deployed LIBRARY the answer is about the wrong account, so use `strategy.rewardReadOk()`.
+    /// @param tokenId  `Layout.tokenId`; 0 ⇒ flat book, nothing to read ⇒ `true`.
+    /// @return ok      `false` iff there IS a staked tokenId and the `earned()` read fails or cannot be made.
+    function rewardReadOk(address gauge, uint256 tokenId) public view returns (bool ok) {
+        (, ok) = _earnedRead(gauge, address(this), tokenId);
     }
 
     /// @dev cbBTC + WETH debt at the same Chainlink basis, converted to USDC face.
@@ -902,6 +1157,63 @@ library LeveragedAeroValuation {
         uint256 usdValue = Math.mulDiv(amount, pToken, 10 ** uint256(tokenDecimals));
         // → USDC face (6dp): divide by the USDC price (8dp) and rescale 1e8 → 1e6.
         return Math.mulDiv(usdValue, 1e6, pUsdc);
+    }
+
+    /// @notice The three oracle bounds an IL-residual cover needs (`LeveragedAeroManager._rebalanceCover`):
+    ///         how much USDC the deficit buy may spend, how much of the surplus leg to sell for it, and the
+    ///         floor that sell must clear. Pure — the caller supplies the hardened prices.
+    /// @dev `buyMax` is the oracle CEILING on the exact-output cover, so a sandwiched permissionless
+    ///      `deleverage` cannot overpay past oracle + `slipBps` (H1). `sellAmt` is NEED-SIZED and capped at
+    ///      `surplusBal` — grossed up by `slipBps` a SECOND time so a sell filling on `sellFloor` still
+    ///      raises the ceiling-priced buy — because selling more would liquidate a delta-neutral remainder
+    ///      into an unrecorded short. `sellFloor` derives from `sellAmt`, not `surplusBal`, or it would be
+    ///      unreachable. `surplusBal == 0` returns `(buyMax, 0, 0)` without touching `pSurplus`.
+    /// @param slipBps `maxSlippageBps`, bounded to (0, 1000] at init so neither gross-up can underflow.
+    function coverBounds(
+        uint256 shortAmt,
+        uint8 deficitDec,
+        uint256 pDeficit,
+        uint256 surplusBal,
+        uint8 surplusDec,
+        uint256 pSurplus,
+        uint256 pUsdc,
+        uint256 slipBps
+    ) public pure returns (uint256 buyMax, uint256 sellAmt, uint256 sellFloor) {
+        buyMax = _usdcValue(shortAmt, deficitDec, pDeficit, pUsdc) * (10000 + slipBps) / 10000;
+        if (surplusBal == 0) return (buyMax, 0, 0);
+        uint256 needed =
+            Math.mulDiv(buyMax * 10000 / (10000 - slipBps), (10 ** uint256(surplusDec)) * pUsdc, pSurplus * 1e6);
+        sellAmt = surplusBal > needed ? needed : surplusBal;
+        sellFloor = _usdcValue(sellAmt, surplusDec, pSurplus, pUsdc) * (10000 - slipBps) / 10000;
+    }
+
+    /// @notice The Chainlink min-out floors for the two residual leg sweeps at the END of a proportional
+    ///         redeem (`LeveragedAeroManager.redeemUnwindImpl` step E) — the same
+    ///         `oracleValue(amountSold) × (1 − maxSlippageBps)` idiom the other priced sweeps use.
+    /// @dev FAIL-CLOSED HERE, DEADMAN-SAFE AT THE CALL SITE: this reverts on a stale feed / down sequencer
+    ///      like every other priced path, and the caller reaches it through a try-able external hop
+    ///      (`LeveragedAerodromeCLStrategy.redeemSweepFloors`) that treats a revert as "floors = 0" — which
+    ///      is the point, since `emergencyRedeem` routes through step E and a hard revert there would turn a
+    ///      value guard into a fund-freeze, while a sandwicher cannot MAKE a feed stale. Coarse by design:
+    ///      one unreadable feed drops BOTH floors, and each leg's feed is read only when that leg sells.
+    ///      Slippage is borne by the REDEEMER — the stayers' `keep` is snapshot BEFORE the sweep.
+    /// @param cbAmt     Leg-B units ACTUALLY being sold (0 in asset-mode — that sweep is the identity).
+    /// @param slipBps   `maxSlippageBps`; bounded to (0, 1000] at init so `10000 - slipBps` can't underflow.
+    /// @return cbFloor   Min USDC out for the leg-B sweep (0 when nothing is being sold).
+    /// @return wethFloor Min USDC out for the leg-A sweep (0 when nothing is being sold).
+    function sweepFloors(Config memory c, uint256 cbAmt, uint256 wethAmt, uint256 slipBps)
+        public
+        view
+        returns (uint256 cbFloor, uint256 wethFloor)
+    {
+        if (cbAmt == 0 && wethAmt == 0) return (0, 0);
+        uint256 pUsdc = _readUsd8(c, c.usdcFeed);
+        if (cbAmt > 0) {
+            cbFloor = _usdcValue(cbAmt, c.cbBTCDecimals, _readUsd8(c, c.cbBTCFeed), pUsdc) * (10000 - slipBps) / 10000;
+        }
+        if (wethAmt > 0) {
+            wethFloor = _usdcValue(wethAmt, c.wethDecimals, _readUsd8(c, c.wethFeed), pUsdc) * (10000 - slipBps) / 10000;
+        }
     }
 
     /// @dev Spot-vs-TWAP calm-gate (fail-closed). Reverts `CalmGateBreached` when the pool

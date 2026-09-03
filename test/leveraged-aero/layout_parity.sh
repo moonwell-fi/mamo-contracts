@@ -18,6 +18,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STRAT="$ROOT/src/leveraged-aero/LeveragedAerodromeCLStrategy.sol"
 MGR="$ROOT/src/leveraged-aero/LeveragedAeroManager.sol"
+VENUE="$ROOT/src/leveraged-aero/LeveragedAeroVenue.sol"
 
 norm() { sed 's#//.*##; s/[[:space:]]*$//' | grep -v '^[[:space:]]*$' || true; }
 
@@ -33,4 +34,7 @@ extract() {
 
 kind="${1:?usage: layout_parity.sh <redeemrequest|layout|storageslot>}"
 
+# Three-way parity: strategy is the reference copy; the manager AND the venue library must both
+# match it (all three are delegatecall peers over the same ERC-7201 slot).
 diff <(extract "$STRAT" "$kind" | norm) <(extract "$MGR" "$kind" | norm) || true
+diff <(extract "$STRAT" "$kind" | norm) <(extract "$VENUE" "$kind" | norm) || true

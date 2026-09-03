@@ -42,16 +42,14 @@
 # so committing them with isContract:true would revert the Addresses constructor on
 # every real-Base-mainnet CI run. They are supplied here via env vars (documented
 # defaults = current vnet values) and injected at runtime inside the deploy .s.sol.
-# The env-var names are STALE BUT REAL: SHERWOOD_LEVERAGED_AERO_STRATEGY (also
-# factory.sherwoodStrategy()) and SHERWOOD_SYNDICATE_VAULT, even though proposal 012 now
-# resolves the vault under the LEVERAGED_AERO_VAULT key. Dropping the SHERWOOD_ prefix is
-# a pending cleanup; it implies no remaining Sherwood dependency.
+# The env-var names match the address-book keys proposal 012 resolves exactly:
+# LEVERAGED_AERO_STRATEGY (also factory.leveragedAeroStrategy()) and LEVERAGED_AERO_VAULT.
 #
 # Usage:
 #   TENDERLY_VNET_RPC_URL=<admin-rpc> ./script/tenderly/run-leveraged-aero-account.sh
 #   make tenderly-leveraged-aero-account
 # Optional env overrides (defaults = current vnet):
-#   SHERWOOD_LEVERAGED_AERO_STRATEGY, SHERWOOD_SYNDICATE_VAULT
+#   LEVERAGED_AERO_STRATEGY, LEVERAGED_AERO_VAULT
 #   HARNESS_USER (skip fresh-user generation and reuse a given EOA)
 #
 # Requires: forge, cast, jq, python3. Reads .env.
@@ -70,10 +68,11 @@ source "$SCRIPT_DIR/lib/common.sh"
 FQ="script/tenderly/LeveragedAeroAccountHarness.s.sol:LeveragedAeroAccountHarness"
 
 # ── documented vnet defaults (overridable via env) ────────────────────────────
-# Pooled layer on the current persistent vnet (block ~48.9M Base fork). NOTE: that
-# instance is Sherwood-era — its vault is Sherwood's SyndicateVault, so it exposes
-# openDeposits() rather than depositsOpen() and has no redeemSettled(). The account ABI is
-# unchanged, so the smoke below is still valid; see the runbook's "Current live instance".
+# Pooled layer on the current persistent vnet. The hardcoded fallbacks at the bottom of this
+# block are Sherwood-era leftovers and are the LAST resort only — the live instance runs the
+# in-repo LeveragedAeroVault (generation 3: depositsOpen(), redeemSettled, maxTotalAssets()),
+# and the generation probe further down refuses anything below 3. See the runbook's
+# "Current live instance".
 # These are env-var DEFAULTS, not hardcoded logic: pass your own to point elsewhere.
 #
 # Resolution order: env var → the pooled addresses recorded in leveraged-aero-vnet.json by
@@ -81,10 +80,10 @@ FQ="script/tenderly/LeveragedAeroAccountHarness.s.sol:LeveragedAeroAccountHarnes
 # the hardcoded fallback. That way a fresh pooled deploy is picked up automatically.
 _CFG="$ROOT/script/tenderly/leveraged-aero-vnet.json"
 _cfg_pooled() { jq -r --arg k "$1" '.pooled[$k] // empty' "$_CFG" 2>/dev/null; }
-export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-$(_cfg_pooled strategyClone)}"
-export SHERWOOD_SYNDICATE_VAULT="${SHERWOOD_SYNDICATE_VAULT:-$(_cfg_pooled vault)}"
-export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-0x5E22913E4C96f816133fbc8E894F652a4f87C760}"
-export SHERWOOD_SYNDICATE_VAULT="${SHERWOOD_SYNDICATE_VAULT:-0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9}"
+export LEVERAGED_AERO_STRATEGY="${LEVERAGED_AERO_STRATEGY:-$(_cfg_pooled strategyClone)}"
+export LEVERAGED_AERO_VAULT="${LEVERAGED_AERO_VAULT:-$(_cfg_pooled vault)}"
+export LEVERAGED_AERO_STRATEGY="${LEVERAGED_AERO_STRATEGY:-0x5E22913E4C96f816133fbc8E894F652a4f87C760}"
+export LEVERAGED_AERO_VAULT="${LEVERAGED_AERO_VAULT:-0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9}"
 # Optional: the vnet's PUBLIC (read-only) RPC — recorded into the emitted config for consumers.
 # NEVER put the admin RPC in the config; it accepts unlocked writes and lives in 1Password only.
 TENDERLY_VNET_PUBLIC_RPC_URL="${TENDERLY_VNET_PUBLIC_RPC_URL:-}"
@@ -115,41 +114,8 @@ _CLI_VNET_RPC="${TENDERLY_VNET_RPC_URL:-}"
 [ -f "$ROOT/.env" ] && { set -a; . "$ROOT/.env"; set +a; }
 [ -n "$_CLI_VNET_RPC" ] && export TENDERLY_VNET_RPC_URL="$_CLI_VNET_RPC"
 
-# ── gas headroom for the vnet's UNDER-estimating eth_estimateGas ──────────────
-# Same class of bug that run_forge_phase's --gas-estimate-multiplier exists for, but on the plain
-# `cast send` path: Tenderly's estimator under-shoots deep nested calls. Observed exactly once here —
-# `fulfillRedeem(id)` (nav() → crystallise → redeemUnwindImpl → Slipstream burn/collect → skim
-# transfers) estimated 1,644,942, was sent with that as the limit, and consumed all of it: status 0x0,
-# EMPTY revert data, gasUsed == gasLimit, while a `cast call` of the same call at the same state
-# returned successfully. `cast send` ships the bare estimate with no multiplier, so every send below
-# now carries an explicit 2x limit instead. Floored at 1M (cheap calls) and capped at 16,000,000 —
-# just under Base's per-tx gas cap of 16,777,216 (2^24), which a blind multiply would otherwise blow
-# past into TxGasLimitGreaterThanCap. If the estimate itself fails (a genuinely reverting call, e.g.
-# the intentional depositIdle negative test) this emits nothing and the send falls back to cast's own
-# estimate, preserving the original failure diagnostics.
-GAS_CAP=16000000
-gas_flags() {   # usage: gas_flags <from> <to> <sig> [args...] → echoes "--gas-limit N", or nothing
-  local from="$1" to="$2"; shift 2
-  local est; est="$(cast estimate "$to" "$@" --from "$from" --rpc-url "$RPC" 2>/dev/null | field)"
-  case "$est" in '' | *[!0-9]*) return 0 ;; esac
-  local lim=$(( est * 2 ))
-  [ "$lim" -lt 1000000 ] && lim=1000000
-  [ "$lim" -gt "$GAS_CAP" ] && lim="$GAS_CAP"
-  echo "--gas-limit $lim"
-}
-
-# ── cast send via unlocked impersonation; asserts status 0x1; echoes tx hash ──
-# usage: csend <label> <from> <to> <sig> [args...]
-csend() {
-  local label="$1" from="$2" to="$3" sig="$4"; shift 4
-  # unquoted on purpose: word-splits into `--gas-limit N`, or vanishes when the estimate failed.
-  local gl; gl="$(gas_flags "$from" "$to" "$sig" "$@")"
-  local out; out="$(cast send "$to" "$sig" "$@" --from "$from" --unlocked $gl --rpc-url "$RPC" --json 2>/dev/null)"
-  local st tx; st="$(echo "$out" | jq -r '.status')"; tx="$(echo "$out" | jq -r '.transactionHash')"
-  [ "$st" = "0x1" ] || die "$label failed (status=$st tx=$tx)"
-  ok "$label — tx $tx"
-  LAST_TX="$tx"
-}
+# gas_flags() and csend() now live in lib/common.sh — the withdraw harness needs the same
+# under-estimating-vnet workaround, and two copies of that logic would drift.
 
 # ── 1. resolve vnet (reuse) + sanity ──────────────────────────────────────────
 resolve_vnet
@@ -158,16 +124,27 @@ REG="$(addr MAMO_STRATEGY_REGISTRY)"
 USDC="$(addr USDC)"
 MULTISIG="$(addr MAMO_MULTISIG)"
 DEPLOYER="$(addr DEPLOYER_EOA)"
-STRAT="$SHERWOOD_LEVERAGED_AERO_STRATEGY"
-VAULT="$SHERWOOD_SYNDICATE_VAULT"
+STRAT="$LEVERAGED_AERO_STRATEGY"
+VAULT="$LEVERAGED_AERO_VAULT"
 [ "$(ccall "$STRAT" 'vault()(address)' | field | tr 'A-Z' 'a-z')" = "$(echo "$VAULT" | tr 'A-Z' 'a-z')" ] \
-  || die "strategy.vault() != SHERWOOD_SYNDICATE_VAULT (env var name is stale; it holds the LeveragedAeroVault)"
+  || die "strategy.vault() != LEVERAGED_AERO_VAULT"
 ok "pooled layer wired: strategy=$STRAT vault=$VAULT state=$(ccall "$STRAT" 'state()(uint8)' | field)"
 # Which vault generation is under us? The in-repo LeveragedAeroVault exposes depositsOpen()
 # (+ redeemSettled); the pre-PR-#66 Sherwood SyndicateVault exposed openDeposits(). The account
 # ABI is identical either way, so the smoke below is valid on both — but the getter name and the
 # emitted config must follow the live contract.
-if [ -n "$(ccall "$VAULT" 'depositsOpen()(bool)')" ]; then
+#
+# GEN 3 MUST BE PROBED FIRST AND SEPARATELY. The STRATEGY now makes a TYPED `maxTotalAssets()` call
+# on the vault inside its fund-capacity check, and the vault is NOT upgradeable — so a current
+# strategy bound to a gen-2 vault reverts on EVERY deposit with empty returndata (Solidity's
+# codesize+returndata guard, no decodable reason). `depositsOpen()` cannot distinguish the two
+# generations because gen 2 answers it too, which is exactly how that hazard would reach a live vnet
+# undetected. Probing the capacity selector is the only reliable discriminator.
+if [ -n "$(ccall "$VAULT" 'maxTotalAssets()(uint256)')" ]; then
+  VAULT_GEN=3
+  VAULT_GEN_NAME="leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())"
+  DEPOSITS_OPEN_SIG='depositsOpen()(bool)'
+elif [ -n "$(ccall "$VAULT" 'depositsOpen()(bool)')" ]; then
   VAULT_GEN=2
   VAULT_GEN_NAME="leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)"
   DEPOSITS_OPEN_SIG='depositsOpen()(bool)'
@@ -177,6 +154,12 @@ else
   DEPOSITS_OPEN_SIG='openDeposits()(bool)'
 fi
 info "vault generation: $VAULT_GEN — $VAULT_GEN_NAME"
+# Fail EARLY and loudly rather than at the first deposit with empty returndata.
+if [ "$VAULT_GEN" -lt 3 ]; then
+  die "vault at $VAULT predates maxTotalAssets() (generation $VAULT_GEN). The strategy's fund-capacity
+  check calls it on every deposit and the vault is not upgradeable, so every deposit here would revert
+  with empty returndata. Redeploy the pooled layer first: make tenderly-leveraged-aero-stack"
+fi
 
 # ── Phase 2: deploy impl + factory ────────────────────────────────────────────
 section "Phase 2 — deploy implementation + factory (DEPLOYER_EOA, unlocked)"
@@ -210,7 +193,7 @@ assert_eq "factory hasRole(BACKEND_ROLE)"    "$(ccall "$REG" 'hasRole(bytes32,ad
 # $DEPOSITS_OPEN_SIG was resolved above from the live vault generation (depositsOpen vs openDeposits).
 assert_eq "vault deposits open"              "$(ccall "$VAULT" "$DEPOSITS_OPEN_SIG")" "true"
 assert_eq "factory.strategyTypeId()"         "$(ccall "$FACTORY" 'strategyTypeId()(uint256)' | field)" "5"
-assert_eq "factory.sherwoodStrategy()"       "$(ccall "$FACTORY" 'sherwoodStrategy()(address)' | field | tr A-Z a-z)" "$(echo "$STRAT" | tr A-Z a-z)"
+assert_eq "factory.leveragedAeroStrategy()"       "$(ccall "$FACTORY" 'leveragedAeroStrategy()(address)' | field | tr A-Z a-z)" "$(echo "$STRAT" | tr A-Z a-z)"
 assert_eq "factory.usdc()"                   "$(ccall "$FACTORY" 'usdc()(address)' | field | tr A-Z a-z)" "$(echo "$USDC" | tr A-Z a-z)"
 
 # ── Phase 4: e2e smoke with a fresh throwaway user ────────────────────────────
@@ -234,7 +217,7 @@ assert_eq "isUserStrategy(user,acct)" "$(ccall "$REG" 'isUserStrategy(address,ad
 assert_eq "account.owner()"           "$(ccall "$ACCT" 'owner()(address)' | field | tr A-Z a-z)" "$(echo "$USER" | tr A-Z a-z)"
 info "account = $ACCT"
 
-# deposit 5,000 USDC (minShares from the vendored formula shares=assets*(supply+1e6)/(navNet+1), 1% tol)
+# deposit 5,000 USDC (minShares from the vendored formula shares=assets*(supply+1e6)/(nav+1), 1% tol)
 NAV="$(ccall "$STRAT" 'nav()(uint256)' | field)"; SUP="$(ccall "$VAULT" 'totalSupply()(uint256)' | field)"
 MINSH="$(python3 -c "print(($DEPOSIT*($SUP+10**6)//($NAV+1))*99//100)")"
 csend "approve(account,5000 USDC)" "$USER" "$USDC" 'approve(address,uint256)' "$ACCT" "$DEPOSIT"
@@ -253,7 +236,7 @@ UAFT="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
 [ "$UAFT" -gt "$UBEF" ] 2>/dev/null && ok "USDC landed on USER (+$((UAFT-UBEF)))" || die "fast withdraw did not pay the user"
 assert_eq "account USDC after fast withdraw" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
 
-# async request → fulfill (proposer) → claim
+# async request → fulfill (proposer), which pays the USER directly — there is no claim step
 REM="$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)"
 REQSIG="$(cast keccak 'WithdrawRequested(uint256,uint256,uint256)')"
 # Raw send rather than csend: the request id is only recoverable from the receipt logs. Same
@@ -267,18 +250,26 @@ assert_eq "account sharesBalance escrowed" "$(ccall "$ACCT" 'sharesBalance()(uin
 
 PROPOSER="$(ccall "$STRAT" 'proposer()(address)' | field)"
 fund_eth "$PROPOSER" "$ETH_FUND_HEX"
-csend "fulfillRedeem(id) [proposer]" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256)' "$ID"
-FA="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)"
-[ "$FA" -gt 0 ] 2>/dev/null && ok "fulfill landed USDC on ACCOUNT (+$FA)" || die "fulfill did not land USDC on account"
-csend "claimWithdrawnUsdc() [user]" "$USER" "$ACCT" 'claimWithdrawnUsdc()'
-assert_eq "account USDC after claim" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
+UBEF2="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
+csend "fulfillRedeem(id) [proposer]" "$PROPOSER" "$STRAT" 'fulfillRedeem(uint256,uint256)' "$ID" 0
+UAFT2="$(ccall "$USDC" 'balanceOf(address)(uint256)' "$USER" | field)"
+# The account named owner() as the request's RECIPIENT, so the pooled strategy pays the user directly.
+[ "$UAFT2" -gt "$UBEF2" ] 2>/dev/null && ok "fulfill paid the USER directly (+$((UAFT2-UBEF2)))" || die "fulfill did not pay the user"
+assert_eq "account USDC after fulfill" "$(ccall "$USDC" 'balanceOf(address)(uint256)' "$ACCT" | field)" "0"
+# Nothing to claim; the completed id is pruned by the next owner call that touches the tracked set.
+csend "syncRedeemRequests() [user]" "$USER" "$ACCT" 'syncRedeemRequests()'
+assert_eq "openRequestIds pruned" "$(ccall "$ACCT" 'openRequestIds()(uint256[])' | tr -d '[] ' | grep -c . || true)" "0"
 
 # depositIdle gate: third address reverts; registry backend succeeds
 section "Phase 4 — depositIdle gate"
 csend "user transfers 100 USDC to account" "$USER" "$USDC" 'transfer(address,uint256)' "$ACCT" "$IDLE_XFER"
 THIRD=0x00000000000000000000000000000000DeaDBeef
 fund_eth "$THIRD" "$ETH_FUND_HEX"
-if cast send "$ACCT" 'depositIdle(uint256)' 0 --from "$THIRD" --unlocked --rpc-url "$RPC" >/dev/null 2>&1; then
+# REAL 2-arg signature and the REAL transferred amount. Against the old 1-arg form this "reverted"
+# on an unknown selector, i.e. it passed for the wrong reason and asserted no access control at all.
+# Passing a valid amount (not 0) also keeps `require(assets > 0)` from being the thing that fires, so
+# the ONLY remaining reason to revert is the caller identity.
+if cast send "$ACCT" 'depositIdle(uint256,uint256)' "$IDLE_XFER" 0 --from "$THIRD" --unlocked --rpc-url "$RPC" >/dev/null 2>&1; then
   die "depositIdle from a third party should have reverted"
 else
   ok "depositIdle reverts for a non-owner/non-backend third party (Not owner or backend)"
@@ -288,7 +279,10 @@ fi
 REGBACKEND="$(ccall "$REG" 'getBackendAddress()(address)' | field)"
 info "registry.getBackendAddress() = $REGBACKEND"
 fund_eth "$REGBACKEND" "$ETH_FUND_HEX"
-csend "depositIdle(0) [registry backend]" "$REGBACKEND" "$ACCT" 'depositIdle(uint256)' 0
+# Must pass the ACTUAL transferred idle amount: the caller now picks the amount (that is what makes
+# the fund capacity ceiling usable — it rejects rather than trims, so a partial deposit has to be
+# expressible), and `require(assets > 0)` rejects the old `0` sentinel outright.
+csend "depositIdle(IDLE_XFER, 0) [registry backend]" "$REGBACKEND" "$ACCT" 'depositIdle(uint256,uint256)' "$IDLE_XFER" 0
 IDLESH="$(ccall "$ACCT" 'sharesBalance()(uint256)' | field)"
 [ "$IDLESH" -gt 0 ] 2>/dev/null && ok "depositIdle minted shares=$IDLESH" || die "depositIdle minted no shares"
 
@@ -336,9 +330,8 @@ jq -n \
     strategyTypeId: 5,
     mamo: { accountImplementation: $impl, accountFactory: $factory, strategyRegistry: $registry },
     pooled: { strategyClone: $strategy, vault: $vault },
-    sherwood: { strategyClone: $strategy, syndicateVault: $vault },
     usdc: $usdc,
-    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
+    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
     vaultGeneration: $vaultGen,
     vaultGenerationName: $vaultGenName
   }' > "$CONFIG_JSON"

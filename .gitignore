@@ -24,3 +24,8 @@ script/tenderly/.phase-*.log
 # directly with the frontend (or commit intentionally), don't bake a soon-stale URL into history.
 docs/tenderly-staging.md
 script/tenderly/staging-setup.log
+
+script/tenderly/mine-ticker.log
+script/tenderly/.mine-ticker.pid
+
+script/tenderly/harness-results-leveraged-aero-withdraw.log

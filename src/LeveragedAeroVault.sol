@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy.sol";
+import {IStrategy} from "@contracts/leveraged-aero/interfaces/IStrategy.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -10,14 +10,26 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
+/// @dev The strategy's NAV read, declared locally so stand-ins for the vendored `IStrategy` need not
+///      grow the selector.
+interface IStrategyNav {
+    function nav() external view returns (uint256);
+}
+
+/// @dev The vendored strategy's operator-rotation hook, declared locally for the {IStrategyNav} reason.
+interface IStrategyProposer {
+    function setProposer(address newProposer) external;
+}
 
 /**
  * @title LeveragedAeroVault
  * @notice Minimal share token + lifecycle driver for ONE vendored
  *         {LeveragedAerodromeCLStrategy} clone. Replaces the Sherwood `SyndicateVault` the vendored
  *         strategy was written against, exposing only the surface that strategy actually consumes:
- *         `asset()`, `owner()`, `totalSupply()`/`transferFrom` (ERC20), `strategyMint`,
- *         `strategyBurn`, and `factory()`.
+ *         `asset()`, `owner()`, `totalSupply()`/`transferFrom` (ERC20), `strategyMint` and
+ *         `strategyBurn`.
  * @dev Deliberately NOT ERC-4626 and NOT upgradeable. Deposits and redemptions are serviced by the
  *      STRATEGY (custody model): LPs call `strategy.deposit` / `strategy.redeem` / `requestRedeem`,
  *      the strategy prices them off its own oracle NAV and mints/burns vault shares through the two
@@ -44,21 +56,26 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice The single bound {LeveragedAerodromeCLStrategy} clone. Set once, never rotated.
     address public strategy;
 
-    /// @notice Gates {strategyMint}. False blocks all new share issuance (deposits + fee-shares).
+    /// @notice Gates {strategyMint}. False blocks all new share issuance.
     bool public depositsOpen;
 
     /// @notice Set by {settleStrategy}; unlocks {redeemSettled}. One-way.
     bool public settled;
 
-    /// @notice Optional protocol-fee config, surfaced to the strategy via {protocolConfig}.
-    ///         `address(0)` (the deploy default) == fees OFF.
-    address public feeConfig;
+    /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp), over the whole book,
+    ///         not a per-user limit. `0` (the deploy default) == UNLIMITED; {depositsOpen} freezes.
+    /// @dev Enforced in the strategy's `deposit` (pre-deposit, against the pre-deposit NAV; crossing
+    ///      deposits rejected, not trimmed), NOT in {strategyMint} — a fund ceiling belongs on the one
+    ///      path that takes capital, not on the issuance primitive.
+    /// @dev The strategy's fee is an IN-KIND skim of the harvested reward tranche, so no fee path mints
+    ///      shares and the ceiling has no fee interaction to reason about.
+    uint256 public maxTotalAssets;
 
     // ==================== EVENTS ====================
 
     event StrategySet(address indexed strategy);
     event OpenDepositsUpdated(bool open);
-    event FeeConfigUpdated(address indexed feeConfig);
+    event MaxTotalAssetsSet(uint256 maxAssets);
     event StrategyActivated(address indexed strategy, uint256 seedAmount);
     event StrategySettled(address indexed strategy);
     event SettledRedeem(address indexed owner, uint256 shares, uint256 assetsOut);
@@ -104,13 +121,12 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     // ==================== STRATEGY SHARE HOOKS ====================
 
     /**
-     * @notice Mint `shares` to `to`. Called by the strategy on an LP deposit and on a fee-share
-     *         crystallise.
+     * @notice Mint `shares` to `to`. Called by the strategy on an LP deposit — its one and only caller.
      * @dev The `msg.sender == strategy` check is the SOLE protection against arbitrary share
      *      inflation — this contract performs no pricing of its own and takes the strategy's share
-     *      count on faith. Gated on {depositsOpen} so the owner can freeze issuance (which also
-     *      defers fee-share mints; the strategy's crystallise is best-effort and tolerates the
-     *      revert).
+     *      count on faith. Gated on {depositsOpen} so the owner can freeze issuance: a clean freeze
+     *      with no fee side effect, since the fund's only fee is the strategy's in-kind AERO skim at
+     *      harvest and nothing mints shares to a fee recipient.
      */
     function strategyMint(address to, uint256 shares) external {
         require(msg.sender == strategy, "LAV: only strategy");
@@ -130,70 +146,48 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         _burn(msg.sender, shares);
     }
 
-    // ==================== FEE CONFIG ====================
-
-    /**
-     * @notice Sherwood-shaped fee-config discovery hop. The strategy resolves the protocol-fee
-     *         config as `ISyndicateFactory(vault.factory()).protocolConfig()`; this vault plays both
-     *         roles, so it points the first hop back at itself once a {feeConfig} exists.
-     * @return `address(this)` when a fee config is set, `address(0)` otherwise (fees off — the
-     *         strategy's null-check short-circuits before the second hop).
-     */
-    function factory() external view returns (address) {
-        return feeConfig == address(0) ? address(0) : address(this);
-    }
-
-    /// @notice Second hop of the fee-config lookup. The returned contract must implement
-    ///         `protocolFeeBps()` + `protocolFeeRecipient()`; `address(0)` == protocol fee off.
-    function protocolConfig() external view returns (address) {
-        return feeConfig;
-    }
-
     // ==================== OWNER: WIRING ====================
 
-    /**
-     * @notice Bind an ALREADY-initialized strategy clone. Set-once: the share ledger's integrity
-     *         rests entirely on `msg.sender == strategy`, so a rotatable pointer would let a future
-     *         owner mint freely against existing holders.
-     * @dev The clone must already point back here (`strategy_.vault() == address(this)`). Binding a
-     *      clone initialized against a DIFFERENT vault would hand this ledger's mint/burn hooks to a
-     *      contract pricing another book — the only way to catch that is to ask the clone.
-     */
-    function setStrategy(address strategy_) external onlyOwner {
-        _bind(strategy_);
-    }
+    // NOTE: no `setStrategy` by design — {cloneAndBind} is the only path the strategy pointer is ever
+    // set by, which closes the front-run window a separate deploy-then-bind flow left open.
 
     /**
-     * @notice Deploy an ERC-1167 clone of `template`, initialize it against THIS vault, and bind it
-     *         — atomically, in one owner transaction.
-     * @dev Closes the init/bind race the two-transaction flow leaves open: a clone deployed and left
-     *      uninitialized can be `initialize`d by anyone (the template's constructor only locks the
-     *      TEMPLATE), so between a bare `Clones.clone` and the owner's `initialize` a front-runner
-     *      can seize the proposer role. Cloning + initializing + binding in one call removes the gap;
-     *      `_bind` re-checks the binding, so this cannot bind a foreign-vault clone either.
-     * @param template  The strategy template to clone (its constructor locked its own `initialize`).
-     * @param proposer_ The proposer role for the new clone.
-     * @param initData  ABI-encoded strategy-specific init params.
-     * @return clone    The deployed, initialized and bound clone.
+     * @notice Atomically deploy an ERC-1167 clone of `template`, initialize it against THIS vault, and
+     *         bind it. Set-once: the share ledger rests entirely on `msg.sender == strategy`, so a
+     *         rotatable pointer would let a future owner mint against existing holders.
+     * @dev Front-run-proof: `BaseStrategy.initialize` gates on `msg.sender == vault_`, so only this call
+     *      can initialize a clone pointed here, and `_bind` re-checks the binding.
      */
     function cloneAndBind(address template, address proposer_, bytes calldata initData)
         external
         onlyOwner
         returns (address clone)
     {
-        require(strategy == address(0), "LAV: strategy already set");
         clone = Clones.clone(template);
         IStrategy(clone).initialize(address(this), proposer_, initData);
         _bind(clone);
     }
 
-    /// @dev Shared set-once bind. Both entrypoints route here so the checks can never drift apart.
+    /// @dev The set-once bind; sole caller is {cloneAndBind}.
     function _bind(address strategy_) private {
         require(strategy == address(0), "LAV: strategy already set");
+        // DEAD BELT: `Clones.clone` never returns the zero address, so the only caller cannot reach this.
         require(strategy_ != address(0), "LAV: invalid strategy");
         require(IStrategy(strategy_).vault() == address(this), "LAV: strategy not bound to this vault");
         strategy = strategy_;
         emit StrategySet(strategy_);
+    }
+
+    /**
+     * @notice Rotate the bound strategy's operator (proposer) key. The strategy rejects zero.
+     * @dev Not fund-moving: `onlyProposer` can neither raise leverage (`setTargetLtv` is admin-only)
+     *      nor move tokens, so this is deliberately not set-once. Does NOT move `Layout.feeRecipient`,
+     *      an init-only field, so it is not a complete key-compromise response.
+     */
+    function setProposer(address newProposer) external onlyOwner {
+        address strategy_ = strategy;
+        require(strategy_ != address(0), "LAV: strategy not set");
+        IStrategyProposer(strategy_).setProposer(newProposer);
     }
 
     /// @notice Open / close new share issuance. Redemptions are unaffected (see {strategyBurn}).
@@ -202,19 +196,41 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
         emit OpenDepositsUpdated(open);
     }
 
-    /// @notice Point the strategy's protocol-fee lookup at a config contract, or clear it
-    ///         (`address(0)` → fees off). Read live by the strategy on every crystallise.
-    /// @dev OWNER-TRUSTED, and deliberately unvalidated + mutable. The pointed-at contract supplies
-    ///      both `protocolFeeBps()` and `protocolFeeRecipient()` LIVE on every crystallise — no cap,
-    ///      no timelock, no snapshot — so an owner may raise the protocol fee or redirect the
-    ///      recipient with effect from the next accrual. The management + performance ceilings are
-    ///      enforced at strategy init and are NOT affected; this is the protocol leg only. The owner
-    ///      is expected to be MAMO_MULTISIG. Blast radius the other way too: a config whose reads
-    ///      REVERT hard-reverts `compound()` / `_settle()` / the redeem skim (those reads are
-    ///      deliberately un-try'd), so point this only at a contract known to answer.
-    function setFeeConfig(address feeConfig_) external onlyOwner {
-        feeConfig = feeConfig_;
-        emit FeeConfigUpdated(feeConfig_);
+    /// @notice Set the fund's capacity ceiling over the whole book, in USDC (6dp); `0` == unlimited.
+    /// @dev Takes effect on the next deposit. Lowering it below current NAV unwinds and traps nobody —
+    ///      it only closes new deposits; every withdrawal path is independent of it.
+    function setMaxTotalAssets(uint256 maxAssets) external onlyOwner {
+        maxTotalAssets = maxAssets;
+        emit MaxTotalAssetsSet(maxAssets);
+    }
+
+    /// @notice ADVISORY: USDC that could still be deposited before the capacity ceiling is reached.
+    /// @dev Point-in-time reading, not a reservation. `0` == at or above the ceiling, and
+    ///      `type(uint256).max` == cap disabled. Reverts when NAV is unpriceable (fail-closed).
+    function remainingCapacity() external view returns (uint256 assets) {
+        uint256 cap = maxTotalAssets;
+        if (cap == 0) return type(uint256).max; // unlimited
+        require(strategy != address(0), "LAV: strategy unset");
+        uint256 navNow = IStrategyNav(strategy).nav();
+        return navNow >= cap ? 0 : cap - navNow;
+    }
+
+    /// @notice ADVISORY: the shares a deposit of `assets` USDC (6dp) would mint at CURRENT pricing —
+    ///         the canonical assets->shares conversion for UI and slippage (`minShares`) sizing.
+    /// @dev Point-in-time, not a peg; reverts when NAV is unpriceable, like the deposit's own
+    ///      `NavUnpriceable`. EXACT, not a bound: nothing mints between the preview and the deposit,
+    ///      so the real mint equals this figure at unchanged NAV and supply.
+    function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
+        require(strategy != address(0), "LAV: strategy unset");
+        uint256 supply = totalSupply();
+        uint256 navNow = IStrategyNav(strategy).nav();
+        // Fail closed: `nav()` FLOORS to 0 instead of reverting, so without this the denominator
+        // collapses to 1 and the preview overstates by ~1e9-1e12x. Reachable post-`settleStrategy`.
+        // `supply == 0` legitimately prices at nav 0, as in deposit.
+        require(navNow > 0 || supply == 0, "LAV: nav unpriceable");
+        // `SHARES_VIRTUAL_OFFSET` is 1e6 in the strategy: the same 6-decimal step `decimals()` documents.
+        uint256 offset = 10 ** (decimals() - IERC20Metadata(asset).decimals());
+        shares = Math.mulDiv(assets, supply + offset, navNow + 1);
     }
 
     // ==================== OWNER: LIFECYCLE ====================
@@ -295,20 +311,17 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
      * @notice Sweep a token out of the vault.
      * @dev Any third-party token, any time — the vault is a plain transfer target for the strategy's
      *      `rescueToVault` sweeps, and those airdrops/strays back no shares. Two exclusions:
-     *
-     *      - The ASSET is claimable only once `totalSupply() == 0`: pre-settlement any asset balance
-     *        is dust/donations, and post-settlement it is the {redeemSettled} pot, so the owner may
-     *        not touch it while a single share is outstanding.
-     *      - The vault's OWN share token is never rescuable. The strategy custodies live shares
-     *        (`requestRedeem` escrows, and the shares it pulls mid-`redeem`); a share balance that
-     *        reaches this contract is someone's un-burned claim on the pot, not a stray, so
-     *        forwarding it to an owner-chosen address would be an exfiltration of depositor value.
-     *        Escrowed shares are recovered by their owner through the strategy's `cancelRedeem`.
+     *      - The ASSET is claimable only once every EXTERNAL share is gone, since post-settlement it is
+     *        the {redeemSettled} pot. The test is `totalSupply() == balanceOf(address(this))`, not
+     *        `totalSupply() == 0`, which one wei of dead-weight shares sent here would brick forever;
+     *        strategy-escrowed shares still count as external and hold the gate shut.
+     *      - The vault's OWN share token is never rescuable: a share balance here is an un-burned claim,
+     *        so sweeping it would exfiltrate depositor value.
      */
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "LAV: invalid recipient");
         require(token != address(this), "LAV: cannot rescue shares");
-        require(token != asset || totalSupply() == 0, "LAV: asset reserved for redemptions");
+        require(token != asset || totalSupply() == balanceOf(address(this)), "LAV: asset reserved for redemptions");
         IERC20(token).safeTransfer(to, amount);
         emit Rescued(token, to, amount);
     }

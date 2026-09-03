@@ -33,6 +33,9 @@ abstract contract BaseStrategy is IStrategy {
     error AlreadySettled();
     error ZeroAddress();
 
+    // ── Events ──
+    event ProposerUpdated(address indexed oldProposer, address indexed newProposer);
+
     // ── State ──
     enum State {
         Pending,
@@ -74,8 +77,11 @@ abstract contract BaseStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
+    /// @dev VAULT-ONLY against the ARGUMENT (`_vault` is not stored yet), so
+    ///      `LeveragedAeroVault.cloneAndBind` is the only initializer: no PROPOSER or `initData` front-run.
     function initialize(address vault_, address proposer_, bytes calldata data) external {
         if (_initialized) revert AlreadyInitialized();
+        if (msg.sender != vault_) revert NotVault();
         if (vault_ == address(0)) revert ZeroAddress();
         if (proposer_ == address(0)) revert ZeroAddress();
         _initialized = true;
@@ -116,6 +122,16 @@ abstract contract BaseStrategy is IStrategy {
         return _proposer;
     }
 
+    /// @notice Rotate the operator role, rejecting zero. VAULT-ONLY, which here resolves to the vault
+    ///         OWNER (`LeveragedAeroVault.setProposer` is `onlyOwner`).
+    /// @dev Not fund-moving: `onlyProposer` can neither raise leverage nor move tokens. Deliberately NOT
+    ///      state-gated — a key can be lost in `Pending` too, and a post-`Settled` rotation is a no-op.
+    function setProposer(address newProposer) external onlyVault {
+        if (newProposer == address(0)) revert ZeroAddress();
+        emit ProposerUpdated(_proposer, newProposer);
+        _proposer = newProposer;
+    }
+
     /// @notice Current lifecycle state
     function state() external view returns (State) {
         return _state;
@@ -128,9 +144,8 @@ abstract contract BaseStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Default: fees are not self-managed. Self-fee'd strategies override to `true` and MUST
-    ///      then collect the protocol fee themselves (see `LeveragedAerodromeCLStrategy`'s
-    ///      `protocolFeeOwed` leg).
+    /// @dev Default: fees are not self-managed. Self-fee'd strategies override to `true` and collect
+    ///      their fees themselves (see `LeveragedAerodromeCLStrategy`).
     function selfManagesFees() external view virtual returns (bool) {
         return false;
     }

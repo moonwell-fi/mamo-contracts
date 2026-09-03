@@ -2,8 +2,8 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
-import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
+import {LiquidityAmounts} from "@contracts/leveraged-aero/libraries/LiquidityAmounts.sol";
+import {TickMath} from "@contracts/leveraged-aero/libraries/TickMath.sol";
 
 import {MockCLPool} from "../mocks/MockCLPool.sol";
 
@@ -354,19 +354,14 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
 
     // ==================== RANGE GEOMETRY (why genesis is always two-sided) ====================
 
-    /**
-     * @dev `centeredTickRange` must STRICTLY BRACKET the current tick for every width init permits
-     *      (`width >= 2 x tickSpacing`). This is load-bearing for asset-mode: it is what guarantees a
-     *      FRESH range is never one-sided, so `executeImpl` can always size. Only a STORED range the
-     *      price has since left can degenerate — hence `deployIdle`'s documented `rerange`-first
-     *      remedy.
-     */
+    /// @dev At the centred skew `skewedTickRange` strictly brackets the tick for every width init permits
+    ///      (`width >= 2 x tickSpacing`), so a FRESH range is never one-sided and `executeImpl` can size.
     function testFuzzCenteredRangeStrictlyBracketsTheTick(int24 tick, uint24 width) public {
         tick = int24(int256(bound(int256(tick), -600_000, 600_000)));
         width = uint24(bound(uint256(width), 2, 4000)) * uint24(SPACING);
         _setPoolTick(int24(tick / SPACING * SPACING)); // an on-grid tick, as a real pool reports
 
-        (int24 lower, int24 upper) = LeveragedAeroValuation.centeredTickRange(address(pool), SPACING, width);
+        (int24 lower, int24 upper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, 5000);
         int24 current = pool.tick();
         assertLe(lower, current, "lower bound must not sit above the current tick");
         assertGt(upper, current, "upper bound must sit strictly above the current tick");
@@ -374,27 +369,126 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         assertEq(upper % SPACING, 0, "upper bound on the spacing grid");
     }
 
+    // ==================== RANGE GEOMETRY: THE SKEW ====================
+
+    /// @dev `LeveragedAeroValuation._alignTick` restated, so the equalities below compare independently.
+    function _alignDown(int24 tick) internal pure returns (int24) {
+        int24 rem = tick % SPACING;
+        if (rem < 0) rem += SPACING;
+        return tick - rem;
+    }
+
+    /// @dev Skew 5000 reproduces the pre-skew centred formula (`span = width / 2` each side) bit for bit —
+    ///      the compatibility pin for live clones, asserted at on- and off-grid ticks and both signs.
+    function testSkewedRangeReproducesCenteredAtHalf() public {
+        uint24[4] memory widths = [uint24(200), 1000, 4000, 40_000];
+        int24[4] memory ticks = [int24(0), TICK, TICK + 37, -TICK - 37]; // two of them deliberately off-grid
+        for (uint256 t; t < ticks.length; ++t) {
+            int24 current = ticks[t];
+            _setPoolTick(current);
+            for (uint256 i; i < widths.length; ++i) {
+                (int24 lower, int24 upper) =
+                    LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, widths[i], 5000);
+                int24 span = int24(widths[i] / 2); // the pre-skew expression, verbatim
+                assertEq(lower, _alignDown(current - span), "lower == the OLD centred lower bound");
+                assertEq(upper, _alignDown(current + span), "upper == the OLD centred upper bound");
+            }
+        }
+    }
+
+    /// @dev Over the whole `_checkSkew`-legal set the range must still strictly bracket the tick, sit on
+    ///      the grid and measure `width` to within one spacing — else a legal skew would brick deploys.
+    function testFuzzSkewedRangeStrictlyBracketsTheTick(int24 tick, uint24 width, uint16 skewBps) public {
+        tick = int24(int256(bound(int256(tick), -600_000, 600_000)));
+        width = uint24(bound(uint256(width), 2, 4000)) * uint24(SPACING);
+        uint256 spacing = uint256(uint24(SPACING));
+        uint256 minSkew = (spacing * 10_000 + uint256(width) - 1) / uint256(width); // ceil
+        skewBps = uint16(bound(uint256(skewBps), minSkew, 10_000 - minSkew));
+
+        _setPoolTick(int24(tick / SPACING * SPACING)); // an on-grid tick, as a real pool reports
+        int24 current = pool.tick();
+
+        (int24 lower, int24 upper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, skewBps);
+
+        int24 maxAligned = (TickMath.MAX_TICK / SPACING) * SPACING;
+        assertLe(lower, current, "lower bound must not sit above the current tick");
+        assertGt(upper, current, "upper bound must sit STRICTLY above the current tick");
+        assertEq(lower % SPACING, 0, "lower bound on the spacing grid");
+        assertEq(upper % SPACING, 0, "upper bound on the spacing grid");
+        assertGe(lower, -maxAligned, "lower bound stays inside the aligned tick domain");
+        assertLe(upper, maxAligned, "upper bound stays inside the aligned tick domain");
+
+        // The width claim holds only when NEITHER domain clamp fired: a clamped range is deliberately
+        // TRUNCATED, and is covered instead by `testSkewedRangeClampsAtTickDomainEdges`.
+        uint256 lowerSpan = (uint256(width) * uint256(skewBps)) / 10_000;
+        int24 nominalLower = _alignDown(int24(int256(current) - int256(lowerSpan)));
+        int24 nominalUpper = _alignDown(int24(int256(current) + int256(uint256(width) - lowerSpan)));
+        if (nominalLower >= -maxAligned && nominalUpper <= maxAligned) {
+            // Each bound aligns DOWN independently, so realised width differs from `width` by < one spacing.
+            assertApproxEqAbs(
+                uint256(int256(upper - lower)), uint256(width), spacing, "realised span == width (+/- one spacing)"
+            );
+        } else {
+            assertLt(
+                uint256(int256(upper - lower)), uint256(width) + spacing, "a clamped range is never WIDER than asked"
+            );
+        }
+    }
+
+    /// @dev `skewBps` really is the fraction of the width placed BELOW the tick — stated first as an
+    ///      absolute one-spacing tick tolerance so it cannot pass on slack, then as the ratio.
+    function testSkewedRangeSpanRatioMatchesSkew() public {
+        uint24 width = 400_000; // 4000 spacings
+        _setPoolTick(TICK);
+        int24 current = pool.tick();
+        uint256 spacing = uint256(uint24(SPACING));
+        uint16[5] memory skews = [uint16(1000), 2500, 5000, 7500, 9000];
+
+        for (uint256 i; i < skews.length; ++i) {
+            (int24 lower, int24 upper) = LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, skews[i]);
+            uint256 below = uint256(int256(current - lower));
+            uint256 total = uint256(int256(upper - lower));
+
+            assertApproxEqAbs(
+                below, (uint256(width) * uint256(skews[i])) / 10_000, spacing, "below-span == skew x width"
+            );
+            assertApproxEqAbs(total, uint256(width), spacing, "total span == width");
+            assertApproxEqRel(
+                (below * 10_000) / total, uint256(skews[i]), 1e15, "realised fraction below spot == skewBps"
+            );
+        }
+    }
+
+    /// @dev At the extreme legal skews nearly the whole width lands on ONE side, so the
+    ///      `±_alignTick(MAX_TICK)` clamps must leave both bounds MINTABLE — `getSqrtRatioAtTick` proves it.
+    function testSkewedRangeClampsAtTickDomainEdges() public {
+        int24 maxAligned = (TickMath.MAX_TICK / SPACING) * SPACING;
+        uint24 width = 1_774_400; // ~2 x MAX_TICK: the init ceiling on `maxWidth`, aligned to SPACING
+        int24[2] memory ticks = [maxAligned, -maxAligned];
+        uint16[2] memory skews = [uint16(1), 9999]; // the extreme legal skews at this width
+
+        for (uint256 t; t < ticks.length; ++t) {
+            _setPoolTick(ticks[t]);
+            for (uint256 i; i < skews.length; ++i) {
+                (int24 lower, int24 upper) =
+                    LeveragedAeroValuation.skewedTickRange(address(pool), SPACING, width, skews[i]);
+                assertEq(lower % SPACING, 0, "clamped lower is still on the spacing grid");
+                assertEq(upper % SPACING, 0, "clamped upper is still on the spacing grid");
+                assertGe(lower, -maxAligned, "lower stays inside the aligned tick domain");
+                assertLe(upper, maxAligned, "upper stays inside the aligned tick domain");
+                assertLt(lower, upper, "the clamped range is still non-empty");
+                TickMath.getSqrtRatioAtTick(lower); // reverts if the clamp left the domain
+                TickMath.getSqrtRatioAtTick(upper);
+            }
+        }
+    }
+
     // ==================== LEVER-UP SIZING (`assetModeLeverUpPair`) ====================
 
-    /**
-     * @dev THE "CANNOT DRIFT" IDENTITY. `assetModeSplit` and `assetModeLeverUpPair` solve the SAME
-     *      pairing relation `A / U = needA / needU` with different unknowns: the split is handed a total
-     *      and solves for the split point `C`, the lever-up is handed the debt delta outright. So feeding
-     *      the split's OWN borrow budget (`C × targetLtv / 1e4`) into the lever-up must reproduce the
-     *      split's `(A, U)` — the algebraic statement that a lever-up to `targetLtvBps` lands the same
-     *      leg ratio genesis does. Asserted across both orderings and several range shapes.
-     *
-     *      `A` must match TO THE WEI — both go through the same `_legABorrow`. `U` matches only to a
-     *      RELATIVE tolerance, and that floor is physical, not slack: the split derives `U` by
-     *      SUBTRACTION from an exact-arithmetic `C` (`amount − C`), whereas the lever-up derives it by
-     *      MULTIPLICATION off two already-FLOORED integers — `borrowUsd6 = floor(C·ltv/1e4)` and
-     *      `A = floor(borrowUsd6·100·10^dA/pA)`. Each lost unit is magnified into `U′` by its own scale
-     *      factor (`U/borrowUsd6` and `needU/needA` respectively), so the error is
-     *      `O(1/borrowUsd6 + 1/A)` RELATIVE — ~1e-8 at the sizes here, and it shrinks with position size.
-     *      1e-6 is two orders above the worst observed case (measured: 933/3.3e11 = 2.8e-9 for the
-     *      expensive-leg ordering, 15/9.7e11 = 1.5e-11 for the cheap-leg one) and still orders of
-     *      magnitude below any mis-sizing a wrong formula would produce.
-     */
+    /// @dev THE "CANNOT DRIFT" IDENTITY: deposit → `supplyIdle` → `adjustLeverage` lands the identical book
+    ///      as deposit → `deployIdle`, because the lever-up's `1/(1 + ltv·m)` rescale is exactly the split's
+    ///      `w/(w+x)` reached from the other direction. Per-side tolerances sit just above the measured
+    ///      integer-floor drift (`A` one unit in the last place, `U` compounded off two floored integers).
     function testLeverUpPairReproducesTheSplitPairAtTheSameLtv() public {
         _setPoolTick(TICK);
         int24[3] memory lowerOffsets = [int24(-2000), -200, -20_000];
@@ -413,22 +507,25 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
                     address(pool),
                     lower,
                     upper,
-                    (c * ltv) / 10_000, // the split's OWN borrow budget
+                    (AMOUNT * ltv) / 10_000, // the WHOLE book's target debt (see @dev)
                     type(uint256).max, // funding bound not under test here
+                    0, // no raw USDC: the deposit is entirely collateral (see @dev)
+                    uint256(ltv),
                     LEG_A_DECIMALS,
                     legAIsToken0,
                     pA
                 );
-                assertEq(aUp, a, "the two entrypoints must convert the borrow identically (to the wei)");
                 assertApproxEqRel(
-                    uUp, u, 1e12, "the two entrypoints must pair at the same ratio (to integer resolution)"
+                    aUp, a, 1e10, "the two entrypoints must convert the borrow identically (to integer resolution)"
+                );
+                assertApproxEqRel(
+                    uUp, u, 1e11, "the two entrypoints must pair at the same ratio (to integer resolution)"
                 );
             }
         }
     }
 
-    /// @dev The lever-up pair scales LINEARLY in the debt delta (it is a ratio, not a solve), which is
-    ///      what makes "borrow ΔB, pair with U′" hedge-neutral for ANY ΔB the retarget asks for.
+    /// @dev The lever-up pair scales LINEARLY in the debt delta, so "borrow ΔB, pair with U′" stays neutral.
     function testFuzzLeverUpPairScalesLinearlyInTheDebtDelta(uint256 borrowUsd6, bool legAIsToken0) public {
         borrowUsd6 = bound(borrowUsd6, 1_000e6, 10_000_000e6);
         _setPoolTick(TICK);
@@ -437,13 +534,15 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         int24 upper = TICK + 2000;
 
         (uint256 a1, uint256 u1) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, borrowUsd6, type(uint256).max, LEG_A_DECIMALS, legAIsToken0, pA
+            address(pool), lower, upper, borrowUsd6, type(uint256).max, 0, 5000, LEG_A_DECIMALS, legAIsToken0, pA
         );
         (uint256 a2, uint256 u2) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, borrowUsd6 * 3, type(uint256).max, LEG_A_DECIMALS, legAIsToken0, pA
+            address(pool), lower, upper, borrowUsd6 * 3, type(uint256).max, 0, 5000, LEG_A_DECIMALS, legAIsToken0, pA
         );
-        assertApproxEqRel(a2, a1 * 3, 1e12, "borrow scales linearly in the delta");
-        assertApproxEqRel(u2, u1 * 3, 1e12, "the pairing USDC scales linearly in the delta");
+        // Tolerance is INTEGER RESOLUTION: three floor divisions per output, so the ×3 comparison sits
+        // within ~8 units — ~4e-6 relative at the smallest permitted delta. 1e12 sat below that noise.
+        assertApproxEqRel(a2, a1 * 3, 1e13, "borrow scales linearly in the delta");
+        assertApproxEqRel(u2, u1 * 3, 1e13, "the pairing USDC scales linearly in the delta");
 
         // The pair is balanced at the tick — the same property the split has, so the LP consumes both.
         (uint256 amt0, uint256 amt1) = legAIsToken0 ? (a1, u1) : (u1, a1);
@@ -456,8 +555,7 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         _assertConsumed(exp1, amt1, "token1 side of the lever-up pair consumed");
     }
 
-    /// @dev The FUNDING BOUND, pinned to the wei: `U′ - 1` of idle reverts with the exact
-    ///      `(needed, available)` pair, `U′` passes. No partial fill, no silent cap.
+    /// @dev The FUNDING BOUND to the wei: `U′ - 1` of idle reverts with the exact `(needed, available)` pair.
     function testLeverUpPairEnforcesTheIdleBoundToTheWei() public {
         _setPoolTick(TICK);
         uint256 pA = _legAPriceFromPool(pool.sqrtPriceX96(), false);
@@ -466,7 +564,7 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
         uint256 delta = 250_000e6;
 
         (, uint256 needed) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, delta, type(uint256).max, LEG_A_DECIMALS, false, pA
+            address(pool), lower, upper, delta, type(uint256).max, 0, 5000, LEG_A_DECIMALS, false, pA
         );
         assertGt(needed, 0, "the pairing draw must be nonzero, or the bound is vacuous");
 
@@ -474,28 +572,27 @@ contract LeveragedAeroAssetModeSizingUnitTest is Test {
             abi.encodeWithSelector(LeveragedAeroValuation.InsufficientIdleForLeverUp.selector, needed, needed - 1)
         );
         LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, delta, needed - 1, LEG_A_DECIMALS, false, pA
+            address(pool), lower, upper, delta, needed - 1, 0, 5000, LEG_A_DECIMALS, false, pA
         );
 
         (, uint256 u) = LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), lower, upper, delta, needed, LEG_A_DECIMALS, false, pA
+            address(pool), lower, upper, delta, needed, 0, 5000, LEG_A_DECIMALS, false, pA
         );
         assertEq(u, needed, "exactly U' of idle clears the bound");
     }
 
-    /// @dev A one-sided range fails closed on the lever-up path too (shared `_rangeRatio`), rather than
-    ///      pairing the borrow against nothing — the unhedged add the shape must never make.
+    /// @dev A one-sided range fails closed on the lever-up path too (shared `_rangeRatio`): no unhedged add.
     function testLeverUpPairFailsClosedOnAOneSidedRange() public {
         _setPoolTick(TICK);
         uint256 pA = _legAPriceFromPool(pool.sqrtPriceX96(), false);
 
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), TICK + 2000, TICK + 6000, 250_000e6, type(uint256).max, LEG_A_DECIMALS, false, pA
+            address(pool), TICK + 2000, TICK + 6000, 250_000e6, type(uint256).max, 0, 5000, LEG_A_DECIMALS, false, pA
         );
         vm.expectRevert(LeveragedAeroValuation.DegenerateRange.selector);
         LeveragedAeroValuation.assetModeLeverUpPair(
-            address(pool), TICK - 6000, TICK - 2000, 250_000e6, type(uint256).max, LEG_A_DECIMALS, false, pA
+            address(pool), TICK - 6000, TICK - 2000, 250_000e6, type(uint256).max, 0, 5000, LEG_A_DECIMALS, false, pA
         );
     }
 }

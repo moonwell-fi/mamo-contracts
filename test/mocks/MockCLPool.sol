@@ -19,6 +19,9 @@ contract MockCLPool {
     ///         swap-pool existence probe (`pool.factory().getPool(usdc, leg, spacing)`).
     address public factory;
 
+    /// @notice Gauge this pool self-reports; must agree with `gauge.pool()`, as one direction is forgeable.
+    address public gauge;
+
     uint160 public sqrtPriceX96 = 79228162514264337593543950336; // 1:1
     int24 public tick;
 
@@ -35,6 +38,10 @@ contract MockCLPool {
 
     function setFactory(address factory_) external {
         factory = factory_;
+    }
+
+    function setGauge(address gauge_) external {
+        gauge = gauge_;
     }
 
     function setTokens(address token0_, address token1_) external {
@@ -59,6 +66,18 @@ contract MockCLPool {
         sqrtPriceX96 = sqrtPriceX96_;
     }
 
+    /// @dev A real pool whose observation cardinality does not span the requested window reverts
+    ///      `observe`; set this to `window - 1` to model "pool younger than twapWindow".
+    function setMaxObservationAge(uint32 maxObservationAge_) external {
+        maxObservationAge = maxObservationAge_;
+    }
+
+    /// @notice Oldest observation `observe` will serve, in seconds ago. `0` == unlimited.
+    uint32 public maxObservationAge;
+
+    /// @notice Thrown when `observe` is asked for a window the mock's history does not span.
+    error MockCLPoolOldestObservation();
+
     // ── ICLPool ──
 
     function slot0() external view returns (uint160, int24, uint16, uint16, uint16, bool) {
@@ -75,6 +94,9 @@ contract MockCLPool {
         tickCumulatives = new int56[](secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);
         for (uint256 i; i < secondsAgos.length; ++i) {
+            if (maxObservationAge != 0 && secondsAgos[i] > maxObservationAge) {
+                revert MockCLPoolOldestObservation();
+            }
             // Cumulative measured backwards from now: -(secondsAgo) * twapTick.
             tickCumulatives[i] = -int56(int32(int256(uint256(secondsAgos[i])))) * int56(twapTick);
         }
@@ -82,10 +104,6 @@ contract MockCLPool {
 
     function fee() external pure returns (uint24) {
         return 500;
-    }
-
-    function gauge() external pure returns (address) {
-        return address(0);
     }
 }
 

@@ -41,19 +41,21 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
   can precompute before it exists.
 - `account.owner() == user`. Every state-changing user action is `onlyOwner`; the user's wallet signs
   directly against their own account.
-- **Legacy naming, unchanged ABI:** the account's strategy pointer is still the public getter
-  `sherwoodStrategy()` (and the initializer guard `"Invalid sherwoodStrategy address"`). The name is
-  historical — it points at the in-repo `LeveragedAerodromeCLStrategy` clone. Keep it as-is in
-  ABIs/typings; nothing on the account's integration surface was renamed.
+- **Naming (renamed pre-mainnet):** the account's strategy pointer is the public getter
+  `leveragedAeroStrategy()` (initializer guard `"Invalid leveragedAeroStrategy address"`). It points at
+  the in-repo `LeveragedAerodromeCLStrategy` clone. Regenerate ABIs/typings if you pinned the former
+  `sherwoodStrategy()` spelling — that break landed before the first mainnet deployment.
 
 ---
 
 ## Contracts & chain (staging)
 
-> **The staging instance now runs the current in-repo stack** (vault generation 2): the vault beneath the
-> accounts is `LeveragedAeroVault`, so `depositsOpen()` and the permissionless `redeemSettled` Settled
-> flow below are both live and exercisable. Sherwood is gone — no `SyndicateVault`, no governor, no
-> propose→vote→execute.
+> **The staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-25 (`6d25f5f`): the vault
+> beneath the accounts is `LeveragedAeroVault` with the fund capacity cap (`maxTotalAssets()` /
+> `remainingCapacity()`), so `depositsOpen()`, the capacity UI below and the permissionless
+> `redeemSettled` Settled flow are all live and exercisable. Every error string on this page — including
+> `"Unclaimed withdrawal proceeds"` and `FundAtCapacity` — is the behaviour of the code deployed here.
+> Sherwood is gone: no `SyndicateVault`, no governor, no propose→vote→execute.
 >
 > ⚠️ **`script/tenderly/leveraged-aero-vnet.json` is the source of truth**, not this table. Addresses
 > change whenever a harness redeploys; read the config file (and
@@ -61,16 +63,21 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
 
 | Field | Value | Config key |
 |---|---|---|
-| Network | Base fork (Tenderly Virtual TestNet), chainId `8453` | `chainId` |
-| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/70a4990f-6686-4536-8237-ad9103acd11b` | `publicRpc` |
+| Network | Base fork (Tenderly Virtual TestNet), **custom** chainId `73578453` (parent Base `8453`) | `chainId` |
+| RPC (public, read-only) | `https://virtual.base.eu.rpc.tenderly.co/b5ec5ea9-e5ea-4e06-a9a6-21310065d282` | `publicRpc` |
 | Admin RPC (writes) | **1Password** (write-capable — never committed to this repo) | `adminRpc` |
-| Factory | `0x3E1304044c31907379c00dd24Bd648327Ac2F20b` | `mamo.accountFactory` |
-| Account implementation | `0xC68F14197Bb68C2b96E90ccA7227cc497Fb48bf9` | `mamo.accountImplementation` |
+| Factory | `0x70707eb4337FAB8043ea737Fa16a14A90Ad1C440` | `mamo.accountFactory` |
+| Account implementation | `0x0EE12E97Fe2b176dB30A00bcE0cDe2699b7F4b8f` | `mamo.accountImplementation` |
 | Registry | `0x46a5624C2ba92c08aBA4B206297052EDf14baa92` | `mamo.strategyRegistry` |
 | Strategy type id | `5` | `strategyTypeId` |
-| Vault (`LeveragedAeroVault`, shares 12dp) | `0x8343b35617326A2B416e17388e1BdF10d5Fd22D7` | `pooled.vault` |
-| Strategy clone | `0xA26557fA6823881327fca5b8C4eD5857997A49da` | `pooled.strategyClone` |
+| Vault (`LeveragedAeroVault`, shares 12dp) | `0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC` | `pooled.vault` |
+| Strategy clone | `0xf72Dd040A1af43e25C3f1B330F5fbc7b909e8008` | `pooled.strategyClone` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `usdc` |
+
+> **The chain id is deliberately not `8453`.** Wallets and RPC configs must use `73578453` (Tenderly's
+> `7357` prefix + the parent network) — it keeps the staging instance disambiguated from real Base and
+> makes replayed transactions impossible. Fork *state* is still Base, so every venue address (USDC,
+> Aerodrome, Moonwell, the Chainlink feeds) resolves exactly as it does on mainnet.
 
 > Production addresses are published separately at deploy.
 
@@ -165,20 +172,25 @@ function owner() external view returns (address);
 - **`fastOk`:** `true` iff the fast withdraw path would currently price and clear the LTV gate. It is
   **advisory only** — execution can still revert even when `fastOk == true` (prices move between the
   preview call and the tx). Use it to choose the default UX path, not as a guarantee.
-- **Idle / claimable USDC:** `IERC20(usdc).balanceOf(account)`. After an async withdrawal is fulfilled,
-  the payout lands here as idle USDC awaiting `claimWithdrawnUsdc()` (see async flow). Surface it as a
-  "claimable" balance.
+- **Idle / sweepable USDC:** `IERC20(usdc).balanceOf(account)`. This is **not** where withdrawal payouts
+  land — a fulfilled async withdrawal pays the user's wallet directly (see async flow). It holds only USDC
+  that arrived some other way (a plain transfer to the account, a deposit remainder), and
+  `claimWithdrawnUsdc()` sweeps it. Normally zero; surface it only when non-zero.
 
-> **Never cache a quote across blocks.** Fees crystallize inside user transactions and supply/NAV move,
-> so `previewWithdraw` and any derived `minShares` / `minAssetsOut` must come from a fresh read in the
-> same UX step as the tx.
+> **Never cache a quote across blocks.** NAV and supply move every block, so `previewWithdraw` and any
+> derived `minShares` / `minAssetsOut` must come from a fresh read in the same UX step as the tx.
 
-> **Fees at launch — don't promise what isn't charged.** The vault deploys with
-> `feeConfig == address(0)`, so the **protocol-fee** leg is **off** (enableable later by the vault owner
-> without touching the strategy). The **management** and **performance** fees are the strategy clone's own
-> init params — read `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
-> hardcoding a schedule in copy, and treat any "APY net of fees" display as moot for whichever legs read
-> zero.
+> **Fees at launch — don't promise what isn't charged.** There is exactly ONE fee leg: a **5% in-kind
+> skim of each AERO tranche the fund realizes**, paid to `feeRecipient` in AERO and logged as
+> `RewardFeePaid(recipient, aeroAmount)`. It is charged wherever the tranche is actually converted —
+> `compound`, `flatten`, and the async-redeem fulfilment, whose own unwind auto-claims it — and waived only
+> on the fund's terminal `settle`. Nothing is deducted
+> from a deposit or a payout, and no fee shares are ever minted, so a share balance is never diluted by a
+> fee. The one place it reaches a user-facing number is NAV, which marks *pending* AERO net of the skim so
+> that neither entering nor exiting around a harvest is worth timing — quotes are therefore already
+> fee-correct and need no adjustment of your own. Read `compoundFeeBps` off the strategy's `layout()`
+> instead of hardcoding a schedule in copy (`0` means a fee-free clone), and describe it as a haircut on
+> **yield**, which is what "APY net of fees" already reflects.
 
 ### Describing the position — don't hardcode "cbBTC + ETH"
 
@@ -276,7 +288,7 @@ await accountContract.write.deposit([assets, minShares]);
 the owner (or backend) sweeps it into the position:
 
 ```solidity
-function depositIdle(uint256 minShares) external returns (uint256 shares); // gated: owner OR registry backend
+function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares); // gated: owner OR registry backend
 ```
 
 Because idle USDC on an account is ambiguous (pending re-deposit vs. a fulfilled withdrawal awaiting
@@ -288,6 +300,29 @@ backend"` otherwise. Prefer the explicit `approve`+`deposit` flow in the UI.
 > Withdrawals are deliberately **not** gated on it and keep working. There is no depositor whitelist and
 > no pause — that one flag is the entire gate — so surface the revert as "deposits are temporarily closed",
 > not as a user error. Read it with `vault.depositsOpen()` to pre-disable the deposit CTA.
+
+> **The fund has a capacity ceiling.** `vault.maxTotalAssets()` caps the whole fund's NAV in USDC
+> (`0` == unlimited, the default). This is a limit on the FUND, not on the user: once it is reached,
+> **nobody** can deposit, however small their own position. It fires on the user-facing `deposit`, so
+> the UI must be able to explain it — the deposit reverts `FundAtCapacity(navAfter, cap)` and the whole
+> transaction unwinds (no shares minted, no USDC taken).
+>
+> Read the room before enabling the CTA:
+>
+> ```
+> room = vault.remainingCapacity()   // USDC (6dp)
+>                                    // type(uint256).max => no cap, show no limit UI
+>                                    // 0                 => fund is full, disable the CTA
+> ```
+>
+> Three things to get right:
+> - **Leave headroom.** `remainingCapacity()` is a point-in-time read and NAV moves between it and the
+>   user's transaction landing. Cap the input at ~95% of `room` and treat `FundAtCapacity` as
+>   retryable — it is a "fund is full right now" message, **not** a user error.
+> - **"Full" is not permanent.** NAV moves on its own, so the fund can close on gains alone and reopen
+>   on a drawdown or when someone withdraws. Don't cache the value or present the state as final.
+> - **Withdrawals are never gated on it.** A user can always exit, including while the fund is over its
+>   ceiling — never disable a withdraw CTA because of capacity.
 
 ---
 
@@ -326,6 +361,16 @@ sequenceDiagram
 > tx, so the owner receives USDC directly. `withdrawAll` redeems the account's entire share balance and
 > reverts `"No shares to withdraw"` if there is none.
 
+**What funds a fast withdraw — and therefore which route the user gets.** The fast path draws the fund's
+**idle USDC first** (the user's pro-rata `f × idle` share only, `f = shares/supply`), then frees whatever
+remains from the Moonwell **collateral**. It never touches the LP position or the debt — unwinding the LP
+happens only on the async path. That is why the LTV gate is scoped to the collateral-funded remainder:
+pulling collateral against unchanged debt raises LTV, and a would-be breach of the cap reverts
+`FastRedeemExceedsLtv` and sends the user to Flow 3. The corollary worth building around: **when idle
+alone covers the withdrawal the LTV gate is skipped entirely**, so small withdrawals against a
+well-funded book stay on the fast path even when the position itself is levered near its cap. Do not
+predict the route from position health alone — trust `previewWithdraw`'s `fastOk`.
+
 ---
 
 ## Flow 3 — async withdraw (request → pending → claim)
@@ -343,12 +388,29 @@ the **rebalancer** fulfils it; the USDC lands **on the account** as idle balance
 function requestWithdraw(uint256 shares, uint256 minAssetsOut) external returns (uint256 id); // onlyOwner
 function cancelWithdraw(uint256 id) external;                                                 // onlyOwner
 function claimWithdrawnUsdc() external returns (uint256 amount);                              // onlyOwner
+
+// Request tracking — read these instead of scraping logs.
+function openRequestIds() external view returns (uint256[] memory);   // ids the account is tracking
+function hasSettledRequest() external view returns (bool);            // any of them COMPLETED (fulfilled)
+function syncRedeemRequests() external;                               // onlyOwner housekeeping
 ```
 
 > **Value floats until fulfill.** `requestWithdraw` escrows the shares but does **not** freeze a price —
 > the escrowed shares keep bearing the position's PnL until the rebalancer fulfils. The USDC the user
 > ultimately receives is priced at fulfill time, not request time. Surface this clearly (e.g. "amount
 > finalizes when processed") and do not display the request-time preview as a locked payout.
+
+> **The rebalancer cannot redirect a fulfillment.** `fulfillRedeem(id, minAssetsOut)` takes no recipient
+> argument — the payee is `redeemRequests[id].recipient`, which the account fixed to **the user's own
+> wallet** (`account.owner()`) at `requestRedeem` and which is immutable thereafter. The floor is the
+> user's own stored `minAssetsOut`. The rebalancer chooses *when* a request settles, never *to whom* or
+> *for how much*.
+>
+> **One consequence for ownership transfers:** the recipient is captured at request time, so a
+> `transferOwnership` while a request is outstanding still pays the address that asked — on BOTH
+> settlement paths (`emergencyWithdraw` forwards to that same frozen recipient, not to the new owner).
+> The new owner's remedy is `cancelWithdraw(id)` (the shares return to the account) and a fresh
+> `requestWithdraw`, which re-freezes the recipient on them.
 
 ```mermaid
 sequenceDiagram
@@ -358,15 +420,13 @@ sequenceDiagram
     participant B as Mamo rebalancer (proposer)
 
     U->>A: requestWithdraw(shares, minAssetsOut)
-    A->>S: forceApprove(shares) + requestRedeem
+    A->>S: forceApprove(shares) + requestRedeem(shares, minAssetsOut, recipient = user)
     S-->>A: id
     A-->>U: WithdrawRequested(id, shares, minAssetsOut)
     Note over U: state = PENDING — show request + offer cancelWithdraw(id)
-    B->>S: fulfillRedeem(id)  (rebalancer, off-frontend)
-    S-->>A: USDC lands ON the account (idle)
-    Note over U,A: poll usdc.balanceOf(account) → claimable
-    U->>A: claimWithdrawnUsdc()
-    A-->>U: sweeps idle USDC to owner + UsdcClaimed(amount)
+    B->>S: fulfillRedeem(id, minAssetsOut)  (rebalancer, off-frontend)
+    S-->>U: USDC paid DIRECTLY to the user's wallet + RedeemFulfilled(id, account, user, assetsOut)
+    Note over U: state = DONE — no claim transaction to prompt for
 ```
 
 **Pending-state UX.** Track pending requests from `WithdrawRequested` / `WithdrawCancelled` events and
@@ -374,9 +434,20 @@ the account's idle USDC balance:
 
 1. `WithdrawRequested(id, shares, minAssetsOut)` → mark request `id` pending; offer **Cancel**
    (`cancelWithdraw(id)` returns the escrowed shares to the account, emits `WithdrawCancelled(id)`).
-2. Detect fulfillment by polling `IERC20(usdc).balanceOf(account)` becoming non-zero (there is no
-   fulfill callback/event on the account). Surface it as **claimable**.
-3. `claimWithdrawnUsdc()` sweeps the idle USDC to the owner and emits `UsdcClaimed(amount)`.
+2. Detect completion from the account's `WithdrawSettled(id)` — emitted whenever a tracked settled id is
+   pruned, whoever prunes — or the strategy's `RedeemFulfilled(id, account, recipient, assetsOut)`
+   (topic2 = the account, topic3 = the user). `hasSettledRequest()` is a convenience poll and is
+   BEST-EFFORT: any pruning call clears it, a backend `depositIdle` included, so do not rely on catching
+   it. `openRequestIds()` gives the live set without replaying logs.
+3. **There is no step 3.** The payout is already in the user's wallet when the request settles — show it
+   as complete, do not prompt for a claim. `claimWithdrawnUsdc()` remains as a sweep for USDC that
+   reached the account some other way, so offer it only when `usdc.balanceOf(account) > 0`.
+
+> **The backend cannot re-lock a fulfilled withdrawal**, because there is nothing on the account to
+> re-lock: the payout went straight to the user. (The old `"Unclaimed withdrawal proceeds"` gate on the
+> backend's `depositIdle` is gone with the state it guarded.) `MAX_OPEN_REQUESTS` (16) bounds how many
+> requests can be tracked at once; settled ids are pruned automatically, so only genuinely OUTSTANDING
+> requests count against it.
 
 ---
 
@@ -393,6 +464,14 @@ Only enable this in the UI once `block.timestamp > requestedAt + 2 days` for the
 reverts `FulfillWindowOpen()`. `minAssetsOut` is a **fresh** floor (the request's original floor may be
 stale after two days).
 
+> **It is unconditionally *reachable*, not unconditionally *successful*.** `emergencyWithdraw` runs the
+> same proportional unwind the rebalancer would have run, so it can still revert: on a partial redeem the
+> IL cover is capped at the redeemer's own budget and fails closed rather than touching other holders'
+> funds, so a deeply out-of-range position can bounce it. Do not present it as a guaranteed payout — treat
+> a revert as retryable, and always keep **Cancel** offered alongside it: `cancelWithdraw(id)` has no state
+> gate and no NAV gate, so the user can always retrieve the escrowed shares and exit afterwards. It is also
+> the *only* route once the strategy settles — `emergencyWithdraw` requires `Executed` (see *Settled exit*).
+
 ---
 
 ## Events (for indexing / UX)
@@ -406,7 +485,8 @@ Account (`MamoLeveragedAeroStrategy`) — exact signatures:
 | `WithdrawRequested(uint256 indexed id, uint256 shares, uint256 minAssetsOut)` | `requestWithdraw` |
 | `WithdrawCancelled(uint256 indexed id)` | `cancelWithdraw` |
 | `WithdrawEmergency(uint256 indexed id, uint256 assetsOut)` | `emergencyWithdraw` |
-| `UsdcClaimed(uint256 amount)` | `claimWithdrawnUsdc` |
+| `WithdrawSettled(uint256 indexed id)` | a tracked request was observed settled and untracked — the account-side COMPLETION record |
+| `UsdcClaimed(uint256 amount)` | `claimWithdrawnUsdc` — an idle-USDC sweep, **not** a withdrawal claim |
 | `TokenRecovered(address indexed token, address indexed to, uint256 amount)` | `recoverERC20` / `recoverETH` (Settled exit) |
 
 Factory:
@@ -431,10 +511,12 @@ Account (`require` strings):
 | Revert | Trigger | Suggested UX |
 |---|---|---|
 | `"Amount must be greater than 0"` | `deposit`/`withdraw`/`requestWithdraw` with 0 | Validate amount > 0 client-side |
-| `"No idle USDC to deposit"` | `depositIdle` with 0 idle balance | Nothing to sweep |
+| `"Insufficient idle USDC"` | `depositIdle` for more than the account holds | Cap the input at the idle balance |
 | `"Not owner or backend"` | `depositIdle` from a non-owner | Hide/disable for non-owner |
+| `"Too many open requests"` | `requestWithdraw` with `MAX_OPEN_REQUESTS` (16) OUTSTANDING requests already tracked | Cancel an existing request, or wait for one to be fulfilled |
+| `FundAtCapacity(navAfter, cap)` (custom error) | `deposit`/`depositIdle` that would push the FUND past its capacity ceiling | Show remaining capacity and cap the input (see below); retryable, and not the user's fault |
 | `"No shares to withdraw"` | `withdrawAll` with 0 shares | Empty position |
-| `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle | Nothing claimable yet |
+| `"No USDC to claim"` | `claimWithdrawnUsdc` with 0 idle — the NORMAL state, since fulfils pay the user directly | Hide the sweep unless `usdc.balanceOf(account) > 0` |
 | `OwnableUnauthorizedAccount(address)` (OZ custom error) | any `onlyOwner` call from non-owner | Wrong wallet connected |
 
 Factory (`require` strings):
@@ -473,6 +555,7 @@ Settled exit:
 - [ ] Show position value from `previewWithdraw(sharesBalance())`; never cache the quote across blocks.
 - [ ] Derive position copy from the clone (`layout().legBIsAsset` + the leg-slot addresses) rather than hardcoding "cbBTC + ETH"; both shapes are USDC-in / USDC-out and every flow below is shape-invariant.
 - [ ] Fast withdraw: preflight `previewWithdraw`, default to async when `fastOk == false`, and catch `FastRedeemExceedsLtv` / oracle reverts as an async fallback.
-- [ ] Async withdraw: surface pending requests from `WithdrawRequested`/`WithdrawCancelled`, offer `cancelWithdraw`, poll idle USDC for fulfillment, and expose `claimWithdrawnUsdc`.
+- [ ] Async withdraw: surface pending requests from `openRequestIds()` (not log scraping), offer `cancelWithdraw`, and detect completion with `hasSettledRequest()` / `RedeemFulfilled` — the payout is already in the user's wallet, so do NOT prompt for a claim.
+- [ ] Offer `claimWithdrawnUsdc` only when `usdc.balanceOf(account) > 0` (a plain transfer or deposit remainder, never withdrawal proceeds).
 - [ ] Warn that async payout value floats until fulfill (no price freeze at request time).
 - [ ] Enable `emergencyWithdraw` only after `requestedAt + 2 days`.
