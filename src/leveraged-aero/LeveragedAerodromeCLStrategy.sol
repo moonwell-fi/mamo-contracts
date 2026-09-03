@@ -1114,7 +1114,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         legs self-funding any shortfall, redeem all collateral, sweep residual legs to USDC, slippage
     ///         floored by `maxSlippageBps`) but does NOT settle: no state transition and no push-to-vault.
     ///         Deposits and redeems keep working against the flat book (NAV == idle
-    ///         USDC, oracle-free); the proposer re-enters via `redeploy`. Idempotent on an already-flat book.
+    ///         USDC, oracle-free); the proposer re-enters via `redeploy`. Idempotent on a flat book with no
+    ///         reward balance above the dust band — above it, quote a nonzero `minRewardUsdcOut` (see below).
     ///         TWO GUARDS `settle` does not need, because `flatten` is repeatable: the pool is CALM-GATED before
     ///         the burn (the unwind's mins come off the same `slot0()` it burns at), and the auto-claimed reward
     ///         tranche is SOLD here, FAIL-CLOSED under `max(minRewardUsdcOut, L9 oracle floor)` — a reverted
