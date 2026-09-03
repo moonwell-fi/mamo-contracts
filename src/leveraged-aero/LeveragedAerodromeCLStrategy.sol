@@ -857,7 +857,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old policy.
     /// @param maxLtvBps_ New ceiling in bps, validated by the shared `checkLtvBand` against the LIVE
     ///        collateral factor: Moonwell governance can move CF after init, and the init-time snapshot
-    ///        could approve a ceiling now above the liquidation line.
+    ///        could approve a ceiling now above the liquidation line. A TIGHTENING skips the last rung,
+    ///        whose inputs it cannot move; `setMinHealth` is what repairs that rung.
     function setMaxLtv(uint16 maxLtvBps_) external onlyAdmin {
         LeveragedAeroVenue.setMaxLtvImpl(maxLtvBps_);
     }

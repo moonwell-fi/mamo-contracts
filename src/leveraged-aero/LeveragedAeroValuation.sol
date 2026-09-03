@@ -334,12 +334,22 @@ library LeveragedAeroValuation {
     ///      it above `maxLtvBps` (grief-deleverage) and below `cfBps` (liquidation precedes the rescue), so
     ///      the ordering is `target ≤ maxLtv < 1e8/minHealth < cf`. CONFIG-TIME ONLY: a CF that Moonwell
     ///      cuts post-init reopens that window until the next `migrateVenue` or `setMinHealth` re-reads it.
-    function checkLtvBand(uint16 targetLtvBps, uint16 maxLtvBps, uint16 minHealthBps, uint16 cfBps) public pure {
+    /// @param assertTriggerUnderCF Run the last rung. Its inputs are storage times the world, so a caller
+    ///        that only TIGHTENS `maxLtvBps` passes false; every other caller passes true.
+    function checkLtvBand(
+        uint16 targetLtvBps,
+        uint16 maxLtvBps,
+        uint16 minHealthBps,
+        uint16 cfBps,
+        bool assertTriggerUnderCF
+    ) public pure {
         if (targetLtvBps > maxLtvBps) revert TargetLtvExceedsMax();
         if (minHealthBps < 10500) revert MinHealthTooLow();
         if (maxLtvBps >= cfBps) revert MaxLtvExceedsCF();
         if (uint256(minHealthBps) * uint256(maxLtvBps) >= 1e8) revert MinHealthMaxLtvConflict();
-        if (uint256(minHealthBps) * uint256(cfBps) <= 1e8) revert DeleverageTriggerAboveCF();
+        if (assertTriggerUnderCF && uint256(minHealthBps) * uint256(cfBps) <= 1e8) {
+            revert DeleverageTriggerAboveCF();
+        }
     }
 
     /// @notice The INIT-ONLY numeric ladder over the risk and oracle params, in the strategy's original
@@ -360,7 +370,7 @@ library LeveragedAeroValuation {
         uint16 calmDeviationTicks,
         uint16 maxSlippageBps
     ) public pure {
-        checkLtvBand(targetLtvBps, maxLtvBps, minHealthBps, cfBps);
+        checkLtvBand(targetLtvBps, maxLtvBps, minHealthBps, cfBps, true);
         if (maxDelay == 0 || maxDelay > 7 days) revert OracleParamOutOfRange();
         if (gracePeriod > 1 days) revert OracleParamOutOfRange();
         if (twapWindow == 0 || twapWindow > 1 days) revert OracleParamOutOfRange();

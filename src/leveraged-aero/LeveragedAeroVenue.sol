@@ -703,7 +703,7 @@ library LeveragedAeroVenue {
         // The lower bound is the only rung not mirrored in that ladder, and `applyVenue` is the shared route
         // for init and migrate, so it closes every path to a stored zero target — a fund that can never lever.
         if (p.targetLtvBps == 0) revert TargetLtvZero();
-        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps);
+        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps, true);
 
         // ── Persist the venue subset (every field a pool/pair change touches, nothing else) ──
         $.mCbBTC = p.mCbBTC;
@@ -774,7 +774,8 @@ library LeveragedAeroVenue {
     function setMaxLtvImpl(uint16 maxLtvBps_) public {
         Layout storage $ = _layout();
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
-        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps);
+        bool loosening = maxLtvBps_ > $.maxLtvBps;
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps, loosening);
         emit MaxLtvUpdated($.maxLtvBps, maxLtvBps_);
         $.maxLtvBps = maxLtvBps_;
         _clearStagedVenue($);
@@ -784,7 +785,7 @@ library LeveragedAeroVenue {
     function setMinHealthImpl(uint16 minHealthBps_) public {
         Layout storage $ = _layout();
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
-        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, $.maxLtvBps, minHealthBps_, cfBps);
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, $.maxLtvBps, minHealthBps_, cfBps, true);
         emit MinHealthUpdated($.minHealthBps, minHealthBps_);
         $.minHealthBps = minHealthBps_;
         _clearStagedVenue($);

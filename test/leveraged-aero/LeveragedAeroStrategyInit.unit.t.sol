@@ -1794,6 +1794,51 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(s.targetLtvBps(), 5500, "policy can meet the lowered ceiling");
     }
 
+    /// @dev The trigger-under-CF rung reads `minHealthBps × liveCF`, which this argument cannot move — so a
+    ///      CF cut that trips it must not freeze the RATCHET-DOWN. Loosening is still refused.
+    function testSetMaxLtvTighteningSurvivesACollateralFactorCutBelowTheTrigger() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        comptroller.setCollateralFactorMantissa(0.83e18); // cf 8300; 12000 * 8300 = 9.96e7 <= 1e8
+
+        vm.prank(owner);
+        s.setMaxLtv(6000); // TIGHTEN from 6500: admitted
+        assertEq(s.layout().maxLtvBps, 6000, "the risk ratchet still turns down");
+
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.DeleverageTriggerAboveCF.selector);
+        s.setMaxLtv(7000); // LOOSEN: still refused
+        assertEq(s.layout().maxLtvBps, 6000, "nothing stored");
+
+        // The tighten path keeps every rung it CAN judge — here rung 1, the standing target underneath.
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.TargetLtvExceedsMax.selector);
+        s.setMaxLtv(4999); // targetLtvBps == 5000
+
+        // And the repair restores the full ladder, loosening included.
+        vm.prank(owner);
+        s.setMinHealth(12_100);
+        vm.prank(owner);
+        s.setMaxLtv(7000);
+        assertEq(s.layout().maxLtvBps, 7000, "with the floor repaired the ceiling moves both ways again");
+    }
+
+    /// @dev The EQUALITY boundary the flag introduces: `== stored` is not a loosening, so the no-op write is
+    ///      admitted with rung 5 tripped, and it still consumes the stage. Mutating `>` to `>=` reverts here.
+    function testSetMaxLtvAtTheStoredCeilingIsAdmittedAndStillClearsAStage() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        comptroller.setCollateralFactorMantissa(0.83e18); // cf 8300; 12000 * 8300 = 9.96e7 <= 1e8
+        vm.prank(owner);
+        s.stageVenue(keccak256("armed"));
+
+        vm.expectEmit(true, true, true, true, address(s));
+        emit MaxLtvUpdated(6500, 6500);
+        vm.prank(owner);
+        s.setMaxLtv(6500);
+
+        assertEq(s.layout().maxLtvBps, 6500, "the stored ceiling is unchanged");
+        assertEq(s.layout().stagedVenueHash, bytes32(0), "and the armed stage is consumed");
+    }
+
     // ==================== setMinHealth (ADMIN-ONLY DELEVERAGE TRIGGER) ====================
     // Same fixture band: target 5000, max 6500, minHealth 12000, live CF 8800. The trigger LTV is
     // `1e8 / minHealthBps`, so at 12000 it is 8333.3 bps and rungs 4/5 bracket it in (6500, 8800).
