@@ -11,6 +11,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {MarketRegistry} from "@contracts/MarketRegistry.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract ERC20StrategyV2Test is BaseTest {
@@ -62,10 +63,13 @@ contract ERC20StrategyV2Test is BaseTest {
         // Deploy new implementation and whitelist it (inlined from old 009 multisig script)
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         vm.startPrank(deployer);
-        newImplementation = new MamoMultiMarketStrategy();
+        // No MarketRegistry existed on chain at this block; this test never migrates, so the pinned
+        // registry only has to be a real deployment for the implementation constructor.
+        address multisig = addresses.getAddress("MAMO_MULTISIG");
+        MarketRegistry marketRegistry = new MarketRegistry(multisig, backend, multisig);
+        newImplementation = new MamoMultiMarketStrategy(address(marketRegistry));
         vm.stopPrank();
 
-        address multisig = addresses.getAddress("MAMO_MULTISIG");
         vm.startPrank(multisig);
         registry.whitelistImplementation(address(newImplementation), STRATEGY_TYPE_ID);
         vm.stopPrank();

@@ -38,6 +38,7 @@ library LPPositionLib {
     error InvalidWidth();
     error WidthTooNarrow();
     error WidthOutOfBounds();
+    error InvalidAltWidth();
 
     /// @notice The rebalance-parameter validation shared by `registerPosition`/`setPool` (via
     ///         `_validateAndStore`) and `setPositionConfig`, so the registration and the
@@ -281,6 +282,7 @@ library LPPositionLib {
         address holder;
         int24 spotTick;
         int24 tickSpacing;
+        uint24 altWidth;
         uint8 dec0;
         uint8 dec1;
         uint256 amount0Min;
@@ -294,8 +296,11 @@ library LPPositionLib {
     ///         decimals differ, e.g. WETH 18 / cbBTC 8). Returns 0 (minting nothing) when the surplus
     ///         is below `minAltValueUsd`: a sub-tick remainder too small to seed liquidity.
     /// @dev Anchored to SPOT, not to the main range's bounds, with floor = floorAlign(spotTick):
-    ///        - token0 surplus => [floor + spacing, floor + 2*spacing]  (tickLower strictly > spot)
-    ///        - token1 surplus => [floor - spacing, floor]              (tickUpper <= spot)
+    ///        - token0 surplus => [floor + spacing, floor + spacing + altWidth]  (tickLower strictly > spot)
+    ///        - token1 surplus => [floor - altWidth, floor]                      (tickUpper <= spot)
+    ///      `altWidth` is caller-supplied (Sherlock: it used to be fixed at one spacing) and must be a
+    ///      nonzero multiple of tickSpacing at most `type(int24).max`, so both bounds stay aligned and
+    ///      the int24 cast cannot reinterpret to a negative tick.
     ///      Those are the CLOSEST single-token ranges to spot. Activity is
     ///      `tickLower <= tick < tickUpper`, so a token0 alt only needs tickLower above spot and a
     ///      token1 alt only needs tickUpper at or below it — anchoring to the main bounds instead
@@ -315,6 +320,12 @@ library LPPositionLib {
     ///      the fresh alt and any loose balance — and only THEN forward the sub-threshold remainder;
     ///      forwarding here would let a non-trivial surplus escape the floor as "dust".
     function mintAlt(AltParams memory ap, LPValuationLib.OracleConfig memory cfg) public returns (uint256 altId) {
+        // Total, so a bad width cannot slip through on the dust branch below. The int24 bound is
+        // load-bearing: the cast bit-REINTERPRETS, so an unbounded uint24 yields negative ticks.
+        if (ap.altWidth == 0 || ap.altWidth > uint24(type(int24).max) || ap.altWidth % uint24(ap.tickSpacing) != 0) {
+            revert InvalidAltWidth();
+        }
+
         uint256 value0 = LPValuationLib.valueInUsd(IERC20(ap.token0).balanceOf(ap.holder), 0, cfg, ap.dec0, ap.dec1);
         uint256 value1 = LPValuationLib.valueInUsd(0, IERC20(ap.token1).balanceOf(ap.holder), cfg, ap.dec0, ap.dec1);
 
@@ -325,15 +336,16 @@ library LPPositionLib {
 
         // `floor` is the largest aligned tick <= spot, so floor + spacing is strictly above spot
         // (also when spot is exactly aligned), and `floor` itself is <= spot.
+        int24 altWidth = int24(ap.altWidth);
         int24 floorTick = LPGeometryLib.floorAlign(ap.spotTick, ap.tickSpacing);
         int24 altTl;
         int24 altTu;
         if (surplus0) {
             altTl = floorTick + ap.tickSpacing;
-            altTu = altTl + ap.tickSpacing;
+            altTu = altTl + altWidth;
         } else {
             altTu = floorTick;
-            altTl = floorTick - ap.tickSpacing;
+            altTl = floorTick - altWidth;
         }
 
         // Single-sided: force the UNFUNDED leg's min to 0. The caller cannot predict which leg the

@@ -64,7 +64,7 @@ contract WhitelistNewStrategyImplementation is MultisigProposal {
         vm.startBroadcast(deployer);
 
         // Deploy new strategy implementation
-        address newImplementation = address(new MamoMultiMarketStrategy());
+        address newImplementation = address(new MamoMultiMarketStrategy(addresses.getAddress("MARKET_REGISTRY")));
         vm.stopBroadcast();
 
         if (addresses.isAddressSet("MOONWELL_MORPHO_STRATEGY_IMPL")) {
