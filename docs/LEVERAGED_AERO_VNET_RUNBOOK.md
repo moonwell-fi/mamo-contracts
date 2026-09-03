@@ -22,12 +22,12 @@ Audience: Mamo engineers with a checkout of **this repo only**.
 > - There is **no governance lifecycle**: no `createSyndicate`, no `SyndicateGovernor`, no
 >   propose → vote → execute, no WOOD/sWOOD voting power, no guardian review window, no ~73 h vote
 >   warp, no strategy duration ceiling. `ISyndicateGovernor` and `BatchExecutorLib` are deleted;
->   `ISyndicateVault` is down to three functions.
+>   `ILeveragedAeroVault` is down to three functions.
 > - The strategy lifecycle is **owner-driven**: `Pending → Executed → Settled` via
 >   `vault.activateStrategy(seed)` and `vault.settleStrategy()`. The `proposer` role **survives** for
 >   the tunable-params / operator surface (`onlyProposer`, `state()` unchanged).
-> - Paths and type names under `src/leveraged-aero/sherwood/` are preserved **only** so the vendored
->   strategy's imports still compile. They are shims. Nothing calls Sherwood.
+> - The vendored framework shims (`BaseStrategy`, `interfaces/`, `libraries/`) sit at the
+>   `src/leveraged-aero/` root; the old `sherwood/` subdirectory is gone. Nothing calls Sherwood.
 > - The post-settlement exit is the vault's **permissionless** `redeemSettled(shares)`.
 > - The strategy now initializes against **any** Aerodrome Slipstream pool, and `rerange` is in-repo —
 >   in its 4-arg `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` form, which
@@ -57,13 +57,12 @@ Two keys are **created by this runbook** and are deliberately **not** committed 
 | Key | What it points at |
 |---|---|
 | `LEVERAGED_AERO_VAULT` | the `LeveragedAeroVault` from Phase B |
-| `SHERWOOD_LEVERAGED_AERO_STRATEGY` | the `LeveragedAerodromeCLStrategy` clone from Phase B |
+| `LEVERAGED_AERO_STRATEGY` | the `LeveragedAerodromeCLStrategy` clone from Phase B |
 
-> **Stale-but-real naming.** `config/strategies/LeveragedAeroAccountConfig.json` still calls the
-> strategy key `sherwoodStrategy` / `SHERWOOD_LEVERAGED_AERO_STRATEGY`, and the factory getter is
-> `factory.sherwoodStrategy()`. That is the live, current naming — use it verbatim or lookups fail.
-> Renaming it to `LEVERAGED_AERO_STRATEGY` is a **pending cleanup**; the `SHERWOOD_` prefix does not
-> imply any remaining Sherwood dependency.
+> **Naming.** `config/strategies/LeveragedAeroAccountConfig.json` calls the strategy key
+> `leveragedAeroStrategy` / `LEVERAGED_AERO_STRATEGY`, and the factory getter is
+> `factory.leveragedAeroStrategy()`. The former `SHERWOOD_*` / `sherwoodStrategy` spellings were
+> retired pre-mainnet — use the names above verbatim or lookups fail.
 
 > On a vnet, all privileged roles are driven by **unlocked impersonation** through the admin RPC — no
 > private keys. Throwaway EOAs are used only for simulated end users.
@@ -204,7 +203,8 @@ The tooling:
 | `script/tenderly/LeveragedAeroStackHarness.s.sol` | `deployTemplate()` (B.1) and `buildInitData()` (B.2) |
 | `script/tenderly/FreshFeed.sol` | the B.0 aggregator stand-in |
 
-Reference implementation contract for this phase: `docs/LEVERAGED_AERO_CL_AUDIT.md`, *Deploy flow*.
+Reference implementation for this phase: `multisig/mamo-multisig/015_DeployLeveragedAeroPooledSystem.sol`
+(the mainnet proposal — same deploy/bind/activate sequence, minus the vnet cheat-RPCs).
 
 Everything is env-driven; the venue book's Base defaults live in the two script files (kept in
 lockstep) and are documented in `script/tenderly/README.md`. The snippets in B.0–B.5 are the
@@ -228,7 +228,8 @@ STRAT=0x...        # the clone from B.3
 > The vnet default is a throwaway keypair (`0x73f6B456d063F78129113D42DBC315b9eEee8FAf`; its private
 > key is published in the runner header so anyone can drive the role on the fork).
 > **Mainnet must pass the real rebalancer ops key via `MAMO_REBALANCER`.** Unless `FEE_RECIPIENT`
-> overrides it, the proposer is also the strategy's fee recipient.
+> overrides it, the proposer is also the strategy's `feeRecipient` — the address that receives the
+> in-kind AERO skim taken at every `compound` (`COMPOUND_FEE_BPS`, default `500` = 5 % of the tranche).
 
 ### B.0 — FreshFeed code-replacement (do this first, per constraint 2)
 
@@ -263,7 +264,7 @@ an already-overridden feed yields the same answer).
 (`--unlocked --sender DEPLOYER_EOA --gas-estimate-multiplier 200`).
 
 **The template.** `LeveragedAerodromeCLStrategy`'s three libraries (`LeveragedAeroManager`,
-`LeveragedAeroValuation`, `LeveragedAeroFees`) have external functions and are `delegatecall`ed — a
+`LeveragedAeroValuation`, `LeveragedAeroVenue`) have external functions and are `delegatecall`ed — a
 `forge script` broadcast deploys and links them automatically; a raw `cast` deploy does not, which is
 why B.1 is a forge script at all. Each library is its own tx, so the Base per-tx gas cap
 (16,777,216) applies per `CREATE` and the 200% multiplier clears all of them. The template's
@@ -371,7 +372,9 @@ Init guards that will bite during a first deploy against a new pool:
 - Risk/oracle bands: `targetLtvBps ≤ maxLtvBps < usdcCollateralFactorBps`, `minHealthBps ≥ 10500`,
   `minHealthBps × maxLtvBps < 1e8`, `maxDelay ∈ (0, 7 days]`, `gracePeriod ≤ 1 day`,
   `twapWindow ∈ (0, 1 day]`, `calmDeviationTicks ∈ (0, 5000]`, `maxSlippageBps ∈ (0, 1000]`.
-- Fee ceilings, and a nonzero `feeRecipient` whenever either fee bps is nonzero.
+- The fee bound: `compoundFeeBps ≤ 1000` (`MAX_COMPOUND_FEE_BPS`, 10 %) → `CompoundFeeTooHigh`, and a
+  nonzero `feeRecipient` whenever `compoundFeeBps != 0` → `FeeRecipientRequired`. Both init-only and
+  immutable per clone — changing either means a new clone.
 
 `rerange(uint24 width_, uint16 skewBps_, uint256 minLiq0, uint256 minLiq1)` is **in-repo**
 (`onlyProposer`, persisted per-cycle width **and** skew, re-checked against the init width band, the
@@ -387,9 +390,12 @@ vendored copy is behind upstream, re-vendor pending" caveat is **obsolete** — 
 > re-pointed. Re-derive rather than copy: `cast sig 'OutOfBounds()'`,
 > `cast sig 'rerange(uint24,uint16,uint256,uint256)'`.
 >
-> **Two more breaks moved `layout()` positions.** The skew band (`minSkewBps` / `maxSkewBps`) was
+> **Three more breaks moved `layout()` positions.** The skew band (`minSkewBps` / `maxSkewBps`) was
 > INSERTED after `skewBps`, not appended; the protocol-fee removal then DELETED `protocolFeeOwed` at
-> position 34. `layout()` is 51 fields now and `hedgedDebtA`/`hedgedDebtB` sit at 49/50. Any hand-rolled
+> position 34; the fee-model swap then dropped four more (`managementFeeBps`, `performanceFeeBps`,
+> `hwmPerShare`, `lastFeeAccrualTimestamp`) and inserted `compoundFeeBps` at 29, ahead of
+> `feeRecipient` at 30. `layout()` is **48 fields** now: fields 1–28 unchanged, `skewBps` at 43, the
+> skew band at 44/45, `hedgedDebtA`/`hedgedDebtB` at 46/47, `stagedVenueHash` last at 48. Any hand-rolled
 > `abi.encode` of `InitParams`, and any positional decode of `layout()`, must be
 > regenerated against the current ABI — `buildInitData()` is generated from the struct and needs no
 > change, but a copied calldata blob from an earlier run will initialize the wrong fields.
@@ -525,6 +531,18 @@ The merge also `del(.STALE)`s: a hand-added "this recorded layer is out of date,
 marker describes the layer being *replaced*, and a plain `$prev * {…}` would carry it forward onto the
 fresh one. A successful run of Phase B is precisely the event that retires such a marker.
 
+> ### ⚠ The recorded layer is PRE-CHANGE — redeploy before using the tooling against it
+>
+> **`script/tenderly/leveraged-aero-vnet.json` still points at the clone deployed before the
+> fee-model swap**, whose `layout()` is the old **51-field** tuple. `compound-cycle.sh` pins the
+> **48-field** signature and reads `compoundFeeBps` / `feeRecipient` at 29/30, so it **cannot decode
+> that clone**: `cast call` fails silently and every `lay N` read — gauge, tokenId, `maxDelay`,
+> `twapWindow`, the tick range — comes back **blank**, which surfaces as empty `snap` / `calm` /
+> `check-feeds` output rather than an error.
+>
+> **Re-run Phase B and then Phase C from this branch before using the helper.** Until that lands,
+> treat the recorded `pooled` addresses as `.STALE` (the marker above is exactly for this).
+
 ---
 
 ## Phase C — account layer (this repo, scripted)
@@ -545,24 +563,21 @@ broadcaster key — everything is unlocked impersonation.
 
 A CLI-supplied `TENDERLY_VNET_RPC_URL` wins over the `.env` value (the `.env` one may point at an older
 vnet without the stack). The two pooled-address env vars
-(`SHERWOOD_LEVERAGED_AERO_STRATEGY` / `SHERWOOD_SYNDICATE_VAULT`) resolve **env → the `pooled` object
+(`LEVERAGED_AERO_STRATEGY` / `LEVERAGED_AERO_VAULT`) resolve **env → the `pooled` object
 Phase B just wrote into `script/tenderly/leveraged-aero-vnet.json` → a hardcoded fallback**, so after a
 Phase B run they normally need no override; pass them to target a different vnet.
 
-> **Env-var name vs address-book key — known skew.** Proposal 012 resolves the vault under the
-> `LEVERAGED_AERO_VAULT` key, but `LeveragedAeroAccountHarness.s.sol` still injects the env var
-> `SHERWOOD_SYNDICATE_VAULT` under the *old* key name. This is currently harmless: the shared deploy
-> path (`LeveragedAeroAccountDeployer`) resolves only `config.sherwoodStrategy` + `config.token` and
-> never touches `config.vault`, and the bash phase-3 replay sends to the raw `$VAULT` address rather
-> than via the address book. It will bite the first time 012 itself is run against a vnet — the harness
-> must then inject `LEVERAGED_AERO_VAULT`. Until then, pass `SHERWOOD_SYNDICATE_VAULT`.
+> **Env-var names now match the address-book keys.** `LeveragedAeroAccountHarness.s.sol` injects
+> `LEVERAGED_AERO_STRATEGY` and `LEVERAGED_AERO_VAULT` — the exact keys proposal 012 resolves, so
+> running 012 itself against a vnet resolves both. (Before the rename the harness injected
+> `SHERWOOD_SYNDICATE_VAULT` under the old key name, which 012's `vaultKey` lookup would have missed.)
 
 ### What it does
 
 | Phase | Actions |
 |---|---|
 | **2 — deploy** | Funds `DEPLOYER_EOA` with ETH, then runs `LeveragedAeroAccountHarness.deploy()` — the real `LeveragedAeroAccountDeployer.deployImplementationAndFactory()` path (the **same** deploy code the 012 multisig proposal calls). Deploys the `MamoLeveragedAeroStrategy` UUPS impl + the `MamoLeveragedAeroStrategyFactory` (wired to registry, admin=`MAMO_MULTISIG`, backend=`MAMO_BACKEND`, impl, `strategyTypeId=5`, strategy clone, USDC). Parses `HARNESS_IMPL` / `HARNESS_FACTORY` from the log. |
-| **3 — multisig `build()`** | As impersonated `MAMO_MULTISIG`: `registry.whitelistImplementation(impl, 5)`, `registry.grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`. Then `validate()` asserts: `whitelistedImplementations(impl)==true`, `implementationToId(impl)==5`, `latestImplementationById(5)==impl`, factory `hasRole(BACKEND_ROLE)`, `vault.depositsOpen()==true`, `factory.strategyTypeId()==5`, `factory.sherwoodStrategy()==$STRAT`, `factory.usdc()==USDC`. |
+| **3 — multisig `build()`** | As impersonated `MAMO_MULTISIG`: `registry.whitelistImplementation(impl, 5)`, `registry.grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`. Then `validate()` asserts: `whitelistedImplementations(impl)==true`, `implementationToId(impl)==5`, `latestImplementationById(5)==impl`, factory `hasRole(BACKEND_ROLE)`, `vault.depositsOpen()==true`, `factory.strategyTypeId()==5`, `factory.leveragedAeroStrategy()==$STRAT`, `factory.usdc()==USDC`. |
 | **4 — e2e lifecycle** | Fresh throwaway user, funded ETH + 10,000 USDC. `createStrategyForUser` → `computeStrategyAddress` (assert `isUserStrategy` + `account.owner()==user`); `deposit(5,000 USDC, minShares)` (minShares from the strategy's `shares=assets*(supply+1e6)/(nav+1)` formula, 1% tol) → assert shares minted & mirrored on the vault; fast `withdraw(half, minOut)` → assert USDC lands on user, account USDC==0; `requestWithdraw` → `fulfillRedeem` (impersonated `proposer`) → assert the USDC landed on the USER directly (account USDC==0, no claim tx) → `syncRedeemRequests` prunes; `depositIdle` gate (a third party reverts "Not owner or backend"; `registry.getBackendAddress()` succeeds); `withdrawAll` cleanup; final clean-state asserts (shares==0, account USDC==0) + net user delta. |
 
 > **Why the vault/strategy keys are runtime-injected, never committed to `addresses/8453.json`:** FPS
@@ -625,13 +640,13 @@ whole sequence is Mamo's to execute:
    `latestImplementationById(5) == address(0)` and `nextStrategyTypeId() <= 5` before whitelisting (the
    stale-counter-safe check).
 5. **Commit the address keys.** At that point `LEVERAGED_AERO_VAULT` and
-   `SHERWOOD_LEVERAGED_AERO_STRATEGY` **are** added to `addresses/8453.json` — safe then, because the
+   `LEVERAGED_AERO_STRATEGY` **are** added to `addresses/8453.json` — safe then, because the
    code genuinely exists on mainnet and the eager `isContract` check passes.
 
-Open gates before a mainnet deploy, from `docs/LEVERAGED_AERO_CL_AUDIT.md`: the
-`wethIsToken0 == false` ordering has never been driven through a full lifecycle, and
-`IMoonwellMarket.underlying()` must be confirmed on the live markets (the new init guard bricks
-initialization if it is absent). Both are Base-fork-verifiable — this runbook is the vehicle.
+The two once-open mainnet gates are closed by `test/LeveragedAeroSystemSetup.integration.t.sol`
+(`make leveraged-aero-setup`): the chosen pool has USDC as token0, so the rehearsal drives the
+`wethIsToken0 == false` ordering through a full lifecycle, and running 015 against the real
+markets exercises the `IMoonwellMarket.underlying()` init guard.
 
 ---
 
@@ -675,7 +690,7 @@ BR=$(cast call "$REG" 'BACKEND_ROLE()(bytes32)' --rpc-url "$PUB")
 cast call "$REG" 'hasRole(bytes32,address)(bool)' "$BR" "$FACTORY"        --rpc-url "$PUB"  # true
 cast call "$VAULT"   'depositsOpen()(bool)'                               --rpc-url "$PUB"  # true
 cast call "$FACTORY" 'strategyTypeId()(uint256)'                          --rpc-url "$PUB"  # 5
-cast call "$FACTORY" 'sherwoodStrategy()(address)'                        --rpc-url "$PUB"  # == $STRAT
+cast call "$FACTORY" 'leveragedAeroStrategy()(address)'                   --rpc-url "$PUB"  # == $STRAT
 cast call "$FACTORY" 'usdc()(address)'                                    --rpc-url "$PUB"  # == $USDC
 ```
 
@@ -695,7 +710,10 @@ cast call "$USDC" 'balanceOf(address)(uint256)' "$ACCT"                  --rpc-u
 Phase B stands the book up; it cannot prove the **harvest** path. At the fork block the CL position has
 just been minted, so `gauge.earned() == 0` and `compound()` is a no-op no matter what you pass it.
 Getting real accrued AERO needs a time warp — and on a Base fork that is only safe because of the
-FreshFeed pattern (constraint 2). Everything below is driven by one in-repo helper:
+FreshFeed pattern (constraint 2). Everything below is driven by one in-repo helper, which resolves
+every address from `script/tenderly/leveraged-aero-vnet.json` and pins the **48-field** `layout()`
+signature — if `snap` / `calm` print blanks, the recorded clone predates the fee-model swap (see the
+⚠ note at the end of B.6):
 
 ```bash
 # admin (write-capable) RPC for THE leveraged-aero instance — NOT the shared TENDERLY_VNET_RPC_URL,
@@ -768,16 +786,22 @@ permissionless and internally does `minter.updatePeriod()` (mints the week) →
 > zero-AERO early return (`LeveragedAeroManager.sol` step 1 vs the `aeroBal == 0` return), so even a
 > deliberate no-op harvest must pass a nonzero floor. Use `1` when you only want to poke the path.
 
-`compound` enforces `max(minUsdcOut, oracleFloor)` on the realized fill, where the manager derives
+`compound` enforces `max(minUsdcOut, oracleFloor)` on the realized fill — **both priced on the
+POST-SKIM sell amount**, because the `compoundFeeBps` tranche leaves as AERO before the swap:
 
 ```
-fair6      = aeroBal(18dp) × AERO/USD(8dp) / 1e20                    # USDC 6dp
+sellAmt     = aeroBal − aeroBal × compoundFeeBps / 10000             # AERO 18dp, skim rounds DOWN
+fair6       = sellAmt × AERO/USD(8dp) / USDC/USD(8dp) / 1e12         # USDC 6dp — the peg leg is real
 oracleFloor = fair6 × (10000 − maxSlippageBps) / 10000               # BelowOracleFloor bound
 ```
 
 `compound-cycle.sh quote` prints `fair6`, `oracleFloor`, and the venue's actual
 `router.getAmountsOut` for the same amount, then suggests `max(oracleFloor, quote × 0.995)` — i.e.
-tighten the proposer bound onto the live quote rather than relying on the 1 % oracle band.
+tighten the proposer bound onto the live quote rather than relying on the 1 % oracle band. All three
+are already **net of the skim** — the script reads `compoundFeeBps` (`lay 29`) and quotes `sellAmt`,
+so `SUGGESTED minUsdcOut` is usable as printed. Its `fair6` still omits the peg leg, so it
+approximates `oracleFloor` rather than reproducing it; the printed floor is the one to trust near the
+band edge.
 
 > Two revert paths that are easy to confuse:
 > - An **absurdly high `minUsdcOut` does NOT test `BelowOracleFloor`.** `minUsdcOut` is forwarded to
@@ -800,30 +824,51 @@ tighten the proposer bound onto the live quote rather than relying on the 1 % or
 | 2 | AERO was claimed | `gauge.earned` → `0`; a gauge→strategy AERO `Transfer` in the receipt |
 | 3 | AERO was swapped, not stranded | strategy AERO balance `0`; pool→strategy USDC `Transfer` = `usdcOut` |
 | 4 | fill beat both bounds | `usdcOut ≥ minUsdcOut` **and** `≥ oracleFloor` (no `0xc872b206`) |
-| 5 | realized vs oracle price | `usdcOut / aeroClaimed` vs the feed answer — expect ≈ venue fee ± pool basis |
+| 5 | realized vs oracle price | `usdcOut / (aeroClaimed − skim)` vs the feed answer — expect ≈ venue fee ± pool basis. Divide by the **post-skim** amount; using `aeroClaimed` reads as `compoundFeeBps` of extra slippage |
 | 6 | yield was redeployed | `supply` + `borrow` + pool `Mint` legs in the receipt; NPM `liquidity` up |
 | 7 | NFT still staked, same `tokenId` | `gauge.stakedContains` `true`; `tokenId` unchanged (this is `increaseLiquidity`, not a re-mint — only `rerange` mints a new id) |
-| 8 | `nav()` up | delta should equal `usdcOut` + realized Moonwell carry (see the decomposition note below) |
-| 9 | fee crystallisation reconciles | `totalSupply` delta == `feeRecipient` share delta, and the minted shares equal `A·supply/(nav−A)` for `A` = mgmt + perf fee |
+| 8 | `nav()` does **not** step across the compound | the pending claim was already marked (net of the skim) in `nav()`'s reward term, so the harvest only *realizes* it. The delta is the realized Moonwell carry plus the small venue-fill-vs-oracle-mark basis — **not** `usdcOut` (see the decomposition note below) |
+| 9 | the skim was paid, in kind | `feeRecipient` AERO balance up by exactly `aeroClaimed × compoundFeeBps / 10000` (floor), and exactly one `RewardFeePaid(recipient, aeroAmount)` log from the **strategy** address (the manager is delegatecalled). `vault.totalSupply()` **unchanged** — nothing mints |
 | 10 | delta-neutrality | LP leg-A amount vs leg-A debt (expect a small short by the *accrued borrow interest* — see below) |
 | 11 | LTV | moves **toward the stored `targetLtvBps`**, not toward the book's current LTV |
 
+> **`vault.totalSupply()` moves on deposit and redeem — and on nothing else.** There are no fee-share
+> mints any longer (the fund's only fee is the in-kind AERO skim), so a supply delta with no
+> corresponding deposit or redeem in the same window is a **red flag**, not fee accrual. Reconcile it
+> against the vault's `Transfer` logs before assuming anything.
+
 > **`nav()` lags Moonwell interest until something touches the market.** `nav()` reads
-> `borrowBalanceStored` / the stored exchange rate, so a 9-day warp shows **zero** NAV change until a
-> tx accrues. `compound`'s supply+borrow does accrue, so the NAV jump you measure is
-> `harvest + the whole warp's carry` at once. To separate them, read the accruing getters by
-> `eth_call` *before* compounding — `mUSDC.balanceOfUnderlying(strategy)` and
+> `borrowBalanceStored` / the stored exchange rate, so a 9-day warp shows **zero** NAV change from the
+> carry until a tx accrues. `compound`'s supply+borrow does accrue, so the NAV jump you measure is the
+> whole warp's carry at once — the **harvest is not in that jump**, because `nav()`'s reward term had
+> already been marking the pending claim (net of the skim) as it accrued. To see the carry alone before
+> compounding, read the accruing getters by `eth_call` — `mUSDC.balanceOfUnderlying(strategy)` and
 > `mLegA.borrowBalanceCurrent(strategy)` are non-view and therefore simulate accrual.
 
 ### Live results — 2026-07-29 on clone `0x7A5A…01Fd` / vault `0x8BcA…B0F5` (since superseded)
 
 > **Historical record, kept for the measurements.** That clone/vault pair has been replaced twice since;
 > the current pair is `0x3393…9c3c` / `0x0B0E…d6f1` (see *Current live instance* below, and
-> `script/tenderly/leveraged-aero-vnet.json`, which is authoritative). The mechanics below still hold —
-> only the addresses moved.
+> `script/tenderly/leveraged-aero-vnet.json`, which is authoritative). The harvest/swap/redeploy
+> mechanics below still hold — only the addresses moved.
+>
+> **2026-08-31 — every fee reading in this section records the RETIRED management/performance fee
+> model.** That layer (`LeveragedAeroFees`, the high-water mark, the crystallise machinery and its
+> fee-share mints) is **deleted**. The fund's only fee is now a single in-kind skim: `compoundFeeBps`
+> (500 = 5 %, cap 1000) of each AERO tranche the fund realizes — `compound`, `flatten` and the
+> async-redeem fulfilment, everything but the terminal `settle` — transferred to `feeRecipient`
+> **pre-swap** and logged as `RewardFeePaid`. Read the numbers below as history; read *What to assert after a
+> `compound`* above for current behaviour.
 
-Asset-mode cbBTC/USDC clone, `state() == 1`, proposer `0x73f6…8FAf`, tokenId `73341624`, fee config
-`managementFeeBps 100` / `performanceFeeBps 1000`, `targetLtvBps 5000`, `maxSlippageBps 100`.
+Asset-mode cbBTC/USDC clone, `state() == 1`, proposer `0x73f6…8FAf`, tokenId `73341624`,
+`targetLtvBps 5000`, `maxSlippageBps 100`, and the retired fee config `managementFeeBps 100` /
+`performanceFeeBps 1000` (both fields gone — see the note above).
+
+> **Retired-model rows (2026-08-31).** The last three rows — `feeRecipient` shares, `hwmPerShare`,
+> `lastFeeAccrualTimestamp` — measured the old crystallise layer. `hwmPerShare` and
+> `lastFeeAccrualTimestamp` are **gone from `Layout`**; do not go looking for them on a current clone
+> (`layout()` is 48 fields, `compoundFeeBps` at 29 / `feeRecipient` at 30). `feeRecipient` survives,
+> but what accrues to it is now **AERO**, not shares — the `totalSupply` row would be flat today.
 
 | Metric (6dp USDC / 12dp shares unless noted) | T0 pre-warp | T2 post-warp, pre-compound | T3 post-`compound` | T4 post 2nd `compound` |
 |---|---|---|---|---|
@@ -869,6 +914,12 @@ Swap, bound, and price (the whole point of the exercise):
 
 Fee crystallisation reconciles to the wei:
 
+> **RETIRED MODEL — measured record only (annotated 2026-08-31).** This table verifies the deleted
+> management/performance fee layer. Nothing in it describes a current clone: there is no
+> crystallisation, no HWM, no fee-share mint and no `A·supply/(nav−A)` identity to check. The
+> replacement is the in-kind `compoundFeeBps` AERO skim; assert it per row 9 of *What to assert after
+> a `compound`* above.
+
 | | `compound` #1 | `compound` #2 |
 |---|---|---|
 | management fee | `$40.873718` = 1 %/yr × 9.20920 d × pre-NAV `162000.007892` | `$0.011380` (221 s) |
@@ -896,13 +947,22 @@ Behaviours worth knowing (observed, **not** defects to fix from this runbook):
 2. **The redeploy sizes at the *stored* `targetLtvBps`, not the book's current LTV.** With the book at
    6000 bps and `targetLtvBps == 5000`, the `201.44` USDC increment was levered at exactly 50.00 %,
    nudging LTV `6000.21 → 5993.79` bps. Expect harvests to walk LTV toward `targetLtvBps` forever.
-3. **A no-AERO `compound` is not free.** It still crystallises: run #2 moved no funds at all (NAV, LP,
-   collateral, debt, idle all byte-identical) yet minted `34.44` shares of deferred performance fee
-   and ratcheted the HWM. Harmless, but do not treat `compound` as a read-only probe.
-4. **Gauge rewards do not enter `nav()` before the harvest**, which is *why* run #1 charged no
-   performance fee: crystallisation runs on the pre-compound NAV, the harvest lifts NAV *after* it,
-   and the profit is charged at the next crystallisation point (run #2 above). Fee-fair, but it means
-   one `compound` never fully settles its own performance fee.
+3. **A no-AERO `compound` is a clean no-op** (current behaviour — run #2 above measured the retired
+   model, where it still crystallised). `compoundImpl` returns at `aeroBal == 0`, and the sub-micro-USD
+   dust case returns at `floor == 0` — *ahead* of the skim, deliberately, so a dust balance donated to
+   a dead gauge cannot be drained a cent at a time. Nothing is paid, nothing is minted, nothing moves.
+4. **A `compound` WITH AERO pays exactly one fee, in kind, up front.** `compoundFeeBps` of the tranche
+   (rounding down) is transferred to `feeRecipient` as **AERO** before the swap, logged
+   `RewardFeePaid(recipient, aeroAmount)` from the strategy address; both `minUsdcOut` and the oracle
+   floor then price only the remainder. **Nothing is ever deferred** — there is no HWM to wait for and
+   no next accrual point. And `nav()` does **not step** across the harvest: the reward term already
+   marks the pending `gauge.earned()` net of the skim, which is what closes the exit-timing arb (a
+   redeemer leaving just before a harvest pays their pro-rata share of the pending fee instead of
+   dodging it). `flatten` and the async-redeem fulfilment skim on the SAME basis, through
+   `LeveragedAeroVenue._sellRewardBalance`: their own `gauge.withdraw` is all-or-nothing per NFT, so each
+   realizes 100 % of the book's accrual and leaves no later harvest to charge it. Assert row 9 on those
+   two as well. The one accepted asymmetry runs in holders' favour: the **terminal** `settle` sells the
+   tranche gross, so the fund's last exit realizes slightly more than the mark.
 
 Could not be verified on this instance: nothing in the harvest path. `BelowOracleFloor` was proven
 only by `eth_call` state override (a genuine venue dislocation > `maxSlippageBps` cannot be induced

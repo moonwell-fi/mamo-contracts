@@ -64,7 +64,7 @@ lp-auto-balancer-v2:
 lp-v2-setup:
 	forge test --ffi --mc LPAutoBalancerV2SetupTest -vvv
 
-# MamoLeveragedAeroStrategy account unit tests. Mocks only (no fork): the Sherwood strategy/vault are
+# MamoLeveragedAeroStrategy account unit tests. Mocks only (no fork): the pooled strategy/vault are
 # stubbed, so NO --fork-url. Matches test/MamoLeveragedAeroStrategy*.unit.t.sol.
 leveraged-aero-account:
 	forge test --ffi --match-path "test/MamoLeveragedAeroStrategy*.unit.t.sol" -vvv
@@ -81,8 +81,19 @@ leveraged-aero-vault:
 	forge test --ffi --match-path "test/LeveragedAeroVault.unit.t.sol" -vvv
 	forge test --ffi --match-path "test/leveraged-aero/*.unit.t.sol" -vvv
 
+# Base-fork exercise of the two leveraged-Aero deployment proposals in mainnet order — 015 (pooled
+# layer: strategy template + LeveragedAeroVault + cloneAndBind + activate) then 012 (account impl +
+# factory + whitelist + open deposits) — followed by a real user lifecycle on the result.
+#
+# Same op-revm note as lp-v2-setup: NO --fork-url here. The test self-forks at a PINNED block via
+# vm.createSelectFork in setUp with the vm.fee(0) Isthmus workaround; passing --fork-url base in
+# addition makes foundry 1.7.x init the OP-stack L1Block handler against the CLI fork and panic
+# ("Missing operator fee scalar for isthmus L1 Block") before that workaround runs.
+leveraged-aero-setup:
+	forge test --ffi --match-path "test/LeveragedAeroSystemSetup.integration.t.sol" -vvv
+
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
@@ -159,4 +170,4 @@ tenderly-leveraged-aero-account:
 tenderly-leveraged-aero-withdraw:
 	./script/tenderly/run-harness.sh leveraged-aero-withdraw
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account leveraged-aero-vault leveraged-aero-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw

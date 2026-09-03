@@ -2,14 +2,15 @@
 pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
+
+import {BaseStrategy} from "@contracts/leveraged-aero/BaseStrategy.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAeroVenue} from "@contracts/leveraged-aero/LeveragedAeroVenue.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
-import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
-import {ChainlinkReader} from "@contracts/leveraged-aero/sherwood/libraries/ChainlinkReader.sol";
-import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
+import {ChainlinkReader} from "@contracts/leveraged-aero/libraries/ChainlinkReader.sol";
+import {LiquidityAmounts} from "@contracts/leveraged-aero/libraries/LiquidityAmounts.sol";
+import {TickMath} from "@contracts/leveraged-aero/libraries/TickMath.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
@@ -209,8 +210,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
         p.maxSlippageBps = 100;
-        p.managementFeeBps = 0;
-        p.performanceFeeBps = 0;
+        p.compoundFeeBps = 0;
         p.feeRecipient = address(0);
     }
 
@@ -2861,7 +2861,6 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         uint256 aeroInRouter0 = aero.balanceOf(AERO_V2_ROUTER);
         uint256 usdcInSwapRouter0 = usdc.balanceOf(address(router));
         uint256 collateral0 = mUsdc.balanceOf(address(strategy));
-        assertEq(strategy.layout().hwmPerShare, 0, "no crystallisation has happened on this book yet");
 
         vm.recordLogs();
         vm.prank(proposer);
@@ -2876,16 +2875,7 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         assertEq(aero.balanceOf(address(strategy)), 0, "the whole claim was sold");
         assertEq(aero.balanceOf(AERO_V2_ROUTER) - aeroInRouter0, budget * 1e12, "...to the AERO->USDC router");
 
-        // 3. THE FEE CRYSTALLISATION HAPPENED and stuck -- it precedes the hedge, so a revert would have undone it.
-        assertGt(strategy.layout().hwmPerShare, 0, "the pre-compound crystallise ran and persisted");
-        for (uint256 i; i < logs.length; i++) {
-            assertTrue(
-                logs[i].topics[0] != LeveragedAerodromeCLStrategy.FeeCrystallizeDeferred.selector,
-                "the crystallise was not deferred either"
-            );
-        }
-
-        // 4. LEG A'S HEDGE HAPPENED and took the WHOLE budget: leg B's cost degraded to 0, so pro-rata gives it all.
+        // 3. LEG A'S HEDGE HAPPENED and took the WHOLE budget: leg B's cost degraded to 0, so pro-rata gives it all.
         assertEq(usdc.balanceOf(address(router)) - usdcInSwapRouter0, budget, "the whole budget bought leg A");
         assertApproxEqRel(driftA0 - _driftLegA(), (driftA0 * 99) / 100, 1e15, "leg A hedged by ~the budget's coverage");
 
@@ -2927,71 +2917,5 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         (uint256 marks,) = _degradations(vm.getRecordedLogs());
         assertEq(marks, 0, "a healthy harvest degrades nothing");
-    }
-
-    // ============ THE EMPTY BOOK: DORMANCY AND THE HWM ACROSS A supply == 0 CYCLE (F03) ============
-    // `_crystallizeFees` used to `return` outright on `totalSupply() == 0`, writing NEITHER the fee clock nor the HWM;
-    // both bill the reopening depositor for a cycle they were not in. FIXTURE: fees are 0 here, so the writes are
-    // asserted as state rather than as minted shares.
-
-    /// @dev THE CLOCK. Drain to zero shares, let a YEAR pass, reopen: the reopening crystallise must move
-    ///      `lastFeeAccrualTimestamp` to now, or the next one bills 365 days of fee on a dormant fund.
-    function testDormancyIsNotBilledToTheReopeningDepositor() public {
-        _flatBookHeldEntirelyAsCollateral();
-        uint256 supply = 1_000_000e12;
-        vm.prank(address(strategy));
-        vault.strategyMint(lp, supply);
-
-        // Drain: the last redeem burns every share and pays the whole pot out.
-        vm.startPrank(lp);
-        vault.approve(address(strategy), supply);
-        strategy.redeem(supply, 0);
-        vm.stopPrank();
-        assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
-        uint256 clockAtDrain = strategy.layout().lastFeeAccrualTimestamp;
-        assertEq(clockAtDrain, block.timestamp, "precondition: the draining redeem left the clock at now");
-
-        // ── A YEAR OF DORMANCY. Nobody holds a share; nothing is being managed. ──
-        vm.warp(block.timestamp + 365 days);
-        _deposit(100_000e6);
-
-        assertEq(
-            strategy.layout().lastFeeAccrualTimestamp,
-            block.timestamp,
-            "the empty-book crystallise advanced the clock past the dormancy"
-        );
-        assertEq(block.timestamp - clockAtDrain, 365 days, "...and the window skipped really was a full year");
-    }
-
-    /// @dev THE HWM. A mark taken against the OLD supply is incommensurable with the reopening basis
-    ///      (`WAD / SHARES_VIRTUAL_OFFSET` == 1e12), so the empty-book branch zeroes it and the next cycle reseeds.
-    function testTheHwmResetsAcrossASupplyZeroCycle() public {
-        _flatBookHeldEntirelyAsCollateral();
-        uint256 supply = 1_000_000e12;
-        vm.prank(address(strategy));
-        vault.strategyMint(lp, supply);
-
-        // Two crystallisation points are needed to MARK the HWM: the first only seeds the clock, the second marks.
-        _deposit(1_000e6);
-        usdc.mint(address(strategy), 500_000e6); // raw idle is in `nav()` — a 50% gain on the book
-        _deposit(1_000e6);
-        uint256 hwmHigh = strategy.layout().hwmPerShare;
-        assertGt(hwmHigh, 1e12, "precondition: the dead cycle's peak is ABOVE the reopening basis");
-
-        // Drain every share, including the two deposits' (both minted to `lp`).
-        uint256 all = vault.totalSupply();
-        vm.startPrank(lp);
-        vault.approve(address(strategy), all);
-        strategy.redeem(all, 0);
-        vm.stopPrank();
-        assertEq(vault.totalSupply(), 0, "precondition: the book is empty");
-
-        // REOPEN. `nav() == 0` and `supply == 0`, so the depositor mints at `assets x SHARES_VIRTUAL_OFFSET` == 1e12.
-        _deposit(100_000e6);
-        assertEq(strategy.layout().hwmPerShare, 0, "the dead cycle's mark did not survive the empty book");
-
-        // The next crystallise re-seeds at the REOPENED fund's basis, charging nothing (first cycle).
-        _deposit(1_000e6);
-        assertEq(strategy.layout().hwmPerShare, 1e12, "re-seeded at the new basis, not the dead cycle's peak");
     }
 }

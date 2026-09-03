@@ -73,7 +73,8 @@
 #     expected-error list below needs no new entry. Immutable per clone: widening it means redeploying.
 #   TARGET_LTV_BPS/MAX_LTV_BPS/MIN_HEALTH_BPS/MAX_SLIPPAGE_BPS
 #   MAX_DELAY/GRACE_PERIOD/TWAP_WINDOW/CALM_DEVIATION_TICKS
-#   MGMT_FEE_BPS (100) / PERF_FEE_BPS (1000) / FEE_RECIPIENT (= MAMO_REBALANCER)
+#   COMPOUND_FEE_BPS (500) — the in-kind AERO skim taken at compound; cap 1000. / FEE_RECIPIENT
+#     (= MAMO_REBALANCER)
 #   VAULT_NAME / VAULT_SYMBOL
 #   TENDERLY_VNET_PUBLIC_RPC_URL  recorded into leveraged-aero-vnet.json
 #
@@ -185,7 +186,7 @@ SEED="${SEED:-100000000000}"          # 100,000 USDC (6dp). A seed is MANDATORY:
                                       # ExecuteZeroBalance inside execute(), not in the vault.
 ETH_FUND_HEX=0x56BC75E2D63100000      # 100 ETH
 # Base per-tx gas cap is 16,777,216 (2^24): estimate x multiplier must stay under it. The
-# template CREATE (+ its 4 delegatecall libraries) is the big one — 200% clears it. The two
+# template CREATE (+ its 3 delegatecall libraries) is the big one — 200% clears it. The two
 # heavy sends get EXPLICIT limits instead of trusting the vnet's estimate, which
 # under-reports deep nested delegatecalls (the LPV2 harness hit an OOG at forge's 1.3x).
 DEPLOY_GAS_MULT=200
@@ -469,8 +470,8 @@ assert_feed_fresh "sequencer " "$SEQ_FEED" "0"
 section "Summary"
 ok "Pooled layer live. vault=$VAULT strategyClone=$CLONE template=$TEMPLATE proposer=$MAMO_REBALANCER"
 info "Next: the account layer —"
-info "  TENDERLY_VNET_RPC_URL=<admin-rpc> SHERWOOD_LEVERAGED_AERO_STRATEGY=$CLONE \\"
-info "  SHERWOOD_SYNDICATE_VAULT=$VAULT make tenderly-leveraged-aero-account"
+info "  TENDERLY_VNET_RPC_URL=<admin-rpc> LEVERAGED_AERO_STRATEGY=$CLONE \\"
+info "  LEVERAGED_AERO_VAULT=$VAULT make tenderly-leveraged-aero-account"
 
 # ── machine-consumable config for downstream consumers ────────────────────────
 # MERGE-WRITE, not clobber: run-leveraged-aero-account.sh owns the `mamo` object and this
@@ -526,7 +527,6 @@ jq -n \
       lpGauge: $gauge,
       venueShape: ($shape + " (tickSpacing " + $tickSpacing + ") — legBIsAsset=" + (if $shape == "asset" then "true" else "false" end) + ". DEPLOY-TIME: a later migrateVenue does not update this — read layout() on the clone.")
     },
-    sherwood: { strategyClone: $clone, syndicateVault: $vault },
     usdc: $usdc,
     feeds: {
       pattern: "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
@@ -535,7 +535,7 @@ jq -n \
     },
     vaultGeneration: 3,
     vaultGenerationName: "leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())",
-    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66); mamo = the account layer, filled by run-leveraged-aero-account.sh (null right after a pooled redeploy — the factory binds the clone at construction, so the account layer must be redeployed too). sherwood is a deprecated alias of pooled, kept for existing consumers. The 5 feeds are FreshFeed-mocked (never stale). proposer is the rebalancer operator key, deliberately distinct from MAMO_BACKEND."
+    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66); mamo = the account layer, filled by run-leveraged-aero-account.sh (null right after a pooled redeploy — the factory binds the clone at construction, so the account layer must be redeployed too). The 5 feeds are FreshFeed-mocked (never stale). proposer is the rebalancer operator key, deliberately distinct from MAMO_BACKEND."
   }' > "$CONFIG_JSON"
 ok "config emitted: $CONFIG_JSON"
 info "Full log: $RESULTS"

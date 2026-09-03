@@ -77,7 +77,7 @@ The two borrowed tokens of the CL pair, carried in `Layout` under the historical
 _Avoid_: WETH leg / cbBTC leg as if fixed, token0/token1 (that is pool ordering, derived separately via `wethIsToken0`)
 
 **Deposits open**:
-The vault's `depositsOpen` flag. Gates `strategyMint` only — new share issuance including fee-share crystallise. Never gates `strategyBurn`: exits keep working while issuance is frozen.
+The vault's `depositsOpen` flag. Gates `strategyMint` only — i.e. all new share issuance, which is deposits and nothing else (the fund's only fee is the in-kind `compoundFeeBps` AERO skim; no path mints shares to `feeRecipient`). Never gates `strategyBurn`: exits keep working while issuance is frozen.
 _Avoid_: paused, pause (there is no pause), deposits enabled
 
 **Activate / Settle**:

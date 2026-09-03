@@ -3,9 +3,8 @@ pragma solidity 0.8.28;
 
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 
-import {LeveragedAeroFees} from "@contracts/leveraged-aero/LeveragedAeroFees.sol";
+import {BaseStrategy} from "@contracts/leveraged-aero/BaseStrategy.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
-import {BaseStrategy} from "@contracts/leveraged-aero/sherwood/BaseStrategy.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
@@ -36,14 +35,11 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
  */
 contract LeveragedAeroStrategyInitUnitTest is Test {
     /// @dev Mirrored from {LeveragedAerodromeCLStrategy} for `vm.expectEmit` / topic matching.
-    event FeeCrystallizeDeferred(uint8 op, uint256 navPre);
+    event RewardFeePaid(address indexed recipient, uint256 aeroAmount);
     event TargetLtvUpdated(uint16 previousBps, uint16 newBps);
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
     event ProposerUpdated(address indexed oldProposer, address indexed newProposer);
-
-    /// @dev The strategy's `OP_COMPOUND` deferral code (private there).
-    uint8 internal constant OP_COMPOUND = 3;
 
     address public owner = makeAddr("owner");
     address public proposer = makeAddr("proposer");
@@ -84,8 +80,8 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     ///      `keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))`.
     bytes32 internal constant STORAGE_SLOT = 0x405ae0b144079093e970849fdffdcb2a514e44968598c6c5c73444496e844900;
 
-    /// @dev Counted off `Layout`: the packed tail is slot 25, so the hedged principals share slot 26.
-    uint256 internal constant TAIL_SLOT_OFFSET = 25;
+    /// @dev Counted off `Layout`: the packed tail is slot 23, so the hedged principals share slot 24.
+    uint256 internal constant TAIL_SLOT_OFFSET = 23;
 
     /// @dev Aerodrome v2 PoolFactory, hardcoded in `LeveragedAeroValuation`, etched below for the probe.
     address internal constant AERO_V2_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
@@ -163,8 +159,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
         p.maxSlippageBps = 100;
-        p.managementFeeBps = 100;
-        p.performanceFeeBps = 1000;
+        p.compoundFeeBps = 500; // the production 5% in-kind harvest skim
         p.feeRecipient = feeRecipient;
     }
 
@@ -1064,50 +1059,73 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
 
     // ==================== FEE PARAMS ====================
 
-    /// @dev Any nonzero fee requires a recipient — fee-shares have nowhere to go otherwise.
-    function testInitRevertsWhenManagementFeeHasNoRecipient() public {
+    /// @dev A nonzero skim requires a recipient — the AERO has nowhere to go otherwise.
+    function testInitRevertsWhenCompoundFeeHasNoRecipient() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
-        p.performanceFeeBps = 0;
+        p.compoundFeeBps = 1;
         p.feeRecipient = address(0);
         _expectInitRevert(p, LeveragedAerodromeCLStrategy.FeeRecipientRequired.selector);
     }
 
-    function testInitRevertsWhenPerformanceFeeHasNoRecipient() public {
+    /// @dev With the skim off, a zero recipient is legitimate (a fee-free clone).
+    function testInitAcceptsZeroRecipientWhenTheSkimIsZero() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
-        p.managementFeeBps = 0;
+        p.compoundFeeBps = 0;
         p.feeRecipient = address(0);
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.FeeRecipientRequired.selector);
+        assertEq(_init(p).layout().feeRecipient, address(0), "no recipient needed when the skim is off");
+        assertEq(_init(p).layout().compoundFeeBps, 0, "...and the skim really is zero");
     }
 
-    /// @dev With BOTH fees off, a zero recipient is legitimate.
-    function testInitAcceptsZeroRecipientWhenAllFeesAreZero() public {
+    /// @dev Skim ceiling: `LeveragedAeroValuation.MAX_COMPOUND_FEE_BPS` (1000 = 10%), mirroring
+    ///      `MamoMultiMarketStrategy.MAX_COMPOUND_FEE`. The edge and the edge+1 are both pinned.
+    function testInitCompoundFeeCeiling() public {
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
-        p.managementFeeBps = 0;
-        p.performanceFeeBps = 0;
-        p.feeRecipient = address(0);
-        assertEq(_init(p).layout().feeRecipient, address(0), "no recipient needed when fees are off");
-    }
-
-    /// @dev Performance fee ceiling: `FeeConstants.MAX_PERFORMANCE_FEE_BPS` (1500 = 15%).
-    function testInitPerformanceFeeCeiling() public {
-        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
-        p.performanceFeeBps = 1501;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.PerformanceFeeTooHigh.selector);
+        p.compoundFeeBps = 1001;
+        _expectInitRevert(p, LeveragedAerodromeCLStrategy.CompoundFeeTooHigh.selector);
 
         p = _baseParams();
-        p.performanceFeeBps = 1500;
-        assertEq(_init(p).layout().performanceFeeBps, 1500, "ceiling accepted");
+        p.compoundFeeBps = 1000;
+        assertEq(_init(p).layout().compoundFeeBps, 1000, "ceiling accepted");
     }
 
-    /// @dev Management fee ceiling: `MAX_MANAGEMENT_FEE_BPS` (500 = 5%/yr).
-    function testInitManagementFeeCeiling() public {
+    /// @dev THE CLONE MAY NOT PAY ITSELF. `feeRecipient` has no setter, so a recipient equal to the clone
+    ///      would make every skim a self-transfer — the fee silently never leaves, unfixably. The rung
+    ///      reads `address(this)` under `initialize`'s delegatecall into `LeveragedAeroValuation`, which is
+    ///      the CLONE and not the library, so this test is also the proof of that call convention.
+    function testInitRevertsWhenTheCloneIsItsOwnFeeRecipient() public {
+        LeveragedAerodromeCLStrategy s = _clone();
         LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
-        p.managementFeeBps = 501;
-        _expectInitRevert(p, LeveragedAerodromeCLStrategy.ManagementFeeTooHigh.selector);
+        p.feeRecipient = address(s);
+        vm.prank(address(vault));
+        vm.expectRevert(LeveragedAerodromeCLStrategy.FeeRecipientIsStrategy.selector);
+        s.initialize(address(vault), proposer, abi.encode(p));
 
-        p = _baseParams();
-        p.managementFeeBps = 500;
-        assertEq(_init(p).layout().managementFeeBps, 500, "ceiling accepted");
+        // Not a blanket ban on a self-ish recipient: another clone, and the template, are both fine.
+        p.feeRecipient = address(_clone());
+        LeveragedAerodromeCLStrategy ok = _clone();
+        vm.prank(address(vault));
+        ok.initialize(address(vault), proposer, abi.encode(p));
+        assertEq(ok.layout().feeRecipient, p.feeRecipient, "a sibling clone is a legal payee");
+    }
+
+    /// @dev The rung is unconditional — a ZERO skim to the clone is rejected too. `compoundFeeBps` is
+    ///      init-only, so "harmless while the skim is off" is a state that can never be repaired.
+    function testTheSelfRecipientRungBindsEvenWithTheSkimOff() public {
+        LeveragedAerodromeCLStrategy s = _clone();
+        LeveragedAerodromeCLStrategy.InitParams memory p = _baseParams();
+        p.compoundFeeBps = 0;
+        p.feeRecipient = address(s);
+        vm.prank(address(vault));
+        vm.expectRevert(LeveragedAerodromeCLStrategy.FeeRecipientIsStrategy.selector);
+        s.initialize(address(vault), proposer, abi.encode(p));
+    }
+
+    /// @dev The production value survives init verbatim — a mutation that stored the wrong field, or
+    ///      dropped the store, changes this number.
+    function testInitPersistsTheProductionSkim() public {
+        LeveragedAerodromeCLStrategy s = _init(_baseParams());
+        assertEq(s.layout().compoundFeeBps, 500, "5% harvest skim stored");
+        assertEq(s.layout().feeRecipient, feeRecipient, "...to the configured recipient");
     }
 
     /// @dev The aligned/in-band matrix: every width that is a multiple of the spacing and lands
@@ -1424,12 +1442,11 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         assertEq(uint256(legBHedged), 7, "hedgedDebtB is STILL slot+1 offset 16 (high 16 bytes)");
     }
 
-    // ==================== COMPOUND FEE-CRYSTALLISE ROUTING ====================
+    // ==================== COMPOUND ON A FLAT BOOK ====================
     //
     // `compound` runs against a FLAT book here: `nav()` reads its `tokenId == 0` branch (face value
-    // of idle USDC, no oracle) and `compoundImpl` returns immediately on the same condition. That
-    // leaves the fee crystallise — the part under test — as the only thing that executes, so the
-    // routing can be exercised without Slipstream/Moonwell venues.
+    // of idle USDC, no oracle) and `compoundImpl` returns immediately on the same condition — so the
+    // keeper-poll no-op can be pinned without Slipstream/Moonwell venues.
 
     /// @dev Force the lifecycle state without running `_execute()` / `_settle()` (both of which need
     ///      live Slipstream + Moonwell venues). `_state` shares slot 1 with `_proposer` (offset 0)
@@ -1456,61 +1473,34 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     /**
-     * @dev A `compound` WITH NOTHING TO HARVEST MUST HAVE NO SIDE EFFECTS. `compound` is a
-     *      keeper-polled entrypoint, and crystallisation is not free: it mints fee-shares and ratchets
-     *      the HWM. This fixture is the maximally-armed no-op — a flat book
-     *      (`tokenId == 0`), shares outstanding, a 1%/yr management fee and 30 days of `dt` — so the
-     *      management leg alone WOULD mint if the entrypoint crystallised before checking. It must not:
-     *      the genuine-no-op probe in `compound` runs ahead of every state write.
+     * @dev A `compound` WITH NOTHING TO HARVEST MUST HAVE NO SIDE EFFECTS — no gauge touch, no skim,
+     *      no idle movement. `compound` is a keeper-polled entrypoint, so a flat book (`tokenId == 0`)
+     *      with shares outstanding and a live 5% skim configured has to return before every state write.
      *
-     *      (The counterpart positive controls — a REAL harvest crystallising, and a real harvest
-     *      DEFERRING the fee when share issuance is shut — need a live position and the AERO→USDC venue,
-     *      so they live in `LeveragedAeroCompoundHedge.unit.t.sol`, which etches the Aerodrome-v2 router
-     *      and drives the whole claim → swap → re-hedge → redeploy sequence.)
+     *      (The positive control — a REAL harvest paying the skim — needs a live position and the
+     *      AERO→USDC venue, so it lives in `LeveragedAeroCompoundHedge.unit.t.sol`.)
      */
     function testCompoundOnAFlatBookIsATrueNoOp() public {
         LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
         _armForCompound(s, 1_000e12, 1_000e6, 30 days);
         assertEq(s.layout().tokenId, 0, "flat book");
+        assertEq(s.layout().compoundFeeBps, 500, "...with the skim armed");
 
-        uint256 lastAccrualBefore = s.layout().lastFeeAccrualTimestamp;
         uint256 idleBefore = usdc.balanceOf(address(s));
 
         vm.recordLogs();
         vm.prank(proposer);
         s.compound(1, 0);
 
-        assertEq(vault.totalSupply(), 1_000e12, "no fee-shares minted");
-        assertEq(vault.balanceOf(feeRecipient), 0, "fee recipient untouched");
-        assertEq(s.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "fee clock NOT advanced");
-        assertEq(s.layout().hwmPerShare, 0, "HWM NOT ratcheted");
+        assertEq(vault.totalSupply(), 1_000e12, "no shares minted");
+        assertEq(aero.balanceOf(feeRecipient), 0, "fee recipient untouched");
         assertEq(usdc.balanceOf(address(s)), idleBefore, "idle USDC byte-identical");
         assertEq(gauge.getRewardCallCount(), 0, "the gauge was never even touched");
 
-        // Not a deferral either — there was simply nothing to crystallise.
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; ++i) {
-            assertTrue(logs[i].topics[0] != FeeCrystallizeDeferred.selector, "a no-op defers nothing");
+            assertTrue(logs[i].topics[0] != RewardFeePaid.selector, "a no-op skims nothing");
         }
-    }
-
-    /// @dev The same no-op holds with share issuance SHUT: nothing is minted, nothing is deferred, and
-    ///      the call does not revert. (With a live book the fee genuinely defers — see the H3 test in
-    ///      `LeveragedAeroCompoundHedge.unit.t.sol`.)
-    function testCompoundOnAFlatBookIsANoOpEvenWithIssuanceClosed() public {
-        LeveragedAerodromeCLStrategy s = _initBound(_baseParams());
-        _armForCompound(s, 1_000e12, 1_000e6, 30 days);
-
-        uint256 lastAccrualBefore = s.layout().lastFeeAccrualTimestamp;
-        vm.prank(owner);
-        vault.setOpenDeposits(false);
-
-        vm.prank(proposer);
-        s.compound(1, 0);
-
-        assertEq(vault.totalSupply(), 1_000e12, "no fee-shares minted");
-        assertEq(s.layout().lastFeeAccrualTimestamp, lastAccrualBefore, "accrual clock unmoved");
-        assertEq(s.layout().hwmPerShare, 0, "HWM unmoved");
     }
 
     function testCompoundRevertsForNonProposer() public {
@@ -1914,65 +1904,5 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
         vm.prank(owner);
         s.setWidthBounds(4000, 4000); // the degenerate band that admits exactly the live width
         assertEq(s.layout().minWidth, 4000, "a band pinned to the live width is legal");
-    }
-
-    // ==================== LeveragedAeroFees: THE FEE MATHS, PINNED EXACTLY ====================
-    //
-    // The library's only direct coverage. Every expected value is an independently computed literal,
-    // not a re-application of the library's own formula. Fixture: a $1.1M book (6dp) over 1e6 shares
-    // (12dp) against the unit-rate mark `WAD / SHARES_VIRTUAL_OFFSET`, i.e. a clean $100k gain.
-    uint256 internal constant FEE_NAV = 1_100_000e6;
-    uint256 internal constant FEE_SUPPLY = 1_000_000e12;
-    uint256 internal constant FEE_HWM = 1e12;
-    /// @dev `FEE_NAV x 1e18 / FEE_SUPPLY` -- where the HWM lands after any priced crystallise.
-    uint256 internal constant FEE_NAV_PER_SHARE = 1.1e12;
-
-    /// @dev 1%/yr over exactly 365 days must dilute to 1% of the POST-mint supply:
-    ///      `1e18 x 0.01 / 0.99 = 10_101_010_101_010_101` shares. Driven through `crystallize` so the
-    ///      wiring is covered too; the HWM starts AT the current level, so the perf leg contributes 0.
-    ///      MUTATION: dropping the `WAD - feeRateX` denominator gives 1e16; an off-by-10_000 in
-    ///      `feeRateX` pushes it past WAD and the absurd-dt guard returns 0. Both fail here.
-    function testManagementFeeDilutesExactlyTheAnnualRate() public pure {
-        (uint256 feeShares, uint256 newHwm, uint256 newLast) = LeveragedAeroFees.crystallize(
-            FEE_NAV, FEE_SUPPLY, FEE_NAV_PER_SHARE, 1_000_000, 1_000_000 + 365 days, 100, 1000
-        );
-
-        assertEq(feeShares, 10_101_010_101_010_101, "1%/yr for a year, in post-mint dilution form");
-        assertEq(newHwm, FEE_NAV_PER_SHARE, "at the mark: the perf leg adds nothing");
-        assertEq(newLast, 1_000_000 + 365 days, "the clock advanced to nowTs");
-    }
-
-    /// @dev A $100k gain at 10% is a $10k fee, minted as `fee x supply / (navPre - fee)` so the
-    ///      recipient's POST-mint value is exactly the fee: `1e10 x 1e18 / 1.09e12`.
-    ///      MUTATION: netting the fee off the numerator instead of the denominator, or charging on
-    ///      `navPre` rather than the gain, both miss this literal.
-    function testPerformanceFeeSharesMatchTheDilutionAlgebra() public pure {
-        (uint256 feeShares, uint256 newHwm) = LeveragedAeroFees.performanceFeeShares(FEE_NAV, FEE_SUPPLY, FEE_HWM, 1000);
-
-        assertEq(feeShares, 9_174_311_926_605_504, "10% of the $100k gain, in dilution form");
-        assertEq(newHwm, FEE_NAV_PER_SHARE, "the HWM ratchets to the new peak");
-    }
-
-    /// @dev The absurd-dt guard: at `feeRate >= 100%` the `WAD - feeRateX` denominator would underflow,
-    ///      so the library returns 0 (LP-favourable) rather than bricking. A BOUNDARY, not a blanket
-    ///      zero -- one bp under still charges. MUTATION: deleting the guard panics on the denominator.
-    function testManagementFeeReturnsZeroWhenTheRateReachesOneHundredPercent() public pure {
-        assertEq(LeveragedAeroFees.managementFeeShares(FEE_SUPPLY, 10_000, 365 days), 0, "exactly 100%/yr");
-        assertEq(
-            LeveragedAeroFees.managementFeeShares(FEE_SUPPLY, 9999, 365 days),
-            9999e18,
-            "one bp under the ceiling still charges"
-        );
-    }
-
-    /// @dev The degenerate perf guard: a fee at or above `navPre` would make the dilution denominator
-    ///      non-positive, so the library charges nothing and still ratchets the HWM. Defensive only --
-    ///      `_initialize` caps `performanceFeeBps` at 1500, so a 200% rate is unreachable in production.
-    ///      MUTATION: deleting the guard panics 0x11 on `navPre - feeValueUsdc`.
-    function testPerformanceFeeDefersWhenTheFeeWouldExceedNav() public pure {
-        (uint256 feeShares, uint256 newHwm) = LeveragedAeroFees.performanceFeeShares(FEE_NAV, FEE_SUPPLY, 1, 20_000);
-
-        assertEq(feeShares, 0, "no shares minted when the fee cannot be diluted");
-        assertEq(newHwm, FEE_NAV_PER_SHARE, "...but the HWM still advances, so the gain is charged once");
     }
 }

@@ -5,8 +5,8 @@ import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "@contracts/leveraged-aero/LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
-import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
+import {LiquidityAmounts} from "@contracts/leveraged-aero/libraries/LiquidityAmounts.sol";
+import {TickMath} from "@contracts/leveraged-aero/libraries/TickMath.sol";
 
 import {MockCLGauge} from "../mocks/MockCLGauge.sol";
 import {MockCLFactory, MockCLPool} from "../mocks/MockCLPool.sol";
@@ -203,8 +203,7 @@ contract LeveragedAeroAssetModeLifecycleUnitTest is Test {
         p.maxLtvBps = 6500;
         p.minHealthBps = 12_000;
         p.maxSlippageBps = 100;
-        p.managementFeeBps = 0; // fees off — these tests are about token flows
-        p.performanceFeeBps = 0;
+        p.compoundFeeBps = 0; // fee off — these tests are about token flows
         p.feeRecipient = address(0);
     }
 

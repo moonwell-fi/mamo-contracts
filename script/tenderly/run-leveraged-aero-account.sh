@@ -42,16 +42,14 @@
 # so committing them with isContract:true would revert the Addresses constructor on
 # every real-Base-mainnet CI run. They are supplied here via env vars (documented
 # defaults = current vnet values) and injected at runtime inside the deploy .s.sol.
-# The env-var names are STALE BUT REAL: SHERWOOD_LEVERAGED_AERO_STRATEGY (also
-# factory.sherwoodStrategy()) and SHERWOOD_SYNDICATE_VAULT, even though proposal 012 now
-# resolves the vault under the LEVERAGED_AERO_VAULT key. Dropping the SHERWOOD_ prefix is
-# a pending cleanup; it implies no remaining Sherwood dependency.
+# The env-var names match the address-book keys proposal 012 resolves exactly:
+# LEVERAGED_AERO_STRATEGY (also factory.leveragedAeroStrategy()) and LEVERAGED_AERO_VAULT.
 #
 # Usage:
 #   TENDERLY_VNET_RPC_URL=<admin-rpc> ./script/tenderly/run-leveraged-aero-account.sh
 #   make tenderly-leveraged-aero-account
 # Optional env overrides (defaults = current vnet):
-#   SHERWOOD_LEVERAGED_AERO_STRATEGY, SHERWOOD_SYNDICATE_VAULT
+#   LEVERAGED_AERO_STRATEGY, LEVERAGED_AERO_VAULT
 #   HARNESS_USER (skip fresh-user generation and reuse a given EOA)
 #
 # Requires: forge, cast, jq, python3. Reads .env.
@@ -82,10 +80,10 @@ FQ="script/tenderly/LeveragedAeroAccountHarness.s.sol:LeveragedAeroAccountHarnes
 # the hardcoded fallback. That way a fresh pooled deploy is picked up automatically.
 _CFG="$ROOT/script/tenderly/leveraged-aero-vnet.json"
 _cfg_pooled() { jq -r --arg k "$1" '.pooled[$k] // empty' "$_CFG" 2>/dev/null; }
-export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-$(_cfg_pooled strategyClone)}"
-export SHERWOOD_SYNDICATE_VAULT="${SHERWOOD_SYNDICATE_VAULT:-$(_cfg_pooled vault)}"
-export SHERWOOD_LEVERAGED_AERO_STRATEGY="${SHERWOOD_LEVERAGED_AERO_STRATEGY:-0x5E22913E4C96f816133fbc8E894F652a4f87C760}"
-export SHERWOOD_SYNDICATE_VAULT="${SHERWOOD_SYNDICATE_VAULT:-0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9}"
+export LEVERAGED_AERO_STRATEGY="${LEVERAGED_AERO_STRATEGY:-$(_cfg_pooled strategyClone)}"
+export LEVERAGED_AERO_VAULT="${LEVERAGED_AERO_VAULT:-$(_cfg_pooled vault)}"
+export LEVERAGED_AERO_STRATEGY="${LEVERAGED_AERO_STRATEGY:-0x5E22913E4C96f816133fbc8E894F652a4f87C760}"
+export LEVERAGED_AERO_VAULT="${LEVERAGED_AERO_VAULT:-0xf88F704023ED4f77769cB112B3FcBB4Cda8588E9}"
 # Optional: the vnet's PUBLIC (read-only) RPC — recorded into the emitted config for consumers.
 # NEVER put the admin RPC in the config; it accepts unlocked writes and lives in 1Password only.
 TENDERLY_VNET_PUBLIC_RPC_URL="${TENDERLY_VNET_PUBLIC_RPC_URL:-}"
@@ -126,10 +124,10 @@ REG="$(addr MAMO_STRATEGY_REGISTRY)"
 USDC="$(addr USDC)"
 MULTISIG="$(addr MAMO_MULTISIG)"
 DEPLOYER="$(addr DEPLOYER_EOA)"
-STRAT="$SHERWOOD_LEVERAGED_AERO_STRATEGY"
-VAULT="$SHERWOOD_SYNDICATE_VAULT"
+STRAT="$LEVERAGED_AERO_STRATEGY"
+VAULT="$LEVERAGED_AERO_VAULT"
 [ "$(ccall "$STRAT" 'vault()(address)' | field | tr 'A-Z' 'a-z')" = "$(echo "$VAULT" | tr 'A-Z' 'a-z')" ] \
-  || die "strategy.vault() != SHERWOOD_SYNDICATE_VAULT (env var name is stale; it holds the LeveragedAeroVault)"
+  || die "strategy.vault() != LEVERAGED_AERO_VAULT"
 ok "pooled layer wired: strategy=$STRAT vault=$VAULT state=$(ccall "$STRAT" 'state()(uint8)' | field)"
 # Which vault generation is under us? The in-repo LeveragedAeroVault exposes depositsOpen()
 # (+ redeemSettled); the pre-PR-#66 Sherwood SyndicateVault exposed openDeposits(). The account
@@ -195,7 +193,7 @@ assert_eq "factory hasRole(BACKEND_ROLE)"    "$(ccall "$REG" 'hasRole(bytes32,ad
 # $DEPOSITS_OPEN_SIG was resolved above from the live vault generation (depositsOpen vs openDeposits).
 assert_eq "vault deposits open"              "$(ccall "$VAULT" "$DEPOSITS_OPEN_SIG")" "true"
 assert_eq "factory.strategyTypeId()"         "$(ccall "$FACTORY" 'strategyTypeId()(uint256)' | field)" "5"
-assert_eq "factory.sherwoodStrategy()"       "$(ccall "$FACTORY" 'sherwoodStrategy()(address)' | field | tr A-Z a-z)" "$(echo "$STRAT" | tr A-Z a-z)"
+assert_eq "factory.leveragedAeroStrategy()"       "$(ccall "$FACTORY" 'leveragedAeroStrategy()(address)' | field | tr A-Z a-z)" "$(echo "$STRAT" | tr A-Z a-z)"
 assert_eq "factory.usdc()"                   "$(ccall "$FACTORY" 'usdc()(address)' | field | tr A-Z a-z)" "$(echo "$USDC" | tr A-Z a-z)"
 
 # ── Phase 4: e2e smoke with a fresh throwaway user ────────────────────────────
@@ -332,9 +330,8 @@ jq -n \
     strategyTypeId: 5,
     mamo: { accountImplementation: $impl, accountFactory: $factory, strategyRegistry: $registry },
     pooled: { strategyClone: $strategy, vault: $vault },
-    sherwood: { strategyClone: $strategy, syndicateVault: $vault },
     usdc: $usdc,
-    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh; sherwood is a deprecated alias of pooled, kept for existing consumers and due for removal. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
+    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66 removed the Sherwood dependency), written by run-leveraged-aero-stack.sh; mamo = the account layer, written by run-leveraged-aero-account.sh. Feeds on the shared instance are FreshFeed-mocked (never stale). Re-run the two harnesses after any refresh to regenerate.",
     vaultGeneration: $vaultGen,
     vaultGenerationName: $vaultGenName
   }' > "$CONFIG_JSON"

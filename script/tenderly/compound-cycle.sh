@@ -78,16 +78,18 @@ AERO_V2_FACTORY=0x420DD381b31aEf6683db6B902084cB0FFECe40Da
 NPM=0x827922686190790b37229fd06084350E74485b72
 
 # NB: keep in lockstep with LeveragedAerodromeCLStrategy.LayoutView — BOTH arity and field ORDER.
-# 51 fields. `uint16 skewBps` sits AFTER `legBIsAsset` — field 46, NOT next to the width band
-# (`width`/`minWidth`/`maxWidth`, 42/43/44) where you would expect it — and the skew GOVERNANCE BAND
-# (`uint16 minSkewBps`, `uint16 maxSkewBps`) follows it at 47/48, ahead of the two hedgedDebt fields
-# at 49/50 and `bytes32 stagedVenueHash` LAST at 51. A short or mis-ordered signature here makes
+# 48 fields. `uint16 skewBps` sits AFTER `legBIsAsset` — field 43, NOT next to the width band
+# (`width`/`minWidth`/`maxWidth`, 39/40/41) where you would expect it — and the skew GOVERNANCE BAND
+# (`uint16 minSkewBps`, `uint16 maxSkewBps`) follows it at 44/45, ahead of the two hedgedDebt fields
+# at 46/47 and `bytes32 stagedVenueHash` LAST at 48. A short or mis-ordered signature here makes
 # `cast call` fail to decode and every `lay N` read comes back empty — if `lay` starts returning
 # nothing, check this line FIRST; `forge inspect LeveragedAerodromeCLStrategy abi` is the authority.
 # (`lay N` is 1-BASED over the comma-split tuple, so field N == LayoutView member N-1. Appends land
-# at the END, but a REMOVAL shifts every later index down — dropping `protocolFeeOwed`, once field
-# 34, is why the tail numbers above are one lower than they used to be.)
-LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,uint16,address,uint256,uint256,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
+# at the END, but a REMOVAL shifts every later index down — the fee-layer swap dropped four fields
+# (`managementFeeBps`, `performanceFeeBps`, `hwmPerShare`, `lastFeeAccrualTimestamp`) and added one
+# (`compoundFeeBps` at 29, ahead of `feeRecipient` at 30), which is why the tail numbers above are
+# three lower than they used to be — 51 → 48.)
+LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,address,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
 
 c() { cast call --rpc-url "$RPC" "$@" 2>/dev/null; }
 num() { echo "${1%% *}"; }
@@ -313,27 +315,39 @@ cmd_warp_to_finish() {
 #   quote  = router.getAmountsOut(aeroBal, AERO→USDC volatile)    (what the venue will actually fill)
 # Pass minUsdcOut = max(floor, quote × (1 − slack)). It MUST be nonzero: `minUsdcOut == 0` reverts
 # ZeroMinOut() (0x2870c094) BEFORE the zero-AERO early return, so even a no-op harvest needs a floor.
+#
+# NET OF THE SKIM throughout. `compoundImpl` transfers `compoundFeeBps` (field 29) of the tranche to
+# `feeRecipient` PRE-SWAP and prices BOTH bounds on the remainder, so every number below is derived
+# from `sellAmt = claimable × (1e4 − compoundFeeBps)/1e4` — the amount the router actually receives.
+# Quoting the gross tranche instead overstates by that fraction and the router fires
+# InsufficientOutputAmount() (0x42301c23). The on-chain floor also divides by the USDC/USD peg leg
+# rather than assuming 1.00, so `floor` here approximates the bound rather than reproducing it.
 cmd_quote() {
-  local g tid earned bal price slip q claimable
+  local g tid earned bal price slip fee q claimable sell
   g="$(gauge)"; tid="$(num "$(tokenid)")"
   # NB: 18dp AERO amounts exceed bash's signed-64-bit arithmetic — do ALL the math in python.
   earned="$(num "$(c "$g" 'earned(address,uint256)(uint256)' "$STRAT" "$tid")")"
   bal="$(num "$(c "$AERO" 'balanceOf(address)(uint256)' "$STRAT")")"
   price="$(num "$(c "$AERO_FEED" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' | sed -n 2p)")"
   slip="$(num "$(lay 24)")"
+  fee="$(num "$(lay 29)")"
   claimable="$(python3 -c "print($earned+$bal)")"
+  sell="$(python3 -c "print(($claimable*(10000-$fee))//10000)")"
   q="$(c "$AERO_V2_ROUTER" 'getAmountsOut(uint256,(address,address,bool,address)[])(uint256[])' \
-        "$claimable" "[($AERO,$USDC,false,$AERO_V2_FACTORY)]" 2>/dev/null \
+        "$sell" "[($AERO,$USDC,false,$AERO_V2_FACTORY)]" 2>/dev/null \
         | tr -d '[]' | tr ',' '\n' | sed -n 2p | awk '{print $1}')"
-  python3 - "$earned" "$bal" "$price" "$slip" "${q:-0}" <<'PY'
+  python3 - "$earned" "$bal" "$price" "$slip" "${q:-0}" "$fee" <<'PY'
 import sys
-earned, bal, price, slip, q = (int(x) for x in sys.argv[1:6])
+earned, bal, price, slip, q, fee = (int(x) for x in sys.argv[1:7])
 claimable = earned + bal
-fair  = claimable * price // 10**20                  # manager step 2: mulDiv(aeroBal, price8, 1e20)
+sell  = claimable * (10000 - fee) // 10000           # manager step 2: the post-skim sell amount
+fair  = sell * price // 10**20                       # ~manager step 3 (peg-less approximation)
 floor = fair * (10000 - slip) // 10000               # BelowOracleFloor bound
 print(f"AERO earned (gauge)     {earned}   ({earned/1e18:,.6f} AERO)")
 print(f"AERO idle (strategy)    {bal}")
 print(f"AERO claimable total    {claimable}   ({claimable/1e18:,.6f} AERO)")
+print(f"compoundFeeBps          {fee}   (skim {claimable-sell} == {(claimable-sell)/1e18:,.6f} AERO)")
+print(f"AERO sold (post-skim)   {sell}   ({sell/1e18:,.6f} AERO)")
 print(f"AERO/USD (8dp)          {price}   (${price/1e8:.8f})")
 print(f"maxSlippageBps          {slip}")
 print(f"oracle fair (USDC 6dp)  {fair}   (${fair/1e6:,.6f})")
@@ -343,7 +357,7 @@ if fair:
     print(f"quote / oracle fair     {q/fair*100:.4f}%   (venue basis + v2 fee)")
     print(f"quote / floor           {q/floor*100:.4f}%   ({'PASSES' if q>=floor else 'WOULD REVERT BelowOracleFloor'})")
 sug = max(floor, q * 995 // 1000)
-print(f"SUGGESTED minUsdcOut    {sug}   (max(floor, quote−0.5%))")
+print(f"SUGGESTED minUsdcOut    {sug}   (max(floor, quote−0.5%), post-skim — use as-is)")
 PY
 }
 
@@ -600,12 +614,11 @@ cmd_snap() {
   echo "nav (USDC 6dp)        $(num "$(c "$STRAT" 'nav()(uint256)')")"
   echo "idle USDC             $(num "$(c "$USDC" 'balanceOf(address)(uint256)' "$STRAT")")"
   echo "idle AERO             $(num "$(c "$AERO" 'balanceOf(address)(uint256)' "$STRAT")")"
-  echo "hwmPerShare           $(num "$(lay 32)")"
-  echo "lastFeeAccrual        $(num "$(lay 33)")"
+  echo "compoundFeeBps        $(num "$(lay 29)")"
   echo "targetLtvBps          $(num "$(lay 21)")"
   echo "-- vault shares (12dp) --"
   echo "totalSupply           $(num "$(c "$VAULT" 'totalSupply()(uint256)')")"
-  echo "feeRecipient shares   $(num "$(c "$VAULT" 'balanceOf(address)(uint256)' "$(lay 31)")")"
+  echo "feeRecipient AERO     $(num "$(c "$AERO" 'balanceOf(address)(uint256)' "$(lay 30)")")"
   echo "-- venue --"
   echo "collateral/debt USDC  $(c --from "$STRAT" "$STRAT" 'previewCollateralDebt()(uint256,uint256)' | tr '\n' ' ')"
   local dbtA hedA hedB

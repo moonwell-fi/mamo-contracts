@@ -5,13 +5,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {FeeConstants} from "./sherwood/FeeConstants.sol";
-import {ICToken} from "./sherwood/interfaces/ICToken.sol";
-import {IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLGauge, ICLPool, ICLSwapRouter} from "./sherwood/interfaces/ISlipstream.sol";
-import {ChainlinkReader} from "./sherwood/libraries/ChainlinkReader.sol";
-import {LiquidityAmounts} from "./sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "./sherwood/libraries/TickMath.sol";
+import {ICToken} from "./interfaces/ICToken.sol";
+import {IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICLGauge, ICLPool, ICLSwapRouter} from "./interfaces/ISlipstream.sol";
+import {ChainlinkReader} from "./libraries/ChainlinkReader.sol";
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
+import {TickMath} from "./libraries/TickMath.sol";
 
 /// @dev Minimal Aerodrome v2 (AMM) Router — used for the `compound` AERO→USDC reward swap (see
 ///      `swapAeroToUsdc`). The Slipstream CL SwapRouter only serves CL pools, so the reward leg needs
@@ -72,7 +71,8 @@ interface IAeroV2Factory {
 ///                             Chainlink on the SAME basis as `debt` — so a borrowed leg is
 ///                             never uncounted and a single-position recenter is NAV-neutral.
 ///         - `reward`        = the reward already claimed into the strategy wallet PLUS the unclaimed
-///                             `gauge.earned()`, both priced via the venue's reward feed (`_rewardUsdc`).
+///                             `gauge.earned()`, both priced via the venue's reward feed and marked
+///                             NET of the `compoundFeeBps` harvest skim (`_rewardUsdc`).
 ///
 ///         The CL-leg split uses the oracle sqrtP (the Gamma/Arrakis technique) so the
 ///         mint mark cannot be tick-shoved; the same two feeds price the debt, so the
@@ -132,10 +132,11 @@ library LeveragedAeroValuation {
     error DeleverageTriggerAboveCF();
     /// @notice A non-zero fee rate with a zero recipient.
     error FeeRecipientRequired();
-    /// @notice Performance fee above the protocol-wide cap.
-    error PerformanceFeeTooHigh();
-    /// @notice Management fee above the factory's cap.
-    error ManagementFeeTooHigh();
+    /// @notice Harvest skim above `MAX_COMPOUND_FEE_BPS`.
+    error CompoundFeeTooHigh();
+    /// @notice `feeRecipient` is the clone itself — the skim would be a self-transfer, i.e. a silent
+    ///         no-op on an init-only field with no setter to fix it.
+    error FeeRecipientIsStrategy();
     /// @notice `Comptroller.markets()` failed, returned short, or reported a zero collateral factor.
     error ComptrollerCallFailed();
 
@@ -148,8 +149,9 @@ library LeveragedAeroValuation {
     /// @dev Chainlink USD feeds on Base are 8-decimal; assumed for the USD→USDC scaling.
     uint256 private constant USD_FEED_DECIMALS = 8;
 
-    /// @dev Annual management-fee ceiling (bps) for `checkFeeParams`; mirrors `SyndicateFactory` (5%/yr).
-    uint16 private constant MAX_MANAGEMENT_FEE_BPS = 500;
+    /// @notice Ceiling on the in-kind harvest skim, in bps (10%) — mirrors `MamoMultiMarketStrategy`'s
+    ///         `MAX_COMPOUND_FEE`, the same shape this fee copies. Enforced at init by `checkFeeParams`.
+    uint16 internal constant MAX_COMPOUND_FEE_BPS = 1000;
 
     /// @dev Reference liquidity for the `assetModeSplit` ratio probe. Only the RATIO of the two
     ///      required amounts matters (both are linear in L for a fixed range + sqrtP, so L cancels),
@@ -185,6 +187,7 @@ library LeveragedAeroValuation {
         uint256 gracePeriod; // sequencer grace period (seconds)
         uint16 calmDeviationTicks; // max |spotTick − twapTick| before fail-closed
         uint32 twapWindow; // calm-gate TWAP lookback (seconds)
+        uint16 compoundFeeBps; // `Layout.compoundFeeBps` — haircuts the reward term (see `_rewardUsdc`)
     }
 
     /// @notice The net-equity oracle NAV of the whole levered book, in USDC (6dp).
@@ -365,13 +368,16 @@ library LeveragedAeroValuation {
         if (maxSlippageBps == 0 || maxSlippageBps > 1000) revert OracleParamOutOfRange();
     }
 
-    /// @notice The INIT-ONLY fee rungs: a non-zero rate needs a recipient, and M3 caps both rates.
-    function checkFeeParams(uint16 managementFeeBps, uint16 performanceFeeBps, address feeRecipient) public pure {
-        if ((managementFeeBps != 0 || performanceFeeBps != 0) && feeRecipient == address(0)) {
-            revert FeeRecipientRequired();
-        }
-        if (performanceFeeBps > FeeConstants.MAX_PERFORMANCE_FEE_BPS) revert PerformanceFeeTooHigh();
-        if (managementFeeBps > 500) revert ManagementFeeTooHigh();
+    /// @notice The INIT-ONLY fee rung: a non-zero skim needs a recipient, the skim is capped, and the
+    ///         recipient is not the clone itself.
+    /// @dev A zero skim with a zero recipient stays legal (a fee-free clone). This runs under
+    ///      `initialize`'s DELEGATECALL, so `address(this)` IS the clone: a recipient equal to it would
+    ///      make every skim a self-transfer — the fee silently never leaves, on a field with no setter.
+    ///      `view`, not `pure`, only because of that `address(this)` read.
+    function checkFeeParams(uint16 compoundFeeBps, address feeRecipient) public view {
+        if (compoundFeeBps != 0 && feeRecipient == address(0)) revert FeeRecipientRequired();
+        if (compoundFeeBps > MAX_COMPOUND_FEE_BPS) revert CompoundFeeTooHigh();
+        if (feeRecipient == address(this)) revert FeeRecipientIsStrategy();
     }
 
     /// @notice THE ONE PREDICATE validating a `(width, skewBps)` pair before `skewedTickRange` consumes it
@@ -993,17 +999,26 @@ library LeveragedAeroValuation {
     ///      revert on a reward probe) and `_earnedRead` / `rewardReadOk` make it observable.
     ///      Gated on the SUM, since `earned()` is non-zero with a zero balance in the steady state.
     ///      FAIL-CLOSED on a stale reward feed while there IS reward value — valuing it at 0 would re-create
-    ///      the mis-pricing this term closes. Accepted consequences: a stale reward feed blocks deposits and
-    ///      the priced fast redeem until `compound` clears both halves (the async queue never reads `nav()`),
-    ///      and the performance fee accrues against unrealised reward value.
+    ///      the mis-pricing this term closes. Accepted consequence: a stale reward feed blocks deposits and
+    ///      the priced fast redeem until `compound` clears both halves (the async queue never reads `nav()`).
     ///      DECIMALS are pinned at 18, matching the `1e18` divisor `compoundImpl` / `_sellRewardBalance`
     ///      apply; `applyVenue` enforces that at init and at every migration and rejects a reward token
     ///      equal to either leg. `c.rewardFeed` is the SAME `Layout.aeroUsdFeed` the sale floor uses.
+    ///
+    ///      MARKED NET OF `compoundFeeBps` (floored, as `compoundImpl`'s own skim rounds): every path that
+    ///      realizes a tranche skims in kind first, so only that fraction can reach the book.
+    ///      Gross made navPerShare step DOWN at each harvest — an exit timed just before one dodged its
+    ///      share of the fee onto the stayers.
+    ///      THE MARK MATCHES REALIZATION ON EVERY LIVE PATH: `compound`, `flatten` and the async redeem all
+    ///      skim (`LeveragedAeroVenue._sellRewardBalance`), so an understated navPre can no longer over-mint
+    ///      a depositor against a gross realization. The only residual asymmetry is the TERMINAL settle,
+    ///      which realizes gross — holder-favourable, and the fund is ending.
     function _rewardUsdc(Config memory c, address strategy, uint256 pUsdc) private view returns (uint256) {
         uint256 amt = IERC20(ICLGauge(c.gauge).rewardToken()).balanceOf(strategy);
         (uint256 e,) = _earnedRead(c.gauge, strategy, c.tokenId);
         amt += e;
         if (amt == 0) return 0;
+        amt = Math.mulDiv(amt, 10_000 - uint256(c.compoundFeeBps), 10_000);
         return _usdcValue(amt, 18, _readUsd8(c, c.rewardFeed), pUsdc);
     }
 

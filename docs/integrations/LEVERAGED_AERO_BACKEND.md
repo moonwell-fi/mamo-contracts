@@ -41,10 +41,11 @@ surface) is **not** a backend touchpoint: every one of those is `onlyProposer`, 
   custodied by each account, never handled by users.
 - The account is `onlyOwner` for user actions; the backend's contract-level responsibilities are
   **account provisioning** and the optional **`depositIdle` nudge** — that is all.
-- **Legacy naming, unchanged ABI:** the account still exposes `sherwoodStrategy()` and the initializer
-  guard `"Invalid sherwoodStrategy address"`; the address-book key is still
-  `SHERWOOD_LEVERAGED_AERO_STRATEGY`. Historical names — they point at the in-repo
-  `LeveragedAerodromeCLStrategy` clone. Nothing on this integration surface was renamed or resigned.
+- **Naming (renamed pre-mainnet):** the account's strategy pointer is the public getter
+  `leveragedAeroStrategy()` and the initializer guard is `"Invalid leveragedAeroStrategy address"`;
+  the address-book key is `LEVERAGED_AERO_STRATEGY`. It points at the in-repo
+  `LeveragedAerodromeCLStrategy` clone. The former `sherwood*` spellings are gone — this ABI break
+  landed before the first mainnet deployment, so no live integration is affected.
 
 ---
 
@@ -400,13 +401,13 @@ Account (`require` strings): `"Amount must be greater than 0"`, `"Insufficient i
 `"Not owner or backend"`, `"No shares to withdraw"`, `"No USDC to claim"`; OZ
 `OwnableUnauthorizedAccount(address)` for `onlyOwner` misuse; initializer strings
 `"Invalid mamoStrategyRegistry address"`, `"Strategy type id not set"`, `"Invalid owner address"`,
-`"Invalid sherwoodStrategy address"`, `"Invalid usdc address"`, `"Invalid vault address"`.
+`"Invalid leveragedAeroStrategy address"`, `"Invalid usdc address"`, `"Invalid vault address"`.
 
 Factory: `"Invalid user address"`, `"Only backend or user can create strategy"`,
 `"Strategy already exists"` (plus constructor guards `"Invalid admin address"`,
 `"Invalid mamoBackend address"`, `"Invalid mamoStrategyRegistry address"`,
 `"Invalid strategyImplementation address"`, `"Implementation must be a contract"`,
-`"Strategy type id not set"`, `"Invalid sherwoodStrategy address"`, `"Invalid usdc address"`).
+`"Strategy type id not set"`, `"Invalid leveragedAeroStrategy address"`, `"Invalid usdc address"`).
 
 Strategy (custom errors, decode by selector): `NotExecuted()`,
 `FastRedeemExceedsLtv(uint256 ltvBps, uint256 maxLtvBps)`, `FulfillWindowOpen()`, `RequestSettled()`,

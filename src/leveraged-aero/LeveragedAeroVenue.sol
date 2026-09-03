@@ -4,9 +4,9 @@ pragma solidity 0.8.28;
 import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "./LeveragedAerodromeCLStrategy.sol";
-import {IAggregatorV3} from "./sherwood/interfaces/IAggregatorV3.sol";
-import {ICToken, IComptroller, IMoonwellMarket} from "./sherwood/interfaces/IMoonwellMarket.sol";
-import {ICLFactory, ICLGauge, ICLPool} from "./sherwood/interfaces/ISlipstream.sol";
+import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
+import {ICToken, IComptroller, IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICLFactory, ICLGauge, ICLPool} from "./interfaces/ISlipstream.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -54,6 +54,9 @@ library LeveragedAeroVenue {
     event VenueStaged(bytes32 venueHash);
     /// @notice The whole book was unwound to idle USDC without settling (strategy stays Executed).
     event Flattened(uint256 idleUsdc);
+    /// @notice `aeroAmount` of a realized reward tranche was skimmed to `recipient`, in AERO (18dp).
+    ///         Re-declared with `LeveragedAeroManager`'s signature (same `topic0`): ONE fee, ONE address.
+    event RewardFeePaid(address indexed recipient, uint256 aeroAmount);
     /// @notice The staged venue rewrite executed on a flat book.
     event VenueMigrated(address indexed oldPool, address indexed newPool);
     /// @notice The fund's STANDING target LTV changed as a side effect of writing a venue — at init, and
@@ -148,12 +151,9 @@ library LeveragedAeroVenue {
         uint256 tokenId; // active CL position; 0 == flat book
         int24 posTickLower;
         int24 posTickUpper;
-        // fee params + state
-        uint16 managementFeeBps;
-        uint16 performanceFeeBps;
+        // fee params
+        uint16 compoundFeeBps; // in-kind skim of each harvested AERO tranche, bps
         address feeRecipient;
-        uint256 hwmPerShare; // HWM nav-per-share (1e18 WAD), 0 until first deposit
-        uint256 lastFeeAccrualTimestamp;
         // ── appended for the L9 compound oracle floor (keep byte-identical in the strategy/manager) ──
         address aeroUsdFeed; // AERO/USD aggregator (8dp) — floors compound()'s AERO→USDC swap
         // ── appended for the escrowed async-redeem queue (keep byte-identical) ──
@@ -359,23 +359,15 @@ library LeveragedAeroVenue {
         } catch {
             return (0, false);
         }
-        // Simulate the pending crystallise the executed `redeem` performs, in a try/catch so a revert
-        // degrades to `(0, false)` symmetrically with the other preview failure modes.
-        uint256 supplyPost;
-        try self.simulateCrystallizeSelf(navPre, supply) returns (uint256 sp) {
-            supplyPost = sp;
-        } catch {
-            return (0, false);
-        }
-        assetsOut = Math.mulDiv(shares, navPre, supplyPost);
+        assetsOut = Math.mulDiv(shares, navPre, supply);
         // Mirror `redeem`'s `ZeroAssetsOut` guard: never quote a payout the executed path would revert on.
         if (assetsOut == 0) return (0, false);
-        // Mirror the executed full-redeem flat-book guard, on the same post-crystallise predicate the
-        // strategy computes: a full fast redeem of a book with a live LP is always refused, so advise async.
-        if (shares == supplyPost && _layout().tokenId != 0) return (assetsOut, false);
+        // Mirror the executed full-redeem flat-book guard: a full fast redeem of a book with a live LP is
+        // always refused, so advise async.
+        if (shares == supply && _layout().tokenId != 0) return (assetsOut, false);
         // Idle-first (mirror `fastRedeemImpl`): the gate only sees the collateral-funded remainder.
         uint256 idle = IERC20(_layout().usdc).balanceOf(address(this));
-        uint256 idleShare = Math.mulDiv(idle, shares, supplyPost);
+        uint256 idleShare = Math.mulDiv(idle, shares, supply);
         uint256 fromCollateral = _fromCollateral(assetsOut, idleShare, idle);
         if (fromCollateral == 0) return (assetsOut, true); // idle alone covers it — no LTV constraint
         // Predict the executed gate by RUNNING it: `_fastGate` is the same function `fastRedeemImpl`
@@ -462,7 +454,7 @@ library LeveragedAeroVenue {
         // Sell the tranche the unwind's `gauge.withdraw` auto-claimed: on a flat book it is invisible to
         // `nav()`, unsellable (`compound` early-returns) and un-rescuable while Executed, so every deposit
         // and redeem in the flat window would price against an understated NAV.
-        _sellRewardBalance(minRewardUsdcOut, true);
+        _sellRewardBalance(minRewardUsdcOut, true, true);
         // Same belt as `_settle`: `_repay`'s clamp drives the bases to 0 unless residual debt could not be
         // covered at all — zero them explicitly so no stale hedge basis reaches the next venue.
         $.hedgedDebtA = 0;
@@ -483,8 +475,9 @@ library LeveragedAeroVenue {
     ///      leaving the balance unsold rather than sold blind). `flattenImpl` takes it fail-closed instead
     ///      because it is RESUMABLE, whereas a hard revert on a terminal settle or the deadman redeem would
     ///      turn a value guard into a fund freeze.
-    function sellRewardImpl() public {
-        _sellRewardBalance(0, false);
+    /// @param skim Pay the fund's fee: TRUE for the async redeem, FALSE for the terminal settle.
+    function sellRewardImpl(bool skim) public {
+        _sellRewardBalance(0, false, skim);
     }
 
     /// @dev Floored exactly as `compoundImpl`'s harvest is: `max(caller minOut, oracle floor)`, the floor a
@@ -495,7 +488,9 @@ library LeveragedAeroVenue {
     /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
     /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error: TRUE for `flatten`,
     ///        FALSE for the terminal settle, which has no argument to supply.
-    function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired) private {
+    /// @param skim Pay the fund's fee out of this sale — TRUE for `flatten` and the async redeem, both of
+    ///        which realize the WHOLE book's accrual; FALSE for the terminal settle. See `compoundImpl`.
+    function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired, bool skim) private {
         Layout storage $ = _layout();
         address rewardTok = ICLGauge($.gauge).rewardToken();
         uint256 bal = IERC20(rewardTok).balanceOf(address(this));
@@ -505,20 +500,33 @@ library LeveragedAeroVenue {
         // reward-feed staleness. `REWARD_PRICE_CEILING_USD8` substitutes a price no live read could exceed
         // (peg divisor included), so this only skips balances the priced check would also skip.
         if (bal < 1e20 / REWARD_PRICE_CEILING_USD8) return;
+        // THE FUND'S FEE, IN KIND, sized (rounding DOWN) ahead of every bound below exactly as
+        // `compoundImpl` sizes it, so both floors price only what really reaches the router.
+        uint256 feeAmt = skim ? Math.mulDiv(bal, uint256($.compoundFeeBps), 10_000) : 0;
+        uint256 sellAmt = bal - feeAmt;
         // PEG LEG, not `/1e20` (same fix as `LeveragedAeroManager.compoundImpl`): the floor is post-checked
         // against `usdcOut`, a USDC-FACE fill, so the USD value must be divided by the USDC/USD price rather
         // than an assumed 1.00 — below peg a lax floor, above peg an UNCLEARABLE one that bricks `flatten`.
         uint256 pUsdc8 = LeveragedAeroValuation.readUsd8($.usdcFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod);
         uint256 floor = Math.mulDiv(
             Math.mulDiv(
-                bal, LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod), 1e18
+                sellAmt,
+                LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod),
+                1e18
             ),
             1e6,
             pUsdc8
         ) * (10000 - uint256($.maxSlippageBps)) / 10000;
         if (floor == 0) return; // dust: unsellable, and worth strictly less than one NAV unit
         if (callerFloorRequired && minRewardUsdcOut == 0) revert ZeroMinOut();
-        uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(rewardTok, $.usdc, bal, minRewardUsdcOut);
+        // Behind both gates, as `compoundImpl` keeps its own: a no-op sale must pay nothing. A plain
+        // transfer reading no oracle, so the must-complete redeem paths gain no new revert path.
+        if (feeAmt > 0) {
+            address recipient = $.feeRecipient;
+            IERC20(rewardTok).safeTransfer(recipient, feeAmt);
+            emit RewardFeePaid(recipient, feeAmt);
+        }
+        uint256 usdcOut = LeveragedAeroValuation.swapAeroToUsdc(rewardTok, $.usdc, sellAmt, minRewardUsdcOut);
         if (usdcOut < floor) revert BelowOracleFloor();
     }
 
@@ -805,11 +813,8 @@ library LeveragedAeroVenue {
         v.tokenId = $.tokenId;
         v.posTickLower = $.posTickLower;
         v.posTickUpper = $.posTickUpper;
-        v.managementFeeBps = $.managementFeeBps;
-        v.performanceFeeBps = $.performanceFeeBps;
+        v.compoundFeeBps = $.compoundFeeBps;
         v.feeRecipient = $.feeRecipient;
-        v.hwmPerShare = $.hwmPerShare;
-        v.lastFeeAccrualTimestamp = $.lastFeeAccrualTimestamp;
         v.aeroUsdFeed = $.aeroUsdFeed;
         v.nextRedeemRequestId = $.nextRedeemRequestId;
         v.cbBTCDecimals = $.cbBTCDecimals;

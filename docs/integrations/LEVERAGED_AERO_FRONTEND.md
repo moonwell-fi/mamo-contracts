@@ -41,10 +41,10 @@ for the frontend — the account wraps them and exposes a USDC-in / USDC-out sur
   can precompute before it exists.
 - `account.owner() == user`. Every state-changing user action is `onlyOwner`; the user's wallet signs
   directly against their own account.
-- **Legacy naming, unchanged ABI:** the account's strategy pointer is still the public getter
-  `sherwoodStrategy()` (and the initializer guard `"Invalid sherwoodStrategy address"`). The name is
-  historical — it points at the in-repo `LeveragedAerodromeCLStrategy` clone. Keep it as-is in
-  ABIs/typings; nothing on the account's integration surface was renamed.
+- **Naming (renamed pre-mainnet):** the account's strategy pointer is the public getter
+  `leveragedAeroStrategy()` (initializer guard `"Invalid leveragedAeroStrategy address"`). It points at
+  the in-repo `LeveragedAerodromeCLStrategy` clone. Regenerate ABIs/typings if you pinned the former
+  `sherwoodStrategy()` spelling — that break landed before the first mainnet deployment.
 
 ---
 
@@ -177,15 +177,20 @@ function owner() external view returns (address);
   that arrived some other way (a plain transfer to the account, a deposit remainder), and
   `claimWithdrawnUsdc()` sweeps it. Normally zero; surface it only when non-zero.
 
-> **Never cache a quote across blocks.** Fees crystallize inside user transactions and supply/NAV move,
-> so `previewWithdraw` and any derived `minShares` / `minAssetsOut` must come from a fresh read in the
-> same UX step as the tx.
+> **Never cache a quote across blocks.** NAV and supply move every block, so `previewWithdraw` and any
+> derived `minShares` / `minAssetsOut` must come from a fresh read in the same UX step as the tx.
 
-> **Fees at launch — don't promise what isn't charged.** The **management** and **performance** fees
-> are the only fee legs, and they are the strategy clone's own init params — read
-> `managementFeeBps` / `performanceFeeBps` off the strategy's `layout()` instead of
-> hardcoding a schedule in copy, and treat any "APY net of fees" display as moot for whichever legs read
-> zero.
+> **Fees at launch — don't promise what isn't charged.** There is exactly ONE fee leg: a **5% in-kind
+> skim of each AERO tranche the fund realizes**, paid to `feeRecipient` in AERO and logged as
+> `RewardFeePaid(recipient, aeroAmount)`. It is charged wherever the tranche is actually converted —
+> `compound`, `flatten`, and the async-redeem fulfilment, whose own unwind auto-claims it — and waived only
+> on the fund's terminal `settle`. Nothing is deducted
+> from a deposit or a payout, and no fee shares are ever minted, so a share balance is never diluted by a
+> fee. The one place it reaches a user-facing number is NAV, which marks *pending* AERO net of the skim so
+> that neither entering nor exiting around a harvest is worth timing — quotes are therefore already
+> fee-correct and need no adjustment of your own. Read `compoundFeeBps` off the strategy's `layout()`
+> instead of hardcoding a schedule in copy (`0` means a fee-free clone), and describe it as a haircut on
+> **yield**, which is what "APY net of fees" already reflects.
 
 ### Describing the position — don't hardcode "cbBTC + ETH"
 

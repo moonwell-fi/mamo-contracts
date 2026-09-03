@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy.sol";
+import {IStrategy} from "@contracts/leveraged-aero/interfaces/IStrategy.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -56,7 +56,7 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice The single bound {LeveragedAerodromeCLStrategy} clone. Set once, never rotated.
     address public strategy;
 
-    /// @notice Gates {strategyMint}. False blocks all new share issuance (deposits + fee-shares).
+    /// @notice Gates {strategyMint}. False blocks all new share issuance.
     bool public depositsOpen;
 
     /// @notice Set by {settleStrategy}; unlocks {redeemSettled}. One-way.
@@ -65,8 +65,10 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice FUND CAPACITY: ceiling on the strategy's total NAV, in USDC (6dp), over the whole book,
     ///         not a per-user limit. `0` (the deploy default) == UNLIMITED; {depositsOpen} freezes.
     /// @dev Enforced in the strategy's `deposit` (pre-deposit, against the pre-deposit NAV; crossing
-    ///      deposits rejected, not trimmed), NOT in {strategyMint} — that also serves
-    ///      best-effort FEE-SHARE mints, which capacity must never gate or fees defer forever.
+    ///      deposits rejected, not trimmed), NOT in {strategyMint} — a fund ceiling belongs on the one
+    ///      path that takes capital, not on the issuance primitive.
+    /// @dev The strategy's fee is an IN-KIND skim of the harvested reward tranche, so no fee path mints
+    ///      shares and the ceiling has no fee interaction to reason about.
     uint256 public maxTotalAssets;
 
     // ==================== EVENTS ====================
@@ -119,13 +121,12 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     // ==================== STRATEGY SHARE HOOKS ====================
 
     /**
-     * @notice Mint `shares` to `to`. Called by the strategy on an LP deposit and on a fee-share
-     *         crystallise.
+     * @notice Mint `shares` to `to`. Called by the strategy on an LP deposit — its one and only caller.
      * @dev The `msg.sender == strategy` check is the SOLE protection against arbitrary share
      *      inflation — this contract performs no pricing of its own and takes the strategy's share
-     *      count on faith. Gated on {depositsOpen} so the owner can freeze issuance (which also
-     *      defers fee-share mints; the strategy's crystallise is best-effort and tolerates the
-     *      revert).
+     *      count on faith. Gated on {depositsOpen} so the owner can freeze issuance: a clean freeze
+     *      with no fee side effect, since the fund's only fee is the strategy's in-kind AERO skim at
+     *      harvest and nothing mints shares to a fee recipient.
      */
     function strategyMint(address to, uint256 shares) external {
         require(msg.sender == strategy, "LAV: only strategy");
@@ -217,8 +218,8 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
     /// @notice ADVISORY: the shares a deposit of `assets` USDC (6dp) would mint at CURRENT pricing —
     ///         the canonical assets->shares conversion for UI and slippage (`minShares`) sizing.
     /// @dev Point-in-time, not a peg; reverts when NAV is unpriceable, like the deposit's own
-    ///      `NavUnpriceable`. A LOWER bound, not upper: `deposit`'s post-crystallise supply is `>=`
-    ///      this one, so the real mint is `>=` this figure.
+    ///      `NavUnpriceable`. EXACT, not a bound: nothing mints between the preview and the deposit,
+    ///      so the real mint equals this figure at unchanged NAV and supply.
     function previewSharesForAssets(uint256 assets) external view returns (uint256 shares) {
         require(strategy != address(0), "LAV: strategy unset");
         uint256 supply = totalSupply();
@@ -314,8 +315,8 @@ contract LeveragedAeroVault is ERC20, Ownable2Step {
      *        the {redeemSettled} pot. The test is `totalSupply() == balanceOf(address(this))`, not
      *        `totalSupply() == 0`, which one wei of dead-weight shares sent here would brick forever;
      *        strategy-escrowed shares still count as external and hold the gate shut.
-     *      - The vault's OWN share token is never rescuable: a share balance here is an un-burned claim
-     *        or a fee-share mint, so sweeping it would exfiltrate depositor value.
+     *      - The vault's OWN share token is never rescuable: a share balance here is an un-burned claim,
+     *        so sweeping it would exfiltrate depositor value.
      */
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "LAV: invalid recipient");

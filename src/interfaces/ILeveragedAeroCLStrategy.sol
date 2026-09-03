@@ -3,22 +3,22 @@ pragma solidity 0.8.28;
 
 /**
  * @title ILeveragedAeroCLStrategy
- * @notice Minimal interface for the vendored Sherwood {LeveragedAerodromeCLStrategy}, exposing
+ * @notice Minimal interface for the vendored {LeveragedAerodromeCLStrategy}, exposing
  *         exactly the entrypoints and views that {MamoLeveragedAeroStrategy} drives externally.
  * @dev Signatures are verified byte-for-byte against
  *      `src/leveraged-aero/LeveragedAerodromeCLStrategy.sol` and its base
- *      `src/leveraged-aero/sherwood/BaseStrategy.sol`. This interface is intentionally NOT the full
+ *      `src/leveraged-aero/BaseStrategy.sol`. This interface is intentionally NOT the full
  *      strategy surface: it omits proposer-only ops (deployIdle / compound / rerange / adjustLeverage /
  *      fulfillRedeem), the settle/execute lifecycle, and the diamond-storage views. Importing the
  *      concrete contract would drag in the entire vendored dependency tree, so the wrapper depends on
  *      this narrow interface instead.
  *
  *      The vault (share ERC-20) is deliberately not typed here: the wrapper reads/approves shares via
- *      the OpenZeppelin `IERC20` returned by {vault}, since the vendored `ISyndicateVault` does not
+ *      the OpenZeppelin `IERC20` returned by {vault}, since the vendored `ILeveragedAeroVault` does not
  *      extend `IERC20`.
  */
 interface ILeveragedAeroCLStrategy {
-    /// @notice Strategy lifecycle state. Ordering MUST match Sherwood's `BaseStrategy.State`.
+    /// @notice Strategy lifecycle state. Ordering MUST match the vendored `BaseStrategy.State`.
     enum State {
         Pending, // 0
         Executed, // 1
@@ -26,7 +26,7 @@ interface ILeveragedAeroCLStrategy {
 
     }
 
-    /// @notice An escrowed async-redeem request; field order MUST match Sherwood's
+    /// @notice An escrowed async-redeem request; field order MUST match the vendored
     ///         `LeveragedAerodromeCLStrategy.RedeemRequest`, which it is ABI-decoded from.
     struct RedeemRequest {
         address owner; // the only address that can cancel / emergency-redeem it

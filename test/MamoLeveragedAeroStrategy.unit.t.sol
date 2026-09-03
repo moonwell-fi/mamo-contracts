@@ -9,7 +9,7 @@ import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {ILeveragedAeroCLStrategy} from "@interfaces/ILeveragedAeroCLStrategy.sol";
 
 import {MockLeveragedAeroCLStrategy} from "./mocks/MockLeveragedAeroCLStrategy.sol";
-import {MockSyndicateVault} from "./mocks/MockSyndicateVault.sol";
+import {MockLeveragedAeroVault} from "./mocks/MockLeveragedAeroVault.sol";
 import {MockToken} from "./mocks/MockToken.sol";
 
 import {Test} from "@forge-std/Test.sol";
@@ -18,7 +18,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /**
  * @title MamoLeveragedAeroStrategy unit tests
  * @notice Fork-free unit suite (runs under `make test-unit`) for the per-user wrapper account and its
- *         factory, exercised against mocks of the (undeployed) Sherwood vault + strategy.
+ *         factory, exercised against mocks of the pooled vault + strategy.
  */
 contract MamoLeveragedAeroStrategyUnitTest is Test {
     // ---- events mirrored from the production contracts (for vm.expectEmit) ----
@@ -41,8 +41,8 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     address public thirdParty = makeAddr("thirdParty");
 
     MockToken public usdc;
-    MockSyndicateVault public vault;
-    MockLeveragedAeroCLStrategy public sherwood;
+    MockLeveragedAeroVault public vault;
+    MockLeveragedAeroCLStrategy public leveragedAero;
     MamoStrategyRegistry public registry;
     MamoLeveragedAeroStrategy public impl;
     MamoLeveragedAeroStrategyFactory public factory;
@@ -54,9 +54,9 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
     function setUp() public {
         usdc = new MockToken("USD Coin", "USDC", 6);
-        vault = new MockSyndicateVault();
-        sherwood = new MockLeveragedAeroCLStrategy(address(vault), address(usdc));
-        vault.setStrategy(address(sherwood));
+        vault = new MockLeveragedAeroVault();
+        leveragedAero = new MockLeveragedAeroCLStrategy(address(vault), address(usdc));
+        vault.setStrategy(address(leveragedAero));
 
         registry = new MamoStrategyRegistry(admin, backend, guardian);
 
@@ -66,7 +66,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         typeId = registry.whitelistImplementation(address(impl), 0);
 
         factory = new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(registry), address(impl), typeId, address(sherwood), address(usdc)
+            admin, backend, address(registry), address(impl), typeId, address(leveragedAero), address(usdc)
         );
 
         vm.prank(admin);
@@ -146,28 +146,28 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     function testConstructorZeroAdminReverts() public {
         vm.expectRevert("Invalid admin address");
         new MamoLeveragedAeroStrategyFactory(
-            address(0), backend, address(registry), address(impl), typeId, address(sherwood), address(usdc)
+            address(0), backend, address(registry), address(impl), typeId, address(leveragedAero), address(usdc)
         );
     }
 
     function testConstructorZeroBackendReverts() public {
         vm.expectRevert("Invalid mamoBackend address");
         new MamoLeveragedAeroStrategyFactory(
-            admin, address(0), address(registry), address(impl), typeId, address(sherwood), address(usdc)
+            admin, address(0), address(registry), address(impl), typeId, address(leveragedAero), address(usdc)
         );
     }
 
     function testConstructorZeroRegistryReverts() public {
         vm.expectRevert("Invalid mamoStrategyRegistry address");
         new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(0), address(impl), typeId, address(sherwood), address(usdc)
+            admin, backend, address(0), address(impl), typeId, address(leveragedAero), address(usdc)
         );
     }
 
     function testConstructorZeroImplementationReverts() public {
         vm.expectRevert("Invalid strategyImplementation address");
         new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(registry), address(0), typeId, address(sherwood), address(usdc)
+            admin, backend, address(registry), address(0), typeId, address(leveragedAero), address(usdc)
         );
     }
 
@@ -180,19 +180,19 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
         vm.expectRevert("Implementation must be a contract");
         new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(registry), eoa, typeId, address(sherwood), address(usdc)
+            admin, backend, address(registry), eoa, typeId, address(leveragedAero), address(usdc)
         );
     }
 
     function testConstructorZeroTypeIdReverts() public {
         vm.expectRevert("Strategy type id not set");
         new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(registry), address(impl), 0, address(sherwood), address(usdc)
+            admin, backend, address(registry), address(impl), 0, address(leveragedAero), address(usdc)
         );
     }
 
-    function testConstructorZeroSherwoodReverts() public {
-        vm.expectRevert("Invalid sherwoodStrategy address");
+    function testConstructorZeroLeveragedAeroStrategyReverts() public {
+        vm.expectRevert("Invalid leveragedAeroStrategy address");
         new MamoLeveragedAeroStrategyFactory(
             admin, backend, address(registry), address(impl), typeId, address(0), address(usdc)
         );
@@ -201,7 +201,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     function testConstructorZeroUsdcReverts() public {
         vm.expectRevert("Invalid usdc address");
         new MamoLeveragedAeroStrategyFactory(
-            admin, backend, address(registry), address(impl), typeId, address(sherwood), address(0)
+            admin, backend, address(registry), address(impl), typeId, address(leveragedAero), address(0)
         );
     }
 
@@ -221,7 +221,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(strategy.sharesBalance(), EXPECTED_SHARES, "wrapper share balance");
         assertEq(vault.balanceOf(address(strategy)), EXPECTED_SHARES, "vault share balance");
         assertEq(usdc.balanceOf(user), 0, "USDC pulled");
-        assertEq(usdc.balanceOf(address(sherwood)), DEPOSIT, "USDC held by sherwood");
+        assertEq(usdc.balanceOf(address(leveragedAero)), DEPOSIT, "USDC held by leveragedAero");
     }
 
     function testDepositPermissionlessFromThirdParty() public {
@@ -247,17 +247,17 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         _fundAndApprove(user, address(strategy), DEPOSIT);
 
         vm.prank(user);
-        vm.expectRevert("MockSherwood: min shares");
+        vm.expectRevert("MockLeveragedAero: min shares");
         strategy.deposit(DEPOSIT, EXPECTED_SHARES + 1);
     }
 
     function testDepositWhilePendingReverts() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
-        sherwood.setState(ILeveragedAeroCLStrategy.State.Pending);
+        leveragedAero.setState(ILeveragedAeroCLStrategy.State.Pending);
         _fundAndApprove(user, address(strategy), DEPOSIT);
 
         vm.prank(user);
-        vm.expectRevert("MockSherwood: not executed");
+        vm.expectRevert("MockLeveragedAero: not executed");
         strategy.deposit(DEPOSIT, 0);
     }
 
@@ -324,7 +324,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy first = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT); // capacity == exactly one DEPOSIT
         _deposit(first, user, DEPOSIT); // fund now full
-        sherwood.setNav(DEPOSIT);
+        leveragedAero.setNav(DEPOSIT);
 
         MamoLeveragedAeroStrategy second = _createStrategy(thirdParty);
         usdc.mint(thirdParty, DEPOSIT);
@@ -343,7 +343,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT);
         _deposit(strategy, user, DEPOSIT); // fund now full
-        sherwood.setNav(DEPOSIT);
+        leveragedAero.setNav(DEPOSIT);
 
         usdc.mint(address(strategy), DEPOSIT);
 
@@ -388,7 +388,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     function testLoweringCapacityDoesNotTrapExistingHolders() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT * 4);
-        sherwood.setNav(DEPOSIT * 4);
+        leveragedAero.setNav(DEPOSIT * 4);
 
         vault.setMaxTotalAssets(DEPOSIT); // now far below the live book
 
@@ -404,11 +404,11 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy first = _createStrategy(user);
         vault.setMaxTotalAssets(DEPOSIT);
         _deposit(first, user, DEPOSIT);
-        sherwood.setNav(DEPOSIT); // full
+        leveragedAero.setNav(DEPOSIT); // full
 
         vm.prank(user);
         first.withdrawAll(0);
-        sherwood.setNav(0); // the book emptied out
+        leveragedAero.setNav(0); // the book emptied out
 
         MamoLeveragedAeroStrategy second = _createStrategy(thirdParty);
         _deposit(second, thirdParty, DEPOSIT);
@@ -469,7 +469,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        sherwood.fulfillRedeem(id, 0);
+        leveragedAero.fulfillRedeem(id, 0);
         assertEq(usdc.balanceOf(address(strategy)), 0, "no window: nothing rests on the wrapper");
         assertEq(usdc.balanceOf(user), DEPOSIT, "the owner already has it");
         assertEq(strategy.sharesBalance(), 0, "and the position is gone");
@@ -514,8 +514,8 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         _deposit(strategy, user, DEPOSIT);
 
         // 10% profit: each share worth more USDC. Fund the mock with the extra USDC to pay it out.
-        sherwood.setPricePerShareE18(1.1e18);
-        usdc.mint(address(sherwood), DEPOSIT); // ample liquidity
+        leveragedAero.setPricePerShareE18(1.1e18);
+        usdc.mint(address(leveragedAero), DEPOSIT); // ample liquidity
 
         uint256 expected = (DEPOSIT * 11) / 10;
         vm.prank(user);
@@ -550,7 +550,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     function testWithdrawFastPathBlockedReverts() public {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
-        sherwood.setFastPathBlocked(true);
+        leveragedAero.setFastPathBlocked(true);
 
         vm.prank(user);
         vm.expectRevert("FastRedeemExceedsLtv");
@@ -592,7 +592,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         _deposit(strategy, user, DEPOSIT);
 
         vm.prank(user);
-        vm.expectRevert("MockSherwood: min assets out");
+        vm.expectRevert("MockLeveragedAero: min assets out");
         strategy.withdraw(EXPECTED_SHARES, DEPOSIT + 1);
     }
 
@@ -610,7 +610,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
         assertEq(id, 0, "first id");
         assertEq(strategy.sharesBalance(), 0, "shares escrowed off the wrapper");
-        assertEq(vault.balanceOf(address(sherwood)), EXPECTED_SHARES, "shares held by sherwood");
+        assertEq(vault.balanceOf(address(leveragedAero)), EXPECTED_SHARES, "shares held by leveragedAero");
     }
 
     function testRequestWithdrawZeroReverts() public {
@@ -654,7 +654,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        sherwood.fulfillRedeem(id, 0);
+        leveragedAero.fulfillRedeem(id, 0);
 
         assertEq(usdc.balanceOf(user), DEPOSIT, "owner paid by the fulfil itself");
         assertEq(usdc.balanceOf(address(strategy)), 0, "nothing parked on the account");
@@ -672,7 +672,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        ILeveragedAeroCLStrategy.RedeemRequest memory r = sherwood.redeemRequest(id);
+        ILeveragedAeroCLStrategy.RedeemRequest memory r = leveragedAero.redeemRequest(id);
         assertEq(r.owner, address(strategy), "the ACCOUNT is the requester (it can cancel)");
         assertEq(r.recipient, user, "...and the USER is the payee");
     }
@@ -684,7 +684,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
-        sherwood.fulfillRedeem(id, 0);
+        leveragedAero.fulfillRedeem(id, 0);
 
         assertEq(strategy.sharesBalance(), 0, "no shares");
         assertEq(usdc.balanceOf(address(strategy)), 0, "no USDC");
@@ -705,7 +705,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
         vm.prank(user);
-        vm.expectRevert("MockSherwood: fulfill window not elapsed");
+        vm.expectRevert("MockLeveragedAero: fulfill window not elapsed");
         strategy.emergencyWithdraw(id, DEPOSIT);
     }
 
@@ -734,19 +734,19 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
 
-        sherwood.setState(ILeveragedAeroCLStrategy.State.Settled);
+        leveragedAero.setState(ILeveragedAeroCLStrategy.State.Settled);
 
         _fundAndApprove(user, address(strategy), DEPOSIT);
         vm.prank(user);
-        vm.expectRevert("MockSherwood: not executed");
+        vm.expectRevert("MockLeveragedAero: not executed");
         strategy.deposit(DEPOSIT, 0);
 
         vm.prank(user);
-        vm.expectRevert("MockSherwood: not executed");
+        vm.expectRevert("MockLeveragedAero: not executed");
         strategy.withdraw(EXPECTED_SHARES, 0);
 
         vm.prank(user);
-        vm.expectRevert("MockSherwood: not executed");
+        vm.expectRevert("MockLeveragedAero: not executed");
         strategy.requestWithdraw(EXPECTED_SHARES, 0);
     }
 
@@ -757,7 +757,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.prank(user);
         uint256 id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
 
-        sherwood.setState(ILeveragedAeroCLStrategy.State.Settled);
+        leveragedAero.setState(ILeveragedAeroCLStrategy.State.Settled);
 
         vm.prank(user);
         strategy.cancelWithdraw(id);
@@ -768,7 +768,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         _deposit(strategy, user, DEPOSIT);
 
-        sherwood.setState(ILeveragedAeroCLStrategy.State.Settled);
+        leveragedAero.setState(ILeveragedAeroCLStrategy.State.Settled);
 
         // Escape hatch: pull the raw vault shares out to the owner.
         vm.prank(user);
@@ -826,7 +826,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(assetsOut, DEPOSIT, "preview assets");
         assertTrue(fastOk, "fastOk when not blocked");
 
-        sherwood.setFastPathBlocked(true);
+        leveragedAero.setFastPathBlocked(true);
         (, bool fastOk2) = strategy.previewWithdraw(EXPECTED_SHARES);
         assertFalse(fastOk2, "fastOk false when blocked");
     }
@@ -835,7 +835,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         MamoLeveragedAeroStrategy strategy = _createStrategy(user);
         assertEq(uint8(strategy.strategyState()), uint8(ILeveragedAeroCLStrategy.State.Executed));
 
-        sherwood.setState(ILeveragedAeroCLStrategy.State.Settled);
+        leveragedAero.setState(ILeveragedAeroCLStrategy.State.Settled);
         assertEq(uint8(strategy.strategyState()), uint8(ILeveragedAeroCLStrategy.State.Settled));
     }
 
@@ -851,7 +851,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
     function _fulfilledRequest(MamoLeveragedAeroStrategy strategy) internal returns (uint256 id) {
         vm.prank(user);
         id = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
-        sherwood.fulfillRedeem(id, 0);
+        leveragedAero.fulfillRedeem(id, 0);
     }
 
     /// @dev (1) A fulfil leaves the backend nothing to re-lock.
@@ -988,8 +988,8 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         vm.stopPrank();
         assertEq(strategy.openRequestIds().length, 3, "three tracked");
 
-        sherwood.fulfillRedeem(a, 0);
-        sherwood.fulfillRedeem(c, 0);
+        leveragedAero.fulfillRedeem(a, 0);
+        leveragedAero.fulfillRedeem(c, 0);
 
         vm.prank(user);
         strategy.syncRedeemRequests();
@@ -1012,7 +1012,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         assertEq(open[0], id, "the id it returned");
         assertFalse(strategy.hasSettledRequest(), "outstanding != settled");
 
-        sherwood.fulfillRedeem(id, 0);
+        leveragedAero.fulfillRedeem(id, 0);
         assertTrue(strategy.hasSettledRequest(), "fulfilled == settled: the frontend's completion signal");
         assertEq(strategy.openRequestIds().length, 1, "still tracked until the next call prunes");
 
@@ -1034,7 +1034,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
         strategy.transferOwnership(newOwner);
         assertEq(strategy.owner(), newOwner, "premise: the account changed hands mid-request");
 
-        sherwood.fulfillRedeem(id, 0);
+        leveragedAero.fulfillRedeem(id, 0);
         assertEq(usdc.balanceOf(user), DEPOSIT, "the owner who asked was paid");
         assertEq(usdc.balanceOf(newOwner), 0, "the new owner was not");
     }
@@ -1081,9 +1081,9 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
 
         vm.prank(newOwner);
         uint256 id2 = strategy.requestWithdraw(EXPECTED_SHARES, DEPOSIT);
-        assertEq(sherwood.redeemRequest(id2).recipient, newOwner, "the re-request names the new owner");
+        assertEq(leveragedAero.redeemRequest(id2).recipient, newOwner, "the re-request names the new owner");
 
-        sherwood.fulfillRedeem(id2, 0);
+        leveragedAero.fulfillRedeem(id2, 0);
         assertEq(usdc.balanceOf(newOwner), DEPOSIT, "and pays them");
         assertEq(usdc.balanceOf(user), 0, "the old owner gets nothing from the re-request");
     }
@@ -1117,7 +1117,7 @@ contract MamoLeveragedAeroStrategyUnitTest is Test {
             ids[i] = strategy.requestWithdraw(EXPECTED_SHARES, 0);
         }
         for (uint256 i; i < max; ++i) {
-            sherwood.fulfillRedeem(ids[i], 0);
+            leveragedAero.fulfillRedeem(ids[i], 0);
         }
         assertEq(strategy.openRequestIds().length, max, "all still tracked, all settled");
 

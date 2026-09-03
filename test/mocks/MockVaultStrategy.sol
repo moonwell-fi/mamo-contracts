@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {Position} from "@contracts/leveraged-aero/sherwood/interfaces/IPriceRouter.sol";
-import {IStrategy} from "@contracts/leveraged-aero/sherwood/interfaces/IStrategy.sol";
-import {ISyndicateVault} from "@contracts/leveraged-aero/sherwood/interfaces/ISyndicateVault.sol";
+import {ILeveragedAeroVault} from "@contracts/leveraged-aero/interfaces/ILeveragedAeroVault.sol";
+import {Position} from "@contracts/leveraged-aero/interfaces/IPriceRouter.sol";
+import {IStrategy} from "@contracts/leveraged-aero/interfaces/IStrategy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -125,12 +125,12 @@ contract MockVaultStrategy is IStrategy {
 
     /// @notice Drives `vault.strategyMint` as the real strategy does on deposit / fee crystallise.
     function mintShares(address to, uint256 shares) external {
-        ISyndicateVault(_vault).strategyMint(to, shares);
+        ILeveragedAeroVault(_vault).strategyMint(to, shares);
     }
 
     /// @notice Drives `vault.strategyBurn` as the real strategy does after pulling a redeemer's shares.
     function burnShares(uint256 shares) external {
-        ISyndicateVault(_vault).strategyBurn(shares);
+        ILeveragedAeroVault(_vault).strategyBurn(shares);
     }
 
     /// @notice Pulls `shares` from `from` (needs a prior vault-side approval), mirroring redeem.
@@ -154,6 +154,6 @@ contract MockVaultStrategy is IStrategy {
         IERC20(assetToken).safeTransferFrom(msg.sender, address(this), assets);
         uint256 supply = IERC20(_vault).totalSupply();
         shares = Math.mulDiv(assets, supply + SHARES_VIRTUAL_OFFSET, navPre + 1);
-        ISyndicateVault(_vault).strategyMint(msg.sender, shares);
+        ILeveragedAeroVault(_vault).strategyMint(msg.sender, shares);
     }
 }

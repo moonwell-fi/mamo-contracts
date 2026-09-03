@@ -11,13 +11,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /**
  * @title MamoLeveragedAeroStrategy
- * @notice A per-user Mamo account contract that wraps the vendored Sherwood leveraged Aerodrome CL
- *         strategy. It holds SyndicateVault shares on the user's behalf and drives the Sherwood
+ * @notice A per-user Mamo account contract that wraps the vendored leveraged Aerodrome CL
+ *         strategy. It holds {LeveragedAeroVault} shares on the user's behalf and drives that
  *         strategy externally: USDC (6dp) flows in on deposit, vault shares are custodied here, and
  *         USDC flows back out to the owner on every withdrawal path.
  * @dev This contract inherits Mamo's {BaseStrategy} (Initializable + UUPSUpgradeable +
- *      OwnableUpgradeable). It deliberately does NOT inherit or extend the Sherwood
- *      `LeveragedAerodromeCLStrategy` — that contract inherits Sherwood's incompatible
+ *      OwnableUpgradeable). It deliberately does NOT inherit or extend the pooled
+ *      `LeveragedAerodromeCLStrategy` — that contract inherits the vendored, incompatible
  *      vault/proposer base — and interacts with it only through {ILeveragedAeroCLStrategy}.
  *
  *      Deployed behind an {ERC1967Proxy} and used as a UUPS implementation, so all initialization runs
@@ -46,11 +46,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrategy {
     using SafeERC20 for IERC20;
 
-    /// @notice The vendored Sherwood leveraged Aerodrome CL strategy this account drives.
-    ILeveragedAeroCLStrategy public sherwoodStrategy;
+    /// @notice The vendored leveraged Aerodrome CL strategy this account drives.
+    ILeveragedAeroCLStrategy public leveragedAeroStrategy;
 
-    /// @notice The SyndicateVault share token (12dp) held by this account; also the token approved to
-    ///         the Sherwood strategy for redeem/request flows.
+    /// @notice The {LeveragedAeroVault} share token (12dp) held by this account; also the token approved to
+    ///         the pooled strategy for redeem/request flows.
     IERC20 public vaultShares;
 
     /// @notice The USDC token (6dp): the deposit asset and the withdrawal payout token.
@@ -90,7 +90,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         address mamoStrategyRegistry;
         uint256 strategyTypeId;
         address owner;
-        address sherwoodStrategy;
+        address leveragedAeroStrategy;
         address usdc;
     }
 
@@ -102,9 +102,9 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     }
 
     /**
-     * @notice Initializer that wires the account to the Mamo registry and the Sherwood strategy.
+     * @notice Initializer that wires the account to the Mamo registry and the pooled strategy.
      * @dev Used instead of a constructor since the contract is deployed behind a proxy. The vault
-     *      share token is derived from `sherwoodStrategy.vault()` (single source of truth) rather than
+     *      share token is derived from `leveragedAeroStrategy.vault()` (single source of truth) rather than
      *      passed separately.
      * @param params The initialization parameters struct.
      */
@@ -112,21 +112,21 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
         require(params.owner != address(0), "Invalid owner address");
-        require(params.sherwoodStrategy != address(0), "Invalid sherwoodStrategy address");
+        require(params.leveragedAeroStrategy != address(0), "Invalid leveragedAeroStrategy address");
         require(params.usdc != address(0), "Invalid usdc address");
 
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
-        sherwoodStrategy = ILeveragedAeroCLStrategy(params.sherwoodStrategy);
+        leveragedAeroStrategy = ILeveragedAeroCLStrategy(params.leveragedAeroStrategy);
         usdc = IERC20(params.usdc);
 
-        address vault = sherwoodStrategy.vault();
+        address vault = leveragedAeroStrategy.vault();
         require(vault != address(0), "Invalid vault address");
         vaultShares = IERC20(vault);
     }
 
     /**
-     * @notice Deposit USDC into the Sherwood strategy, minting vault shares to this account (permissionless).
+     * @notice Deposit USDC into the pooled strategy, minting vault shares to this account (permissionless).
      * @dev Pulls `assets` USDC from the caller, approves the exact amount to the strategy, and deposits.
      *      Permissionless by design so the backend or any keeper can fund the account; the resulting
      *      shares are always custodied by this account and remain under owner control.
@@ -138,14 +138,14 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         require(assets > 0, "Amount must be greater than 0");
 
         usdc.safeTransferFrom(msg.sender, address(this), assets);
-        usdc.forceApprove(address(sherwoodStrategy), assets);
-        shares = sherwoodStrategy.deposit(assets, minShares);
+        usdc.forceApprove(address(leveragedAeroStrategy), assets);
+        shares = leveragedAeroStrategy.deposit(assets, minShares);
 
         emit Deposit(msg.sender, assets, shares);
     }
 
     /**
-     * @notice Deposit `assets` of this account's idle USDC into the Sherwood strategy (owner or backend).
+     * @notice Deposit `assets` of this account's idle USDC into the pooled strategy (owner or backend).
      * @dev Users can plain-transfer USDC to their account; the backend then nudges it in via this call
      *      (mirrors `depositIdleTokens` in MamoMultiMarketStrategy). Reverts if there is no idle USDC.
      *      The CALLER sizes the amount to `vault.remainingCapacity()`, since
@@ -162,8 +162,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         require(assets > 0, "Amount must be greater than 0");
         require(assets <= usdc.balanceOf(address(this)), "Insufficient idle USDC");
 
-        usdc.forceApprove(address(sherwoodStrategy), assets);
-        shares = sherwoodStrategy.deposit(assets, minShares);
+        usdc.forceApprove(address(leveragedAeroStrategy), assets);
+        shares = leveragedAeroStrategy.deposit(assets, minShares);
 
         emit Deposit(msg.sender, assets, shares);
     }
@@ -215,8 +215,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
         _pruneSettled();
         require(_openRequestIds.length < MAX_OPEN_REQUESTS, "Too many open requests");
 
-        vaultShares.forceApprove(address(sherwoodStrategy), shares);
-        id = sherwoodStrategy.requestRedeem(shares, minAssetsOut, owner());
+        vaultShares.forceApprove(address(leveragedAeroStrategy), shares);
+        id = leveragedAeroStrategy.requestRedeem(shares, minAssetsOut, owner());
         _openRequestIds.push(id);
 
         emit WithdrawRequested(id, shares, minAssetsOut);
@@ -227,7 +227,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      * @param id Request id to cancel.
      */
     function cancelWithdraw(uint256 id) external onlyOwner {
-        sherwoodStrategy.cancelRedeem(id);
+        leveragedAeroStrategy.cancelRedeem(id);
         // BY ID ONLY: a cancel returns SHARES, so it must not report other ids as settled withdrawals.
         _untrack(id);
 
@@ -245,8 +245,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      * @return assetsOut USDC forwarded to the request's recipient (6dp).
      */
     function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external onlyOwner returns (uint256 assetsOut) {
-        address recipient = sherwoodStrategy.redeemRequest(id).recipient;
-        assetsOut = sherwoodStrategy.emergencyRedeem(id, minAssetsOut);
+        address recipient = leveragedAeroStrategy.redeemRequest(id).recipient;
+        assetsOut = leveragedAeroStrategy.emergencyRedeem(id, minAssetsOut);
 
         if (assetsOut > 0) usdc.safeTransfer(recipient, assetsOut);
         // BY ID ONLY, as in {cancelWithdraw}: this pays straight through, so a blanket prune would be wrong.
@@ -288,15 +288,15 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      * @return fastOk True iff the fast path would price and clear the LTV gate (advisory).
      */
     function previewWithdraw(uint256 shares) external view returns (uint256 assetsOut, bool fastOk) {
-        return sherwoodStrategy.previewRedeem(shares);
+        return leveragedAeroStrategy.previewRedeem(shares);
     }
 
     /**
-     * @notice The Sherwood strategy's lifecycle state (pass-through).
+     * @notice The pooled strategy's lifecycle state (pass-through).
      * @return The strategy lifecycle state.
      */
     function strategyState() external view returns (ILeveragedAeroCLStrategy.State) {
-        return sherwoodStrategy.state();
+        return leveragedAeroStrategy.state();
     }
 
     /// @notice True while a tracked async request has settled, i.e. completed.
@@ -305,7 +305,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
     function hasSettledRequest() public view returns (bool) {
         uint256 n = _openRequestIds.length;
         for (uint256 i; i < n; ++i) {
-            if (sherwoodStrategy.redeemRequest(_openRequestIds[i]).settled) return true;
+            if (leveragedAeroStrategy.redeemRequest(_openRequestIds[i]).settled) return true;
         }
         return false;
     }
@@ -344,7 +344,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
                 --i;
             }
             uint256 id = _openRequestIds[i];
-            if (sherwoodStrategy.redeemRequest(id).settled) {
+            if (leveragedAeroStrategy.redeemRequest(id).settled) {
                 _openRequestIds[i] = _openRequestIds[_openRequestIds.length - 1];
                 _openRequestIds.pop();
                 emit WithdrawSettled(id);
@@ -360,8 +360,8 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      * @return assetsOut USDC forwarded to the owner (6dp).
      */
     function _redeemAndForward(uint256 shares, uint256 minAssetsOut) internal returns (uint256 assetsOut) {
-        vaultShares.forceApprove(address(sherwoodStrategy), shares);
-        assetsOut = sherwoodStrategy.redeem(shares, minAssetsOut);
+        vaultShares.forceApprove(address(leveragedAeroStrategy), shares);
+        assetsOut = leveragedAeroStrategy.redeem(shares, minAssetsOut);
 
         _forwardToOwner(assetsOut);
     }
