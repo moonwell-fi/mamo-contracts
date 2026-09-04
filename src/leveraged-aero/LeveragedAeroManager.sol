@@ -167,7 +167,7 @@ library LeveragedAeroManager {
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
         // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
-        bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
+        bytes32 stagedVenueHash; // keccak256(abi.encode(paramsHash, stagingOwner)); 0 == none; owner move suspends
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -1087,21 +1087,29 @@ library LeveragedAeroManager {
         if (cbDebtRem == 0 && wethDebtRem == 0) return;
         // Chainlink prices (8dp) — reached ONLY on a book that still owes after the direct repays, i.e.
         // genuine deep IL; the phases above exist to keep this unreached (see `redeemUnwindImpl` Phase 2).
-        (uint256 pBTC, uint256 pETH, uint256 pUsdc) = _readAllPrices();
+        // USDC/USD is needed either way; a LEG's feed is read only when that leg still owes.
+        uint256 pUsdc = _readUsd8($.usdcFeed);
         uint256 slip = uint256($.maxSlippageBps);
-        // Per-leg USDC budget: the oracle cost grossed up by the CONFIGURED slippage — the same number the
-        // exact-output swap takes as `amountInMax`, which is what collapses the two old bounds into one.
-        uint256 cbUsdcNeed = _tokenToUsdc(cbDebtRem, $.cbBTCDecimals, pBTC, pUsdc) * (10000 + slip) / 10000;
-        uint256 wethUsdcNeed = _tokenToUsdc(wethDebtRem, $.wethDecimals, pETH, pUsdc) * (10000 + slip) / 10000;
-        // Dust floor: nonzero debt but oracle cost rounds to 0 (e.g. 1 wei WETH) → fund at least 1 unit.
-        if (cbDebtRem > 0 && cbUsdcNeed == 0) cbUsdcNeed = 1e5;
-        if (wethDebtRem > 0 && wethUsdcNeed == 0) wethUsdcNeed = 1e5;
+        uint256 cbUsdcNeed = _coverBudget(cbDebtRem, $.cbBTCDecimals, $.cbBTCFeed, pUsdc, slip);
+        uint256 wethUsdcNeed = _coverBudget(wethDebtRem, $.wethDecimals, $.wethFeed, pUsdc, slip);
         // Fund the buys out of collateral, but only the part the raw balance does not already cover.
         _materialiseUsdc(cbUsdcNeed + wethUsdcNeed);
         // Cover each leg by buying EXACTLY the remaining debt, capped at its own oracle budget, and repay.
         // Asset-mode is a structural no-op on the leg-B line (leg B is the unit of account, carries no debt).
         if (cbDebtRem > 0) _redeemCoverShortfall($.cbBTC, $.mCbBTC, cbDebtRem, cbUsdcNeed, false);
         if (wethDebtRem > 0) _redeemCoverShortfall($.weth, $.mWeth, wethDebtRem, wethUsdcNeed, false);
+    }
+
+    /// @dev One leg's USDC cover budget: its oracle cost grossed up by the CONFIGURED slippage, i.e. the
+    ///      swap's `amountInMax`. ZERO RESIDUAL READS NO FEED; the floor covers a cost that rounds to 0.
+    function _coverBudget(uint256 rem, uint8 dec, address feed, uint256 pUsdc, uint256 slip)
+        private
+        view
+        returns (uint256)
+    {
+        if (rem == 0) return 0;
+        uint256 need = _tokenToUsdc(rem, dec, _readUsd8(feed), pUsdc) * (10000 + slip) / 10000;
+        return need == 0 ? 1e5 : need;
     }
 
     /// @dev tickSpacing of the `leg`↔USDC SWAP pool — a different venue from the LP pool, so it
@@ -1173,9 +1181,8 @@ library LeveragedAeroManager {
     }
 
     /// @dev The 3-price bundle (cbBTC / WETH / USDC, all 8dp) read on the debt/health/sweep basis.
-    ///      Hoisted so the four debt-sizing sites (settle sweep, _readCollateralDebt, _settleShortfall,
-    ///      _assertHealthy) share one call instead of inlining three `_readUsd8`s each (bytecode offset
-    ///      for the L9 floor).
+    ///      Hoisted so the three debt-sizing sites (settle sweep, _readCollateralDebt, _assertHealthy)
+    ///      share one call instead of inlining three `_readUsd8`s each (bytecode offset for the L9 floor).
     function _readAllPrices() private view returns (uint256 pBTC, uint256 pETH, uint256 pUsdc) {
         Layout storage $ = _layout();
         pBTC = _readUsd8($.cbBTCFeed);

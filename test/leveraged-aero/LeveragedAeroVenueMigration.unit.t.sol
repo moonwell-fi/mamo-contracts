@@ -36,6 +36,7 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
  */
 contract LeveragedAeroVenueMigrationUnitTest is Test {
     address internal owner = makeAddr("owner");
+    address internal newOwner = makeAddr("newOwner");
     address internal proposer = makeAddr("proposer");
     address internal lp = makeAddr("lp");
 
@@ -339,9 +340,23 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.stageVenue(h);
     }
 
+    /// @dev What `stagedVenueHash` HOLDS: the owner's input hash bound to the staging vault owner.
+    function _stagedHash(bytes32 venueHash, address stagingOwner) internal pure returns (bytes32) {
+        return keccak256(abi.encode(venueHash, stagingOwner));
+    }
+
     function _migrate(LeveragedAeroVenue.VenueParams memory v) internal {
         vm.prank(proposer);
         strategy.migrateVenue(v);
+    }
+
+    /// @dev Full Ownable2Step rotation, asserting the nomination alone does not move `owner()`.
+    function _rotateVaultOwner(address from, address to) internal {
+        vm.prank(from);
+        vault.transferOwnership(to);
+        assertEq(vault.owner(), from, "nomination alone does not rotate");
+        vm.prank(to);
+        vault.acceptOwnership();
     }
 
     function _assertFlat() internal view {
@@ -821,7 +836,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         emit LeveragedAeroVenue.VenueStaged(h);
         vm.prank(owner);
         strategy.stageVenue(h);
-        assertEq(strategy.layout().stagedVenueHash, h, "hash staged");
+        assertEq(strategy.layout().stagedVenueHash, _stagedHash(h, owner), "hash staged");
 
         // Staging is inert: live venue untouched.
         assertEq(strategy.layout().pool, address(pool), "live venue unchanged");
@@ -884,6 +899,60 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         LeveragedAeroVenue.VenueParams memory v = _venueBParams();
         vm.expectRevert(BaseStrategy.NotProposer.selector);
         vm.prank(owner);
+        strategy.migrateVenue(v);
+    }
+
+    /// @dev THE HANDOVER CLOSE. A stage is an authorization by a SPECIFIC authority, so an Ownable2Step
+    ///      rotation on the vault must SUSPEND it — otherwise the proposer could fire a venue rewrite the
+    ///      incoming owner never sanctioned. The gate is a predicate on the LIVE owner, not a clear, so
+    ///      the suspension lifts if ownership returns to the staging address.
+    function testAVaultOwnerRotationSuspendsAStagedVenue() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        _stage(v);
+        _flatten();
+
+        _rotateVaultOwner(owner, newOwner);
+
+        // The outgoing owner's authorization is dead.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroVenue.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().pool, address(pool), "venue untouched");
+
+        // ...and the incoming owner can re-authorize deliberately.
+        vm.prank(newOwner);
+        strategy.stageVenue(keccak256(abi.encode(v)));
+        assertEq(
+            strategy.layout().stagedVenueHash,
+            _stagedHash(keccak256(abi.encode(v)), newOwner),
+            "the new owner's authorization is bound to the new owner"
+        );
+        // SUSPENDED, NOT ENDED: a round trip back to the staging owner re-arms the SAME stored word.
+        _rotateVaultOwner(newOwner, owner);
+        _rotateVaultOwner(owner, newOwner);
+        _migrate(v);
+        assertEq(strategy.layout().pool, address(poolB), "a fresh stage by the new owner migrates as before");
+    }
+
+    /// @dev `bytes32(0)` stays the unbound "nothing staged" sentinel, so the inherited-stage revocation the
+    ///      runbook leans on keeps working for whoever holds the vault. This pins THE SENTINEL, not the
+    ///      owner binding — it passes with the binding reverted; `testAVaultOwnerRotationSuspendsAStagedVenue`
+    ///      is the binding's only coverage.
+    function testANewVaultOwnerCanClearAnInheritedVenueStage() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        _stage(v);
+
+        _rotateVaultOwner(owner, newOwner);
+
+        vm.prank(newOwner);
+        strategy.stageVenue(bytes32(0));
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the incoming owner revoked it");
+
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroVenue.VenueNotStaged.selector);
         strategy.migrateVenue(v);
     }
 
@@ -1308,7 +1377,9 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 6500 ceiling
         _stage(v);
-        assertEq(strategy.layout().stagedVenueHash, keccak256(abi.encode(v)), "owner authorization armed");
+        assertEq(
+            strategy.layout().stagedVenueHash, _stagedHash(keccak256(abi.encode(v)), owner), "owner authorization armed"
+        );
 
         // Markets turn: the admin ratchets policy and the ceiling down.
         vm.startPrank(owner);
@@ -1336,7 +1407,9 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 5000 target
         _stage(v);
-        assertEq(strategy.layout().stagedVenueHash, keccak256(abi.encode(v)), "owner authorization armed");
+        assertEq(
+            strategy.layout().stagedVenueHash, _stagedHash(keccak256(abi.encode(v)), owner), "owner authorization armed"
+        );
 
         vm.prank(owner);
         strategy.setTargetLtv(3000);

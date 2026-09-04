@@ -348,7 +348,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
         // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
-        bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
+        bytes32 stagedVenueHash; // keccak256(abi.encode(paramsHash, stagingOwner)); 0 == none; owner move suspends
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -891,8 +891,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev "The keeper cannot raise fund risk" is NOT a property of this bound alone: `migrateVenue` is
     ///      `onlyProposer` and rewrites BOTH `targetLtvBps` and `maxLtvBps`. That is safe for exactly two
     ///      reasons — `stageVenue` is OWNER-gated, and the params are BYTE-COMMITTED to the staged
-    ///      `keccak256(abi.encode(p))`. Loosening either would SILENTLY UN-GATE this bound; `applyVenue` emits
-    ///      `TargetLtvUpdated` on that path, so do not add a write path without an emit.
+    ///      `keccak256(abi.encode(keccak256(abi.encode(p)), vaultOwner))`. Loosening either would SILENTLY
+    ///      UN-GATE this bound; `applyVenue` emits `TargetLtvUpdated` there, so add no write path without an emit.
     /// @param targetBps Target LTV for THIS call only, in bps; must be `<= targetLtvBps()`. A zero (or
     ///        near-zero) target is a full unwind and fails closed in `_leverDown` with
     ///        `FullUnwindNotSupported` — `flatten()` is the real full unwind.
@@ -1104,9 +1104,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))`; `bytes32(0)` clears. VAULT OWNER ONLY —
     ///         the venue-selection authority, so the hot proposer key can never choose where the fund's liquidity
     ///         goes. Staging is inert until `migrateVenue` runs with the byte-exact params; re-staging replaces.
+    ///         The stage is bound to the STAGING owner, so a vault-owner rotation invalidates it; it never expires.
     function stageVenue(bytes32 venueHash) external {
         if (msg.sender != _vaultOwner()) revert NotVaultOwner();
-        LeveragedAeroVenue.stageImpl(venueHash);
+        LeveragedAeroVenue.stageImpl(venueHash, msg.sender);
     }
 
     /// @notice Unwind the WHOLE book to idle USDC while staying `Executed` — the migration's first leg, and a
@@ -1135,7 +1136,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         idle USDC balance, which no venue field touches. Old-leg dust becomes `rescueToVault`-able.
     function migrateVenue(LeveragedAeroVenue.VenueParams calldata p) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        LeveragedAeroVenue.migrateImpl(p);
+        LeveragedAeroVenue.migrateImpl(p, _vaultOwner());
     }
 
     /// @notice Open a FRESH position from a flat `Executed` book, deploying the entire idle USDC balance — the

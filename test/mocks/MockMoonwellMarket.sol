@@ -141,6 +141,20 @@ contract MockComptroller {
         registered[market] = RegisteredMarket(feed, underlyingDecimals, cfMantissa);
     }
 
+    /// @notice Moonwell's Comptroller exposes its price oracle; this mock IS its own oracle.
+    function oracle() external view returns (address) {
+        return address(this);
+    }
+
+    /// @dev `1e(36 − decimals)`-scaled like Moonwell's ChainlinkOracle, off the SAME raw feed answer
+    ///      `hypotheticalLiquidity` prices with. An unregistered market prices at 0, i.e. fail-closed.
+    function getUnderlyingPrice(address market) external view returns (uint256) {
+        RegisteredMarket memory m = registered[market];
+        if (m.feed == address(0)) return 0;
+        (, int256 answer,,,) = IMockFeedRead(m.feed).latestRoundData();
+        return uint256(answer) * (10 ** (28 - uint256(m.underlyingDecimals)));
+    }
+
     /// @dev The strategy staticcalls this and reads the SECOND return word as the mantissa.
     function markets(address) external view returns (bool, uint256) {
         return (isListed, collateralFactorMantissa);
