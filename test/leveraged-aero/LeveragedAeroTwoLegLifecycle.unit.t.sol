@@ -2288,7 +2288,8 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
 
         vm.startPrank(lp);
         vault.approve(address(strategy), supply);
-        // Selector-only: the reverting LTV is finite here, NOT the `uint256.max` collateral-exhausted arm.
+        // Selector-only: the book is levered AND the LP is open, so the full-redeem guard fires first and
+        // the revert carries the `uint256.max` sentinel, not the finite post-draw LTV.
         vm.expectPartialRevert(LeveragedAeroVenue.FastRedeemExceedsLtv.selector);
         strategy.redeem(supply, 0);
         vm.stopPrank();

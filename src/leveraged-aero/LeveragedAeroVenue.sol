@@ -242,9 +242,11 @@ library LeveragedAeroVenue {
     }
 
     /// @dev With USDC the sole collateral, `getAccountLiquidity` returns 18dp `C·CF − D` (or a shortfall),
-    ///      so `D = C·CF − liquidity + shortfall`, with `C` read oracle-free off the cToken books and USDC
-    ///      taken at face — a DEpeg only tightens the bound. CF is read LIVE, not from the stored copy a
-    ///      governance raise would leave loose; both reads fail closed `ComptrollerCallFailed`.
+    ///      so `D = C·CF − liquidity + shortfall`, with `C` read oracle-free off the cToken books. The
+    ///      liquidity/shortfall term is 18dp USD but is taken at face here, so Moonwell's USDC price `1 ± ε`
+    ///      shifts the recovered debt by `ε·(C·CF − D)`: BELOW $1 tightens the bound, ABOVE $1 loosens it to
+    ///      `target·(1 + ε·(CF/target − 1))` — a few bps at a realistic depeg. CF is read LIVE, not from the
+    ///      stored copy a governance raise would leave loose; both reads fail closed `ComptrollerCallFailed`.
     function _unleveredAtVenueOracle() private view returns (uint256) {
         Layout storage $ = _layout();
         uint256 c = (ICToken($.mUsdc).balanceOf(address(this)) * ICToken($.mUsdc).exchangeRateStored()) / 1e18;
@@ -443,7 +445,10 @@ library LeveragedAeroVenue {
     ///         no push-to-vault and no state transition — the strategy stays `Executed`, so deposits/redeems keep working
     ///         against the flat book (NAV == idle USDC, no oracle).
     /// @dev Unwind-swap slippage is Chainlink-floored inside `settleImpl` via `maxSlippageBps`, so a down
-    ///      oracle fail-closes the flatten. Idempotent on an already-flat book.
+    ///      oracle fail-closes the flatten. Idempotent on a flat book whose reward balance is empty or
+    ///      inside the dust band; a balance ABOVE that band is a real tranche (a donation included), so
+    ///      always quote a nonzero `minRewardUsdcOut` — `flatten(1, …)` clears it, and the post-checked
+    ///      oracle floor is the real guard.
     function flattenImpl(uint256 minRewardUsdcOut, uint256 minIdleUsdcOut) public {
         Layout storage $ = _layout();
         // CALM GATE FIRST — never unwind at a manipulated tick. `settleImpl` has none of its own (it was
@@ -482,12 +487,14 @@ library LeveragedAeroVenue {
 
     /// @dev Floored exactly as `compoundImpl`'s harvest is: `max(caller minOut, oracle floor)`, the floor a
     ///      hardened 8dp `aeroUsdFeed` read haircut by `maxSlippageBps` and post-checked against the
-    ///      MEASURED fill so a dishonest router cannot widen it. No-op on an empty balance (which keeps
-    ///      `flatten` idempotent) and on dust whose floor rounds to 0 — without that a 1e6-wei donation
-    ///      would brick `flatten`, and so `migrateVenue`, permanently.
+    ///      MEASURED fill so a dishonest router cannot widen it. No-op on an empty balance and on dust
+    ///      whose floor rounds to 0 — without that a 1e6-wei donation would brick `flatten`, and so
+    ///      `migrateVenue`, permanently. Above that band a zero `minRewardUsdcOut` reverts `ZeroMinOut`,
+    ///      so only the empty/dust cases make `flatten` idempotent.
     /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
     /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error: TRUE for `flatten`,
-    ///        FALSE for the terminal settle, which has no argument to supply.
+    ///        FALSE for the terminal settle AND the async redeem unwind (`redeemUnwindImpl` via
+    ///        `sellRewardImpl`), neither of which has an argument to supply.
     /// @param skim Pay the fund's fee out of this sale — TRUE for `flatten` and the async redeem, both of
     ///        which realize the WHOLE book's accrual; FALSE for the terminal settle. See `compoundImpl`.
     function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired, bool skim) private {
