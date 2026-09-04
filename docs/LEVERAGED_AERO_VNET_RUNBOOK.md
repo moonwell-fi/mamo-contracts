@@ -274,9 +274,12 @@ constructor sets `_initialized = true`, permanently locking `initialize` on the 
 > **Never pass `--libraries` for this stack.** The three delegatecall libraries must be deployed and
 > linked by the **same compilation** that produces the template. Pointing the link at libraries from an
 > earlier run reverts inside the delegatecall dispatcher rather than failing at link time, and it is not
-> a theoretical risk here: this PR changed the libraries' public selectors (`centeredTickRange` →
-> `skewedTickRange`, the new `checkRange`). Let the broadcast deploy and link them; if you have stale
-> library addresses in an env or a config, delete them.
+> a theoretical risk here: successive audit rounds changed the libraries' public selectors
+> (`centeredTickRange` → `skewedTickRange`, the new `checkRange`, the re-arity of `checkLtvBand` in
+> Valuation and of `stageImpl` / `migrateImpl` in Venue) — so the three libraries and the template must be
+> deployed together as one release, which is what `script/LeveragedAeroPoolDeployer.s.sol` already does.
+> Let the broadcast deploy and link them; if you have stale library addresses in an env or a config,
+> delete them.
 
 **The vault.** `src/LeveragedAeroVault.sol`, constructor
 `(address asset_, address owner_, string name_, string symbol_)`:
@@ -370,8 +373,17 @@ Init guards that will bite during a first deploy against a new pool:
   `UnexpectedAssetDecimals`.
 - `aeroUsdFeed.decimals() == 8` → `UnexpectedFeedDecimals`.
 - Risk/oracle bands: `targetLtvBps ≤ maxLtvBps < usdcCollateralFactorBps`, `minHealthBps ≥ 10500`,
-  `minHealthBps × maxLtvBps < 1e8`, `maxDelay ∈ (0, 7 days]`, `gracePeriod ≤ 1 day`,
+  `minHealthBps × maxLtvBps < 1e8`, **`minHealthBps × cfBps > 1e8`** (`DeleverageTriggerAboveCF` — the
+  deleverage trigger LTV `1e8/minHealthBps` must sit strictly below the CF, so the real `minHealthBps`
+  floor is `1e8/cfBps`: **11364** at the live CF of 8800, not 10500 — and it binds at init and at every
+  `migrateVenue` **only**, so a Moonwell CF cut afterwards reopens the liquidatable-but-locked window
+  until the next migration), `maxDelay ∈ (0, 7 days]`, `gracePeriod ≤ 1 day`,
   `twapWindow ∈ (0, 1 day]`, `calmDeviationTicks ∈ (0, 5000]`, `maxSlippageBps ∈ (0, 1000]`.
+- **Post-init repair for the health floor:** `setMinHealth(uint16)` (admin, selector `0x24a9a572`) re-runs
+  that same LTV ladder against the **live** collateral factor. Needed when Moonwell cuts the USDC CF to at
+  or below `1e8 / minHealthBps` bps — 8333 at the deployed 12000, against a live CF of 8800 — which trips
+  `DeleverageTriggerAboveCF` and blocks `migrateVenue` and any *loosening* of `setMaxLtv` until the floor is
+  raised to `floor(1e8/cfBps) + 1` or more. Monitor the CF: warn below 8600, page at or below 8400.
 - The fee bound: `compoundFeeBps ≤ 1000` (`MAX_COMPOUND_FEE_BPS`, 10 %) → `CompoundFeeTooHigh`, and a
   nonzero `feeRecipient` whenever `compoundFeeBps != 0` → `FeeRecipientRequired`. Both init-only and
   immutable per clone — changing either means a new clone.

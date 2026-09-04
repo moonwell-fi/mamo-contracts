@@ -36,6 +36,7 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
  */
 contract LeveragedAeroVenueMigrationUnitTest is Test {
     address internal owner = makeAddr("owner");
+    address internal newOwner = makeAddr("newOwner");
     address internal proposer = makeAddr("proposer");
     address internal lp = makeAddr("lp");
 
@@ -339,9 +340,23 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         strategy.stageVenue(h);
     }
 
+    /// @dev What `stagedVenueHash` HOLDS: the owner's input hash bound to the staging vault owner.
+    function _stagedHash(bytes32 venueHash, address stagingOwner) internal pure returns (bytes32) {
+        return keccak256(abi.encode(venueHash, stagingOwner));
+    }
+
     function _migrate(LeveragedAeroVenue.VenueParams memory v) internal {
         vm.prank(proposer);
         strategy.migrateVenue(v);
+    }
+
+    /// @dev Full Ownable2Step rotation, asserting the nomination alone does not move `owner()`.
+    function _rotateVaultOwner(address from, address to) internal {
+        vm.prank(from);
+        vault.transferOwnership(to);
+        assertEq(vault.owner(), from, "nomination alone does not rotate");
+        vm.prank(to);
+        vault.acceptOwnership();
     }
 
     function _assertFlat() internal view {
@@ -821,7 +836,7 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         emit LeveragedAeroVenue.VenueStaged(h);
         vm.prank(owner);
         strategy.stageVenue(h);
-        assertEq(strategy.layout().stagedVenueHash, h, "hash staged");
+        assertEq(strategy.layout().stagedVenueHash, _stagedHash(h, owner), "hash staged");
 
         // Staging is inert: live venue untouched.
         assertEq(strategy.layout().pool, address(pool), "live venue unchanged");
@@ -884,6 +899,60 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         LeveragedAeroVenue.VenueParams memory v = _venueBParams();
         vm.expectRevert(BaseStrategy.NotProposer.selector);
         vm.prank(owner);
+        strategy.migrateVenue(v);
+    }
+
+    /// @dev THE HANDOVER CLOSE. A stage is an authorization by a SPECIFIC authority, so an Ownable2Step
+    ///      rotation on the vault must SUSPEND it — otherwise the proposer could fire a venue rewrite the
+    ///      incoming owner never sanctioned. The gate is a predicate on the LIVE owner, not a clear, so
+    ///      the suspension lifts if ownership returns to the staging address.
+    function testAVaultOwnerRotationSuspendsAStagedVenue() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        _stage(v);
+        _flatten();
+
+        _rotateVaultOwner(owner, newOwner);
+
+        // The outgoing owner's authorization is dead.
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroVenue.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().pool, address(pool), "venue untouched");
+
+        // ...and the incoming owner can re-authorize deliberately.
+        vm.prank(newOwner);
+        strategy.stageVenue(keccak256(abi.encode(v)));
+        assertEq(
+            strategy.layout().stagedVenueHash,
+            _stagedHash(keccak256(abi.encode(v)), newOwner),
+            "the new owner's authorization is bound to the new owner"
+        );
+        // SUSPENDED, NOT ENDED: a round trip back to the staging owner re-arms the SAME stored word.
+        _rotateVaultOwner(newOwner, owner);
+        _rotateVaultOwner(owner, newOwner);
+        _migrate(v);
+        assertEq(strategy.layout().pool, address(poolB), "a fresh stage by the new owner migrates as before");
+    }
+
+    /// @dev `bytes32(0)` stays the unbound "nothing staged" sentinel, so the inherited-stage revocation the
+    ///      runbook leans on keeps working for whoever holds the vault. This pins THE SENTINEL, not the
+    ///      owner binding — it passes with the binding reverted; `testAVaultOwnerRotationSuspendsAStagedVenue`
+    ///      is the binding's only coverage.
+    function testANewVaultOwnerCanClearAnInheritedVenueStage() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        _stage(v);
+
+        _rotateVaultOwner(owner, newOwner);
+
+        vm.prank(newOwner);
+        strategy.stageVenue(bytes32(0));
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the incoming owner revoked it");
+
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroVenue.VenueNotStaged.selector);
         strategy.migrateVenue(v);
     }
 
@@ -1301,6 +1370,64 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         assertTrue(sawMigrated, "the migration itself did run -- the assertions above are not vacuous");
     }
 
+    /// @dev The health floor is the last policy field a migration rewrites, and it sets the LTV the
+    ///      permissionless valve arms at (`1e8 / minHealthBps`) — so it gets the same announcement.
+    function testMigrateAnnouncesTheHealthFloorItRewrites() public {
+        _execute(SEED);
+        _flatten();
+        assertEq(strategy.layout().minHealthBps, 12_000, "the init health floor");
+
+        LeveragedAeroVenue.VenueParams memory v = _venueBParams();
+        v.minHealthBps = 11_500; // 11500 * 8800 = 1.012e8 > 1e8 and 11500 * 6000 < 1e8: all rungs clear
+        _stage(v);
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.MinHealthUpdated(12_000, 11_500);
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().minHealthBps, 11_500, "the staged floor won, loudly");
+    }
+
+    /// @dev The inequality half: an unchanged floor is quiet, so the event means "the trigger moved".
+    function testMigrateStaysQuietWhenTheHealthFloorIsUnchanged() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // minHealthBps == the live 12000
+        _stage(v);
+
+        vm.recordLogs();
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool sawMigrated;
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != LeveragedAerodromeCLStrategy.MinHealthUpdated.selector,
+                "an unchanged health floor must not announce a change"
+            );
+            if (logs[i].topics[0] == LeveragedAeroVenue.VenueMigrated.selector) sawMigrated = true;
+        }
+        assertTrue(sawMigrated, "the migration itself did run -- the assertion above is not vacuous");
+        assertEq(strategy.layout().minHealthBps, 12_000, "health floor unchanged");
+    }
+
+    /// @dev The stage a migration CONSUMES is announced like every other clear, so an indexer tracking
+    ///      "is a stage armed?" from `VenueStaged` alone does not show a phantom one afterwards.
+    function testMigrateAnnouncesTheStagedHashItConsumes() public {
+        _execute(SEED);
+        _flatten();
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams();
+        _stage(v);
+
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit LeveragedAerodromeCLStrategy.VenueStaged(bytes32(0));
+        vm.prank(proposer);
+        strategy.migrateVenue(v);
+
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "...and the storage matches the log");
+    }
+
     /// @dev THE STALE-AUTHORIZATION CLOSE. An owner stage carries a ceiling picked under the policy standing
     ///      at stage time; an admin ratchet-down moves that policy, so the setter consumes the stage exactly
     ///      as `redeploy` does. Without it the proposer alone could restore the pre-ratchet ceiling.
@@ -1308,7 +1435,9 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 6500 ceiling
         _stage(v);
-        assertEq(strategy.layout().stagedVenueHash, keccak256(abi.encode(v)), "owner authorization armed");
+        assertEq(
+            strategy.layout().stagedVenueHash, _stagedHash(keccak256(abi.encode(v)), owner), "owner authorization armed"
+        );
 
         // Markets turn: the admin ratchets policy and the ceiling down.
         vm.startPrank(owner);
@@ -1336,7 +1465,9 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _execute(SEED);
         LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 5000 target
         _stage(v);
-        assertEq(strategy.layout().stagedVenueHash, keccak256(abi.encode(v)), "owner authorization armed");
+        assertEq(
+            strategy.layout().stagedVenueHash, _stagedHash(keccak256(abi.encode(v)), owner), "owner authorization armed"
+        );
 
         vm.prank(owner);
         strategy.setTargetLtv(3000);
@@ -1352,6 +1483,24 @@ contract LeveragedAeroVenueMigrationUnitTest is Test {
         _stage(v);
         _migrate(v);
         assertEq(strategy.layout().targetLtvBps, TARGET_LTV_BPS, "a FRESH owner stage migrates as before");
+    }
+
+    /// @dev And on the health-floor setter: an armed stage carries a floor the owner picked under the old
+    ///      policy, so a repair of that floor consumes it too.
+    function testSetMinHealthConsumesAStaleVenueStage() public {
+        _execute(SEED);
+        LeveragedAeroVenue.VenueParams memory v = _venueAParams(); // carries the init 12000 floor
+        _stage(v);
+
+        vm.prank(owner);
+        strategy.setMinHealth(13_000);
+        assertEq(strategy.layout().stagedVenueHash, bytes32(0), "the repair consumed the stale authorization");
+
+        _flatten();
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.VenueNotStaged.selector);
+        strategy.migrateVenue(v);
+        assertEq(strategy.layout().minHealthBps, 13_000, "the floor the admin set still stands");
     }
 
     /// @dev Same close on the band setter.

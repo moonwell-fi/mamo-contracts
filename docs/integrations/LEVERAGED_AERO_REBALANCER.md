@@ -412,8 +412,28 @@ is **the only way to move the stored target at all**, in either direction — th
 | Why zero is refused | A zero standing target is not a brick — it borrows nothing, so `debtUsdc == 0`, `adjustLeverage`'s two branches both skip, and `_leverDown` guards the full-unwind case anyway (`FullUnwindNotSupported`). What it *is* is a fund that can silently never lever. Refused on **all three** write paths: the two setters, and `migrateVenue` (the guard sits in `LeveragedAeroVenue.applyVenue`, the route `_initialize` and `migrateVenue` share). |
 | Position effect | **None.** This is policy only; it moves nothing on chain. The value takes effect on the next `adjustLeverage` (retargets the live position to it) or the next `deployIdle` / `compound` / `execute` (sizes its collateral/borrow split at it). |
 | State gate | **None** — legal in `Pending` as well as `Executed`, so the multisig can correct an init-time target before the genesis `execute` without redeploying the clone. |
-| Events | `TargetLtvUpdated(uint16 previousBps, uint16 newBps)` — topic0 `0x74a1eafe22c602fe09147945eeb780f3482d293fefdceaa3ff058fd31134093e`. The only leverage-policy event on the contract; monitor it as a multisig-signed risk change. **Two emitters, one topic**: this setter and `migrateVenue` — a migration's staged params carry their own `targetLtvBps`, and `applyVenue` announces it when it differs from the stored one (it stays quiet when it does not, and it also fires once at init, `previousBps == 0`). So the log stream is the complete history of the stored target, with no per-path special case. |
+| Events | `TargetLtvUpdated(uint16 previousBps, uint16 newBps)` — topic0 `0x74a1eafe22c602fe09147945eeb780f3482d293fefdceaa3ff058fd31134093e`. One of four risk-policy events (`MaxLtvUpdated`, `MinHealthUpdated` and `WidthBoundsUpdated` are the others); monitor all of them as multisig-signed risk changes. **Two emitters, one topic**: this setter and `migrateVenue` — a migration's staged params carry their own `targetLtvBps`, and `applyVenue` announces it when it differs from the stored one (it stays quiet when it does not, and it also fires once at init, `previousBps == 0`). So the log stream is the complete history of the stored target, with no per-path special case. |
 | Read-back | `targetLtvBps()` or `layout().targetLtvBps` (§E) — the same storage read. |
+
+### `setMinHealth` — **ADMIN-ONLY**: move the health floor the permissionless `deleverage()` arms below
+
+```solidity
+function setMinHealth(uint16 minHealthBps_) external onlyAdmin;   // selector 0x24a9a572
+```
+
+**Not a rebalancer call**, and not an everyday one. `minHealthBps` sets the permissionless valve's trigger
+at `LTV = 1e8 / minHealthBps`, so **raising it lowers the trigger** and vice versa. Same gate as
+`setTargetLtv` (`Ownable(vault()).owner()`, else `NotAdmin()`), same non-existent state gate.
+
+| | |
+|---|---|
+| `minHealthBps_` | The new floor in bps, on the shared `checkLtvBand` ladder against the **live** Moonwell USDC collateral factor: `≥ 10500` → `MinHealthTooLow()`; `minHealthBps_ × maxLtvBps < 1e8` → `MinHealthMaxLtvConflict()` (the trigger must stay strictly **above** the ceiling, or in-band positions are grief-deleverageable); `minHealthBps_ × cfBps > 1e8` → `DeleverageTriggerAboveCF()` (the trigger must stay strictly **below** the CF, or Moonwell can liquidate before the valve is callable). A rejected value stores nothing and emits nothing. |
+| Direction risk | **Lowering is the dangerous direction** — it raises the trigger toward the liquidation line, and the last rung is what refuses it. Raising is the safe one and costs only a wider gap between policy and the backstop. |
+| Position effect | **None.** Policy only; it moves nothing on chain. It changes when `deleverage()` becomes callable and what health it repays down to (`minHealthBps × 1.05`). |
+| **When you actually need it** | Moonwell governance cuts the USDC CF to at or below `1e8 / minHealthBps` bps. At the deployed `minHealthBps = 12000` that is a CF of **≤ 8333** (live CF today: **8800**, so 466 bps of headroom). In that regime `migrateVenue` reverts `DeleverageTriggerAboveCF` and `setMaxLtv` refuses any **loosening**; one `setMinHealth(≥ floor(1e8/cfBps) + 1)` repairs both, with no flatten, no re-stage and no proposer. Also check `maxLtvBps ≤ ceil(1e8/minHealthBps) - 1` still holds. Nothing else breaks: deposits, both redeem paths, `compound`, `rerange`, `flatten`, `adjustLeverage` down and `setMaxLtv` **tightening** all keep working through it. |
+| Monitor | Alert on `Comptroller.markets(mUsdc).collateralFactorMantissa` — one `eth_call`. At `minHealthBps = 12000`: **warn below 8600, page at or below 8400.** Moonwell CF changes go through governance with a notice period, so there is lead time. |
+| Events | `MinHealthUpdated(uint16 previousBps, uint16 newBps)` — topic0 `0xbb87d47d0ab57e8775e3ae9a96b54ab86840d9a5d36c405f19c766f3b7c4331f`. Two emitters, one topic: this setter and `migrateVenue` (inequality-guarded in `applyVenue`, and it fires once at init with `previousBps == 0`), so the log stream is the field's complete history. |
+| Read-back | `layout().minHealthBps` (§E). |
 
 ### `adjustLeverage` — move the BOOK to any LTV at or below the stored target
 
@@ -486,7 +506,7 @@ function deleverage(uint256 minOut) external nonReentrant;   // NOT onlyProposer
 | Trigger conditions | Health basis `health = collateralUsdc × 1e4 / debtUsdc` (same hardened-Chainlink reads as `_assertHealthy`). Reverts `HealthyNoDeleverage()` when `debtUsdc == 0` **or** `health >= minHealthBps`. Only fires when the position has slipped below the `minHealthBps` buffer. |
 | Bounds | A **recovery op, not** the full LTV-≤-max gate: repays debt down to `minHealthBps × (1 + DELEVERAGE_BUFFER_BPS/1e4)` = `minHealthBps × 1.05`. Post-checks: health strictly improved **and** the Moonwell shortfall cleared or reduced, else `UnhealthyPosition(healthAfter, minHealth)`. |
 | Oracle | A stale strategy-side feed fail-closes (reverts) — deleveraging at a stale/manipulated price is worse than waiting. Moonwell liquidation uses Moonwell's own oracle; the window where ours is stale but theirs is fresh is an accepted residual (audit §9). |
-| Config invariant | The deleverage trigger LTV `= 1e8 / minHealthBps` is guaranteed strictly above `maxLtvBps` at init (`minHealthBps × maxLtvBps < 1e8`), so there is no in-band range anyone can grief-deleverage. |
+| Config invariant | The deleverage trigger LTV `= 1e8 / minHealthBps` is guaranteed strictly above `maxLtvBps` at init **and at every `migrateVenue`** (`applyVenue` re-runs `checkLtvBand`, so `minHealthBps × maxLtvBps < 1e8` holds for the clone's whole life), so there is no in-band range anyone can grief-deleverage. |
 | When to call | Proactively when health approaches `minHealthBps`; but note anyone can and will call it — treat it as an always-available backstop, not an exclusive agent action. |
 
 ### `rescueToVault` — sweep stray tokens to the vault
@@ -1051,9 +1071,9 @@ function redeemSweepFloors(uint256 cbAmt, uint256 wethAmt) external view returns
   Nothing needs to be added for the keeper's core watch-and-fulfill duty.
 - **Position-management ops emit almost nothing** — `deployIdle`, `rerange`, `adjustLeverage`, and
   `deleverage` are event-silent, and `compound` emits only `RewardFeePaid` (and, on a degraded leg,
-  `HedgeLegMeasureDegraded`). What *does* emit is every write to the standing target — the admin's `setTargetLtv` and a
-  `migrateVenue` whose staged params change it — both as
-  `TargetLtvUpdated(previousBps, newBps)`; watch it as a risk change. Until that changes, dashboards key off
+  `HedgeLegMeasureDegraded`). What *does* emit is every write to the risk policy — the admin's `setTargetLtv` /
+  `setMaxLtv` / `setMinHealth` / `setWidthBounds`, and a `migrateVenue` whose staged params change any of
+  them — as `TargetLtvUpdated`, `MaxLtvUpdated`, `MinHealthUpdated` and `WidthBoundsUpdated`; watch all four as risk changes. Until that changes, dashboards key off
   venue-level events (Moonwell mint/borrow/repay/redeem, Slipstream NPM increase/decrease, gauge
   stake/getReward) and transaction receipts.
 - **Adding events is an open option, not a blocker.** If the rebalancer or an indexer ends up needing
@@ -1067,11 +1087,15 @@ Strategy events that exist today:
 |---|---|
 | `RedeemRequested / RedeemFulfilled / RedeemCancelled / RedeemEmergency` | withdraw-queue tracking (§C) |
 | `RewardFeePaid(address indexed recipient, uint256 aeroAmount)` | a realization skimmed the in-kind fee. `aeroAmount` is **AERO (18dp), not USDC** — `compoundFeeBps` of the tranche being sold, transferred before the sale. Emitted by `compound`, by `flatten`, and by an async-redeem fulfilment; **not** by the terminal `settle`, which waives the fee. Absent when `compoundFeeBps == 0` or on a dust no-op. This is the whole fee accounting feed. |
+| `TargetLtvUpdated(uint16 previousBps, uint16 newBps)` | the fund's **standing target LTV** was rewritten — by the admin's `setTargetLtv`, or by an `applyVenue` (init, `previousBps == 0`; and any `migrateVenue` whose staged params differ). topic0 `0x74a1eafe22c602fe09147945eeb780f3482d293fefdceaa3ff058fd31134093e`. The log stream is the complete history of the stored target. |
+| `MaxLtvUpdated(uint16 previousBps, uint16 newBps)` | the **LTV ceiling** was rewritten — `setMaxLtv`, or `applyVenue` when the staged value differs. topic0 `0x9c5caa95f0110d20ac4733b64a52135f52197970f7b4334308c304f9531b4ae9`. |
+| `WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth)` | the **width band** was rewritten — `setWidthBounds`, or `applyVenue` when either bound differs. topic0 `0x10e37904b0d56ce20c721a98e7ce8b1432b06f1dad198eb02edcf87eb95b68f0`. |
 | `SettleRewardSaleDeferred()` | the **terminal settle**'s best-effort reward-tranche sale was skipped (stale/paused AERO feed, broken AERO→USDC route, or a fill under the L9 floor). The settle completed; the tranche is left on the now-`Settled` strategy and needs the owner's `rescueToVault(rewardToken)` → `vault.rescueERC20`. **Check the strategy's AERO balance after any settle.** |
 | `RedeemRewardSaleDeferred()` | an **async redeem**'s sale of the tranche its own unwind auto-claimed was skipped, same causes. The redeem completed and paid, but that redeemer got `f × (assets − reward)` and the tranche stayed with the stayers — the one residual of the pre-fix behaviour (§C). Clear it with `compound` once the feed/route recovers; a *recurring* one means every redeemer is being short-paid, so treat it as a feed/route incident, not noise. |
 | `RedeemSweepFloorsDegraded()` | an **async redeem**'s closing leg→USDC sweeps ran with their Chainlink min-out floors at **zero** — the derivation reverted (stale feed / down sequencer, or an out-of-gas: the `catch` cannot tell them apart). Deliberately fail-open so the `emergencyRedeem` deadman still completes, but those swaps were **unbounded** for that call. Expect it only alongside a real oracle outage; seeing it while feeds are healthy is a gas/venue problem worth investigating before the next fulfill. |
 | `WithdrawIdleBoundDegraded()` | a `withdrawIdle` could not price its un-levered bound at the hardened reader and **re-derived the same line from Moonwell's own account snapshot** for that call (see the `withdrawIdle` entry's Feed-outage row). The withdraw happened, **inside the bound** — what degraded is the price basis, not the line. Reconcile LTV against the hardened feeds once they recover; seeing it while feeds are healthy is a gas problem worth investigating. |
 | `HedgeLegMeasureDegraded(address market)` | a `compound` could not accrue-and-read one leg's live Moonwell debt, so that leg's interest-drift hedge was skipped for the harvest (the other leg proceeds). The drift stays open and compounds until a later harvest reads it; a *recurring* one on the same market is a venue incident. |
+| `MinHealthUpdated(uint16 previousBps, uint16 newBps)` | the permissionless `deleverage()` trigger moved — it sits at `LTV = 1e8 / newBps`, so a **higher** `newBps` is a **lower** trigger. Emitted by the admin's `setMinHealth` and by a `migrateVenue` whose staged params carry a different floor (inequality-guarded, plus once at init with `previousBps == 0`), so the stream is the field's complete history. Treat any decrease as a multisig-signed risk change; see `setMinHealth` in §B for the CF-cut case that motivates an increase. |
 
 > **The naming rule for the fail-opens above.** `…Deferred` = an optional **action** was skipped;
 > `…Degraded` = a **guard or measure** fell back and the op ran with less protection. All are emitted from
@@ -1223,9 +1247,9 @@ same vault, same share token, same user accounts, no user action. Three new stra
 
 | Call | Who | What |
 |---|---|---|
-| `stageVenue(bytes32)` | **vault owner (multisig)** | Commit `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))` for the destination venue; `0` clears. Inert until executed. |
-| `flatten(minRewardUsdcOut, minIdleUsdcOut)` | proposer | `settleImpl`'s exact unwind (exit gauge+CL, repay both legs, redeem all collateral, sweep legs → USDC) but **no settle**: state stays `Executed`, USDC stays in the strategy, deposits/redeems keep working (flat NAV = idle USDC, oracle-free). **Calm-gated** before the burn, and it **sells the reward tranche** the unwind auto-claims (L9 oracle floor + your `minRewardUsdcOut`) so the flat NAV is the whole book — **skimming `compoundFeeBps` in kind first**, so quote `minRewardUsdcOut` on the POST-skim amount exactly as for `compound`. `minIdleUsdcOut` is your aggregate floor on the realised unwind. Idempotent. |
-| `migrateVenue(VenueParams)` | proposer | Executes the staged rewrite. Requires byte-exact hash match AND a flat book (`tokenId == 0`, hedged bases 0, zero debt on both current leg markets). Re-runs full init-grade validation (incl. the **two-way** gauge↔pool binding `gauge.pool() == pool` *and* `pool.gauge() == gauge`, and a probe that the reward token has an Aerodrome v2 volatile USDC route) and rewrites the venue subset of storage. Moves **no funds**. **The skew triple is NOT in `VenueParams`** — `skewBps`/`minSkewBps`/`maxSkewBps` are venue-independent governance config and a migration never rewrites them; but the destination's `width` + `tickSpacing` ARE rewritten, and `checkRange`'s one-spacing-per-side floor couples the two, so `migrateVenue` re-validates the **live** skew against the destination and reverts `OutOfBounds` if that venue would starve either side. Pick a destination width/spacing the standing `skewBps` still fits, or the migration is rejected (nothing changes). |
+| `stageVenue(bytes32)` | **vault owner (multisig)** | Commit `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))` for the destination venue; `0` clears. Inert until executed. Stored BOUND to the staging owner as `keccak256(abi.encode(paramsHash, vaultOwner))` (the `VenueStaged` event still carries the RAW params hash, so recompute the stored value with the live owner), so while `owner()` differs from the staging address the stage is **suspended** — `migrateVenue` reverts `VenueNotStaged` — and it **re-arms** if ownership returns to that address. |
+| `flatten(minRewardUsdcOut, minIdleUsdcOut)` | proposer | `settleImpl`'s exact unwind (exit gauge+CL, repay both legs, redeem all collateral, sweep legs → USDC) but **no settle**: state stays `Executed`, USDC stays in the strategy, deposits/redeems keep working (flat NAV = idle USDC, oracle-free). **Calm-gated** before the burn, and it **sells the reward tranche** the unwind auto-claims (L9 oracle floor + your `minRewardUsdcOut`) so the flat NAV is the whole book — **skimming `compoundFeeBps` in kind first**, so quote `minRewardUsdcOut` on the POST-skim amount exactly as for `compound`. `minIdleUsdcOut` is your aggregate floor on the realised unwind. Idempotent on a flat book with no reward balance above the dust band; always pass a nonzero `minRewardUsdcOut` (1 wei suffices) — above that band a zero floor reverts `ZeroMinOut`. |
+| `migrateVenue(VenueParams)` | proposer | Executes the staged rewrite. Requires byte-exact hash match AND a flat book (`tokenId == 0`, hedged bases 0, zero debt on both current leg markets). Re-runs full init-grade validation (incl. the **two-way** gauge↔pool binding `gauge.pool() == pool` *and* `pool.gauge() == gauge`, and a probe that the reward token has an Aerodrome v2 volatile USDC route) and rewrites the venue subset of storage. Moves **no funds**. **The skew triple is NOT in `VenueParams`** — `skewBps`/`minSkewBps`/`maxSkewBps` are venue-independent governance config and a migration never rewrites them; but the destination's `width` + `tickSpacing` ARE rewritten, and `checkRange`'s one-spacing-per-side floor couples the two, so `migrateVenue` re-validates the **live** skew against the destination and reverts `OutOfBounds` if that venue would starve either side. Pick a destination width/spacing the standing `skewBps` still fits, or the migration is rejected (nothing changes) — closed form, a width that NO in-band skew can starve: `p.width ≥ p.tickSpacing × 10000 / min(minSkewBps, 10000 − maxSkewBps)`, i.e. `≥ 10 × p.tickSpacing` for the deployed `[1000, 9000]` band. The staged params also rewrite the **risk policy**: `targetLtvBps`, `maxLtvBps`, `minHealthBps`, `width`, `minWidth`, `maxWidth` (all re-validated by `checkLtvBand` / `checkRange`). The first three and the width band announce themselves (`TargetLtvUpdated` / `MaxLtvUpdated` / `MinHealthUpdated` / `WidthBoundsUpdated`, inequality-guarded); only `width` changes silently — read it back from `layout()` after every migration. |
 | `redeploy(minLiquidity)` | proposer | Re-opens a **fresh** position from the flat book — `executeImpl`'s genesis sequence, entire idle balance, stored width/target-LTV, floored by your `minLiquidity`. **Clears any staged venue hash.** `deployIdle` can NOT do this (it `increaseLiquidity`s the stored tokenId, 0 when flat); conversely `redeploy` reverts `PositionAlreadyOpen` on a live book. |
 
 **Runbook (per migration):**
@@ -1240,14 +1264,18 @@ same vault, same share token, same user accounts, no user action. Three new stra
 2. Rebalancer: `flatten(minRewardUsdcOut, minIdleUsdcOut)` (oracle must be live — the leg sweeps and
    the reward sale are Chainlink-floored via `maxSlippageBps`, and the pool is calm-gated, so a
    shoved tick reverts rather than unwinding at a manipulated price). Size `minIdleUsdcOut` off the
-   expected realised unwind; pass a nonzero `minRewardUsdcOut` whenever a tranche is pending.
+   expected realised unwind; ALWAYS pass a nonzero `minRewardUsdcOut` (1 wei suffices — the post-checked
+   oracle floor is the real guard). A reward-token donation is a pending tranche emissions data will not
+   show, and above the dust band a zero floor reverts `ZeroMinOut`.
 3. Rebalancer: `migrateVenue(params)` — pure config rewrite; NAV is provably unchanged (flat NAV is
    the idle-USDC balance, which no venue field touches).
 4. Rebalancer: `redeploy(minLiquidity)`; afterwards sweep old-leg unwind dust with
    `rescueToVault(oldLeg)` (former legs leave the deny-list at the rewrite; the NEW legs enter it).
 
-**Any admin policy setter clears an armed stage.** `setTargetLtv` / `setMaxLtv` / `setWidthBounds`
-between steps 1 and 3 consume the staged hash — re-stage to proceed.
+**Any admin policy setter clears an armed stage.** `setTargetLtv` / `setMaxLtv` / `setWidthBounds` /
+`setMinHealth` between steps 1 and 3 consume the staged hash — re-stage to proceed. A stage never expires on
+its own: only `migrateVenue`, `redeploy`, those four setters or `stageVenue(0)` END one, and a vault-owner
+rotation merely suspends it — so **`stageVenue(0)` is a mandatory step before any ownership handover.**
 
 **Trust split:** the owner alone picks the venue (hash-committed, byte-exact); the proposer alone
 sequences execution and can neither deviate from the committed config nor move funds out of the
@@ -1315,15 +1343,18 @@ mechanism protecting the fund from being rebalanced at a manipulated price — a
 | `tickSpacing` | 20 | 100 | LP pool spacing |
 | `maxSlippageBps` | 24 | 100 | 1 % — also the oracle-floor tolerance on swaps |
 | `posTickLower` / `posTickUpper` | 27 / 28 | −66300 / −63300 | current range (width 3000 ≈ 35 % span, centered — `skewBps` 5000) |
-| width band | 43 / 44 | [200, 20000] | `rerange` width bounds (`OutOfBounds` outside) |
-| `legBIsAsset` | 45 | `true` | asset mode: leg B **is** USDC |
-| `skewBps` | 46 | **5000** | fraction of `width` placed BELOW spot; 5000 = centered (`OutOfBounds` outside `(0, 10000)`, outside the skew band below, or if either span < `tickSpacing`). **Appended after `legBIsAsset`, not next to the width band** — decode by name, not by eyeballing the group |
-| skew band (`minSkewBps` / `maxSkewBps`) | 47 / 48 | [1000, 9000] (harness default) | init-immutable governance band on `skewBps`, checked at init **and** every `rerange` → the same `OutOfBounds` |
-| `hedgedDebtA` / `hedgedDebtB` | 49 / 50 | — | hedged borrow principal per leg |
-| `stagedVenueHash` | 51 | `0x00…0` | `keccak256(abi.encode(VenueParams))` the vault owner has staged as the migration destination; `0` == nothing staged. Appended **last**, so it shifts nothing |
+| width band (`minWidth` / `maxWidth`) | 40 / 41 | [200, 20000] | `rerange` width bounds (`OutOfBounds` outside) |
+| `legBIsAsset` | 42 | `true` | asset mode: leg B **is** USDC |
+| `skewBps` | 43 | **5000** | fraction of `width` placed BELOW spot; 5000 = centered (`OutOfBounds` outside `(0, 10000)`, outside the skew band below, or if either span < `tickSpacing`). **Appended after `legBIsAsset`, not next to the width band** — decode by name, not by eyeballing the group |
+| skew band (`minSkewBps` / `maxSkewBps`) | 44 / 45 | [1000, 9000] (harness default) | init-immutable governance band on `skewBps`, checked at init **and** every `rerange` → the same `OutOfBounds` |
+| `hedgedDebtA` / `hedgedDebtB` | 46 / 47 | — | hedged borrow principal per leg |
+| `stagedVenueHash` | 48 | `0x00…0` | `keccak256(abi.encode(keccak256(abi.encode(VenueParams)), vaultOwner))` — the migration destination the vault owner has staged; `0` == nothing staged. Appended **last**, so it shifts nothing |
 
 > **The two skew-band fields were INSERTED after `skewBps`, not appended**, so every field below them
-> shifted by two — `hedgedDebtA`/`hedgedDebtB` were 48/49 and are now 50/51. Anything decoding `layout()`
+> shifted by two. The later fee-model rework then removed three fields net, so the whole tail moved down
+> again: `layout()` is **48 fields**, with `width`/`minWidth`/`maxWidth` at 39/40/41,
+> `hedgedDebtA`/`hedgedDebtB` at 46/47 and `stagedVenueHash` last at 48
+> (`script/tenderly/compound-cycle.sh`'s `LAYOUT_SIG` is the maintained reference). Anything decoding `layout()`
 > positionally (a raw `abi.decode`, a hand-written tuple, a cached ABI) will read the wrong values against
 > a clone built from this PR. Decode by **name** off a freshly generated ABI. A clone deployed *before*
 > this PR — the current staging one included — has neither field at all; re-deploy the pooled layer to

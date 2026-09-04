@@ -85,10 +85,11 @@ NPM=0x827922686190790b37229fd06084350E74485b72
 # `cast call` fail to decode and every `lay N` read comes back empty — if `lay` starts returning
 # nothing, check this line FIRST; `forge inspect LeveragedAerodromeCLStrategy abi` is the authority.
 # (`lay N` is 1-BASED over the comma-split tuple, so field N == LayoutView member N-1. Appends land
-# at the END, but a REMOVAL shifts every later index down — the fee-layer swap dropped four fields
-# (`managementFeeBps`, `performanceFeeBps`, `hwmPerShare`, `lastFeeAccrualTimestamp`) and added one
-# (`compoundFeeBps` at 29, ahead of `feeRecipient` at 30), which is why the tail numbers above are
-# three lower than they used to be — 51 → 48.)
+# at the END, but a REMOVAL shifts every later index down — RETIRING the crystallize fee model dropped
+# its four fields (`managementFeeBps`, `performanceFeeBps`, `hwmPerShare`, `lastFeeAccrualTimestamp`,
+# none of which exist any more) and added the in-kind skim's one (`compoundFeeBps` at 29, ahead of
+# `feeRecipient` at 30), which is why the tail numbers above are three lower than they used to be —
+# 51 → 48.)
 LAYOUT_SIG='layout()((address,address,address,address,address,address,address,address,address,address,address,uint256,uint256,uint16,uint32,address,address,address,address,int24,uint16,uint16,uint16,uint16,uint16,uint256,int24,int24,uint16,address,address,uint256,uint8,uint8,bool,bool,int24,int24,uint24,uint24,uint24,bool,uint16,uint16,uint16,uint128,uint128,bytes32))'
 
 c() { cast call --rpc-url "$RPC" "$@" 2>/dev/null; }

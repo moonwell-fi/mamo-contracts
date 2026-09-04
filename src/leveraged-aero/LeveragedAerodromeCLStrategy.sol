@@ -157,6 +157,9 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
 
+    /// @dev `setMinHealth`, and `applyVenue` (init + `migrateVenue`) inequality-guarded.
+    event MinHealthUpdated(uint16 previousBps, uint16 newBps);
+
     /// @dev Mirror of `LeveragedAeroManager.RewardFeePaid` / `LeveragedAeroVenue.RewardFeePaid` (both
     ///      delegatecalled, so both log from THIS address). `aeroAmount` of a realized reward tranche was
     ///      skimmed to `recipient`, in AERO (18dp) — by `compound`, `flatten`, or the async-redeem sale.
@@ -348,7 +351,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
         // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
-        bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
+        bytes32 stagedVenueHash; // keccak256(abi.encode(paramsHash, stagingOwner)); 0 == none; owner move suspends
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -854,9 +857,19 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev CONSUMES ANY STAGED VENUE HASH (like `redeploy`): the owner staged it under the old policy.
     /// @param maxLtvBps_ New ceiling in bps, validated by the shared `checkLtvBand` against the LIVE
     ///        collateral factor: Moonwell governance can move CF after init, and the init-time snapshot
-    ///        could approve a ceiling now above the liquidation line.
+    ///        could approve a ceiling now above the liquidation line. A TIGHTENING skips the last rung,
+    ///        whose inputs it cannot move; `setMinHealth` is what repairs that rung.
     function setMaxLtv(uint16 maxLtvBps_) external onlyAdmin {
         LeveragedAeroVenue.setMaxLtvImpl(maxLtvBps_);
+    }
+
+    /// @notice ADMIN-ONLY POLICY: the health floor the permissionless `deleverage()` valve arms below — its
+    ///         trigger LTV is `1e8 / minHealthBps`, so RAISING this LOWERS it. Not state-gated, and it
+    ///         CONSUMES ANY STAGED VENUE HASH, on `setMaxLtv`'s `checkLtvBand` ladder against the LIVE CF.
+    /// @dev Reads no position state: a raise past CURRENT health arms the permissionless `deleverage()` in
+    ///      the same block — read health first. Rung 4 bounds that to a book already above `maxLtvBps`.
+    function setMinHealth(uint16 minHealthBps_) external onlyAdmin {
+        LeveragedAeroVenue.setMinHealthImpl(minHealthBps_);
     }
 
     /// @notice ADMIN-ONLY POLICY: set the `[minWidth, maxWidth]` band a proposer `rerange` width must land
@@ -891,8 +904,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     /// @dev "The keeper cannot raise fund risk" is NOT a property of this bound alone: `migrateVenue` is
     ///      `onlyProposer` and rewrites BOTH `targetLtvBps` and `maxLtvBps`. That is safe for exactly two
     ///      reasons — `stageVenue` is OWNER-gated, and the params are BYTE-COMMITTED to the staged
-    ///      `keccak256(abi.encode(p))`. Loosening either would SILENTLY UN-GATE this bound; `applyVenue` emits
-    ///      `TargetLtvUpdated` on that path, so do not add a write path without an emit.
+    ///      `keccak256(abi.encode(keccak256(abi.encode(p)), vaultOwner))`. Loosening either would SILENTLY
+    ///      UN-GATE this bound; `applyVenue` emits `TargetLtvUpdated` there, so add no write path without an emit.
     /// @param targetBps Target LTV for THIS call only, in bps; must be `<= targetLtvBps()`. A zero (or
     ///        near-zero) target is a full unwind and fails closed in `_leverDown` with
     ///        `FullUnwindNotSupported` — `flatten()` is the real full unwind.
@@ -1104,9 +1117,10 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         `keccak256(abi.encode(LeveragedAeroVenue.VenueParams))`; `bytes32(0)` clears. VAULT OWNER ONLY —
     ///         the venue-selection authority, so the hot proposer key can never choose where the fund's liquidity
     ///         goes. Staging is inert until `migrateVenue` runs with the byte-exact params; re-staging replaces.
+    ///         The stage is bound to the STAGING owner, so a vault-owner rotation invalidates it; it never expires.
     function stageVenue(bytes32 venueHash) external {
         if (msg.sender != _vaultOwner()) revert NotVaultOwner();
-        LeveragedAeroVenue.stageImpl(venueHash);
+        LeveragedAeroVenue.stageImpl(venueHash, msg.sender);
     }
 
     /// @notice Unwind the WHOLE book to idle USDC while staying `Executed` — the migration's first leg, and a
@@ -1114,7 +1128,8 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         legs self-funding any shortfall, redeem all collateral, sweep residual legs to USDC, slippage
     ///         floored by `maxSlippageBps`) but does NOT settle: no state transition and no push-to-vault.
     ///         Deposits and redeems keep working against the flat book (NAV == idle
-    ///         USDC, oracle-free); the proposer re-enters via `redeploy`. Idempotent on an already-flat book.
+    ///         USDC, oracle-free); the proposer re-enters via `redeploy`. Idempotent on a flat book with no
+    ///         reward balance above the dust band — above it, quote a nonzero `minRewardUsdcOut` (see below).
     ///         TWO GUARDS `settle` does not need, because `flatten` is repeatable: the pool is CALM-GATED before
     ///         the burn (the unwind's mins come off the same `slot0()` it burns at), and the auto-claimed reward
     ///         tranche is SOLD here, FAIL-CLOSED under `max(minRewardUsdcOut, L9 oracle floor)` — a reverted
@@ -1134,7 +1149,7 @@ contract LeveragedAerodromeCLStrategy is BaseStrategy, ReentrancyGuardTransient,
     ///         idle USDC balance, which no venue field touches. Old-leg dust becomes `rescueToVault`-able.
     function migrateVenue(LeveragedAeroVenue.VenueParams calldata p) external onlyProposer nonReentrant {
         if (_state != State.Executed) revert NotExecuted();
-        LeveragedAeroVenue.migrateImpl(p);
+        LeveragedAeroVenue.migrateImpl(p, _vaultOwner());
     }
 
     /// @notice Open a FRESH position from a flat `Executed` book, deploying the entire idle USDC balance — the
