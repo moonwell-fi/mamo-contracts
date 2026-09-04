@@ -69,6 +69,8 @@ library LeveragedAeroVenue {
     ///         signatures (same `topic0`), since both routes log from the strategy's address.
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
+    /// @notice The permissionless-deleverage trigger moved: it sits at `LTV = 1e8 / minHealthBps`.
+    event MinHealthUpdated(uint16 previousBps, uint16 newBps);
 
     /// @notice An async-redeem request was escrowed. Re-declared with the strategy's signature (same `topic0`).
     event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
@@ -559,7 +561,7 @@ library LeveragedAeroVenue {
         if (IMoonwellMarket($.mWeth).borrowBalanceStored(address(this)) != 0) revert BookNotFlat();
         address oldPool = $.pool;
         applyVenue(p);
-        $.stagedVenueHash = bytes32(0);
+        _clearStagedVenue($); // announced, or a stage-tracking indexer shows a phantom armed stage here
         emit VenueMigrated(oldPool, p.pool);
     }
 
@@ -701,7 +703,7 @@ library LeveragedAeroVenue {
         // The lower bound is the only rung not mirrored in that ladder, and `applyVenue` is the shared route
         // for init and migrate, so it closes every path to a stored zero target — a fund that can never lever.
         if (p.targetLtvBps == 0) revert TargetLtvZero();
-        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps);
+        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps, true);
 
         // ── Persist the venue subset (every field a pool/pair change touches, nothing else) ──
         $.mCbBTC = p.mCbBTC;
@@ -727,10 +729,11 @@ library LeveragedAeroVenue {
         // The target LTV is the one venue field that is also POLICY, so announce it or a migration becomes
         // the one route that moves leverage policy in silence. Guarded on inequality, so the event means
         // "policy moved", not "a migration happened"; at init it is trivially true, announcing the opener.
-        // Same argument for the ceiling and the band above: `VenueMigrated` carries only the two pools, so
+        // Same argument for the ceiling, the band and the floor below: `VenueMigrated` carries only the pools,
         // without these a migration moves them in silence past a monitor keyed on the setters' events.
         if ($.targetLtvBps != p.targetLtvBps) emit TargetLtvUpdated($.targetLtvBps, p.targetLtvBps);
         if ($.maxLtvBps != p.maxLtvBps) emit MaxLtvUpdated($.maxLtvBps, p.maxLtvBps);
+        if ($.minHealthBps != p.minHealthBps) emit MinHealthUpdated($.minHealthBps, p.minHealthBps);
         $.targetLtvBps = p.targetLtvBps;
         $.maxLtvBps = p.maxLtvBps;
         $.minHealthBps = p.minHealthBps;
@@ -741,7 +744,7 @@ library LeveragedAeroVenue {
         $.legBIsAsset = legBIsAsset_;
     }
 
-    // ── Bodies of the strategy's three admin policy setters, hosted here for its EIP-170 budget ──
+    // ── Bodies of the strategy's four admin policy setters, hosted here for its EIP-170 budget ──
 
     /// @dev A staged hash authorises a venue whose params carry a `maxLtvBps` / width band / target the
     ///      owner picked under the policy standing AT STAGE TIME. An admin write moves that policy, so the
@@ -771,9 +774,20 @@ library LeveragedAeroVenue {
     function setMaxLtvImpl(uint16 maxLtvBps_) public {
         Layout storage $ = _layout();
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
-        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps);
+        bool loosening = maxLtvBps_ > $.maxLtvBps;
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps, loosening);
         emit MaxLtvUpdated($.maxLtvBps, maxLtvBps_);
         $.maxLtvBps = maxLtvBps_;
+        _clearStagedVenue($);
+    }
+
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setMinHealth`, on `setMaxLtvImpl`'s exact ladder.
+    function setMinHealthImpl(uint16 minHealthBps_) public {
+        Layout storage $ = _layout();
+        uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, $.maxLtvBps, minHealthBps_, cfBps, true);
+        emit MinHealthUpdated($.minHealthBps, minHealthBps_);
+        $.minHealthBps = minHealthBps_;
         _clearStagedVenue($);
     }
 
