@@ -101,9 +101,9 @@ contract LeveragedAeroSystemSetupTest is Test {
         addresses = new Addresses("./addresses", chainIds);
         vm.makePersistent(address(addresses));
 
-        // MAMO_REBALANCER is an ops-held EOA, not committed by the deploy PR (see 015's NatSpec).
-        // isContract = false: it is a signer key, and FPS validates that eagerly.
-        addresses.addAddress("MAMO_REBALANCER", rebalancer, false);
+        // The committed MAMO_REBALANCER is the ops-held signer; the test swaps in its own EOA so
+        // it can prank the proposer legs. changeAddress, since the key ships in addresses/8453.json.
+        addresses.changeAddress("MAMO_REBALANCER", rebalancer, false);
 
         multisig = addresses.getAddress("MAMO_MULTISIG");
         usdc = addresses.getAddress("USDC");
