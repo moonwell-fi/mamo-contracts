@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+
+interface IStockAccountRegistry {
+    enum TokenStatus {
+        None,
+        Active,
+        SellOnly,
+        Halted
+    }
+
+    enum PriceSource {
+        PoolTwap,
+        Chainlink
+    }
+
+    struct TokenConfig {
+        TokenStatus status;
+        PriceSource source;
+        address pool;
+        address chainlinkFeed;
+    }
+
+    function tokenConfig(address token) external view returns (TokenConfig memory);
+
+    function allTokens() external view returns (address[] memory);
+
+    function maxPositions() external view returns (uint8);
+
+    function minTargetBps() external view returns (uint16);
+
+    function maxDeviationBps() external view returns (uint16);
+
+    function maxStrategyDeposit() external view returns (uint256);
+
+    function twapWindow() external view returns (uint32);
+
+    function maxBackendSlippageBps() external view returns (uint16);
+
+    function maxWithdrawSlippageBps() external view returns (uint16);
+
+    function requiredAppDataHash() external view returns (bytes32);
+
+    function aerodromeRouter() external view returns (ISwapRouter);
+
+    function priceChecker() external view returns (ISlippagePriceChecker);
+}
