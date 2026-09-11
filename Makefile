@@ -40,7 +40,12 @@ mamo-staking:
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
 
+# StockAccountPriceChecker (CT-02): unit suite is mock-only; the integration suite self-forks Base at a
+# PINNED block in setUp (no --fork-url: foundry 1.7.x panics on Isthmus L1Block otherwise) and needs BASE_RPC_URL.
+stock-price-checker:
+	forge test --ffi --match-contract StockAccountPriceChecker -vvv
+
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+.PHONY: stock-price-checker test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
