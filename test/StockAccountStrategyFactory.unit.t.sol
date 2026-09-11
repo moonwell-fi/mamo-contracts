@@ -118,7 +118,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroAdmin() public {
-        vm.expectRevert("Invalid admin address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             address(0),
             backend,
@@ -134,7 +134,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroBackend() public {
-        vm.expectRevert("Invalid backend address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             address(0),
@@ -150,7 +150,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroMamoStrategyRegistry() public {
-        vm.expectRevert("Invalid mamoStrategyRegistry address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -166,7 +166,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroStockRegistry() public {
-        vm.expectRevert("Invalid stock registry address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -182,7 +182,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroAsset() public {
-        vm.expectRevert("Invalid asset address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -198,7 +198,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroSettlement() public {
-        vm.expectRevert("Invalid settlement address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -214,7 +214,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroImplementation() public {
-        vm.expectRevert("Invalid implementation address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -230,7 +230,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroStrategyTypeId() public {
-        vm.expectRevert("Strategy type id not set");
+        vm.expectRevert(StockAccountStrategyFactory.StrategyTypeIdNotSet.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -246,7 +246,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     }
 
     function testConstructorRevertsWithZeroFeeRecipient() public {
-        vm.expectRevert("Invalid fee recipient address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
@@ -281,7 +281,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         registry.grantRole(backendRole, address(highFee));
 
         vm.prank(backend);
-        vm.expectRevert("Fee exceeds maximum");
+        vm.expectRevert(IStockAccountStrategy.FeeExceedsMaximum.selector);
         highFee.createStrategyForUser(user, _entries(5000, 5000), 0);
     }
 
@@ -335,7 +335,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
 
     function testStrangerCannotCreateStrategy() public {
         vm.prank(stranger);
-        vm.expectRevert("Only backend or user can create strategy");
+        vm.expectRevert(StockAccountStrategyFactory.NotBackendOrUser.selector);
         factory.createStrategyForUser(user, _entries(5000, 5000), 0);
     }
 
@@ -343,20 +343,22 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         vm.prank(backend);
         factory.createStrategyForUser(user, _entries(5000, 5000), 0);
 
+        address existing = factory.computeStrategyAddress(user);
+
         vm.prank(backend);
-        vm.expectRevert("Strategy already exists");
+        vm.expectRevert(abi.encodeWithSelector(StockAccountStrategyFactory.StrategyAlreadyExists.selector, existing));
         factory.createStrategyForUser(user, _entries(5000, 5000), 0);
     }
 
     function testCannotCreateStrategyForZeroAddress() public {
         vm.prank(backend);
-        vm.expectRevert("Invalid user address");
+        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         factory.createStrategyForUser(address(0), _entries(5000, 5000), 0);
     }
 
     function testInvalidBasketReverts() public {
         vm.prank(backend);
-        vm.expectRevert("Weights must total 10000");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.WeightsMustTotal.selector, 9000));
         factory.createStrategyForUser(user, _entries(5000, 4000), 0);
     }
 }

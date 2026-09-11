@@ -136,7 +136,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         vm.warp(startTime + 30 days);
 
         vm.prank(user);
-        vm.expectRevert("Amount exceeds available balance");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.ExceedsAvailable.selector, address(nvda)));
         strategy.withdrawToken(address(nvda), 10e18);
     }
 
@@ -161,7 +161,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         strategy.accrueManagementFee();
         strategy.collectFees(address(nvda));
 
-        vm.expectRevert("Nothing to collect");
+        vm.expectRevert(IStockAccountStrategy.NothingToCollect.selector);
         strategy.collectFees(address(nvda));
     }
 
@@ -179,13 +179,13 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
     function testSetFeeRecipientOnlyBackend() public {
         vm.prank(user);
-        vm.expectRevert("Not backend");
+        vm.expectRevert(IStockAccountStrategy.NotBackend.selector);
         strategy.setFeeRecipient(makeAddr("newFeeRecipient"));
     }
 
     function testSetFeeRecipientRevertsOnZeroAddress() public {
         vm.prank(backend);
-        vm.expectRevert("Invalid fee recipient address");
+        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
         strategy.setFeeRecipient(address(0));
     }
 
@@ -193,7 +193,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.feeRecipient = address(0);
 
-        vm.expectRevert("Invalid fee recipient address");
+        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
         _deployProxy(params);
     }
 
@@ -201,7 +201,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.managementFeeBps = strategy.MAX_MANAGEMENT_FEE_BPS() + 1;
 
-        vm.expectRevert("Fee exceeds maximum");
+        vm.expectRevert(IStockAccountStrategy.FeeExceedsMaximum.selector);
         _deployProxy(params);
     }
 

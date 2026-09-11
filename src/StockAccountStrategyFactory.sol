@@ -26,6 +26,11 @@ contract StockAccountStrategyFactory is AccessControl {
 
     event StrategyCreated(address indexed user, address indexed strategy);
 
+    error ZeroAddress();
+    error StrategyTypeIdNotSet();
+    error NotBackendOrUser();
+    error StrategyAlreadyExists(address strategy);
+
     /**
      * @param admin Address to grant the DEFAULT_ADMIN_ROLE to
      * @param backend Address to grant the BACKEND_ROLE to
@@ -50,15 +55,15 @@ contract StockAccountStrategyFactory is AccessControl {
         address _feeRecipient,
         uint16 _managementFeeBps
     ) {
-        require(admin != address(0), "Invalid admin address");
-        require(backend != address(0), "Invalid backend address");
-        require(_mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
-        require(_stockRegistry != address(0), "Invalid stock registry address");
-        require(_asset != address(0), "Invalid asset address");
-        require(_cowSettlement != address(0), "Invalid settlement address");
-        require(_strategyImplementation != address(0), "Invalid implementation address");
-        require(_strategyTypeId != 0, "Strategy type id not set");
-        require(_feeRecipient != address(0), "Invalid fee recipient address");
+        if (admin == address(0)) revert ZeroAddress();
+        if (backend == address(0)) revert ZeroAddress();
+        if (_mamoStrategyRegistry == address(0)) revert ZeroAddress();
+        if (_stockRegistry == address(0)) revert ZeroAddress();
+        if (_asset == address(0)) revert ZeroAddress();
+        if (_cowSettlement == address(0)) revert ZeroAddress();
+        if (_strategyImplementation == address(0)) revert ZeroAddress();
+        if (_strategyTypeId == 0) revert StrategyTypeIdNotSet();
+        if (_feeRecipient == address(0)) revert ZeroAddress();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -95,9 +100,11 @@ contract StockAccountStrategyFactory is AccessControl {
         IStockAccountStrategy.BasketEntry[] calldata entries,
         uint16 cashTargetBps
     ) external returns (address strategy) {
-        require(user != address(0), "Invalid user address");
-        require(hasRole(BACKEND_ROLE, msg.sender) || msg.sender == user, "Only backend or user can create strategy");
-        require(computeStrategyAddress(user).code.length == 0, "Strategy already exists");
+        if (user == address(0)) revert ZeroAddress();
+        if (!hasRole(BACKEND_ROLE, msg.sender) && msg.sender != user) revert NotBackendOrUser();
+
+        address predicted = computeStrategyAddress(user);
+        if (predicted.code.length != 0) revert StrategyAlreadyExists(predicted);
 
         bytes32 salt = keccak256(abi.encodePacked(user));
 

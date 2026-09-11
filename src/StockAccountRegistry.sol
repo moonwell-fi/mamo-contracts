@@ -64,8 +64,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
     /// @param config The initial roles and global configuration
     constructor(Config memory config) {
-        require(config.admin != address(0), "Invalid admin address");
-        require(config.guardian != address(0), "Invalid guardian address");
+        if (config.admin == address(0)) revert ZeroAddress();
+        if (config.guardian == address(0)) revert ZeroAddress();
 
         _grantRole(DEFAULT_ADMIN_ROLE, config.admin);
         _grantRole(GUARDIAN_ROLE, config.guardian);
@@ -85,7 +85,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
     /// @notice Sets the Aerodrome router used by stock accounts
     function setAerodromeRouter(ISwapRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(address(newRouter) != address(aerodromeRouter), "Already set");
+        if (address(newRouter) == address(aerodromeRouter)) revert AlreadySet();
         _setAerodromeRouter(newRouter);
     }
 
@@ -95,61 +95,61 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         onlyRole(DEFAULT_ADMIN_ROLE)
         whenNotPaused
     {
-        require(address(newPriceChecker) != address(priceChecker), "Already set");
+        if (address(newPriceChecker) == address(priceChecker)) revert AlreadySet();
         _setPriceChecker(newPriceChecker);
     }
 
     /// @notice Sets the maximum number of positions a stock account may hold
     function setMaxPositions(uint8 newMaxPositions) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newMaxPositions != maxPositions, "Already set");
+        if (newMaxPositions == maxPositions) revert AlreadySet();
         _setMaxPositions(newMaxPositions);
     }
 
     /// @notice Sets the minimum per-position target weight in basis points
     function setMinTargetBps(uint16 newMinTargetBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newMinTargetBps != minTargetBps, "Already set");
+        if (newMinTargetBps == minTargetBps) revert AlreadySet();
         _setMinTargetBps(newMinTargetBps);
     }
 
     /// @notice Sets the maximum tolerated drift from target weights in basis points
     function setMaxDeviationBps(uint16 newMaxDeviationBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newMaxDeviationBps != maxDeviationBps, "Already set");
+        if (newMaxDeviationBps == maxDeviationBps) revert AlreadySet();
         _setMaxDeviationBps(newMaxDeviationBps);
     }
 
     /// @notice Sets the slippage cap in basis points for backend-initiated swaps
     function setMaxBackendSlippageBps(uint16 newSlippageBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newSlippageBps != maxBackendSlippageBps, "Already set");
+        if (newSlippageBps == maxBackendSlippageBps) revert AlreadySet();
         _setMaxBackendSlippageBps(newSlippageBps);
     }
 
     /// @notice Sets the slippage cap in basis points for user withdrawals
     function setMaxWithdrawSlippageBps(uint16 newSlippageBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newSlippageBps != maxWithdrawSlippageBps, "Already set");
+        if (newSlippageBps == maxWithdrawSlippageBps) revert AlreadySet();
         _setMaxWithdrawSlippageBps(newSlippageBps);
     }
 
     /// @notice Sets the TWAP observation window in seconds
     function setTwapWindow(uint32 newTwapWindow) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newTwapWindow != twapWindow, "Already set");
+        if (newTwapWindow == twapWindow) revert AlreadySet();
         _setTwapWindow(newTwapWindow);
     }
 
     /// @notice Sets the minimum total value a single stock account must hold after a deposit
     function setMinStrategyDeposit(uint256 newMinDeposit) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newMinDeposit != minStrategyDeposit, "Already set");
+        if (newMinDeposit == minStrategyDeposit) revert AlreadySet();
         _setMinStrategyDeposit(newMinDeposit);
     }
 
     /// @notice Sets the maximum total deposit a single stock account may hold
     function setMaxStrategyDeposit(uint256 newMaxDeposit) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newMaxDeposit != maxStrategyDeposit, "Already set");
+        if (newMaxDeposit == maxStrategyDeposit) revert AlreadySet();
         _setMaxStrategyDeposit(newMaxDeposit);
     }
 
     /// @notice Sets the CowSwap app data hash that orders must carry
     function setRequiredAppDataHash(bytes32 newHash) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(newHash != requiredAppDataHash, "Already set");
+        if (newHash == requiredAppDataHash) revert AlreadySet();
         _setRequiredAppDataHash(newHash);
     }
 
@@ -157,16 +157,16 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @param token The token to list
     /// @param cfg The pricing source and venue recorded for the token
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        require(_tokenConfig[token].status == TokenStatus.None, "Token already listed");
-        require(cfg.status == TokenStatus.Active, "Must list as active");
-        require(token.code.length > 0, "Token must be a contract");
-        require(cfg.pool.code.length > 0, "Pool must be a contract");
-        require(cfg.pool != token, "Pool cannot be the token");
+        if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
+        if (cfg.status != TokenStatus.Active) revert MustListAsActive();
+        if (token.code.length == 0) revert NotAContract(token);
+        if (cfg.pool.code.length == 0) revert NotAContract(cfg.pool);
+        if (cfg.pool == token) revert PoolIsToken();
 
         if (cfg.source == PriceSource.Chainlink) {
-            require(cfg.chainlinkFeed.code.length > 0, "Feed must be a contract");
+            if (cfg.chainlinkFeed.code.length == 0) revert NotAContract(cfg.chainlinkFeed);
         } else {
-            require(cfg.chainlinkFeed == address(0), "Feed only for Chainlink source");
+            if (cfg.chainlinkFeed != address(0)) revert FeedOnlyForChainlink();
         }
 
         _tokenConfig[token] = cfg;
@@ -180,15 +180,13 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @param status The new status; the guardian may only tighten it
     function setTokenStatus(address token, TokenStatus status) external whenNotPaused {
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        require(isAdmin || hasRole(GUARDIAN_ROLE, msg.sender), "Not admin or guardian");
+        if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian();
 
         TokenStatus oldStatus = _tokenConfig[token].status;
-        require(oldStatus != TokenStatus.None, "Token not listed");
-        require(status != TokenStatus.None, "Invalid status");
-        require(status != oldStatus, "Already set");
-        if (!isAdmin) {
-            require(status > oldStatus, "Guardian can only lower status");
-        }
+        if (oldStatus == TokenStatus.None) revert TokenNotListed(token);
+        if (status == TokenStatus.None) revert InvalidStatus();
+        if (status == oldStatus) revert AlreadySet();
+        if (!isAdmin && status <= oldStatus) revert GuardianCanOnlyLower();
 
         _tokenConfig[token].status = status;
 
@@ -217,8 +215,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setAerodromeRouter(ISwapRouter newRouter) internal {
-        require(address(newRouter) != address(0), "Invalid router address");
-        require(address(newRouter).code.length > 0, "Router must be a contract");
+        if (address(newRouter) == address(0)) revert ZeroAddress();
+        if (address(newRouter).code.length == 0) revert NotAContract(address(newRouter));
 
         address oldRouter = address(aerodromeRouter);
         aerodromeRouter = newRouter;
@@ -227,8 +225,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setPriceChecker(ISlippagePriceChecker newPriceChecker) internal {
-        require(address(newPriceChecker) != address(0), "Invalid price checker address");
-        require(address(newPriceChecker).code.length > 0, "Price checker must be a contract");
+        if (address(newPriceChecker) == address(0)) revert ZeroAddress();
+        if (address(newPriceChecker).code.length == 0) revert NotAContract(address(newPriceChecker));
 
         address oldPriceChecker = address(priceChecker);
         priceChecker = newPriceChecker;
@@ -237,7 +235,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxPositions(uint8 newMaxPositions) internal {
-        require(newMaxPositions > 0, "Invalid max positions");
+        if (newMaxPositions == 0) revert InvalidMaxPositions();
 
         uint8 oldValue = maxPositions;
         maxPositions = newMaxPositions;
@@ -246,7 +244,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMinTargetBps(uint16 newMinTargetBps) internal {
-        require(newMinTargetBps > 0 && newMinTargetBps <= 10_000, "Invalid min target");
+        if (newMinTargetBps == 0 || newMinTargetBps > 10_000) revert InvalidMinTarget();
 
         uint16 oldValue = minTargetBps;
         minTargetBps = newMinTargetBps;
@@ -255,7 +253,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxDeviationBps(uint16 newMaxDeviationBps) internal {
-        require(newMaxDeviationBps <= 10_000, "Invalid max deviation");
+        if (newMaxDeviationBps > 10_000) revert InvalidMaxDeviation();
 
         uint16 oldValue = maxDeviationBps;
         maxDeviationBps = newMaxDeviationBps;
@@ -264,7 +262,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        require(newSlippageBps <= 10_000, "Invalid slippage cap");
+        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -273,7 +271,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        require(newSlippageBps <= 10_000, "Invalid slippage cap");
+        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;
@@ -282,7 +280,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setTwapWindow(uint32 newTwapWindow) internal {
-        require(newTwapWindow > 0, "Invalid twap window");
+        if (newTwapWindow == 0) revert InvalidTwapWindow();
 
         uint32 oldValue = twapWindow;
         twapWindow = newTwapWindow;

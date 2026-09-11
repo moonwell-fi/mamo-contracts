@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
+import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 
@@ -44,7 +46,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     function testRevertsWhenDigestDoesNotMatch() public {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
 
-        vm.expectRevert("Order hash does not match the provided digest");
+        vm.expectRevert(IStockAccountStrategy.OrderHashMismatch.selector);
         strategy.isValidSignature(keccak256("other"), abi.encode(order));
     }
 
@@ -52,7 +54,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.kind = GPv2Order.KIND_BUY;
 
-        vm.expectRevert("Order must be a sell order");
+        vm.expectRevert(IStockAccountStrategy.OrderMustBeSell.selector);
         _check(order);
     }
 
@@ -60,7 +62,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.partiallyFillable = true;
 
-        vm.expectRevert("Order must be fill-or-kill");
+        vm.expectRevert(IStockAccountStrategy.OrderMustBeFillOrKill.selector);
         _check(order);
     }
 
@@ -68,7 +70,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.sellTokenBalance = GPv2Order.BALANCE_INTERNAL;
 
-        vm.expectRevert("Order balances must be ERC20");
+        vm.expectRevert(IStockAccountStrategy.OrderBalancesMustBeErc20.selector);
         _check(order);
     }
 
@@ -76,7 +78,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.buyTokenBalance = GPv2Order.BALANCE_EXTERNAL;
 
-        vm.expectRevert("Order balances must be ERC20");
+        vm.expectRevert(IStockAccountStrategy.OrderBalancesMustBeErc20.selector);
         _check(order);
     }
 
@@ -84,7 +86,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.receiver = user;
 
-        vm.expectRevert("Order receiver must be this strategy");
+        vm.expectRevert(IStockAccountStrategy.OrderReceiverMismatch.selector);
         _check(order);
     }
 
@@ -92,7 +94,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.feeAmount = 1;
 
-        vm.expectRevert("Fee amount must be zero");
+        vm.expectRevert(IStockAccountStrategy.OrderFeeMustBeZero.selector);
         _check(order);
     }
 
@@ -100,7 +102,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.appData = keccak256("other app data");
 
-        vm.expectRevert("Invalid app data");
+        vm.expectRevert(IStockAccountStrategy.InvalidAppData.selector);
         _check(order);
     }
 
@@ -108,7 +110,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.validTo = uint32(block.timestamp + 4 minutes);
 
-        vm.expectRevert("Order expires too soon");
+        vm.expectRevert(IStockAccountStrategy.OrderExpiresTooSoon.selector);
         _check(order);
     }
 
@@ -116,19 +118,19 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.validTo = uint32(block.timestamp + 31 minutes);
 
-        vm.expectRevert("Order expires too far in the future");
+        vm.expectRevert(IStockAccountStrategy.OrderExpiresTooLate.selector);
         _check(order);
     }
 
     function testRevertsWhenTokensAreTheSame() public {
-        vm.expectRevert("Tokens must differ");
+        vm.expectRevert(IStockAccountStrategy.TokensMustDiffer.selector);
         _check(_order(address(nvda), address(nvda), 1e18, 1e18));
     }
 
     function testRevertsWhenSellTokenIsHalted() public {
         _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.Halted);
 
-        vm.expectRevert("Sell token not sellable");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellTokenNotSellable.selector, address(nvda)));
         _check(_order(address(nvda), address(usdc), 1e18, 199e18));
     }
 
@@ -141,19 +143,19 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     function testRevertsWhenBuyTokenIsSellOnly() public {
         _setStatus(address(aapl), IStockAccountRegistry.TokenStatus.SellOnly);
 
-        vm.expectRevert("Buy token not active");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyTokenNotActive.selector, address(aapl)));
         _check(_order(address(nvda), address(aapl), 1e18, 2e18));
     }
 
     function testRevertsWhenBuyTokenIsNotListed() public {
         MockERC20 other = new MockERC20("Other Coin", "OTHERc");
 
-        vm.expectRevert("Buy token not active");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyTokenNotActive.selector, address(other)));
         _check(_order(address(nvda), address(other), 1e18, 2e18));
     }
 
     function testRevertsWhenSellAmountExceedsBalance() public {
-        vm.expectRevert("Sell amount exceeds balance");
+        vm.expectRevert(IStockAccountStrategy.SellExceedsBalance.selector);
         _check(_order(address(nvda), address(usdc), 11e18, 2189e18));
     }
 
@@ -161,7 +163,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 1000), 5000);
 
-        vm.expectRevert("Sell leaves token below range");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellLeavesTokenBelowRange.selector, address(nvda)));
         _check(_order(address(nvda), address(usdc), 6e18, 1194e18));
     }
 
@@ -169,7 +171,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 1000, address(aapl), 9000), 0);
 
-        vm.expectRevert("Buy leaves token above range");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(usdc)));
         _check(_order(address(nvda), address(usdc), 3e18, 597e18));
     }
 
@@ -181,8 +183,25 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     }
 
     function testRevertsWhenPriceCheckFails() public {
-        vm.expectRevert("Price check failed");
+        vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
         _check(_order(address(nvda), address(usdc), 1e18, 197e18));
+    }
+
+    function testHaltedHoldingIsNotPricedByOrderCheck() public {
+        _setStatus(address(aapl), IStockAccountRegistry.TokenStatus.Halted);
+        priceChecker.setRate(address(aapl), address(usdc), 0);
+
+        assertTrue(_check(_order(address(nvda), address(usdc), 1e18, 199e18)) == MAGIC_VALUE, "magic value");
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(usdc)));
+        _check(_order(address(nvda), address(usdc), 2e18, 398e18));
+    }
+
+    function testValidOrderQuotesTwoHoldingsPlusTwoOrderAmountsAndChecksPriceOnce() public {
+        vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.getExpectedOut.selector), 4);
+        vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.checkPrice.selector), 1);
+
+        assertTrue(_check(_order(address(nvda), address(aapl), 1e18, 2e18)) == MAGIC_VALUE, "magic value");
     }
 
     function _check(GPv2Order.Data memory order) internal view returns (bytes4) {
