@@ -17,6 +17,7 @@ import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol
 contract StockAccountPriceCheckerUnitTest is Test {
     uint32 internal constant WINDOW = 180;
     uint256 internal constant MAX_BPS = 10_000;
+    uint256 internal constant EXPECTED_ALT_TICK_500000 = 5171760815372400971558161892130124037985;
 
     address internal owner = makeAddr("owner");
     MockStockAccountRegistry internal registry;
@@ -207,9 +208,28 @@ contract StockAccountPriceCheckerUnitTest is Test {
 
     function test_getExpectedOut_pricesSellOnlyAndHaltedTokens() public {
         IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(address(stock));
+        cfg.status = IStockAccountRegistry.TokenStatus.SellOnly;
+        registry.setTokenConfig(address(stock), cfg);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
         cfg.status = IStockAccountRegistry.TokenStatus.Halted;
         registry.setTokenConfig(address(stock), cfg);
         assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    function test_getExpectedOut_highTick_ratioX128Branch() public {
+        // sqrtP exceeds uint128 above tick ~443,614; 1.0001^500000 * 1e18 computed off-chain with 60-digit Decimal
+        altPool.setMeanTick(500_000, WINDOW);
+        uint256 out = checker.getExpectedOut(1e18, address(alt), address(usdc));
+        assertGt(out, 0);
+        assertApproxEqRel(out, EXPECTED_ALT_TICK_500000, 1e12);
+        // and the reverse direction lands back within rounding
+        assertApproxEqAbs(checker.getExpectedOut(out, address(usdc), address(alt)), 1e18, 1e6);
+    }
+
+    function test_getExpectedOut_singleFloor_liveLikeTrade() public {
+        // 3 NVDAc at tick -7880: exact value is 659,672,221.31 raw USDC; a pre-scale floor gives ...220
+        stockPool.setMeanTick(-7880, WINDOW);
+        assertEq(checker.getExpectedOut(3e8, address(stock), address(usdc)), 659_672_221);
     }
 
     function test_getExpectedOut_revertsForChainlinkSource() public {
@@ -256,6 +276,12 @@ contract StockAccountPriceCheckerUnitTest is Test {
     function test_checkPrice_zeroSlippageRequiresFullExpected() public view {
         assertTrue(checker.checkPrice(1e8, address(stock), address(usdc), 1e8, 0));
         assertFalse(checker.checkPrice(1e8, address(stock), address(usdc), 1e8 - 1, 0));
+    }
+
+    function test_checkPrice_zeroExpectedOutNeverPasses() public view {
+        assertEq(checker.getExpectedOut(0, address(stock), address(usdc)), 0);
+        assertFalse(checker.checkPrice(0, address(stock), address(usdc), 0, MAX_BPS));
+        assertFalse(checker.checkPrice(0, address(stock), address(usdc), 1, 100));
     }
 
     function test_checkPrice_revertsAboveMaxBps() public {
@@ -310,5 +336,6 @@ contract StockAccountPriceCheckerUnitTest is Test {
         vm.prank(owner);
         checker.upgradeToAndCall(address(next), "");
         assertEq(checker.quoteAsset(), address(usdc));
+        assertEq(address(checker.registry()), address(registry));
     }
 }

@@ -59,12 +59,14 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
     ) external view override returns (bool) {
         if (_slippageInBps > MAX_BPS) revert InvalidSlippage(_slippageInBps);
         uint256 expectedOut = getExpectedOut(_amountIn, _fromToken, _toToken);
+        // A zero reference would accept any minOut; refuse rather than fail open.
+        if (expectedOut == 0) return false;
         return _minOut >= (expectedOut * (MAX_BPS - _slippageInBps)) / MAX_BPS;
     }
 
     /// @inheritdoc ISlippagePriceChecker
-    /// @dev Composes `from -> quote -> to`. Value is carried at 36 decimals so the only material
-    ///      rounding is the final floor into `_toToken` units.
+    /// @dev Composes `from -> quote -> to`. Every intermediate is carried at 36 decimals; the final
+    ///      floor into `_toToken` units is the only rounding that can move the result by a whole unit.
     function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken)
         public
         view
@@ -92,7 +94,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
         return new TokenFeedConfiguration[](0);
     }
 
-    /// @inheritdoc ISlippagePriceChecker
+    /// @notice Always false: this checker holds no oracle configuration of its own.
     function isRewardToken(address) external pure override returns (bool) {
         return false;
     }
@@ -103,17 +105,17 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
         return registry.twapWindow();
     }
 
-    /// @inheritdoc ISlippagePriceChecker
+    /// @notice Unsupported for everyone, owner included: token config lives in the registry.
     function addTokenConfiguration(address, address, TokenFeedConfiguration[] calldata) external pure override {
         revert NotSupported();
     }
 
-    /// @inheritdoc ISlippagePriceChecker
+    /// @notice Unsupported for everyone, owner included: token config lives in the registry.
     function removeTokenConfiguration(address, address) external pure override {
         revert NotSupported();
     }
 
-    /// @inheritdoc ISlippagePriceChecker
+    /// @notice Unsupported for everyone, owner included: the window is the registry's `twapWindow`.
     function setMaxTimePriceValid(address, uint256) external pure override {
         revert NotSupported();
     }
@@ -122,7 +124,6 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
 
     /// @dev Quote-asset units per one whole `token`, scaled to 36 decimals. The quote asset itself is 1.
     function _quotePerWholeToken(address token) internal view returns (uint256) {
-        uint256 quoteDecimals = IERC20Metadata(quoteAsset).decimals();
         if (token == quoteAsset) return 10 ** INTERNAL_DECIMALS;
 
         IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
@@ -138,8 +139,10 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
         else revert PoolNotAgainstQuoteAsset(address(pool));
 
         uint160 sqrtP = TickMath.getSqrtRatioAtTick(_twapTick(pool, registry.twapWindow()));
-        uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
-        return _quoteAtSqrtPrice(sqrtP, oneToken, tokenIsToken0) * 10 ** (INTERNAL_DECIMALS - quoteDecimals);
+        // Scale the base amount BEFORE the quote so the only floor is at 36 decimals, not at raw quote units.
+        uint256 quoteDecimals = IERC20Metadata(quoteAsset).decimals();
+        uint256 oneTokenScaled = 10 ** (IERC20Metadata(token).decimals() + INTERNAL_DECIMALS - quoteDecimals);
+        return _quoteAtSqrtPrice(sqrtP, oneTokenScaled, tokenIsToken0);
     }
 
     /// @dev Quote-asset raw units for `baseAmount` raw units of the base token at `sqrtP`
