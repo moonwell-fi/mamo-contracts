@@ -147,10 +147,9 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
     function _quoteAtSqrtPrice(uint160 sqrtP, uint256 baseAmount, bool baseIsToken0) internal pure returns (uint256) {
         if (sqrtP <= type(uint128).max) {
             uint256 ratioX192 = uint256(sqrtP) * sqrtP;
-            return
-                baseIsToken0
-                    ? Math.mulDiv(ratioX192, baseAmount, 1 << 192)
-                    : Math.mulDiv(1 << 192, baseAmount, ratioX192);
+            return baseIsToken0
+                ? Math.mulDiv(ratioX192, baseAmount, 1 << 192)
+                : Math.mulDiv(1 << 192, baseAmount, ratioX192);
         }
         uint256 ratioX128 = Math.mulDiv(sqrtP, sqrtP, 1 << 64);
         return
