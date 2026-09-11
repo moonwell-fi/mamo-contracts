@@ -93,9 +93,6 @@ contract LeveragedAeroSystemSetupTest is Test {
         vm.txGasPrice(0);
         vm.fee(0);
 
-        // `setEnv` outlives a test case, so pin 015's default stage per case.
-        vm.setEnv("PROPOSAL_STAGE", "full");
-
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses("./addresses", chainIds);
@@ -136,7 +133,7 @@ contract LeveragedAeroSystemSetupTest is Test {
         DeployLeveragedAeroPoolConfig.Config memory cfg = pooled.deployConfig().getConfig();
 
         // ── 1. the bind stage: deploy + cloneAndBind + setMaxTotalAssets, all of it live ──
-        vm.setEnv("PROPOSAL_STAGE", "bind");
+        pooled.setStage(DeployLeveragedAeroPooledSystem.Stage.Bind);
         pooled.deploy();
         pooled.preBuildMock();
         pooled.build();
@@ -163,7 +160,7 @@ contract LeveragedAeroSystemSetupTest is Test {
         DeployLeveragedAeroPooledSystem activateRun = new DeployLeveragedAeroPooledSystem();
         activateRun.setPrimaryForkId(vm.activeFork());
         activateRun.setAddresses(addresses);
-        vm.setEnv("PROPOSAL_STAGE", "activate");
+        activateRun.setStage(DeployLeveragedAeroPooledSystem.Stage.Activate);
 
         // Its preconditions hold — the vault is bound and Pending, the multisig holds the seed.
         activateRun.preBuildMock();

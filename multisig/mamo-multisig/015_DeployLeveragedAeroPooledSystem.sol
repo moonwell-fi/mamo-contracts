@@ -117,9 +117,19 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         "Deploy the LeveragedAerodromeCLStrategy template and the LeveragedAeroVault, clone+bind a strategy against the cbBTC/USDC asset-mode venue book, set the fund capacity ceiling, and activate it with the seed";
     }
 
+    /// @dev Per-instance override of `PROPOSAL_STAGE`; the env is process-global, so parallel tests must pin it here.
+    Stage private _stageOverride;
+    bool private _stageOverridden;
+
+    function setStage(Stage s) external {
+        _stageOverride = s;
+        _stageOverridden = true;
+    }
+
     /// @notice The stage this run executes. Read on EVERY entrypoint, not cached at construction, so one
     ///         process can move between stages between calls.
     function stage() public view returns (Stage) {
+        if (_stageOverridden) return _stageOverride;
         bytes32 s = keccak256(bytes(vm.envOr("PROPOSAL_STAGE", string("full"))));
         if (s == keccak256(bytes("full"))) return Stage.Full;
         if (s == keccak256(bytes("bind"))) return Stage.Bind;
