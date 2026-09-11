@@ -13,6 +13,9 @@ interface IStockAccountStrategy {
     event WithdrawToken(address indexed token, uint256 amount);
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
+    event FeesAccrued(uint256 elapsed);
+    event FeesCollected(address indexed token, uint256 amount);
+    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
     function deposit(uint256 amount) external;
 
@@ -30,7 +33,13 @@ interface IStockAccountStrategy {
 
     function setAccountSlippage(uint16 bps) external;
 
+    function setFeeRecipient(address newRecipient) external;
+
     function approveCowRelayer(address token) external;
+
+    function accrueManagementFee() external;
+
+    function collectFees(address token) external;
 
     function getNAV() external view returns (uint256 valueUsdc);
 
@@ -49,4 +58,6 @@ interface IStockAccountStrategy {
         returns (address[] memory tokensToSell, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds);
 
     function getAccountSlippage() external view returns (uint16);
+
+    function feeOwed(address token) external view returns (uint256);
 }

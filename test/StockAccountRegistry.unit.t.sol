@@ -52,6 +52,7 @@ contract StockAccountRegistryUnitTest is Test {
             maxPositions: 10,
             maxStrategyDeposit: 1_000_000e6,
             maxWithdrawSlippageBps: 200,
+            minStrategyDeposit: 100e6,
             minTargetBps: 250,
             priceChecker: checker,
             requiredAppDataHash: keccak256("appData"),
@@ -88,6 +89,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.maxBackendSlippageBps(), 100, "backend slippage mismatch");
         assertEq(registry.maxWithdrawSlippageBps(), 200, "withdraw slippage mismatch");
         assertEq(registry.twapWindow(), 1800, "twap window mismatch");
+        assertEq(registry.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 1_000_000e6, "max deposit mismatch");
         assertEq(registry.requiredAppDataHash(), keccak256("appData"), "app data hash mismatch");
         assertEq(registry.allTokens().length, 0, "token list should start empty");
@@ -242,6 +244,10 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setTwapWindow(600);
 
         vm.expectEmit(address(registry));
+        emit StockAccountRegistry.MinStrategyDepositUpdated(100e6, 250e6);
+        registry.setMinStrategyDeposit(250e6);
+
+        vm.expectEmit(address(registry));
         emit StockAccountRegistry.MaxStrategyDepositUpdated(1_000_000e6, 500e6);
         registry.setMaxStrategyDeposit(500e6);
 
@@ -259,6 +265,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.maxBackendSlippageBps(), 50, "backend slippage mismatch");
         assertEq(registry.maxWithdrawSlippageBps(), 75, "withdraw slippage mismatch");
         assertEq(registry.twapWindow(), 600, "twap window mismatch");
+        assertEq(registry.minStrategyDeposit(), 250e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 500e6, "max deposit mismatch");
         assertEq(registry.requiredAppDataHash(), keccak256("newAppData"), "app data hash mismatch");
     }
@@ -292,6 +299,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         expectNotAdmin(guardian);
         registry.setTwapWindow(600);
+
+        expectNotAdmin(guardian);
+        registry.setMinStrategyDeposit(250e6);
 
         expectNotAdmin(guardian);
         registry.setMaxStrategyDeposit(500e6);
@@ -334,6 +344,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert("Already set");
         registry.setTwapWindow(1800);
+
+        vm.expectRevert("Already set");
+        registry.setMinStrategyDeposit(100e6);
 
         vm.expectRevert("Already set");
         registry.setMaxStrategyDeposit(1_000_000e6);
@@ -645,6 +658,7 @@ contract StockAccountRegistryUnitTest is Test {
         mock.setMaxPositions(7);
         mock.setMinTargetBps(300);
         mock.setMaxDeviationBps(400);
+        mock.setMinStrategyDeposit(100e6);
         mock.setMaxStrategyDeposit(500e6);
         mock.setTwapWindow(600);
         mock.setMaxBackendSlippageBps(50);
@@ -656,6 +670,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(mock.maxPositions(), 7, "max positions mismatch");
         assertEq(mock.minTargetBps(), 300, "min target mismatch");
         assertEq(mock.maxDeviationBps(), 400, "max deviation mismatch");
+        assertEq(mock.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(mock.maxStrategyDeposit(), 500e6, "max deposit mismatch");
         assertEq(mock.twapWindow(), 600, "twap window mismatch");
         assertEq(mock.maxBackendSlippageBps(), 50, "backend slippage mismatch");

@@ -33,6 +33,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     address public relayer = makeAddr("relayer");
     address public user = makeAddr("user");
     address public stranger = makeAddr("stranger");
+    address public feeRecipient = makeAddr("feeRecipient");
 
     uint256 public strategyTypeId;
 
@@ -66,7 +67,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
 
         bytes32 backendRole = registry.BACKEND_ROLE();
@@ -104,6 +107,8 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(factory.cowSettlement(), address(settlement), "settlement");
         assertEq(factory.strategyImplementation(), address(implementation), "implementation");
         assertEq(factory.strategyTypeId(), strategyTypeId, "strategy type id");
+        assertEq(factory.feeRecipient(), feeRecipient, "fee recipient");
+        assertEq(factory.managementFeeBps(), 100, "management fee");
     }
 
     function testConstructorGrantsRoles() public view {
@@ -122,7 +127,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -136,7 +143,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -150,7 +159,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -164,7 +175,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -178,7 +191,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(0),
             address(settlement),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -192,7 +207,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(0),
             address(implementation),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -206,7 +223,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(0),
-            strategyTypeId
+            strategyTypeId,
+            feeRecipient,
+            100
         );
     }
 
@@ -220,8 +239,50 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            0
+            0,
+            feeRecipient,
+            100
         );
+    }
+
+    function testConstructorRevertsWithZeroFeeRecipient() public {
+        vm.expectRevert("Invalid fee recipient address");
+        new StockAccountStrategyFactory(
+            admin,
+            backend,
+            address(registry),
+            address(stockRegistry),
+            address(usdc),
+            address(settlement),
+            address(implementation),
+            strategyTypeId,
+            address(0),
+            100
+        );
+    }
+
+    function testCreateRevertsWhenFeeAboveMaximum() public {
+        StockAccountStrategyFactory highFee = new StockAccountStrategyFactory(
+            admin,
+            backend,
+            address(registry),
+            address(stockRegistry),
+            address(usdc),
+            address(settlement),
+            address(implementation),
+            strategyTypeId,
+            feeRecipient,
+            201
+        );
+
+        bytes32 backendRole = registry.BACKEND_ROLE();
+
+        vm.prank(admin);
+        registry.grantRole(backendRole, address(highFee));
+
+        vm.prank(backend);
+        vm.expectRevert("Fee exceeds maximum");
+        highFee.createStrategyForUser(user, _entries(5000, 5000), 0);
     }
 
     function testComputeStrategyAddressIsDeterministic() public view {
@@ -248,6 +309,9 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(account.strategyTypeId(), strategyTypeId, "strategy type id");
         assertEq(account.cowDomainSeparator(), SEPARATOR, "domain separator");
         assertEq(account.cowVaultRelayer(), relayer, "vault relayer");
+        assertEq(account.feeRecipient(), feeRecipient, "fee recipient");
+        assertEq(account.managementFeeBps(), 100, "management fee");
+        assertEq(account.lastFeeAccrual(), block.timestamp, "last fee accrual");
 
         (IStockAccountStrategy.BasketEntry[] memory entries, uint16 cashTargetBps) = account.getBasket();
         assertEq(entries.length, 2, "entries length");

@@ -25,6 +25,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         uint8 maxPositions;
         uint256 maxStrategyDeposit;
         uint16 maxWithdrawSlippageBps;
+        uint256 minStrategyDeposit;
         uint16 minTargetBps;
         ISlippagePriceChecker priceChecker;
         bytes32 requiredAppDataHash;
@@ -40,6 +41,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
+    uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
     bytes32 public override requiredAppDataHash;
 
@@ -54,6 +56,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event MaxBackendSlippageBpsUpdated(uint16 oldValue, uint16 newValue);
     event MaxWithdrawSlippageBpsUpdated(uint16 oldValue, uint16 newValue);
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
+    event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event RequiredAppDataHashUpdated(bytes32 indexed oldHash, bytes32 indexed newHash);
     event TokenListed(address indexed token, TokenConfig cfg);
@@ -75,6 +78,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMaxBackendSlippageBps(config.maxBackendSlippageBps);
         _setMaxWithdrawSlippageBps(config.maxWithdrawSlippageBps);
         _setTwapWindow(config.twapWindow);
+        _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
         _setRequiredAppDataHash(config.requiredAppDataHash);
     }
@@ -129,6 +133,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     function setTwapWindow(uint32 newTwapWindow) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         require(newTwapWindow != twapWindow, "Already set");
         _setTwapWindow(newTwapWindow);
+    }
+
+    /// @notice Sets the minimum total value a single stock account must hold after a deposit
+    function setMinStrategyDeposit(uint256 newMinDeposit) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        require(newMinDeposit != minStrategyDeposit, "Already set");
+        _setMinStrategyDeposit(newMinDeposit);
     }
 
     /// @notice Sets the maximum total deposit a single stock account may hold
@@ -278,6 +288,13 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         twapWindow = newTwapWindow;
 
         emit TwapWindowUpdated(oldValue, newTwapWindow);
+    }
+
+    function _setMinStrategyDeposit(uint256 newMinDeposit) internal {
+        uint256 oldValue = minStrategyDeposit;
+        minStrategyDeposit = newMinDeposit;
+
+        emit MinStrategyDepositUpdated(oldValue, newMinDeposit);
     }
 
     function _setMaxStrategyDeposit(uint256 newMaxDeposit) internal {

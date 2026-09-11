@@ -34,6 +34,8 @@ interface IStockAccountRegistry {
 
     function maxDeviationBps() external view returns (uint16);
 
+    function minStrategyDeposit() external view returns (uint256);
+
     function maxStrategyDeposit() external view returns (uint256);
 
     function twapWindow() external view returns (uint32);

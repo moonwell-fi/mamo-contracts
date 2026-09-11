@@ -16,6 +16,7 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
+    uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
     bytes32 public override requiredAppDataHash;
 
@@ -33,6 +34,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setMaxDeviationBps(uint16 value) external {
         maxDeviationBps = value;
+    }
+
+    function setMinStrategyDeposit(uint256 value) external {
+        minStrategyDeposit = value;
     }
 
     function setMaxStrategyDeposit(uint256 value) external {
