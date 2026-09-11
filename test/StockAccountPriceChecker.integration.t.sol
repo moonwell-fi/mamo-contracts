@@ -50,6 +50,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 maxPositions: 10,
                 maxStrategyDeposit: 25_000e6,
                 maxWithdrawSlippageBps: 500,
+                minStrategyDeposit: 100e6,
                 minTargetBps: 100,
                 priceChecker: ISlippagePriceChecker(address(impl)),
                 requiredAppDataHash: bytes32(0),
