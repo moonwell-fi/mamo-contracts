@@ -688,6 +688,10 @@ library LeveragedAeroManager {
         // longer holds and every later venue op would brick on `ICLGauge.withdraw`, `emergencyRedeem`
         // included. A genuine full unwind is `flatten()`.
         if (repayUsd >= debtUsd) revert FullUnwindNotSupported();
+        // Scale the hedged basis by (1−f) BEFORE `_repay`'s clamp, as `redeemUnwindImpl` does: `(1−f)` of
+        // the interest drift survives this partial unwind and must stay measured as `debt − hedged`.
+        $.hedgedDebtA -= uint128(Math.mulDiv(uint256($.hedgedDebtA), repayUsd, debtUsd));
+        $.hedgedDebtB -= uint128(Math.mulDiv(uint256($.hedgedDebtB), repayUsd, debtUsd));
         _unwindLiquidity(repayUsd, debtUsd);
         (uint256 cbShort, uint256 wethShort) = _redeemRepayFromCollected(repayUsd, debtUsd, 0, 0);
         // Two independent `if`s (NOT else-if): a dual-leg IL shortfall covers BOTH legs (L6), mirroring

@@ -507,7 +507,7 @@ function deleverage(uint256 minOut) external nonReentrant;   // NOT onlyProposer
 | Bounds | A **recovery op, not** the full LTV-≤-max gate: repays debt down to `minHealthBps × (1 + DELEVERAGE_BUFFER_BPS/1e4)` = `minHealthBps × 1.05`. Post-checks: health strictly improved **and** the Moonwell shortfall cleared or reduced, else `UnhealthyPosition(healthAfter, minHealth)`. |
 | Oracle | A stale strategy-side feed fail-closes (reverts) — deleveraging at a stale/manipulated price is worse than waiting. Moonwell liquidation uses Moonwell's own oracle; the window where ours is stale but theirs is fresh is an accepted residual (audit §9). |
 | Config invariant | The deleverage trigger LTV `= 1e8 / minHealthBps` is guaranteed strictly above `maxLtvBps` at init **and at every `migrateVenue`** (`applyVenue` re-runs `checkLtvBand`, so `minHealthBps × maxLtvBps < 1e8` holds for the clone's whole life), so there is no in-band range anyone can grief-deleverage. |
-| When to call | Proactively when health approaches `minHealthBps`; but note anyone can and will call it — treat it as an always-available backstop, not an exclusive agent action. |
+| When to call | Proactively when health approaches `minHealthBps`; but note anyone can and will call it — treat it as an always-available backstop, not an exclusive agent action. If the borrow market has been idle for long, call its `accrueInterest()` first: the pre-op health is read on the stored index and the post-op one on the fresh index, so un-accrued interest above `DELEVERAGE_BUFFER_BPS` of the debt would fail the improvement check. |
 
 ### `rescueToVault` — sweep stray tokens to the vault
 
@@ -1260,7 +1260,9 @@ same vault, same share token, same user accounts, no user action. Three new stra
    sequencerFeed/oracle-calm params/fees — is read from live storage and is NOT in the struct).
    The reward feed travels WITH the gauge on purpose: the gauge determines `rewardToken()`, so
    pinning its feed separately would let a migration price a new reward token at AERO's price and
-   mis-scale the L9 harvest floor.
+   mis-scale the L9 harvest floor. Stage right before step 2, not days ahead: `VenueStaged` is public,
+   and fast `redeem`s ahead of the flatten leave its realized slippage to the stayers (bounded by the
+   fast-path LTV gate and `maxSlippageBps`, ≲ 7 bps of NAV).
 2. Rebalancer: `flatten(minRewardUsdcOut, minIdleUsdcOut)` (oracle must be live — the leg sweeps and
    the reward sale are Chainlink-floored via `maxSlippageBps`, and the pool is calm-gated, so a
    shoved tick reverts rather than unwinding at a manipulated price). Size `minIdleUsdcOut` off the
