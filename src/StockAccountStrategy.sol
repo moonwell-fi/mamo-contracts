@@ -26,6 +26,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     uint16 internal constant TOTAL_BPS = 10_000;
 
+    uint16 public constant MAX_MANAGEMENT_FEE_BPS = 200;
+
     /// @notice Value returned to CoW when this account accepts an order, per EIP-1271
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
 
@@ -55,15 +57,34 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     BasketEntry[] internal _entries;
 
+    /// @notice Annual management fee charged on the account value, in basis points
+    uint16 public managementFeeBps;
+
+    /// @notice Address the accrued fee slivers are collected to
+    address public feeRecipient;
+
+    /// @notice Timestamp fees were last accrued at
+    uint256 public lastFeeAccrual;
+
+    /// @notice Fee set aside per token, held by the account until it is collected
+    mapping(address => uint256) public override feeOwed;
+
     struct InitParams {
         address asset;
         uint16 cashTargetBps;
         address cowSettlement;
         BasketEntry[] entries;
+        address feeRecipient;
         address mamoStrategyRegistry;
+        uint16 managementFeeBps;
         address owner;
         address stockRegistry;
         uint256 strategyTypeId;
+    }
+
+    modifier onlyBackend() {
+        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        _;
     }
 
     /**
@@ -74,7 +95,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function initialize(InitParams calldata params) external initializer {
         require(params.asset != address(0), "Invalid asset address");
         require(params.cowSettlement != address(0), "Invalid settlement address");
+        require(params.feeRecipient != address(0), "Invalid fee recipient address");
         require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
+        require(params.managementFeeBps <= MAX_MANAGEMENT_FEE_BPS, "Fee exceeds maximum");
         require(params.stockRegistry != address(0), "Invalid stock registry address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
 
@@ -84,6 +107,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         stockRegistry = IStockAccountRegistry(params.stockRegistry);
         cowDomainSeparator = IGPv2Settlement(params.cowSettlement).domainSeparator();
         cowVaultRelayer = IGPv2Settlement(params.cowSettlement).vaultRelayer();
+        feeRecipient = params.feeRecipient;
+        managementFeeBps = params.managementFeeBps;
+        lastFeeAccrual = block.timestamp;
 
         _setBasket(params.entries, params.cashTargetBps);
     }
@@ -93,10 +119,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param amount The amount of the asset to pull from the caller
      */
     function deposit(uint256 amount) external override {
+        _accrueFees();
+
         require(amount > 0, "Amount must be greater than 0");
 
         asset.safeTransferFrom(msg.sender, address(this), amount);
-        _checkDepositCap();
+        _checkAccountValue();
 
         emit Deposit(amount);
     }
@@ -107,11 +135,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param amount The amount of the token to pull from the caller
      */
     function depositToken(address token, uint256 amount) external override {
+        _accrueFees();
+
         require(amount > 0, "Amount must be greater than 0");
         require(stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.Active, "Token not active");
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        _checkDepositCap();
+        _checkAccountValue();
 
         emit DepositToken(token, amount);
     }
@@ -122,7 +152,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param amount The amount to send
      */
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
+        _accrueFees();
+
         require(amount > 0, "Amount must be greater than 0");
+        require(amount <= _available(token), "Amount exceeds available balance");
 
         IERC20(token).safeTransfer(owner(), amount);
 
@@ -131,9 +164,11 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice Sends every balance held by the account to the owner without selling anything
     function withdrawAllInKind() external override onlyOwner {
+        _accrueFees();
+
         address to = owner();
 
-        uint256 assetBalance = asset.balanceOf(address(this));
+        uint256 assetBalance = _available(address(asset));
         if (assetBalance > 0) {
             asset.safeTransfer(to, assetBalance);
             emit WithdrawToken(address(asset), assetBalance);
@@ -141,7 +176,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         address[] memory tokens = stockRegistry.allTokens();
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
+            uint256 balance = _available(tokens[i]);
             if (balance > 0) {
                 IERC20(tokens[i]).safeTransfer(to, balance);
                 emit WithdrawToken(tokens[i], balance);
@@ -155,6 +190,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param newCashTargetBps The share targeted to stay in the asset, in basis points
      */
     function setBasket(BasketEntry[] calldata entries, uint16 newCashTargetBps) external override onlyOwner {
+        _accrueFees();
         _setBasket(entries, newCashTargetBps);
     }
 
@@ -171,6 +207,18 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /**
+     * @notice Sets the address the accrued fees are collected to
+     * @param newRecipient The new fee recipient
+     */
+    function setFeeRecipient(address newRecipient) external override onlyBackend {
+        require(newRecipient != address(0), "Invalid fee recipient address");
+
+        emit FeeRecipientUpdated(feeRecipient, newRecipient);
+
+        feeRecipient = newRecipient;
+    }
+
+    /**
      * @notice Grants the CoW vault relayer an unlimited allowance so orders can settle, callable by anyone
      * @param token The asset or a listed token
      */
@@ -181,6 +229,27 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         );
 
         IERC20(token).forceApprove(cowVaultRelayer, type(uint256).max);
+    }
+
+    /// @notice Sets aside the fee owed on every token held since the last accrual, callable by anyone
+    function accrueManagementFee() external override {
+        _accrueFees();
+    }
+
+    /**
+     * @notice Sends the fee set aside on a token to the fee recipient, callable by anyone
+     * @param token The token to collect the fee of
+     */
+    function collectFees(address token) external override {
+        _accrueFees();
+
+        uint256 amount = feeOwed[token];
+        require(amount > 0, "Nothing to collect");
+
+        feeOwed[token] = 0;
+        IERC20(token).safeTransfer(feeRecipient, amount);
+
+        emit FeesCollected(token, amount);
     }
 
     /**
@@ -256,7 +325,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _holdingValue(address token) internal view returns (uint256) {
-        return _referenceValue(token, IERC20(token).balanceOf(address(this)));
+        return _referenceValue(token, _available(token));
     }
 
     function _referenceValue(address token, uint256 amount) internal view returns (uint256) {
@@ -277,17 +346,19 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
      */
     function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
+        _accrueFees();
+
         require(usdcAmount > 0, "Amount must be greater than 0");
         require(maxSlippageBps <= stockRegistry.maxWithdrawSlippageBps(), "Slippage exceeds maximum");
 
-        uint256 idle = asset.balanceOf(address(this));
+        uint256 idle = _available(address(asset));
         uint256 sold;
 
         if (idle < usdcAmount) {
             (address[] memory tokens, uint256[] memory amounts,,) = _planSells(usdcAmount - idle, maxSlippageBps);
             sold = _executeSells(tokens, amounts, maxSlippageBps);
 
-            require(asset.balanceOf(address(this)) >= usdcAmount, "Insufficient proceeds");
+            require(_available(address(asset)) >= usdcAmount, "Insufficient proceeds");
         }
 
         asset.safeTransfer(owner(), usdcAmount);
@@ -300,12 +371,14 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
      */
     function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
+        _accrueFees();
+
         require(maxSlippageBps <= stockRegistry.maxWithdrawSlippageBps(), "Slippage exceeds maximum");
 
         (address[] memory tokens, uint256[] memory balances) = _sellable();
         uint256 sold = _executeSells(tokens, balances, maxSlippageBps);
 
-        uint256 usdcOut = asset.balanceOf(address(this));
+        uint256 usdcOut = _available(address(asset));
         require(usdcOut > 0, "Empty balance");
 
         asset.safeTransfer(owner(), usdcOut);
@@ -324,7 +397,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         override
         returns (address[] memory tokensToSell, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds)
     {
-        uint256 idle = asset.balanceOf(address(this));
+        uint256 idle = _available(address(asset));
         if (idle >= usdcAmount) {
             return (new address[](0), new uint256[](0), 0, 0);
         }
@@ -334,13 +407,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
     function getNAV() public view override returns (uint256 valueUsdc) {
-        valueUsdc = asset.balanceOf(address(this));
+        valueUsdc = _available(address(asset));
 
         address[] memory tokens = stockRegistry.allTokens();
         ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
+            uint256 balance = _available(tokens[i]);
             if (balance > 0) {
                 valueUsdc += priceChecker.getExpectedOut(balance, tokens[i], address(asset));
             }
@@ -360,10 +433,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
         uint256[] memory values = new uint256[](tokens.length);
-        uint256 nav = asset.balanceOf(address(this));
+        uint256 nav = _available(address(asset));
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
+            uint256 balance = _available(tokens[i]);
             if (balance > 0) {
                 values[i] = priceChecker.getExpectedOut(balance, tokens[i], address(asset));
                 nav += values[i];
@@ -387,7 +460,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 count;
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            if (IERC20(tokens[i]).balanceOf(address(this)) > 0) {
+            if (_available(tokens[i]) > 0) {
                 count++;
             }
         }
@@ -396,7 +469,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 next;
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            if (IERC20(tokens[i]).balanceOf(address(this)) > 0) {
+            if (_available(tokens[i]) > 0) {
                 held[next++] = tokens[i];
             }
         }
@@ -443,8 +516,48 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         emit BasketUpdated(entries, newCashTargetBps);
     }
 
-    function _checkDepositCap() internal view {
-        require(getNAV() <= stockRegistry.maxStrategyDeposit(), "Deposit cap exceeded");
+    function _checkAccountValue() internal view {
+        uint256 nav = getNAV();
+
+        require(nav >= stockRegistry.minStrategyDeposit(), "Account below minimum");
+        require(nav <= stockRegistry.maxStrategyDeposit(), "Deposit cap exceeded");
+    }
+
+    function _available(address token) internal view returns (uint256) {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        uint256 owed = feeOwed[token];
+
+        return balance > owed ? balance - owed : 0;
+    }
+
+    function _accrueFees() internal {
+        uint256 elapsed = block.timestamp - lastFeeAccrual;
+        if (elapsed == 0) {
+            return;
+        }
+
+        address[] memory tokens = stockRegistry.allTokens();
+        uint256 total = _accrueToken(address(asset), elapsed);
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            total += _accrueToken(tokens[i], elapsed);
+        }
+
+        if (total == 0) {
+            return;
+        }
+
+        lastFeeAccrual = block.timestamp;
+
+        emit FeesAccrued(elapsed);
+    }
+
+    function _accrueToken(address token, uint256 elapsed) internal returns (uint256 accrued) {
+        accrued = (_available(token) * managementFeeBps * elapsed) / (uint256(TOTAL_BPS) * 365 days);
+
+        if (accrued > 0) {
+            feeOwed[token] += accrued;
+        }
     }
 
     function _targetBps(address token) internal view returns (uint16) {
@@ -474,14 +587,14 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         for (uint256 i = 0; i < listed.length; i++) {
             if (_isSellable(listed[i])) {
                 tokens[next] = listed[i];
-                balances[next++] = IERC20(listed[i]).balanceOf(address(this));
+                balances[next++] = _available(listed[i]);
             }
         }
     }
 
     function _isSellable(address token) internal view returns (bool) {
-        return IERC20(token).balanceOf(address(this)) > 0
-            && stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Halted;
+        return
+            _available(token) > 0 && stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Halted;
     }
 
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)

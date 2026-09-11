@@ -22,6 +22,9 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.owner(), user, "owner");
         assertEq(strategy.cashTargetBps(), 0, "cash target");
         assertEq(strategy.accountSlippageBps(), 0, "account slippage");
+        assertEq(strategy.feeRecipient(), feeRecipient, "fee recipient");
+        assertEq(strategy.managementFeeBps(), 100, "management fee");
+        assertEq(strategy.lastFeeAccrual(), block.timestamp, "last fee accrual");
 
         (IStockAccountStrategy.BasketEntry[] memory entries, uint16 cashTargetBps) = strategy.getBasket();
         assertEq(entries.length, 2, "entries length");
@@ -119,6 +122,52 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         strategy.deposit(CAP);
 
         assertEq(strategy.getNAV(), CAP, "nav at cap");
+    }
+
+    function testDepositRevertsBelowMinimum() public {
+        _fundUsdc(funder, MIN_DEPOSIT - 1);
+
+        vm.prank(funder);
+        vm.expectRevert("Account below minimum");
+        strategy.deposit(MIN_DEPOSIT - 1);
+    }
+
+    function testDepositAtMinimumSucceeds() public {
+        _fundUsdc(funder, MIN_DEPOSIT);
+
+        vm.prank(funder);
+        strategy.deposit(MIN_DEPOSIT);
+
+        assertEq(strategy.getNAV(), MIN_DEPOSIT, "nav at minimum");
+    }
+
+    function testTopUpBelowMinimumSucceedsOnFundedAccount() public {
+        _fundUsdc(funder, MIN_DEPOSIT);
+        vm.prank(funder);
+        strategy.deposit(MIN_DEPOSIT);
+
+        _fundUsdc(funder, 1e18);
+        vm.prank(funder);
+        strategy.deposit(1e18);
+
+        assertEq(strategy.getNAV(), MIN_DEPOSIT + 1e18, "nav after top up");
+    }
+
+    function testDepositTokenRevertsBelowMinimum() public {
+        _fundToken(nvda, funder, 0.4e18);
+
+        vm.prank(funder);
+        vm.expectRevert("Account below minimum");
+        strategy.depositToken(address(nvda), 0.4e18);
+    }
+
+    function testDepositTokenAtMinimumSucceeds() public {
+        _fundToken(nvda, funder, 0.5e18);
+
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 0.5e18);
+
+        assertEq(strategy.getNAV(), MIN_DEPOSIT, "nav at minimum");
     }
 
     function testDepositTokenPullsTokenAndEmits() public {

@@ -18,6 +18,7 @@ import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol
 abstract contract StockAccountStrategyTestBase is Test {
     bytes32 public constant SEPARATOR = keccak256("cow-domain-separator");
     uint256 public constant CAP = 25_000e18;
+    uint256 public constant MIN_DEPOSIT = 100e18;
 
     MamoStrategyRegistry public registry;
     MockStockAccountRegistry public stockRegistry;
@@ -37,6 +38,7 @@ abstract contract StockAccountStrategyTestBase is Test {
     address public relayer = makeAddr("relayer");
     address public user = makeAddr("user");
     address public funder = makeAddr("funder");
+    address public feeRecipient = makeAddr("feeRecipient");
 
     uint256 public strategyTypeId;
 
@@ -57,6 +59,7 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMaxPositions(10);
         stockRegistry.setMinTargetBps(100);
         stockRegistry.setMaxDeviationBps(1000);
+        stockRegistry.setMinStrategyDeposit(MIN_DEPOSIT);
         stockRegistry.setMaxStrategyDeposit(CAP);
         stockRegistry.setMaxBackendSlippageBps(100);
         stockRegistry.setPriceChecker(priceChecker);
@@ -111,7 +114,9 @@ abstract contract StockAccountStrategyTestBase is Test {
             cashTargetBps: 0,
             cowSettlement: address(settlement),
             entries: _entries(address(nvda), 5000, address(aapl), 5000),
+            feeRecipient: feeRecipient,
             mamoStrategyRegistry: address(registry),
+            managementFeeBps: 100,
             owner: user,
             stockRegistry: address(stockRegistry),
             strategyTypeId: strategyTypeId

@@ -21,6 +21,8 @@ contract StockAccountStrategyFactory is AccessControl {
     address public immutable cowSettlement;
     address public immutable strategyImplementation;
     uint256 public immutable strategyTypeId;
+    address public immutable feeRecipient;
+    uint16 public immutable managementFeeBps;
 
     event StrategyCreated(address indexed user, address indexed strategy);
 
@@ -33,6 +35,8 @@ contract StockAccountStrategyFactory is AccessControl {
      * @param _cowSettlement Address of the CoW settlement contract
      * @param _strategyImplementation Address of the StockAccountStrategy implementation
      * @param _strategyTypeId The strategy type ID assigned by the MamoStrategyRegistry
+     * @param _feeRecipient Address the management fee of every account is collected to
+     * @param _managementFeeBps Annual management fee every account is created with, in basis points
      */
     constructor(
         address admin,
@@ -42,7 +46,9 @@ contract StockAccountStrategyFactory is AccessControl {
         address _asset,
         address _cowSettlement,
         address _strategyImplementation,
-        uint256 _strategyTypeId
+        uint256 _strategyTypeId,
+        address _feeRecipient,
+        uint16 _managementFeeBps
     ) {
         require(admin != address(0), "Invalid admin address");
         require(backend != address(0), "Invalid backend address");
@@ -52,6 +58,7 @@ contract StockAccountStrategyFactory is AccessControl {
         require(_cowSettlement != address(0), "Invalid settlement address");
         require(_strategyImplementation != address(0), "Invalid implementation address");
         require(_strategyTypeId != 0, "Strategy type id not set");
+        require(_feeRecipient != address(0), "Invalid fee recipient address");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -62,6 +69,8 @@ contract StockAccountStrategyFactory is AccessControl {
         cowSettlement = _cowSettlement;
         strategyImplementation = _strategyImplementation;
         strategyTypeId = _strategyTypeId;
+        feeRecipient = _feeRecipient;
+        managementFeeBps = _managementFeeBps;
     }
 
     /// @notice Returns the address at which the account of a given user is or would be deployed
@@ -103,7 +112,9 @@ contract StockAccountStrategyFactory is AccessControl {
                 cashTargetBps: cashTargetBps,
                 cowSettlement: cowSettlement,
                 entries: entries,
+                feeRecipient: feeRecipient,
                 mamoStrategyRegistry: address(mamoStrategyRegistry),
+                managementFeeBps: managementFeeBps,
                 owner: user,
                 stockRegistry: stockRegistry,
                 strategyTypeId: strategyTypeId
