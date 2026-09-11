@@ -1,0 +1,14 @@
+{
+  "admin": "MAMO_MULTISIG",
+  "aerodromeRouter": "AERODROME_ROUTER",
+  "guardian": "MAMO_MULTISIG",
+  "maxBackendSlippageBps": 100,
+  "maxDeviationBps": 1000,
+  "maxPositions": 10,
+  "maxStrategyDeposit": 25000000000,
+  "maxWithdrawSlippageBps": 500,
+  "minTargetBps": 100,
+  "priceChecker": "STOCK_ACCOUNT_PRICE_CHECKER",
+  "requiredAppDataHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "twapWindow": 180
+}
