@@ -1,0 +1,548 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {Test} from "@forge-std/Test.sol";
+
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
+
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
+import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
+
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {MockERC20} from "./MockERC20.sol";
+import {MockFailingERC20} from "./MockFailingERC20.sol";
+import {MockGPv2Settlement} from "./mocks/MockGPv2Settlement.sol";
+import {MockPriceChecker} from "./mocks/MockPriceChecker.sol";
+import {MockStockAccountRegistry} from "./mocks/MockStockAccountRegistry.sol";
+
+contract StockAccountStrategyUnitTest is Test {
+    bytes32 public constant SEPARATOR = keccak256("cow-domain-separator");
+    uint256 public constant CAP = 25_000e18;
+
+    MamoStrategyRegistry public registry;
+    MockStockAccountRegistry public stockRegistry;
+    MockPriceChecker public priceChecker;
+    MockGPv2Settlement public settlement;
+
+    MockERC20 public usdc;
+    MockERC20 public nvda;
+    MockERC20 public aapl;
+
+    StockAccountStrategy public implementation;
+    StockAccountStrategy public strategy;
+
+    address public admin = makeAddr("admin");
+    address public backend = makeAddr("backend");
+    address public guardian = makeAddr("guardian");
+    address public relayer = makeAddr("relayer");
+    address public user = makeAddr("user");
+    address public funder = makeAddr("funder");
+
+    uint256 public strategyTypeId;
+
+    function setUp() public {
+        registry = new MamoStrategyRegistry(admin, backend, guardian);
+
+        usdc = new MockERC20("USD Coin", "USDC");
+        nvda = new MockERC20("NVDA Coin", "NVDAc");
+        aapl = new MockERC20("AAPL Coin", "AAPLc");
+
+        priceChecker = new MockPriceChecker();
+        priceChecker.setRate(address(nvda), address(usdc), 200e18);
+        priceChecker.setRate(address(aapl), address(usdc), 100e18);
+
+        settlement = new MockGPv2Settlement(SEPARATOR, relayer);
+
+        stockRegistry = new MockStockAccountRegistry();
+        stockRegistry.setMaxPositions(10);
+        stockRegistry.setMinTargetBps(100);
+        stockRegistry.setMaxDeviationBps(1000);
+        stockRegistry.setMaxStrategyDeposit(CAP);
+        stockRegistry.setMaxBackendSlippageBps(100);
+        stockRegistry.setPriceChecker(priceChecker);
+        _listActive(address(nvda));
+        _listActive(address(aapl));
+
+        implementation = new StockAccountStrategy();
+
+        vm.prank(admin);
+        strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
+
+        strategy = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+
+        vm.prank(backend);
+        registry.addStrategy(user, address(strategy));
+    }
+
+    function _listActive(address token) internal {
+        stockRegistry.setTokenConfig(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: IStockAccountRegistry.TokenStatus.Active,
+                source: IStockAccountRegistry.PriceSource.PoolTwap,
+                pool: address(0),
+                chainlinkFeed: address(0)
+            })
+        );
+    }
+
+    function _entries(address tokenA, uint16 bpsA, address tokenB, uint16 bpsB)
+        internal
+        pure
+        returns (IStockAccountStrategy.BasketEntry[] memory entries)
+    {
+        entries = new IStockAccountStrategy.BasketEntry[](2);
+        entries[0] = IStockAccountStrategy.BasketEntry({token: tokenA, targetBps: bpsA});
+        entries[1] = IStockAccountStrategy.BasketEntry({token: tokenB, targetBps: bpsB});
+    }
+
+    function _entries(address token, uint16 bps)
+        internal
+        pure
+        returns (IStockAccountStrategy.BasketEntry[] memory entries)
+    {
+        entries = new IStockAccountStrategy.BasketEntry[](1);
+        entries[0] = IStockAccountStrategy.BasketEntry({token: token, targetBps: bps});
+    }
+
+    function _defaultParams() internal view returns (StockAccountStrategy.InitParams memory) {
+        return StockAccountStrategy.InitParams({
+            asset: address(usdc),
+            cashTargetBps: 0,
+            cowSettlement: address(settlement),
+            entries: _entries(address(nvda), 5000, address(aapl), 5000),
+            mamoStrategyRegistry: address(registry),
+            owner: user,
+            stockRegistry: address(stockRegistry),
+            strategyTypeId: strategyTypeId
+        });
+    }
+
+    function _deployProxy(StockAccountStrategy.InitParams memory params) internal returns (address) {
+        return address(
+            new ERC1967Proxy(address(implementation), abi.encodeCall(StockAccountStrategy.initialize, (params)))
+        );
+    }
+
+    function _fundUsdc(address to, uint256 amount) internal {
+        usdc.mint(to, amount);
+        vm.prank(to);
+        usdc.approve(address(strategy), amount);
+    }
+
+    function _fundToken(MockERC20 token, address to, uint256 amount) internal {
+        token.mint(to, amount);
+        vm.prank(to);
+        token.approve(address(strategy), amount);
+    }
+
+    function testInitializeStoresConfiguration() public view {
+        assertEq(address(strategy.asset()), address(usdc), "asset");
+        assertEq(address(strategy.stockRegistry()), address(stockRegistry), "stock registry");
+        assertEq(address(strategy.mamoStrategyRegistry()), address(registry), "mamo registry");
+        assertEq(strategy.strategyTypeId(), strategyTypeId, "strategy type id");
+        assertEq(strategy.cowDomainSeparator(), SEPARATOR, "domain separator");
+        assertEq(strategy.cowVaultRelayer(), relayer, "vault relayer");
+        assertEq(strategy.owner(), user, "owner");
+        assertEq(strategy.cashTargetBps(), 0, "cash target");
+        assertEq(strategy.accountSlippageBps(), 0, "account slippage");
+
+        (IStockAccountStrategy.BasketEntry[] memory entries, uint16 cashTargetBps) = strategy.getBasket();
+        assertEq(entries.length, 2, "entries length");
+        assertEq(entries[0].token, address(nvda), "entry 0 token");
+        assertEq(entries[0].targetBps, 5000, "entry 0 weight");
+        assertEq(entries[1].token, address(aapl), "entry 1 token");
+        assertEq(entries[1].targetBps, 5000, "entry 1 weight");
+        assertEq(cashTargetBps, 0, "returned cash target");
+    }
+
+    function testInitializeRevertsOnZeroAsset() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+        params.asset = address(0);
+
+        vm.expectRevert("Invalid asset address");
+        _deployProxy(params);
+    }
+
+    function testInitializeRevertsOnZeroSettlement() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+        params.cowSettlement = address(0);
+
+        vm.expectRevert("Invalid settlement address");
+        _deployProxy(params);
+    }
+
+    function testInitializeRevertsOnZeroMamoRegistry() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+        params.mamoStrategyRegistry = address(0);
+
+        vm.expectRevert("Invalid mamoStrategyRegistry address");
+        _deployProxy(params);
+    }
+
+    function testInitializeRevertsOnZeroStockRegistry() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+        params.stockRegistry = address(0);
+
+        vm.expectRevert("Invalid stock registry address");
+        _deployProxy(params);
+    }
+
+    function testInitializeRevertsOnZeroStrategyTypeId() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+        params.strategyTypeId = 0;
+
+        vm.expectRevert("Strategy type id not set");
+        _deployProxy(params);
+    }
+
+    function testInitializeValidatesBasket() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+        params.entries = _entries(address(nvda), 4000, address(aapl), 5000);
+
+        vm.expectRevert("Weights must total 10000");
+        _deployProxy(params);
+    }
+
+    function testInitializeCannotRunTwice() public {
+        vm.expectRevert();
+        strategy.initialize(_defaultParams());
+    }
+
+    function testDepositPullsAssetAndEmits() public {
+        _fundUsdc(funder, 1_000e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.Deposit(1_000e18);
+
+        vm.prank(funder);
+        strategy.deposit(1_000e18);
+
+        assertEq(usdc.balanceOf(address(strategy)), 1_000e18, "strategy balance");
+        assertEq(usdc.balanceOf(funder), 0, "funder balance");
+        assertEq(strategy.getNAV(), 1_000e18, "nav");
+    }
+
+    function testDepositRevertsOnZeroAmount() public {
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.deposit(0);
+    }
+
+    function testDepositRevertsAboveCap() public {
+        _fundUsdc(funder, CAP + 1);
+
+        vm.prank(funder);
+        vm.expectRevert("Deposit cap exceeded");
+        strategy.deposit(CAP + 1);
+    }
+
+    function testDepositAtCapSucceeds() public {
+        _fundUsdc(funder, CAP);
+
+        vm.prank(funder);
+        strategy.deposit(CAP);
+
+        assertEq(strategy.getNAV(), CAP, "nav at cap");
+    }
+
+    function testDepositTokenPullsTokenAndEmits() public {
+        _fundToken(nvda, funder, 10e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.DepositToken(address(nvda), 10e18);
+
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        assertEq(nvda.balanceOf(address(strategy)), 10e18, "strategy balance");
+        assertEq(strategy.getNAV(), 2_000e18, "nav");
+    }
+
+    function testDepositTokenRevertsOnUnlistedToken() public {
+        MockERC20 other = new MockERC20("Other", "OTH");
+        _fundToken(other, funder, 1e18);
+
+        vm.prank(funder);
+        vm.expectRevert("Token not active");
+        strategy.depositToken(address(other), 1e18);
+    }
+
+    function testDepositTokenRevertsOnZeroAmount() public {
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.depositToken(address(nvda), 0);
+    }
+
+    function testDepositTokenRevertsAboveCap() public {
+        _fundToken(nvda, funder, 126e18);
+
+        vm.prank(funder);
+        vm.expectRevert("Deposit cap exceeded");
+        strategy.depositToken(address(nvda), 126e18);
+    }
+
+    function testDepositTokenAtCapSucceeds() public {
+        _fundToken(nvda, funder, 125e18);
+
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 125e18);
+
+        assertEq(strategy.getNAV(), CAP, "nav at cap");
+    }
+
+    function testSetBasketReplacesEntriesAndEmits() public {
+        IStockAccountStrategy.BasketEntry[] memory entries = _entries(address(nvda), 7000, address(aapl), 2000);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.BasketUpdated(entries, 1000);
+
+        vm.prank(user);
+        strategy.setBasket(entries, 1000);
+
+        (IStockAccountStrategy.BasketEntry[] memory stored, uint16 cashTargetBps) = strategy.getBasket();
+        assertEq(stored.length, 2, "entries length");
+        assertEq(stored[0].targetBps, 7000, "entry 0 weight");
+        assertEq(stored[1].targetBps, 2000, "entry 1 weight");
+        assertEq(cashTargetBps, 1000, "cash target");
+    }
+
+    function testSetBasketRevertsOnTooManyPositions() public {
+        stockRegistry.setMaxPositions(1);
+
+        vm.prank(user);
+        vm.expectRevert("Too many positions");
+        strategy.setBasket(_entries(address(nvda), 5000, address(aapl), 5000), 0);
+    }
+
+    function testSetBasketRevertsOnWeightBelowMinimum() public {
+        vm.prank(user);
+        vm.expectRevert("Weight below minimum");
+        strategy.setBasket(_entries(address(nvda), 9950, address(aapl), 50), 0);
+    }
+
+    function testSetBasketRevertsOnZeroWeight() public {
+        vm.prank(user);
+        vm.expectRevert("Weight below minimum");
+        strategy.setBasket(_entries(address(nvda), 10000, address(aapl), 0), 0);
+    }
+
+    function testSetBasketRevertsOnInactiveToken() public {
+        MockERC20 other = new MockERC20("Other", "OTH");
+
+        vm.prank(user);
+        vm.expectRevert("Token not active");
+        strategy.setBasket(_entries(address(nvda), 5000, address(other), 5000), 0);
+    }
+
+    function testSetBasketRevertsOnDuplicateToken() public {
+        vm.prank(user);
+        vm.expectRevert("Duplicate token");
+        strategy.setBasket(_entries(address(nvda), 5000, address(nvda), 5000), 0);
+    }
+
+    function testSetBasketRevertsOnWrongTotal() public {
+        vm.prank(user);
+        vm.expectRevert("Weights must total 10000");
+        strategy.setBasket(_entries(address(nvda), 5000, address(aapl), 4000), 0);
+    }
+
+    function testSetBasketOnlyOwner() public {
+        vm.prank(funder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
+        strategy.setBasket(_entries(address(nvda), 5000, address(aapl), 5000), 0);
+    }
+
+    function testDroppedTokenKeepsBalanceWithZeroTarget() public {
+        _fundToken(nvda, funder, 10e18);
+        _fundToken(aapl, funder, 20e18);
+
+        vm.startPrank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+        strategy.depositToken(address(aapl), 20e18);
+        vm.stopPrank();
+
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 10000), 0);
+
+        (address[] memory tokens, uint256[] memory currentBps, uint256[] memory targetBps) = strategy.getWeights();
+        assertEq(tokens[1], address(aapl), "aapl listed");
+        assertEq(targetBps[1], 0, "dropped target");
+        assertEq(currentBps[1], 5000, "dropped weight still held");
+        assertEq(targetBps[0], 10000, "kept target");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18, "aapl still held");
+    }
+
+    function testSetAccountSlippageStoresAndEmits() public {
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.SlippageUpdated(0, 50);
+
+        vm.prank(user);
+        strategy.setAccountSlippage(50);
+
+        assertEq(strategy.accountSlippageBps(), 50, "stored slippage");
+        assertEq(strategy.getAccountSlippage(), 50, "effective slippage");
+    }
+
+    function testSetAccountSlippageRevertsAboveCap() public {
+        vm.prank(user);
+        vm.expectRevert("Slippage exceeds maximum");
+        strategy.setAccountSlippage(101);
+    }
+
+    function testSetAccountSlippageOnlyOwner() public {
+        vm.prank(funder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
+        strategy.setAccountSlippage(50);
+    }
+
+    function testGetAccountSlippageFallsBackToCap() public {
+        assertEq(strategy.getAccountSlippage(), 100, "unset falls back to cap");
+
+        vm.prank(user);
+        strategy.setAccountSlippage(80);
+        stockRegistry.setMaxBackendSlippageBps(25);
+
+        assertEq(strategy.getAccountSlippage(), 25, "lowered cap wins");
+    }
+
+    function testWithdrawTokenMovesBalanceAndEmits() public {
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.WithdrawToken(address(nvda), 4e18);
+
+        vm.prank(user);
+        strategy.withdrawToken(address(nvda), 4e18);
+
+        assertEq(nvda.balanceOf(user), 4e18, "user balance");
+        assertEq(nvda.balanceOf(address(strategy)), 6e18, "strategy balance");
+    }
+
+    function testWithdrawTokenRevertsOnZeroAmount() public {
+        vm.prank(user);
+        vm.expectRevert("Amount must be greater than 0");
+        strategy.withdrawToken(address(nvda), 0);
+    }
+
+    function testWithdrawTokenOnlyOwner() public {
+        vm.prank(funder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
+        strategy.withdrawToken(address(nvda), 1);
+    }
+
+    function testWithdrawTokenUnaffectedByFailingToken() public {
+        MockFailingERC20 failing = new MockFailingERC20();
+        _listActive(address(failing));
+        priceChecker.setRate(address(failing), address(usdc), 1e18);
+        failing.setBalance(address(strategy), 5e18);
+
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        vm.prank(user);
+        vm.expectRevert("Transfer failed");
+        strategy.withdrawToken(address(failing), 5e18);
+
+        vm.prank(user);
+        strategy.withdrawToken(address(nvda), 10e18);
+
+        assertEq(nvda.balanceOf(user), 10e18, "user balance");
+    }
+
+    function testWithdrawAllInKindSweepsEverything() public {
+        _fundUsdc(funder, 1_000e18);
+        _fundToken(nvda, funder, 10e18);
+
+        vm.startPrank(funder);
+        strategy.deposit(1_000e18);
+        strategy.depositToken(address(nvda), 10e18);
+        vm.stopPrank();
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.WithdrawToken(address(usdc), 1_000e18);
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.WithdrawToken(address(nvda), 10e18);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(usdc.balanceOf(user), 1_000e18, "user usdc");
+        assertEq(nvda.balanceOf(user), 10e18, "user nvda");
+        assertEq(strategy.getNAV(), 0, "nav emptied");
+    }
+
+    function testWithdrawAllInKindOnlyOwner() public {
+        vm.prank(funder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
+        strategy.withdrawAllInKind();
+    }
+
+    function testApproveCowRelayerSetsMaxAllowance() public {
+        strategy.approveCowRelayer(address(usdc));
+        strategy.approveCowRelayer(address(nvda));
+
+        assertEq(usdc.allowance(address(strategy), relayer), type(uint256).max, "usdc allowance");
+        assertEq(nvda.allowance(address(strategy), relayer), type(uint256).max, "nvda allowance");
+    }
+
+    function testApproveCowRelayerRevertsOnUnlistedToken() public {
+        MockERC20 other = new MockERC20("Other", "OTH");
+
+        vm.expectRevert("Token not listed");
+        strategy.approveCowRelayer(address(other));
+    }
+
+    function testViewsWithMixedPosition() public {
+        _fundUsdc(funder, 1_000e18);
+        _fundToken(nvda, funder, 10e18);
+
+        vm.startPrank(funder);
+        strategy.deposit(1_000e18);
+        strategy.depositToken(address(nvda), 10e18);
+        vm.stopPrank();
+
+        assertEq(strategy.getNAV(), 3_000e18, "nav");
+
+        address[] memory held = strategy.heldTokens();
+        assertEq(held.length, 1, "held length");
+        assertEq(held[0], address(nvda), "held token");
+
+        (address[] memory tokens, uint256[] memory currentBps, uint256[] memory targetBps) = strategy.getWeights();
+        assertEq(tokens.length, 2, "tokens length");
+        assertEq(currentBps[0], 6666, "nvda current");
+        assertEq(currentBps[1], 0, "aapl current");
+        assertEq(targetBps[0], 5000, "nvda target");
+        assertEq(targetBps[1], 5000, "aapl target");
+    }
+
+    function testWeightsAreZeroOnEmptyAccount() public view {
+        (, uint256[] memory currentBps,) = strategy.getWeights();
+        assertEq(currentBps[0], 0, "nvda current");
+        assertEq(currentBps[1], 0, "aapl current");
+        assertEq(strategy.getNAV(), 0, "nav");
+        assertEq(strategy.heldTokens().length, 0, "held length");
+    }
+
+    function testWithdrawNotImplemented() public {
+        vm.prank(user);
+        vm.expectRevert("Not implemented");
+        strategy.withdraw(1e18, 100);
+    }
+
+    function testWithdrawAllNotImplemented() public {
+        vm.prank(user);
+        vm.expectRevert("Not implemented");
+        strategy.withdrawAll(100);
+    }
+
+    function testPreviewWithdrawNotImplemented() public {
+        vm.expectRevert("Not implemented");
+        strategy.previewWithdraw(1e18, 100);
+    }
+}
