@@ -40,7 +40,7 @@ abstract contract StockAccountStrategyTestBase is Test {
 
     uint256 public strategyTypeId;
 
-    function setUp() public {
+    function setUp() public virtual {
         registry = new MamoStrategyRegistry(admin, backend, guardian);
 
         usdc = new MockERC20("USD Coin", "USDC");

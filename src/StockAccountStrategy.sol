@@ -4,9 +4,13 @@ pragma solidity 0.8.28;
 import {BaseStrategy} from "@contracts/BaseStrategy.sol";
 
 import {IGPv2Settlement} from "@interfaces/IGPv2Settlement.sol";
+import {IPool} from "@interfaces/IPool.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+
+import {GPv2Order} from "@libraries/GPv2Order.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -17,9 +21,19 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  * @dev This contract is designed to be used as an implementation for proxies
  */
 contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
+    using GPv2Order for GPv2Order.Data;
     using SafeERC20 for IERC20;
 
     uint16 internal constant TOTAL_BPS = 10_000;
+
+    /// @notice Value returned to CoW when this account accepts an order, per EIP-1271
+    bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
+
+    /// @notice Shortest time an order may stay valid for
+    uint256 internal constant MIN_ORDER_VALIDITY = 5 minutes;
+
+    /// @notice Longest time an order may stay valid for
+    uint256 internal constant MAX_ORDER_VALIDITY = 30 minutes;
 
     /// @notice The cash leg of the account, also the unit of account for every valuation
     IERC20 public asset;
@@ -169,22 +183,153 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         IERC20(token).forceApprove(cowVaultRelayer, type(uint256).max);
     }
 
-    function withdraw(uint256, uint16) external virtual override onlyOwner {
-        revert("Not implemented");
+    /**
+     * @notice Accepts a CoW order that keeps the account inside the basket ranges and prices it fairly
+     * @param orderDigest The EIP-712 signing digest derived from the order
+     * @param encodedOrder The abi encoded GPv2Order.Data the digest was derived from
+     */
+    function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
+        GPv2Order.Data memory order = abi.decode(encodedOrder, (GPv2Order.Data));
+
+        require(order.hash(cowDomainSeparator) == orderDigest, "Order hash does not match the provided digest");
+        require(order.kind == GPv2Order.KIND_SELL, "Order must be a sell order");
+        require(!order.partiallyFillable, "Order must be fill-or-kill");
+        require(
+            order.sellTokenBalance == GPv2Order.BALANCE_ERC20 && order.buyTokenBalance == GPv2Order.BALANCE_ERC20,
+            "Order balances must be ERC20"
+        );
+        require(order.receiver == address(this), "Order receiver must be this strategy");
+        require(order.feeAmount == 0, "Fee amount must be zero");
+        require(order.appData == stockRegistry.requiredAppDataHash(), "Invalid app data");
+        require(order.validTo >= block.timestamp + MIN_ORDER_VALIDITY, "Order expires too soon");
+        require(order.validTo <= block.timestamp + MAX_ORDER_VALIDITY, "Order expires too far in the future");
+
+        address sellToken = address(order.sellToken);
+        address buyToken = address(order.buyToken);
+        require(sellToken != buyToken, "Tokens must differ");
+
+        if (sellToken != address(asset)) {
+            IStockAccountRegistry.TokenStatus status = stockRegistry.tokenConfig(sellToken).status;
+            require(
+                status == IStockAccountRegistry.TokenStatus.Active
+                    || status == IStockAccountRegistry.TokenStatus.SellOnly,
+                "Sell token not sellable"
+            );
+        }
+
+        if (buyToken != address(asset)) {
+            require(
+                stockRegistry.tokenConfig(buyToken).status == IStockAccountRegistry.TokenStatus.Active,
+                "Buy token not active"
+            );
+        }
+
+        _checkRange(
+            sellToken,
+            buyToken,
+            _referenceValue(sellToken, order.sellAmount),
+            _referenceValue(buyToken, order.buyAmount)
+        );
+
+        require(
+            stockRegistry.priceChecker().checkPrice(
+                order.sellAmount, sellToken, buyToken, order.buyAmount, getAccountSlippage()
+            ),
+            "Price check failed"
+        );
+
+        return MAGIC_VALUE;
     }
 
-    function withdrawAll(uint16) external virtual override onlyOwner {
-        revert("Not implemented");
+    function _checkRange(address sellToken, address buyToken, uint256 sellValue, uint256 buyValue) internal view {
+        uint256 sellHeld = _holdingValue(sellToken);
+        require(sellValue <= sellHeld, "Sell amount exceeds balance");
+
+        uint256 navAfter = getNAV() - sellValue + buyValue;
+        uint256 dev = stockRegistry.maxDeviationBps();
+
+        uint256 sellWeight = navAfter == 0 ? 0 : ((sellHeld - sellValue) * TOTAL_BPS) / navAfter;
+        uint256 buyWeight = navAfter == 0 ? 0 : ((_holdingValue(buyToken) + buyValue) * TOTAL_BPS) / navAfter;
+
+        require(sellWeight + dev >= _targetOf(sellToken), "Sell leaves token below range");
+        require(buyWeight <= _targetOf(buyToken) + dev, "Buy leaves token above range");
     }
 
-    function previewWithdraw(uint256, uint16)
+    function _holdingValue(address token) internal view returns (uint256) {
+        return _referenceValue(token, IERC20(token).balanceOf(address(this)));
+    }
+
+    function _referenceValue(address token, uint256 amount) internal view returns (uint256) {
+        if (token == address(asset) || amount == 0) {
+            return amount;
+        }
+
+        return stockRegistry.priceChecker().getExpectedOut(amount, token, address(asset));
+    }
+
+    function _targetOf(address token) internal view returns (uint16) {
+        return token == address(asset) ? cashTargetBps : _targetBps(token);
+    }
+
+    /**
+     * @notice Sends the asset to the owner, selling positions pro rata when the idle balance falls short
+     * @param usdcAmount The amount of the asset the owner receives
+     * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
+     */
+    function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
+        require(usdcAmount > 0, "Amount must be greater than 0");
+        require(maxSlippageBps <= stockRegistry.maxWithdrawSlippageBps(), "Slippage exceeds maximum");
+
+        uint256 idle = asset.balanceOf(address(this));
+        uint256 sold;
+
+        if (idle < usdcAmount) {
+            (address[] memory tokens, uint256[] memory amounts,,) = _planSells(usdcAmount - idle, maxSlippageBps);
+            sold = _executeSells(tokens, amounts, maxSlippageBps);
+
+            require(asset.balanceOf(address(this)) >= usdcAmount, "Insufficient proceeds");
+        }
+
+        asset.safeTransfer(owner(), usdcAmount);
+
+        emit Withdraw(usdcAmount, sold);
+    }
+
+    /**
+     * @notice Sells every position that is not halted and sends all the asset to the owner
+     * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
+     */
+    function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
+        require(maxSlippageBps <= stockRegistry.maxWithdrawSlippageBps(), "Slippage exceeds maximum");
+
+        (address[] memory tokens, uint256[] memory balances) = _sellable();
+        uint256 sold = _executeSells(tokens, balances, maxSlippageBps);
+
+        uint256 usdcOut = asset.balanceOf(address(this));
+        require(usdcOut > 0, "Empty balance");
+
+        asset.safeTransfer(owner(), usdcOut);
+
+        emit Withdraw(usdcOut, sold);
+    }
+
+    /**
+     * @notice The sells a withdrawal of this size would execute, without executing them
+     * @param usdcAmount The amount of the asset the owner would receive
+     * @param maxSlippageBps The slippage each sell leg would tolerate, in basis points
+     */
+    function previewWithdraw(uint256 usdcAmount, uint16 maxSlippageBps)
         external
         view
-        virtual
         override
-        returns (address[] memory, uint256[] memory, uint256, uint256)
+        returns (address[] memory tokensToSell, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds)
     {
-        revert("Not implemented");
+        uint256 idle = asset.balanceOf(address(this));
+        if (idle >= usdcAmount) {
+            return (new address[](0), new uint256[](0), 0, 0);
+        }
+
+        return _planSells(usdcAmount - idle, maxSlippageBps);
     }
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
@@ -260,7 +405,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /// @notice The slippage that applies to this account, capped by the registry
-    function getAccountSlippage() external view override returns (uint16) {
+    function getAccountSlippage() public view override returns (uint16) {
         uint16 cap = stockRegistry.maxBackendSlippageBps();
         return accountSlippageBps == 0 || accountSlippageBps > cap ? cap : accountSlippageBps;
     }
@@ -310,5 +455,115 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
 
         return 0;
+    }
+
+    function _sellable() internal view returns (address[] memory tokens, uint256[] memory balances) {
+        address[] memory listed = stockRegistry.allTokens();
+        uint256 count;
+
+        for (uint256 i = 0; i < listed.length; i++) {
+            if (_isSellable(listed[i])) {
+                count++;
+            }
+        }
+
+        tokens = new address[](count);
+        balances = new uint256[](count);
+        uint256 next;
+
+        for (uint256 i = 0; i < listed.length; i++) {
+            if (_isSellable(listed[i])) {
+                tokens[next] = listed[i];
+                balances[next++] = IERC20(listed[i]).balanceOf(address(this));
+            }
+        }
+    }
+
+    function _isSellable(address token) internal view returns (bool) {
+        return IERC20(token).balanceOf(address(this)) > 0
+            && stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Halted;
+    }
+
+    function _planSells(uint256 shortfall, uint16 maxSlippageBps)
+        internal
+        view
+        returns (address[] memory tokens, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds)
+    {
+        (address[] memory sellable, uint256[] memory balances) = _sellable();
+        ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
+
+        uint256 total;
+        for (uint256 i = 0; i < sellable.length; i++) {
+            total += priceChecker.getExpectedOut(balances[i], sellable[i], address(asset));
+        }
+
+        require(shortfall <= total, "Insufficient balance");
+
+        if (total == 0) {
+            return (new address[](0), new uint256[](0), 0, 0);
+        }
+
+        uint256 target = (shortfall * TOTAL_BPS) / (TOTAL_BPS - maxSlippageBps);
+        if (target > total) {
+            target = total;
+        }
+
+        uint256[] memory planned = new uint256[](sellable.length);
+        uint256 count;
+
+        for (uint256 i = 0; i < sellable.length; i++) {
+            planned[i] = (balances[i] * target) / total;
+            if (planned[i] > 0) {
+                count++;
+            }
+        }
+
+        tokens = new address[](count);
+        amounts = new uint256[](count);
+        uint256 next;
+
+        for (uint256 i = 0; i < sellable.length; i++) {
+            if (planned[i] == 0) {
+                continue;
+            }
+
+            uint256 legValue = priceChecker.getExpectedOut(planned[i], sellable[i], address(asset));
+            referenceValue += legValue;
+            minProceeds += (legValue * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS;
+
+            tokens[next] = sellable[i];
+            amounts[next++] = planned[i];
+        }
+    }
+
+    function _executeSells(address[] memory tokens, uint256[] memory amounts, uint16 maxSlippageBps)
+        internal
+        returns (uint256 sold)
+    {
+        ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 legValue = priceChecker.getExpectedOut(amounts[i], tokens[i], address(asset));
+            sold += _sell(tokens[i], amounts[i], (legValue * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS);
+        }
+    }
+
+    function _sell(address token, uint256 amountIn, uint256 minOut) internal returns (uint256 amountOut) {
+        ISwapRouter router = stockRegistry.aerodromeRouter();
+
+        IERC20(token).forceApprove(address(router), amountIn);
+
+        amountOut = router.exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: token,
+                tokenOut: address(asset),
+                tickSpacing: IPool(stockRegistry.tokenConfig(token).pool).tickSpacing(),
+                recipient: address(this),
+                deadline: block.timestamp,
+                amountIn: amountIn,
+                amountOutMinimum: minOut,
+                sqrtPriceLimitX96: 0
+            })
+        );
     }
 }

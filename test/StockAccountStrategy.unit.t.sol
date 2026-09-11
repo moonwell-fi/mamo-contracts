@@ -400,21 +400,4 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.getNAV(), 0, "nav");
         assertEq(strategy.heldTokens().length, 0, "held length");
     }
-
-    function testWithdrawNotImplemented() public {
-        vm.prank(user);
-        vm.expectRevert("Not implemented");
-        strategy.withdraw(1e18, 100);
-    }
-
-    function testWithdrawAllNotImplemented() public {
-        vm.prank(user);
-        vm.expectRevert("Not implemented");
-        strategy.withdrawAll(100);
-    }
-
-    function testPreviewWithdrawNotImplemented() public {
-        vm.expectRevert("Not implemented");
-        strategy.previewWithdraw(1e18, 100);
-    }
 }
