@@ -24,6 +24,23 @@ interface IStockAccountRegistry {
         address chainlinkFeed;
     }
 
+    error ZeroAddress();
+    error InvalidMaxPositions();
+    error InvalidMinTarget();
+    error InvalidMaxDeviation();
+    error InvalidSlippageCap();
+    error InvalidTwapWindow();
+    error AlreadySet();
+    error NotAContract(address account);
+    error TokenAlreadyListed(address token);
+    error MustListAsActive();
+    error PoolIsToken();
+    error FeedOnlyForChainlink();
+    error TokenNotListed(address token);
+    error InvalidStatus();
+    error NotAdminOrGuardian();
+    error GuardianCanOnlyLower();
+
     function tokenConfig(address token) external view returns (TokenConfig memory);
 
     function allTokens() external view returns (address[] memory);

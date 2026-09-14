@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
 
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -39,7 +40,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.asset = address(0);
 
-        vm.expectRevert("Invalid asset address");
+        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
         _deployProxy(params);
     }
 
@@ -47,7 +48,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.cowSettlement = address(0);
 
-        vm.expectRevert("Invalid settlement address");
+        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
         _deployProxy(params);
     }
 
@@ -55,7 +56,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.mamoStrategyRegistry = address(0);
 
-        vm.expectRevert("Invalid mamoStrategyRegistry address");
+        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
         _deployProxy(params);
     }
 
@@ -63,7 +64,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.stockRegistry = address(0);
 
-        vm.expectRevert("Invalid stock registry address");
+        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
         _deployProxy(params);
     }
 
@@ -71,7 +72,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.strategyTypeId = 0;
 
-        vm.expectRevert("Strategy type id not set");
+        vm.expectRevert(IStockAccountStrategy.StrategyTypeIdNotSet.selector);
         _deployProxy(params);
     }
 
@@ -79,7 +80,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.entries = _entries(address(nvda), 4000, address(aapl), 5000);
 
-        vm.expectRevert("Weights must total 10000");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.WeightsMustTotal.selector, 9000));
         _deployProxy(params);
     }
 
@@ -103,7 +104,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
     }
 
     function testDepositRevertsOnZeroAmount() public {
-        vm.expectRevert("Amount must be greater than 0");
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
         strategy.deposit(0);
     }
 
@@ -111,7 +112,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         _fundUsdc(funder, CAP + 1);
 
         vm.prank(funder);
-        vm.expectRevert("Deposit cap exceeded");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.DepositCapExceeded.selector, CAP + 1));
         strategy.deposit(CAP + 1);
     }
 
@@ -128,7 +129,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         _fundUsdc(funder, MIN_DEPOSIT - 1);
 
         vm.prank(funder);
-        vm.expectRevert("Account below minimum");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.AccountBelowMinimum.selector, MIN_DEPOSIT - 1));
         strategy.deposit(MIN_DEPOSIT - 1);
     }
 
@@ -157,7 +158,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         _fundToken(nvda, funder, 0.4e18);
 
         vm.prank(funder);
-        vm.expectRevert("Account below minimum");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.AccountBelowMinimum.selector, 80e18));
         strategy.depositToken(address(nvda), 0.4e18);
     }
 
@@ -188,12 +189,12 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         _fundToken(other, funder, 1e18);
 
         vm.prank(funder);
-        vm.expectRevert("Token not active");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.TokenNotActive.selector, address(other)));
         strategy.depositToken(address(other), 1e18);
     }
 
     function testDepositTokenRevertsOnZeroAmount() public {
-        vm.expectRevert("Amount must be greater than 0");
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
         strategy.depositToken(address(nvda), 0);
     }
 
@@ -201,7 +202,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         _fundToken(nvda, funder, 126e18);
 
         vm.prank(funder);
-        vm.expectRevert("Deposit cap exceeded");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.DepositCapExceeded.selector, 25_200e18));
         strategy.depositToken(address(nvda), 126e18);
     }
 
@@ -234,19 +235,19 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         stockRegistry.setMaxPositions(1);
 
         vm.prank(user);
-        vm.expectRevert("Too many positions");
+        vm.expectRevert(IStockAccountStrategy.TooManyPositions.selector);
         strategy.setBasket(_entries(address(nvda), 5000, address(aapl), 5000), 0);
     }
 
     function testSetBasketRevertsOnWeightBelowMinimum() public {
         vm.prank(user);
-        vm.expectRevert("Weight below minimum");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.WeightBelowMinimum.selector, address(aapl)));
         strategy.setBasket(_entries(address(nvda), 9950, address(aapl), 50), 0);
     }
 
     function testSetBasketRevertsOnZeroWeight() public {
         vm.prank(user);
-        vm.expectRevert("Weight below minimum");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.WeightBelowMinimum.selector, address(aapl)));
         strategy.setBasket(_entries(address(nvda), 10000, address(aapl), 0), 0);
     }
 
@@ -254,19 +255,19 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         MockERC20 other = new MockERC20("Other", "OTH");
 
         vm.prank(user);
-        vm.expectRevert("Token not active");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.TokenNotActive.selector, address(other)));
         strategy.setBasket(_entries(address(nvda), 5000, address(other), 5000), 0);
     }
 
     function testSetBasketRevertsOnDuplicateToken() public {
         vm.prank(user);
-        vm.expectRevert("Duplicate token");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.DuplicateToken.selector, address(nvda)));
         strategy.setBasket(_entries(address(nvda), 5000, address(nvda), 5000), 0);
     }
 
     function testSetBasketRevertsOnWrongTotal() public {
         vm.prank(user);
-        vm.expectRevert("Weights must total 10000");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.WeightsMustTotal.selector, 9000));
         strategy.setBasket(_entries(address(nvda), 5000, address(aapl), 4000), 0);
     }
 
@@ -309,7 +310,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
 
     function testSetAccountSlippageRevertsAboveCap() public {
         vm.prank(user);
-        vm.expectRevert("Slippage exceeds maximum");
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
         strategy.setAccountSlippage(101);
     }
 
@@ -346,7 +347,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
 
     function testWithdrawTokenRevertsOnZeroAmount() public {
         vm.prank(user);
-        vm.expectRevert("Amount must be greater than 0");
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
         strategy.withdrawToken(address(nvda), 0);
     }
 
@@ -415,7 +416,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
     function testApproveCowRelayerRevertsOnUnlistedToken() public {
         MockERC20 other = new MockERC20("Other", "OTH");
 
-        vm.expectRevert("Token not listed");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.TokenNotListed.selector, address(other)));
         strategy.approveCowRelayer(address(other));
     }
 
@@ -442,11 +443,55 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(targetBps[1], 5000, "aapl target");
     }
 
+    function testHaltedTokenIsExcludedFromValuationButStaysHeld() public {
+        _fundUsdc(funder, 1_000e18);
+        _fundToken(nvda, funder, 10e18);
+        _fundToken(aapl, funder, 20e18);
+
+        vm.startPrank(funder);
+        strategy.deposit(1_000e18);
+        strategy.depositToken(address(nvda), 10e18);
+        strategy.depositToken(address(aapl), 20e18);
+        vm.stopPrank();
+
+        _halt(address(aapl));
+        priceChecker.setRate(address(aapl), address(usdc), 0);
+
+        assertEq(strategy.getNAV(), 3_000e18, "nav excludes halted token");
+
+        (address[] memory tokens, uint256[] memory currentBps,) = strategy.getWeights();
+        assertEq(tokens[1], address(aapl), "halted token still listed");
+        assertEq(currentBps[0], 6666, "nvda current");
+        assertEq(currentBps[1], 0, "halted current");
+
+        address[] memory held = strategy.heldTokens();
+        assertEq(held.length, 2, "held length");
+        assertEq(held[1], address(aapl), "halted token still held");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(aapl.balanceOf(user), 20e18, "halted token swept in kind");
+        assertEq(aapl.balanceOf(address(strategy)), 0, "halted token drained");
+    }
+
     function testWeightsAreZeroOnEmptyAccount() public view {
         (, uint256[] memory currentBps,) = strategy.getWeights();
         assertEq(currentBps[0], 0, "nvda current");
         assertEq(currentBps[1], 0, "aapl current");
         assertEq(strategy.getNAV(), 0, "nav");
         assertEq(strategy.heldTokens().length, 0, "held length");
+    }
+
+    function _halt(address token) internal {
+        stockRegistry.setTokenConfig(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: IStockAccountRegistry.TokenStatus.Halted,
+                source: IStockAccountRegistry.PriceSource.PoolTwap,
+                pool: address(0),
+                chainlinkFeed: address(0)
+            })
+        );
     }
 }

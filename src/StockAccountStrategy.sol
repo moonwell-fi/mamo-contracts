@@ -83,7 +83,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     modifier onlyBackend() {
-        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        if (msg.sender != mamoStrategyRegistry.getBackendAddress()) revert NotBackend();
         _;
     }
 
@@ -93,13 +93,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param params The initialization parameters struct
      */
     function initialize(InitParams calldata params) external initializer {
-        require(params.asset != address(0), "Invalid asset address");
-        require(params.cowSettlement != address(0), "Invalid settlement address");
-        require(params.feeRecipient != address(0), "Invalid fee recipient address");
-        require(params.mamoStrategyRegistry != address(0), "Invalid mamoStrategyRegistry address");
-        require(params.managementFeeBps <= MAX_MANAGEMENT_FEE_BPS, "Fee exceeds maximum");
-        require(params.stockRegistry != address(0), "Invalid stock registry address");
-        require(params.strategyTypeId != 0, "Strategy type id not set");
+        if (params.asset == address(0)) revert ZeroAddress();
+        if (params.cowSettlement == address(0)) revert ZeroAddress();
+        if (params.feeRecipient == address(0)) revert ZeroAddress();
+        if (params.mamoStrategyRegistry == address(0)) revert ZeroAddress();
+        if (params.managementFeeBps > MAX_MANAGEMENT_FEE_BPS) revert FeeExceedsMaximum();
+        if (params.stockRegistry == address(0)) revert ZeroAddress();
+        if (params.strategyTypeId == 0) revert StrategyTypeIdNotSet();
 
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
@@ -121,7 +121,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function deposit(uint256 amount) external override {
         _accrueFees();
 
-        require(amount > 0, "Amount must be greater than 0");
+        if (amount == 0) revert ZeroAmount();
 
         asset.safeTransferFrom(msg.sender, address(this), amount);
         _checkAccountValue();
@@ -137,8 +137,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function depositToken(address token, uint256 amount) external override {
         _accrueFees();
 
-        require(amount > 0, "Amount must be greater than 0");
-        require(stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.Active, "Token not active");
+        if (amount == 0) revert ZeroAmount();
+        if (stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Active) {
+            revert TokenNotActive(token);
+        }
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         _checkAccountValue();
@@ -154,8 +156,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
         _accrueFees();
 
-        require(amount > 0, "Amount must be greater than 0");
-        require(amount <= _available(token), "Amount exceeds available balance");
+        if (amount == 0) revert ZeroAmount();
+        if (amount > _available(token)) revert ExceedsAvailable(token);
 
         IERC20(token).safeTransfer(owner(), amount);
 
@@ -199,7 +201,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param bps The slippage in basis points, zero to follow the registry cap
      */
     function setAccountSlippage(uint16 bps) external override onlyOwner {
-        require(bps <= stockRegistry.maxBackendSlippageBps(), "Slippage exceeds maximum");
+        if (bps > stockRegistry.maxBackendSlippageBps()) revert SlippageExceedsMaximum();
 
         emit SlippageUpdated(accountSlippageBps, bps);
 
@@ -211,7 +213,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param newRecipient The new fee recipient
      */
     function setFeeRecipient(address newRecipient) external override onlyBackend {
-        require(newRecipient != address(0), "Invalid fee recipient address");
+        if (newRecipient == address(0)) revert ZeroAddress();
 
         emit FeeRecipientUpdated(feeRecipient, newRecipient);
 
@@ -223,10 +225,11 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param token The asset or a listed token
      */
     function approveCowRelayer(address token) external override {
-        require(
-            token == address(asset) || stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.None,
-            "Token not listed"
-        );
+        if (
+            token != address(asset) && stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.None
+        ) {
+            revert TokenNotListed(token);
+        }
 
         IERC20(token).forceApprove(cowVaultRelayer, type(uint256).max);
     }
@@ -244,7 +247,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         _accrueFees();
 
         uint256 amount = feeOwed[token];
-        require(amount > 0, "Nothing to collect");
+        if (amount == 0) revert NothingToCollect();
 
         feeOwed[token] = 0;
         IERC20(token).safeTransfer(feeRecipient, amount);
@@ -260,37 +263,34 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
         GPv2Order.Data memory order = abi.decode(encodedOrder, (GPv2Order.Data));
 
-        require(order.hash(cowDomainSeparator) == orderDigest, "Order hash does not match the provided digest");
-        require(order.kind == GPv2Order.KIND_SELL, "Order must be a sell order");
-        require(!order.partiallyFillable, "Order must be fill-or-kill");
-        require(
-            order.sellTokenBalance == GPv2Order.BALANCE_ERC20 && order.buyTokenBalance == GPv2Order.BALANCE_ERC20,
-            "Order balances must be ERC20"
-        );
-        require(order.receiver == address(this), "Order receiver must be this strategy");
-        require(order.feeAmount == 0, "Fee amount must be zero");
-        require(order.appData == stockRegistry.requiredAppDataHash(), "Invalid app data");
-        require(order.validTo >= block.timestamp + MIN_ORDER_VALIDITY, "Order expires too soon");
-        require(order.validTo <= block.timestamp + MAX_ORDER_VALIDITY, "Order expires too far in the future");
+        if (order.hash(cowDomainSeparator) != orderDigest) revert OrderHashMismatch();
+        if (order.kind != GPv2Order.KIND_SELL) revert OrderMustBeSell();
+        if (order.partiallyFillable) revert OrderMustBeFillOrKill();
+        if (order.sellTokenBalance != GPv2Order.BALANCE_ERC20 || order.buyTokenBalance != GPv2Order.BALANCE_ERC20) {
+            revert OrderBalancesMustBeErc20();
+        }
+        if (order.receiver != address(this)) revert OrderReceiverMismatch();
+        if (order.feeAmount != 0) revert OrderFeeMustBeZero();
+        if (order.appData != stockRegistry.requiredAppDataHash()) revert InvalidAppData();
+        if (order.validTo < block.timestamp + MIN_ORDER_VALIDITY) revert OrderExpiresTooSoon();
+        if (order.validTo > block.timestamp + MAX_ORDER_VALIDITY) revert OrderExpiresTooLate();
 
         address sellToken = address(order.sellToken);
         address buyToken = address(order.buyToken);
-        require(sellToken != buyToken, "Tokens must differ");
+        if (sellToken == buyToken) revert TokensMustDiffer();
 
         if (sellToken != address(asset)) {
             IStockAccountRegistry.TokenStatus status = stockRegistry.tokenConfig(sellToken).status;
-            require(
-                status == IStockAccountRegistry.TokenStatus.Active
-                    || status == IStockAccountRegistry.TokenStatus.SellOnly,
-                "Sell token not sellable"
-            );
+            bool sellable = status == IStockAccountRegistry.TokenStatus.Active
+                || status == IStockAccountRegistry.TokenStatus.SellOnly;
+
+            if (!sellable) revert SellTokenNotSellable(sellToken);
         }
 
         if (buyToken != address(asset)) {
-            require(
-                stockRegistry.tokenConfig(buyToken).status == IStockAccountRegistry.TokenStatus.Active,
-                "Buy token not active"
-            );
+            if (stockRegistry.tokenConfig(buyToken).status != IStockAccountRegistry.TokenStatus.Active) {
+                revert BuyTokenNotActive(buyToken);
+            }
         }
 
         _checkRange(
@@ -300,32 +300,70 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             _referenceValue(buyToken, order.buyAmount)
         );
 
-        require(
-            stockRegistry.priceChecker().checkPrice(
-                order.sellAmount, sellToken, buyToken, order.buyAmount, getAccountSlippage()
-            ),
-            "Price check failed"
-        );
+        ISlippagePriceChecker checker = stockRegistry.priceChecker();
+
+        if (!checker.checkPrice(order.sellAmount, sellToken, buyToken, order.buyAmount, getAccountSlippage())) {
+            revert PriceCheckFailed();
+        }
 
         return MAGIC_VALUE;
     }
 
     function _checkRange(address sellToken, address buyToken, uint256 sellValue, uint256 buyValue) internal view {
-        uint256 sellHeld = _holdingValue(sellToken);
-        require(sellValue <= sellHeld, "Sell amount exceeds balance");
+        (address[] memory tokens, uint256[] memory values, uint256 nav) = _valuation();
 
-        uint256 navAfter = getNAV() - sellValue + buyValue;
+        uint256 sellHeld = _heldValue(tokens, values, sellToken);
+        if (sellValue > sellHeld) revert SellExceedsBalance();
+
+        uint256 navAfter = nav - sellValue + buyValue;
         uint256 dev = stockRegistry.maxDeviationBps();
 
         uint256 sellWeight = navAfter == 0 ? 0 : ((sellHeld - sellValue) * TOTAL_BPS) / navAfter;
-        uint256 buyWeight = navAfter == 0 ? 0 : ((_holdingValue(buyToken) + buyValue) * TOTAL_BPS) / navAfter;
+        uint256 buyHeld = _heldValue(tokens, values, buyToken);
+        uint256 buyWeight = navAfter == 0 ? 0 : ((buyHeld + buyValue) * TOTAL_BPS) / navAfter;
 
-        require(sellWeight + dev >= _targetOf(sellToken), "Sell leaves token below range");
-        require(buyWeight <= _targetOf(buyToken) + dev, "Buy leaves token above range");
+        if (sellWeight + dev < _targetOf(sellToken)) revert SellLeavesTokenBelowRange(sellToken);
+        if (buyWeight > _targetOf(buyToken) + dev) revert BuyLeavesTokenAboveRange(buyToken);
     }
 
-    function _holdingValue(address token) internal view returns (uint256) {
-        return _referenceValue(token, _available(token));
+    function _valuation() internal view returns (address[] memory tokens, uint256[] memory values, uint256 nav) {
+        tokens = stockRegistry.allTokens();
+        values = new uint256[](tokens.length);
+        nav = _available(address(asset));
+
+        ISlippagePriceChecker checker = stockRegistry.priceChecker();
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 balance = _available(tokens[i]);
+            if (balance == 0) {
+                continue;
+            }
+
+            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) {
+                continue;
+            }
+
+            values[i] = checker.getExpectedOut(balance, tokens[i], address(asset));
+            nav += values[i];
+        }
+    }
+
+    function _heldValue(address[] memory tokens, uint256[] memory values, address token)
+        internal
+        view
+        returns (uint256)
+    {
+        if (token == address(asset)) {
+            return _available(token);
+        }
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == token) {
+                return values[i];
+            }
+        }
+
+        return 0;
     }
 
     function _referenceValue(address token, uint256 amount) internal view returns (uint256) {
@@ -348,8 +386,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
         _accrueFees();
 
-        require(usdcAmount > 0, "Amount must be greater than 0");
-        require(maxSlippageBps <= stockRegistry.maxWithdrawSlippageBps(), "Slippage exceeds maximum");
+        if (usdcAmount == 0) revert ZeroAmount();
+        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
 
         uint256 idle = _available(address(asset));
         uint256 sold;
@@ -358,7 +396,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             (address[] memory tokens, uint256[] memory amounts,,) = _planSells(usdcAmount - idle, maxSlippageBps);
             sold = _executeSells(tokens, amounts, maxSlippageBps);
 
-            require(_available(address(asset)) >= usdcAmount, "Insufficient proceeds");
+            if (_available(address(asset)) < usdcAmount) revert InsufficientProceeds();
         }
 
         asset.safeTransfer(owner(), usdcAmount);
@@ -373,13 +411,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
         _accrueFees();
 
-        require(maxSlippageBps <= stockRegistry.maxWithdrawSlippageBps(), "Slippage exceeds maximum");
+        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
 
         (address[] memory tokens, uint256[] memory balances) = _sellable();
         uint256 sold = _executeSells(tokens, balances, maxSlippageBps);
 
         uint256 usdcOut = _available(address(asset));
-        require(usdcOut > 0, "Empty balance");
+        if (usdcOut == 0) revert EmptyBalance();
 
         asset.safeTransfer(owner(), usdcOut);
 
@@ -407,17 +445,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
     function getNAV() public view override returns (uint256 valueUsdc) {
-        valueUsdc = _available(address(asset));
-
-        address[] memory tokens = stockRegistry.allTokens();
-        ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
-
-        for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = _available(tokens[i]);
-            if (balance > 0) {
-                valueUsdc += priceChecker.getExpectedOut(balance, tokens[i], address(asset));
-            }
-        }
+        (,, valueUsdc) = _valuation();
     }
 
     /// @notice Current and target weight of every listed token, in basis points of the account value
@@ -427,21 +455,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         override
         returns (address[] memory tokens, uint256[] memory currentBps, uint256[] memory targetBps)
     {
-        tokens = stockRegistry.allTokens();
+        uint256[] memory values;
+        uint256 nav;
+        (tokens, values, nav) = _valuation();
+
         currentBps = new uint256[](tokens.length);
         targetBps = new uint256[](tokens.length);
-
-        ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
-        uint256[] memory values = new uint256[](tokens.length);
-        uint256 nav = _available(address(asset));
-
-        for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = _available(tokens[i]);
-            if (balance > 0) {
-                values[i] = priceChecker.getExpectedOut(balance, tokens[i], address(asset));
-                nav += values[i];
-            }
-        }
 
         for (uint256 i = 0; i < tokens.length; i++) {
             currentBps[i] = nav == 0 ? 0 : (values[i] * TOTAL_BPS) / nav;
@@ -484,26 +503,25 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _setBasket(BasketEntry[] calldata entries, uint16 newCashTargetBps) internal {
-        require(entries.length <= stockRegistry.maxPositions(), "Too many positions");
+        if (entries.length > stockRegistry.maxPositions()) revert TooManyPositions();
 
         uint16 minTargetBps = stockRegistry.minTargetBps();
         uint256 total;
 
         for (uint256 i = 0; i < entries.length; i++) {
-            require(entries[i].targetBps >= minTargetBps, "Weight below minimum");
-            require(
-                stockRegistry.tokenConfig(entries[i].token).status == IStockAccountRegistry.TokenStatus.Active,
-                "Token not active"
-            );
+            if (entries[i].targetBps < minTargetBps) revert WeightBelowMinimum(entries[i].token);
+            if (stockRegistry.tokenConfig(entries[i].token).status != IStockAccountRegistry.TokenStatus.Active) {
+                revert TokenNotActive(entries[i].token);
+            }
 
             for (uint256 j = 0; j < i; j++) {
-                require(entries[j].token != entries[i].token, "Duplicate token");
+                if (entries[j].token == entries[i].token) revert DuplicateToken(entries[i].token);
             }
 
             total += entries[i].targetBps;
         }
 
-        require(total + newCashTargetBps == TOTAL_BPS, "Weights must total 10000");
+        if (total + newCashTargetBps != TOTAL_BPS) revert WeightsMustTotal(total + newCashTargetBps);
 
         delete _entries;
 
@@ -519,8 +537,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function _checkAccountValue() internal view {
         uint256 nav = getNAV();
 
-        require(nav >= stockRegistry.minStrategyDeposit(), "Account below minimum");
-        require(nav <= stockRegistry.maxStrategyDeposit(), "Deposit cap exceeded");
+        if (nav < stockRegistry.minStrategyDeposit()) revert AccountBelowMinimum(nav);
+        if (nav > stockRegistry.maxStrategyDeposit()) revert DepositCapExceeded(nav);
     }
 
     function _available(address token) internal view returns (uint256) {
@@ -610,7 +628,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             total += priceChecker.getExpectedOut(balances[i], sellable[i], address(asset));
         }
 
-        require(shortfall <= total, "Insufficient balance");
+        if (shortfall > total) revert InsufficientBalance();
 
         if (total == 0) {
             return (new address[](0), new uint256[](0), 0, 0);

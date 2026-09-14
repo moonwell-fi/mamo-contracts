@@ -74,19 +74,19 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
 
     function testWithdrawRevertsOnZeroAmount() public {
         vm.prank(user);
-        vm.expectRevert("Amount must be greater than 0");
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
         strategy.withdraw(0, 100);
     }
 
     function testWithdrawRevertsWhenSlippageAboveCap() public {
         vm.prank(user);
-        vm.expectRevert("Slippage exceeds maximum");
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
         strategy.withdraw(1_500e18, 501);
     }
 
     function testWithdrawRevertsWhenValueIsInsufficient() public {
         vm.prank(user);
-        vm.expectRevert("Insufficient balance");
+        vm.expectRevert(IStockAccountStrategy.InsufficientBalance.selector);
         strategy.withdraw(5_000e18, 100);
     }
 
@@ -140,13 +140,13 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         strategy.withdrawAllInKind();
 
         vm.prank(user);
-        vm.expectRevert("Empty balance");
+        vm.expectRevert(IStockAccountStrategy.EmptyBalance.selector);
         strategy.withdrawAll(100);
     }
 
     function testWithdrawAllRevertsWhenSlippageAboveCap() public {
         vm.prank(user);
-        vm.expectRevert("Slippage exceeds maximum");
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
         strategy.withdrawAll(501);
     }
 

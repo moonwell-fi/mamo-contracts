@@ -15,3 +15,7 @@ node_modules/
 .roo/
 .claude/settings.local.json
 memory-bank/
+# Stock accounts vnet artifacts
+script/stock-accounts/addresses-vnet/
+script/stock-accounts/vnet-manifest.json
+script/stock-accounts/addresses-dryrun/

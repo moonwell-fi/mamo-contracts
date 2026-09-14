@@ -17,6 +17,42 @@ interface IStockAccountStrategy {
     event FeesCollected(address indexed token, uint256 amount);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
+    error ZeroAddress();
+    error StrategyTypeIdNotSet();
+    error FeeExceedsMaximum();
+    error NotBackend();
+    error ZeroAmount();
+    error TokenNotActive(address token);
+    error TokenNotListed(address token);
+    error AccountBelowMinimum(uint256 nav);
+    error DepositCapExceeded(uint256 nav);
+    error ExceedsAvailable(address token);
+    error TooManyPositions();
+    error WeightBelowMinimum(address token);
+    error DuplicateToken(address token);
+    error WeightsMustTotal(uint256 total);
+    error SlippageExceedsMaximum();
+    error NothingToCollect();
+    error InsufficientBalance();
+    error InsufficientProceeds();
+    error EmptyBalance();
+    error OrderHashMismatch();
+    error OrderMustBeSell();
+    error OrderMustBeFillOrKill();
+    error OrderBalancesMustBeErc20();
+    error OrderReceiverMismatch();
+    error OrderFeeMustBeZero();
+    error InvalidAppData();
+    error OrderExpiresTooSoon();
+    error OrderExpiresTooLate();
+    error TokensMustDiffer();
+    error SellTokenNotSellable(address token);
+    error BuyTokenNotActive(address token);
+    error SellExceedsBalance();
+    error SellLeavesTokenBelowRange(address token);
+    error BuyLeavesTokenAboveRange(address token);
+    error PriceCheckFailed();
+
     function deposit(uint256 amount) external;
 
     function depositToken(address token, uint256 amount) external;

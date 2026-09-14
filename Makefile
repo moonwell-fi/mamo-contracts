@@ -1,3 +1,6 @@
+DEPLOY_ENV ?= 8453_TESTING
+ADDRESSES_PATH ?= ./script/stock-accounts/addresses-dryrun
+
 test:
 	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest"
 
@@ -45,7 +48,17 @@ fee-splitter:
 stock-price-checker:
 	forge test --ffi --match-contract StockAccountPriceChecker -vvv
 
+deploy-stock-accounts:
+	rm -rf script/stock-accounts/addresses-dryrun && mkdir -p script/stock-accounts/addresses-dryrun && cp addresses/*.json script/stock-accounts/addresses-dryrun/
+	ADDRESSES_PATH=$(ADDRESSES_PATH) DEPLOY_ENV=$(DEPLOY_ENV) ADMIN_MODE=calldata forge script script/DeployStockAccounts.s.sol:DeployStockAccounts --fork-url base --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 -vv
+
+tenderly-stock-accounts:
+	./script/stock-accounts/vnet-up.sh
+
+cow-appdata-hash:
+	cast keccak "$$(cat script/stock-accounts/appData.json)"
+
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker
 
-.PHONY: stock-price-checker test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+.PHONY: stock-price-checker deploy-stock-accounts tenderly-stock-accounts cow-appdata-hash test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all

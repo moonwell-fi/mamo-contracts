@@ -105,7 +105,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.admin = address(0);
 
-        vm.expectRevert("Invalid admin address");
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         new StockAccountRegistry(config);
     }
 
@@ -113,7 +113,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.guardian = address(0);
 
-        vm.expectRevert("Invalid guardian address");
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         new StockAccountRegistry(config);
     }
 
@@ -121,15 +121,16 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.aerodromeRouter = ISwapRouter(address(0));
 
-        vm.expectRevert("Invalid router address");
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         new StockAccountRegistry(config);
     }
 
     function testConstructorRevertsOnEOARouter() public {
         StockAccountRegistry.Config memory config = defaultConfig();
-        config.aerodromeRouter = ISwapRouter(makeAddr("eoaRouter"));
+        address eoaRouter = makeAddr("eoaRouter");
+        config.aerodromeRouter = ISwapRouter(eoaRouter);
 
-        vm.expectRevert("Router must be a contract");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaRouter));
         new StockAccountRegistry(config);
     }
 
@@ -137,15 +138,16 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.priceChecker = ISlippagePriceChecker(address(0));
 
-        vm.expectRevert("Invalid price checker address");
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         new StockAccountRegistry(config);
     }
 
     function testConstructorRevertsOnEOAPriceChecker() public {
         StockAccountRegistry.Config memory config = defaultConfig();
-        config.priceChecker = ISlippagePriceChecker(makeAddr("eoaChecker"));
+        address eoaChecker = makeAddr("eoaChecker");
+        config.priceChecker = ISlippagePriceChecker(eoaChecker);
 
-        vm.expectRevert("Price checker must be a contract");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaChecker));
         new StockAccountRegistry(config);
     }
 
@@ -153,7 +155,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.maxPositions = 0;
 
-        vm.expectRevert("Invalid max positions");
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxPositions.selector);
         new StockAccountRegistry(config);
     }
 
@@ -161,7 +163,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.minTargetBps = 0;
 
-        vm.expectRevert("Invalid min target");
+        vm.expectRevert(IStockAccountRegistry.InvalidMinTarget.selector);
         new StockAccountRegistry(config);
     }
 
@@ -169,7 +171,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.minTargetBps = 10_001;
 
-        vm.expectRevert("Invalid min target");
+        vm.expectRevert(IStockAccountRegistry.InvalidMinTarget.selector);
         new StockAccountRegistry(config);
     }
 
@@ -177,7 +179,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.maxDeviationBps = 10_001;
 
-        vm.expectRevert("Invalid max deviation");
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
         new StockAccountRegistry(config);
     }
 
@@ -185,7 +187,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.maxBackendSlippageBps = 10_001;
 
-        vm.expectRevert("Invalid slippage cap");
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         new StockAccountRegistry(config);
     }
 
@@ -193,7 +195,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.maxWithdrawSlippageBps = 10_001;
 
-        vm.expectRevert("Invalid slippage cap");
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         new StockAccountRegistry(config);
     }
 
@@ -201,7 +203,7 @@ contract StockAccountRegistryUnitTest is Test {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.twapWindow = 0;
 
-        vm.expectRevert("Invalid twap window");
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         new StockAccountRegistry(config);
     }
 
@@ -321,37 +323,37 @@ contract StockAccountRegistryUnitTest is Test {
     function testScalarSettersRevertOnSameValue() public {
         vm.startPrank(admin);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setAerodromeRouter(router);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setPriceChecker(checker);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMaxPositions(10);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMinTargetBps(250);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMaxDeviationBps(500);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMaxBackendSlippageBps(100);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMaxWithdrawSlippageBps(200);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setTwapWindow(1800);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMinStrategyDeposit(100e6);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMaxStrategyDeposit(1_000_000e6);
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setRequiredAppDataHash(keccak256("appData"));
 
         vm.stopPrank();
@@ -360,37 +362,39 @@ contract StockAccountRegistryUnitTest is Test {
     function testScalarSettersRevertOnInvalidValues() public {
         vm.startPrank(admin);
 
-        vm.expectRevert("Invalid router address");
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         registry.setAerodromeRouter(ISwapRouter(address(0)));
 
-        vm.expectRevert("Router must be a contract");
-        registry.setAerodromeRouter(ISwapRouter(makeAddr("eoaRouter")));
+        address eoaRouter = makeAddr("eoaRouter");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaRouter));
+        registry.setAerodromeRouter(ISwapRouter(eoaRouter));
 
-        vm.expectRevert("Invalid price checker address");
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         registry.setPriceChecker(ISlippagePriceChecker(address(0)));
 
-        vm.expectRevert("Price checker must be a contract");
-        registry.setPriceChecker(ISlippagePriceChecker(makeAddr("eoaChecker")));
+        address eoaChecker = makeAddr("eoaChecker");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaChecker));
+        registry.setPriceChecker(ISlippagePriceChecker(eoaChecker));
 
-        vm.expectRevert("Invalid max positions");
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxPositions.selector);
         registry.setMaxPositions(0);
 
-        vm.expectRevert("Invalid min target");
+        vm.expectRevert(IStockAccountRegistry.InvalidMinTarget.selector);
         registry.setMinTargetBps(0);
 
-        vm.expectRevert("Invalid min target");
+        vm.expectRevert(IStockAccountRegistry.InvalidMinTarget.selector);
         registry.setMinTargetBps(10_001);
 
-        vm.expectRevert("Invalid max deviation");
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
         registry.setMaxDeviationBps(10_001);
 
-        vm.expectRevert("Invalid slippage cap");
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxBackendSlippageBps(10_001);
 
-        vm.expectRevert("Invalid slippage cap");
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(10_001);
 
-        vm.expectRevert("Invalid twap window");
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
 
         vm.stopPrank();
@@ -429,7 +433,7 @@ contract StockAccountRegistryUnitTest is Test {
     function testListTokenRevertsWhenAlreadyListed() public {
         listDefaultToken();
 
-        vm.expectRevert("Token already listed");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenAlreadyListed.selector, token));
         vm.prank(admin);
         registry.listToken(token, activeConfig());
     }
@@ -438,22 +442,24 @@ contract StockAccountRegistryUnitTest is Test {
         IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
         cfg.status = IStockAccountRegistry.TokenStatus.SellOnly;
 
-        vm.expectRevert("Must list as active");
+        vm.expectRevert(IStockAccountRegistry.MustListAsActive.selector);
         vm.prank(admin);
         registry.listToken(token, cfg);
     }
 
     function testListTokenRevertsWhenTokenNotContract() public {
-        vm.expectRevert("Token must be a contract");
+        address eoaToken = makeAddr("eoaToken");
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaToken));
         vm.prank(admin);
-        registry.listToken(makeAddr("eoaToken"), activeConfig());
+        registry.listToken(eoaToken, activeConfig());
     }
 
     function testListTokenRevertsWhenPoolNotContract() public {
         IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
         cfg.pool = makeAddr("eoaPool");
 
-        vm.expectRevert("Pool must be a contract");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, cfg.pool));
         vm.prank(admin);
         registry.listToken(token, cfg);
     }
@@ -462,7 +468,7 @@ contract StockAccountRegistryUnitTest is Test {
         IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
         cfg.pool = token;
 
-        vm.expectRevert("Pool cannot be the token");
+        vm.expectRevert(IStockAccountRegistry.PoolIsToken.selector);
         vm.prank(admin);
         registry.listToken(token, cfg);
     }
@@ -472,7 +478,7 @@ contract StockAccountRegistryUnitTest is Test {
         cfg.source = IStockAccountRegistry.PriceSource.Chainlink;
         cfg.chainlinkFeed = makeAddr("eoaFeed");
 
-        vm.expectRevert("Feed must be a contract");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, cfg.chainlinkFeed));
         vm.prank(admin);
         registry.listToken(token, cfg);
     }
@@ -481,7 +487,7 @@ contract StockAccountRegistryUnitTest is Test {
         IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
         cfg.chainlinkFeed = feed;
 
-        vm.expectRevert("Feed only for Chainlink source");
+        vm.expectRevert(IStockAccountRegistry.FeedOnlyForChainlink.selector);
         vm.prank(admin);
         registry.listToken(token, cfg);
     }
@@ -517,7 +523,7 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
 
-        vm.expectRevert("Guardian can only lower status");
+        vm.expectRevert(IStockAccountRegistry.GuardianCanOnlyLower.selector);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
         vm.stopPrank();
 
@@ -531,13 +537,13 @@ contract StockAccountRegistryUnitTest is Test {
     function testSetTokenStatusRevertsForStranger() public {
         listDefaultToken();
 
-        vm.expectRevert("Not admin or guardian");
+        vm.expectRevert(IStockAccountRegistry.NotAdminOrGuardian.selector);
         vm.prank(stranger);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
     }
 
     function testSetTokenStatusRevertsForUnlistedToken() public {
-        vm.expectRevert("Token not listed");
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotListed.selector, token));
         vm.prank(admin);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
     }
@@ -545,7 +551,7 @@ contract StockAccountRegistryUnitTest is Test {
     function testSetTokenStatusRevertsOnNoneStatus() public {
         listDefaultToken();
 
-        vm.expectRevert("Invalid status");
+        vm.expectRevert(IStockAccountRegistry.InvalidStatus.selector);
         vm.prank(admin);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.None);
     }
@@ -553,7 +559,7 @@ contract StockAccountRegistryUnitTest is Test {
     function testSetTokenStatusRevertsOnSameStatus() public {
         listDefaultToken();
 
-        vm.expectRevert("Already set");
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         vm.prank(admin);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
     }
