@@ -69,7 +69,7 @@ The project uses Foundry for testing with three primary test types:
 Tests fork the Base network to interact with production dependencies like Moonwell and MetaMorpho.
 
 ### Testing Best Practices
-- When calling vm.expectRevert on tests, always pass the expected revert string as a parameter
+- When calling vm.expectRevert on tests, always pass the exact expected revert: the custom error selector (with its arguments when it has any), or the exact string for legacy contracts that still use require strings
 
 ## Deployment Process
 
