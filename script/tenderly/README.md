@@ -218,10 +218,10 @@ the shared instance carries FreshFeed mocks (see step 0). When a refresh does ha
    Deploys + wires + smokes everything and merge-writes `leveraged-aero-vnet.json` — commit that diff so
    consumers pick up the new instance.
 
-> **The current shared instance is Sherwood-era.** It predates PR #66, so the vault beneath it is
-> Sherwood's `SyndicateVault`: no `redeemSettled`, `openDeposits()` instead of `depositsOpen()`,
-> governor-driven lifecycle. The account ABI is unchanged (`MamoLeveragedAeroStrategy` is byte-identical
-> across PR #66), so it stays valid for account-side FE/BE work — but not for anything vault-shaped.
+> **The recorded shared instance predates the fee rework.** It was deployed 2026-08-25 from `6d25f5f`
+> — the in-repo vault and strategy, but with the retired management/performance fee layer and the old
+> 51-field `layout()`. Redeploy from the current branch before using it for anything fee- or
+> layout-shaped; account-side FE/BE reads remain valid.
 
 One-off ops against the vnet (all via the **admin** RPC, no keys — unlocked impersonation):
 

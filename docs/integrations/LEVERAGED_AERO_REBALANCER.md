@@ -547,10 +547,11 @@ own at settle; this strategy collects its one fee itself:
   claims is transferred to `feeRecipient` **as AERO, before the sale**. Both are the clone's own init
   params (`compoundFeeBps` / `feeRecipient` in `layout()`); read them rather than assuming a schedule.
   Production is `500` (5%); `0` is a fee-free clone.
-- **`compound` is the ONLY site.** `deposit`, both redeem paths, `rerange`, `adjustLeverage`,
-  `deleverage`, `flatten` and `settle` charge nothing. In particular the reward-tranche sales on the
-  EXIT paths (`_settle`, `flatten`, the async-redeem residual) do **not** skim — those are exits, and a
-  fee there would charge the same tranche twice.
+- **Every realization path skims.** `compound`, `flatten` and the async-redeem residual sale all take
+  the skim and emit `RewardFeePaid` — `gauge.withdraw` is all-or-nothing per NFT, so any of them
+  converts the whole accrued tranche and there is no later harvest to charge. The **terminal `settle`
+  alone waives it** (the fund is ending; nothing follows). `deposit`, `rerange`, `adjustLeverage` and
+  `deleverage` charge nothing.
 - **No shares are ever minted for a fee**, so `depositsOpen` has no fee interaction: a frozen vault
   cannot stall or defer the fee, and no holder's balance is diluted by it.
 - **Fee ceiling at init:** `compoundFeeBps ≤ 1000` (10%, `LeveragedAeroValuation.MAX_COMPOUND_FEE_BPS`,
@@ -1227,7 +1228,10 @@ the clone rather than assuming the launch pair:
 
 ### Known gaps the operator must know (disclosed in PR #66)
 
-- **No behavioural fork suite in CI.** The lifecycle *has* now been driven on a Base-fork vnet by hand —
+- **Fork coverage in CI is the deployment rehearsal, not a behavioural matrix.**
+  `test/LeveragedAeroSystemSetup.integration.t.sol` now runs 015 → 012 → a real user lifecycle
+  (deposit, fast withdraw, request, fulfil) against live venues in CI. Beyond that, the lifecycle
+  *has* been driven on a Base-fork vnet by hand —
   `deployIdle` (real mint), `compound` (real accrued AERO), `rerange`, `adjustLeverage`, `fulfillRedeem`
   and the full account lifecycle all executed as broadcast txs — but those are **manual harness drives,
   not automated coverage**. A Slipstream+Moonwell fork suite remains the named top follow-up before
@@ -1579,7 +1583,10 @@ Three things to keep straight:
 
 ## Staging
 
-> **The live staging instance runs the AUDITED build** (vault generation 3), redeployed 2026-08-25 (`6d25f5f`) from
+> **The recorded staging instance PREDATES the fee rework and the round-2 audit fixes** — it was
+> redeployed 2026-08-25 (`6d25f5f`), before the in-kind skim replaced the management/performance layer
+> and before `layout()` became 48 fields. Redeploy (`make tenderly-leveraged-aero-stack`) before using
+> it for anything fee- or layout-shaped. As recorded it runs vault generation 3 (`6d25f5f`) from
 > the audit-remediation branch: a `LeveragedAerodromeCLStrategy` clone bound to `LeveragedAeroVault`,
 > deployed by `make tenderly-leveraged-aero-stack`, with the full lifecycle / rescue surface
 > documented above (`activateStrategy`, `settleStrategy`, `redeemSettled`), the fund

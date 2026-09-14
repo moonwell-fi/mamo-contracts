@@ -808,7 +808,7 @@ library LeveragedAeroVenue {
 
     /// @notice The strategy's full `LayoutView` read out of diamond storage — the BODY of
     ///         `LeveragedAerodromeCLStrategy.layout()`, hosted here for the strategy's EIP-170 budget.
-    /// @dev Field-by-field, not a struct literal: a 51-field literal overflows the 16-live-variable stack
+    /// @dev Field-by-field, not a struct literal: a 48-field literal overflows the 16-live-variable stack
     ///      window under via_ir. Solc emits no library call-protection guard for views, so a direct call on
     ///      the deployed library reads the LIBRARY's own all-zero slot — reach it via `strategy.layout()`.
     function layoutView() public view returns (LeveragedAerodromeCLStrategy.LayoutView memory v) {
