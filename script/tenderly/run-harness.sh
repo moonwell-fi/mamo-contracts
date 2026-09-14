@@ -12,6 +12,8 @@
 #                                         (run-leveraged-aero-stack.sh) — run this FIRST
 #   ./run-harness.sh leveraged-aero-account [..] → MamoLeveragedAeroStrategy account
 #                                         (run-leveraged-aero-account.sh)
+#   ./run-harness.sh leveraged-aero-withdraw [..] → withdraw-flow EDGE matrix
+#                                         (run-leveraged-aero-account.sh)
 #
 # Flags passed with no leading subcommand still route to lpv2, so the historical
 # `make tenderly-harness` and `./run-harness.sh --scenario balanced` keep working.
@@ -29,6 +31,7 @@ case "$1" in
   price-checker) shift; exec "$SCRIPT_DIR/run-price-checker.sh" "$@" ;;
   leveraged-aero-stack)   shift; exec "$SCRIPT_DIR/run-leveraged-aero-stack.sh" "$@" ;;
   leveraged-aero-account) shift; exec "$SCRIPT_DIR/run-leveraged-aero-account.sh" "$@" ;;
+  leveraged-aero-withdraw) shift; exec "$SCRIPT_DIR/run-leveraged-aero-withdraw.sh" "$@" ;;
   --*)           exec "$SCRIPT_DIR/run-lpv2.sh" "$@" ;;   # bare flags → lpv2 (back-compat)
-  *) echo "unknown harness '$1' (expected: lpv2 | lpv2-matrix | price-checker | leveraged-aero-stack | leveraged-aero-account)"; exit 2 ;;
+  *) echo "unknown harness '$1' (expected: lpv2 | lpv2-matrix | price-checker | leveraged-aero-stack | leveraged-aero-account | leveraged-aero-withdraw)"; exit 2 ;;
 esac

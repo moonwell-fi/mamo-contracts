@@ -26,8 +26,9 @@
 # FE/BE/keeper work points at, so this harness ALWAYS reuses TENDERLY_VNET_RPC_URL
 # (the vnet's ADMIN RPC — it accepts eth_sendTransaction from any unlocked sender AND
 # serves reads). It never creates or tears down a vnet: an ephemeral fork would be
-# deleted with the stack on it. Create the vnet per runbook Phase A (chainId 8453
-# MANDATORY, state sync DISABLED, persistent).
+# deleted with the stack on it. Create the vnet per runbook Phase A (persistent, state sync
+# DISABLED; a CUSTOM chain id is supported and preferred — the live instance reports 73578453,
+# which needs EXPECTED_CHAIN=73578453 and an addresses/73578453.json copy of 8453.json).
 #
 # ── NO TIME WARPING ───────────────────────────────────────────────────────────
 # This script never calls evm_increaseTime. FreshFeed makes warping SAFE, but the
@@ -64,9 +65,16 @@
 #   LEG_A/LEG_B, M_LEG_A/M_LEG_B, M_USDC, COMPTROLLER, NPM, GAUGE, SWAP_ROUTER
 #   LEG_A_FEED/LEG_B_FEED/USDC_FEED/AERO_FEED/SEQ_FEED
 #   TICK_SPACING, LEG_A_SWAP_TICK_SPACING, LEG_B_SWAP_TICK_SPACING, WETH_DELIVERS_NATIVE
-#   WIDTH/MIN_WIDTH/MAX_WIDTH, TARGET_LTV_BPS/MAX_LTV_BPS/MIN_HEALTH_BPS/MAX_SLIPPAGE_BPS
+#   WIDTH/MIN_WIDTH/MAX_WIDTH, SKEW_BPS (5000 = centered — the ops default; skew is meant to be
+#     applied per-cycle via `rerange`, not baked into genesis),
+#   MIN_SKEW_BPS (1000) / MAX_SKEW_BPS (9000) — the INIT-IMMUTABLE governance band on skewBps, the
+#     skew analogue of MIN_WIDTH/MAX_WIDTH. Validated at init AND re-checked on every rerange, and a
+#     violation raises the SAME OutOfBounds() as a bad width — there is no new selector, so the
+#     expected-error list below needs no new entry. Immutable per clone: widening it means redeploying.
+#   TARGET_LTV_BPS/MAX_LTV_BPS/MIN_HEALTH_BPS/MAX_SLIPPAGE_BPS
 #   MAX_DELAY/GRACE_PERIOD/TWAP_WINDOW/CALM_DEVIATION_TICKS
-#   MGMT_FEE_BPS (100) / PERF_FEE_BPS (1000) / FEE_RECIPIENT (= MAMO_REBALANCER)
+#   COMPOUND_FEE_BPS (500) — the in-kind AERO skim taken at compound; cap 1000. / FEE_RECIPIENT
+#     (= MAMO_REBALANCER)
 #   VAULT_NAME / VAULT_SYMBOL
 #   TENDERLY_VNET_PUBLIC_RPC_URL  recorded into leveraged-aero-vnet.json
 #
@@ -112,7 +120,11 @@ _CLI_VNET_RPC="${TENDERLY_VNET_RPC_URL:-}"
 # These are the subset THIS script also needs (the 5 feeds for B.0, the pool for the
 # log, USDC for the seed). LeveragedAeroStackHarness.s.sol carries identical defaults for
 # them plus the fields only it reads (legs, Moonwell markets, NPM, gauge, router, risk /
-# oracle / width / fee params) — keep the two default sets in lockstep.
+# oracle / width+skew / fee params) — keep the two default sets in lockstep. SKEW_BPS defaults
+# to 5000 (centered) on both sides, and its governance band defaults to MIN_SKEW_BPS=1000 /
+# MAX_SKEW_BPS=9000 (init-immutable; re-checked on every rerange, same OutOfBounds()). Like WIDTH
+# and SKEW_BPS these are read straight from the process env by LeveragedAeroStackHarness.buildInitData()
+# — this script does not re-export them, so a caller override reaches the harness unchanged.
 #
 # ── SHAPE: which pool family this fund LPs ────────────────────────────────────
 # `asset` (DEFAULT — the launch product): leg B IS the unit of account, i.e. a cbBTC/USDC
@@ -155,6 +167,7 @@ case "$SHAPE" in
   twoleg)
     # WETH/cbBTC at tickSpacing 100 — the original two-borrowed-legs shape.
     export LP_POOL="${LP_POOL:-0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1}"
+    export GAUGE="${GAUGE:-0x41b2126661C673C2beDd208cC72E85DC51a5320a}"
     export LEG_A_FEED="${LEG_A_FEED:-0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70}" # ETH/USD  8dp
     export LEG_B_FEED="${LEG_B_FEED:-0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F}" # BTC/USD  8dp
     ;;
@@ -388,19 +401,23 @@ forge script "$FQ" --sig 'buildInitData()' -vvv > "$INITDATA_LOG" 2>&1 \
   || { grep -iE "error|revert|fail" "$INITDATA_LOG" | tail -20 | tee -a "$RESULTS"; die "buildInitData() failed"; }
 INITDATA="$(grep -oE 'HARNESS_INITDATA=0x[0-9a-fA-F]+' "$INITDATA_LOG" | head -1 | cut -d= -f2)"
 [ -n "$INITDATA" ] || die "could not parse HARNESS_INITDATA from $INITDATA_LOG"
+# "width band" matches EVERY harness range line: the min/width/max triple AND the min/skew/max skew
+# triple. Both keep that prefix deliberately so this one pattern covers the whole range config — if you
+# add another range knob, prefix its log line the same way rather than widening this grep.
 grep -E "(pool +:|legA/legB:|feeRecip +:|mgmt/perf fee bps|width band)" "$INITDATA_LOG" | tee -a "$RESULTS"
 ok "initData = ${#INITDATA} hex chars"
 
 # ── Phase B.3: clone + initialize + bind, atomically, as the owner ────────────
 section "Phase B.3 — vault.cloneAndBind(template, MAMO_REBALANCER, initData) [MAMO_MULTISIG]"
 # cloneAndBind is onlyOwner and atomic (clone -> initialize -> bind). It replaces the old
-# Clones.clone + initialize + setStrategy flow, which left the fresh clone initializable by
+# Clones.clone + initialize + setStrategy flow (both halves now gone), which left the fresh clone initializable by
 # ANYONE in between (a front-runner could seize the proposer role). _bind re-checks
 # clone.vault() == this vault, so a foreign-vault clone can never be bound here either.
 # A wrong venue value fails HERE, loudly: VenueMismatch (pool spacing / token set / Moonwell
 # underlying / a swap pool that does not exist at the configured spacing), UnsupportedLeg
 # (USDC or AERO as a leg), LegDecimalsOutOfRange, AssetMismatch, UnexpectedFeedDecimals,
-# WidthOutOfBounds, or one of the risk/oracle/fee bound errors.
+# OutOfBounds (width band OR skewBps OR the [MIN_SKEW_BPS, MAX_SKEW_BPS] band — one error covers
+# every range knob), or one of the risk/oracle/fee bound errors.
 csend_gas "$GAS_CLONE_AND_BIND" "cloneAndBind" "$MULTISIG" "$VAULT" \
   'cloneAndBind(address,address,bytes)' "$TEMPLATE" "$MAMO_REBALANCER" "$INITDATA"
 CLONE="$(ccall "$VAULT" 'strategy()(address)' | field)"
@@ -433,7 +450,6 @@ assert_eq "vault.decimals()"     "$(ccall "$VAULT" 'decimals()(uint8)' | field)"
 # Left CLOSED here on purpose: proposal 012's build() flips it, which is what makes the vnet
 # a faithful rehearsal of the mainnet proposal (the account harness replays that).
 assert_eq "vault.depositsOpen()" "$(ccall "$VAULT" 'depositsOpen()(bool)')" "false"
-assert_eq "vault.feeConfig()"    "$(ccall "$VAULT" 'feeConfig()(address)' | field)" "0x0000000000000000000000000000000000000000"
 assert_eq "vault.settled()"      "$(ccall "$VAULT" 'settled()(bool)')" "false"
 # Genesis mint: seed x 10^(12-6).
 SEED_SHARES="$(python3 -c "print($SEED * 10**6)")"
@@ -454,8 +470,8 @@ assert_feed_fresh "sequencer " "$SEQ_FEED" "0"
 section "Summary"
 ok "Pooled layer live. vault=$VAULT strategyClone=$CLONE template=$TEMPLATE proposer=$MAMO_REBALANCER"
 info "Next: the account layer —"
-info "  TENDERLY_VNET_RPC_URL=<admin-rpc> SHERWOOD_LEVERAGED_AERO_STRATEGY=$CLONE \\"
-info "  SHERWOOD_SYNDICATE_VAULT=$VAULT make tenderly-leveraged-aero-account"
+info "  TENDERLY_VNET_RPC_URL=<admin-rpc> LEVERAGED_AERO_STRATEGY=$CLONE \\"
+info "  LEVERAGED_AERO_VAULT=$VAULT make tenderly-leveraged-aero-account"
 
 # ── machine-consumable config for downstream consumers ────────────────────────
 # MERGE-WRITE, not clobber: run-leveraged-aero-account.sh owns the `mamo` object and this
@@ -463,7 +479,17 @@ info "  SHERWOOD_SYNDICATE_VAULT=$VAULT make tenderly-leveraged-aero-account"
 # harnesses can run in either order without erasing each other's fields. A NEW pooled layer
 # does invalidate the account layer (the factory binds the strategy clone at construction),
 # so the account addresses are reset to null here and the account harness refills them.
-PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(cat "$CONFIG_JSON")"
+#
+# `del(.STALE)` is part of the merge for the same reason the merge exists: a manually-added
+# "this recorded layer is out of date, redeploy before use" marker describes the PREVIOUS
+# pooled layer, and `$prev * {…}` would carry it forward onto the layer that just replaced it.
+# A successful run of THIS script is exactly the event that retires the marker, so it clears it.
+#
+# `venueNote` is deleted for the same reason: it is a hand-written description of the PREVIOUS
+# clone's venue (and of any migrateVenue applied to it), so carrying it forward mislabels the
+# clone that just replaced it. lpGauge and venueShape are now EMITTED (below) rather than
+# hand-maintained, which is what let a stale twoleg gauge survive an asset-mode redeploy.
+PREV='{}'; [ -f "$CONFIG_JSON" ] && PREV="$(jq 'del(.STALE) | del(.venueNote)' "$CONFIG_JSON")"
 jq -n \
   --argjson prev "$PREV" \
   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -472,7 +498,8 @@ jq -n \
   --arg vault "$VAULT" --arg clone "$CLONE" --arg template "$TEMPLATE" \
   --arg proposer "$MAMO_REBALANCER" --arg seed "$SEED" \
   --arg usdc "$USDC" --arg registry "$(addr MAMO_STRATEGY_REGISTRY)" \
-  --arg pool "$LP_POOL" \
+  --arg pool "$LP_POOL" --arg gauge "$GAUGE" --arg shape "$SHAPE" \
+  --arg tickSpacing "${TICK_SPACING:-100}" \
   --arg legAFeed "$LEG_A_FEED" --arg legBFeed "$LEG_B_FEED" --arg usdcFeed "$USDC_FEED" \
   --arg aeroFeed "$AERO_FEED" --arg seqFeed "$SEQ_FEED" \
   '$prev * {
@@ -496,18 +523,19 @@ jq -n \
       template: $template,
       proposer: $proposer,
       seed: $seed,
-      lpPool: $pool
+      lpPool: $pool,
+      lpGauge: $gauge,
+      venueShape: ($shape + " (tickSpacing " + $tickSpacing + ") — legBIsAsset=" + (if $shape == "asset" then "true" else "false" end) + ". DEPLOY-TIME: a later migrateVenue does not update this — read layout() on the clone.")
     },
-    sherwood: { strategyClone: $clone, syndicateVault: $vault },
     usdc: $usdc,
     feeds: {
       pattern: "FreshFeed (tenderly_setCode; updatedAt tracks block.timestamp)",
       legAUsd: $legAFeed, legBUsd: $legBFeed, usdcUsd: $usdcFeed, aeroUsd: $aeroFeed,
       sequencerUptime: $seqFeed
     },
-    vaultGeneration: 2,
-    vaultGenerationName: "leveraged-aero-vault (in-repo: depositsOpen(), cloneAndBind, redeemSettled)",
-    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66); mamo = the account layer, filled by run-leveraged-aero-account.sh (null right after a pooled redeploy — the factory binds the clone at construction, so the account layer must be redeployed too). sherwood is a deprecated alias of pooled, kept for existing consumers. The 5 feeds are FreshFeed-mocked (never stale). proposer is the rebalancer operator key, deliberately distinct from MAMO_BACKEND."
+    vaultGeneration: 3,
+    vaultGenerationName: "leveraged-aero-vault (in-repo: + maxTotalAssets(), remainingCapacity())",
+    note: "Addresses change when the instance rotates or a harness redeploys — always read this file, never hardcode. pooled = the LeveragedAeroVault + its LeveragedAerodromeCLStrategy clone (both in-repo since PR #66); mamo = the account layer, filled by run-leveraged-aero-account.sh (null right after a pooled redeploy — the factory binds the clone at construction, so the account layer must be redeployed too). The 5 feeds are FreshFeed-mocked (never stale). proposer is the rebalancer operator key, deliberately distinct from MAMO_BACKEND."
   }' > "$CONFIG_JSON"
 ok "config emitted: $CONFIG_JSON"
 info "Full log: $RESULTS"

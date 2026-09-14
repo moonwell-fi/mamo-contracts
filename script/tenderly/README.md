@@ -92,7 +92,7 @@ make tenderly-leveraged-aero-stack
 | `vault.owner()` / `pendingOwner()` | `MAMO_MULTISIG` / `0x0` |
 | `vault.strategy()` | the clone (both directions bound) |
 | `vault.asset()` / `decimals()` | USDC / `12` (6dp asset + the load-bearing 6-decimal offset) |
-| `vault.depositsOpen()` / `feeConfig()` / `settled()` | `false` / `0x0` / `false` — deposits are flipped by proposal 012 in Phase C, fees are off at launch |
+| `vault.depositsOpen()` / `settled()` | `false` / `false` — deposits are flipped by proposal 012 in Phase C |
 | `vault.balanceOf(MAMO_MULTISIG)` / `totalSupply()` | `SEED × 1e6` (the genesis mint) |
 | `strategy.state()` | `1` — Executed |
 | `strategy.nav()` | `> 0` |
@@ -141,7 +141,7 @@ picks them up as its defaults (env vars still win).
 |---|---|
 | **2 — deploy** | `LeveragedAeroAccountHarness.deploy()` runs the real `LeveragedAeroAccountDeployer` (the same code proposal 012 calls) to deploy the impl + factory as `DEPLOYER_EOA`. |
 | **3 — multisig** | As `MAMO_MULTISIG`: `whitelistImplementation(impl,5)`, `grantRole(BACKEND_ROLE, factory)`, `vault.setOpenDeposits(true)`; then reproduces every `validate()` assert via `cast` reads. |
-| **4 — e2e** | Fresh throwaway user: `createStrategyForUser` → `deposit` → fast `withdraw(half)` → `requestWithdraw` → proposer `fulfillRedeem` → `claimWithdrawnUsdc` → `depositIdle` gate (third-party reverts, registry backend succeeds) → `withdrawAll` cleanup → clean-state asserts + net-delta report. |
+| **4 — e2e** | Fresh throwaway user: `createStrategyForUser` → `deposit` → fast `withdraw(half)` → `requestWithdraw` → proposer `fulfillRedeem` (pays the USER directly — no claim step) → `syncRedeemRequests` → `depositIdle` gate (third-party reverts, registry backend succeeds) → `withdrawAll` cleanup → clean-state asserts + net-delta report. |
 
 **Why `--reuse` is forced.** The vault + strategy clone exist only on the shared persistent vnet, so
 this harness ALWAYS reuses `TENDERLY_VNET_RPC_URL` (point it at the vnet's **Admin RPC** — it accepts
@@ -154,11 +154,9 @@ constructor on every real-Base-mainnet CI run (no code lives there). They are su
 (documented defaults = current vnet values) and injected at runtime inside
 `LeveragedAeroAccountHarness.s.sol` with `addresses.addAddress(...)`.
 
-The env-var / key names are **stale but real**: the strategy is `SHERWOOD_LEVERAGED_AERO_STRATEGY`
-(also `factory.sherwoodStrategy()`) and the vault is passed as `SHERWOOD_SYNDICATE_VAULT` even though
-proposal 012 now resolves it under the `LEVERAGED_AERO_VAULT` key. Use the names as written or lookups
-fail; dropping the `SHERWOOD_` prefix is a pending cleanup and implies no remaining Sherwood
-dependency.
+The env-var names match the address-book keys proposal 012 resolves exactly: the strategy is
+`LEVERAGED_AERO_STRATEGY` (also `factory.leveragedAeroStrategy()`) and the vault is
+`LEVERAGED_AERO_VAULT`.
 
 **Feed freshness.** A Base fork's Chainlink answers are frozen, so `updatedAt` recedes as the clock
 advances and every priced path bricks with `StaleOracle` in ~1 day. The fix is the **FreshFeed**
@@ -179,11 +177,10 @@ required), never committed. Set
 
 Both harnesses **merge-write** the file (`jq '$prev * {…}'`) rather than overwriting it, so they can run
 in either order: the stack harness owns `pooled` + `feeds`, the account harness owns `mamo`. The pooled
-layer is published under `pooled.{vault, strategyClone, template, proposer, seed, lpPool}`; the old
-`sherwood.{syndicateVault, strategyClone}` object is kept as a **deprecated alias** of the vault + clone
-so existing consumers keep working, and will be dropped. `vaultGeneration` is a **number** — `2` for the
-in-repo `LeveragedAeroVault`, `1` for the legacy Sherwood `SyndicateVault` — probed at run time from
-whether the vault answers `depositsOpen()`, with the human-readable form in `vaultGenerationName`.
+layer is published under `pooled.{vault, strategyClone, template, proposer, seed, lpPool}`.
+`vaultGeneration` is a **number** — `2` for the in-repo `LeveragedAeroVault`, `1` for the legacy
+Sherwood `SyndicateVault` — probed at run time from whether the vault answers `depositsOpen()`, with
+the human-readable form in `vaultGenerationName`.
 
 ### Future reference — redeploying / vnet ops crib
 
@@ -234,7 +231,7 @@ cast rpc tenderly_setBalance        '["<addr>","0x56BC75E2D63100000"]'          
 cast rpc tenderly_setErc20Balance   '["<usdc>","<addr>","0x2540BE400"]'                   --rpc-url "$ADMIN"   # 10,000 USDC
 
 # act as any actor — e.g. fulfill an async withdrawal as the backend/proposer
-cast send <strategyClone> 'fulfillRedeem(uint256)' <id> --from <MAMO_BACKEND> --unlocked --rpc-url "$ADMIN"
+cast send <strategyClone> 'fulfillRedeem(uint256,uint256)' <id> 0 --from <MAMO_BACKEND> --unlocked --rpc-url "$ADMIN"
 
 # read anything via the public RPC (share this one freely)
 cast call <account> 'sharesBalance()(uint256)' --rpc-url <public-rpc>
@@ -244,6 +241,85 @@ cast call <account> 'sharesBalance()(uint256)' --rpc-url <public-rpc>
 # current vnet values are the built-in defaults; override to point elsewhere
 TENDERLY_VNET_RPC_URL=<admin-rpc> make tenderly-leveraged-aero-account
 ```
+
+## Vnet heartbeat — an idle vnet mines nothing (MOO-768)
+
+A Tenderly vnet produces a block **only when a transaction arrives**. Real Base produces one every
+~2s, and wallets assume the latter. Two QA artifacts fall out of that, both seen during FE-05 manual
+testing:
+
+1. **Confirmation deadlock** — any `waitForTransactionReceipt` with `confirmations > 1` between
+   interactive legs never resolves: the first leg mines into its own block and no further blocks come.
+2. **MetaMask "previous transactions are still being signed or submitted"** — MetaMask's activity
+   tracker needs block progression to mark a tx confirmed, so mined txs linger locally as
+   submitted/pending and the next signature request shows the stale-queue banner. Benign (nonces come
+   from the RPC and are correct) but it reads as a failure to testers. Clears via MetaMask → Settings
+   → Advanced → *Clear activity tab data*.
+
+`mine-ticker.sh` closes the gap from outside the app — it calls `evm_mine` on a fixed interval so the
+chain keeps ticking while nobody is transacting. It holds no state, so starting and stopping it is
+always safe, and it needs the **admin** (write-capable) RPC: on the public one `evm_mine` returns
+`Access forbidden by access rules`.
+
+```bash
+make tenderly-mine                                  # foreground 15s heartbeat, Ctrl-C to stop
+make tenderly-mine-start                            # detached — logs to mine-ticker.log
+make tenderly-mine-status                           # running? and how far behind wall clock
+make tenderly-mine-stop
+./script/tenderly/mine-ticker.sh --once             # single block — catch a drifted vnet up
+./script/tenderly/mine-ticker.sh --interval 2 --quiet   # exactly Base's cadence
+```
+
+**It does not fast-forward the chain.** Tenderly stamps each mined block with the real time elapsed
+since the previous one, so the cadence sets the block rate, not the rate of chain time — a 15s ticker
+and a 2s ticker both keep the offset flat. What it fixes is *drift*:
+an idle vnet falls behind wall clock by exactly as long as it sat idle (measured 2026-08-19: the
+shared instance was ~2h behind after a quiet stretch), and the first transaction afterwards closes the
+whole gap in a single block's timestamp. A running ticker keeps that offset flat — which is the more
+production-faithful thing for anything reading a TWAP or an oracle age.
+
+### Keeping it up all day
+
+QA wants blocks whenever someone is clicking, not only when someone remembers to start a ticker. The
+daemon has to live on a host that does not sleep — a closed laptop stops the chain, which is the exact
+failure this exists to prevent. On macOS, a LaunchAgent restarts it across crashes and reboots:
+
+```xml
+<!-- ~/Library/LaunchAgents/fi.moonwell.vnet-mine.plist -->
+<plist version="1.0"><dict>
+  <key>Label</key>            <string>fi.moonwell.vnet-mine</string>
+  <key>ProgramArguments</key> <array>
+    <string>/path/to/mamo-contracts/script/tenderly/mine-ticker.sh</string>
+    <string>--interval</string><string>15</string>
+    <string>--quiet</string>
+  </array>
+  <key>EnvironmentVariables</key> <dict>
+    <!-- admin RPC from 1Password; the plist is NOT in the repo -->
+    <key>TENDERLY_VNET_RPC_URL</key> <string>https://virtual.base.…</string>
+  </dict>
+  <key>RunAtLoad</key>  <true/>
+  <key>KeepAlive</key>  <true/>
+  <key>StandardOutPath</key>   <string>/tmp/vnet-mine.log</string>
+  <key>StandardErrorPath</key> <string>/tmp/vnet-mine.err</string>
+</dict></plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/fi.moonwell.vnet-mine.plist
+launchctl print gui/$(id -u)/fi.moonwell.vnet-mine | grep 'pid ='
+launchctl bootout   gui/$(id -u) ~/Library/LaunchAgents/fi.moonwell.vnet-mine.plist   # remove
+```
+
+Run it under `--quiet` there: the status line is for humans watching a terminal, and unattended it
+just grows the log. Note the plist embeds the write-capable RPC, so it stays out of the repo — keep it
+in `~/Library/LaunchAgents` and source the URL from 1Password.
+
+The alternative that depends on nobody's machine is a scheduled CI job holding the admin RPC as a
+secret and mining for the length of its run — worth it only if the vnet outlives the QA train.
+
+Fixing this at the source instead — interval mining configured on the vnet itself — is a Tenderly
+dashboard/admin action rather than anything in this repo, and it is still the right permanent answer.
+The ticker is the version that needs no account privileges and no maintainer in the loop.
 
 ## vnet resolution
 
@@ -270,7 +346,7 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   (`run-price-checker.sh`): `checkPriceGating`, `checkStalePrice`.
 - `LeveragedAeroAccountHarness.s.sol` — the MamoLeveragedAeroStrategy account deploy runner
   (`run-leveraged-aero-account.sh`): `deploy()` wraps the real `LeveragedAeroAccountDeployer` and
-  injects the vnet-only vault / strategy-clone keys at runtime (env vars still named `SHERWOOD_*`).
+  injects the vnet-only vault / strategy-clone keys at runtime (`LEVERAGED_AERO_{STRATEGY,VAULT}`).
 - `LeveragedAeroStackHarness.s.sol` — the leveraged-Aero **pooled**-layer script
   (`run-leveraged-aero-stack.sh`): `deployTemplate()` (strategy template + vault, libraries linked by
   the broadcast) and `buildInitData()` (env venue book → ABI-encoded `InitParams`). The clone/init/bind
@@ -298,6 +374,9 @@ interleave Tenderly cheat-RPCs (funding, time advance, snapshots) between phases
   the persistent vnet carrying the pooled layer (unlocked impersonation; always `--reuse`). See section
   above.
 - `setup-staging.sh` — stands up a **persistent** frontend staging vnet (not torn down after the run).
+- `mine-ticker.sh` — vnet heartbeat: `evm_mine` on an interval so an idle chain keeps producing
+  blocks for wallet-driven manual QA. `--daemon/--stop/--status` for an all-day ticker (see
+  "Vnet heartbeat" above for the launchd recipe). Standalone; not part of any harness run.
 - `lib/common.sh` — shared plumbing (vnet resolution/teardown, cheat-RPC fund/time helpers, the
   forge-phase runner, address-book lookup, vnet gotcha fixes). Sourced, never executed.
 - `lib/market.sh` — reusable price/market simulation cheat primitives (`snapshot`/`revert_to`,

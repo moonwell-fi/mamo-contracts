@@ -27,8 +27,8 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
     /// @notice The strategy type ID assigned to accounts created by this factory.
     uint256 public immutable strategyTypeId;
 
-    /// @notice The vendored Sherwood leveraged Aerodrome CL strategy each account drives.
-    address public immutable sherwoodStrategy;
+    /// @notice The vendored leveraged Aerodrome CL strategy each account drives.
+    address public immutable leveragedAeroStrategy;
 
     /// @notice The USDC token (6dp) used by the accounts.
     address public immutable usdc;
@@ -46,7 +46,7 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
      * @param _mamoStrategyRegistry Address of the MamoStrategyRegistry contract.
      * @param _strategyImplementation Address of the MamoLeveragedAeroStrategy implementation.
      * @param _strategyTypeId The strategy type ID (must be non-zero).
-     * @param _sherwoodStrategy Address of the Sherwood leveraged Aerodrome CL strategy.
+     * @param _leveragedAeroStrategy Address of the vendored leveraged Aerodrome CL strategy.
      * @param _usdc Address of the USDC token.
      */
     constructor(
@@ -55,7 +55,7 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
         address _mamoStrategyRegistry,
         address _strategyImplementation,
         uint256 _strategyTypeId,
-        address _sherwoodStrategy,
+        address _leveragedAeroStrategy,
         address _usdc
     ) {
         require(_admin != address(0), "Invalid admin address");
@@ -64,7 +64,7 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
         require(_strategyImplementation != address(0), "Invalid strategyImplementation address");
         require(_strategyImplementation.code.length > 0, "Implementation must be a contract");
         require(_strategyTypeId != 0, "Strategy type id not set");
-        require(_sherwoodStrategy != address(0), "Invalid sherwoodStrategy address");
+        require(_leveragedAeroStrategy != address(0), "Invalid leveragedAeroStrategy address");
         require(_usdc != address(0), "Invalid usdc address");
 
         // Set up roles
@@ -74,7 +74,7 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
         mamoStrategyRegistry = _mamoStrategyRegistry;
         strategyImplementation = _strategyImplementation;
         strategyTypeId = _strategyTypeId;
-        sherwoodStrategy = _sherwoodStrategy;
+        leveragedAeroStrategy = _leveragedAeroStrategy;
         usdc = _usdc;
 
         mamoStrategyRegistryInterface = IMamoStrategyRegistry(_mamoStrategyRegistry);
@@ -125,7 +125,7 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 strategyTypeId: strategyTypeId,
                 owner: user,
-                sherwoodStrategy: sherwoodStrategy,
+                leveragedAeroStrategy: leveragedAeroStrategy,
                 usdc: usdc
             })
         );

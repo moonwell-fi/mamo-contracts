@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {INonfungiblePositionManager} from "@contracts/leveraged-aero/sherwood/interfaces/ISlipstream.sol";
-import {LiquidityAmounts} from "@contracts/leveraged-aero/sherwood/libraries/LiquidityAmounts.sol";
-import {TickMath} from "@contracts/leveraged-aero/sherwood/libraries/TickMath.sol";
+import {INonfungiblePositionManager} from "@contracts/leveraged-aero/interfaces/ISlipstream.sol";
+import {LiquidityAmounts} from "@contracts/leveraged-aero/libraries/LiquidityAmounts.sol";
+import {TickMath} from "@contracts/leveraged-aero/libraries/TickMath.sol";
 
 import {MockCLPool} from "../mocks/MockCLPool.sol";
+import {MockComptroller} from "../mocks/MockMoonwellMarket.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -74,7 +75,7 @@ contract MockChainlinkFeed {
 ///      contract carries a borrow index at all. The previous version stored a single
 ///      `borrowBalance[account]` scalar that every read and every setter touched directly, so
 ///      `borrowBalanceStored` and `borrowBalanceCurrent` were IDENTICAL BY CONSTRUCTION — and the one
-///      real-world condition that matters for `LeveragedAeroValuation._hedgeLeg` (interest that has
+///      real-world condition that matters for `LeveragedAeroValuation._measureLeg` (interest that has
 ///      accrued in wall-clock time but that no transaction has yet folded into the market's
 ///      `borrowIndex`) was simply not representable. A hedge that measured the stale index therefore
 ///      looked perfect in the suite and hedged ~0 on a live fork.
@@ -100,6 +101,11 @@ contract MockLendingMarket {
     address public immutable underlying;
     uint256 public exchangeRateStored = 1e18;
 
+    /// @dev The exchange rate the next MUTATING call adopts; 0 ⇒ nothing pending (opt-in, existing suites
+    ///      unchanged). Supply-side twin of `_pendingBorrowIndex`: with one rate serving both roles a caller
+    ///      sized a draw and burned at the same rate, so `_redeemCollateral`'s full-redeem branch was untestable.
+    uint256 internal _pendingExchangeRate;
+
     mapping(address => uint256) public balanceOf; // cToken balance
 
     // ── Compound borrow book ──
@@ -118,12 +124,53 @@ contract MockLendingMarket {
 
     error MockLendingMarketNoDebt();
 
+    /// @notice Compound error codes the supply side should return INSTEAD of acting (0 == act normally).
+    /// @dev Moonwell/Compound signal a paused/capped/cash-short market by RETURN CODE, never by reverting.
+    uint256 public mintError;
+    uint256 public redeemError;
+
     constructor(address underlying_) {
         underlying = underlying_;
     }
 
     function setExchangeRateStored(uint256 rate) external {
         exchangeRateStored = rate;
+    }
+
+    /// @notice Arm accrued-but-unfolded supply interest: views stay stale, the next mutating call adopts `rate`.
+    function setPendingExchangeRate(uint256 rate) external {
+        _pendingExchangeRate = rate;
+    }
+
+    /// @notice The rate a mutating call would adopt right now (== `exchangeRateStored` when nothing is pending).
+    function pendingExchangeRate() external view returns (uint256) {
+        return _pendingExchangeRate == 0 ? exchangeRateStored : _pendingExchangeRate;
+    }
+
+    /// @dev `accrueInterest()`'s supply half, called at the top of every mutating entry point and NO view.
+    function _accrueExchangeRate() internal {
+        if (_pendingExchangeRate != 0) {
+            exchangeRateStored = _pendingExchangeRate;
+            _pendingExchangeRate = 0;
+        }
+    }
+
+    function setSupplyErrors(uint256 mintErr, uint256 redeemErr) external {
+        mintError = mintErr;
+        redeemError = redeemErr;
+    }
+
+    /// @notice Comptroller consulted on every redeem (0 = ungated), so a rejection CODE replaces a mock underflow.
+    address public comptroller;
+
+    function setComptroller(address comptroller_) external {
+        comptroller = comptroller_;
+    }
+
+    /// @dev Compound's `redeemAllowed` hop, code-shaped: real `redeemFresh` returns a CODE, never reverts.
+    function _redeemAllowed(uint256 cTokens) internal view returns (uint256) {
+        if (comptroller == address(0)) return 0;
+        return MockComptroller(comptroller).redeemAllowed(address(this), msg.sender, cTokens);
     }
 
     // ── Borrow-balance reads ──
@@ -133,7 +180,7 @@ contract MockLendingMarket {
         return _balanceAt(account, borrowIndex);
     }
 
-    /// @notice Accrue, then return the balance — the production read `_hedgeLeg` now uses.
+    /// @notice Accrue, then return the balance — the production read `_measureLeg` now uses.
     function borrowBalanceCurrent(address account) external returns (uint256) {
         accrueInterest();
         return borrowBalanceStored(account);
@@ -206,19 +253,30 @@ contract MockLendingMarket {
     }
 
     function mint(uint256 amount) external returns (uint256) {
+        if (mintError != 0) return mintError; // paused / at supply cap: answer with the code, move nothing
+        _accrueExchangeRate();
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
         balanceOf[msg.sender] += (amount * 1e18) / exchangeRateStored;
         return 0;
     }
 
     function redeem(uint256 cAmount) external returns (uint256) {
-        balanceOf[msg.sender] -= cAmount; // under-collateralised redeem reverts, as Moonwell would
+        if (redeemError != 0) return redeemError;
+        _accrueExchangeRate();
+        uint256 rejection = _redeemAllowed(cAmount);
+        if (rejection != 0) return rejection;
+        balanceOf[msg.sender] -= cAmount; // an over-the-balance redeem still underflows, as a belt
         IERC20(underlying).safeTransfer(msg.sender, (cAmount * exchangeRateStored) / 1e18);
         return 0;
     }
 
     function redeemUnderlying(uint256 amount) external returns (uint256) {
-        balanceOf[msg.sender] -= (amount * 1e18) / exchangeRateStored;
+        if (redeemError != 0) return redeemError; // insufficient cash / paused
+        _accrueExchangeRate();
+        uint256 cTokens = (amount * 1e18) / exchangeRateStored;
+        uint256 rejection = _redeemAllowed(cTokens);
+        if (rejection != 0) return rejection;
+        balanceOf[msg.sender] -= cTokens;
         IERC20(underlying).safeTransfer(msg.sender, amount);
         return 0;
     }
@@ -281,12 +339,25 @@ contract MockNpm {
     }
 
     mapping(uint256 => Pos) internal _pos;
+    /// @notice ERC-721 owner of each minted position.
+    /// @dev Modelled on purpose: the real NPM authorises liquidity calls against the owner (a STAKED NFT is
+    ///      owned by the GAUGE), so without an owner a touch-before-unstaking bug is invisible to the suite.
+    mapping(uint256 => address) public ownerOf;
+    mapping(uint256 => address) public getApproved;
     uint256 public nextId = 1;
-    MockCLPool public immutable pool;
+    /// @dev Settable (not immutable): the real NPM is pool-agnostic, so a migration test can re-point it.
+    MockCLPool public pool;
 
     error MockNpmSlippage();
+    error MockNpmZeroLiquidity();
+    error MockNpmNotAuthorised();
+    error MockNpmNotOwner();
 
     constructor(MockCLPool pool_) {
+        pool = pool_;
+    }
+
+    function setPool(MockCLPool pool_) external {
         pool = pool_;
     }
 
@@ -324,11 +395,29 @@ contract MockNpm {
             owed0: 0,
             owed1: 0
         });
+        ownerOf[tokenId] = mp.recipient;
+    }
+
+    /// @dev Authorised == owner or the single approved operator, mirroring NPM's `isAuthorizedForToken`.
+    modifier onlyAuthorised(uint256 tokenId) {
+        if (msg.sender != ownerOf[tokenId] && msg.sender != getApproved[tokenId]) revert MockNpmNotAuthorised();
+        _;
+    }
+
+    function transferFrom(address from, address to, uint256 tokenId) public onlyAuthorised(tokenId) {
+        if (ownerOf[tokenId] != from) revert MockNpmNotOwner();
+        ownerOf[tokenId] = to;
+        getApproved[tokenId] = address(0);
+    }
+
+    function safeTransferFrom(address from, address to, uint256 tokenId) external {
+        transferFrom(from, to, tokenId);
     }
 
     function increaseLiquidity(INonfungiblePositionManager.IncreaseLiquidityParams calldata ip)
         external
         payable
+        onlyAuthorised(ip.tokenId)
         returns (uint128 liquidity, uint256 amount0, uint256 amount1)
     {
         Pos storage p = _pos[ip.tokenId];
@@ -341,6 +430,7 @@ contract MockNpm {
     function decreaseLiquidity(INonfungiblePositionManager.DecreaseLiquidityParams calldata dp)
         external
         payable
+        onlyAuthorised(dp.tokenId)
         returns (uint256 amount0, uint256 amount1)
     {
         Pos storage p = _pos[dp.tokenId];
@@ -359,6 +449,7 @@ contract MockNpm {
     function collect(INonfungiblePositionManager.CollectParams calldata cp)
         external
         payable
+        onlyAuthorised(cp.tokenId)
         returns (uint256 amount0, uint256 amount1)
     {
         Pos storage p = _pos[cp.tokenId];
@@ -370,8 +461,11 @@ contract MockNpm {
         if (amount1 > 0) IERC20(p.token1).safeTransfer(cp.recipient, amount1);
     }
 
-    /// @dev ERC-721 approve — the manager calls this raw before staking; only success matters.
-    function approve(address, uint256) external {}
+    /// @dev ERC-721 approve — the manager calls this raw before staking, so the gauge's pull is authorised.
+    function approve(address to, uint256 tokenId) external {
+        if (msg.sender != ownerOf[tokenId]) revert MockNpmNotOwner();
+        getApproved[tokenId] = to;
+    }
 
     function _addFor(int24 tickLower, int24 tickUpper, uint256 desired0, uint256 desired1)
         internal
@@ -382,6 +476,8 @@ contract MockNpm {
         uint160 sqrtLower = TickMath.getSqrtRatioAtTick(tickLower);
         uint160 sqrtUpper = TickMath.getSqrtRatioAtTick(tickUpper);
         liquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sqrtLower, sqrtUpper, desired0, desired1);
+        // `CLPool.mint` opens with `require(amount > 0)`: a zero-liquidity add reverts, never silently mints.
+        if (liquidity == 0) revert MockNpmZeroLiquidity();
         (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liquidity);
     }
 
@@ -391,12 +487,32 @@ contract MockNpm {
     }
 }
 
+/// @notice Aerodrome **v2 (AMM)** PoolFactory stand-in for venue validation's reward-route probe.
+/// @dev Etched at a hardcoded address, hence immutables only (same rule as {MockAeroV2Router}): `applyVenue`
+///      probes `getPool(reward, usdc, false)`; configure a different pair to model "no USDC route".
+contract MockAeroV2Factory {
+    address public immutable tokenA;
+    address public immutable tokenB;
+    address public immutable pool;
+
+    constructor(address tokenA_, address tokenB_, address pool_) {
+        tokenA = tokenA_;
+        tokenB = tokenB_;
+        pool = pool_;
+    }
+
+    function getPool(address a, address b, bool stable) external view returns (address) {
+        if (stable) return address(0);
+        if ((a == tokenA && b == tokenB) || (a == tokenB && b == tokenA)) return pool;
+        return address(0);
+    }
+}
+
 /// @notice Aerodrome **v2 (AMM)** Router stand-in for `compoundImpl`'s AERO→USDC reward swap.
 /// @dev The manager routes that one swap through a HARDCODED mainnet address (`AERO_V2_ROUTER`), so a
 ///      fork-free test has to place code there. All state is in `immutable`s precisely so the contract
 ///      survives `vm.etch(AERO_V2_ROUTER, address(m).code)` — immutables live in the deployed runtime
-///      bytecode, whereas storage-based config would be left behind at the original address. To change
-///      the rate, deploy a second instance and etch again.
+///      bytecode, whereas storage-based config would be left behind at the original address.
 ///      Fund it with `tokenOut` before use; it pays fills out of its own balance.
 contract MockAeroV2Router {
     using SafeERC20 for IERC20;
@@ -405,6 +521,8 @@ contract MockAeroV2Router {
     address public immutable tokenOut;
     /// @dev `out per in`, 1e18-scaled, spanning the decimal gap between the two tokens.
     uint256 public immutable rateE18;
+    /// @dev Post-etch rate override (an immutable cannot be given one). Zero ⇒ use {rateE18}.
+    uint256 public rateOverrideE18;
 
     error MockAeroRouterBadRoute();
     error MockAeroRouterMinOut();
@@ -422,6 +540,10 @@ contract MockAeroV2Router {
         rateE18 = rateE18_;
     }
 
+    function setRateOverrideE18(uint256 r) external {
+        rateOverrideE18 = r;
+    }
+
     function swapExactTokensForTokens(
         uint256 amountIn,
         uint256 amountOutMin,
@@ -432,7 +554,8 @@ contract MockAeroV2Router {
         if (routes.length != 1 || routes[0].from != tokenIn || routes[0].to != tokenOut) {
             revert MockAeroRouterBadRoute();
         }
-        uint256 out = (amountIn * rateE18) / 1e18;
+        uint256 r = rateOverrideE18 == 0 ? rateE18 : rateOverrideE18;
+        uint256 out = (amountIn * r) / 1e18;
         if (out < amountOutMin) revert MockAeroRouterMinOut();
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(tokenOut).safeTransfer(to, out);
@@ -449,6 +572,9 @@ contract MockClSwapRouter {
     using SafeERC20 for IERC20;
 
     mapping(address => mapping(address => uint256)) public rateE18;
+
+    /// @notice Cumulative `tokenOut` bought per token: proves a cover swap happened without net-balance inference.
+    mapping(address => uint256) public boughtOf;
 
     error MockRouterNoRate();
     error MockRouterMinOut();
@@ -487,6 +613,7 @@ contract MockClSwapRouter {
         if (amountOut < p.amountOutMinimum) revert MockRouterMinOut();
         IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), p.amountIn);
         IERC20(p.tokenOut).safeTransfer(p.recipient, amountOut);
+        boughtOf[p.tokenOut] += amountOut;
     }
 
     function exactOutputSingle(ExactOutputSingleParams calldata p) external payable returns (uint256 amountIn) {
@@ -496,5 +623,6 @@ contract MockClSwapRouter {
         if (amountIn > p.amountInMaximum) revert MockRouterMaxIn();
         IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(p.tokenOut).safeTransfer(p.recipient, p.amountOut);
+        boughtOf[p.tokenOut] += p.amountOut;
     }
 }

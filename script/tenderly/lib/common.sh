@@ -149,6 +149,39 @@ fund_eth()     { crpc tenderly_setBalance "[\"$1\"]" "$2" >/dev/null; }
 fund_erc20()   { crpc tenderly_setErc20Balance "$1" "$2" "$3" >/dev/null; }
 advance_time() { crpc evm_increaseTime "$(cast to-hex "$1")" >/dev/null; crpc evm_mine >/dev/null; }
 
+# ── impersonated sends with gas headroom ────────────────────────────────────
+# Tenderly's eth_estimateGas UNDER-shoots deep nested calls, and `cast send` ships the bare
+# estimate with no multiplier. Observed on the account harness: fulfillRedeem(id) estimated
+# 1,644,942, was sent with that as the limit, and consumed all of it — status 0x0, EMPTY revert
+# data, gasUsed == gasLimit — while a `cast call` of the same call at the same state returned
+# fine. Hence the explicit 2x limit on every send. Floored at 1M (cheap calls) and capped just
+# under Base's per-tx cap of 16,777,216 (2^24), which a blind multiply would blow past into
+# TxGasLimitGreaterThanCap. A failing estimate (a genuinely reverting call, e.g. an intentional
+# negative test) emits nothing, so the send falls back to cast's own estimate and keeps the
+# original diagnostics.
+GAS_CAP="${GAS_CAP:-16000000}"
+gas_flags() {   # usage: gas_flags <from> <to> <sig> [args...] → echoes "--gas-limit N", or nothing
+  local from="$1" to="$2"; shift 2
+  local est; est="$(cast estimate "$to" "$@" --from "$from" --rpc-url "$RPC" 2>/dev/null | field)"
+  case "$est" in '' | *[!0-9]*) return 0 ;; esac
+  local lim=$(( est * 2 ))
+  [ "$lim" -lt 1000000 ] && lim=1000000
+  [ "$lim" -gt "$GAS_CAP" ] && lim="$GAS_CAP"
+  echo "--gas-limit $lim"
+}
+
+# usage: csend <label> <from> <to> <sig> [args...] — asserts status 0x1, sets LAST_TX
+csend() {
+  local label="$1" from="$2" to="$3" sig="$4"; shift 4
+  # unquoted on purpose: word-splits into `--gas-limit N`, or vanishes when the estimate failed.
+  local gl; gl="$(gas_flags "$from" "$to" "$sig" "$@")"
+  local out; out="$(cast send "$to" "$sig" "$@" --from "$from" --unlocked $gl --rpc-url "$RPC" --json 2>/dev/null)"
+  local st tx; st="$(echo "$out" | jq -r '.status')"; tx="$(echo "$out" | jq -r '.transactionHash')"
+  [ "$st" = "0x1" ] || die "$label failed (status=$st tx=$tx)"
+  ok "$label — tx $tx"
+  LAST_TX="$tx"
+}
+
 # Advance the vnet clock just past the freshest of the given Chainlink feeds so
 # `block.timestamp - updatedAt` in _readFeed can't underflow on a fresh fork.
 # Stays far under maxOracleDelay. usage: ensure_feeds_fresh <feed> [<feed>...]

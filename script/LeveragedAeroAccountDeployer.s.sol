@@ -19,8 +19,8 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  *      012 multisig proposal calls into it rather than duplicating deploy logic. Broadcasts under the
  *      supplied `deployer` EOA and writes both address-book keys.
  *
- *      Requires the `SHERWOOD_LEVERAGED_AERO_STRATEGY` and `USDC` keys to resolve at call time; the
- *      former is added when the Sherwood system is deployed (Tenderly vnet, then Base mainnet).
+ *      Requires the `LEVERAGED_AERO_STRATEGY` and `USDC` keys to resolve at call time; the
+ *      former is added by proposal 015 when the pooled layer is deployed (Tenderly vnet, then Base mainnet).
  */
 contract LeveragedAeroAccountDeployer is Script {
     /**
@@ -40,7 +40,7 @@ contract LeveragedAeroAccountDeployer is Script {
         address mamoStrategyRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address admin = addresses.getAddress("MAMO_MULTISIG");
         address mamoBackend = addresses.getAddress("MAMO_BACKEND");
-        address sherwoodStrategy = addresses.getAddress(config.sherwoodStrategy);
+        address leveragedAeroStrategy = addresses.getAddress(config.leveragedAeroStrategy);
         address usdc = addresses.getAddress(config.token);
 
         vm.startBroadcast(deployer);
@@ -54,7 +54,7 @@ contract LeveragedAeroAccountDeployer is Script {
 
         // 2. Deploy the factory wired to the implementation.
         MamoLeveragedAeroStrategyFactory deployedFactory = new MamoLeveragedAeroStrategyFactory(
-            admin, mamoBackend, mamoStrategyRegistry, implementation, config.strategyTypeId, sherwoodStrategy, usdc
+            admin, mamoBackend, mamoStrategyRegistry, implementation, config.strategyTypeId, leveragedAeroStrategy, usdc
         );
         factory = address(deployedFactory);
 
