@@ -35,17 +35,20 @@ In reuse mode the address book copy is kept, so every deploy step that already r
 
 ## What it deploys, in order
 
-1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`
-2. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
-3. admin: `MamoStrategyRegistry.whitelistImplementation(impl, 0)` — assigns the strategy type id
+1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
+   deployed with the placeholder price checker (see Configuration)
+2. `StockAccountPriceChecker(registry, USDC)` — recorded as `STOCK_ACCOUNT_PRICE_CHECKER`
+3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
+4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
+5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, 0)` — assigns the strategy type id
    (existing ids are 1, 2 and 3; the stock account implementation takes **4**)
-4. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
-5. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
-6. admin: `StockAccountRegistry.listToken(...)` for every entry of `config/stock-accounts/8453.json`
+6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
+7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
+8. admin: `StockAccountRegistry.listToken(...)` for every entry of `config/stock-accounts/8453.json`
 
-Every step checks the address book (steps 1, 2, 4) or the onchain state (steps 3, 5, 6) first, so a
-rerun against the same address book is a no-op. Deploying a name that is already recorded is refused
-by the address book rather than silently overwritten.
+Every step checks the address book (steps 1, 2, 4, 6) or the onchain state (steps 3, 5, 7, 8) first,
+so a rerun against the same address book is a no-op. Deploying a name that is already recorded is
+refused by the address book rather than silently overwritten.
 
 ## Admin steps: the two modes
 
@@ -74,17 +77,18 @@ The real mainnet run adds `ADDRESSES_PATH=./addresses` and `--broadcast` with th
 `deploy/stock-accounts/8453_PROD.json` and `deploy/stock-accounts/8453_TESTING.json` hold the registry
 parameters; every address field is an FPS address **name** resolved against `addresses/8453.json`.
 
-TESTING differs from PROD in two ways:
+`placeholderPriceChecker` is `CHAINLINK_SWAP_CHECKER_PROXY` in both environments. It is a permanent
+bootstrap detail, not a stopgap: the registry constructor needs a price checker that has code, and
+the real `StockAccountPriceChecker` needs the registry address, so the registry is born with the
+placeholder and step 3 immediately points it at the checker deployed in step 2. Any address with code
+works; nothing is ever priced through the placeholder.
 
-- `priceChecker` is `CHAINLINK_SWAP_CHECKER_PROXY`, an explicit placeholder. The real
-  `StockAccountPriceChecker` (CT-02/CT-04) is not merged yet, and the registry constructor requires an
-  address with code. Swap TESTING to `STOCK_ACCOUNT_PRICE_CHECKER` once CT-04 lands and the name is in
-  the address book — PROD already points at it.
-- `admin`, `guardian` and `feeRecipient` are `DEPLOYER_EOA`, so a vnet run needs no impersonation for
-  the stock registry itself. The `MamoStrategyRegistry` steps still run as `MAMO_MULTISIG`.
+TESTING differs from PROD in one way: `admin`, `guardian` and `feeRecipient` are `DEPLOYER_EOA`, so a
+vnet run needs no impersonation for the stock registry itself — step 3 and step 8 run directly. The
+`MamoStrategyRegistry` steps still run as `MAMO_MULTISIG`. On PROD every admin step goes to the Safe.
 
-`config/stock-accounts/8453.json` is the token list. It ships empty, so step 6 is a no-op. CT-04 fills
-it with entries shaped like:
+`config/stock-accounts/8453.json` is the token list. It ships empty, so step 8 is a no-op — listing
+tokens still waits on CT-04, which fills the file with entries shaped like:
 
 ```json
 {"tokens":[{"chainlinkFeed":"","pool":"0x…","source":"PoolTwap","symbol":"NVDAc","token":"0xb20000000000000000000078ee7ce2fE4908108C"}]}
@@ -101,8 +105,8 @@ Anything touching a real stock token (pricing, rebalancing, in-kind withdrawals)
 Tenderly vnet, where the node serves the precompile, and not in `forge test`.
 
 `StockAccountsSmoke` therefore creates an all-cash account (empty basket, `cashTargetBps = 10000`),
-deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is involved, so it passes with
-the placeholder price checker.
+deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is involved, so it passes
+before any token is listed. It also asserts the registry points at `STOCK_ACCOUNT_PRICE_CHECKER`.
 
 ## CoW appData
 

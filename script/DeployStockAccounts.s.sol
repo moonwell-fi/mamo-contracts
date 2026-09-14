@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {StockAccountsConfig} from "./StockAccountsConfig.sol";
 
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
 import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
 import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactory.sol";
@@ -19,11 +20,15 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 /**
  * @title DeployStockAccounts
  * @notice Deploys the stock accounts system and wires it into the MamoStrategyRegistry
+ * @dev The registry constructor needs a price checker with code, and the price checker needs the
+ *      registry, so the registry is deployed with the configured placeholder and pointed at the real
+ *      StockAccountPriceChecker right after
  * @dev Env: DEPLOY_ENV (default 8453_TESTING), ADDRESSES_PATH (default ./addresses),
  *      ADMIN_MODE (impersonate | calldata)
  */
 contract DeployStockAccounts is Script {
     string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
+    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER";
     string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
     string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
@@ -59,6 +64,8 @@ contract DeployStockAccounts is Script {
         MamoStrategyRegistry mamoRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
         address stockRegistry = _deployStockRegistry();
+        address priceChecker = _deployPriceChecker(stockRegistry);
+        _setPriceChecker(stockRegistry, priceChecker);
         address implementation = _deployImplementation();
         uint256 strategyTypeId = _whitelistImplementation(mamoRegistry, implementation);
         address factory = _deployFactory(stockRegistry, implementation, strategyTypeId);
@@ -69,6 +76,7 @@ contract DeployStockAccounts is Script {
         addresses.printJSONChanges();
 
         console.log("STOCK_ACCOUNT_REGISTRY: %s", stockRegistry);
+        console.log("STOCK_ACCOUNT_PRICE_CHECKER: %s", priceChecker);
         console.log("STOCK_ACCOUNT_STRATEGY_IMPL: %s", implementation);
         console.log("STOCK_ACCOUNT_STRATEGY_FACTORY: %s", factory);
         console.log("strategyTypeId: %s", strategyTypeId);
@@ -93,7 +101,7 @@ contract DeployStockAccounts is Script {
             maxWithdrawSlippageBps: config.maxWithdrawSlippageBps,
             minStrategyDeposit: config.minStrategyDeposit,
             minTargetBps: config.minTargetBps,
-            priceChecker: ISlippagePriceChecker(addresses.getAddress(config.priceChecker)),
+            priceChecker: ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker)),
             requiredAppDataHash: config.requiredAppDataHash,
             twapWindow: config.twapWindow
         });
@@ -108,11 +116,43 @@ contract DeployStockAccounts is Script {
         return address(registry);
     }
 
+    /// @notice Deploys the StockAccountPriceChecker for the stock registry, or returns the recorded one
+    function _deployPriceChecker(address stockRegistry) internal returns (address) {
+        if (addresses.isAddressSet(PRICE_CHECKER_NAME)) {
+            address existing = addresses.getAddress(PRICE_CHECKER_NAME);
+            console.log("step 2 skipped, %s already deployed at %s", PRICE_CHECKER_NAME, existing);
+            return existing;
+        }
+
+        vm.startBroadcast();
+        StockAccountPriceChecker priceChecker =
+            new StockAccountPriceChecker(IStockAccountRegistry(stockRegistry), addresses.getAddress(config.asset));
+        vm.stopBroadcast();
+
+        addresses.addAddress(PRICE_CHECKER_NAME, address(priceChecker), true);
+        console.log("step 2: StockAccountPriceChecker deployed at %s", address(priceChecker));
+
+        return address(priceChecker);
+    }
+
+    /// @notice Points the stock registry at the deployed price checker, replacing the config placeholder
+    function _setPriceChecker(address stockRegistry, address priceChecker) internal {
+        if (address(IStockAccountRegistry(stockRegistry).priceChecker()) == priceChecker) {
+            console.log("step 3 skipped, the stock registry already points at %s", priceChecker);
+            return;
+        }
+
+        console.log("step 3: setting the stock registry price checker");
+
+        bytes memory data = abi.encodeCall(StockAccountRegistry.setPriceChecker, (ISlippagePriceChecker(priceChecker)));
+        _adminCall(stockRegistry, data, "setPriceChecker");
+    }
+
     /// @notice Deploys the StockAccountStrategy implementation, or returns the recorded one
     function _deployImplementation() internal returns (address) {
         if (addresses.isAddressSet(IMPL_NAME)) {
             address existing = addresses.getAddress(IMPL_NAME);
-            console.log("step 2 skipped, %s already deployed at %s", IMPL_NAME, existing);
+            console.log("step 4 skipped, %s already deployed at %s", IMPL_NAME, existing);
             return existing;
         }
 
@@ -121,7 +161,7 @@ contract DeployStockAccounts is Script {
         vm.stopBroadcast();
 
         addresses.addAddress(IMPL_NAME, address(implementation), true);
-        console.log("step 2: StockAccountStrategy implementation deployed at %s", address(implementation));
+        console.log("step 4: StockAccountStrategy implementation deployed at %s", address(implementation));
 
         return address(implementation);
     }
@@ -133,20 +173,20 @@ contract DeployStockAccounts is Script {
     {
         if (mamoRegistry.whitelistedImplementations(implementation)) {
             strategyTypeId = mamoRegistry.implementationToId(implementation);
-            console.log("step 3 skipped, implementation already whitelisted with type id %s", strategyTypeId);
+            console.log("step 5 skipped, implementation already whitelisted with type id %s", strategyTypeId);
             return strategyTypeId;
         }
 
         strategyTypeId = mamoRegistry.nextStrategyTypeId();
 
-        console.log("step 3: whitelisting the implementation");
+        console.log("step 5: whitelisting the implementation");
 
         bytes memory data = abi.encodeCall(MamoStrategyRegistry.whitelistImplementation, (implementation, 0));
         if (_adminCall(address(mamoRegistry), data, "whitelistImplementation")) {
             require(mamoRegistry.implementationToId(implementation) == strategyTypeId, "Unexpected strategy type id");
         }
 
-        console.log("step 3: strategy type id is %s", strategyTypeId);
+        console.log("step 5: strategy type id is %s", strategyTypeId);
     }
 
     /// @notice Deploys the StockAccountStrategyFactory, or returns the one already recorded in addresses
@@ -156,7 +196,7 @@ contract DeployStockAccounts is Script {
     {
         if (addresses.isAddressSet(FACTORY_NAME)) {
             address existing = addresses.getAddress(FACTORY_NAME);
-            console.log("step 4 skipped, %s already deployed at %s", FACTORY_NAME, existing);
+            console.log("step 6 skipped, %s already deployed at %s", FACTORY_NAME, existing);
             return existing;
         }
 
@@ -176,7 +216,7 @@ contract DeployStockAccounts is Script {
         vm.stopBroadcast();
 
         addresses.addAddress(FACTORY_NAME, address(factory), true);
-        console.log("step 4: StockAccountStrategyFactory deployed at %s", address(factory));
+        console.log("step 6: StockAccountStrategyFactory deployed at %s", address(factory));
 
         return address(factory);
     }
@@ -186,11 +226,11 @@ contract DeployStockAccounts is Script {
         bytes32 backendRole = mamoRegistry.BACKEND_ROLE();
 
         if (mamoRegistry.hasRole(backendRole, factory)) {
-            console.log("step 5 skipped, factory already holds BACKEND_ROLE");
+            console.log("step 7 skipped, factory already holds BACKEND_ROLE");
             return;
         }
 
-        console.log("step 5: granting BACKEND_ROLE to the factory");
+        console.log("step 7: granting BACKEND_ROLE to the factory");
 
         bytes memory data = abi.encodeCall(IAccessControl.grantRole, (backendRole, factory));
         _adminCall(address(mamoRegistry), data, "grantRole(BACKEND_ROLE, factory)");
@@ -201,7 +241,7 @@ contract DeployStockAccounts is Script {
         string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
 
         if (!vm.isFile(path)) {
-            console.log("step 6: no token config at %s, nothing to list", path);
+            console.log("step 8: no token config at %s, nothing to list", path);
             return;
         }
 
@@ -210,7 +250,7 @@ contract DeployStockAccounts is Script {
             raw.length == 0 ? new TokenListEntry[](0) : abi.decode(raw, (TokenListEntry[]));
 
         if (entries.length == 0) {
-            console.log("step 6: no tokens to list");
+            console.log("step 8: no tokens to list");
             return;
         }
 
@@ -219,7 +259,7 @@ contract DeployStockAccounts is Script {
                 IStockAccountRegistry(stockRegistry).tokenConfig(entries[i].token).status;
 
             if (status != IStockAccountRegistry.TokenStatus.None) {
-                console.log("step 6 skipped for %s, already listed", entries[i].symbol);
+                console.log("step 8 skipped for %s, already listed", entries[i].symbol);
                 continue;
             }
 

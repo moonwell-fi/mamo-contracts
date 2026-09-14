@@ -8,6 +8,7 @@ import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
 /**
@@ -32,6 +33,10 @@ contract StockAccountsSmoke is Script {
         StockAccountStrategyFactory factory =
             StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
         IERC20 asset = IERC20(factory.asset());
+
+        address priceChecker = addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER");
+        address wired = address(IStockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY")).priceChecker());
+        require(wired == priceChecker, "Stock registry does not point at STOCK_ACCOUNT_PRICE_CHECKER");
 
         address account = factory.computeStrategyAddress(user);
         bool created = account.code.length == 0;
@@ -78,6 +83,7 @@ contract StockAccountsSmoke is Script {
         vm.serializeString(json, "rpc", vm.envOr("TENDERLY_VNET_RPC_URL", string("")));
         vm.serializeUint(json, "chainId", block.chainid);
         vm.serializeAddress(json, "STOCK_ACCOUNT_REGISTRY", addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
+        vm.serializeAddress(json, "STOCK_ACCOUNT_PRICE_CHECKER", addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"));
         vm.serializeAddress(json, "STOCK_ACCOUNT_STRATEGY_IMPL", addresses.getAddress("STOCK_ACCOUNT_STRATEGY_IMPL"));
         vm.serializeAddress(json, "STOCK_ACCOUNT_STRATEGY_FACTORY", address(factory));
         vm.serializeAddress(json, "AERODROME_STOCKS_CL_FACTORY", addresses.getAddress("AERODROME_STOCKS_CL_FACTORY"));
