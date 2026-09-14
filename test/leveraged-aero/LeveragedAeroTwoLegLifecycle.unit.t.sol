@@ -871,6 +871,250 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
             + _valueUsdc(legA.balanceOf(address(strategy)), P_LEG_A, 18);
     }
 
+    // ============ REMINT RANGE: EXPLICIT TICKS + AN OPTIONAL LEG SWAP (two borrowed legs) ============
+    // `rerange` derives its band from `(width, skew)` around spot and swaps nothing; `remintRange` takes the
+    // band and may move part of the collected inventory ACROSS the legs. Leg B is token0 in this fixture.
+
+    /// @dev The centred band `rerange(WIDTH, 5000, ...)` would derive — the parity reference below.
+    int24 internal constant REMINT_LOWER = TICK - 2000;
+    int24 internal constant REMINT_UPPER = TICK + 2000;
+
+    /// @dev ORACLE-CONSISTENT legB↔legA rates: `out per in`, 1e18-scaled, spanning the 8dp↔18dp gap
+    ///      (`pIn·10^decOut / (pOut·10^decIn)`). The LP pair is its own swap venue on this path, and setUp
+    ///      only wires the leg↔USDC directions, so a `remintRange` swap needs these.
+    function _setLegSwapRates() internal {
+        router.setRate(address(legB), address(legA), (P_LEG_B * 1e18 * 1e18) / (P_LEG_A * 1e8));
+        router.setRate(address(legA), address(legB), (P_LEG_A * 1e8 * 1e18) / (P_LEG_B * 1e18));
+    }
+
+    /// @dev `remintRange` as the proposer, with the shared explicit band.
+    function _remint(bool zeroForOne, uint16 swapBps, uint256 minSwapOut, uint256 minLiquidity) internal {
+        vm.prank(proposer);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, zeroForOne, swapBps, minSwapOut, minLiquidity);
+    }
+
+    /**
+     * @dev BEHAVIOURAL PARITY AT `swapBps == 0`: pointed at the band `rerange` would derive, a swap-free
+     *      `remintRange` must land the IDENTICAL position — same ticks, same liquidity, same NAV — and touch
+     *      no router. The two paths are run from the same state via a snapshot so this is an equality, not a
+     *      tolerance.
+     */
+    function testRemintRangeWithoutASwapIsRerangeAtAnExplicitBand() public {
+        _execute(SEED);
+        uint256 navBefore = strategy.nav();
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(proposer);
+        strategy.rerange(WIDTH, SKEW_CENTERED, 0, 0);
+        uint256 rerangeTokenId = strategy.layout().tokenId;
+        int24 rerangeLower = strategy.layout().posTickLower;
+        int24 rerangeUpper = strategy.layout().posTickUpper;
+        uint128 rerangeLiq = npm.liquidityOf(rerangeTokenId);
+        uint256 rerangeNav = strategy.nav();
+        vm.revertToState(snap);
+
+        assertEq(rerangeLower, REMINT_LOWER, "the fixture's explicit band IS the centred rerange band");
+        assertEq(rerangeUpper, REMINT_UPPER, "the fixture's explicit band IS the centred rerange band");
+
+        _remint(false, 0, 0, 0);
+
+        assertEq(strategy.layout().posTickLower, REMINT_LOWER, "minted at the explicit lower tick");
+        assertEq(strategy.layout().posTickUpper, REMINT_UPPER, "minted at the explicit upper tick");
+        assertEq(strategy.layout().tokenId, rerangeTokenId, "a fresh NFT, exactly as the re-range mints");
+        assertEq(npm.liquidityOf(strategy.layout().tokenId), rerangeLiq, "identical liquidity: principal conserved");
+        assertEq(strategy.nav(), rerangeNav, "identical NAV");
+        assertApproxEqRel(strategy.nav(), navBefore, 1e16, "a no-swap re-mint is NAV-neutral");
+        assertEq(router.boughtOf(address(legA)) + router.boughtOf(address(legB)), 0, "swapBps == 0 touched no router");
+    }
+
+    /// @dev The validated span is PERSISTED as `width` (so `setWidthBounds` / venue migration keep re-checking a
+    ///      truthful value) while `skewBps` is left alone — explicit ticks carry no skew.
+    function testRemintRangePersistsTheWidthAndLeavesSkewUntouched() public {
+        _execute(SEED);
+
+        vm.prank(proposer);
+        strategy.remintRange(TICK - 1000, TICK + 5000, false, 0, 0, 0);
+
+        assertEq(strategy.layout().width, 6000, "the explicit span became the stored width");
+        assertEq(strategy.layout().skewBps, SKEW_CENTERED, "the stored skew is untouched");
+
+        // The persisted width is the one the band checks now measure: it must be inside a new band.
+        vm.prank(owner);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.setWidthBounds(200, 5000);
+    }
+
+    /// @dev token0 → token1 (leg B → leg A). The routed venue must be the LP POOL's tickSpacing, not the
+    ///      leg↔USDC one: `remintRange`'s swap IS the LP pair.
+    function testRemintRangeSwapsToken0IntoToken1() public {
+        _execute(SEED);
+        _setLegSwapRates();
+        uint256 routerLegBBefore = legB.balanceOf(address(router));
+
+        _remint(true, 5000, 0, 0);
+
+        assertGt(router.boughtOf(address(legA)), 0, "leg A was bought");
+        assertGt(legB.balanceOf(address(router)), routerLegBBefore, "...and leg B is what paid for it");
+        assertEq(router.lastTickSpacing(), SPACING, "routed through the LP pool's spacing");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the re-mint still opened a real position");
+    }
+
+    /// @dev token1 → token0 (leg A → leg B). Leg A's leg↔USDC pool has a DIFFERENT spacing (200), so the
+    ///      tickSpacing assertion here would fail if the swap borrowed `_legSwapSpacing`.
+    function testRemintRangeSwapsToken1IntoToken0() public {
+        _execute(SEED);
+        _setLegSwapRates();
+        uint256 routerLegABefore = legA.balanceOf(address(router));
+
+        _remint(false, 5000, 0, 0);
+
+        assertGt(router.boughtOf(address(legB)), 0, "leg B was bought");
+        assertGt(legA.balanceOf(address(router)), routerLegABefore, "...and leg A is what paid for it");
+        assertEq(router.lastTickSpacing(), SPACING, "the LP pool's spacing, NOT leg A's USDC-pool 200");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "the re-mint still opened a real position");
+    }
+
+    /// @dev FULL NOTIONAL: `swapBps == 10000` empties the input leg, so the only mintable band is one placed
+    ///      wholly on the surviving side — here at/below spot, which a token1-only position fills.
+    function testRemintRangeAtFullNotionalMintsOneSided() public {
+        _execute(SEED);
+        _setLegSwapRates();
+
+        vm.prank(proposer);
+        strategy.remintRange(TICK - 4000, TICK, true, 10_000, 0, 0);
+
+        assertEq(legB.balanceOf(address(strategy)), 0, "the whole leg-B inventory was sold");
+        assertEq(strategy.layout().posTickUpper, TICK, "the band abuts spot from below");
+        assertGt(npm.liquidityOf(strategy.layout().tokenId), 0, "one-sided, but real liquidity");
+        assertEq(gauge.depositCallCount(), 2, "the new NFT was restaked");
+    }
+
+    /// @dev THE TRUST MODEL. `minSwapOut == 0` is NOT a licence to fill at any price: the Chainlink cross-rate
+    ///      floor is always applied, so a router 5% off the oracle reverts even with the caller's guard open.
+    function testRemintRangeOracleFloorBindsEvenWithZeroMinSwapOut() public {
+        _execute(SEED);
+        _setLegSwapRates();
+        // 5% below the oracle cross rate — well past `maxSlippageBps = 100`.
+        router.setRate(address(legB), address(legA), (P_LEG_B * 1e18 * 1e18 * 95) / (P_LEG_A * 1e8 * 100));
+
+        vm.prank(proposer);
+        vm.expectRevert(MockClSwapRouter.MockRouterMinOut.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, true, 5000, 0, 0);
+    }
+
+    /// @dev The caller's own floor may only TIGHTEN the oracle one.
+    function testRemintRangeCallerFloorCanTightenTheOracleFloor() public {
+        _execute(SEED);
+        _setLegSwapRates();
+
+        vm.prank(proposer);
+        vm.expectRevert(MockClSwapRouter.MockRouterMinOut.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, true, 5000, 1_000_000e18, 0);
+    }
+
+    /// @dev `minLiquidity` is a LIQUIDITY-UNITS floor (the `_mintAndStake` guard), not `rerange`'s two
+    ///      per-amount floors — a swap makes the consumed amounts a moving target.
+    function testRemintRangeMinLiquidityFloorBinds() public {
+        _execute(SEED);
+
+        _remint(false, 0, 0, 0); // the achievable liquidity, uncapped
+        uint128 achieved = npm.liquidityOf(strategy.layout().tokenId);
+        assertGt(achieved, 0, "baseline liquidity");
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.InsufficientLiquidity.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 0, 0, type(uint128).max);
+    }
+
+    /// @dev THE DELIBERATE DEVIATION from `rerange`: a flat book REVERTS. `rerange`'s silent return exists to
+    ///      persist width/skew; there is nothing to persist here, so a silent success would mislead the keeper.
+    function testRemintRangeRevertsOnAFlatBook() public {
+        _execute(SEED);
+
+        // Redeem the whole book: `tokenId` goes to 0 while the strategy stays Executed.
+        uint256 supply = 1_000_000e12;
+        vm.prank(address(strategy));
+        vault.strategyMint(lp, supply);
+        vm.prank(lp);
+        vault.approve(address(strategy), supply);
+        vm.prank(lp);
+        uint256 id = strategy.requestRedeem(supply, 0, address(0));
+        vm.prank(proposer);
+        strategy.fulfillRedeem(id, 0);
+        assertEq(strategy.layout().tokenId, 0, "flat book");
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.NothingToRerange.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 0, 0, 0);
+    }
+
+    /// @dev The calm-gate runs FIRST, so neither the swap nor the mint can execute at a shoved tick.
+    function testRemintRangeCalmGateBlocksAShovedTick() public {
+        _execute(SEED);
+        _setLegSwapRates();
+        uint256 tokenIdBefore = strategy.layout().tokenId;
+        uint128 liqBefore = npm.liquidityOf(tokenIdBefore);
+
+        pool.setTick(TICK + 5000);
+        pool.setTwapTick(TICK);
+        pool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(TICK + 5000));
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.CalmGateBreached.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, true, 5000, 0, 0);
+
+        assertEq(strategy.layout().tokenId, tokenIdBefore, "the position was never touched");
+        assertEq(npm.liquidityOf(tokenIdBefore), liqBefore, "no liquidity was removed");
+        assertEq(router.boughtOf(address(legA)), 0, "and nothing was swapped");
+    }
+
+    /// @dev The three entrypoint gates: auth, lifecycle state, and `swapBps <= 100%`.
+    function testRemintRangeEntrypointGates() public {
+        // Not yet Executed — the state gate, reached by the proposer.
+        vm.prank(proposer);
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 0, 0, 0);
+
+        _execute(SEED);
+
+        vm.prank(lp);
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 0, 0, 0);
+
+        vm.prank(owner); // the admin is not the proposer either
+        vm.expectRevert(BaseStrategy.NotProposer.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 0, 0, 0);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAerodromeCLStrategy.OutOfBounds.selector);
+        strategy.remintRange(REMINT_LOWER, REMINT_UPPER, false, 10_001, 0, 0);
+    }
+
+    /// @dev The width band still bounds explicit placement — the SKEW band deliberately does not.
+    function testRemintRangeIsBoundedByTheWidthBand() public {
+        _execute(SEED);
+
+        vm.prank(owner);
+        strategy.setWidthBounds(2000, 6000);
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.remintRange(TICK - 500, TICK + 500, false, 0, 0, 0); // 1000 < minWidth
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.remintRange(TICK - 4000, TICK + 4000, false, 0, 0, 0); // 8000 > maxWidth
+
+        vm.prank(proposer);
+        vm.expectRevert(LeveragedAeroValuation.OutOfBounds.selector);
+        strategy.remintRange(TICK - 2050, TICK + 2000, false, 0, 0, 0); // off the tickSpacing grid
+
+        // A skew the `[minSkewBps, maxSkewBps]` band would refuse for `rerange` is legal HERE.
+        vm.prank(proposer);
+        strategy.remintRange(TICK - 5900, TICK + 100, false, 0, 0, 0);
+        assertEq(strategy.layout().width, 6000, "an all-but-one-spacing-below band is legal explicitly");
+    }
+
     // ==================== LEVER-DOWN COVER IS NEED-SIZED ====================
 
     /// @dev THE IDLE REMAINDER A LEVER-DOWN MUST NOT LIQUIDATE. `_rebalanceCover` sells the surplus leg to buy the

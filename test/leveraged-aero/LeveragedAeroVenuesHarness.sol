@@ -576,6 +576,9 @@ contract MockClSwapRouter {
     /// @notice Cumulative `tokenOut` bought per token: proves a cover swap happened without net-balance inference.
     mapping(address => uint256) public boughtOf;
 
+    /// @notice tickSpacing of the LAST `exactInputSingle` — the routed VENUE, which rates alone cannot pin.
+    int24 public lastTickSpacing;
+
     error MockRouterNoRate();
     error MockRouterMinOut();
     error MockRouterMaxIn();
@@ -607,6 +610,7 @@ contract MockClSwapRouter {
     }
 
     function exactInputSingle(ExactInputSingleParams calldata p) external payable returns (uint256 amountOut) {
+        lastTickSpacing = p.tickSpacing;
         uint256 rate = rateE18[p.tokenIn][p.tokenOut];
         if (rate == 0) revert MockRouterNoRate();
         amountOut = (p.amountIn * rate) / 1e18;
