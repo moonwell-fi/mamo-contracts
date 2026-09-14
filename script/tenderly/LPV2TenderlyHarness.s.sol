@@ -180,6 +180,7 @@ contract LPV2TenderlyHarness is Script {
         // deterministic. Sandwich-min wiring is asserted in the unit suite.
         return LPAutoBalancerV2.RebalanceParams({
             width: WIDTH,
+            altWidth: uint24(TICK_SPACING),
             amount0MinMain: 0,
             amount1MinMain: 0,
             amount0MinAlt: 0,

@@ -81,7 +81,7 @@ contract MultiMarketStrategyFactoryTest is Test {
         registry = new MamoStrategyRegistry(admin, backend, guardian);
         marketRegistry = new MarketRegistry(admin, backend, guardian);
 
-        implementation = new MamoMultiMarketStrategy();
+        implementation = new MamoMultiMarketStrategy(address(marketRegistry));
 
         vm.prank(admin);
         strategyTypeId = registry.whitelistImplementation(address(implementation), 0);

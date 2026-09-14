@@ -27,6 +27,8 @@ import {DeployMultiMarketSystem} from "../multisig/mamo-multisig/011_DeployMulti
 ///      the deprecated storage slots (mToken, metaMorphoVault, splitMToken, splitVault)
 ///      to test migrateV1ToMarketRegistry.
 contract LegacyV1Strategy is MamoMultiMarketStrategy {
+    constructor(address _marketRegistry) MamoMultiMarketStrategy(_marketRegistry) {}
+
     function initializeLegacyForTest(
         address _mamoStrategyRegistry,
         address _mToken,
@@ -149,7 +151,7 @@ contract MultiMarketStrategyTest is Test {
         // Deploy a fresh MarketRegistry with no markets registered
         MarketRegistry emptyMarketRegistry = new MarketRegistry(admin, backend, guardian);
 
-        MamoMultiMarketStrategy impl = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy impl = new MamoMultiMarketStrategy(address(marketRegistry));
         uint256[] memory emptyDefaultSplits = new uint256[](0);
 
         bytes memory data = abi.encodeWithSelector(
@@ -175,7 +177,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testRevertInitializeWithInvalidSplit() public {
-        MamoMultiMarketStrategy impl = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy impl = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Splits that don't add up to 10000
         uint256[] memory badSplits = new uint256[](2);
@@ -205,7 +207,7 @@ contract MultiMarketStrategyTest is Test {
     }
 
     function testRevertInitializeWithSplitCountMismatch() public {
-        MamoMultiMarketStrategy impl = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy impl = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Only 1 split but 2 markets in registry
         uint256[] memory wrongCountSplits = new uint256[](1);
@@ -495,7 +497,7 @@ contract MultiMarketStrategyTest is Test {
         internal
         returns (MamoMultiMarketStrategy s, uint256 typeId)
     {
-        LegacyV1Strategy v1Impl = new LegacyV1Strategy();
+        LegacyV1Strategy v1Impl = new LegacyV1Strategy(address(marketRegistry));
 
         vm.prank(admin);
         typeId = registry.whitelistImplementation(address(v1Impl), 0);

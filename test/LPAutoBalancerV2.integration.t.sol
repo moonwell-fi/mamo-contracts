@@ -224,6 +224,7 @@ contract LPAutoBalancerV2Integration is Test {
         // Width 400 (= 4 * spacing); mins 0 (fork is deterministic, pinned).
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
+            altWidth: uint24(TICK_SPACING),
             amount0MinMain: 0,
             amount1MinMain: 0,
             amount0MinAlt: 0,
@@ -275,6 +276,7 @@ contract LPAutoBalancerV2Integration is Test {
         LPAutoBalancerV2.RebalanceParams memory p = _defaultParams();
         return LPAutoBalancerV2.RebuildParams({
             width: p.width,
+            altWidth: p.altWidth,
             amount0MinMain: p.amount0MinMain,
             amount1MinMain: p.amount1MinMain,
             amount0MinAlt: p.amount0MinAlt,

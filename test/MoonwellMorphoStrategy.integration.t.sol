@@ -1427,7 +1427,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfInvalidInitializationParameters() public {
         // Deploy a new implementation
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Whitelist the implementation
         vm.prank(admin);
@@ -1870,7 +1870,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
-        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Create an unauthorized address
         address unauthorizedAddress = makeAddr("unauthorized");
@@ -2138,7 +2138,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testInitializeWithRewardTokens() public {
         // Deploy a new implementation for testing initialization
-        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Whitelist the implementation
         vm.prank(admin);
@@ -2217,7 +2217,7 @@ contract MoonwellMorphoStrategyTest is Test {
         initSplits[0] = 5000;
         initSplits[1] = 5000;
 
-        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy(address(marketRegistry));
 
         vm.expectRevert("Not a reward token");
         new ERC1967Proxy(

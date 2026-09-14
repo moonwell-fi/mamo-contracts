@@ -149,6 +149,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         int24 expectedTl = _align(spotTick) + TICK_SPACING;
         return LPAutoBalancerV2.RebalanceParams({
             width: 400,
+            altWidth: uint24(TICK_SPACING),
             amount0MinMain: 0,
             amount1MinMain: 0,
             amount0MinAlt: 0,

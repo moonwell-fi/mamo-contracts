@@ -11,8 +11,9 @@
 >
 > | Change | Then | Now |
 > | --- | --- | --- |
-> | `RebuildParams` | 6 fields | **8** — `expectedTickLower`/`expectedTickUpper` appended. Different selector (§2.2). |
-> | `RebalanceParams` | 10 fields | **12** — same two tick-commitment fields appended. Different selector (§2.2). |
+> | `RebuildParams` | 6 fields | **9** — `expectedTickLower`/`expectedTickUpper` appended, then `altWidth` inserted as field 2. Different selector (§2.2). |
+> | `RebalanceParams` | 10 fields | **13** — same two tick-commitment fields appended, then `altWidth` inserted as field 2. Different selector (§2.2). |
+> | Alt width | fixed at one `tickSpacing` | **caller-supplied `altWidth`** — nonzero multiple of `tickSpacing`, at most `type(int24).max`, else `InvalidAltWidth()` (§5). |
 > | Value-floor snapshot | `rebalanceValueBeforePos()` / `rebalanceLooseBefore()` / `rebalanceValueBefore()`, USD 1e8 | **removed.** One `rebalanceAmountsBefore()` returning four raw TOKEN amounts (§2.1, §8.2). |
 > | Oracle staleness | one `maxOracleDelay()` | **`maxOracleDelay0()` / `maxOracleDelay1()`**, one bound per feed. |
 > | Oracle staleness DEFAULT | 26 hours | **1 hour** (`DEFAULT_MAX_ORACLE_DELAY`), cap **1 day** (`MAX_ORACLE_DELAY`); proposal 011 arms 3600s on both (§7). |
@@ -135,7 +136,8 @@ struct UnwindParams {            // unwindForSwap — phase 1
 }
 
 struct RebalanceParams {         // rebalanceUsingAlt ONLY (has withdraw-min fields; it tears down)
-    uint24  width;               // ∈ [minWidth, maxWidth], multiple of tickSpacing
+    uint24  width;               // ∈ [minWidth, maxWidth], multiple of 2 × tickSpacing
+    uint24  altWidth;            // single-sided alt width: nonzero multiple of tickSpacing, ≤ int24 max
     uint256 amount0MinMain;      // mint floors, main
     uint256 amount1MinMain;
     uint256 amount0MinAlt;       // mint floors, alt (contract zeroes the unfunded leg)
@@ -145,33 +147,34 @@ struct RebalanceParams {         // rebalanceUsingAlt ONLY (has withdraw-min fie
     uint256 amount0MinWithdrawAlt;
     uint256 amount1MinWithdrawAlt;
     uint256 deadline;
-    int24   expectedTickLower;   // ── TICK COMMITMENT (fields 11 and 12, appended in this order)
+    int24   expectedTickLower;   // ── TICK COMMITMENT (fields 12 and 13, appended in this order)
     int24   expectedTickUpper;   //    reverts TickMismatch() unless the on-chain main range matches
 }
 
 struct RebuildParams {           // rebuildAfterSwap ONLY — NO withdraw-min fields (teardown
     uint24  width;               // already happened in unwindForSwap; this call only mints)
+    uint24  altWidth;            // single-sided alt width: nonzero multiple of tickSpacing, ≤ int24 max
     uint256 amount0MinMain;      // mint floors, main
     uint256 amount1MinMain;
     uint256 amount0MinAlt;       // mint floors, alt (contract zeroes the unfunded leg)
     uint256 amount1MinAlt;
     uint256 deadline;
-    int24   expectedTickLower;   // ── TICK COMMITMENT (fields 7 and 8, appended in this order)
+    int24   expectedTickLower;   // ── TICK COMMITMENT (fields 8 and 9, appended in this order)
     int24   expectedTickUpper;   //    reverts TickMismatch() unless the on-chain main range matches
 }
 ```
 
-**`RebuildParams` is 8 fields, in exactly that order.** The canonical signature is
+**`RebuildParams` is 9 fields, in exactly that order.** The canonical signature is
 
 ```
-rebuildAfterSwap((uint24,uint256,uint256,uint256,uint256,uint256,int24,int24))   selector 0x44254680
+rebuildAfterSwap((uint24,uint24,uint256,uint256,uint256,uint256,uint256,int24,int24))   selector 0x24ea14c0
 ```
 
 (for reference: `unwindForSwap((address,uint256,uint256,uint256,uint256,uint256,uint256))` = `0x6792a3dc`,
-`rebalanceUsingAlt((uint24,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,int24,int24))` = `0x924a74b4` —
-the pre-audit 10-field encoding `0xb1d2c9ac` no longer decodes.)
-The pre-audit 6-field encoding hits a **different selector and will not decode** — it lands in the
-fallback and reverts. Both new fields are `int24`, ABI-encoded as sign-extended 32-byte words.
+`rebalanceUsingAlt((uint24,uint24,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,int24,int24))` = `0x0c99b86e` —
+the pre-audit 10-field encoding `0xb1d2c9ac` and the 12-field `0x924a74b4` no longer decode.)
+The pre-audit 6- and 8-field encodings hit a **different selector and will not decode** — they land in the
+fallback and revert. Both new fields are `int24`, ABI-encoded as sign-extended 32-byte words.
 
 **Computing the commitment — required on BOTH rebalance paths.** `expectedTickLower`/`expectedTickUpper`
 are the main range you decided on off-chain; the contract recomputes the range from LIVE spot and
@@ -270,7 +273,7 @@ or a Safe `setOracles`/`setMaxOracleDelays` mid-flight all still strand the rebu
 residual got MORE reachable with MOO-740: at the 3600s bound three consecutive missed rounds strand a
 rebuild, where the old 26h bound took ~76. Mitigations are operational — short `validTo`, and prefer the
 no-swap `rebalanceUsingAlt` while either feed is degraded (§8.2). Tears down both legs (AERO skimmed to feeCollector), pins `forceApprove(VAULT_RELAYER, sellAmount)`, sets `rebalanceInFlight` and `sellTokenInFlight = sellToken`. **Does NOT stamp `lastRebalance`.** Emits `RebalanceUnwound(address sellToken, uint256 sellAmount)`.
-- `rebuildAfterSwap(RebuildParams)` — **takes `RebuildParams`, NOT `RebalanceParams`** (8 fields: no withdraw-mins, plus the two tick-commitment fields — a `RebalanceParams`-encoded call, or a pre-audit 6-field `RebuildParams`, hits a different selector and reverts). Requires in-flight; **no cooldown**; revokes approval; re-runs calm gate; checks `width` bounds and the `2 × tickSpacing` alignment; derives the main range and reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)`; mints main (+alt from surplus); enforces
+- `rebuildAfterSwap(RebuildParams)` — **takes `RebuildParams`, NOT `RebalanceParams`** (9 fields: no withdraw-mins, plus `altWidth` and the two tick-commitment fields — a `RebalanceParams`-encoded call, or any pre-audit 6- or 8-field `RebuildParams`, hits a different selector and reverts). Requires in-flight; **no cooldown**; revokes approval; re-runs calm gate; checks `width` bounds and the `2 × tickSpacing` alignment; derives the main range and reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)`; mints main (+alt from surplus); enforces
 
   ```
   valueAfter ≥ usd(amount0Pos, amount1Pos) × (10000 − maxRebalanceLossBps − swapLossAllowanceBps)/10000
@@ -281,7 +284,7 @@ no-swap `rebalanceUsingAlt` while either feed is degraded (§8.2). Tears down bo
   produce `valueAfter` (position term haircut, loose term added back UN-haircut — same H-1 treatment
   as `rebalanceUsingAlt`). Then clears in-flight state; forwards dust; restakes iff staked at unwind;
   **stamps `lastRebalance`**. Emits `RebalanceRebuilt(uint256 mainTokenId, uint256 altTokenId)`.
-- `rebalanceUsingAlt(RebalanceParams)` — the atomic no-swap path (same-transaction floor: `valueAfter ≥ valueBeforePos × (10000 − maxRebalanceLossBps)/10000 + looseBefore`). **Takes 12 fields now**, and derives the main range then reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)` — same rule as `rebuildAfterSwap`; see §2.2 for how to compute the commitment on this path (the principal is still in the positions, so you must predict the teardown output). Emits `RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper)`.
+- `rebalanceUsingAlt(RebalanceParams)` — the atomic no-swap path (same-transaction floor: `valueAfter ≥ valueBeforePos × (10000 − maxRebalanceLossBps)/10000 + looseBefore`). **Takes 13 fields now**, and derives the main range then reverts `TickMismatch()` unless it equals `(expectedTickLower, expectedTickUpper)` — same rule as `rebuildAfterSwap`; see §2.2 for how to compute the commitment on this path (the principal is still in the positions, so you must predict the teardown output). Emits `RebalancedUsingAlt(uint256 mainTokenId, uint256 altTokenId, int24 tickLower, int24 tickUpper)`.
 - `compound(uint16 compoundBps)` — harvests AERO from staked legs; `compoundBps`/10000 → module, remainder → feeCollector. Emits `CompoundInitiated(uint256 compoundAmount, uint256 droppedAmount, uint16 compoundBps)`.
 - `stake()` / `unstake()` — gauge deposit/withdraw for both legs.
 
@@ -374,6 +377,15 @@ The emissions-regime guard is the `marginalUsd > MARGINAL_MIN_USD_PER_H` term: w
 - **Mint mins (rebuild + alt path).** Predict the in-ratio consumption from planned post-swap balances at `spotTick` for the chosen range, haircut by `MINT_TOLERANCE_BPS` (default 50). Alt mint mins: apply the haircut to the predicted surplus leg (the contract zeroes the unfunded side itself).
   **Send them, and size them — they are the only control for the in-bucket residual (§2.2).** On the balanced branch the contract forwards BOTH `amount0MinMain` and `amount1MinMain` to the position manager unchanged, so a min set at `predicted × (1 − MINT_TOLERANCE_BPS/10000)` reverts a sandwich that skews the in-range split inside a single committed tick bucket (where `TickMismatch()` is silent by construction). Zeros disable that protection entirely: `TickMismatch` pins WHERE liquidity lands, the minima pin HOW MUCH of each leg actually lands there, and neither substitutes for the other. The Tenderly reference harness passes zeros for rig convenience — do not copy it into a production caller.
 - **Width.** Default `WIDTH_TICKS` env (phase-1 default 200 = 2 × tickSpacing, the tightest allowed — the CL10 backtest's edge is tight ranges). Must satisfy `minWidth ≤ width ≤ maxWidth` **and `width % (2 × tickSpacing) == 0`** — at the phase-1 tickSpacing of 100 that is `width % 200 == 0`, so 200/400/600… are legal and 300/500/700… now revert `InvalidWidth()` even though they are multiples of 100. The even-multiple rule is load-bearing, not stylistic: it makes `width/2` a whole number of spacings, which is what lets the `RebuildParams` tick commitment recover `floorAlign(spot)` — and so the ALT's anchor — from the committed `tickLower` **on the balanced branch**. It does NOT pin the ALT placement outright: the commitment names the tick pair, not the branch that produced it, and at `width == 2 × tickSpacing` two branches collide on the same pair at different anchors (§2.2 residual 1). Nor does it pin which SIDE of spot the alt takes (§2.2 residual 2). The same rule is validated on `minWidth`/`maxWidth` at config time, so a Safe config write with an odd-multiple bound reverts `InvalidWidth()` too. The phase-1 config (`minWidth` 200, `maxWidth` 20 000) and the default width all satisfy it unchanged. Any adaptive widening (realized-vol responsive) stays within the on-chain band AND on the even-multiple grid.
+- **Alt width.** `altWidth` is caller-supplied per call (it used to be hardwired to one `tickSpacing`).
+  It must be a **nonzero multiple of `tickSpacing`** and at most `type(int24).max` (8 388 607), else
+  `InvalidAltWidth()`. The check is total: it runs before the USD dust early-return, so a sub-threshold
+  surplus does not excuse an invalid width. Placement is unchanged and still anchored on
+  `floorAlign(spot)` — token0 surplus mints `[floor + tickSpacing, floor + tickSpacing + altWidth]`,
+  token1 surplus mints `[floor - altWidth, floor]` — so neither candidate can contain spot at any width.
+  A wider alt trades fee concentration for hit probability; it does NOT weaken the value floor, because
+  a single-sided out-of-range mint's principal is width-independent. Default to `tickSpacing` to
+  reproduce pre-audit behavior.
 - **Deadline.** `now + 300` seconds on every write.
 - **Order size ≠ approval.** After the unwind tx confirms, read actual loose balances and size the order: `sellAmountOrder = min(recomputed excess from actual balances, approval, balanceOf(sellToken))`. An order larger than the balance can never settle (fill-or-kill), it just wastes the cycle.
 
@@ -557,7 +569,7 @@ cast call $BALANCER "maxOracleDelay1()(uint256)" --rpc-url $RPC
 cast call $BALANCER "sequencerUptimeFeed()(address)" --rpc-url $RPC    # 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433, NOT 0x0
 cast call $BALANCER "sequencerGracePeriod()(uint256)" --rpc-url $RPC   # 3600, NOT 0
 # rebuildAfterSwap must be the 8-field encoding:
-cast sig "rebuildAfterSwap((uint24,uint256,uint256,uint256,uint256,uint256,int24,int24))"   # 0x44254680
+cast sig "rebuildAfterSwap((uint24,uint24,uint256,uint256,uint256,uint256,uint256,int24,int24))"   # 0x24ea14c0
 ```
 
 6. **Fork dry-run** of one full SWAP cycle: `make lp-auto-balancer-v2` covers the contract legs; the backend end-to-end (quote → place → poll → rebuild) runs against a fork with the orderbook mocked, asserting the §3 recovery from a killed process at each step.
