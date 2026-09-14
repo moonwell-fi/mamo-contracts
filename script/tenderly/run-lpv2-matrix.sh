@@ -65,6 +65,7 @@ BTC_USD="$(addr CHAINLINK_BTC_USD)"
 resolve_vnet
 section "Verify fork is Base + protocol wiring intact"
 chain_sanity
+ensure_address_book
 [ "$(ccall "$GAUGE" 'nft()(address)')" = "$NFPM" ] || die "gauge.nft() != expected NFPM"
 ok "gauge.nft()==NFPM"
 
@@ -86,7 +87,7 @@ ok "funded sender"
 
 info "→ deploySwapper()"
 run_forge_phase "$FQ" "deploySwapper()" 1 200 || die "deploySwapper failed"
-capture_created_address "broadcast/LPV2TenderlyHarness.s.sol/8453/deploySwapper-latest.json"
+capture_created_address "$(broadcast_artifact deploySwapper)"
 export HARNESS_SWAPPER="$CREATED_ADDR"
 info "swapper → $HARNESS_SWAPPER"
 # fund the swapper generously so multi-tick pushes never run dry
@@ -96,7 +97,7 @@ ok "funded swapper (6000 WETH / 150 cbBTC)"
 
 info "→ deployAndMint() (balanced straddle)"
 run_forge_phase "$FQ" "deployAndMint()" 1 200 || die "deployAndMint failed"
-capture_created_address "broadcast/LPV2TenderlyHarness.s.sol/8453/deployAndMint-latest.json"
+capture_created_address "$(broadcast_artifact deployAndMint)"
 export HARNESS_LAB="$CREATED_ADDR"
 info "lab → $HARNESS_LAB"
 HARNESS_TOKEN_ID="$(ccall "$NFPM" 'tokenOfOwnerByIndex(address,uint256)(uint256)' "$HARNESS_LAB" 0 | field)"

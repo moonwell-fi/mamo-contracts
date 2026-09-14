@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
+import {LPValuationLib} from "@contracts/libraries/LPValuationLib.sol";
+import {ICLPool} from "@interfaces/ICLPool.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {DeployLPAutoBalancerV2} from "@script/DeployLPAutoBalancerV2.s.sol";
 
@@ -44,6 +46,10 @@ import {console} from "forge-std/console.sol";
 ///         already owns it. The production run MUST set the real values via the setters below:
 ///           - setTokenId(uint256)        — the tokenId the Safe holds (minted in Phase B2).
 ///           - setRebalancerEOA(address)  — the real backend signer EOA (MAMO_LP_REBALANCER).
+///         And ONE the production run SHOULD set, since it defaults to $50k:
+///           - setTotalAllocation(uint256,uint16) — the USD size committed to this position.
+///             validate() asserts the registered principal lands inside that band. See the field's
+///             NatSpec for why the size is VALIDATED here rather than minted.
 ///         The fork test injects fork-minted / makeAddr values via the same setters.
 ///         If MAMO_LP_REBALANCER is registered in addresses/8453.json at run time it is used as the
 ///         default; otherwise rebalancerEOA MUST be set explicitly or build() reverts.
@@ -76,7 +82,10 @@ import {console} from "forge-std/console.sol";
 ///         action — this is a documented manual follow-up, not a missing on-chain step.
 contract LPAutoBalancerV2Setup is MultisigProposal {
     // ─── phase-1 position config (WETH/cbBTC, tickSpacing 100) ──────────────────
-    int24 public constant TICK_SPACING = 100;
+    int24 public constant TICK_SPACING = 10;
+    /// @notice Floor width (ticks). At tickSpacing 10 this is 20 spacings, well above the R7
+    ///         branch-collision width (2*tickSpacing = 20 ticks), so R7 is unreachable at config
+    ///         level on this pool (handbook §4.1).
     uint24 public constant MIN_WIDTH = 200;
     uint24 public constant MAX_WIDTH = 20_000;
     uint24 public constant MAX_CENTER_DEVIATION = 200;
@@ -108,6 +117,28 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     /// @notice The backend signer EOA to be granted REBALANCER_ROLE. If unset, defaults to the
     ///         MAMO_LP_REBALANCER address entry when present; otherwise MUST be set via setRebalancerEOA.
     address public rebalancerEOA;
+
+    /// @notice TOTAL ALLOCATION committed to this position, 8-decimal USD (the balancer's own
+    ///         `valueInUsd` scale). $50,000 by default: large enough that emissions and gas are
+    ///         measurable against real fee income, small enough that phase-1 proves the rebalancer at
+    ///         a TVL the protocol can afford to lose. Change it per run via `setTotalAllocation`,
+    ///         never by editing this file.
+    /// @dev    This is a VALIDATED parameter, not a minting instruction. The position NFT is minted
+    ///         off-chain in Phase B2 and pinned via `setTokenId`; `validate()` then asserts the
+    ///         registered principal matches this target. It cannot mint here: FPS records `build()`'s
+    ///         actions as calldata and replays them at Safe-execution time, so a `mint` inside
+    ///         `build()` would return a tokenId observed during SIMULATION while the Slipstream NFPM's
+    ///         tokenId is a global counter that anyone's mint advances in between — the encoded
+    ///         `registerPosition(tokenId)` would then name someone else's NFT. Minting off-chain and
+    ///         asserting the resulting SIZE is the only form of this parameter that cannot silently
+    ///         bind the wrong token.
+    uint256 public totalAllocationUsd = 50_000e8;
+
+    /// @notice Band `validate()` accepts around `totalAllocationUsd`. 500 bps absorbs the spread
+    ///         between the price the Safe minted at and the price validation reads, plus the in-ratio
+    ///         remainder the NFPM refunds. NOT slack for a wrong allocation: a position minted at half
+    ///         the intended size fails this assertion.
+    uint16 public allocationToleranceBps = 500;
 
     /// @notice Default seconds the Base sequencer must have been continuously up before the balancer
     ///         accepts a Chainlink read. 3600s is the conventional L2 grace period: long enough for
@@ -144,6 +175,19 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         rebalancerEOA = rebalancerEOA_;
     }
 
+    /// @notice Set the total allocation this proposal commits and validates.
+    /// @param totalAllocationUsd_ 8-decimal USD. Must be non-zero — a zero target collapses the
+    ///        validation band to `[0, 0]` and would silently accept any position, which is the one
+    ///        outcome this parameter exists to prevent.
+    /// @param allocationToleranceBps_ band around the target, strictly < 10000 so lo is never 0
+    ///        (a 100% band makes under-allocation always pass).
+    function setTotalAllocation(uint256 totalAllocationUsd_, uint16 allocationToleranceBps_) external {
+        require(totalAllocationUsd_ != 0, "totalAllocationUsd must be non-zero");
+        require(allocationToleranceBps_ < 10_000, "tolerance >= 100%");
+        totalAllocationUsd = totalAllocationUsd_;
+        allocationToleranceBps = allocationToleranceBps_;
+    }
+
     /// @notice Override the sequencer grace period this proposal arms the guard with. Must be
     ///         non-zero and <= 7 days — the balancer rejects anything else with InvalidConfig.
     function setSequencerGracePeriod(uint256 gracePeriod_) external {
@@ -160,6 +204,18 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         maxOracleDelay1 = delay1_;
     }
 
+    /// @dev Pull the per-run inputs from the environment, leaving anything already set by a setter
+    ///      alone. Kept out of the field initializers deliberately: those run at construction, which
+    ///      would force the fork test to define these vars too.
+    function _loadRunInputs() internal {
+        if (tokenId == 0) tokenId = vm.envOr("INIT_TOKEN_ID", uint256(0));
+        totalAllocationUsd = vm.envOr("TOTAL_ALLOCATION_USD", totalAllocationUsd);
+        uint256 tol = vm.envOr("ALLOCATION_TOLERANCE_BPS", uint256(allocationToleranceBps));
+        require(tol <= 10_000, "ALLOCATION_TOLERANCE_BPS > 100%");
+        allocationToleranceBps = uint16(tol);
+        require(totalAllocationUsd != 0, "TOTAL_ALLOCATION_USD must be non-zero");
+    }
+
     function _initializeAddresses() internal {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -168,8 +224,23 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         vm.makePersistent(address(addresses));
     }
 
+    /// @notice Production entrypoint. Reads the per-run inputs from the ENVIRONMENT, because a
+    ///         `forge script` invocation cannot call the setters below — those exist for the fork
+    ///         test, which instantiates this contract in-process.
+    ///
+    ///         Without this, a mainnet `forge script ... --broadcast` runs `build()` with
+    ///         `tokenId == 0` and reverts "tokenId not set". (Safely: forge simulates the whole
+    ///         script before sending anything, so the revert costs nothing but a wasted run.)
+    ///
+    ///         INIT_TOKEN_ID          required — the WETH/cbBTC NFT the Safe minted in Phase B2.
+    ///         TOTAL_ALLOCATION_USD   optional, 8-dec USD; defaults to the field's $50k.
+    ///         ALLOCATION_TOLERANCE_BPS optional; defaults to the field's 500.
+    ///
+    ///         Values already set via the setters win, so the fork test is unaffected: it never sets
+    ///         these env vars, and `vm.envOr` returns the default it passes.
     function run() public override {
         _initializeAddresses();
+        _loadRunInputs();
 
         if (DO_DEPLOY) {
             deploy();
@@ -191,7 +262,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position, and grant REBALANCER_ROLE to the backend signer.";
+        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position at the configured total allocation, and grant REBALANCER_ROLE to the backend signer.";
     }
 
     function deploy() public override {
@@ -236,7 +307,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         // Steps 1-3 in a block so the config struct + locals free before _wireModule inlines
         // (keeps build() under the via_ir stack limit — position config has 21 fields).
         {
-            address nfpm = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+            address nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
             address safe = addresses.getAddress("F-MAMO");
 
             require(tokenId != 0, "tokenId not set: mint the WETH/cbBTC NFT to the Safe and call setTokenId");
@@ -359,6 +430,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         // views so via_ir compiles each in its own frame (position() returns a 21-field tuple; inlining
         // both into validate() overflows the stack).
         this.validatePosition(lab);
+        this.validateAllocation(lab);
         this.validateModule(labAddr, safe);
     }
 
@@ -400,12 +472,65 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(oracle1, addresses.getAddress("CHAINLINK_BTC_USD"), "oracle1 == BTC/USD");
 
         assertEq(
-            INonfungiblePositionManager(addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME")).ownerOf(
+            INonfungiblePositionManager(addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2")).ownerOf(
                 mainTokenId
             ),
             address(lab),
             "balancer owns the WETH/cbBTC NFT"
         );
+    }
+
+    /// @dev Assert the registered position's principal actually equals the allocation this proposal
+    ///      commits. Priced with the SAME feeds, staleness bounds and sequencer guard the balancer
+    ///      itself uses, at the pool's live sqrtPriceX96 — so this is the balancer's own notion of the
+    ///      position's value, not an independent estimate that could agree by luck.
+    function validateAllocation(LPAutoBalancerV2 lab) public view {
+        (
+            uint256 mainTokenId,
+            ,
+            address pool,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            address oracle0,
+            address oracle1,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            bool active
+        ) = lab.position();
+        require(active, "position active");
+
+        LPValuationLib.OracleConfig memory cfg = LPValuationLib.OracleConfig({
+            oracle0: oracle0,
+            oracle1: oracle1,
+            maxDelay0: lab.maxOracleDelay0(),
+            maxDelay1: lab.maxOracleDelay1(),
+            sequencerUptimeFeed: lab.sequencerUptimeFeed(),
+            sequencerGracePeriod: lab.sequencerGracePeriod()
+        });
+
+        (uint160 sqrtP,,,,,) = ICLPool(pool).slot0();
+
+        // Leg decimals are NOT symmetric on this pair: WETH (token0) is 18dp, cbBTC (token1) is 8dp.
+        uint256 principalUsd = LPValuationLib.principalValue(
+            addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2"), mainTokenId, sqrtP, cfg, 18, 8
+        );
+
+        uint256 lo = (totalAllocationUsd * (10_000 - allocationToleranceBps)) / 10_000;
+        uint256 hi = (totalAllocationUsd * (10_000 + allocationToleranceBps)) / 10_000;
+
+        assertTrue(principalUsd >= lo, "position under-allocated vs totalAllocationUsd");
+        assertTrue(principalUsd <= hi, "position over-allocated vs totalAllocationUsd");
     }
 
     /// @dev Assert the compound module was deployed and wired (the F-MAMO-doable portion; the
