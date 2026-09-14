@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# Shared plumbing for the stock account vnet scenarios. Sourced, never executed.
+
+SCEN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCEN_DIR/../../.." && pwd)"
+STATE_DIR="$SCEN_DIR/.state"
+RESULTS="$SCEN_DIR/results.json"
+LOG="$STATE_DIR/harness.log"
+MANIFEST="$REPO_ROOT/script/stock-accounts/vnet-manifest.json"
+ADDRESS_BOOK="$REPO_ROOT/addresses/8453.json"
+
+mkdir -p "$STATE_DIR"
+cd "$REPO_ROOT"
+
+set -a
+# shellcheck disable=SC1091
+source "$REPO_ROOT/.env"
+set +a
+
+export FOUNDRY_OUT=${FOUNDRY_OUT:-out}
+export FOUNDRY_CACHE_PATH=${FOUNDRY_CACHE_PATH:-cache}
+
+[ -f "$MANIFEST" ] || { echo "missing $MANIFEST; run 'make tenderly-stock-accounts' first" >&2; exit 1; }
+
+book() { jq -r --arg n "$1" '.[] | select(.name == $n) | .addr' "$ADDRESS_BOOK"; }
+mani() { jq -r --arg n "$1" '.[$n]' "$MANIFEST"; }
+
+VNET=$(mani rpc)
+DEPLOYER=$(mani testUser)
+STOCK_REGISTRY=$(mani STOCK_ACCOUNT_REGISTRY)
+CHECKER=$(mani STOCK_ACCOUNT_PRICE_CHECKER)
+FACTORY=$(mani STOCK_ACCOUNT_STRATEGY_FACTORY)
+CL_FACTORY=$(mani AERODROME_STOCKS_CL_FACTORY)
+ROUTER=$(mani AERODROME_STOCKS_SWAP_ROUTER)
+QUOTER=$(mani AERODROME_STOCKS_QUOTER)
+USDC=$(book USDC)
+SETTLEMENT=$(book COWSWAP_SETTLEMENT)
+RELAYER=$(book COWSWAP_VAULT_RELAYER)
+
+# CoW allow-list authenticator and its manager, impersonated on the vnet to register our solver.
+COW_AUTHENTICATOR=0x2c4c28DDBdAc9C5E7055b4C863b72eA0149D8aFE
+COW_AUTH_MANAGER=0xA03be496e67Ec29bC62F01a428683D7F9c204930
+
+# The one token the deploy config lists; its 0.05% Slipstream pool against USDC, tick spacing 10.
+NVDA=0xb20000000000000000000078ee7ce2fE4908108C
+NVDA_POOL=0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9
+
+KIND_SELL=0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775
+BALANCE_ERC20=0x5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9
+MAGIC_VALUE=0x1626ba7e
+ORDER_T='(address,address,address,uint256,uint256,uint32,bytes32,uint256,bytes32,bool,bytes32,bytes32)'
+POOL_CREATED_TOPIC=0xab0d57f0df537bb25e80245ef7748fa62353808c54d6e528a9dd20887aed9ac2
+MAX_UINT=115792089237316195423570985008687907853269984665640564039457584007913129639935
+SEND_GAS_LIMIT=12000000
+
+FAILURES=0
+SCEN=${SCEN:-lib}
+
+# ---------------------------------------------------------------- arithmetic
+
+# Big integers past 2^63 (sqrt prices, wei) are beyond bash arithmetic.
+bn() { python3 -c "print(int($1))"; }
+bb() { python3 -c "print(1 if ($1) else 0)"; }
+
+# ---------------------------------------------------------------- rpc
+
+rpc() { # rpc <method> <params-json>
+  local out
+  out=$(curl -sS -m 120 -X POST "$VNET" -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}")
+  if [ "$(printf '%s' "$out" | jq -r 'has("error")')" = "true" ]; then
+    echo "rpc $1 failed: $out" >&2
+    return 1
+  fi
+  printf '%s' "$out" | jq -r '.result'
+}
+
+read -r -d '' BATCH_CALL_PY <<'PYSRC' || true
+import json, sys, urllib.request
+rpc = sys.argv[1]
+calls = [l.split() for l in sys.stdin.read().splitlines() if l.strip()]
+body = [{'jsonrpc': '2.0', 'id': i, 'method': 'eth_call', 'params': [{'to': to, 'data': data}, 'latest']}
+        for i, (to, data) in enumerate(calls)]
+if body:
+    request = urllib.request.Request(rpc, json.dumps(body).encode(), {'content-type': 'application/json'})
+    for reply in sorted(json.load(urllib.request.urlopen(request, timeout=120)), key=lambda r: r['id']):
+        print(reply.get('result', '0x'))
+PYSRC
+
+# One http round trip for many eth_calls. Reads "to data" pairs on stdin, prints one result per line.
+batch_call() { python3 -c "$BATCH_CALL_PY" "$VNET"; }
+
+callraw() { cast call --rpc-url "$VNET" "$@" 2>>"$LOG"; }
+
+# Nth returned value, stripped of cast's "[1e9]" annotation.
+calln() { local n=$1; shift; callraw "$@" | sed -n "${n}p" | awk '{print $1}'; }
+call() { calln 1 "$@"; }
+
+# Nth returned value kept whole, for the "[a, b, c]" array returns.
+callline() { local n=$1; shift; callraw "$@" | sed -n "${n}p"; }
+list_at() { printf '%s' "$1" | tr -d '[]' | tr ',' '\n' | sed -n "$(($2 + 1))p" | awk '{print $1}'; }
+
+send() { # send <from> <to> <sig> [args...]
+  local from=$1 to=$2 out status
+  shift 2
+  # An explicit limit: estimation against the B20 precompiles occasionally comes back short.
+  if ! out=$(cast send --rpc-url "$VNET" --unlocked --from "$from" --gas-limit "$SEND_GAS_LIMIT" --json "$to" "$@" 2>>"$LOG"); then
+    echo "send reverted: from=$from to=$to sig=$1 (see $LOG)" >&2
+    return 1
+  fi
+  status=$(printf '%s' "$out" | jq -r '.status')
+  if [ "$status" != "0x1" ]; then
+    echo "tx status $status: from=$from to=$to sig=$1 hash=$(printf '%s' "$out" | jq -r '.transactionHash') gasUsed=$(printf '%s' "$out" | jq -r '.gasUsed')" >&2
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+estimate_gas() { # estimate_gas <from> <to> <sig> [args...]
+  local from=$1 to=$2
+  shift 2
+  cast estimate --rpc-url "$VNET" --from "$from" "$to" "$@" 2>>"$LOG"
+}
+
+set_eth() { rpc tenderly_setBalance "[[\"$1\"],\"0x56BC75E2D63100000\"]" >/dev/null; }
+set_usdc() { rpc tenderly_setErc20Balance "[\"$USDC\",\"$1\",\"$(cast to-hex "$2")\"]" >/dev/null; }
+increase_time() { rpc evm_increaseTime "[\"$(cast to-hex "$1")\"]" >/dev/null; }
+now_ts() { cast block latest --field timestamp --rpc-url "$VNET" 2>>"$LOG"; }
+
+# ---------------------------------------------------------------- results
+
+init_results() { [ -f "$RESULTS" ] || echo '{"setup":{},"checks":[]}' >"$RESULTS"; }
+
+record() { # record <scenario> <check> <0|1> <value>
+  local flag=false
+  [ "$3" = 1 ] && flag=true
+  init_results
+  jq --arg s "$1" --arg c "$2" --argjson p "$flag" --arg v "$4" \
+    '.checks += [{scenario: $s, check: $c, pass: $p, value: $v}]' "$RESULTS" >"$RESULTS.tmp"
+  mv "$RESULTS.tmp" "$RESULTS"
+}
+
+setup_note() { # setup_note <key> <value>
+  init_results
+  jq --arg k "$1" --arg v "$2" '.setup[$k] = $v' "$RESULTS" >"$RESULTS.tmp"
+  mv "$RESULTS.tmp" "$RESULTS"
+}
+
+pass() { record "$SCEN" "$1" 1 "${2-}"; printf '  ok   %-44s %s\n' "$1" "${2-}"; }
+fail() { record "$SCEN" "$1" 0 "${2-}"; printf '  FAIL %-44s %s\n' "$1" "${2-}" >&2; FAILURES=$((FAILURES + 1)); }
+
+assert_eq() { # assert_eq <check> <actual> <expected>
+  if [ "$(echo "$2" | tr 'A-Z' 'a-z')" = "$(echo "$3" | tr 'A-Z' 'a-z')" ]; then
+    pass "$1" "$2"
+  else
+    fail "$1" "actual=$2 expected=$3"
+  fi
+}
+
+assert_gt() { # assert_gt <check> <a> <b>
+  if [ "$(bb "$2 > $3")" = 1 ]; then pass "$1" "$2 > $3"; else fail "$1" "$2 !> $3"; fi
+}
+
+assert_gte() { # assert_gte <check> <a> <b>
+  if [ "$(bb "$2 >= $3")" = 1 ]; then pass "$1" "$2 >= $3"; else fail "$1" "$2 !>= $3"; fi
+}
+
+assert_approx() { # assert_approx <check> <actual> <expected> <tolerance-bps>
+  if [ "$(bb "abs($2 - $3) * 10000 <= $4 * $3")" = 1 ]; then
+    pass "$1" "$2 ~ $3"
+  else
+    fail "$1" "actual=$2 expected=$3 tol=${4}bps"
+  fi
+}
+
+# ---------------------------------------------------------------- reverts
+
+_expect_revert() { # _expect_revert <send|call> <check> <want> <from> <to> <sig> [args...]
+  local mode=$1 check=$2 want=$3 from=$4 to=$5 out rc=0
+  shift 5
+  if [ "$mode" = send ]; then
+    out=$(cast send --rpc-url "$VNET" --unlocked --from "$from" "$to" "$@" 2>&1) || rc=$?
+  else
+    out=$(cast call --rpc-url "$VNET" --from "$from" "$to" "$@" 2>&1) || rc=$?
+  fi
+  if [ $rc -eq 0 ]; then
+    fail "$check" "succeeded, expected revert ${want:-any}"
+    return 0
+  fi
+  out=$(printf '%s' "$out" | tr '\n' ' ')
+  if [ -z "$want" ] || printf '%s' "$out" | grep -qiF -- "${want#0x}"; then
+    pass "$check" "${want:-reverted}"
+  else
+    fail "$check" "wanted ${want}, got: $(printf '%s' "$out" | cut -c1-240)"
+  fi
+}
+
+# expect_revert <check> <selector-or-substring> <from> <to> <sig> [args...]
+expect_revert() { _expect_revert send "$@"; }
+expect_call_revert() { _expect_revert call "$@"; }
+
+selector() { cast sig "$1"; }
+
+# ---------------------------------------------------------------- vnet actors
+
+# Addresses are derived per run so a rerun never collides with an account created by an earlier one.
+if [ -n "${CT11_RUN_ID:-}" ]; then
+  RUN_ID=$CT11_RUN_ID
+elif [ -f "$STATE_DIR/run-id" ]; then
+  RUN_ID=$(cat "$STATE_DIR/run-id")
+else
+  RUN_ID=$(date +%s)
+  echo "$RUN_ID" >"$STATE_DIR/run-id"
+fi
+
+actor() { printf '0x%s\n' "$(cast keccak "ct11:$RUN_ID:$1" | cut -c 27-66)"; }
+
+fund() { # fund <address> [usdc-amount]
+  set_eth "$1"
+  [ $# -gt 1 ] && set_usdc "$1" "$2"
+  return 0
+}
+
+ensure_approve() { # ensure_approve <owner> <token> <spender>
+  local cur
+  cur=$(call "$2" 'allowance(address,address)(uint256)' "$1" "$3")
+  [ "$cur" = "$MAX_UINT" ] && return 0
+  send "$1" "$2" 'approve(address,uint256)' "$3" "$MAX_UINT" >/dev/null
+}
+
+# ---------------------------------------------------------------- stock accounts
+
+token_status() { call "$STOCK_REGISTRY" 'tokenConfig(address)(uint8,uint8,address,address)' "$1"; }
+
+ensure_listed() { # ensure_listed <token> <pool>
+  [ "$(token_status "$1")" != "0" ] && return 0
+  send "$DEPLOYER" "$STOCK_REGISTRY" 'listToken(address,(uint8,uint8,address,address))' \
+    "$1" "(1,0,$2,0x0000000000000000000000000000000000000000)" >/dev/null
+}
+
+create_account() { # create_account <user> <entries-tuple-array> <cash-bps>
+  local acct
+  acct=$(call "$FACTORY" 'computeStrategyAddress(address)(address)' "$1")
+  if [ "$(cast code "$acct" --rpc-url "$VNET" 2>>"$LOG")" = "0x" ]; then
+    send "$1" "$FACTORY" 'createStrategyForUser(address,(address,uint16)[],uint16)' "$1" "$2" "$3" >/dev/null
+  fi
+  echo "$acct"
+}
+
+deposit_usdc() { # deposit_usdc <user> <account> <amount>
+  ensure_approve "$1" "$USDC" "$2"
+  send "$1" "$2" 'deposit(uint256)' "$3" >/dev/null
+}
+
+# Stock tokens cannot be minted, so an actor buys them on the stocks router and deposits them in kind.
+buy_and_deposit() { # buy_and_deposit <user> <account> <token> <tick-spacing> <usdc-in>
+  local before got
+  before=$(call "$3" 'balanceOf(address)(uint256)' "$1")
+  swap "$1" "$USDC" "$3" "$4" "$5" 0
+  got=$(bn "$(call "$3" 'balanceOf(address)(uint256)' "$1") - $before")
+  ensure_approve "$1" "$3" "$2"
+  send "$1" "$2" 'depositToken(address,uint256)' "$3" "$got" >/dev/null
+  echo "$got"
+}
+
+swap() { # swap <from> <tokenIn> <tokenOut> <tick-spacing> <amount-in> <sqrt-limit>
+  ensure_approve "$1" "$2" "$ROUTER"
+  send "$1" "$ROUTER" \
+    'exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))(uint256)' \
+    "($2,$3,$4,$1,$(bn "$(now_ts) + 3600"),$5,0,$6)" >/dev/null
+}
+
+event_word() { # event_word <receipt-json> <event-signature> <word-index>
+  local topic data
+  topic=$(cast keccak "$2")
+  data=$(printf '%s' "$1" | jq -r --arg t "$topic" '[.logs[] | select(.topics[0] == $t) | .data] | first // empty')
+  [ -n "$data" ] || { echo "event $2 not in receipt" >&2; return 1; }
+  bn "0x${data:$((2 + $3 * 64)):64}"
+}
+
+quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
+  call "$QUOTER" 'quoteExactInputSingle((address,address,uint256,int24,uint160))(uint256,uint160,uint32,uint256)' \
+    "($1,$2,$4,$3,0)"
+}
+
+expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint256)' "$1" "$2" "$3"; }
+nav() { call "$1" 'getNAV()(uint256)'; }
+sqrt_price() { calln 1 "$1" 'slot0()(uint160,int24,uint16,uint16,uint16,bool)'; }
+
+# ---------------------------------------------------------------- cow orders
+
+mk_order() { # mk_order <sellToken> <buyToken> <account> <sellAmount> <buyAmount> <validTo>
+  printf '(%s,%s,%s,%s,%s,%s,%s,0,%s,false,%s,%s)' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$APP_DATA" "$KIND_SELL" "$BALANCE_ERC20" "$BALANCE_ERC20"
+}
+
+order_digest() { call "$HELPER" "digest($ORDER_T,bytes32)(bytes32)" "$1" "$DOMAIN_SEPARATOR"; }
+order_encoded() { call "$HELPER" "encodeOrder($ORDER_T)(bytes)" "$1"; }
+
+check_signature() { # check_signature <account> <order>
+  call "$1" 'isValidSignature(bytes32,bytes)(bytes4)' "$(order_digest "$2")" "$(order_encoded "$2")"
+}
+
+settle_sell() { # settle_sell <account> <order> <sellAmount> <buyAmount>
+  send "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,uint256,uint256)" "$1" "$2" "$4" "$3" >/dev/null
+}
+
+# ---------------------------------------------------------------- scenario frame
+
+finish() {
+  echo "$SCEN: $FAILURES failed check(s)"
+  [ "$FAILURES" -eq 0 ] || exit 1
+  exit 0
+}
+
+load_helper() {
+  HELPER=$(jq -r '.setup.settlementHelper // empty' "$RESULTS" 2>/dev/null || true)
+  [ -n "$HELPER" ] || HELPER=$(cat "$STATE_DIR/helper" 2>/dev/null || true)
+  if [ -z "$HELPER" ] || [ "$(cast code "$HELPER" --rpc-url "$VNET" 2>>"$LOG")" = "0x" ]; then
+    echo "settlement helper not deployed; run prepare.sh" >&2
+    exit 1
+  fi
+  DOMAIN_SEPARATOR=$(call "$SETTLEMENT" 'domainSeparator()(bytes32)')
+  APP_DATA=$(call "$STOCK_REGISTRY" 'requiredAppDataHash()(bytes32)')
+  MAX_DEVIATION=$(call "$STOCK_REGISTRY" 'maxDeviationBps()(uint16)')
+}
