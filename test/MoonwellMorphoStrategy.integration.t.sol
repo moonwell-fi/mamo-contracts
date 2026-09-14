@@ -20,6 +20,7 @@ import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {IMarketRegistry, MarketType, RegistryMarket} from "@interfaces/IMarketRegistry.sol";
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {Surl} from "@surl/Surl.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
@@ -1557,6 +1558,8 @@ contract MoonwellMorphoStrategyTest is Test {
     function testSlippageAffectsPriceCheck() public {
         uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
+        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the slippage logic.
+        freshenRewardTokenPriceFeeds();
 
         // First check with default slippage (1%)
         uint256 defaultSlippage = 100; // 1%
@@ -1647,6 +1650,8 @@ contract MoonwellMorphoStrategyTest is Test {
     function testRevertIfPriceCheckFails() public {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
+        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the price check.
+        freshenRewardTokenPriceFeeds();
 
         vm.prank(owner);
         strategy.approveCowSwap(address(well), type(uint256).max);
@@ -2410,6 +2415,29 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
 
         return metaMorphoBalance + mTokenBalance + tokenBalance;
+    }
+
+    /**
+     * @notice Neutralize fork-time Chainlink staleness for every configured reward-token price feed.
+     * @dev Forked at `latest`, a feed can be past its heartbeat and SlippagePriceChecker's staleness
+     *      gate fires before the logic under test. Re-mocks only the timestamps, keeping real answers.
+     */
+    function freshenRewardTokenPriceFeeds() internal {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                address feed = addresses.getAddress(rewardToken.priceFeeds[j].priceFeed);
+
+                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+
+                vm.mockCall(
+                    feed,
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+                );
+            }
+        }
     }
 
     /**
