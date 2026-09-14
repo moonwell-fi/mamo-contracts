@@ -293,6 +293,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             }
         }
 
+        if (order.sellAmount > _available(sellToken)) revert SellExceedsBalance();
+
         _checkRange(
             sellToken,
             buyToken,
@@ -313,7 +315,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         (address[] memory tokens, uint256[] memory values, uint256 nav) = _valuation();
 
         uint256 sellHeld = _heldValue(tokens, values, sellToken);
-        if (sellValue > sellHeld) revert SellExceedsBalance();
+        if (sellValue > sellHeld) sellValue = sellHeld;
 
         uint256 navAfter = nav - sellValue + buyValue;
         uint256 dev = stockRegistry.maxDeviationBps();

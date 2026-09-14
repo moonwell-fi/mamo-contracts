@@ -11,6 +11,14 @@ via_ir = true
 [fmt]
 sort_imports = true
 
+[fuzz]
+runs = 256
+
+[invariant]
+runs = 64
+depth = 64
+fail_on_revert = false
+
 [rpc_endpoints]
 localhost = "http://127.0.0.1:8545"
 base = { endpoint= "${BASE_RPC_URL}", retries = 3, retry_backoff = 1000 }
