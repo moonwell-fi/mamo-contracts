@@ -7,8 +7,11 @@ import {DeployLeveragedAeroPooledSystem} from "../multisig/mamo-multisig/015_Dep
 import {LeveragedAeroVault} from "@contracts/LeveragedAeroVault.sol";
 import {MamoLeveragedAeroStrategy} from "@contracts/MamoLeveragedAeroStrategy.sol";
 import {MamoLeveragedAeroStrategyFactory} from "@contracts/MamoLeveragedAeroStrategyFactory.sol";
+import {BaseStrategy} from "@contracts/leveraged-aero/BaseStrategy.sol";
 import {LeveragedAeroManager} from "@contracts/leveraged-aero/LeveragedAeroManager.sol";
 import {LeveragedAerodromeCLStrategy} from "@contracts/leveraged-aero/LeveragedAerodromeCLStrategy.sol";
+
+import {DeployLeveragedAeroPoolConfig} from "@script/DeployLeveragedAeroPoolConfig.sol";
 
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -54,12 +57,17 @@ contract LeveragedAeroSystemSetupTest is Test {
     ///      set `borrowCaps(MOONWELL_cbBTC)` on Base from 9e9 to **1**, which Compound-v2's
     ///      `borrowAllowed` reads as "no new borrowing at any size" — so on HEAD-of-chain Base the
     ///      strategy's cbBTC borrow inside `activateStrategy` reverts "market borrow cap reached" and
-    ///      015 CANNOT EXECUTE. That is a live external blocker on the mainnet deploy, not a test
-    ///      artifact, and it is recorded here rather than papered over: the alternative — pinning HEAD
-    ///      and raising the cap as the `borrowCapGuardian` — would make this suite green over a
-    ///      deployment that reverts on the real chain. Before signing 015, ops must confirm
+    ///      015's `activate` stage CANNOT EXECUTE (its `bind` stage still can — see
+    ///      {test_bindStageShipsToday_activateStillBorrowCapBlocked}). That is a live external blocker,
+    ///      not a test artifact, and it is recorded here rather than papered over: the alternative —
+    ///      pinning HEAD and raising the cap as the `borrowCapGuardian` — would make this suite green
+    ///      over a deployment that reverts on the real chain. Before signing 015, ops must confirm
     ///      `borrowCaps(MOONWELL_cbBTC) - totalBorrows() > seed x targetLtvBps` in cbBTC terms.
     uint256 constant PINNED_BLOCK = 50_500_000;
+
+    /// @dev A RECENT, POST-FREEZE pin (2026-09-08 17:42 UTC) — `borrowCaps(MOONWELL_cbBTC)` reads 1 here,
+    ///      i.e. mainnet as it actually is on the day of the deploy.
+    uint256 constant POST_FREEZE_BLOCK = 51_050_000;
 
     uint256 constant USER_DEPOSIT = 5_000e6;
 
@@ -73,8 +81,14 @@ contract LeveragedAeroSystemSetupTest is Test {
     address user = makeAddr("leveragedAeroUser");
 
     function setUp() public {
+        _bootstrapAt(PINNED_BLOCK);
+    }
+
+    /// @dev The fork + address book + proposal instances. Factored out of {setUp} so the post-freeze
+    ///      test can rebuild the rig on its own pin — the proposal contracts live on the active fork.
+    function _bootstrapAt(uint256 forkBlock) internal {
         // PIN THE BLOCK (mandatory) — deterministic fork.
-        vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), forkBlock);
         // op-revm Isthmus operator-fee workaround (see LPAutoBalancerV2.integration.t.sol).
         vm.txGasPrice(0);
         vm.fee(0);
@@ -84,9 +98,9 @@ contract LeveragedAeroSystemSetupTest is Test {
         addresses = new Addresses("./addresses", chainIds);
         vm.makePersistent(address(addresses));
 
-        // MAMO_REBALANCER is an ops-held EOA, not committed by the deploy PR (see 015's NatSpec).
-        // isContract = false: it is a signer key, and FPS validates that eagerly.
-        addresses.addAddress("MAMO_REBALANCER", rebalancer, false);
+        // The committed MAMO_REBALANCER is the ops-held signer; the test swaps in its own EOA so
+        // it can prank the proposer legs. changeAddress, since the key ships in addresses/8453.json.
+        addresses.changeAddress("MAMO_REBALANCER", rebalancer, false);
 
         multisig = addresses.getAddress("MAMO_MULTISIG");
         usdc = addresses.getAddress("USDC");
@@ -108,6 +122,59 @@ contract LeveragedAeroSystemSetupTest is Test {
         _runAccountProposal();
         _proveUserLifecycle();
         _proveCompoundWiring();
+    }
+
+    /// @notice The day-1 deploy against mainnet AS IT IS: 015's `bind` stage executes under the
+    ///         borrow-cap freeze, the result is inert, and `activate` is the only part the freeze blocks.
+    /// @dev Post-freeze pin, unlike the full-mode case above — the negative that pin cannot show. If
+    ///      Moonwell restores the caps, part 3 stops reverting and this fails: the signal to `activate`.
+    function test_bindStageShipsToday_activateStillBorrowCapBlocked() public {
+        _bootstrapAt(POST_FREEZE_BLOCK);
+        DeployLeveragedAeroPoolConfig.Config memory cfg = pooled.deployConfig().getConfig();
+
+        // ── 1. the bind stage: deploy + cloneAndBind + setMaxTotalAssets, all of it live ──
+        pooled.setStage(DeployLeveragedAeroPooledSystem.Stage.Bind);
+        pooled.deploy();
+        pooled.preBuildMock();
+        pooled.build();
+        pooled.simulate();
+        pooled.validate();
+
+        LeveragedAeroVault vault = LeveragedAeroVault(addresses.getAddress("LEVERAGED_AERO_VAULT"));
+        LeveragedAerodromeCLStrategy clone = _clone();
+        assertEq(vault.strategy(), address(clone), "bind bound the clone");
+        assertEq(uint256(clone.state()), uint256(BaseStrategy.State.Pending), "bind leaves the strategy Pending");
+        assertEq(vault.maxTotalAssets(), cfg.maxTotalAssets, "bind set the capacity ceiling");
+
+        // ── 2. inert: an un-activated fund can take no capital ──
+        deal(usdc, user, USER_DEPOSIT);
+        vm.startPrank(user);
+        IERC20(usdc).approve(address(clone), USER_DEPOSIT);
+        vm.expectRevert(BaseStrategy.NotExecuted.selector);
+        clone.deposit(USER_DEPOSIT, 0);
+        vm.stopPrank();
+        assertEq(vault.totalSupply(), 0, "no shares issued while Pending");
+
+        // ── 3. the activate stage cannot execute under the cap ──
+        // A second instance: FPS accumulates `actions`, so the bind one would re-encode its own.
+        DeployLeveragedAeroPooledSystem activateRun = new DeployLeveragedAeroPooledSystem();
+        activateRun.setPrimaryForkId(vm.activeFork());
+        activateRun.setAddresses(addresses);
+        activateRun.setStage(DeployLeveragedAeroPooledSystem.Stage.Activate);
+
+        // Its preconditions hold — the vault is bound and Pending, the multisig holds the seed.
+        activateRun.preBuildMock();
+        assertGe(IERC20(usdc).balanceOf(multisig), cfg.seed, "activate stage funded the seed");
+
+        // `build()` is where the freeze bites: FPS records actions by EXECUTING them, so this is the
+        // real `activateStrategy`, and `borrowAllowed`'s cap check rejects the leg-A borrow with a
+        // `require` — `_borrowLegA`'s Compound error-code branch is never reached.
+        vm.expectRevert("market borrow cap reached");
+        activateRun.build();
+
+        // Unchanged by the failed activation: still Pending, still no shares.
+        assertEq(uint256(clone.state()), uint256(BaseStrategy.State.Pending), "failed activate left it Pending");
+        assertEq(vault.totalSupply(), 0, "failed activate minted nothing");
     }
 
     function _clone() internal view returns (LeveragedAerodromeCLStrategy) {

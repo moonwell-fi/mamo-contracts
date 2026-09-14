@@ -5,7 +5,7 @@ import {LeveragedAeroManager} from "./LeveragedAeroManager.sol";
 import {LeveragedAeroValuation} from "./LeveragedAeroValuation.sol";
 import {LeveragedAerodromeCLStrategy} from "./LeveragedAerodromeCLStrategy.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
-import {ICToken, IComptroller, IMoonwellMarket} from "./interfaces/IMoonwellMarket.sol";
+import {ICToken, IComptroller, IMoonwellMarket, IMoonwellPriceOracle} from "./interfaces/IMoonwellMarket.sol";
 import {ICLFactory, ICLGauge, ICLPool} from "./interfaces/ISlipstream.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -69,6 +69,8 @@ library LeveragedAeroVenue {
     ///         signatures (same `topic0`), since both routes log from the strategy's address.
     event MaxLtvUpdated(uint16 previousBps, uint16 newBps);
     event WidthBoundsUpdated(uint24 previousMinWidth, uint24 previousMaxWidth, uint24 newMinWidth, uint24 newMaxWidth);
+    /// @notice The permissionless-deleverage trigger moved: it sits at `LTV = 1e8 / minHealthBps`.
+    event MinHealthUpdated(uint16 previousBps, uint16 newBps);
 
     /// @notice An async-redeem request was escrowed. Re-declared with the strategy's signature (same `topic0`).
     event RedeemRequested(uint256 indexed id, address indexed owner, address indexed recipient, uint256 shares);
@@ -183,7 +185,7 @@ library LeveragedAeroVenue {
         uint128 hedgedDebtA; // leg-A borrowed PRINCIPAL the LP hedges (packs with hedgedDebtB below)
         uint128 hedgedDebtB; // leg-B borrowed principal the LP hedges (0 in asset-mode: leg B never borrows)
         // ── LAST field: appended for the owner-staged venue migration (keep byte-identical) ──
-        bytes32 stagedVenueHash; // keccak256(abi.encode(VenueParams)) staged by the vault owner; 0 == none
+        bytes32 stagedVenueHash; // keccak256(abi.encode(paramsHash, stagingOwner)); 0 == none; owner move suspends
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("leveraged.aero.cl.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -241,10 +243,11 @@ library LeveragedAeroVenue {
         _redeemUnderlying(_layout().mUsdc, amount);
     }
 
-    /// @dev With USDC the sole collateral, `getAccountLiquidity` returns 18dp `C·CF − D` (or a shortfall),
-    ///      so `D = C·CF − liquidity + shortfall`, with `C` read oracle-free off the cToken books and USDC
-    ///      taken at face — a DEpeg only tightens the bound. CF is read LIVE, not from the stored copy a
-    ///      governance raise would leave loose; both reads fail closed `ComptrollerCallFailed`.
+    /// @dev With USDC the sole collateral, `getAccountLiquidity` returns 18dp `C·CF − D` (or a shortfall), so
+    ///      `D = C·CF − liquidity + shortfall` — but in USDC FACE, the basis `targetLtvBps` is measured on, so
+    ///      the 18dp USD terms are divided by the SAME USDC price the venue just priced them with and the peg
+    ///      factor cancels exactly. CF is read LIVE; the comptroller reads fail closed
+    ///      `ComptrollerCallFailed`, and a zero oracle price panics on the division.
     function _unleveredAtVenueOracle() private view returns (uint256) {
         Layout storage $ = _layout();
         uint256 c = (ICToken($.mUsdc).balanceOf(address(this)) * ICToken($.mUsdc).exchangeRateStored()) / 1e18;
@@ -252,8 +255,10 @@ library LeveragedAeroVenue {
         (uint256 err, uint256 liquidity, uint256 shortfall) =
             IComptroller($.comptroller).getAccountLiquidity(address(this));
         if (err != 0) revert ComptrollerCallFailed();
-        uint256 dVenue = (c * cf) / 10_000 + shortfall / 1e12;
-        uint256 liqFace = liquidity / 1e12; // 18dp USD → 6dp USDC face at $1
+        // `1e(36−decimals)`-scaled, so `usd18 × 1e18 / p` is USDC face for any underlying decimals.
+        uint256 p = IMoonwellPriceOracle(IComptroller($.comptroller).oracle()).getUnderlyingPrice($.mUsdc);
+        uint256 dVenue = (c * cf) / 10_000 + (shortfall * 1e18) / p;
+        uint256 liqFace = (liquidity * 1e18) / p;
         dVenue = dVenue > liqFace ? dVenue - liqFace : 0;
         return _unleveredFrom(c, dVenue);
     }
@@ -431,10 +436,14 @@ library LeveragedAeroVenue {
 
     // ── Migration ops (auth + state gates live in the strategy's entry points) ──
 
-    /// @notice Stage `venueHash` as the committed destination venue (0 clears). Staging is inert — no
-    ///         live venue state, position or share pricing changes until `migrateImpl` consumes it.
-    function stageImpl(bytes32 venueHash) public {
-        _layout().stagedVenueHash = venueHash;
+    /// @notice Stage `venueHash` as the committed destination venue (0 clears), BOUND to `stagingOwner`
+    ///         so a vault-owner rotation SUSPENDS it (re-arms if ownership returns — `stageVenue(0)`
+    ///         before a handover). Inert: no venue state, position or pricing change until `migrateImpl`.
+    /// @dev `0` must stay the "nothing staged" sentinel, so the clear path is NOT bound. The event
+    ///      carries the RAW hash: off-chain, recompute the stored value with the live vault owner.
+    function stageImpl(bytes32 venueHash, address stagingOwner) public {
+        _layout().stagedVenueHash =
+            venueHash == bytes32(0) ? bytes32(0) : keccak256(abi.encode(venueHash, stagingOwner));
         emit VenueStaged(venueHash);
     }
 
@@ -443,7 +452,10 @@ library LeveragedAeroVenue {
     ///         no push-to-vault and no state transition — the strategy stays `Executed`, so deposits/redeems keep working
     ///         against the flat book (NAV == idle USDC, no oracle).
     /// @dev Unwind-swap slippage is Chainlink-floored inside `settleImpl` via `maxSlippageBps`, so a down
-    ///      oracle fail-closes the flatten. Idempotent on an already-flat book.
+    ///      oracle fail-closes the flatten. Idempotent on a flat book whose reward balance is empty or
+    ///      inside the dust band; a balance ABOVE that band is a real tranche (a donation included), so
+    ///      always quote a nonzero `minRewardUsdcOut` — `flatten(1, …)` clears it, and the post-checked
+    ///      oracle floor is the real guard.
     function flattenImpl(uint256 minRewardUsdcOut, uint256 minIdleUsdcOut) public {
         Layout storage $ = _layout();
         // CALM GATE FIRST — never unwind at a manipulated tick. `settleImpl` has none of its own (it was
@@ -482,12 +494,14 @@ library LeveragedAeroVenue {
 
     /// @dev Floored exactly as `compoundImpl`'s harvest is: `max(caller minOut, oracle floor)`, the floor a
     ///      hardened 8dp `aeroUsdFeed` read haircut by `maxSlippageBps` and post-checked against the
-    ///      MEASURED fill so a dishonest router cannot widen it. No-op on an empty balance (which keeps
-    ///      `flatten` idempotent) and on dust whose floor rounds to 0 — without that a 1e6-wei donation
-    ///      would brick `flatten`, and so `migrateVenue`, permanently.
+    ///      MEASURED fill so a dishonest router cannot widen it. No-op on an empty balance and on dust
+    ///      whose floor rounds to 0 — without that a 1e6-wei donation would brick `flatten`, and so
+    ///      `migrateVenue`, permanently. Above that band a zero `minRewardUsdcOut` reverts `ZeroMinOut`,
+    ///      so only the empty/dust cases make `flatten` idempotent.
     /// @param minRewardUsdcOut Caller's own floor on the fill (the oracle floor applies on top).
     /// @param callerFloorRequired Whether a zero `minRewardUsdcOut` is a caller error: TRUE for `flatten`,
-    ///        FALSE for the terminal settle, which has no argument to supply.
+    ///        FALSE for the terminal settle AND the async redeem unwind (`redeemUnwindImpl` via
+    ///        `sellRewardImpl`), neither of which has an argument to supply.
     /// @param skim Pay the fund's fee out of this sale — TRUE for `flatten` and the async redeem, both of
     ///        which realize the WHOLE book's accrual; FALSE for the terminal settle. See `compoundImpl`.
     function _sellRewardBalance(uint256 minRewardUsdcOut, bool callerFloorRequired, bool skim) private {
@@ -536,16 +550,18 @@ library LeveragedAeroVenue {
     ///         field touches, so share pricing is continuous across it.
     /// @dev The flat-book gate is deliberately NOT extended to residual collateral or token balances, which
     ///      are rescuable and where a 1-wei donation must not brick a migration.
-    function migrateImpl(VenueParams memory p) public {
+    function migrateImpl(VenueParams memory p, address currentOwner) public {
         Layout storage $ = _layout();
         bytes32 staged = $.stagedVenueHash;
-        if (staged == bytes32(0) || keccak256(abi.encode(p)) != staged) revert VenueNotStaged();
+        if (staged == bytes32(0) || keccak256(abi.encode(keccak256(abi.encode(p)), currentOwner)) != staged) {
+            revert VenueNotStaged();
+        }
         if ($.tokenId != 0 || $.hedgedDebtA != 0 || $.hedgedDebtB != 0) revert BookNotFlat();
         if (IMoonwellMarket($.mCbBTC).borrowBalanceStored(address(this)) != 0) revert BookNotFlat();
         if (IMoonwellMarket($.mWeth).borrowBalanceStored(address(this)) != 0) revert BookNotFlat();
         address oldPool = $.pool;
         applyVenue(p);
-        $.stagedVenueHash = bytes32(0);
+        _clearStagedVenue($); // announced, or a stage-tracking indexer shows a phantom armed stage here
         emit VenueMigrated(oldPool, p.pool);
     }
 
@@ -687,7 +703,7 @@ library LeveragedAeroVenue {
         // The lower bound is the only rung not mirrored in that ladder, and `applyVenue` is the shared route
         // for init and migrate, so it closes every path to a stored zero target — a fund that can never lever.
         if (p.targetLtvBps == 0) revert TargetLtvZero();
-        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps);
+        LeveragedAeroValuation.checkLtvBand(p.targetLtvBps, p.maxLtvBps, p.minHealthBps, cfBps, true);
 
         // ── Persist the venue subset (every field a pool/pair change touches, nothing else) ──
         $.mCbBTC = p.mCbBTC;
@@ -713,10 +729,11 @@ library LeveragedAeroVenue {
         // The target LTV is the one venue field that is also POLICY, so announce it or a migration becomes
         // the one route that moves leverage policy in silence. Guarded on inequality, so the event means
         // "policy moved", not "a migration happened"; at init it is trivially true, announcing the opener.
-        // Same argument for the ceiling and the band above: `VenueMigrated` carries only the two pools, so
+        // Same argument for the ceiling, the band and the floor below: `VenueMigrated` carries only the pools,
         // without these a migration moves them in silence past a monitor keyed on the setters' events.
         if ($.targetLtvBps != p.targetLtvBps) emit TargetLtvUpdated($.targetLtvBps, p.targetLtvBps);
         if ($.maxLtvBps != p.maxLtvBps) emit MaxLtvUpdated($.maxLtvBps, p.maxLtvBps);
+        if ($.minHealthBps != p.minHealthBps) emit MinHealthUpdated($.minHealthBps, p.minHealthBps);
         $.targetLtvBps = p.targetLtvBps;
         $.maxLtvBps = p.maxLtvBps;
         $.minHealthBps = p.minHealthBps;
@@ -727,7 +744,7 @@ library LeveragedAeroVenue {
         $.legBIsAsset = legBIsAsset_;
     }
 
-    // ── Bodies of the strategy's three admin policy setters, hosted here for its EIP-170 budget ──
+    // ── Bodies of the strategy's four admin policy setters, hosted here for its EIP-170 budget ──
 
     /// @dev A staged hash authorises a venue whose params carry a `maxLtvBps` / width band / target the
     ///      owner picked under the policy standing AT STAGE TIME. An admin write moves that policy, so the
@@ -757,9 +774,20 @@ library LeveragedAeroVenue {
     function setMaxLtvImpl(uint16 maxLtvBps_) public {
         Layout storage $ = _layout();
         uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
-        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps);
+        bool loosening = maxLtvBps_ > $.maxLtvBps;
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, maxLtvBps_, $.minHealthBps, cfBps, loosening);
         emit MaxLtvUpdated($.maxLtvBps, maxLtvBps_);
         $.maxLtvBps = maxLtvBps_;
+        _clearStagedVenue($);
+    }
+
+    /// @notice The BODY of `LeveragedAerodromeCLStrategy.setMinHealth`, on `setMaxLtvImpl`'s exact ladder.
+    function setMinHealthImpl(uint16 minHealthBps_) public {
+        Layout storage $ = _layout();
+        uint16 cfBps = LeveragedAeroValuation.readCollateralFactor($.comptroller, $.mUsdc);
+        LeveragedAeroValuation.checkLtvBand($.targetLtvBps, $.maxLtvBps, minHealthBps_, cfBps, true);
+        emit MinHealthUpdated($.minHealthBps, minHealthBps_);
+        $.minHealthBps = minHealthBps_;
         _clearStagedVenue($);
     }
 

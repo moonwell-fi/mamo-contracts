@@ -433,5 +433,10 @@
     "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
     "name": "CHAINLINK_BASE_SEQUENCER_UPTIME",
     "isContract": true
+  },
+  {
+    "addr": "0xA0510b5323E127346A6D8Bbd6556032A8Ca59a37",
+    "name": "MAMO_REBALANCER",
+    "isContract": false
   }
 ]

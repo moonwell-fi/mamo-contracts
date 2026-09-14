@@ -373,10 +373,12 @@ predict the route from position health alone — trust `previewWithdraw`'s `fast
 
 ---
 
-## Flow 3 — async withdraw (request → pending → claim)
+## Flow 3 — async withdraw (request → pending → paid)
 
 For sizes the fast path can't serve, or when the oracle is down, the owner escrows shares into a request;
-the **rebalancer** fulfils it; the USDC lands **on the account** as idle balance; the owner sweeps it.
+the **rebalancer** fulfils it and the strategy pays the USDC **straight to the recipient frozen at request
+time** — the account passes `owner()` as that recipient, so it is the user's own wallet. There is no claim
+step (see step 3 below).
 
 > **Who fulfils:** `fulfillRedeem` is `onlyProposer` on the strategy, and the proposer is the dedicated
 > **rebalancer** address — **not** the Mamo backend. The backend drives the account layer
@@ -410,7 +412,9 @@ function syncRedeemRequests() external;                               // onlyOwn
 > `transferOwnership` while a request is outstanding still pays the address that asked — on BOTH
 > settlement paths (`emergencyWithdraw` forwards to that same frozen recipient, not to the new owner).
 > The new owner's remedy is `cancelWithdraw(id)` (the shares return to the account) and a fresh
-> `requestWithdraw`, which re-freezes the recipient on them.
+> `requestWithdraw`, which re-freezes the recipient on them. Put plainly: transferring account ownership
+> while a request is open leaves that request's payout with the recipient frozen at request time, so cancel
+> any open request before handing an account over.
 
 ```mermaid
 sequenceDiagram
@@ -454,7 +458,9 @@ the account's idle USDC balance:
 ## Flow 4 — emergency deadman withdraw
 
 If the rebalancer never fulfils a request, after a **2-day** fulfill window the owner can trustlessly
-self-service the request; USDC is forwarded to the owner in the same tx.
+self-service the request; the USDC is forwarded in the same tx to the recipient **frozen at request
+time** — the account reads `redeemRequest(id).recipient` and pays that address, exactly as a fulfil does,
+never the current `owner()`.
 
 ```solidity
 function emergencyWithdraw(uint256 id, uint256 minAssetsOut) external returns (uint256 assetsOut); // onlyOwner

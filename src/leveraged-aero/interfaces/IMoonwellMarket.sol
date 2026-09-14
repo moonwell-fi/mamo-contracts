@@ -66,4 +66,14 @@ interface IComptroller {
         external
         view
         returns (uint256 err, uint256 liquidity, uint256 shortfall);
+
+    /// @notice The price oracle `getAccountLiquidity` prices every entered market with.
+    function oracle() external view returns (address);
+}
+
+/// @notice Moonwell's Comptroller price oracle — on Base a live Chainlink passthrough, NOT a $1 pin for
+///         stables.
+interface IMoonwellPriceOracle {
+    /// @notice Underlying price of `mToken`, scaled `1e(36 − underlyingDecimals)` (USDC, 6dp ⇒ 1e30 at $1).
+    function getUnderlyingPrice(address mToken) external view returns (uint256);
 }

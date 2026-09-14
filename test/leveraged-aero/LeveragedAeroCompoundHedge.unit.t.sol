@@ -605,6 +605,28 @@ contract LeveragedAeroCompoundHedgeUnitTest is Test {
         assertApproxEqAbs(_driftLegA(), 0, 100, "harvest clears the surviving drift");
     }
 
+    /// @dev The sibling pro-rata site: a partial `adjustLeverage` sheds `f` of the LP and repays `f` of the
+    ///      debt, so the same `(1−f)` of the drift must survive measured — not be re-anchored away by the clamp.
+    function testPartialLeverDownScalesTheHedgedBasisSoSurvivingDriftStaysMeasured() public {
+        _armBook();
+        uint256 interest = _debtLegA() / 200;
+        mLegA.accrueBorrowInterest(address(strategy), interest);
+        uint256 debtBefore = _debtLegA();
+
+        vm.prank(proposer);
+        strategy.adjustLeverage(2500, 0, 0);
+
+        uint256 debtAfter = _debtLegA();
+        assertGt(debtAfter, 0, "not a full unwind");
+        assertApproxEqRel(
+            _driftLegA(), Math.mulDiv(interest, debtAfter, debtBefore), 1e15, "surviving drift == (1-f) x drift"
+        );
+
+        _armRewards(20_000e18);
+        _compound(1);
+        assertApproxEqAbs(_driftLegA(), 0, 100, "harvest clears the surviving drift");
+    }
+
     /// @dev A rerange leaves part of the hedge as an IDLE leg-A remainder rather than inside the LP. The
     ///      accounting basis is indifferent to that (it tracks principal, not composition), so the drift
     ///      measure stays 0 — which an `lpLegA`-based measure would have mis-read as a huge short.

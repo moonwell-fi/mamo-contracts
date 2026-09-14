@@ -51,8 +51,27 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *      DEPOSITS STAY CLOSED HERE. `depositsOpen` is false at construction and 012 is what opens it, so
  *      between the two executions the fund holds only the multisig's seed and can take no third-party
  *      capital. Exits (`strategyBurn`) are never gated on that flag.
+ *
+ *      STAGES (`PROPOSAL_STAGE`, default `full`). Since Base block 50,519,338 Moonwell holds every
+ *      `borrowCaps` entry at **1**, which Compound-v2's `borrowAllowed` reads as "no new borrowing at
+ *      any size" — so `activateStrategy`, whose `execute()` borrows leg A, cannot execute until that
+ *      lifts, while everything before it can (the init ladder only reads and probes). Hence:
+ *        - `bind`     — `cloneAndBind` + `setMaxTotalAssets`; no seed, no activation. Ships day 1, and
+ *                       leaves the strategy `Pending`, i.e. INERT — `deposit` reverts `NotExecuted`.
+ *        - `activate` — the seed approval + `activateStrategy` against the ALREADY-BOUND vault.
+ *        - `full`     — both in one execution. The DEFAULT, and what a post-unfreeze deploy signs.
+ *      ORDER: `bind` now, then `activate` once caps restore, reading the address book `bind` committed
+ *      (`LEVERAGED_AERO_STRATEGY` is only knowable there) and only once
+ *      `borrowCaps(MOONWELL_cbBTC) - totalBorrows() > seed x targetLtvBps` in cbBTC.
  */
 contract DeployLeveragedAeroPooledSystem is MultisigProposal {
+    /// @notice Which slice of the multisig actions a run executes; see the contract NatSpec.
+    enum Stage {
+        Full,
+        Bind,
+        Activate
+    }
+
     DeployLeveragedAeroPoolConfig public immutable deployConfig;
     LeveragedAeroPoolDeployer public immutable poolDeployer;
 
@@ -98,6 +117,27 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         "Deploy the LeveragedAerodromeCLStrategy template and the LeveragedAeroVault, clone+bind a strategy against the cbBTC/USDC asset-mode venue book, set the fund capacity ceiling, and activate it with the seed";
     }
 
+    /// @dev Per-instance override of `PROPOSAL_STAGE`; the env is process-global, so parallel tests must pin it here.
+    Stage private _stageOverride;
+    bool private _stageOverridden;
+
+    function setStage(Stage s) external {
+        _stageOverride = s;
+        _stageOverridden = true;
+    }
+
+    /// @notice The stage this run executes. Read on EVERY entrypoint, not cached at construction, so one
+    ///         process can move between stages between calls.
+    function stage() public view returns (Stage) {
+        if (_stageOverridden) return _stageOverride;
+        bytes32 s = keccak256(bytes(vm.envOr("PROPOSAL_STAGE", string("full"))));
+        if (s == keccak256(bytes("full"))) return Stage.Full;
+        if (s == keccak256(bytes("bind"))) return Stage.Bind;
+        if (s == keccak256(bytes("activate"))) return Stage.Activate;
+        revert("015: PROPOSAL_STAGE must be full, bind or activate");
+    }
+
+    /// @dev Stage-independent: {LeveragedAeroPoolDeployer} reuses an already-recorded template/vault.
     function deploy() public override {
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         poolDeployer.deployTemplateAndVault(addresses, deployConfig.getConfig(), deployer);
@@ -107,23 +147,38 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         DeployLeveragedAeroPoolConfig.Config memory cfg = deployConfig.getConfig();
         address multisig = addresses.getAddress("MAMO_MULTISIG");
         LeveragedAeroVault vault = LeveragedAeroVault(addresses.getAddress(vaultKey));
+        // Read BEFORE any `vm.expectRevert` below — `envOr` is a cheatcode call and would consume it.
+        Stage s = stage();
 
-        // The vault's strategy pointer is SET-ONCE (`cloneAndBind` is the only writer and `_bind`
-        // requires `strategy == address(0)`), so a vault that is already bound makes this proposal
-        // unexecutable. Assert it here rather than discovering it as a revert inside `simulate`.
-        assertEq(vault.strategy(), address(0), "Vault already has a strategy bound");
         assertEq(vault.owner(), multisig, "Vault owner should be MAMO_MULTISIG");
         assertEq(vault.asset(), addresses.getAddress(cfg.token), "Vault asset should be the configured token");
         assertFalse(vault.depositsOpen(), "Deposits should still be closed (012 opens them)");
 
-        // The template must be permanently locked against `initialize`: its constructor sets
-        // `_initialized`, and clones — which skip constructors — are what stay initializable. A template
-        // deployed some other way (e.g. cloned itself) would let someone else's init win the race.
-        // Resolve BEFORE arming the cheatcode: `getAddress` is itself an external call and would
-        // consume the expectation.
-        address template = addresses.getAddress(templateKey);
-        vm.expectRevert(BaseStrategy.AlreadyInitialized.selector);
-        IStrategy(template).initialize(address(this), address(this), "");
+        if (s == Stage.Activate) {
+            // The `activate` stage does not bind: it activates what the `bind` run left Pending.
+            address bound = vault.strategy();
+            assertTrue(bound != address(0), "Vault has no strategy bound; run the bind stage first");
+            assertEq(
+                uint256(LeveragedAerodromeCLStrategy(payable(bound)).state()),
+                uint256(BaseStrategy.State.Pending),
+                "Bound strategy is not Pending (already activated?)"
+            );
+        } else {
+            // The vault's strategy pointer is SET-ONCE (`cloneAndBind` is the only writer and `_bind`
+            // requires `strategy == address(0)`), so a vault that is already bound makes this stage
+            // unexecutable. Assert it here rather than discovering it as a revert inside `simulate`.
+            assertEq(vault.strategy(), address(0), "Vault already has a strategy bound");
+
+            // The template must be permanently locked against `initialize`: its constructor sets
+            // `_initialized`, and clones — which skip constructors — are what stay initializable. A
+            // template deployed some other way (e.g. cloned itself) would let someone else's init win.
+            address template = addresses.getAddress(templateKey);
+            vm.expectRevert(BaseStrategy.AlreadyInitialized.selector);
+            IStrategy(template).initialize(address(this), address(this), "");
+        }
+
+        // The seed is only moved by the stages that activate; `bind` needs no capital at all.
+        if (s == Stage.Bind) return;
 
         // Fund the seed for SIMULATION only: on mainnet the multisig genuinely holds the USDC, and this
         // `deal` is a no-op there in the sense that it overwrites a balance that is already sufficient.
@@ -135,19 +190,22 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
         DeployLeveragedAeroPoolConfig.Config memory cfg = deployConfig.getConfig();
         LeveragedAeroVault vault = LeveragedAeroVault(addresses.getAddress(vaultKey));
+        Stage s = stage();
 
         // 1. Approve the seed to the VAULT: `activateStrategy` pulls it from the caller.
-        IERC20(addresses.getAddress(cfg.token)).approve(address(vault), cfg.seed);
+        if (s != Stage.Bind) IERC20(addresses.getAddress(cfg.token)).approve(address(vault), cfg.seed);
 
-        // 2. Clone the template, initialize it against this vault with the venue book, and bind it —
-        //    one atomic call, so no third party can initialize the clone in between.
-        vault.cloneAndBind(addresses.getAddress(templateKey), addresses.getAddress(cfg.rebalancer), _initData());
+        if (s != Stage.Activate) {
+            // 2. Clone the template, initialize it against this vault with the venue book, and bind it —
+            //    one atomic call, so no third party can initialize the clone in between.
+            vault.cloneAndBind(addresses.getAddress(templateKey), addresses.getAddress(cfg.rebalancer), _initData());
 
-        // 3. Capacity ceiling before any deposit is possible (see the contract NatSpec).
-        vault.setMaxTotalAssets(cfg.maxTotalAssets);
+            // 3. Capacity ceiling before any deposit is possible (see the contract NatSpec).
+            vault.setMaxTotalAssets(cfg.maxTotalAssets);
+        }
 
         // 4. Seed + Pending -> Executed, minting the multisig the genesis shares backing the seed.
-        vault.activateStrategy(cfg.seed);
+        if (s != Stage.Bind) vault.activateStrategy(cfg.seed);
     }
 
     function simulate() public override {
@@ -155,9 +213,12 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         _simulateActions(multisig);
 
         // The clone address only exists once `cloneAndBind` has actually executed, so this is the
-        // earliest point the key can be written. 012 resolves it under exactly this key.
+        // earliest point the key can be written. 012 resolves it under exactly this key. An unchanged
+        // pointer is left alone: the `activate` stage inherits the key, and `changeAddress` rejects a
+        // same-value write.
         address clone = LeveragedAeroVault(addresses.getAddress(vaultKey)).strategy();
         if (addresses.isAddressSet(strategyKey)) {
+            if (addresses.getAddress(strategyKey) == clone) return;
             addresses.changeAddress(strategyKey, clone, true);
         } else {
             addresses.addAddress(strategyKey, clone, true);
@@ -179,14 +240,36 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         assertEq(vault.name(), cfg.vaultName, "Vault name should be the configured vaultName");
         assertEq(vault.symbol(), cfg.vaultSymbol, "Vault symbol should be the configured vaultSymbol");
 
-        // Genesis state: Executed, seeded, and the seeder holds the genesis shares.
-        this.validateGenesis(vault, clone);
+        // Bind-time wiring — true from `cloneAndBind` onward, in every stage.
+        assertEq(IStrategy(clone).proposer(), addresses.getAddress(cfg.rebalancer), "Proposer should be the rebalancer");
+        assertEq(vault.maxTotalAssets(), cfg.maxTotalAssets, "Capacity ceiling mismatch");
+        assertFalse(vault.depositsOpen(), "Deposits should still be closed (012 opens them)");
+
+        // Lifecycle: `bind` leaves an inert Pending strategy; the other stages activate it.
+        if (stage() == Stage.Bind) this.validatePending(vault, clone);
+        else this.validateGenesis(vault, clone);
 
         // Every `InitParams` field, read back off the clone's own storage. Split into `this.` external
         // views so via_ir compiles each in its own frame — `layout()` returns a 48-field struct and
         // inlining all of these into `validate()` overflows the stack.
         this.validateVenue(clone);
         this.validateRiskAndRange(clone);
+    }
+
+    /// @dev `bind`-stage post-conditions: wired, but not a live book — nothing borrowed, nothing LP'd,
+    ///      no shares, which with the `NotExecuted` gate is why an un-activated fund can take no capital.
+    function validatePending(LeveragedAeroVault vault, address clone) public view {
+        LeveragedAerodromeCLStrategy.LayoutView memory v = LeveragedAerodromeCLStrategy(payable(clone)).layout();
+
+        assertEq(
+            uint256(LeveragedAerodromeCLStrategy(payable(clone)).state()),
+            uint256(BaseStrategy.State.Pending),
+            "Clone should still be Pending after the bind stage"
+        );
+        assertEq(vault.totalSupply(), 0, "No shares should exist before activation");
+        assertEq(v.tokenId, 0, "No LP position before activation");
+        assertEq(uint256(v.hedgedDebtA), 0, "No leg-A debt before activation");
+        assertEq(uint256(v.hedgedDebtB), 0, "No leg-B debt before activation");
     }
 
     /// @dev Lifecycle + share-ledger post-conditions of `activateStrategy`.
@@ -199,9 +282,6 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
             uint256(BaseStrategy.State.Executed),
             "Clone should be Executed"
         );
-        assertEq(IStrategy(clone).proposer(), addresses.getAddress(cfg.rebalancer), "Proposer should be the rebalancer");
-        assertEq(vault.maxTotalAssets(), cfg.maxTotalAssets, "Capacity ceiling mismatch");
-        assertFalse(vault.depositsOpen(), "Deposits should still be closed (012 opens them)");
 
         // Genesis shares: `seed * 10 ** (vault.decimals() - assetDecimals)`, i.e. seed * 1e6 for USDC.
         uint256 genesisShares = cfg.seed * 1e6;
@@ -214,6 +294,7 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         uint256 nav = LeveragedAerodromeCLStrategy(payable(clone)).nav();
         assertGe(nav, (cfg.seed * 98) / 100, "NAV should be within 2% below the seed");
         assertLe(nav, (cfg.seed * 102) / 100, "NAV should be within 2% above the seed");
+        assertGt(LeveragedAerodromeCLStrategy(payable(clone)).layout().tokenId, 0, "genesis mint minted an LP");
     }
 
     /// @dev Token / venue / feed wiring, plus the three asset-mode pins.
@@ -280,9 +361,9 @@ contract DeployLeveragedAeroPooledSystem is MultisigProposal {
         // Read off the live Moonwell market rather than the config: the collateral factor is the
         // ceiling `maxLtvBps` was chosen against, and it can move under governance.
         assertLt(uint256(v.maxLtvBps), uint256(v.usdcCollateralFactorBps), "maxLtvBps must stay under the CF");
-        // No position staged for migration, and the genesis mint produced a real LP token.
+        // No position staged for migration. (The LP token is a genesis post-condition — see
+        // {validateGenesis} — since `bind` mints nothing.)
         assertEq(v.stagedVenueHash, bytes32(0), "no venue staged at genesis");
-        assertGt(v.tokenId, 0, "genesis mint should have produced an LP position");
     }
 
     /// @dev Build `InitParams` field-by-field, sourced from the config + address book. Assignments
