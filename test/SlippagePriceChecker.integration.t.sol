@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 
+import {SlippagePriceCheckerOracleHardening} from
+    "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
 import {BaseTest} from "./BaseTest.t.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
@@ -75,6 +77,43 @@ contract SlippagePriceCheckerTest is BaseTest {
 
         chainlinkWellUsd = addresses.getAddress("CHAINLINK_WELL_USD");
         chainlinkBtcUsd = addresses.getAddress("CHAINLINK_BTC_USD");
+
+        _freshenRewardFeeds();
+    }
+
+    /// @notice Re-stamps every configured price feed's `updatedAt` to now, keeping its real answer.
+    /// @dev This suite forks at `latest` and prices reward tokens against `underlying` in most tests,
+    ///      so a feed older than its configured heartbeat turns an unrelated assertion into
+    ///      "Price feed update time exceeds heartbeat". Under the WETH config that is not a remote
+    ///      possibility: `underlying` is WETH, so every quote traverses CHAINLINK_ETH_USD, whose live
+    ///      configured bound is 1200s while that feed's observed cadence on Base is ~1230s. Seven
+    ///      tests fail whenever the fork block lands in that window — enumerated by warping past the
+    ///      bound: testCheckPrice, testCheckPriceFail, testFeedSaneRangeBounds, testGetExpectedOut,
+    ///      testRevertIfSlippageExceedsMaximum, testSequencerUptimeGuard,
+    ///      testUpgradeDoesNotLowerExistingQuotes.
+    ///
+    ///      Proposal 013 raises that bound to 3600s on chain, which fixes the cause; this keeps the
+    ///      suite deterministic before the Safe executes it and after. Freshening here does not weaken
+    ///      the tests that care about feed timing: each installs its OWN mock for the feed it
+    ///      exercises and a later vm.mockCall replaces this one, so the heartbeat, zero-price,
+    ///      incomplete-round and future-timestamp tests stay discriminating. Only timestamps move —
+    ///      the live answer is preserved so the arithmetic under test stays production arithmetic.
+    function _freshenRewardFeeds() internal {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.PriceFeedConfig[] memory feeds = assetConfig.rewardTokens[i].priceFeeds;
+
+            for (uint256 j = 0; j < feeds.length; j++) {
+                address feed = addresses.getAddress(feeds[j].priceFeed);
+
+                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+
+                vm.mockCall(
+                    feed,
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+                );
+            }
+        }
     }
 
     function testInitialState() public view {
@@ -82,7 +121,21 @@ contract SlippagePriceCheckerTest is BaseTest {
         assertEq(OwnableUpgradeable(address(slippagePriceChecker)).owner(), owner, "Owner should be set correctly");
     }
 
-    function testTokenConfigurationMatchesAssetConfig() public view {
+    /// @notice The live checker's per-pair oracle configuration must match the asset config JSON.
+    /// @dev Runs proposal 013 first, so this asserts parity for the state the release LANDS in rather
+    ///      than the state it starts from. That matters because 013 rewrites the WETH pairs'
+    ///      ETH/USD heartbeat from 1200s to 3600s: the live 1200s bound is below that feed's own
+    ///      ~1230s cadence, so quotes revert during the tail of every update cycle. Asserting against
+    ///      pre-proposal chain state would force the JSON to keep documenting the broken value.
+    ///      For the USDC and cbBTC configs 013 touches none of their pairs, so parity is unchanged.
+    function testTokenConfigurationMatchesAssetConfig() public {
+        SlippagePriceCheckerOracleHardening proposal = new SlippagePriceCheckerOracleHardening();
+        proposal.setAddresses(addresses);
+        proposal.setPrimaryForkId(vm.activeFork());
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+
         for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
             DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
             assertEq(
@@ -362,18 +415,26 @@ contract SlippagePriceCheckerTest is BaseTest {
         slippagePriceChecker.checkPrice(amountIn, address(well), address(underlying), minOut, excessiveSlippage);
     }
 
-    function testRevertIfZeroMaxTimePriceValid() public {
-        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
-            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkWellUsd,
-            reverse: false,
-            heartbeat: 1800
-        });
+    /// @notice MOO-726: zero is a legitimate value — it CLEARS the legacy reward-token flag.
+    /// @dev This used to revert with "Max time price valid can't be zero", which together with
+    ///      removeTokenConfiguration never touching the mapping made the flag a one-way latch: once
+    ///      set, a token passed isRewardToken() forever, so consumers kept approving the CoW relayer
+    ///      for a token whose oracle configuration had been removed.
+    function testMaxTimePriceValidCanBeClearedToZero() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        assertGt(checker.maxTimePriceValid(address(well)), 0, "WELL should start with the legacy flag set");
 
         vm.prank(owner);
-        vm.expectRevert("Max time price valid can't be zero");
-        slippagePriceChecker.setMaxTimePriceValid(address(well), 0);
+        checker.setMaxTimePriceValid(address(well), 0);
+
+        assertEq(checker.maxTimePriceValid(address(well)), 0, "Zero must clear the legacy flag");
+
+        // Only the owner may do it.
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        checker.setMaxTimePriceValid(address(well), 0);
     }
 
     function testRevertIfTokenNotConfiguredInRemoveTokenConfiguration() public {
@@ -552,6 +613,75 @@ contract SlippagePriceCheckerTest is BaseTest {
         }
     }
 
+    /// @notice N3: the SAME three guards, asserted against the implementation this PR ships.
+    /// @dev The three tests above run WITHOUT `_upgradeChecker()`, so they exercise the bytecode
+    ///      already live on Base. This PR rewrites `getExpectedOutFromChainlink` wholesale for #34,
+    ///      which makes those guards NEW code in the artifact being upgraded onto the live proxy —
+    ///      and nothing in the repo would have noticed if the rewrite had dropped one. Proven, not
+    ///      assumed: before this test, deleting the heartbeat require, the `answer > 0` require or
+    ///      the `updatedAt != 0` require from source left all three of the tests above passing.
+    ///
+    ///      Deliberately one test covering all three rather than three upgraded clones: the upgrade
+    ///      is the expensive part, and the point is coverage of the new artifact, not new scenarios.
+    function testRevertsOnBadChainlinkDataAfterUpgrade() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
+            address tokenAddress = addresses.getAddress(rewardToken.token);
+            address firstFeed = addresses.getAddress(rewardToken.priceFeeds[0].priceFeed);
+
+            // Non-vacuity: the pair must quote successfully on the UPGRADED implementation with live
+            // feed data, otherwise every revert below could be the pair being unconfigured instead of
+            // the guard firing.
+            assertGt(
+                checker.getExpectedOut(1e18, tokenAddress, address(underlying)),
+                0,
+                "pair must quote on the upgraded implementation before the guards are provoked"
+            );
+
+            // 1. answer <= 0
+            vm.mockCall(
+                firstFeed,
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(uint80(1), int256(0), uint256(0), block.timestamp, uint80(1))
+            );
+            vm.expectRevert("Chainlink price cannot be lower or equal to 0");
+            checker.getExpectedOut(1e18, tokenAddress, address(underlying));
+
+            // 2. incomplete round (updatedAt == 0)
+            vm.mockCall(
+                firstFeed,
+                abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                abi.encode(uint80(1), int256(1e8), uint256(0), uint256(0), uint80(1))
+            );
+            vm.expectRevert("Round is in incompleted state");
+            checker.getExpectedOut(1e18, tokenAddress, address(underlying));
+
+            // 3. older than the configured heartbeat, on EVERY leg (a multi-hop pair reverts on
+            //    whichever leg is checked first, so staling only the first hop would be ambiguous).
+            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
+                vm.mockCall(
+                    addresses.getAddress(rewardToken.priceFeeds[j].priceFeed),
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(
+                        uint80(1),
+                        int256(1e8),
+                        uint256(0),
+                        block.timestamp - rewardToken.priceFeeds[j].heartbeat - 1,
+                        uint80(1)
+                    )
+                );
+            }
+            vm.expectRevert("Price feed update time exceeds heartbeat");
+            checker.getExpectedOut(1e18, tokenAddress, address(underlying));
+
+            // Clear the mocks so the next token starts from live feed data (the non-vacuity assert
+            // at the top of the loop reads real feeds).
+            vm.clearMockedCalls();
+        }
+    }
+
     function testIsRewardToken() public {
         for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
             DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
@@ -563,5 +693,522 @@ contract SlippagePriceCheckerTest is BaseTest {
         // random token that is not a reward token
         address randomToken = makeAddr("randomToken");
         assertEq(slippagePriceChecker.isRewardToken(randomToken), false);
+    }
+
+    // ========== SHERLOCK AUDIT REGRESSION TESTS ==========
+    //
+    // CHAINLINK_SWAP_CHECKER_PROXY resolves to the proxy deployed on Base, so every test above runs
+    // against the implementation that is live today. The tests below first upgrade that proxy to the
+    // implementation compiled from this branch -- exactly the operation these fixes ship as -- so
+    // they exercise the new code against the real, already-populated storage.
+
+    function _upgradeChecker() internal returns (SlippagePriceChecker) {
+        SlippagePriceChecker newImplementation = new SlippagePriceChecker();
+
+        vm.prank(owner);
+        SlippagePriceChecker(address(slippagePriceChecker)).upgradeToAndCall(address(newImplementation), "");
+
+        return SlippagePriceChecker(address(slippagePriceChecker));
+    }
+
+    /// @notice MOO-734: the implementation must not be initializable directly.
+    function testImplementationInitializersAreDisabled() public {
+        SlippagePriceChecker implementation = new SlippagePriceChecker();
+
+        address attacker = makeAddr("attacker");
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
+        implementation.initialize(attacker);
+    }
+
+    /// @notice MOO-726: a pair configured only through addTokenConfiguration must count as a reward token.
+    /// @dev isRewardToken() used to read maxTimePriceValid, which addTokenConfiguration never writes.
+    ///      Consumers gate approvals on it (MamoMultiMarketStrategy._approveCowSwap, called in a loop
+    ///      from initialize(); LPCompoundModule.approveCowSwap), so configuring a reward token the
+    ///      modern way made strategy creation revert outright with "Token not allowed".
+    function testIsRewardTokenFromPairConfigurationAlone() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        // A token the checker has never seen: no pair, no legacy maxTimePriceValid.
+        address newRewardToken = makeAddr("freshRewardToken");
+        assertEq(checker.maxTimePriceValid(newRewardToken), 0, "Legacy maxTimePriceValid should be unset");
+        assertFalse(checker.isRewardToken(newRewardToken), "Unconfigured token is not a reward token");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1 days
+        });
+
+        // Configure the pair the modern way ONLY -- setMaxTimePriceValid is never called.
+        vm.prank(owner);
+        checker.addTokenConfiguration(newRewardToken, address(underlying), configs);
+
+        assertEq(checker.maxTimePriceValid(newRewardToken), 0, "Legacy mapping must stay untouched");
+        assertTrue(checker.isRewardToken(newRewardToken), "Pair configuration alone must mark a reward token");
+
+        // Removing the only configured pair takes the flag away again.
+        vm.prank(owner);
+        checker.removeTokenConfiguration(newRewardToken, address(underlying));
+        assertFalse(checker.isRewardToken(newRewardToken), "Removing the last pair clears the flag");
+    }
+
+    /// @notice MOO-726: isTokenPairConfigured must answer from the pair, not from the legacy flag.
+    /// @dev It used to require maxTimePriceValid[fromToken] > 0 as well — the same per-token legacy
+    ///      flag addTokenConfiguration never writes — so a pair configured the modern way reported
+    ///      false while every pricing path would happily serve it. That is the two-sources-of-truth
+    ///      defect this finding was about, left in place one function over from the one that got fixed.
+    function testIsTokenPairConfiguredFromPairDataAlone() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        address newRewardToken = makeAddr("freshPairToken");
+        assertFalse(checker.isTokenPairConfigured(newRewardToken, address(underlying)), "Unconfigured pair is false");
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1 days
+        });
+
+        // Configure the pair the modern way ONLY -- setMaxTimePriceValid is never called.
+        vm.prank(owner);
+        checker.addTokenConfiguration(newRewardToken, address(underlying), configs);
+
+        assertEq(checker.maxTimePriceValid(newRewardToken), 0, "Legacy flag must stay unset for this to mean anything");
+        assertTrue(
+            checker.isTokenPairConfigured(newRewardToken, address(underlying)),
+            "Pair configuration alone must make the pair report as configured"
+        );
+
+        // And it goes back to false when the pair itself goes away, not when the flag changes.
+        vm.prank(owner);
+        checker.removeTokenConfiguration(newRewardToken, address(underlying));
+        assertFalse(
+            checker.isTokenPairConfigured(newRewardToken, address(underlying)), "Removing the pair must clear it"
+        );
+    }
+
+    /// @notice MOO-726: tokens configured before the upgrade keep reporting as reward tokens.
+    function testIsRewardTokenStillTrueForPreUpgradeConfiguration() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            address tokenAddress = addresses.getAddress(assetConfig.rewardTokens[i].token);
+            assertTrue(checker.isRewardToken(tokenAddress), "Pre-upgrade reward token should stay a reward token");
+        }
+
+        assertFalse(checker.isRewardToken(makeAddr("randomToken")), "Random token is not a reward token");
+    }
+
+    /// @notice MOO-741: a price answer stamped in the future must be rejected.
+    function testRevertIfChainlinkTimestampIsInTheFuture() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        vm.mockCall(
+            chainlinkWellUsd,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(uint80(1), int256(1e8), uint256(0), block.timestamp + 1, uint80(1))
+        );
+
+        vm.expectRevert("Price feed update time in the future");
+        checker.getExpectedOut(1e18, address(well), address(underlying));
+    }
+
+    /// @notice MOO-741: quotes must be refused while the Base sequencer is down or freshly recovered.
+    /// @dev A reward-sell order stays valid for up to maxTimePriceValid. If the sequencer drops while
+    ///      the market moves and comes back before the feed refreshes, a solver settles against the
+    ///      pre-outage answer -- and the configured slippage cannot cap the loss, because slippage is
+    ///      measured against that same stale answer.
+    function testSequencerUptimeGuard() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        MockChainlinkFeed uptimeFeedContract = new MockChainlinkFeed(8);
+        address uptimeFeed = address(uptimeFeedContract);
+        uint256 gracePeriod = 3600;
+
+        // Unset by default, so an in-place upgrade cannot brick pricing.
+        assertEq(checker.sequencerUptimeFeed(), address(0), "Sequencer feed should start unset");
+        uint256 quoteWithoutFeed = checker.getExpectedOut(1e18, address(well), address(underlying));
+        assertGt(quoteWithoutFeed, 0, "Quote should work while the sequencer check is disabled");
+
+        vm.prank(owner);
+        checker.setSequencerUptimeFeed(uptimeFeed, gracePeriod);
+        assertEq(checker.sequencerUptimeFeed(), uptimeFeed, "Sequencer feed should be set");
+        assertEq(checker.sequencerGracePeriod(), gracePeriod, "Grace period should be set");
+
+        // Sequencer reported down (answer == 1).
+        uptimeFeedContract.set(int256(1), block.timestamp - 10, block.timestamp - 10);
+        vm.expectRevert("Sequencer is down");
+        checker.getExpectedOut(1e18, address(well), address(underlying));
+
+        // Back up, but still inside the grace period.
+        uptimeFeedContract.set(int256(0), block.timestamp - (gracePeriod - 1), block.timestamp);
+        vm.expectRevert("Sequencer grace period not over");
+        checker.getExpectedOut(1e18, address(well), address(underlying));
+
+        // Back up long enough: quotes resume, unchanged.
+        uptimeFeedContract.set(int256(0), block.timestamp - gracePeriod, block.timestamp);
+        assertEq(
+            checker.getExpectedOut(1e18, address(well), address(underlying)),
+            quoteWithoutFeed,
+            "Quote should be unchanged once the sequencer has recovered"
+        );
+
+        // The owner can disable the check again, and only the owner can touch it.
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        checker.setSequencerUptimeFeed(address(0), 0);
+
+        vm.prank(owner);
+        checker.setSequencerUptimeFeed(address(0), 0);
+        assertEq(checker.sequencerUptimeFeed(), address(0), "Sequencer feed should be cleared");
+    }
+
+    /// @notice MOO-741: an answer pinned at an aggregator's boundary must not pass as a price.
+    /// @dev Every aggregator behind the feeds used today reports minAnswer = 1 and
+    ///      maxAnswer = 2**176 - 1, i.e. representational limits, so nothing can saturate right now.
+    ///      A proxy upgrade to an aggregator with ACTIVE finite bounds is what this guards against.
+    function testFeedSaneRangeBounds() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        (, int256 liveAnswer,,,) = IPriceFeed(chainlinkWellUsd).latestRoundData();
+        uint256 answer = uint256(liveAnswer);
+
+        // No bounds configured: nothing changes.
+        uint256 quote = checker.getExpectedOut(1e18, address(well), address(underlying));
+        assertGt(quote, 0, "Quote should work with no bounds configured");
+
+        vm.prank(owner);
+        checker.setFeedBounds(chainlinkWellUsd, answer + 1, answer + 100);
+        vm.expectRevert("Chainlink price out of bounds");
+        checker.getExpectedOut(1e18, address(well), address(underlying));
+
+        vm.prank(owner);
+        checker.setFeedBounds(chainlinkWellUsd, answer / 2, answer * 2);
+        assertEq(
+            checker.getExpectedOut(1e18, address(well), address(underlying)),
+            quote,
+            "An in-range answer should quote exactly as before"
+        );
+
+        // maxAnswer == 0 clears the bounds; nonsensical ranges are rejected.
+        vm.prank(owner);
+        vm.expectRevert("Invalid bounds");
+        checker.setFeedBounds(chainlinkWellUsd, 10, 10);
+
+        vm.prank(owner);
+        checker.setFeedBounds(chainlinkWellUsd, 0, 0);
+        (, uint256 maxAnswer) = checker.feedBounds(chainlinkWellUsd);
+        assertEq(maxAnswer, 0, "Bounds should be cleared");
+    }
+
+    /// @notice MOO-748: hops must not truncate at the sell token's precision.
+    /// @dev Every live reward token is 18 decimals, so there is no current exposure. This pins the
+    ///      behaviour for a low-precision sell token, where the old implementation discarded up to a
+    ///      whole unit at that scale on every hop and later ratios amplified the loss.
+    function testLowDecimalSellTokenKeepsFullPrecision() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        // A 2-decimal sell token quoted through two hops.
+        LowDecimalToken sellToken = new LowDecimalToken();
+
+        // 1 sellToken = 3.00000001 USD, then USD -> underlying at 1.00000003.
+        uint256 priceA = 3_00000001; // 8 decimals
+        uint256 priceB = 1_00000003; // 8 decimals
+
+        MockChainlinkFeed feedA = new MockChainlinkFeed(8);
+        feedA.set(int256(priceA), 1, block.timestamp);
+        MockChainlinkFeed feedB = new MockChainlinkFeed(8);
+        feedB.set(int256(priceB), 1, block.timestamp);
+
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: address(feedA),
+            reverse: false,
+            heartbeat: 1 days
+        });
+        configs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: address(feedB),
+            reverse: false,
+            heartbeat: 1 days
+        });
+
+        vm.prank(owner);
+        checker.addTokenConfiguration(address(sellToken), address(underlying), configs);
+
+        uint256 amountIn = 1234; // 12.34 sellToken
+
+        uint256 toDecimals = underlying.decimals();
+        // Full-precision reference: amountIn * priceA * priceB, rescaled from 2 to toDecimals, floored.
+        uint256 expected = (amountIn * priceA * priceB * (10 ** toDecimals)) / (1e8 * 1e8 * 100);
+
+        assertEq(
+            checker.getExpectedOut(amountIn, address(sellToken), address(underlying)),
+            expected,
+            "Quote should carry full precision through every hop"
+        );
+
+        // The pre-fix implementation truncated at the sell token's own scale on each hop.
+        uint256 truncatingHops = (amountIn * priceA) / 1e8;
+        truncatingHops = (truncatingHops * priceB) / 1e8;
+        uint256 legacy =
+            toDecimals >= 2 ? truncatingHops * (10 ** (toDecimals - 2)) : truncatingHops / (10 ** (2 - toDecimals));
+        assertGt(expected, legacy, "Fixture must actually exercise the truncation the fix removes");
+    }
+
+    /// @dev The buy tokens any live pair may be configured against. Mirrors the candidate list the
+    ///      release proposal backfills with; the nested pair mapping cannot be enumerated on chain.
+    function _candidateBuyTokens() internal view returns (address[] memory buyTokens) {
+        buyTokens = new address[](4);
+        buyTokens[0] = addresses.getAddress("USDC");
+        buyTokens[1] = addresses.getAddress("cbBTC");
+        buyTokens[2] = addresses.getAddress("WETH");
+        buyTokens[3] = addresses.getAddress("MAMO");
+    }
+
+    /// @dev Removes every configured pair for `fromToken` among the candidate buy tokens.
+    function _removeAllPairs(SlippagePriceChecker checker, address fromToken) internal returns (uint256 removed) {
+        address[] memory buyTokens = _candidateBuyTokens();
+        for (uint256 i = 0; i < buyTokens.length; i++) {
+            if (checker.tokenPairOracleInformation(fromToken, buyTokens[i]).length == 0) continue;
+            vm.prank(owner);
+            checker.removeTokenConfiguration(fromToken, buyTokens[i]);
+            removed++;
+        }
+    }
+
+    /// @notice MOO-726: removing the last configured pair must stop the token being a reward token.
+    /// @dev `removeTokenConfiguration` never cleared `maxTimePriceValid`, and `setMaxTimePriceValid`
+    ///      rejected zero, so the legacy flag was a permanent latch. On chain
+    ///      `maxTimePriceValid(MORPHO) == 3600`, so after the owner removed MORPHO's pairs
+    ///      `MamoMultiMarketStrategy._approveCowSwap` and `LPCompoundModule.approveCowSwap` still
+    ///      passed their "Token not allowed" gate and handed the CoW relayer an allowance for a
+    ///      de-configured token.
+    function testRemoveLastPairClearsRewardTokenFlag() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        // Register the pre-upgrade pairs exactly as the release proposal does, so the counter knows
+        // how many pairs are really live. Hoisted: a call in argument position is evaluated first and
+        // would consume the prank.
+        address[] memory candidates = _candidateBuyTokens();
+        vm.prank(owner);
+        checker.backfillPairCount(address(morpho), candidates);
+
+        uint256 pairs = checker.configuredPairCount(address(morpho));
+        assertGt(pairs, 1, "MORPHO should have more than one live pair for this test to be meaningful");
+        assertGt(checker.maxTimePriceValid(address(morpho)), 0, "MORPHO carries the legacy flag on chain");
+        assertTrue(checker.isRewardToken(address(morpho)), "MORPHO starts as a reward token");
+
+        // Removing ONE of several pairs must not disarm the token.
+        address[] memory buyTokens = _candidateBuyTokens();
+        for (uint256 i = 0; i < buyTokens.length; i++) {
+            if (checker.tokenPairOracleInformation(address(morpho), buyTokens[i]).length == 0) continue;
+            vm.prank(owner);
+            checker.removeTokenConfiguration(address(morpho), buyTokens[i]);
+            break;
+        }
+        assertEq(checker.configuredPairCount(address(morpho)), pairs - 1, "One pair should have been removed");
+        assertTrue(checker.isRewardToken(address(morpho)), "Still a reward token while other pairs are live");
+        assertGt(checker.maxTimePriceValid(address(morpho)), 0, "Legacy flag survives a partial removal");
+
+        // Removing the REST disarms it, legacy flag included.
+        _removeAllPairs(checker, address(morpho));
+
+        assertEq(checker.configuredPairCount(address(morpho)), 0, "No pairs should remain");
+        assertEq(checker.maxTimePriceValid(address(morpho)), 0, "Legacy flag must be cleared with the last pair");
+        assertFalse(checker.isRewardToken(address(morpho)), "A fully de-configured token is not a reward token");
+    }
+
+    /// @notice Pre-upgrade pairs must not be able to drive configuredPairCount below the truth.
+    /// @dev The counter only ever incremented for pairs added AFTER the upgrade, but the removal path
+    ///      decremented for any pair with a non-empty config. Sequence: token X has a pre-upgrade
+    ///      pair X->A (count 0); add X->B (count 1); remove X->A (count 0) while X->B is still live.
+    ///      With no legacy flag, isRewardToken(X) then reads false for a token that IS configured.
+    function testRemovingPreUpgradePairKeepsCountForLivePairs() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        // WELL -> underlying is configured on chain, i.e. before this bookkeeping existed.
+        assertGt(
+            checker.tokenPairOracleInformation(address(well), address(underlying)).length,
+            0,
+            "WELL -> underlying should be a live pre-upgrade pair"
+        );
+        assertEq(checker.configuredPairCount(address(well)), 0, "Pre-upgrade pairs contribute nothing to the count");
+        assertFalse(checker.pairCounted(address(well), address(underlying)), "Pre-upgrade pair is not counted");
+
+        // Drop the legacy flag so isRewardToken() depends purely on the counter.
+        vm.prank(owner);
+        checker.setMaxTimePriceValid(address(well), 0);
+
+        // Add a NEW pair the modern way: this one is counted.
+        address newBuyToken = makeAddr("newBuyToken");
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+            new ISlippagePriceChecker.TokenFeedConfiguration[](1);
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkWellUsd,
+            reverse: false,
+            heartbeat: 1 days
+        });
+        vm.prank(owner);
+        checker.addTokenConfiguration(address(well), newBuyToken, configs);
+        assertEq(checker.configuredPairCount(address(well)), 1, "The new pair should be counted");
+        assertTrue(checker.isRewardToken(address(well)), "WELL is a reward token through the new pair");
+
+        // Remove the PRE-UPGRADE pair. It never incremented the counter, so it must not decrement it.
+        vm.prank(owner);
+        checker.removeTokenConfiguration(address(well), address(underlying));
+
+        assertEq(checker.configuredPairCount(address(well)), 1, "Removing an uncounted pair must not decrement");
+        assertTrue(checker.isRewardToken(address(well)), "WELL must still be a reward token: WELL -> new is live");
+        assertGt(
+            checker.tokenPairOracleInformation(address(well), newBuyToken).length, 0, "The new pair is still configured"
+        );
+    }
+
+    /// @notice Pairs configured before the upgrade need an explicit backfill to enter the counter.
+    /// @dev There is no reinitializer and the nested pair mapping cannot be enumerated on chain, so
+    ///      without backfillPairCount a pre-upgrade pair reports isRewardToken() == false the moment
+    ///      the legacy maxTimePriceValid flag is not set (or is cleared).
+    function testBackfillPairCountRegistersPreUpgradePairs() public {
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        vm.prank(owner);
+        checker.setMaxTimePriceValid(address(well), 0);
+
+        // Live pairs, invisible to the counter, and no legacy flag: reported as not a reward token.
+        assertGt(
+            checker.tokenPairOracleInformation(address(well), address(underlying)).length, 0, "Pair is live on chain"
+        );
+        assertEq(checker.configuredPairCount(address(well)), 0, "Counter starts empty for pre-upgrade pairs");
+        assertFalse(checker.isRewardToken(address(well)), "Un-backfilled pre-upgrade token reads as not a reward token");
+
+        // Hoisted: a call in argument position is evaluated first and would consume the prank.
+        address[] memory candidates = _candidateBuyTokens();
+
+        vm.prank(owner);
+        checker.backfillPairCount(address(well), candidates);
+
+        uint256 counted = checker.configuredPairCount(address(well));
+        assertGt(counted, 0, "Backfill must register the live pairs");
+        assertTrue(checker.pairCounted(address(well), address(underlying)), "The live pair must be marked counted");
+        assertTrue(checker.isRewardToken(address(well)), "A backfilled token is a reward token again");
+
+        // Idempotent: running it twice must not double count.
+        vm.prank(owner);
+        checker.backfillPairCount(address(well), candidates);
+        assertEq(checker.configuredPairCount(address(well)), counted, "Backfill must be idempotent");
+
+        // Unconfigured pairs are skipped, and only the owner may backfill.
+        address[] memory unconfigured = new address[](1);
+        unconfigured[0] = makeAddr("neverConfigured");
+        vm.prank(owner);
+        checker.backfillPairCount(address(well), unconfigured);
+        assertEq(checker.configuredPairCount(address(well)), counted, "Unconfigured pairs must be skipped");
+
+        address nonOwner = makeAddr("nonOwner");
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        checker.backfillPairCount(address(well), candidates);
+    }
+
+    /// @notice MOO-741: the release must leave the sequencer guard ENABLED, not merely deployed.
+    /// @dev `_requireSequencerUp()` returns early while `sequencerUptimeFeed == address(0)`, so
+    ///      shipping the implementation on its own leaves MOO-741 exactly as unmitigated as before.
+    ///      This runs the real proposal end to end and then proves the guard actually bites.
+    function testOracleHardeningProposalEnablesSequencerGuard() public {
+        SlippagePriceCheckerOracleHardening proposal = new SlippagePriceCheckerOracleHardening();
+        proposal.setAddresses(addresses);
+        proposal.setPrimaryForkId(vm.activeFork());
+
+        // No pre-check on sequencerUptimeFeed(): the implementation live on Base predates the getter,
+        // so calling it before the upgrade reverts. Its storage slot is untouched, i.e. zero, which is
+        // exactly the "guard disabled" state the upgrade would land in on its own.
+        SlippagePriceChecker checker = SlippagePriceChecker(address(slippagePriceChecker));
+
+        proposal.deploy();
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        address uptimeFeed = addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED");
+        assertEq(checker.sequencerUptimeFeed(), uptimeFeed, "Release must wire the sequencer uptime feed");
+        assertEq(checker.sequencerGracePeriod(), 3600, "Release must set the grace period");
+
+        // The guard is live: quotes work now, and stop the moment the sequencer reports down.
+        assertGt(checker.getExpectedOut(1e18, address(well), address(underlying)), 0, "Quotes work with the guard on");
+
+        vm.mockCall(
+            uptimeFeed,
+            abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+            abi.encode(uint80(1), int256(1), block.timestamp - 10, block.timestamp - 10, uint80(1))
+        );
+        vm.expectRevert("Sequencer is down");
+        checker.getExpectedOut(1e18, address(well), address(underlying));
+    }
+
+    /// @notice MOO-748: the upgrade must not loosen any existing quote.
+    function testUpgradeDoesNotLowerExistingQuotes() public {
+        uint256[] memory before = new uint256[](assetConfig.rewardTokens.length);
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            address tokenAddress = addresses.getAddress(assetConfig.rewardTokens[i].token);
+            before[i] =
+                slippagePriceChecker.getExpectedOut(amountInByToken[tokenAddress], tokenAddress, address(underlying));
+        }
+
+        SlippagePriceChecker checker = _upgradeChecker();
+
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            address tokenAddress = addresses.getAddress(assetConfig.rewardTokens[i].token);
+            uint256 quote = checker.getExpectedOut(amountInByToken[tokenAddress], tokenAddress, address(underlying));
+
+            // Rounding can only move the quote up (less truncation), never down: a lower expected-out
+            // would loosen every slippage floor derived from it.
+            assertGe(quote, before[i], "Upgraded quote must not be lower than the live one");
+            assertLe(quote - before[i], 1 + before[i] / 1_000_000, "Upgraded quote should differ only by rounding");
+        }
+    }
+}
+
+/// @dev Minimal 2-decimal ERC20 used to exercise low-precision sell tokens.
+contract LowDecimalToken is ERC20 {
+    constructor() ERC20("Low Decimal", "LOW") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 2;
+    }
+}
+
+/// @dev Settable Chainlink-shaped feed. A real contract rather than vm.mockCall because the checker
+///      makes typed calls, and solc's extcodesize guard reverts before a mock on a codeless address
+///      is ever consulted.
+contract MockChainlinkFeed is IPriceFeed {
+    uint8 private immutable _decimals;
+
+    int256 private _answer;
+    uint256 private _startedAt;
+    uint256 private _updatedAt;
+
+    constructor(uint8 decimals_) {
+        _decimals = decimals_;
+    }
+
+    function set(int256 answer_, uint256 startedAt_, uint256 updatedAt_) external {
+        _answer = answer_;
+        _startedAt = startedAt_;
+        _updatedAt = updatedAt_;
+    }
+
+    function decimals() external view override returns (uint8) {
+        return _decimals;
+    }
+
+    function latestRoundData() external view override returns (uint80, int256, uint256, uint256, uint80) {
+        return (uint80(1), _answer, _startedAt, _updatedAt, uint80(1));
     }
 }

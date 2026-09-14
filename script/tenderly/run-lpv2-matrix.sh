@@ -136,7 +136,7 @@ sc_calm_gate() {
   run_forge_phase "$FQ" "checkCalmGate()" 0
 }
 sc_stale_oracle() {
-  advance_time 97200   # 27h > maxOracleDelay (26h)
+  advance_time 97200   # 27h > maxOracleDelay (24h — deployAndMint arms MAX_ORACLE_DELAY)
   run_forge_phase "$FQ" "checkStaleOracle()" 0
 }
 

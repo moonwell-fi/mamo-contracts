@@ -145,6 +145,29 @@ contract MamoStrategyRegistryIntegrationTest is BaseTest {
         );
     }
 
+    /// @notice MOO-745: whitelisting is admin-only. A random address is not the interesting case.
+    /// @dev The spec's headline claim is "DEFAULT_ADMIN_ROLE — not the backend", and a test that
+    ///      pranks an address holding no roles at all cannot express it: it passes just as well if
+    ///      the gate were `onlyRole(BACKEND_ROLE)`. This pins the REAL backend as rejected.
+    function testRevertIfBackendCallsWhitelistImplementation() public {
+        address mockImplementation = makeAddr("mockImplementation");
+        address realBackend = registry.getBackendAddress();
+
+        assertTrue(
+            registry.hasRole(registry.BACKEND_ROLE(), realBackend),
+            "Fixture must use an address that genuinely holds BACKEND_ROLE"
+        );
+
+        // Hoisted: a call in argument position would consume the vm.prank below.
+        bytes32 role = registry.DEFAULT_ADMIN_ROLE();
+        bytes memory expectedRevert =
+            abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", realBackend, role);
+
+        vm.prank(realBackend);
+        vm.expectRevert(expectedRevert);
+        registry.whitelistImplementation(mockImplementation, 0);
+    }
+
     function testRevertIfNonBackendCallWhitelistImplemention() public {
         // Create a mock implementation address
         address mockImplementation = makeAddr("mockImplementation");

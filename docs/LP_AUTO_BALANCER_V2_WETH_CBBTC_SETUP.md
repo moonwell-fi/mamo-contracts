@@ -103,7 +103,7 @@ Call `registerPosition` with the `ManagedPositionV2` config. The contract **vali
 - `mainTokenId = INIT_TOKEN_ID` and the NFT is **already held** by the contract (B3 done first).
 - `pool = 0x70aCDF…` and **`pool.token0()/token1()/tickSpacing()` must equal** `token0=WETH`, `token1=cbBTC`, `tickSpacing=100` (`PoolMismatch` otherwise).
 - `gauge = 0x41b2…` and **`gauge.rewardToken()` must equal `AERO`** (`GaugeRewardMismatch` otherwise).
-- `oracle0 = ETH/USD (0x71041d…)`, `oracle1 = BTC/USD (0x64c911…)` — both must return a **fresh, non-zero** answer at call time (within `maxOracleDelay`, default 26h).
+- `oracle0 = ETH/USD (0x71041d…)`, `oracle1 = BTC/USD (0x64c911…)` — both must return a **fresh, non-zero** answer at call time. Each leg is bounded SEPARATELY: `maxOracleDelay0` for `oracle0`, `maxOracleDelay1` for `oracle1` (constructor seeds `DEFAULT_MAX_ORACLE_DELAY` = 1h, hard cap `MAX_ORACLE_DELAY` = 1 day). Proposal 011 arms both at 3600s — 3x the feeds' ~20-minute heartbeat.
 - `minWidth ≥ 2·tickSpacing = 200`, `minWidth % 100 == 0`, `maxWidth ≥ minWidth` (`WidthTooNarrow` / `InvalidWidth`).
 - `maxRebalanceLossBps ≤ MAX_LOSS_CAP_BPS`, `maxTickDeviation > 0`, `maxCenterDeviation > 0`, `twapWindow > 0`.
 - `feeCollector = DROP_AUTOMATION`.
@@ -161,7 +161,7 @@ Output of Phase B: a registered, **unstaked** WETH/cbBTC position in the balance
 Every rebalance cycle, the backend (`REBALANCER_ROLE`) picks **one** of two paths. There is **no Safe-level master switch** — the choice is made per cycle by the backend, based on whether re-ranging the position without a swap keeps it reasonably centered or whether a partial swap is needed to rebalance the underlying ratio:
 
 - **No-swap path — `rebalanceUsingAlt(RebalanceParams)`.** The original single-transaction flow: re-range using only what the position already holds. Use this whenever it's sufficient; it's simpler and has no off-chain dependency.
-- **Swap path — `unwindForSwap(UnwindParams)` + off-chain CowSwap order + `rebuildAfterSwap(RebuildParams)`.** (`RebuildParams` is the slimmer 6-field struct — `width`, the four mint mins, `deadline`; it has **no** withdraw-min fields, those belong to `UnwindParams`.) An async, two-phase flow for when the backend needs to actually change the WETH/cbBTC ratio:
+- **Swap path — `unwindForSwap(UnwindParams)` + off-chain CowSwap order + `rebuildAfterSwap(RebuildParams)`.** (`RebuildParams` is the slimmer 9-field struct — `width`, `altWidth`, the four mint mins, `deadline`, `expectedTickLower`, `expectedTickUpper`; it has **no** withdraw-min fields, those belong to `UnwindParams`.) An async, two-phase flow for when the backend needs to actually change the WETH/cbBTC ratio:
   1. `unwindForSwap` tears down the position and pins the CowSwap relayer's allowance to an **exact** sell amount.
   2. The backend places a CowSwap order off-chain. **The sell amount is chosen off-chain by the backend and baked directly into the order** — the contract's only job is pinning the relayer approval to that exact amount in step 1; it does not compute or re-derive a sell size on-chain.
   3. Once the order settles (or is abandoned), the backend calls `rebuildAfterSwap` to redeploy into a fresh position.

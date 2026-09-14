@@ -118,6 +118,11 @@ The harness handles each explicitly (see inline comments):
    orchestrator copies real Base's authoritative slot 14 onto the vnet (+1000 id margin).
 5. **Oracle freshness.** A fresh fork's Chainlink `updatedAt` can sit slightly ahead of the latest
    block, underflowing `block.timestamp - updatedAt`. The orchestrator advances the clock just past
-   the freshest feed (and stays far under `maxOracleDelay = 26 h`).
+   the freshest feed. MOO-740 tightened the balancer's constructor default to **1 h**, which the
+   harness's own `advance_time` warps would trip on every phase, so `deployAndMint()` arms both
+   bounds at `MAX_ORACLE_DELAY` (**24 h**) — a test-rig concession, since feed repointing is not
+   implemented for LPV2 (`lib/market.sh`). The shipped on-chain values are 3600/3600, armed by
+   proposal 011 and pinned by `LPAutoBalancerV2SetupTest`. The matrix's stale-oracle scenario warps
+   27 h, still past the 24 h rig bound.
 6. **Gas estimate multiplier (3×).** The vnet under-estimates gas for deep nested delegatecalls
    (e.g. `exit()`'s final cbBTC FiatToken transfer OOG'd at the default 1.3×).

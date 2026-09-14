@@ -98,9 +98,30 @@ interface IMamoStrategyRegistry {
 
     /**
      * @notice Gets the backend address (first member of the BACKEND_ROLE)
+     * @dev DEPRECATED as an authorization primitive. The returned address is whatever
+     *      `getRoleMember(BACKEND_ROLE, 0)` happens to be — enumerable-set membership is unordered
+     *      and a revocation moves the last member into the vacated slot, so index 0 changes
+     *      identity as a side effect of granting or revoking an unrelated member. Gate on
+     *      {hasRole} instead; this getter is kept for off-chain/legacy consumers only.
      * @return The address of the backend
      */
     function getBackendAddress() external view returns (address);
+
+    /**
+     * @notice The role identifier the registry uses for backend authorization
+     * @dev Read rather than re-derived locally so a registry that ever uses a different id makes
+     *      the mismatch a hard failure instead of silently degrading every gate that trusts it.
+     * @return The BACKEND_ROLE identifier
+     */
+    function BACKEND_ROLE() external view returns (bytes32);
+
+    /**
+     * @notice Whether `account` holds `role` on the registry
+     * @param role The role identifier
+     * @param account The account to check
+     * @return True if the account holds the role
+     */
+    function hasRole(bytes32 role, address account) external view returns (bool);
 
     /**
      * @notice Updates the owner of a strategy
