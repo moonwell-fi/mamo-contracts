@@ -19,3 +19,4 @@ memory-bank/
 script/stock-accounts/addresses-vnet/
 script/stock-accounts/vnet-manifest.json
 script/stock-accounts/addresses-dryrun/
+foundry.lock
