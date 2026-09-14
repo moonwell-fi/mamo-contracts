@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import {Test} from "@forge-std/Test.sol";
 
-import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
@@ -19,7 +18,6 @@ contract StockAccountPriceCheckerUnitTest is Test {
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant EXPECTED_ALT_TICK_500000 = 5171760815372400971558161892130124037985;
 
-    address internal owner = makeAddr("owner");
     MockStockAccountRegistry internal registry;
     StockAccountPriceChecker internal checker;
 
@@ -51,9 +49,7 @@ contract StockAccountPriceCheckerUnitTest is Test {
         _list(address(orphan), address(orphanPool), IStockAccountRegistry.PriceSource.PoolTwap);
         _list(address(feedToken), address(stockPool), IStockAccountRegistry.PriceSource.Chainlink);
 
-        StockAccountPriceChecker impl = new StockAccountPriceChecker();
-        bytes memory init = abi.encodeCall(StockAccountPriceChecker.initialize, (owner, registry, address(usdc)));
-        checker = StockAccountPriceChecker(address(new ERC1967Proxy(address(impl), init)));
+        checker = new StockAccountPriceChecker(registry, address(usdc));
 
         stockPool.setMeanTick(0, WINDOW);
         altPool.setMeanTick(0, WINDOW);
@@ -79,32 +75,16 @@ contract StockAccountPriceCheckerUnitTest is Test {
             baseIsToken0 ? Math.mulDiv(ratioX192, baseAmount, 1 << 192) : Math.mulDiv(1 << 192, baseAmount, ratioX192);
     }
 
-    // ==================== initialize ====================
-
-    function test_initialize_setsRegistryQuoteAssetAndOwner() public view {
+    function test_constructor_setsRegistryAndQuoteAsset() public view {
         assertEq(address(checker.registry()), address(registry));
         assertEq(checker.quoteAsset(), address(usdc));
-        assertEq(checker.owner(), owner);
     }
 
-    function test_initialize_revertsOnZeroAddresses() public {
-        StockAccountPriceChecker impl = new StockAccountPriceChecker();
+    function test_constructor_revertsOnZeroAddresses() public {
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new ERC1967Proxy(
-            address(impl),
-            abi.encodeCall(
-                StockAccountPriceChecker.initialize, (owner, IStockAccountRegistry(address(0)), address(usdc))
-            )
-        );
+        new StockAccountPriceChecker(IStockAccountRegistry(address(0)), address(usdc));
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new ERC1967Proxy(
-            address(impl), abi.encodeCall(StockAccountPriceChecker.initialize, (owner, registry, address(0)))
-        );
-    }
-
-    function test_initialize_cannotRunTwice() public {
-        vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
-        checker.initialize(owner, registry, address(usdc));
+        new StockAccountPriceChecker(registry, address(0));
     }
 
     // ==================== TWAP reference ====================
@@ -293,14 +273,12 @@ contract StockAccountPriceCheckerUnitTest is Test {
 
     function test_legacyMutators_revertNotSupported() public {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs;
-        vm.startPrank(owner);
         vm.expectRevert(StockAccountPriceChecker.NotSupported.selector);
         checker.addTokenConfiguration(address(stock), address(usdc), cfgs);
         vm.expectRevert(StockAccountPriceChecker.NotSupported.selector);
         checker.removeTokenConfiguration(address(stock), address(usdc));
         vm.expectRevert(StockAccountPriceChecker.NotSupported.selector);
         checker.setMaxTimePriceValid(address(stock), 1);
-        vm.stopPrank();
     }
 
     function test_legacyViews_answerFromRegistry() public {
@@ -322,20 +300,5 @@ contract StockAccountPriceCheckerUnitTest is Test {
         _list(address(fresh), address(pool), IStockAccountRegistry.PriceSource.PoolTwap);
         assertTrue(checker.isTokenPairConfigured(address(fresh), address(usdc)));
         assertEq(checker.getExpectedOut(1e8, address(fresh), address(usdc)), 1e8);
-    }
-
-    // ==================== upgrade ====================
-
-    function test_upgrade_onlyOwner() public {
-        StockAccountPriceChecker next = new StockAccountPriceChecker();
-        address nonOwner = makeAddr("nonOwner");
-        vm.prank(nonOwner);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
-        checker.upgradeToAndCall(address(next), "");
-
-        vm.prank(owner);
-        checker.upgradeToAndCall(address(next), "");
-        assertEq(checker.quoteAsset(), address(usdc));
-        assertEq(address(checker.registry()), address(registry));
     }
 }

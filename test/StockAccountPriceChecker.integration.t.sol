@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import {Test} from "@forge-std/Test.sol";
 
-import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
 import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
@@ -38,8 +37,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         vm.etch(NVDAC, address(new MockERC20Decimals("NVDAc", 8)).code);
         assertEq(MockERC20Decimals(NVDAC).decimals(), 8);
 
-        StockAccountPriceChecker impl = new StockAccountPriceChecker();
-        // Registry requires a code-bearing checker at construction; the impl stands in until the proxy exists.
+        // The checker takes the registry as an immutable, so the registry is built first against a
+        // code-bearing stand-in (this test contract) and repointed once the real checker exists.
         registry = new StockAccountRegistry(
             StockAccountRegistry.Config({
                 admin: admin,
@@ -52,18 +51,12 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 maxWithdrawSlippageBps: 500,
                 minStrategyDeposit: 100e6,
                 minTargetBps: 100,
-                priceChecker: ISlippagePriceChecker(address(impl)),
+                priceChecker: ISlippagePriceChecker(address(this)),
                 requiredAppDataHash: bytes32(0),
                 twapWindow: WINDOW
             })
         );
-        checker = StockAccountPriceChecker(
-            address(
-                new ERC1967Proxy(
-                    address(impl), abi.encodeCall(StockAccountPriceChecker.initialize, (admin, registry, USDC))
-                )
-            )
-        );
+        checker = new StockAccountPriceChecker(registry, USDC);
         vm.prank(admin);
         registry.setPriceChecker(checker);
         assertEq(address(registry.priceChecker()), address(checker));

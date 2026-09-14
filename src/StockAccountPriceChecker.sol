@@ -6,23 +6,20 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
 
-import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
-import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
-import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title StockAccountPriceChecker
 /// @notice Prices stock-account tokens from their own Aerodrome CL pool, time-averaged over the
 ///         registry's window, and routes every quote through the quote asset (USDC).
-contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgradeable, OwnableUpgradeable {
+/// @dev Immutable and unowned: replacement goes through `StockAccountRegistry.setPriceChecker`,
+///      which every stock account reads live.
+contract StockAccountPriceChecker is ISlippagePriceChecker {
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant INTERNAL_DECIMALS = 36;
 
-    IStockAccountRegistry public registry;
-    address public quoteAsset;
-
-    uint256[48] private __gap;
+    IStockAccountRegistry public immutable registry;
+    address public immutable quoteAsset;
 
     error ZeroAddress();
     error TokenNotListed(address token);
@@ -32,24 +29,14 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
     error InvalidSlippage(uint256 slippageBps);
     error NotSupported();
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
-
-    function initialize(address owner_, IStockAccountRegistry registry_, address quoteAsset_) external initializer {
-        if (owner_ == address(0) || address(registry_) == address(0) || quoteAsset_ == address(0)) {
-            revert ZeroAddress();
-        }
-        __Ownable_init(owner_);
-        __UUPSUpgradeable_init();
+    constructor(IStockAccountRegistry registry_, address quoteAsset_) {
+        if (address(registry_) == address(0) || quoteAsset_ == address(0)) revert ZeroAddress();
         registry = registry_;
         quoteAsset = quoteAsset_;
     }
 
-    // ==================== ISlippagePriceChecker ====================
-
     /// @inheritdoc ISlippagePriceChecker
+    /// @dev Returns false on a zero reference: it would otherwise accept any `_minOut`.
     function checkPrice(
         uint256 _amountIn,
         address _fromToken,
@@ -59,7 +46,6 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
     ) external view override returns (bool) {
         if (_slippageInBps > MAX_BPS) revert InvalidSlippage(_slippageInBps);
         uint256 expectedOut = getExpectedOut(_amountIn, _fromToken, _toToken);
-        // A zero reference would accept any minOut; refuse rather than fail open.
         if (expectedOut == 0) return false;
         return _minOut >= (expectedOut * (MAX_BPS - _slippageInBps)) / MAX_BPS;
     }
@@ -105,24 +91,24 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
         return registry.twapWindow();
     }
 
-    /// @notice Unsupported for everyone, owner included: token config lives in the registry.
+    /// @notice Unsupported for everyone: token config lives in the registry.
     function addTokenConfiguration(address, address, TokenFeedConfiguration[] calldata) external pure override {
         revert NotSupported();
     }
 
-    /// @notice Unsupported for everyone, owner included: token config lives in the registry.
+    /// @notice Unsupported for everyone: token config lives in the registry.
     function removeTokenConfiguration(address, address) external pure override {
         revert NotSupported();
     }
 
-    /// @notice Unsupported for everyone, owner included: the window is the registry's `twapWindow`.
+    /// @notice Unsupported for everyone: the window is the registry's `twapWindow`.
     function setMaxTimePriceValid(address, uint256) external pure override {
         revert NotSupported();
     }
 
-    // ==================== Internal ====================
-
     /// @dev Quote-asset units per one whole `token`, scaled to 36 decimals. The quote asset itself is 1.
+    ///      The base amount is scaled before the quote so the only floor is at 36 decimals, not at raw
+    ///      quote units.
     function _quotePerWholeToken(address token) internal view returns (uint256) {
         if (token == quoteAsset) return 10 ** INTERNAL_DECIMALS;
 
@@ -139,7 +125,6 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
         else revert PoolNotAgainstQuoteAsset(address(pool));
 
         uint160 sqrtP = TickMath.getSqrtRatioAtTick(_twapTick(pool, registry.twapWindow()));
-        // Scale the base amount BEFORE the quote so the only floor is at 36 decimals, not at raw quote units.
         uint256 quoteDecimals = IERC20Metadata(quoteAsset).decimals();
         uint256 oneTokenScaled = 10 ** (IERC20Metadata(token).decimals() + INTERNAL_DECIMALS - quoteDecimals);
         return _quoteAtSqrtPrice(sqrtP, oneTokenScaled, tokenIsToken0);
@@ -181,6 +166,4 @@ contract StockAccountPriceChecker is ISlippagePriceChecker, Initializable, UUPSU
         return cfg.status != IStockAccountRegistry.TokenStatus.None
             && cfg.source == IStockAccountRegistry.PriceSource.PoolTwap;
     }
-
-    function _authorizeUpgrade(address) internal override onlyOwner {}
 }
