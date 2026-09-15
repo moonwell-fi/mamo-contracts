@@ -109,10 +109,14 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_BTC_USD, reverse: false, heartbeat: 3600
+            chainlinkFeed: CHAINLINK_BTC_USD,
+            reverse: false,
+            heartbeat: 3600
         });
         cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_USDC_USD, reverse: true, heartbeat: 86_400
+            chainlinkFeed: CHAINLINK_USDC_USD,
+            reverse: true,
+            heartbeat: 86_400
         });
         proxy.addTokenConfiguration(CBBTC, USDC, cfgs);
         proxy.setMaxTimePriceValid(CBBTC, CBBTC_MAX_TIME_PRICE_VALID);
