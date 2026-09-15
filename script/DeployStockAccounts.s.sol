@@ -125,8 +125,13 @@ contract DeployStockAccounts is Script {
         }
 
         vm.startBroadcast();
-        StockAccountPriceChecker priceChecker =
-            new StockAccountPriceChecker(IStockAccountRegistry(stockRegistry), addresses.getAddress(config.asset));
+        // The configured placeholder IS the audited SlippagePriceChecker; the new checker delegates
+        // every PriceSource.Chainlink token to it.
+        StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
+            IStockAccountRegistry(stockRegistry),
+            addresses.getAddress(config.asset),
+            ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker))
+        );
         vm.stopBroadcast();
 
         addresses.addAddress(PRICE_CHECKER_NAME, address(priceChecker), true);
