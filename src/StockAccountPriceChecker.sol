@@ -10,16 +10,20 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title StockAccountPriceChecker
-/// @notice Prices stock-account tokens from their own Aerodrome CL pool, time-averaged over the
-///         registry's window, and routes every quote through the quote asset (USDC).
+/// @notice Prices stock-account tokens by their registry `PriceSource` — an Aerodrome CL pool TWAP
+///         over the registry's window, or the audited `SlippagePriceChecker` — routing every quote
+///         through the quote asset (USDC).
 /// @dev Immutable and unowned: replacement goes through `StockAccountRegistry.setPriceChecker`,
-///      which every stock account reads live.
+///      which every stock account reads live. That covers `existingChecker` too.
 contract StockAccountPriceChecker is ISlippagePriceChecker {
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant INTERNAL_DECIMALS = 36;
 
     IStockAccountRegistry public immutable registry;
     address public immutable quoteAsset;
+    /// @dev Prices every `PriceSource.Chainlink` token against `quoteAsset`; only `token -> quoteAsset`
+    ///      needs configuring there, the reverse direction is derived here.
+    ISlippagePriceChecker public immutable existingChecker;
 
     error ZeroAddress();
     error TokenNotListed(address token);
@@ -29,10 +33,13 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     error InvalidSlippage(uint256 slippageBps);
     error NotSupported();
 
-    constructor(IStockAccountRegistry registry_, address quoteAsset_) {
-        if (address(registry_) == address(0) || quoteAsset_ == address(0)) revert ZeroAddress();
+    constructor(IStockAccountRegistry registry_, address quoteAsset_, ISlippagePriceChecker existingChecker_) {
+        if (address(registry_) == address(0) || quoteAsset_ == address(0) || address(existingChecker_) == address(0)) {
+            revert ZeroAddress();
+        }
         registry = registry_;
         quoteAsset = quoteAsset_;
+        existingChecker = existingChecker_;
     }
 
     /// @inheritdoc ISlippagePriceChecker
@@ -51,7 +58,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     }
 
     /// @inheritdoc ISlippagePriceChecker
-    /// @dev Composes `from -> quote -> to`. Every intermediate is carried at 36 decimals; the final
+    /// @dev Composes `from -> quote -> to`. The intermediate is carried at 36 decimals; the final
     ///      floor into `_toToken` units is the only rounding that can move the result by a whole unit.
     function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken)
         public
@@ -59,10 +66,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         override
         returns (uint256)
     {
-        uint256 quotePerFrom = _quotePerWholeToken(_fromToken);
-        uint256 quotePerTo = _quotePerWholeToken(_toToken);
-        uint256 value = Math.mulDiv(_amountIn, quotePerFrom, 10 ** IERC20Metadata(_fromToken).decimals());
-        return Math.mulDiv(value, 10 ** IERC20Metadata(_toToken).decimals(), quotePerTo);
+        return _fromQuote(_toQuote(_amountIn, _fromToken), _toToken);
     }
 
     /// @inheritdoc ISlippagePriceChecker
@@ -86,8 +90,18 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     }
 
     /// @inheritdoc ISlippagePriceChecker
-    /// @dev The TWAP window is the only time-validity notion this checker has.
-    function maxTimePriceValid(address) external view override returns (uint256) {
+    /// @dev A Chainlink token inherits the existing checker's feed-based bound; everything else is
+    ///      bounded by the TWAP window, the only time-validity notion this checker has of its own.
+    function maxTimePriceValid(address token) external view override returns (uint256) {
+        if (token != quoteAsset) {
+            IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
+            if (
+                cfg.status != IStockAccountRegistry.TokenStatus.None
+                    && cfg.source == IStockAccountRegistry.PriceSource.Chainlink
+            ) {
+                return existingChecker.maxTimePriceValid(token);
+            }
+        }
         return registry.twapWindow();
     }
 
@@ -106,16 +120,56 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         revert NotSupported();
     }
 
-    /// @dev Quote-asset units per one whole `token`, scaled to 36 decimals. The quote asset itself is 1.
-    ///      The base amount is scaled before the quote so the only floor is at 36 decimals, not at raw
-    ///      quote units.
-    function _quotePerWholeToken(address token) internal view returns (uint256) {
-        if (token == quoteAsset) return 10 ** INTERNAL_DECIMALS;
+    /// @dev Value of `amountIn` raw `token` units in quote asset, scaled to 36 decimals. A Chainlink
+    ///      token delegates with the real amount, so a pure `token -> quoteAsset` quote is exactly what
+    ///      the existing checker returns.
+    function _toQuote(uint256 amountIn, address token) internal view returns (uint256) {
+        if (token == quoteAsset) return _scaleToInternal(amountIn);
 
         IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
         if (cfg.status == IStockAccountRegistry.TokenStatus.None) revert TokenNotListed(token);
-        if (cfg.source != IStockAccountRegistry.PriceSource.PoolTwap) revert UnsupportedPriceSource(token);
+        if (cfg.source == IStockAccountRegistry.PriceSource.Chainlink) {
+            return _scaleToInternal(existingChecker.getExpectedOut(amountIn, token, quoteAsset));
+        }
+        if (cfg.source == IStockAccountRegistry.PriceSource.PoolTwap) {
+            return Math.mulDiv(amountIn, _twapQuotePerWholeToken(token, cfg), 10 ** IERC20Metadata(token).decimals());
+        }
+        revert UnsupportedPriceSource(token);
+    }
 
+    /// @dev Raw `token` units for a 36-decimal quote-asset value. The Chainlink price is inverted from a
+    ///      one-whole-token probe, so it inherits that probe's floor at raw quote units
+    ///      (<= 1e-6 USDC per whole token — far below any bps tolerance).
+    function _fromQuote(uint256 quoteValue, address token) internal view returns (uint256) {
+        if (token == quoteAsset) {
+            return Math.mulDiv(quoteValue, 10 ** IERC20Metadata(quoteAsset).decimals(), 10 ** INTERNAL_DECIMALS);
+        }
+
+        IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
+        if (cfg.status == IStockAccountRegistry.TokenStatus.None) revert TokenNotListed(token);
+        uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
+        if (cfg.source == IStockAccountRegistry.PriceSource.Chainlink) {
+            uint256 pricePerWhole = _scaleToInternal(existingChecker.getExpectedOut(oneToken, token, quoteAsset));
+            return Math.mulDiv(quoteValue, oneToken, pricePerWhole);
+        }
+        if (cfg.source == IStockAccountRegistry.PriceSource.PoolTwap) {
+            return Math.mulDiv(quoteValue, oneToken, _twapQuotePerWholeToken(token, cfg));
+        }
+        revert UnsupportedPriceSource(token);
+    }
+
+    /// @dev Raw quote-asset units scaled to the 36-decimal internal representation.
+    function _scaleToInternal(uint256 rawQuoteAmount) internal view returns (uint256) {
+        return Math.mulDiv(rawQuoteAmount, 10 ** INTERNAL_DECIMALS, 10 ** IERC20Metadata(quoteAsset).decimals());
+    }
+
+    /// @dev Quote-asset units per one whole `token` from its pool TWAP, scaled to 36 decimals. The base
+    ///      amount is scaled before the quote so the only floor is at 36 decimals, not at raw quote units.
+    function _twapQuotePerWholeToken(address token, IStockAccountRegistry.TokenConfig memory cfg)
+        internal
+        view
+        returns (uint256)
+    {
         ICLPool pool = ICLPool(cfg.pool);
         address token0 = pool.token0();
         address token1 = pool.token1();
@@ -163,7 +217,10 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     function _isPriceable(address token) internal view returns (bool) {
         if (token == quoteAsset) return true;
         IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
-        return cfg.status != IStockAccountRegistry.TokenStatus.None
-            && cfg.source == IStockAccountRegistry.PriceSource.PoolTwap;
+        if (cfg.status == IStockAccountRegistry.TokenStatus.None) return false;
+        if (cfg.source == IStockAccountRegistry.PriceSource.Chainlink) {
+            return existingChecker.isTokenPairConfigured(token, quoteAsset);
+        }
+        return cfg.source == IStockAccountRegistry.PriceSource.PoolTwap;
     }
 }
