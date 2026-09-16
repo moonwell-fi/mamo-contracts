@@ -25,7 +25,11 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.accountSlippageBps(), 0, "account slippage");
         assertEq(strategy.feeRecipient(), feeRecipient, "fee recipient");
         assertEq(strategy.lastFeePaid(), block.timestamp, "last fee paid");
-        assertEq(strategy.appDataHash(), keccak256(bytes(strategy.appDataDocument())), "app data hash");
+        assertEq(
+            strategy.appDataHash(address(nvda)),
+            keccak256(bytes(strategy.appDataDocument(address(nvda)))),
+            "app data hash"
+        );
 
         (IStockAccountStrategy.BasketEntry[] memory entries, uint16 cashTargetBps) = strategy.getBasket();
         assertEq(entries.length, 2, "entries length");

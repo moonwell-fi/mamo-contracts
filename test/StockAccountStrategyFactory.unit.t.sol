@@ -276,7 +276,11 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(account.cowVaultRelayer(), relayer, "vault relayer");
         assertEq(account.feeRecipient(), feeRecipient, "fee recipient");
         assertEq(account.lastFeePaid(), block.timestamp, "last fee paid");
-        assertEq(account.appDataHash(), keccak256(bytes(account.appDataDocument())), "app data hash");
+        assertEq(
+            account.appDataHash(address(nvda)),
+            keccak256(bytes(account.appDataDocument(address(nvda)))),
+            "app data hash"
+        );
 
         (IStockAccountStrategy.BasketEntry[] memory entries, uint16 cashTargetBps) = account.getBasket();
         assertEq(entries.length, 2, "entries length");

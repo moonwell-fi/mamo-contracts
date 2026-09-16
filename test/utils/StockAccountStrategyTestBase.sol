@@ -52,6 +52,8 @@ abstract contract StockAccountStrategyTestBase is Test {
         priceChecker = new MockPriceChecker();
         priceChecker.setRate(address(nvda), address(usdc), 200e18);
         priceChecker.setRate(address(aapl), address(usdc), 100e18);
+        priceChecker.setRate(address(usdc), address(nvda), 5e15);
+        priceChecker.setRate(address(usdc), address(aapl), 1e16);
 
         settlement = new MockGPv2Settlement(SEPARATOR, relayer);
 

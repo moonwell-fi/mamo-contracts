@@ -13,7 +13,7 @@ interface IStockAccountStrategy {
     event WithdrawToken(address indexed token, uint256 amount);
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
-    event FeesPaid(uint256 elapsed, address[] tokens, uint256[] amounts);
+    event FeesPaid(uint256 elapsed, address token, uint256 amount);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
     error ZeroAddress();
@@ -49,6 +49,8 @@ interface IStockAccountStrategy {
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);
     error PriceCheckFailed();
+    error FeeTokenNotAllowed(address token);
+    error NoBalanceForFee(address token);
 
     function deposit(uint256 amount) external;
 
@@ -70,7 +72,7 @@ interface IStockAccountStrategy {
 
     function approveCowRelayer(address token) external;
 
-    function payFees() external;
+    function payFees(address token) external;
 
     function getNAV() external view returns (uint256 valueUsdc);
 
@@ -90,11 +92,13 @@ interface IStockAccountStrategy {
 
     function getAccountSlippage() external view returns (uint16);
 
-    function feeDue(address token) external view returns (uint256);
+    function feeDue() external view returns (uint256);
 
-    function appDataDocument() external view returns (string memory);
+    function feeDueIn(address token) external view returns (uint256);
 
-    function appDataHash() external view returns (bytes32);
+    function appDataDocument(address feeToken) external view returns (string memory);
+
+    function appDataHash(address feeToken) external view returns (bytes32);
 
     function lastFeePaid() external view returns (uint64);
 }
