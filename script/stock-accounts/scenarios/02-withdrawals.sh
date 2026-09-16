@@ -21,12 +21,12 @@ ACCT=$(create_account "$USER_D" "[($NVDA,5000)]" 5000)
 buy_and_deposit "$USER_D" "$ACCT" "$NVDA" 10 "$STOCK_LEG" >/dev/null
 deposit_usdc "$USER_D" "$ACCT" "$IDLE"
 
-# Idle cash covers it, so no position is touched beyond the fee every withdrawal pays first.
+# Idle cash covers it, and `withdraw` pays its fee in USDC, so the position is not touched at all.
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 RECEIPT=$(send "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' "$SMALL_WITHDRAW" "$SLIPPAGE")
 
 assert_eq "cash-only withdrawal sells no NVDAc" \
-  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") + $(fees_paid "$RECEIPT" "$ACCT" "$NVDA")")" "$NVDA_BEFORE"
+  "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
 assert_eq "Withdraw event reports the cash paid" "$(event_word "$RECEIPT" 'Withdraw(uint256,uint256)' 0)" "$SMALL_WITHDRAW"
 assert_eq "Withdraw event reports zero sold" "$(event_word "$RECEIPT" 'Withdraw(uint256,uint256)' 1)" 0
 
@@ -41,11 +41,10 @@ assert_gt "preview floors the proceeds" "$PREVIEW_MIN" 0
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 OWNER_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_D")
-RECEIPT=$(send "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' "$BIG_WITHDRAW" "$SLIPPAGE")
+send "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' "$BIG_WITHDRAW" "$SLIPPAGE" >/dev/null
 
 assert_approx "sold amount matches the preview" \
-  "$(bn "$NVDA_BEFORE - $(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") - $(fees_paid "$RECEIPT" "$ACCT" "$NVDA")")" \
-  "$PREVIEW_AMOUNT" 10
+  "$(bn "$NVDA_BEFORE - $(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")")" "$PREVIEW_AMOUNT" 10
 assert_eq "owner received exactly what was asked" \
   "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_D") - $OWNER_BEFORE")" "$BIG_WITHDRAW"
 

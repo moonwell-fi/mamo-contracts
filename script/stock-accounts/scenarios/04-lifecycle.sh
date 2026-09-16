@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Account lifecycle: deterministic address, buy-in, basket change, cash withdrawal, a halted token
-# leaving the account valuation but not the account, and the two ways the management fee gets paid
-# outside a settlement -- the withdrawal backstop and a plain poke on an idle account.
+# Account lifecycle: deterministic address, buy-in, basket change, and every way the management fee is
+# paid outside a settlement -- a cash withdrawal paying in USDC, an in-kind withdrawal paying in the
+# token it sends, a poke on an idle account, and a halted token that can no longer settle the fee but
+# is still withdrawable, the fee then coming out of the cash instead.
 set -euo pipefail
 
 SCEN=04-lifecycle
@@ -15,12 +16,11 @@ CASH_WITHDRAW=100000000
 FEE_WITHDRAW=10000000
 MONTH=2592000
 DAY=86400
-YEAR=31536000
 HALTED=3
 ACTIVE=1
-
-FEE_BPS=$(mgmt_fee_bps)
-expected_fee() { bn "$1 * $FEE_BPS * $2 // (10000 * $YEAR)"; }
+# All that separates a feeDue read from what the next transaction pays: a few seconds of accrual, and
+# any move in the pool average behind the conversion.
+FEE_TOL_BPS=10
 
 USER_C=$(actor C)
 fund "$USER_C" "$DEPOSIT"
@@ -53,63 +53,95 @@ assert_eq "new NVDAc target read back" "$(list_at "$(callline 3 "$ACCT" 'getWeig
 assert_eq "new cash target read back" "$(call "$ACCT" 'cashTargetBps()(uint16)')" 3000
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
-RECEIPT=$(send "$USER_C" "$ACCT" 'withdraw(uint256,uint16)' "$CASH_WITHDRAW" 100)
-assert_eq "cash withdrawal sold no NVDAc" \
-  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") + $(fees_paid "$RECEIPT" "$ACCT" "$NVDA")")" "$NVDA_BEFORE"
+send "$USER_C" "$ACCT" 'withdraw(uint256,uint16)' "$CASH_WITHDRAW" 100 >/dev/null
+assert_eq "cash withdrawal sold no NVDAc" "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
 
-# A halted token stops being valued and stops accruing a fee, but stays withdrawable in kind.
-send "$DEPLOYER" "$STOCK_REGISTRY" 'setTokenStatus(address,uint8)' "$NVDA" "$HALTED" >/dev/null
-assert_eq "halted token drops out of the NAV" "$(nav "$ACCT")" "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")"
-assert_eq "no fee is due on a halted token" "$(fee_due "$ACCT" "$NVDA")" 0
-assert_eq "halted token is still held" "$(list_at "$(callline 1 "$ACCT" 'heldTokens()(address[])')" 0)" "$NVDA"
-
-IN_KIND=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
-OWNER_NVDA=$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C")
-send "$USER_C" "$ACCT" 'withdrawToken(address,uint256)' "$NVDA" "$IN_KIND" >/dev/null
-assert_eq "halted token withdrawn in kind" \
-  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_NVDA")" "$IN_KIND"
-
-send "$DEPLOYER" "$STOCK_REGISTRY" 'setTokenStatus(address,uint8)' "$NVDA" "$ACTIVE" >/dev/null
-assert_eq "admin restores the token to Active" "$(token_status "$NVDA")" "$ACTIVE"
-
-# A month of fee on an account that never traded: the next withdrawal pays it before paying the owner.
+# A month of fee on an account that never traded: `withdraw` sells nothing and pays it in USDC.
 increase_time "$MONTH"
 
-BALANCE=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")
-FEE_DUE=$(fee_due "$ACCT" "$USDC")
+FEE_DUE=$(fee_due "$ACCT")
 COLLECTOR_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
 OWNER_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_C")
+NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 
 RECEIPT=$(send "$USER_C" "$ACCT" 'withdraw(uint256,uint16)' "$FEE_WITHDRAW" 100)
 PAID=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
 ELAPSED=$(fees_paid_elapsed "$RECEIPT" "$ACCT")
 
-assert_eq "the withdrawal paid the month of fee in the same tx" \
+assert_eq "the withdrawal paid its fee in USDC" "$(fees_paid_token "$RECEIPT" "$ACCT")" "$USDC"
+assert_eq "collector USDC grew by exactly that fee" \
   "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID"
-# Fees come out before the owner is paid, so the month is charged on the pre-withdrawal balance.
-assert_eq "the fee is the balance x rate x elapsed" "$PAID" "$(expected_fee "$BALANCE" "$ELAPSED")"
-assert_approx "the fee matches feeDue read before the withdrawal" "$PAID" "$FEE_DUE" 10
+assert_approx "the fee is feeDue read before the withdrawal" "$PAID" "$FEE_DUE" "$FEE_TOL_BPS"
+assert_eq "the withdrawal fee left the position alone" "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
 assert_eq "the owner still received what was asked" \
   "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_BEFORE")" "$FEE_WITHDRAW"
 record "$SCEN" "month of fee: paid vs feeDue" 1 "$PAID vs $FEE_DUE over ${ELAPSED}s"
 
-# An account nobody touches is poked instead, which is how the backend settles an idle one.
+# An in-kind withdrawal pays in the token it sends, not in cash.
 increase_time "$DAY"
 
-BALANCE=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")
-FEE_DUE=$(fee_due "$ACCT" "$USDC")
-COLLECTOR_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
+PART=$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") // 2")
+FEE_DUE_NVDA=$(fee_due_in "$ACCT" "$NVDA")
+COLLECTOR_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")
+COLLECTOR_USDC_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
+OWNER_NVDA=$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C")
 
-RECEIPT=$(send "$DEPLOYER" "$ACCT" 'payFees()')
-PAID=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
-ELAPSED=$(fees_paid_elapsed "$RECEIPT" "$ACCT")
+RECEIPT=$(send "$USER_C" "$ACCT" 'withdrawToken(address,uint256)' "$NVDA" "$PART")
+PAID_NVDA=$(fees_paid "$RECEIPT" "$ACCT" "$NVDA")
 
-assert_eq "the poke paid the day of fee" \
-  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID"
-assert_eq "the poked fee is the balance x rate x elapsed" "$PAID" "$(expected_fee "$BALANCE" "$ELAPSED")"
-assert_approx "the poked fee matches feeDue read before it" "$PAID" "$FEE_DUE" 10
+assert_eq "withdrawToken paid its fee in NVDAc" "$(fees_paid_token "$RECEIPT" "$ACCT")" "$NVDA"
+assert_eq "collector NVDAc grew by exactly that fee" \
+  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID_NVDA"
+assert_eq "collector USDC untouched by an in-kind withdrawal" \
+  "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")" "$COLLECTOR_USDC_BEFORE"
+assert_approx "that fee is feeDueIn(NVDAc) read before it" "$PAID_NVDA" "$FEE_DUE_NVDA" "$FEE_TOL_BPS"
+assert_eq "the owner received the tokens asked for" \
+  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_NVDA")" "$PART"
+record "$SCEN" "in-kind fee: paid vs feeDueIn(NVDAc)" 1 "$PAID_NVDA vs $FEE_DUE_NVDA"
+
+# An account nobody touches is poked instead, which is how the backend settles an idle one. The poke
+# names the token, so the backend can take it out of a position rather than out of the cash.
+increase_time "$DAY"
+
+FEE_DUE_NVDA=$(fee_due_in "$ACCT" "$NVDA")
+COLLECTOR_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")
+
+RECEIPT=$(send "$DEPLOYER" "$ACCT" 'payFees(address)' "$NVDA")
+PAID_NVDA=$(fees_paid "$RECEIPT" "$ACCT" "$NVDA")
+
+assert_eq "the poke paid the day of fee in NVDAc" \
+  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID_NVDA"
+assert_approx "the poked fee is feeDueIn(NVDAc) read before it" "$PAID_NVDA" "$FEE_DUE_NVDA" "$FEE_TOL_BPS"
 assert_eq "lastFeePaid moved to the poke" "$(call "$ACCT" 'lastFeePaid()(uint64)')" "$(now_ts)"
-assert_eq "nothing is due straight after" "$(fee_due "$ACCT" "$USDC")" 0
+assert_eq "nothing is due straight after" "$(fee_due "$ACCT")" 0
+record "$SCEN" "poked fee: paid vs feeDueIn(NVDAc)" 1 "$PAID_NVDA vs $FEE_DUE_NVDA"
+
+# A halted token stops being valued and can no longer settle the fee, but stays withdrawable in kind.
+send "$DEPLOYER" "$STOCK_REGISTRY" 'setTokenStatus(address,uint8)' "$NVDA" "$HALTED" >/dev/null
+increase_time "$DAY"
+
+assert_eq "halted token drops out of the NAV" "$(nav "$ACCT")" "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")"
+assert_eq "halted token is still held" "$(list_at "$(callline 1 "$ACCT" 'heldTokens()(address[])')" 0)" "$NVDA"
+expect_revert "the fee cannot be taken in a halted token" "$(selector 'FeeTokenNotAllowed(address)')" \
+  "$DEPLOYER" "$ACCT" 'payFees(address)' "$NVDA"
+
+IN_KIND=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
+OWNER_NVDA=$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C")
+COLLECTOR_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
+FEE_DUE=$(fee_due "$ACCT")
+
+RECEIPT=$(send "$USER_C" "$ACCT" 'withdrawToken(address,uint256)' "$NVDA" "$IN_KIND")
+PAID=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
+
+assert_eq "halted token withdrawn in kind" \
+  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_NVDA")" "$IN_KIND"
+assert_eq "its fee fell back to the cash" "$(fees_paid_token "$RECEIPT" "$ACCT")" "$USDC"
+assert_eq "collector USDC grew by exactly that fee" \
+  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID"
+assert_approx "the fallback fee is feeDue read before it" "$PAID" "$FEE_DUE" "$FEE_TOL_BPS"
+
+send "$DEPLOYER" "$STOCK_REGISTRY" 'setTokenStatus(address,uint8)' "$NVDA" "$ACTIVE" >/dev/null
+assert_eq "admin restores the token to Active" "$(token_status "$NVDA")" "$ACTIVE"
 
 setup_note accountC "$ACCT"
 finish

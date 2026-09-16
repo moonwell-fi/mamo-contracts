@@ -46,15 +46,16 @@ interface IPoolLike {
 }
 
 interface IStockAccountLike {
-    function payFees() external;
+    function payFees(address token) external;
 }
 
 /// @title SettlementHelper
 /// @notice Vnet-only CoW solver that settles stock account orders, so the whole settlement path runs
 ///         on the Tenderly node where the B20 stock token precompiles are executable.
-/// @dev Every account order carries an appData document with one post-hook, `payFees()` on the account
-///      itself. CoW routes hooks through the HooksTrampoline; since `payFees` is permissionless, calling
-///      the account straight from the settlement post-interactions is equivalent.
+/// @dev Every account order carries an appData document with one post-hook, `payFees(buyToken)` on the
+///      account itself, so the fee is paid in the token the order buys. CoW routes hooks through the
+///      HooksTrampoline; since `payFees` is permissionless, calling the account straight from the
+///      settlement post-interactions is equivalent.
 contract SettlementHelper {
     /// @dev sell kind, fill-or-kill, erc20 balances both sides, EIP-1271 signing scheme.
     uint256 internal constant EIP1271_SELL_FOK_FLAGS = 0x40;
@@ -139,8 +140,8 @@ contract SettlementHelper {
         interactions[0] = new IGPv2SettlementLike.Interaction[](0);
         interactions[1] = new IGPv2SettlementLike.Interaction[](0);
         interactions[2] = new IGPv2SettlementLike.Interaction[](2);
-        interactions[2][0] = _feeHook(accountA);
-        interactions[2][1] = _feeHook(accountB);
+        interactions[2][0] = _feeHook(accountA, address(orderA.buyToken));
+        interactions[2][1] = _feeHook(accountB, address(orderB.buyToken));
 
         settlement.settle(tokens, prices, trades, interactions);
     }
@@ -181,11 +182,17 @@ contract SettlementHelper {
     }
 
     /// @notice The post-interaction CoW runs for an account order: the fee hook its appData declares
-    function _feeHook(address account) internal pure returns (IGPv2SettlementLike.Interaction memory) {
+    /// @param account The account that signed the order
+    /// @param feeToken The token the order buys, which is the token the fee is paid in
+    function _feeHook(address account, address feeToken)
+        internal
+        pure
+        returns (IGPv2SettlementLike.Interaction memory)
+    {
         return IGPv2SettlementLike.Interaction({
             target: account,
             value: 0,
-            callData: abi.encodeCall(IStockAccountLike.payFees, ())
+            callData: abi.encodeCall(IStockAccountLike.payFees, (feeToken))
         });
     }
 
@@ -196,7 +203,7 @@ contract SettlementHelper {
     {
         interactions[0] = new IGPv2SettlementLike.Interaction[](0);
         interactions[2] = new IGPv2SettlementLike.Interaction[](1);
-        interactions[2][0] = _feeHook(account);
+        interactions[2][0] = _feeHook(account, address(order.buyToken));
         interactions[1] = new IGPv2SettlementLike.Interaction[](2);
 
         interactions[1][0] = IGPv2SettlementLike.Interaction({

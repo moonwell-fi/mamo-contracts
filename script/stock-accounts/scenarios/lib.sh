@@ -61,6 +61,7 @@ SCEN=${SCEN:-lib}
 # Big integers past 2^63 (sqrt prices, wei) are beyond bash arithmetic.
 bn() { python3 -c "print(int($1))"; }
 bb() { python3 -c "print(1 if ($1) else 0)"; }
+lc() { printf '%s\n' "$1" | tr 'A-Z' 'a-z'; }
 
 # ---------------------------------------------------------------- rpc
 
@@ -284,21 +285,29 @@ event_word() { # event_word <receipt-json> <event-signature> <word-index>
   bn "0x${data:$((2 + $3 * 64)):64}"
 }
 
-# What an account's fee post-hook actually paid in a transaction; zero when the token owed nothing.
+# FeesPaid(elapsed, token, amount): one token per payment, so the event is three flat words.
+FEES_PAID_SIG='FeesPaid(uint256,address,uint256)'
+
+# The token an account's fee payment was taken in, empty when it paid nothing in this transaction.
+fees_paid_token() { # fees_paid_token <receipt-json> <account>
+  local data
+  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
+  [ -n "$data" ] || return 0
+  printf '0x%s\n' "${data:90:40}"
+}
+
+# What an account's fee payment moved in one token; zero when it paid in another token or not at all.
 fees_paid() { # fees_paid <receipt-json> <account> <token>
-  local data decoded index
-  data=$(event_data "$1" 'FeesPaid(uint256,address[],uint256[])' "$2")
+  local data
+  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
   [ -n "$data" ] || { echo 0; return 0; }
-  decoded=$(cast abi-decode 'f()(uint256,address[],uint256[])' "$data")
-  index=$(printf '%s' "$decoded" | sed -n 2p | tr -d '[]' | tr ',' '\n' | awk '{print tolower($1)}' |
-    grep -n -x -- "$(echo "$3" | tr 'A-Z' 'a-z')" | cut -d: -f1)
-  [ -n "$index" ] || { echo 0; return 0; }
-  list_at "$(printf '%s' "$decoded" | sed -n 3p)" "$((index - 1))"
+  [ "$(lc "0x${data:90:40}")" = "$(lc "$3")" ] || { echo 0; return 0; }
+  bn "0x${data:130:64}"
 }
 
 fees_paid_elapsed() { # fees_paid_elapsed <receipt-json> <account>
   local data
-  data=$(event_data "$1" 'FeesPaid(uint256,address[],uint256[])' "$2")
+  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
   [ -n "$data" ] || { echo 0; return 0; }
   bn "0x${data:2:64}"
 }
@@ -309,18 +318,22 @@ quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
 }
 
 expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint256)' "$1" "$2" "$3"; }
-fee_due() { call "$1" 'feeDue(address)(uint256)' "$2"; }
+# The fee is valued on the whole account in USDC, then converted to whichever token settles it.
+fee_due() { call "$1" 'feeDue()(uint256)'; }
+fee_due_in() { call "$1" 'feeDueIn(address)(uint256)' "$2"; }
 fee_collector() { call "$1" 'feeRecipient()(address)'; }
-app_data_hash() { call "$1" 'appDataHash()(bytes32)'; }
-mgmt_fee_bps() { call "$STOCK_REGISTRY" 'managementFeeBps()(uint16)'; }
+# One document, and one hash, per (account, fee token); the fee token is the token an order buys.
+app_data_hash() { call "$1" 'appDataHash(address)(bytes32)' "$2"; }
 nav() { call "$1" 'getNAV()(uint256)'; }
 sqrt_price() { calln 1 "$1" 'slot0()(uint160,int24,uint16,uint16,uint16,bool)'; }
 
 # ---------------------------------------------------------------- cow orders
 
+# The appData an order must carry is the account's document for the token it buys, since that is the
+# token the post-hook takes the fee in.
 mk_order() { # mk_order <sellToken> <buyToken> <account> <sellAmount> <buyAmount> <validTo> [appData]
   printf '(%s,%s,%s,%s,%s,%s,%s,0,%s,false,%s,%s)' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "${7:-$(app_data_hash "$3")}" "$KIND_SELL" "$BALANCE_ERC20" "$BALANCE_ERC20"
+    "$1" "$2" "$3" "$4" "$5" "$6" "${7:-$(app_data_hash "$3" "$2")}" "$KIND_SELL" "$BALANCE_ERC20" "$BALANCE_ERC20"
 }
 
 order_digest() { call "$HELPER" "digest($ORDER_T,bytes32)(bytes32)" "$1" "$DOMAIN_SEPARATOR"; }
