@@ -21,6 +21,8 @@ interface IStockAccountRegistry {
         TokenStatus status;
         PriceSource source;
         address pool;
+        /// @dev Advisory bookkeeping only. A Chainlink token is priced through the audited
+        ///      SlippagePriceChecker, whose feeds its own owner configures; this field is not read.
         address chainlinkFeed;
     }
 
