@@ -45,9 +45,16 @@ interface IPoolLike {
     function tickSpacing() external view returns (int24);
 }
 
+interface IStockAccountLike {
+    function payFees() external;
+}
+
 /// @title SettlementHelper
 /// @notice Vnet-only CoW solver that settles stock account orders, so the whole settlement path runs
 ///         on the Tenderly node where the B20 stock token precompiles are executable.
+/// @dev Every account order carries an appData document with one post-hook, `payFees()` on the account
+///      itself. CoW routes hooks through the HooksTrampoline; since `payFees` is permissionless, calling
+///      the account straight from the settlement post-interactions is equivalent.
 contract SettlementHelper {
     /// @dev sell kind, fill-or-kill, erc20 balances both sides, EIP-1271 signing scheme.
     uint256 internal constant EIP1271_SELL_FOK_FLAGS = 0x40;
@@ -97,7 +104,7 @@ contract SettlementHelper {
 
         uint256 buyOwed = (order.sellAmount * clearingSell) / clearingBuy;
 
-        settlement.settle(tokens, prices, trades, _swapInteractions(order, buyOwed));
+        settlement.settle(tokens, prices, trades, _swapInteractions(order, buyOwed, account));
     }
 
     /// @notice Settles two accounts on opposite sides of the same pair against each other, no venue touched
@@ -131,7 +138,9 @@ contract SettlementHelper {
         IGPv2SettlementLike.Interaction[][3] memory interactions;
         interactions[0] = new IGPv2SettlementLike.Interaction[](0);
         interactions[1] = new IGPv2SettlementLike.Interaction[](0);
-        interactions[2] = new IGPv2SettlementLike.Interaction[](0);
+        interactions[2] = new IGPv2SettlementLike.Interaction[](2);
+        interactions[2][0] = _feeHook(accountA);
+        interactions[2][1] = _feeHook(accountB);
 
         settlement.settle(tokens, prices, trades, interactions);
     }
@@ -171,13 +180,23 @@ contract SettlementHelper {
         });
     }
 
-    function _swapInteractions(GPv2Order.Data calldata order, uint256 buyOwed)
+    /// @notice The post-interaction CoW runs for an account order: the fee hook its appData declares
+    function _feeHook(address account) internal pure returns (IGPv2SettlementLike.Interaction memory) {
+        return IGPv2SettlementLike.Interaction({
+            target: account,
+            value: 0,
+            callData: abi.encodeCall(IStockAccountLike.payFees, ())
+        });
+    }
+
+    function _swapInteractions(GPv2Order.Data calldata order, uint256 buyOwed, address account)
         internal
         view
         returns (IGPv2SettlementLike.Interaction[][3] memory interactions)
     {
         interactions[0] = new IGPv2SettlementLike.Interaction[](0);
-        interactions[2] = new IGPv2SettlementLike.Interaction[](0);
+        interactions[2] = new IGPv2SettlementLike.Interaction[](1);
+        interactions[2][0] = _feeHook(account);
         interactions[1] = new IGPv2SettlementLike.Interaction[](2);
 
         interactions[1][0] = IGPv2SettlementLike.Interaction({

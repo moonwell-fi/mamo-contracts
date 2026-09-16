@@ -36,6 +36,12 @@ if [ "$(call "$COW_AUTHENTICATOR" 'isSolver(address)(bool)' "$HELPER")" != "true
 fi
 assert_eq "helper registered as CoW solver" "$(call "$COW_AUTHENTICATOR" 'isSolver(address)(bool)' "$HELPER")" true
 
+# appData is per account now: the backend uploads the document the account itself reports.
+assert_eq "manifest appData document hashes to the recorded appDataHash" \
+  "$(cast keccak "$(jq -c '.appDataDocument' "$MANIFEST")")" "$(mani appDataHash)"
+assert_eq "the smoke account reports that same appDataHash" \
+  "$(app_data_hash "$(mani testUserAccount)")" "$(mani appDataHash)"
+
 setup_note runId "$RUN_ID"
 setup_note rpc "$VNET"
 setup_note settlementHelper "$HELPER"

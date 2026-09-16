@@ -108,35 +108,69 @@ Tenderly vnet, where the node serves the precompile, and not in `forge test`.
 deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is involved, so it passes
 before any token is listed. It also asserts the registry points at `STOCK_ACCOUNT_PRICE_CHECKER`.
 
+## The management fee
+
+Every account charges the registry's `managementFeeBps` — 100 bps a year in both deploy configs — on
+every balance it holds: the cash and each listed token that is not Halted. Nothing is accrued in
+storage. `payFees()` sends `balance x rate x elapsed / (10000 x 365 days)` of each of those tokens
+straight to the fee recipient, moves `lastFeePaid` to now and emits `FeesPaid`. It is permissionless.
+`feeDue(token)` is what the account would pay on one token right now.
+
+Three things call it:
+
+- **The CoW post-hook.** Each account's appData document declares one post-hook: `payFees()` on the
+  account itself, with a 500,000 gas limit. CoW runs it inside the settlement transaction, after the
+  trade legs, so each token is charged on the balance the trade left behind. An account that trades
+  settles its own fee.
+- **Withdrawals.** `withdraw`, `withdrawAll`, `withdrawToken` and `withdrawAllInKind` pay the fee
+  before they pay the owner, so nobody leaves ahead of it. This is the backstop.
+- **A poke.** An account that neither trades nor withdraws just keeps owing more; the backend calls
+  `payFees()` on it directly to settle it.
+
+The rate lives on the registry, one for every account: `managementFeeBps` in the deploy config, then
+`setManagementFeeBps` from the admin, capped by the immutable `maxManagementFeeBps` of 200.
+
+Before changing it, poke `payFees()` on every account. The rate is read when the fee is paid and
+applied to the whole elapsed period, so an unsettled account would have its backlog charged at the
+new rate.
+
 ## CoW appData
 
-`script/stock-accounts/appData.json` is the canonical document, byte for byte, with no trailing
-newline. Its hash is what `requiredAppDataHash` is set to in both deploy configs:
+appData is per account, because the post-hook target is the account address. It is fixed at creation
+and the account is the source of truth for it:
 
 ```bash
-make cow-appdata-hash
-# 0x7cbb2322cf53b3a2b45d36850ed9678dd2ad87737e996de24646edbbed599382
+cast call <account> 'appDataDocument()(string)' --rpc-url "$RPC"
+cast call <account> 'appDataHash()(bytes32)' --rpc-url "$RPC"
 ```
 
-Before any order is placed the document has to be uploaded to the CoW API (once per network):
+After creating an account the backend uploads that document to the CoW API, verbatim, under its hash.
+`cast` already prints the document as a JSON string, which is the shape `fullAppData` wants:
 
 ```bash
-curl -X PUT https://api.cow.fi/base/api/v1/app_data/0x7cbb2322cf53b3a2b45d36850ed9678dd2ad87737e996de24646edbbed599382 \
-  -H 'content-type: application/json' \
-  -d '{"fullAppData": "{\"appCode\":\"Mamo\",\"metadata\":{},\"version\":\"1.3.0\"}"}'
+HASH=$(cast call <account> 'appDataHash()(bytes32)' --rpc-url "$RPC")
+DOC=$(cast call <account> 'appDataDocument()(string)' --rpc-url "$RPC")
+curl -X PUT "https://api.cow.fi/base/api/v1/app_data/$HASH" \
+  -H 'content-type: application/json' -d "{\"fullAppData\": $DOC}"
 ```
+
+Every order the account signs has to carry that hash: `isValidSignature` refuses anything else with
+`InvalidAppData`, so an order whose appData does not declare the fee hook cannot settle.
 
 ## The manifest
 
 `script/stock-accounts/vnet-manifest.json` (gitignored) is written by the smoke script and is what the
 backend or a follow-up script reads to pick the vnet up: the admin `rpc`, `chainId`, every
-`STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address, the `strategyTypeId`, and the test user with the
-account created for them.
+`STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address, the `strategyTypeId`, the test user with the
+account created for them, and that account's `appDataHash` and `appDataDocument`. Forge writes the
+document inlined as JSON rather than as a string, so `jq -c` is what reproduces the bytes the hash is
+over.
 
 ```bash
 jq -r '.rpc' script/stock-accounts/vnet-manifest.json
 cast call "$(jq -r '.testUserAccount' script/stock-accounts/vnet-manifest.json)" 'getNAV()(uint256)' \
   --rpc-url "$(jq -r '.rpc' script/stock-accounts/vnet-manifest.json)"
+cast keccak "$(jq -c '.appDataDocument' script/stock-accounts/vnet-manifest.json)"   # the appDataHash
 ```
 
 ## Scenarios
@@ -169,16 +203,19 @@ code runs on the node. USDC balances come from `tenderly_setErc20Balance` and ti
 It builds the `tokens`/`clearingPrices`/`trades` arrays for `GPv2Settlement.settle`, signs each trade
 with the EIP-1271 scheme (the owner address followed by the encoded order), and either sources the buy
 token from the stocks pool in the intra-settlement interactions or nets two accounts against each
-other with no interaction at all.
+other with no interaction at all. It also carries, as a post-interaction, the hook each account's
+appData declares: `payFees()` on the account, one per account in the settle. Real CoW routes hooks
+through the `HooksTrampoline`; calling the account straight from the settlement is equivalent because
+`payFees` is permissionless.
 
 ### What each scenario proves
 
 | Scenario | Proves |
 | --- | --- |
-| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; NAV and weights survive it; the same trade sized past the band is refused by the account and therefore by the settlement; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue. |
+| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; the appData post-hook pays a day of fee to the fee collector in that same transaction, on each token's post-trade balance; the same order carrying a foreign appData is refused with `InvalidAppData`; NAV and weights survive the trade; the same trade sized past the band is refused by the account and therefore by the settlement; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue, each with its own fee hook. |
 | `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
-| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a Halted token leaves the NAV while remaining held and withdrawable in kind; a month of management fee accrues at the configured rate and collects to the fee recipient. |
+| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a Halted token leaves the NAV while remaining held and withdrawable in kind and owes no fee while it is Halted; a month of management fee is paid by the next withdrawal before the owner is paid, and a further day by a plain `payFees()` poke. |
 | `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them, and measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions. |
 
 Two things the range rule makes concrete and the scenarios assert. An account sitting on its targets

@@ -74,9 +74,10 @@ expect_call_revert "buying more NVDAc refused while overweight" "$(selector 'Sel
   "$(order_digest "$BUY_ORDER")" "$(order_encoded "$BUY_ORDER")"
 
 USDC_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")
-settle_sell "$ACCT" "$SELL_ORDER" "$SELL_NVDA" "$SELL_USDC"
+RECEIPT=$(settle_sell "$ACCT" "$SELL_ORDER" "$SELL_NVDA" "$SELL_USDC")
 assert_eq "de-risking sell settled" \
-  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT") - $USDC_BEFORE")" "$SELL_USDC"
+  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT") - $USDC_BEFORE + $(fees_paid "$RECEIPT" "$ACCT" "$USDC")")" \
+  "$SELL_USDC"
 
 # Unwind the spike and let the average come back down with it.
 swap "$DEPLOYER" "$NVDA" "$USDC" 10 "$(call "$NVDA" 'balanceOf(address)(uint256)' "$DEPLOYER")" "$PRE_SQRT"

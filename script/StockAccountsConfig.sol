@@ -31,7 +31,6 @@ contract StockAccountsConfig is Script {
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
         string placeholderPriceChecker;
-        bytes32 requiredAppDataHash;
         uint32 twapWindow;
     }
 
@@ -57,7 +56,6 @@ contract StockAccountsConfig is Script {
         config.minStrategyDeposit = json.readUint(".minStrategyDeposit");
         config.minTargetBps = uint16(json.readUint(".minTargetBps"));
         config.placeholderPriceChecker = json.readString(".placeholderPriceChecker");
-        config.requiredAppDataHash = json.readBytes32(".requiredAppDataHash");
         config.twapWindow = uint32(json.readUint(".twapWindow"));
 
         require(config.chainId == block.chainid, "Config chain id does not match the current chain");

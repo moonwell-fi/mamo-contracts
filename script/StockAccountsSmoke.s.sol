@@ -94,7 +94,12 @@ contract StockAccountsSmoke is Script {
         );
         vm.serializeUint(json, "strategyTypeId", factory.strategyTypeId());
         vm.serializeAddress(json, "testUser", user);
-        string memory out = vm.serializeAddress(json, "testUserAccount", account);
+        vm.serializeAddress(json, "testUserAccount", account);
+
+        // The appData is per account: the backend uploads this document to the CoW API under its hash
+        vm.serializeBytes32(json, "appDataHash", StockAccountStrategy(payable(account)).appDataHash());
+        string memory out =
+            vm.serializeString(json, "appDataDocument", StockAccountStrategy(payable(account)).appDataDocument());
 
         vm.writeJson(out, MANIFEST_PATH);
         console.log("manifest written to %s", MANIFEST_PATH);
