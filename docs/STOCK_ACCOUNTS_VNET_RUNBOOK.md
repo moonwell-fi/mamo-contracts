@@ -44,7 +44,9 @@ In reuse mode the address book copy is kept, so every deploy step that already r
    (existing ids are 1, 2 and 3; the stock account implementation takes **4**)
 6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
-8. admin: `StockAccountRegistry.listToken(...)` for every entry of `config/stock-accounts/8453.json`
+8. admin: `StockAccountRegistry.listToken(...)` for every entry of `config/stock-accounts/8453.json`;
+   each listing is probed against the registry's current price checker and refused with
+   `TokenNotPriceable` unless one whole token quotes into `asset`, so step 3 has to land first
 
 Every step checks the address book (steps 1, 2, 4, 6) or the onchain state (steps 3, 5, 7, 8) first,
 so a rerun against the same address book is a no-op. Deploying a name that is already recorded is
@@ -96,6 +98,12 @@ tokens still waits on CT-04, which fills the file with entries shaped like:
 
 `pool` and `chainlinkFeed` are raw addresses (empty string means the zero address), `source` is
 `PoolTwap` or `Chainlink`, and every token is listed as `Active`.
+
+`asset` (USDC) is the quote asset: it goes to the registry constructor, the price checker and the
+factory. The registry probes every listing and every raise back to `Active` through it, so a token
+the checker cannot quote — no pool against `asset`, or a pool whose history is shorter than
+`twapWindow` — is refused at listing instead of breaking `getNAV` for every holder. Lowering a
+token to `SellOnly` or `Halted` never probes.
 
 ## Why the smoke test only deposits USDC
 

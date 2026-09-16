@@ -93,6 +93,7 @@ contract DeployStockAccounts is Script {
         StockAccountRegistry.Config memory registryConfig = StockAccountRegistry.Config({
             admin: addresses.getAddress(config.admin),
             aerodromeRouter: ISwapRouter(addresses.getAddress(config.aerodromeRouter)),
+            asset: addresses.getAddress(config.asset),
             guardian: addresses.getAddress(config.guardian),
             managementFeeBps: config.managementFeeBps,
             maxBackendSlippageBps: config.maxBackendSlippageBps,

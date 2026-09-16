@@ -41,6 +41,9 @@ interface IStockAccountRegistry {
     error InvalidStatus();
     error NotAdminOrGuardian();
     error GuardianCanOnlyLower();
+    error TokenNotPriceable(address token);
+
+    function asset() external view returns (address);
 
     function tokenConfig(address token) external view returns (TokenConfig memory);
 
