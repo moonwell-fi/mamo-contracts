@@ -31,6 +31,7 @@ interface IStockAccountRegistry {
     error InvalidSlippageCap();
     error InvalidTwapWindow();
     error AlreadySet();
+    error InvalidManagementFee();
     error NotAContract(address account);
     error TokenAlreadyListed(address token);
     error MustListAsActive();
@@ -61,7 +62,9 @@ interface IStockAccountRegistry {
 
     function maxWithdrawSlippageBps() external view returns (uint16);
 
-    function requiredAppDataHash() external view returns (bytes32);
+    function managementFeeBps() external view returns (uint16);
+
+    function maxManagementFeeBps() external view returns (uint16);
 
     function aerodromeRouter() external view returns (ISwapRouter);
 

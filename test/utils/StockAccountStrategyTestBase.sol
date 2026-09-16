@@ -62,6 +62,7 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMinStrategyDeposit(MIN_DEPOSIT);
         stockRegistry.setMaxStrategyDeposit(CAP);
         stockRegistry.setMaxBackendSlippageBps(100);
+        stockRegistry.setManagementFeeBps(100);
         stockRegistry.setPriceChecker(priceChecker);
         _listActive(address(nvda));
         _listActive(address(aapl));
@@ -116,7 +117,6 @@ abstract contract StockAccountStrategyTestBase is Test {
             entries: _entries(address(nvda), 5000, address(aapl), 5000),
             feeRecipient: feeRecipient,
             mamoStrategyRegistry: address(registry),
-            managementFeeBps: 100,
             owner: user,
             stockRegistry: address(stockRegistry),
             strategyTypeId: strategyTypeId

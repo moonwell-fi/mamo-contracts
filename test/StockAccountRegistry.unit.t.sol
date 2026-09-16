@@ -54,8 +54,8 @@ contract StockAccountRegistryUnitTest is Test {
             maxWithdrawSlippageBps: 200,
             minStrategyDeposit: 100e6,
             minTargetBps: 250,
+            managementFeeBps: 100,
             priceChecker: checker,
-            requiredAppDataHash: keccak256("appData"),
             twapWindow: 1800
         });
     }
@@ -91,7 +91,8 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 1800, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 1_000_000e6, "max deposit mismatch");
-        assertEq(registry.requiredAppDataHash(), keccak256("appData"), "app data hash mismatch");
+        assertEq(registry.managementFeeBps(), 100, "management fee mismatch");
+        assertEq(registry.maxManagementFeeBps(), 200, "max management fee mismatch");
         assertEq(registry.allTokens().length, 0, "token list should start empty");
     }
 
@@ -253,9 +254,9 @@ contract StockAccountRegistryUnitTest is Test {
         emit StockAccountRegistry.MaxStrategyDepositUpdated(1_000_000e6, 500e6);
         registry.setMaxStrategyDeposit(500e6);
 
-        vm.expectEmit(true, true, false, true, address(registry));
-        emit StockAccountRegistry.RequiredAppDataHashUpdated(keccak256("appData"), keccak256("newAppData"));
-        registry.setRequiredAppDataHash(keccak256("newAppData"));
+        vm.expectEmit(address(registry));
+        emit StockAccountRegistry.ManagementFeeBpsUpdated(100, 25);
+        registry.setManagementFeeBps(25);
 
         vm.stopPrank();
 
@@ -269,7 +270,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 600, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 250e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 500e6, "max deposit mismatch");
-        assertEq(registry.requiredAppDataHash(), keccak256("newAppData"), "app data hash mismatch");
+        assertEq(registry.managementFeeBps(), 25, "management fee mismatch");
     }
 
     function testGuardianCannotUpdateScalars() public {
@@ -309,7 +310,7 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(500e6);
 
         expectNotAdmin(guardian);
-        registry.setRequiredAppDataHash(keccak256("newAppData"));
+        registry.setManagementFeeBps(25);
 
         vm.stopPrank();
     }
@@ -354,7 +355,7 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(1_000_000e6);
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
-        registry.setRequiredAppDataHash(keccak256("appData"));
+        registry.setManagementFeeBps(100);
 
         vm.stopPrank();
     }
@@ -397,7 +398,30 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
 
+        vm.expectRevert(IStockAccountRegistry.InvalidManagementFee.selector);
+        registry.setManagementFeeBps(201);
+
         vm.stopPrank();
+    }
+
+    function testManagementFeeCanBeSetToTheCapAndToZero() public {
+        vm.startPrank(admin);
+
+        registry.setManagementFeeBps(registry.maxManagementFeeBps());
+        assertEq(registry.managementFeeBps(), 200, "capped fee mismatch");
+
+        registry.setManagementFeeBps(0);
+        assertEq(registry.managementFeeBps(), 0, "promo fee mismatch");
+
+        vm.stopPrank();
+    }
+
+    function testConstructorRevertsOnFeeAboveCap() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.managementFeeBps = 201;
+
+        vm.expectRevert(IStockAccountRegistry.InvalidManagementFee.selector);
+        new StockAccountRegistry(config);
     }
 
     function testListTokenStoresConfigAndEmits() public {
@@ -669,7 +693,7 @@ contract StockAccountRegistryUnitTest is Test {
         mock.setTwapWindow(600);
         mock.setMaxBackendSlippageBps(50);
         mock.setMaxWithdrawSlippageBps(75);
-        mock.setRequiredAppDataHash(keccak256("mockAppData"));
+        mock.setManagementFeeBps(150);
         mock.setAerodromeRouter(router);
         mock.setPriceChecker(checker);
 
@@ -681,7 +705,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(mock.twapWindow(), 600, "twap window mismatch");
         assertEq(mock.maxBackendSlippageBps(), 50, "backend slippage mismatch");
         assertEq(mock.maxWithdrawSlippageBps(), 75, "withdraw slippage mismatch");
-        assertEq(mock.requiredAppDataHash(), keccak256("mockAppData"), "app data hash mismatch");
+        assertEq(mock.managementFeeBps(), 150, "management fee mismatch");
         assertEq(address(mock.aerodromeRouter()), address(router), "router mismatch");
         assertEq(address(mock.priceChecker()), address(checker), "price checker mismatch");
     }

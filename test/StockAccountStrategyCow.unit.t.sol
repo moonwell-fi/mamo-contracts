@@ -15,13 +15,15 @@ import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase
 contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     using GPv2Order for GPv2Order.Data;
 
-    bytes32 public constant APP_DATA = keccak256("appData");
     bytes4 public constant MAGIC_VALUE = 0x1626ba7e;
+
+    bytes32 public appData;
 
     function setUp() public override {
         super.setUp();
 
-        stockRegistry.setRequiredAppDataHash(APP_DATA);
+        appData = strategy.appDataHash();
+
         priceChecker.setRate(address(usdc), address(nvda), 0.005e18);
         priceChecker.setRate(address(usdc), address(aapl), 0.01e18);
         priceChecker.setRate(address(nvda), address(aapl), 2e18);
@@ -96,6 +98,20 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
 
         vm.expectRevert(IStockAccountStrategy.OrderFeeMustBeZero.selector);
         _check(order);
+    }
+
+    function testAppDataDocumentHashesToTheStoredHash() public {
+        string memory document = strategy.appDataDocument();
+
+        assertEq(keccak256(bytes(document)), strategy.appDataHash(), "document hash");
+        assertTrue(
+            vm.contains(document, vm.toLowercase(vm.toString(address(strategy)))), "document carries the account"
+        );
+        assertTrue(
+            vm.contains(document, vm.toString(abi.encodeWithSelector(IStockAccountStrategy.payFees.selector))),
+            "document carries the payFees selector"
+        );
+        assertTrue(vm.contains(document, '"gasLimit":"500000"'), "document carries the hook gas limit");
     }
 
     function testRevertsOnWrongAppData() public {
@@ -220,7 +236,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
             sellAmount: sellAmount,
             buyAmount: buyAmount,
             validTo: uint32(block.timestamp + 10 minutes),
-            appData: APP_DATA,
+            appData: appData,
             feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,

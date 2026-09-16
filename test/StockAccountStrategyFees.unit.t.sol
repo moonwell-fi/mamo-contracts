@@ -6,8 +6,6 @@ import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-
 import {MockCLPool} from "./mocks/MockCLPool.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase.sol";
@@ -48,121 +46,179 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         startTime = block.timestamp;
     }
 
-    function testAccrualSetsFeeOwedPerTokenAndEmits() public {
+    function testPayFeesTransfersEveryTokenAndEmits() public {
         vm.warp(startTime + 30 days);
+
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(usdc);
+        tokens[1] = address(nvda);
+        tokens[2] = address(aapl);
+
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = _fee(1_000e18, 30 days);
+        amounts[1] = _fee(10e18, 30 days);
+        amounts[2] = _fee(20e18, 30 days);
 
         vm.expectEmit(address(strategy));
-        emit IStockAccountStrategy.FeesAccrued(30 days);
+        emit IStockAccountStrategy.FeesPaid(30 days, tokens, amounts);
 
-        strategy.accrueManagementFee();
+        strategy.payFees();
 
-        assertEq(strategy.feeOwed(address(usdc)), _fee(1_000e18, 30 days), "usdc fee");
-        assertEq(strategy.feeOwed(address(nvda)), _fee(10e18, 30 days), "nvda fee");
-        assertEq(strategy.feeOwed(address(aapl)), _fee(20e18, 30 days), "aapl fee");
-        assertEq(strategy.lastFeeAccrual(), startTime + 30 days, "accrual timestamp");
+        assertEq(usdc.balanceOf(feeRecipient), amounts[0], "usdc fee");
+        assertEq(nvda.balanceOf(feeRecipient), amounts[1], "nvda fee");
+        assertEq(aapl.balanceOf(feeRecipient), amounts[2], "aapl fee");
+        assertEq(usdc.balanceOf(address(strategy)), 1_000e18 - amounts[0], "usdc left");
+        assertEq(nvda.balanceOf(address(strategy)), 10e18 - amounts[1], "nvda left");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18 - amounts[2], "aapl left");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
     }
 
-    function testAccrualWithoutElapsedTimeIsNoOp() public {
-        strategy.accrueManagementFee();
-
-        assertEq(strategy.feeOwed(address(usdc)), 0, "usdc fee");
-        assertEq(strategy.feeOwed(address(nvda)), 0, "nvda fee");
-        assertEq(strategy.lastFeeAccrual(), startTime, "accrual timestamp");
-    }
-
-    function testDustAccrualKeepsAccrualTimestamp() public {
-        StockAccountStrategy dust = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
-        usdc.mint(address(dust), 1);
-
-        vm.warp(startTime + 1);
-        dust.accrueManagementFee();
-
-        assertEq(dust.feeOwed(address(usdc)), 0, "usdc fee");
-        assertEq(dust.lastFeeAccrual(), startTime, "accrual timestamp");
-    }
-
-    function testNavAndWeightsExcludeFeesOwed() public {
+    function testSecondPaymentInTheSameBlockIsANoOp() public {
         vm.warp(startTime + 30 days);
-        strategy.accrueManagementFee();
+        strategy.payFees();
 
-        uint256 cash = 1_000e18 - strategy.feeOwed(address(usdc));
-        uint256 nvdaValue = (10e18 - strategy.feeOwed(address(nvda))) * 200;
-        uint256 aaplValue = (20e18 - strategy.feeOwed(address(aapl))) * 100;
-        uint256 nav = cash + nvdaValue + aaplValue;
+        uint256 paid = usdc.balanceOf(feeRecipient);
 
-        assertEq(strategy.getNAV(), nav, "nav");
+        strategy.payFees();
 
-        (, uint256[] memory currentBps,) = strategy.getWeights();
-        assertEq(currentBps[0], (nvdaValue * 10_000) / nav, "nvda weight");
-        assertEq(currentBps[1], (aaplValue * 10_000) / nav, "aapl weight");
+        assertEq(usdc.balanceOf(feeRecipient), paid, "recipient balance unchanged");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
     }
 
-    function testWithdrawAllInKindLeavesFeesBehind() public {
-        vm.warp(startTime + 30 days);
-        strategy.accrueManagementFee();
+    function testHaltedTokenIsSkippedWhileTheOthersPay() public {
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.Halted);
 
-        uint256 usdcFee = strategy.feeOwed(address(usdc));
-        uint256 nvdaFee = strategy.feeOwed(address(nvda));
-        uint256 aaplFee = strategy.feeOwed(address(aapl));
+        vm.warp(startTime + 30 days);
+        strategy.payFees();
+
+        assertEq(nvda.balanceOf(feeRecipient), 0, "halted token not charged");
+        assertEq(nvda.balanceOf(address(strategy)), 10e18, "halted balance untouched");
+        assertEq(usdc.balanceOf(feeRecipient), _fee(1_000e18, 30 days), "usdc fee");
+        assertEq(aapl.balanceOf(feeRecipient), _fee(20e18, 30 days), "aapl fee");
+    }
+
+    function testPromoRateChargesNothingAndStillAdvancesTheClock() public {
+        stockRegistry.setManagementFeeBps(0);
+
+        vm.warp(startTime + 30 days);
+        strategy.payFees();
+
+        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing charged");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
+    }
+
+    function testRaisingTheRateDoesNotChargeThePromoPeriod() public {
+        stockRegistry.setManagementFeeBps(0);
+
+        vm.warp(startTime + 30 days);
+        strategy.payFees();
+
+        stockRegistry.setManagementFeeBps(100);
+
+        vm.warp(startTime + 60 days);
+        strategy.payFees();
+
+        assertEq(usdc.balanceOf(feeRecipient), _fee(1_000e18, 30 days), "only the paid period is charged");
+    }
+
+    function testFeeDueMatchesWhatIsPaid() public {
+        vm.warp(startTime + 45 days);
+
+        uint256 usdcDue = strategy.feeDue(address(usdc));
+        uint256 nvdaDue = strategy.feeDue(address(nvda));
+
+        assertEq(usdcDue, _fee(1_000e18, 45 days), "usdc due");
+
+        strategy.payFees();
+
+        assertEq(usdc.balanceOf(feeRecipient), usdcDue, "usdc paid");
+        assertEq(nvda.balanceOf(feeRecipient), nvdaDue, "nvda paid");
+        assertEq(strategy.feeDue(address(usdc)), 0, "nothing due right after");
+    }
+
+    function testFeeDueIsZeroForHaltedAndUnlistedTokens() public {
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.Halted);
+
+        vm.warp(startTime + 30 days);
+
+        assertEq(strategy.feeDue(address(nvda)), 0, "halted token");
+        assertEq(strategy.feeDue(address(router)), 0, "unlisted token");
+    }
+
+    function testWithdrawPaysFeesFirst() public {
+        vm.warp(startTime + 30 days);
+
+        vm.prank(user);
+        strategy.withdraw(100e18, 100);
+
+        assertEq(usdc.balanceOf(feeRecipient), _fee(1_000e18, 30 days), "usdc fee");
+        assertEq(nvda.balanceOf(feeRecipient), _fee(10e18, 30 days), "nvda fee");
+        assertEq(usdc.balanceOf(user), 100e18, "user asset");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
+    }
+
+    function testWithdrawTokenPaysFeesFirst() public {
+        vm.warp(startTime + 30 days);
+
+        uint256 fee = _fee(10e18, 30 days);
+
+        vm.prank(user);
+        strategy.withdrawToken(address(nvda), 10e18 - fee);
+
+        assertEq(nvda.balanceOf(feeRecipient), fee, "nvda fee");
+        assertEq(nvda.balanceOf(user), 10e18 - fee, "user balance");
+        assertEq(nvda.balanceOf(address(strategy)), 0, "account emptied");
+    }
+
+    function testWithdrawTokenAboveBalanceReverts() public {
+        vm.warp(startTime + 30 days);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.ExceedsBalance.selector, address(nvda)));
+        strategy.withdrawToken(address(nvda), 10e18);
+    }
+
+    function testWithdrawAllInKindPaysFeesFirst() public {
+        vm.warp(startTime + 30 days);
+
+        uint256 usdcFee = _fee(1_000e18, 30 days);
+        uint256 nvdaFee = _fee(10e18, 30 days);
+        uint256 aaplFee = _fee(20e18, 30 days);
 
         vm.prank(user);
         strategy.withdrawAllInKind();
 
-        assertEq(usdc.balanceOf(address(strategy)), usdcFee, "usdc left behind");
-        assertEq(nvda.balanceOf(address(strategy)), nvdaFee, "nvda left behind");
-        assertEq(aapl.balanceOf(address(strategy)), aaplFee, "aapl left behind");
+        assertEq(usdc.balanceOf(feeRecipient), usdcFee, "usdc fee");
+        assertEq(nvda.balanceOf(feeRecipient), nvdaFee, "nvda fee");
+        assertEq(aapl.balanceOf(feeRecipient), aaplFee, "aapl fee");
         assertEq(usdc.balanceOf(user), 1_000e18 - usdcFee, "user usdc");
         assertEq(nvda.balanceOf(user), 10e18 - nvdaFee, "user nvda");
         assertEq(aapl.balanceOf(user), 20e18 - aaplFee, "user aapl");
         assertEq(strategy.getNAV(), 0, "nav emptied");
     }
 
-    function testWithdrawAllSellsOnlyAvailableBalance() public {
+    function testWithdrawAllPaysFeesBeforeSelling() public {
         vm.warp(startTime + 365 days);
 
         vm.prank(user);
         strategy.withdrawAll(100);
 
-        assertEq(strategy.feeOwed(address(usdc)), 10e18, "usdc fee");
-        assertEq(strategy.feeOwed(address(nvda)), 0.1e18, "nvda fee");
-        assertEq(strategy.feeOwed(address(aapl)), 0.2e18, "aapl fee");
-        assertEq(usdc.balanceOf(address(strategy)), 10e18, "usdc left behind");
-        assertEq(nvda.balanceOf(address(strategy)), 0.1e18, "nvda left behind");
-        assertEq(aapl.balanceOf(address(strategy)), 0.2e18, "aapl left behind");
+        assertEq(usdc.balanceOf(feeRecipient), 10e18, "usdc fee");
+        assertEq(nvda.balanceOf(feeRecipient), 0.1e18, "nvda fee");
+        assertEq(aapl.balanceOf(feeRecipient), 0.2e18, "aapl fee");
         assertEq(usdc.balanceOf(user), 4_950e18, "user asset");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "idle drained");
     }
 
-    function testWithdrawTokenAboveAvailableReverts() public {
+    function testDepositDoesNotPayFees() public {
         vm.warp(startTime + 30 days);
 
-        vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.ExceedsAvailable.selector, address(nvda)));
-        strategy.withdrawToken(address(nvda), 10e18);
-    }
+        _fundUsdc(funder, 100e18);
+        vm.prank(funder);
+        strategy.deposit(100e18);
 
-    function testCollectFeesTransfersAndZeroes() public {
-        vm.warp(startTime + 30 days);
-        strategy.accrueManagementFee();
-
-        uint256 usdcFee = strategy.feeOwed(address(usdc));
-
-        vm.expectEmit(address(strategy));
-        emit IStockAccountStrategy.FeesCollected(address(usdc), usdcFee);
-
-        strategy.collectFees(address(usdc));
-
-        assertEq(usdc.balanceOf(feeRecipient), usdcFee, "recipient balance");
-        assertEq(usdc.balanceOf(address(strategy)), 1_000e18 - usdcFee, "strategy balance");
-        assertEq(strategy.feeOwed(address(usdc)), 0, "fee owed cleared");
-    }
-
-    function testCollectFeesRevertsWhenNothingOwed() public {
-        vm.warp(startTime + 30 days);
-        strategy.accrueManagementFee();
-        strategy.collectFees(address(nvda));
-
-        vm.expectRevert(IStockAccountStrategy.NothingToCollect.selector);
-        strategy.collectFees(address(nvda));
+        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing paid");
+        assertEq(strategy.lastFeePaid(), startTime, "last fee paid");
     }
 
     function testSetFeeRecipientStoresAndEmits() public {
@@ -197,16 +253,8 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         _deployProxy(params);
     }
 
-    function testInitializeRevertsOnFeeAboveMaximum() public {
-        StockAccountStrategy.InitParams memory params = _defaultParams();
-        params.managementFeeBps = strategy.MAX_MANAGEMENT_FEE_BPS() + 1;
-
-        vm.expectRevert(IStockAccountStrategy.FeeExceedsMaximum.selector);
-        _deployProxy(params);
-    }
-
     function _fee(uint256 balance, uint256 elapsed) internal view returns (uint256) {
-        return (balance * strategy.managementFeeBps() * elapsed) / (10_000 * 365 days);
+        return (balance * stockRegistry.managementFeeBps() * elapsed) / (10_000 * 365 days);
     }
 
     function _listWithPool(address token) internal {
@@ -214,6 +262,18 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
             token,
             IStockAccountRegistry.TokenConfig({
                 status: IStockAccountRegistry.TokenStatus.Active,
+                source: IStockAccountRegistry.PriceSource.PoolTwap,
+                pool: address(pool),
+                chainlinkFeed: address(0)
+            })
+        );
+    }
+
+    function _setStatus(address token, IStockAccountRegistry.TokenStatus status) internal {
+        stockRegistry.setTokenConfig(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: status,
                 source: IStockAccountRegistry.PriceSource.PoolTwap,
                 pool: address(pool),
                 chainlinkFeed: address(0)
