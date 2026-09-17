@@ -95,11 +95,39 @@ library LPPairConfig {
         });
     }
 
+    /// @notice The live WETH/cbBTC deployment (tickSpacing 10). Values mirror the on-chain
+    ///         `position()` of MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC, so this entry describes what is
+    ///         deployed rather than proposing a new config.
+    function wethCbbtc(Addresses a) internal view returns (Pair memory) {
+        return Pair({
+            key: "WETH_CBBTC",
+            pool: a.getAddress("WETH_CBBTC_CL_POOL"),
+            gauge: a.getAddress("WETH_CBBTC_CL_GAUGE"),
+            token0: a.getAddress("WETH"),
+            token1: a.getAddress("cbBTC"),
+            decimals0: 18,
+            decimals1: 8,
+            oracle0: a.getAddress("CHAINLINK_ETH_USD"),
+            oracle1: a.getAddress("CHAINLINK_BTC_USD"),
+            tickSpacing: 10,
+            minWidth: MIN_WIDTH,
+            maxWidth: MAX_WIDTH,
+            maxCenterDeviation: MAX_CENTER_DEVIATION,
+            twapWindow: TWAP_WINDOW,
+            maxTickDeviation: MAX_TICK_DEVIATION,
+            maxRebalanceLossBps: MAX_REBALANCE_LOSS_BPS,
+            minRebalanceInterval: 3600,
+            maxOracleDelay0: DELAY_FAST_FEED,
+            maxOracleDelay1: DELAY_FAST_FEED
+        });
+    }
+
     /// @notice Resolve a pair by its key. Reverts on an unknown key rather than defaulting.
     function byKey(Addresses a, string memory key) internal view returns (Pair memory) {
         bytes32 h = keccak256(bytes(key));
         if (h == keccak256("WETH_USDC")) return wethUsdc(a);
         if (h == keccak256("USDC_CBBTC")) return usdcCbbtc(a);
+        if (h == keccak256("WETH_CBBTC")) return wethCbbtc(a);
         revert("LPPairConfig: unknown pair key");
     }
 
