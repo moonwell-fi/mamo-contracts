@@ -483,5 +483,15 @@
     "addr": "0xE0f5C2AE94cf81A8cEcf2a9e0935AfEbf1a675af",
     "name": "MAMO_LP_COMPOUND_MODULE_USDC_CBBTC",
     "isContract": true
+  },
+  {
+    "addr": "0xE559268df385ca2bb1A2649C109df0a8186CF56d",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC",
+    "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC",
+    "isContract": true
   }
 ]
