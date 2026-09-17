@@ -12,7 +12,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 contract DeployLPAutoBalancerV2Test is Test {
     // Pinned Base block — the constructor runs against a forked post-Isthmus block, which under
     // foundry 1.7.x panics on operator-fee refund unless gas/base fee are zeroed (see below).
-    uint256 constant PINNED_BLOCK = 47_600_000;
+    uint256 constant PINNED_BLOCK = 50_600_000;
 
     Addresses internal addresses;
     DeployLPAutoBalancerV2 internal deployScript;
@@ -42,7 +42,7 @@ contract DeployLPAutoBalancerV2Test is Test {
         assertGt(address(lab).code.length, 0, "no code");
 
         address fMamo = addresses.getAddress("F-MAMO");
-        address nfpm = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        address nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
         address aero = addresses.getAddress("AERO");
 
         // F-MAMO holds DEFAULT_ADMIN_ROLE.

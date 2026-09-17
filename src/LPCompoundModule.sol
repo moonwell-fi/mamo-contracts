@@ -128,7 +128,17 @@ contract LPCompoundModule is AccessControlEnumerable {
     ///      balancer refuses AERO as a pair token at registration (_validateAndStore's
     ///      InvalidConfig guard). If that invariant ever broke, an AERO leg would satisfy both
     ///      classes — see test_documents_classDisjointness_dependsOnBalancerAeroExclusion.
+    ///      IN-FLIGHT EXCLUSION: compound orders are rejected while the balancer reports
+    ///      `rebalanceInFlight`, mirroring (as the complement of) validateRebalanceOrder's
+    ///      requirement below. The swap-rebalance value floor compares a snapshot taken at
+    ///      unwindForSwap against a `valueAfter` measured at rebuildAfterSwap; AERO-compound
+    ///      proceeds settling inside that window are delivered to the balancer (receiver ==
+    ///      balancer), so they inflate valueAfter without inflating either snapshot term and hand
+    ///      the floor free headroom — a real rebalance loss can then hide behind unrelated compound
+    ///      income. Deferring compound settlement until the window closes keeps the two flows'
+    ///      accounting disjoint; the order can simply be re-placed after the rebuild.
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
+        require(!ILPAutoBalancerV2(balancer).rebalanceInFlight(), "rebalance in flight");
         GPv2Order.Data memory o = abi.decode(encodedOrder, (GPv2Order.Data));
         require(address(o.sellToken) == AERO, "sellToken must be AERO");
         address t0 = ILPAutoBalancerV2(balancer).token0();

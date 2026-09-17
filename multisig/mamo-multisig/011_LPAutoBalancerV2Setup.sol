@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
+import {LPValuationLib} from "@contracts/libraries/LPValuationLib.sol";
+import {ICLPool} from "@interfaces/ICLPool.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 import {DeployLPAutoBalancerV2} from "@script/DeployLPAutoBalancerV2.s.sol";
 
@@ -19,19 +21,35 @@ import {console} from "forge-std/console.sol";
 ///              address(0); both are granted later, the rebalancer in this very proposal). Skipped
 ///              if MAMO_LP_AUTO_BALANCER_V2 is already registered.
 ///           2. build() — Safe actions, in order:
-///                a. NFPM.safeTransferFrom(F-MAMO, balancer, tokenId)  — deposit the pre-minted
+///                a. balancer.setSequencerUptimeFeed(CHAINLINK_L2_SEQUENCER_UPTIME_FEED, grace) — arm the L2
+///                   sequencer guard BEFORE anything reads a Chainlink feed. It defaults to
+///                   address(0) on a fresh deployment, and `LPValuationLib.checkSequencer`
+///                   early-returns while unset, so a deployment that never runs this action ships
+///                   with the guard OFF — on Base, an L2, that is the whole exposure MOO-741 exists
+///                   to close. Ordered first so the registration probes in (d) also run under it.
+///                b. balancer.setMaxOracleDelays(delay0, delay1) — arm BOTH per-feed Chainlink
+///                   staleness bounds (MOO-740), also before any feed read. Same lens as (a): the
+///                   finding is that one 26-hour bound is far too loose for two ~20-minute feeds, and
+///                   splitting it in two closes nothing unless something actually tightens them. The
+///                   value that ships is the value that protects the position, so it is named here
+///                   and asserted in validate(), never inherited implicitly from a constructor default.
+///                c. NFPM.safeTransferFrom(F-MAMO, balancer, tokenId)  — deposit the pre-minted
 ///                   WETH/cbBTC Slipstream NFT into the balancer.
-///                b. balancer.registerPosition(config)                 — register the phase-1 position.
-///                c. balancer.grantRole(REBALANCER_ROLE, rebalancerEOA) — authorize the backend signer.
+///                d. balancer.registerPosition(config)                 — register the phase-1 position.
+///                e. balancer.grantRole(REBALANCER_ROLE, rebalancerEOA) — authorize the backend signer.
 ///              The AERO->drop wiring is intentionally NOT an action here — see the NOTE below.
 ///
 ///         PRECONDITION (off-chain Phase B): the WETH/cbBTC Slipstream position NFT must already be
 ///         minted and held by the F-MAMO Safe BEFORE build() runs. registerPosition reverts with
-///         NotHeld unless the balancer owns the NFT, and the transfer action (2a) executes inside
-///         build()'s state-diff recording, so by the time registerPosition (2b) runs the balancer
+///         NotHeld unless the balancer owns the NFT, and the transfer action (2c) executes inside
+///         build()'s state-diff recording, so by the time registerPosition (2d) runs the balancer
 ///         already owns it. The production run MUST set the real values via the setters below:
 ///           - setTokenId(uint256)        — the tokenId the Safe holds (minted in Phase B2).
 ///           - setRebalancerEOA(address)  — the real backend signer EOA (MAMO_LP_REBALANCER).
+///         And ONE the production run SHOULD set, since it defaults to $50k:
+///           - setTotalAllocation(uint256,uint16) — the USD size committed to this position.
+///             validate() asserts the registered principal lands inside that band. See the field's
+///             NatSpec for why the size is VALIDATED here rather than minted.
 ///         The fork test injects fork-minted / makeAddr values via the same setters.
 ///         If MAMO_LP_REBALANCER is registered in addresses/8453.json at run time it is used as the
 ///         default; otherwise rebalancerEOA MUST be set explicitly or build() reverts.
@@ -64,7 +82,10 @@ import {console} from "forge-std/console.sol";
 ///         action — this is a documented manual follow-up, not a missing on-chain step.
 contract LPAutoBalancerV2Setup is MultisigProposal {
     // ─── phase-1 position config (WETH/cbBTC, tickSpacing 100) ──────────────────
-    int24 public constant TICK_SPACING = 100;
+    int24 public constant TICK_SPACING = 10;
+    /// @notice Floor width (ticks). At tickSpacing 10 this is 20 spacings, well above the R7
+    ///         branch-collision width (2*tickSpacing = 20 ticks), so R7 is unreachable at config
+    ///         level on this pool (handbook §4.1).
     uint24 public constant MIN_WIDTH = 200;
     uint24 public constant MAX_WIDTH = 20_000;
     uint24 public constant MAX_CENTER_DEVIATION = 200;
@@ -97,12 +118,102 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     ///         MAMO_LP_REBALANCER address entry when present; otherwise MUST be set via setRebalancerEOA.
     address public rebalancerEOA;
 
+    /// @notice TOTAL ALLOCATION committed to this position, 8-decimal USD (the balancer's own
+    ///         `valueInUsd` scale). $50,000 by default: large enough that emissions and gas are
+    ///         measurable against real fee income, small enough that phase-1 proves the rebalancer at
+    ///         a TVL the protocol can afford to lose. Change it per run via `setTotalAllocation`,
+    ///         never by editing this file.
+    /// @dev    This is a VALIDATED parameter, not a minting instruction. The position NFT is minted
+    ///         off-chain in Phase B2 and pinned via `setTokenId`; `validate()` then asserts the
+    ///         registered principal matches this target. It cannot mint here: FPS records `build()`'s
+    ///         actions as calldata and replays them at Safe-execution time, so a `mint` inside
+    ///         `build()` would return a tokenId observed during SIMULATION while the Slipstream NFPM's
+    ///         tokenId is a global counter that anyone's mint advances in between — the encoded
+    ///         `registerPosition(tokenId)` would then name someone else's NFT. Minting off-chain and
+    ///         asserting the resulting SIZE is the only form of this parameter that cannot silently
+    ///         bind the wrong token.
+    uint256 public totalAllocationUsd = 50_000e8;
+
+    /// @notice Band `validate()` accepts around `totalAllocationUsd`. 500 bps absorbs the spread
+    ///         between the price the Safe minted at and the price validation reads, plus the in-ratio
+    ///         remainder the NFPM refunds. NOT slack for a wrong allocation: a position minted at half
+    ///         the intended size fails this assertion.
+    uint16 public allocationToleranceBps = 500;
+
+    /// @notice Default seconds the Base sequencer must have been continuously up before the balancer
+    ///         accepts a Chainlink read. 3600s is the conventional L2 grace period: long enough for
+    ///         ETH/USD and BTC/USD to publish a post-outage round, short enough that a recovery does
+    ///         not idle the rebalancer for a whole cadence. Overridable per run via
+    ///         `setSequencerGracePeriod` (and on-chain afterwards by the Safe via
+    ///         `setSequencerUptimeFeed`), which is why it is a variable and not a constant.
+    uint256 public sequencerGracePeriod = 3600;
+
+    /// @notice Staleness bound armed for oracle0 (CHAINLINK_ETH_USD on Base). Base ETH/USD publishes
+    ///         on a ~1200s heartbeat, so 3600s tolerates two consecutive missed rounds before the
+    ///         balancer refuses to price — three heartbeats, not the 78 that 26 hours would allow.
+    /// @dev    MOO-740 is only closed if a tight bound is the bound that SHIPS. Splitting the single
+    ///         shared bound into per-feed `maxOracleDelay0`/`maxOracleDelay1` is necessary but not
+    ///         sufficient: the balancer's constructor has to seed SOME default, and whatever the
+    ///         setup proposal does not overwrite is what protects the position on chain. So this
+    ///         proposal names both values explicitly, arms them before anything reads a feed, and
+    ///         `validate()` asserts them — the same lens MOO-741 was closed under (a guard whose
+    ///         setter is never called is a guard that is not there). Per-run overridable via
+    ///         `setMaxOracleDelays` below, which is why these are variables and not constants.
+    uint256 public maxOracleDelay0 = 3600;
+
+    /// @notice Staleness bound armed for oracle1 (CHAINLINK_BTC_USD on Base). Same ~1200s heartbeat
+    ///         and the same three-heartbeat reasoning as `maxOracleDelay0`. Kept as its own field
+    ///         rather than a shared one precisely so a future pair with genuinely different feed
+    ///         cadences tunes each leg instead of flattening both to the slower one.
+    uint256 public maxOracleDelay1 = 3600;
+
     function setTokenId(uint256 tokenId_) external {
         tokenId = tokenId_;
     }
 
     function setRebalancerEOA(address rebalancerEOA_) external {
         rebalancerEOA = rebalancerEOA_;
+    }
+
+    /// @notice Set the total allocation this proposal commits and validates.
+    /// @param totalAllocationUsd_ 8-decimal USD. Must be non-zero — a zero target collapses the
+    ///        validation band to `[0, 0]` and would silently accept any position, which is the one
+    ///        outcome this parameter exists to prevent.
+    /// @param allocationToleranceBps_ band around the target, strictly < 10000 so lo is never 0
+    ///        (a 100% band makes under-allocation always pass).
+    function setTotalAllocation(uint256 totalAllocationUsd_, uint16 allocationToleranceBps_) external {
+        require(totalAllocationUsd_ != 0, "totalAllocationUsd must be non-zero");
+        require(allocationToleranceBps_ < 10_000, "tolerance >= 100%");
+        totalAllocationUsd = totalAllocationUsd_;
+        allocationToleranceBps = allocationToleranceBps_;
+    }
+
+    /// @notice Override the sequencer grace period this proposal arms the guard with. Must be
+    ///         non-zero and <= 7 days — the balancer rejects anything else with InvalidConfig.
+    function setSequencerGracePeriod(uint256 gracePeriod_) external {
+        sequencerGracePeriod = gracePeriod_;
+    }
+
+    /// @notice Override the per-feed staleness bounds this proposal arms. Each must be non-zero and
+    ///         <= LPAutoBalancerV2.MAX_ORACLE_DELAY (1 day) — the balancer rejects anything else with
+    ///         InvalidConfig. Both must be named: there is deliberately no one-value form, here or on
+    ///         the balancer, because writing a single number to both feeds is how per-feed tuning
+    ///         gets silently flattened back to the shared bound MOO-740 was raised about.
+    function setMaxOracleDelays(uint256 delay0_, uint256 delay1_) external {
+        maxOracleDelay0 = delay0_;
+        maxOracleDelay1 = delay1_;
+    }
+
+    /// @dev Pull the per-run inputs from the environment, leaving anything already set by a setter
+    ///      alone. Kept out of the field initializers deliberately: those run at construction, which
+    ///      would force the fork test to define these vars too.
+    function _loadRunInputs() internal {
+        if (tokenId == 0) tokenId = vm.envOr("INIT_TOKEN_ID", uint256(0));
+        totalAllocationUsd = vm.envOr("TOTAL_ALLOCATION_USD", totalAllocationUsd);
+        uint256 tol = vm.envOr("ALLOCATION_TOLERANCE_BPS", uint256(allocationToleranceBps));
+        require(tol <= 10_000, "ALLOCATION_TOLERANCE_BPS > 100%");
+        allocationToleranceBps = uint16(tol);
+        require(totalAllocationUsd != 0, "TOTAL_ALLOCATION_USD must be non-zero");
     }
 
     function _initializeAddresses() internal {
@@ -113,8 +224,23 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         vm.makePersistent(address(addresses));
     }
 
+    /// @notice Production entrypoint. Reads the per-run inputs from the ENVIRONMENT, because a
+    ///         `forge script` invocation cannot call the setters below — those exist for the fork
+    ///         test, which instantiates this contract in-process.
+    ///
+    ///         Without this, a mainnet `forge script ... --broadcast` runs `build()` with
+    ///         `tokenId == 0` and reverts "tokenId not set". (Safely: forge simulates the whole
+    ///         script before sending anything, so the revert costs nothing but a wasted run.)
+    ///
+    ///         INIT_TOKEN_ID          required — the WETH/cbBTC NFT the Safe minted in Phase B2.
+    ///         TOTAL_ALLOCATION_USD   optional, 8-dec USD; defaults to the field's $50k.
+    ///         ALLOCATION_TOLERANCE_BPS optional; defaults to the field's 500.
+    ///
+    ///         Values already set via the setters win, so the fork test is unaffected: it never sets
+    ///         these env vars, and `vm.envOr` returns the default it passes.
     function run() public override {
         _initializeAddresses();
+        _loadRunInputs();
 
         if (DO_DEPLOY) {
             deploy();
@@ -136,7 +262,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position, and grant REBALANCER_ROLE to the backend signer.";
+        "Deploy LPAutoBalancerV2 (if needed), deposit the pre-minted WETH/cbBTC Slipstream NFT into it, register the phase-1 position at the configured total allocation, and grant REBALANCER_ROLE to the backend signer.";
     }
 
     function deploy() public override {
@@ -169,12 +295,19 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
     }
 
     function build() public override buildModifier(addresses.getAddress("F-MAMO")) {
-        LPAutoBalancerV2 lab = LPAutoBalancerV2(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2"));
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2")));
+
+        // 0. Arm the L2 sequencer guard and both per-feed staleness bounds first (own frame: keeps
+        //    build() under the via_ir stack limit). BOTH must precede registerPosition in (d): that
+        //    call probes oracle0/oracle1, and the probe is only meaningful once the bounds it checks
+        //    against are the ones this deployment intends to run with.
+        _wireSequencer(lab);
+        _wireOracleDelays(lab);
 
         // Steps 1-3 in a block so the config struct + locals free before _wireModule inlines
         // (keeps build() under the via_ir stack limit — position config has 21 fields).
         {
-            address nfpm = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+            address nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
             address safe = addresses.getAddress("F-MAMO");
 
             require(tokenId != 0, "tokenId not set: mint the WETH/cbBTC NFT to the Safe and call setTokenId");
@@ -219,6 +352,30 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         _wireModule(lab);
     }
 
+    /// @dev Arm the balancer's L2 sequencer-uptime guard. Not optional decoration: the guard ships
+    ///      DISABLED (`sequencerUptimeFeed == address(0)` makes `checkSequencer` a no-op), so without
+    ///      this action the balancer prices every rebalance off Chainlink rounds that may pre-date a
+    ///      Base sequencer outage — exactly the state MOO-741 was raised about. `setSequencerUptimeFeed`
+    ///      probes the feed in this same tx, so a wrong address or a sequencer inside its grace window
+    ///      fails the Safe simulation instead of the next rebalance.
+    function _wireSequencer(LPAutoBalancerV2 lab) internal {
+        lab.setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), sequencerGracePeriod);
+    }
+
+    /// @dev Arm both per-feed oracle staleness bounds (MOO-740). Not optional decoration, for exactly
+    ///      the reason `_wireSequencer` is not: the finding was that ONE 26-hour bound is far too
+    ///      loose for two ~20-minute feeds, and splitting it into two bounds does not by itself
+    ///      tighten anything. If no proposal or deploy script ever calls the setter, the bound that
+    ///      ships on chain is whatever the constructor seeded — i.e. the finding would read "fixed"
+    ///      while the live position still prices off answers hours past their validity. The balancer's
+    ///      constructor default is now itself tight (DEFAULT_MAX_ORACLE_DELAY), so this action is
+    ///      defence in depth rather than the sole line — but it is what makes the shipped values
+    ///      EXPLICIT and assertable in validate(), instead of an implicit inheritance from a default
+    ///      that a later refactor could loosen without any proposal changing.
+    function _wireOracleDelays(LPAutoBalancerV2 lab) internal {
+        lab.setMaxOracleDelays(maxOracleDelay0, maxOracleDelay1);
+    }
+
     /// @dev Wire the balancer to the compound module and set the F-MAMO-doable compound config.
     ///      approveCowSwap() + the SlippagePriceChecker AERO->WETH/cbBTC config are DEFERRED (see the
     ///      COMPOUND NOTE at the top): the checker owner is NOT F-MAMO, so AERO cannot be whitelisted
@@ -241,7 +398,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         address labAddr = addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2");
         assertTrue(labAddr != address(0), "balancer address set");
         assertTrue(labAddr.code.length > 0, "balancer has code");
-        LPAutoBalancerV2 lab = LPAutoBalancerV2(labAddr);
+        LPAutoBalancerV2 lab = LPAutoBalancerV2(payable(labAddr));
 
         // Roles: admin = F-MAMO, rebalancer granted.
         address safe = addresses.getAddress("F-MAMO");
@@ -249,10 +406,31 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertTrue(lab.hasRole(lab.GUARDIAN_ROLE(), safe), "guardian is F-MAMO");
         assertTrue(lab.hasRole(lab.REBALANCER_ROLE(), _resolveRebalancer()), "rebalancer granted");
 
+        // MOO-741: the L2 sequencer guard must be ENABLED when this proposal lands. A zero feed is a
+        // silently-disabled guard, which is indistinguishable from "never wired" — assert both the
+        // address and a non-zero grace period so a regression to the default fails validation.
+        assertEq(
+            lab.sequencerUptimeFeed(),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            "sequencer uptime feed armed"
+        );
+        assertEq(lab.sequencerGracePeriod(), sequencerGracePeriod, "sequencer grace period set");
+        assertTrue(lab.sequencerGracePeriod() != 0, "sequencer guard not silently disabled");
+
+        // MOO-740: the per-feed staleness bounds must be the ones this proposal armed, not whatever
+        // the constructor happened to seed. Asserting the exact values (rather than merely "non-zero"
+        // or "<= cap") is the point: the failure mode the finding describes is a bound that is
+        // technically valid and economically meaningless, which every weaker assertion would pass.
+        assertEq(lab.maxOracleDelay0(), maxOracleDelay0, "oracle0 staleness bound armed");
+        assertEq(lab.maxOracleDelay1(), maxOracleDelay1, "oracle1 staleness bound armed");
+        assertTrue(lab.maxOracleDelay0() <= lab.MAX_ORACLE_DELAY(), "oracle0 bound within cap");
+        assertTrue(lab.maxOracleDelay1() <= lab.MAX_ORACLE_DELAY(), "oracle1 bound within cap");
+
         // Position config + NFT custody, and the compound module wiring — split into `this.` external
         // views so via_ir compiles each in its own frame (position() returns a 21-field tuple; inlining
         // both into validate() overflows the stack).
         this.validatePosition(lab);
+        this.validateAllocation(lab);
         this.validateModule(labAddr, safe);
     }
 
@@ -294,7 +472,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(oracle1, addresses.getAddress("CHAINLINK_BTC_USD"), "oracle1 == BTC/USD");
 
         assertEq(
-            INonfungiblePositionManager(addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME")).ownerOf(
+            INonfungiblePositionManager(addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2")).ownerOf(
                 mainTokenId
             ),
             address(lab),
@@ -302,12 +480,65 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         );
     }
 
+    /// @dev Assert the registered position's principal actually equals the allocation this proposal
+    ///      commits. Priced with the SAME feeds, staleness bounds and sequencer guard the balancer
+    ///      itself uses, at the pool's live sqrtPriceX96 — so this is the balancer's own notion of the
+    ///      position's value, not an independent estimate that could agree by luck.
+    function validateAllocation(LPAutoBalancerV2 lab) public view {
+        (
+            uint256 mainTokenId,
+            ,
+            address pool,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            address oracle0,
+            address oracle1,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            bool active
+        ) = lab.position();
+        require(active, "position active");
+
+        LPValuationLib.OracleConfig memory cfg = LPValuationLib.OracleConfig({
+            oracle0: oracle0,
+            oracle1: oracle1,
+            maxDelay0: lab.maxOracleDelay0(),
+            maxDelay1: lab.maxOracleDelay1(),
+            sequencerUptimeFeed: lab.sequencerUptimeFeed(),
+            sequencerGracePeriod: lab.sequencerGracePeriod()
+        });
+
+        (uint160 sqrtP,,,,,) = ICLPool(pool).slot0();
+
+        // Leg decimals are NOT symmetric on this pair: WETH (token0) is 18dp, cbBTC (token1) is 8dp.
+        uint256 principalUsd = LPValuationLib.principalValue(
+            addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2"), mainTokenId, sqrtP, cfg, 18, 8
+        );
+
+        uint256 lo = (totalAllocationUsd * (10_000 - allocationToleranceBps)) / 10_000;
+        uint256 hi = (totalAllocationUsd * (10_000 + allocationToleranceBps)) / 10_000;
+
+        assertTrue(principalUsd >= lo, "position under-allocated vs totalAllocationUsd");
+        assertTrue(principalUsd <= hi, "position over-allocated vs totalAllocationUsd");
+    }
+
     /// @dev Assert the compound module was deployed and wired (the F-MAMO-doable portion; the
     ///      checker AERO config + approveCowSwap are the deferred owner tx — see the COMPOUND NOTE).
     function validateModule(address labAddr, address safe) public view {
         address moduleAddr = addresses.getAddress("MAMO_LP_COMPOUND_MODULE");
         assertTrue(moduleAddr != address(0) && moduleAddr.code.length > 0, "module deployed");
-        assertEq(LPAutoBalancerV2(labAddr).compoundModule(), moduleAddr, "balancer wired to module");
+        assertEq(LPAutoBalancerV2(payable(labAddr)).compoundModule(), moduleAddr, "balancer wired to module");
         LPCompoundModule module = LPCompoundModule(moduleAddr);
         assertEq(module.balancer(), labAddr, "module bound to balancer");
         assertEq(module.AERO(), addresses.getAddress("AERO"), "module AERO");
@@ -318,7 +549,7 @@ contract LPAutoBalancerV2Setup is MultisigProposal {
         assertEq(
             address(module.slippagePriceChecker()), addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"), "checker set"
         );
-        assertEq(LPAutoBalancerV2(labAddr).swapLossAllowanceBps(), SWAP_LOSS_ALLOWANCE_BPS, "swap loss allowance set");
+        assertEq(LPAutoBalancerV2(payable(labAddr)).swapLossAllowanceBps(), SWAP_LOSS_ALLOWANCE_BPS, "swap loss allowance set");
     }
 
     /// @dev Resolve the rebalancer EOA: explicit setter wins; else fall back to the
