@@ -443,5 +443,25 @@
     "addr": "0xEA05B89CA6045f65E5040519354aBca93b695425",
     "name": "MAMO_LP_COMPOUND_MODULE_TEST",
     "isContract": true
+  },
+  {
+    "addr": "0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A",
+    "name": "WETH_USDC_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0xA0B61fdB9f1FB9b917Fe38b49427Fd4D87472D28",
+    "name": "WETH_USDC_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0x160D7E9d948B16c163332a277b393c288408eb12",
+    "name": "USDC_CBBTC_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x7B0f1103746648FBfce9222f1266f79B934E16b2",
+    "name": "USDC_CBBTC_CL_GAUGE",
+    "isContract": true
   }
 ]
