@@ -45,6 +45,12 @@ COW_AUTH_MANAGER=0xA03be496e67Ec29bC62F01a428683D7F9c204930
 NVDA=0xb20000000000000000000078ee7ce2fE4908108C
 NVDA_POOL=0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9
 
+# The order signer prepare.sh points the registry at, from the public test key
+# `cast keccak "mamo stock accounts order signer"`. The anvil accounts cannot be used: all of them
+# carry an EIP-7702 delegation on Base, which makes them ERC-1271 signers rather than plain EOAs.
+ORDER_SIGNER=0xc419099bfA195fe92e57d137dFe3b2116E9203fe
+ORDER_SIGNER_KEY=0x7b6a9fd55d3ea602d74d514fc4d8366d864d3d565ba36ba636701eed6c19b047
+
 KIND_SELL=0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775
 BALANCE_ERC20=0x5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9
 MAGIC_VALUE=0x1626ba7e
@@ -337,14 +343,23 @@ mk_order() { # mk_order <sellToken> <buyToken> <account> <sellAmount> <buyAmount
 }
 
 order_digest() { call "$HELPER" "digest($ORDER_T,bytes32)(bytes32)" "$1" "$DOMAIN_SEPARATOR"; }
-order_encoded() { call "$HELPER" "encodeOrder($ORDER_T)(bytes)" "$1"; }
+
+sign_digest() { cast wallet sign --no-hash --private-key "$ORDER_SIGNER_KEY" "$1" 2>>"$LOG"; }
+
+# The bytes the account decodes in isValidSignature: the order and the backend signature over its digest.
+order_encoded() { # order_encoded <order> <signature>
+  call "$HELPER" "encodeOrder($ORDER_T,bytes)(bytes)" "$1" "$2"
+}
 
 check_signature() { # check_signature <account> <order>
-  call "$1" 'isValidSignature(bytes32,bytes)(bytes4)' "$(order_digest "$2")" "$(order_encoded "$2")"
+  local digest
+  digest=$(order_digest "$2")
+  call "$1" 'isValidSignature(bytes32,bytes)(bytes4)' "$digest" "$(order_encoded "$2" "$(sign_digest "$digest")")"
 }
 
 settle_sell() { # settle_sell <account> <order> <sellAmount> <buyAmount>
-  send "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,uint256,uint256)" "$1" "$2" "$4" "$3"
+  send "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
+    "$1" "$2" "$(sign_digest "$(order_digest "$2")")" "$4" "$3"
 }
 
 # ---------------------------------------------------------------- scenario frame

@@ -131,8 +131,9 @@ for SIZE in $SIZES; do
   ORDER=$(mk_order "$USDC" "${TOKENS[0]}" "$ACCT" "$ORDER_SIZE" "$BUY_AMT" "$VALID_TO")
 
   assert_eq "order valid against a $SIZE-position account" "$(check_signature "$ACCT" "$ORDER")" "$MAGIC_VALUE"
+  DIGEST=$(order_digest "$ORDER")
   GAS=$(estimate_gas "$DEPLOYER" "$ACCT" 'isValidSignature(bytes32,bytes)' \
-    "$(order_digest "$ORDER")" "$(order_encoded "$ORDER")")
+    "$DIGEST" "$(order_encoded "$ORDER" "$(sign_digest "$DIGEST")")")
   if [ -n "$GAS" ]; then
     pass "isValidSignature gas with $SIZE positions" "$GAS"
   else

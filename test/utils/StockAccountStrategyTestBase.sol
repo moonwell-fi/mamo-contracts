@@ -40,6 +40,9 @@ abstract contract StockAccountStrategyTestBase is Test {
     address public funder = makeAddr("funder");
     address public feeRecipient = makeAddr("feeRecipient");
 
+    address public orderSigner;
+    uint256 internal orderSignerKey;
+
     uint256 public strategyTypeId;
 
     function setUp() public virtual {
@@ -66,6 +69,10 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMaxBackendSlippageBps(100);
         stockRegistry.setManagementFeeBps(100);
         stockRegistry.setPriceChecker(priceChecker);
+
+        (orderSigner, orderSignerKey) = makeAddrAndKey("orderSigner");
+        stockRegistry.setOrderSigner(orderSigner);
+
         _listActive(address(nvda));
         _listActive(address(aapl));
 
@@ -129,6 +136,11 @@ abstract contract StockAccountStrategyTestBase is Test {
         return address(
             new ERC1967Proxy(address(implementation), abi.encodeCall(StockAccountStrategy.initialize, (params)))
         );
+    }
+
+    function _sign(bytes32 digest) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(orderSignerKey, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     function _fundUsdc(address to, uint256 amount) internal {

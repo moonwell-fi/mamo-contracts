@@ -84,11 +84,16 @@ contract SettlementHelper {
     /// @notice Settles one account order, the settlement sourcing the buy token from the stocks pool
     /// @param account The stock account that owns the order and validates it through EIP-1271
     /// @param order The order the account signed
+    /// @param backendSig The order signer signature over the order digest
     /// @param clearingSell Uniform clearing price of the sell token
     /// @param clearingBuy Uniform clearing price of the buy token
-    function settleSell(address account, GPv2Order.Data calldata order, uint256 clearingSell, uint256 clearingBuy)
-        external
-    {
+    function settleSell(
+        address account,
+        GPv2Order.Data calldata order,
+        bytes calldata backendSig,
+        uint256 clearingSell,
+        uint256 clearingBuy
+    ) external {
         if (clearingSell == 0 || clearingBuy == 0) revert ZeroClearingPrice();
         if (address(order.sellToken) == address(order.buyToken)) revert TokensMustDiffer();
 
@@ -101,7 +106,7 @@ contract SettlementHelper {
         prices[1] = clearingBuy;
 
         IGPv2SettlementLike.Trade[] memory trades = new IGPv2SettlementLike.Trade[](1);
-        trades[0] = _trade(account, order, 0, 1);
+        trades[0] = _trade(account, order, backendSig, 0, 1);
 
         uint256 buyOwed = (order.sellAmount * clearingSell) / clearingBuy;
 
@@ -111,13 +116,17 @@ contract SettlementHelper {
     /// @notice Settles two accounts on opposite sides of the same pair against each other, no venue touched
     /// @param accountA The account selling `orderA.sellToken`
     /// @param orderA The order of `accountA`
+    /// @param backendSigA The order signer signature over the `orderA` digest
     /// @param accountB The account selling `orderA.buyToken`
     /// @param orderB The order of `accountB`, whose sell amount must equal `orderA.buyAmount`
+    /// @param backendSigB The order signer signature over the `orderB` digest
     function settleBatch(
         address accountA,
         GPv2Order.Data calldata orderA,
+        bytes calldata backendSigA,
         address accountB,
-        GPv2Order.Data calldata orderB
+        GPv2Order.Data calldata orderB,
+        bytes calldata backendSigB
     ) external {
         if (
             address(orderA.sellToken) != address(orderB.buyToken)
@@ -133,8 +142,8 @@ contract SettlementHelper {
         prices[1] = orderA.sellAmount;
 
         IGPv2SettlementLike.Trade[] memory trades = new IGPv2SettlementLike.Trade[](2);
-        trades[0] = _trade(accountA, orderA, 0, 1);
-        trades[1] = _trade(accountB, orderB, 1, 0);
+        trades[0] = _trade(accountA, orderA, backendSigA, 0, 1);
+        trades[1] = _trade(accountB, orderB, backendSigB, 1, 0);
 
         IGPv2SettlementLike.Interaction[][3] memory interactions;
         interactions[0] = new IGPv2SettlementLike.Interaction[](0);
@@ -152,20 +161,26 @@ contract SettlementHelper {
     }
 
     /// @notice The bytes the account decodes in `isValidSignature`
-    function encodeOrder(GPv2Order.Data memory order) public pure returns (bytes memory) {
-        return abi.encode(order);
+    function encodeOrder(GPv2Order.Data memory order, bytes memory backendSig) public pure returns (bytes memory) {
+        return abi.encode(order, backendSig);
     }
 
-    /// @notice The trade signature field: the owner address followed by the encoded order
-    function encodeSignature(address account, GPv2Order.Data memory order) public pure returns (bytes memory) {
-        return abi.encodePacked(account, abi.encode(order));
-    }
-
-    function _trade(address account, GPv2Order.Data calldata order, uint256 sellIndex, uint256 buyIndex)
-        internal
+    /// @notice The trade signature field: the owner address followed by the encoded order and its backend signature
+    function encodeSignature(address account, GPv2Order.Data memory order, bytes memory backendSig)
+        public
         pure
-        returns (IGPv2SettlementLike.Trade memory)
+        returns (bytes memory)
     {
+        return abi.encodePacked(account, encodeOrder(order, backendSig));
+    }
+
+    function _trade(
+        address account,
+        GPv2Order.Data calldata order,
+        bytes calldata backendSig,
+        uint256 sellIndex,
+        uint256 buyIndex
+    ) internal pure returns (IGPv2SettlementLike.Trade memory) {
         return IGPv2SettlementLike.Trade({
             sellTokenIndex: sellIndex,
             buyTokenIndex: buyIndex,
@@ -177,7 +192,7 @@ contract SettlementHelper {
             feeAmount: order.feeAmount,
             flags: EIP1271_SELL_FOK_FLAGS,
             executedAmount: 0,
-            signature: encodeSignature(account, order)
+            signature: encodeSignature(account, order, backendSig)
         });
     }
 

@@ -15,6 +15,7 @@
   "maxWithdrawSlippageBps": 500,
   "minStrategyDeposit": 100000000,
   "minTargetBps": 500,
+  "orderSigner": "DEPLOYER_EOA",
   "placeholderPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
   "twapWindow": 180
 }

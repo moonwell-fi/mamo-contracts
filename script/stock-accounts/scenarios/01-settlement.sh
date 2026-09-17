@@ -46,9 +46,11 @@ assert_eq "in-range buy order accepted by EIP-1271" "$(check_signature "$ACCT_A"
 # Same order carrying the document for the sell token: its hook would take the fee in USDC, which is
 # not what this order buys, so the account refuses it.
 WRONG_ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT_A" "$BUY_IN" "$BUY_AMT" "$VALID_TO" "$(app_data_hash "$ACCT_A" "$USDC")")
+WRONG_DIGEST=$(order_digest "$WRONG_ORDER")
+
 expect_call_revert "order carrying the sell token appData refused" "$(selector 'InvalidAppData()')" \
   "$DEPLOYER" "$ACCT_A" 'isValidSignature(bytes32,bytes)(bytes4)' \
-  "$(order_digest "$WRONG_ORDER")" "$(order_encoded "$WRONG_ORDER")"
+  "$WRONG_DIGEST" "$(order_encoded "$WRONG_ORDER" "$(sign_digest "$WRONG_DIGEST")")"
 
 FEE_DUE_NVDA=$(fee_due_in "$ACCT_A" "$NVDA")
 COLLECTOR_USDC=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
@@ -87,13 +89,32 @@ VALID_TO=$(bn "$(now_ts) + 900")
 BAD_BUY=$(bn "$(expected_out "$OUT_OF_RANGE" "$USDC" "$NVDA") * 995 // 1000")
 BAD_ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT_A" "$OUT_OF_RANGE" "$BAD_BUY" "$VALID_TO")
 
+BAD_DIGEST=$(order_digest "$BAD_ORDER")
+BAD_SIG=$(sign_digest "$BAD_DIGEST")
+
 expect_call_revert "out-of-range order refused by EIP-1271" "$(selector 'SellLeavesTokenBelowRange(address)')" \
   "$DEPLOYER" "$ACCT_A" 'isValidSignature(bytes32,bytes)(bytes4)' \
-  "$(order_digest "$BAD_ORDER")" "$(order_encoded "$BAD_ORDER")"
+  "$BAD_DIGEST" "$(order_encoded "$BAD_ORDER" "$BAD_SIG")"
 
 expect_revert "out-of-range order refused at settlement" "$(selector 'SellLeavesTokenBelowRange(address)')" \
-  "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,uint256,uint256)" \
-  "$ACCT_A" "$BAD_ORDER" "$BAD_BUY" "$OUT_OF_RANGE"
+  "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
+  "$ACCT_A" "$BAD_ORDER" "$BAD_SIG" "$BAD_BUY" "$OUT_OF_RANGE"
+
+# The solver cannot author an order on its own: without the backend signature the account refuses it.
+VALID_TO=$(bn "$(now_ts) + 900")
+UNSIGNED_IN=100000000
+UNSIGNED_BUY=$(bn "$(expected_out "$UNSIGNED_IN" "$USDC" "$NVDA") * 995 // 1000")
+UNSIGNED_ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT_A" "$UNSIGNED_IN" "$UNSIGNED_BUY" "$VALID_TO")
+
+expect_call_revert "unsigned order refused by EIP-1271" "$(selector 'InvalidBackendSignature()')" \
+  "$DEPLOYER" "$ACCT_A" 'isValidSignature(bytes32,bytes)(bytes4)' \
+  "$(order_digest "$UNSIGNED_ORDER")" "$(order_encoded "$UNSIGNED_ORDER" 0x)"
+
+expect_revert "unsigned order refused at settlement" "$(selector 'InvalidBackendSignature()')" \
+  "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
+  "$ACCT_A" "$UNSIGNED_ORDER" 0x "$UNSIGNED_BUY" "$UNSIGNED_IN"
+
+assert_eq "the same order signed by the backend is accepted" "$(check_signature "$ACCT_A" "$UNSIGNED_ORDER")" "$MAGIC_VALUE"
 
 # B holds NVDAc and wants cash, A wants the reverse: one settle, no pool, no liquidity cost.
 USER_B=$(actor B)
@@ -122,8 +143,9 @@ B_FEE_DUE_USDC=$(fee_due "$ACCT_B")
 COLLECTOR_USDC=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
 COLLECTOR_NVDA=$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")
 
-RECEIPT=$(send "$DEPLOYER" "$HELPER" "settleBatch(address,$ORDER_T,address,$ORDER_T)" \
-  "$ACCT_A" "$ORDER_A" "$ACCT_B" "$ORDER_B")
+RECEIPT=$(send "$DEPLOYER" "$HELPER" "settleBatch(address,$ORDER_T,bytes,address,$ORDER_T,bytes)" \
+  "$ACCT_A" "$ORDER_A" "$(sign_digest "$(order_digest "$ORDER_A")")" \
+  "$ACCT_B" "$ORDER_B" "$(sign_digest "$(order_digest "$ORDER_B")")")
 
 A_FEE_NVDA=$(fees_paid "$RECEIPT" "$ACCT_A" "$NVDA")
 B_FEE_USDC=$(fees_paid "$RECEIPT" "$ACCT_B" "$USDC")
