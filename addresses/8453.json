@@ -463,5 +463,15 @@
     "addr": "0x7B0f1103746648FBfce9222f1266f79B934E16b2",
     "name": "USDC_CBBTC_CL_GAUGE",
     "isContract": true
+  },
+  {
+    "addr": "0x0F0f89Edfd6BECebAa9cA13430Db474f2aA5cC0a",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_WETH_USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0x9b45E48882daaC69A902dE2A6A5Fc4fE6eA074B6",
+    "name": "MAMO_LP_COMPOUND_MODULE_WETH_USDC",
+    "isContract": true
   }
 ]
