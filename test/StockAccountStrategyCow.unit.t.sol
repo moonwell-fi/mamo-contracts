@@ -43,7 +43,37 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
 
         vm.expectRevert(IStockAccountStrategy.OrderHashMismatch.selector);
-        strategy.isValidSignature(keccak256("other"), abi.encode(order));
+        strategy.isValidSignature(keccak256("other"), abi.encode(order, _sign(keccak256("other"))));
+    }
+
+    function testRevertsWhenTheBackendSignatureIsMissing() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+
+        vm.expectRevert(IStockAccountStrategy.InvalidBackendSignature.selector);
+        strategy.isValidSignature(order.hash(SEPARATOR), abi.encode(order, bytes("")));
+    }
+
+    function testRevertsWhenTheBackendSignatureIsFromAnotherKey() public {
+        (, uint256 otherKey) = makeAddrAndKey("otherSigner");
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+        bytes32 digest = order.hash(SEPARATOR);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(otherKey, digest);
+
+        vm.expectRevert(IStockAccountStrategy.InvalidBackendSignature.selector);
+        strategy.isValidSignature(digest, abi.encode(order, abi.encodePacked(r, s, v)));
+    }
+
+    function testRotatingTheOrderSignerInvalidatesASignedOrder() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+        bytes32 digest = order.hash(SEPARATOR);
+        bytes memory signature = _sign(digest);
+
+        assertTrue(strategy.isValidSignature(digest, abi.encode(order, signature)) == MAGIC_VALUE, "magic value");
+
+        stockRegistry.setOrderSigner(makeAddr("rotatedSigner"));
+
+        vm.expectRevert(IStockAccountStrategy.InvalidBackendSignature.selector);
+        strategy.isValidSignature(digest, abi.encode(order, signature));
     }
 
     function testRevertsOnBuyOrder() public {
@@ -244,15 +274,44 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(order);
     }
 
-    function testValidOrderQuotesTwoHoldingsPlusTwoOrderAmountsAndChecksPriceOnce() public {
-        vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.getExpectedOut.selector), 4);
-        vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.checkPrice.selector), 1);
+    function testValidOrderQuotesEveryHoldingPlusTheOrderOnce() public {
+        vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.getExpectedOut.selector), 3);
+        vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.checkPrice.selector), 0);
 
         assertTrue(_check(_order(address(nvda), address(aapl), 1e18, 2e18)) == MAGIC_VALUE, "magic value");
     }
 
+    function testOrderExactlyOnTheSlippageFloorIsAcceptedAndOneWeiUnderIsNot() public {
+        uint256 slippage = strategy.getAccountSlippage();
+        uint256 floor = (200e18 * (10_000 - slippage)) / 10_000;
+
+        assertTrue(_check(_order(address(nvda), address(usdc), 1e18, floor)) == MAGIC_VALUE, "magic value");
+
+        GPv2Order.Data memory under = _order(address(nvda), address(usdc), 1e18, floor - 1);
+
+        vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
+        _check(under);
+    }
+
+    function testRevertsWhenTheQuoteRoundsToZero() public {
+        usdc.mint(address(strategy), 1_000e18);
+
+        GPv2Order.Data memory order = _order(address(usdc), address(nvda), 1, 1);
+
+        vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
+        _check(order);
+    }
+
+    function testRevertsOnZeroSellAmount() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 0, 0);
+
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
+        _check(order);
+    }
+
     function _check(GPv2Order.Data memory order) internal view returns (bytes4) {
-        return strategy.isValidSignature(order.hash(SEPARATOR), abi.encode(order));
+        bytes32 digest = order.hash(SEPARATOR);
+        return strategy.isValidSignature(digest, abi.encode(order, _sign(digest)));
     }
 
     function _order(address sellToken, address buyToken, uint256 sellAmount, uint256 buyAmount)

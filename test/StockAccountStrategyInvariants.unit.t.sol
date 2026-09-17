@@ -25,6 +25,7 @@ struct HandlerConfig {
     address user;
     address feeRecipient;
     bytes32 separator;
+    uint256 signerKey;
     address[4] tokens;
     uint256[4] prices;
 }
@@ -51,6 +52,7 @@ contract StockAccountStrategyHandler is Test {
     address internal immutable user;
     address internal immutable feeRecipient;
     bytes32 internal immutable separator;
+    uint256 internal immutable signerKey;
     uint256 internal immutable cap;
     uint256 internal immutable minDeposit;
 
@@ -85,6 +87,8 @@ contract StockAccountStrategyHandler is Test {
     uint64 public lastFeePaidSeen;
     bool public feeClockWentBackwards;
 
+    uint256 public maxSellValueDrift;
+
     bool public rangeViolated;
     bool public fillCapViolated;
     bool public valueLossViolated;
@@ -106,6 +110,7 @@ contract StockAccountStrategyHandler is Test {
         user = config.user;
         feeRecipient = config.feeRecipient;
         separator = config.separator;
+        signerKey = config.signerKey;
         cap = config.stockRegistry.maxStrategyDeposit();
         minDeposit = config.stockRegistry.minStrategyDeposit();
         maxRateSeen = config.stockRegistry.managementFeeBps();
@@ -346,9 +351,10 @@ contract StockAccountStrategyHandler is Test {
         if (buyAmount == 0) return;
 
         GPv2Order.Data memory order = _order(tokens[sell], tokens[buy], sellAmount, buyAmount);
+        bytes32 digest = order.hash(separator);
         uint256 navBefore = strategy.getNAV();
 
-        try strategy.isValidSignature(order.hash(separator), abi.encode(order)) returns (bytes4 value) {
+        try strategy.isValidSignature(digest, abi.encode(order, _sign(digest))) returns (bytes4 value) {
             if (value != MAGIC_VALUE) {
                 _latch("isValidSignature returned a value that is not the magic value");
                 return;
@@ -357,6 +363,7 @@ contract StockAccountStrategyHandler is Test {
             acceptedOrders++;
             _checkStatuses(tokens[sell], tokens[buy]);
             _checkFillCap(expectedOut, buyAmount);
+            _recordSellReference(tokens[sell], sellAmount);
 
             if (!_settle(tokens[sell], tokens[buy], sellAmount, buyAmount)) return;
 
@@ -388,6 +395,26 @@ contract StockAccountStrategyHandler is Test {
             _latch("an accepted order could not be settled out of the account balance");
             return false;
         }
+    }
+
+    function _sign(bytes32 digest) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev The asset leg is the unit of account, so only a stock leg has a reference to compare
+    function _recordSellReference(address sellToken, uint256 sellAmount) internal {
+        if (sellToken == tokens[0]) return;
+
+        uint256 available = IERC20(sellToken).balanceOf(address(strategy));
+        if (available == 0) return;
+
+        uint256 held = priceChecker.getExpectedOut(available, sellToken, tokens[0]);
+        uint256 derived = (held * sellAmount) / available;
+        uint256 fresh = priceChecker.getExpectedOut(sellAmount, sellToken, tokens[0]);
+        uint256 drift = derived > fresh ? derived - fresh : fresh - derived;
+
+        if (drift > maxSellValueDrift) maxSellValueDrift = drift;
     }
 
     function _checkStatuses(address sellToken, address buyToken) internal {
@@ -624,6 +651,7 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
                 user: user,
                 feeRecipient: feeRecipient,
                 separator: SEPARATOR,
+                signerKey: orderSignerKey,
                 tokens: [address(usdc), address(nvda), address(aapl), address(googl)],
                 prices: [uint256(1e18), 200e18, 100e18, 150e18]
             })
@@ -657,6 +685,14 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
     function invariant_acceptedOrdersFillWithinTheSlippageCap() public view {
         assertFalse(handler.fillCapViolated(), handler.lastViolation());
+    }
+
+    function invariant_derivedSellReferenceMatchesAFreshQuote() public view {
+        assertLe(
+            handler.maxSellValueDrift(),
+            2,
+            "the derived sell reference differs from a fresh quote by more than the 2 wei its two floor divisions round"
+        );
     }
 
     function invariant_acceptedOrdersKeepAccountValue() public view {
@@ -744,6 +780,7 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
         emit log_named_uint("rejected BuyTokenNotActive", handler.rejectBuyNotActive());
         emit log_named_uint("rejected SellExceedsBalance", handler.rejectSellExceedsBalance());
         emit log_named_uint("rejected other", handler.rejectOther());
+        emit log_named_uint("max derived sell reference drift, wei", handler.maxSellValueDrift());
     }
 
     function testFuzz_rangeRuleBoundary(uint16 targetBps, uint256 sellBps) public {
@@ -773,7 +810,8 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
     }
 
     function _check(GPv2Order.Data memory order) internal view returns (bytes4) {
-        return strategy.isValidSignature(order.hash(SEPARATOR), abi.encode(order));
+        bytes32 digest = order.hash(SEPARATOR);
+        return strategy.isValidSignature(digest, abi.encode(order, _sign(digest)));
     }
 
     function _order(address sellToken, address buyToken, uint256 sellAmount, uint256 buyAmount)

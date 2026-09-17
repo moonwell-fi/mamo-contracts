@@ -53,6 +53,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 maxWithdrawSlippageBps: 500,
                 minStrategyDeposit: 100e6,
                 minTargetBps: 100,
+                orderSigner: admin,
                 priceChecker: ISlippagePriceChecker(address(this)),
                 twapWindow: WINDOW
             })

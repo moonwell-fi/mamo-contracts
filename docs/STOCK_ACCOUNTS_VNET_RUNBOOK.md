@@ -223,18 +223,26 @@ code runs on the node. USDC balances come from `tenderly_setErc20Balance` and ti
 
 `SettlementHelper` is registered as a CoW solver by impersonating the allow-list manager on the vnet.
 It builds the `tokens`/`clearingPrices`/`trades` arrays for `GPv2Settlement.settle`, signs each trade
-with the EIP-1271 scheme (the owner address followed by the encoded order), and either sources the buy
-token from the stocks pool in the intra-settlement interactions or nets two accounts against each
-other with no interaction at all. It also carries, as a post-interaction, the hook each account's
-appData declares: `payFees(buyToken)` on the account, one per account in the settle, each naming that
-account's own buy token. Real CoW routes hooks through the `HooksTrampoline`; calling the account
-straight from the settlement is equivalent because `payFees` is permissionless.
+with the EIP-1271 scheme (the owner address followed by the encoded order and the backend signature
+over its digest), and either sources the buy token from the stocks pool in the intra-settlement
+interactions or nets two accounts against each other with no interaction at all. It also carries, as a
+post-interaction, the hook each account's appData declares: `payFees(buyToken)` on the account, one per
+account in the settle, each naming that account's own buy token. Real CoW routes hooks through the
+`HooksTrampoline`; calling the account straight from the settlement is equivalent because `payFees` is
+permissionless.
+
+Every order an account accepts also carries a signature by `StockAccountRegistry.orderSigner`, so
+being an allow-listed solver is not enough to author one. `prepare.sh` points the registry at
+`0xc419099bfA195fe92e57d137dFe3b2116E9203fe`, a public test key that is fine on a vnet, and asserts it
+has no code before use: the anvil accounts cannot serve here because each carries an EIP-7702
+delegation on Base, which would make it an ERC-1271 signer rather than the plain EOA the harness signs
+with.
 
 ### What each scenario proves
 
 | Scenario | Proves |
 | --- | --- |
-| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; the appData post-hook pays a day of fee in the token the order buys — NVDAc for the buy-in, the collector's USDC untouched; the same order carrying the document for the sell token is refused with `InvalidAppData`; NAV and weights survive the trade; the same trade sized past the band is refused by the account and therefore by the settlement; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue, the buyer paying its fee in NVDAc and the seller in USDC. |
+| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; the appData post-hook pays a day of fee in the token the order buys — NVDAc for the buy-in, the collector's USDC untouched; the same order carrying the document for the sell token is refused with `InvalidAppData`; NAV and weights survive the trade; the same trade sized past the band is refused by the account and therefore by the settlement; a solver-authored order with no backend signature is refused both ways and accepted once signed; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue, the buyer paying its fee in NVDAc and the seller in USDC. |
 | `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
 | `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays in NVDAc and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
