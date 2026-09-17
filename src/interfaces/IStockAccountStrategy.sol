@@ -37,6 +37,7 @@ interface IStockAccountStrategy {
     error InsufficientProceeds();
     error EmptyBalance();
     error OrderHashMismatch();
+    error InvalidBackendSignature();
     error OrderMustBeSell();
     error OrderMustBeFillOrKill();
     error OrderBalancesMustBeErc20();

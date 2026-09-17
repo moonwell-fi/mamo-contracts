@@ -27,6 +27,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         uint16 maxWithdrawSlippageBps;
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
+        address orderSigner;
         ISlippagePriceChecker priceChecker;
         bytes32 requiredAppDataHash;
         uint32 twapWindow;
@@ -41,6 +42,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
+    address public override orderSigner;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
     bytes32 public override requiredAppDataHash;
@@ -58,6 +60,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
+    event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event RequiredAppDataHashUpdated(bytes32 indexed oldHash, bytes32 indexed newHash);
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
@@ -80,6 +83,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setTwapWindow(config.twapWindow);
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
+        _setOrderSigner(config.orderSigner);
         _setRequiredAppDataHash(config.requiredAppDataHash);
     }
 
@@ -145,6 +149,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     function setMaxStrategyDeposit(uint256 newMaxDeposit) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newMaxDeposit == maxStrategyDeposit) revert AlreadySet();
         _setMaxStrategyDeposit(newMaxDeposit);
+    }
+
+    /// @notice Sets the key the backend signs orders with, invalidating any order signed by the old one
+    function setOrderSigner(address newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newSigner == orderSigner) revert AlreadySet();
+        _setOrderSigner(newSigner);
     }
 
     /// @notice Sets the CowSwap app data hash that orders must carry
@@ -300,6 +310,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         maxStrategyDeposit = newMaxDeposit;
 
         emit MaxStrategyDepositUpdated(oldValue, newMaxDeposit);
+    }
+
+    function _setOrderSigner(address newSigner) internal {
+        if (newSigner == address(0)) revert ZeroAddress();
+
+        address oldSigner = orderSigner;
+        orderSigner = newSigner;
+
+        emit OrderSignerUpdated(oldSigner, newSigner);
     }
 
     function _setRequiredAppDataHash(bytes32 newHash) internal {

@@ -30,6 +30,7 @@ contract StockAccountsConfig is Script {
         uint16 maxWithdrawSlippageBps;
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
+        string orderSigner;
         string placeholderPriceChecker;
         bytes32 requiredAppDataHash;
         uint32 twapWindow;
@@ -56,6 +57,7 @@ contract StockAccountsConfig is Script {
         config.maxWithdrawSlippageBps = uint16(json.readUint(".maxWithdrawSlippageBps"));
         config.minStrategyDeposit = json.readUint(".minStrategyDeposit");
         config.minTargetBps = uint16(json.readUint(".minTargetBps"));
+        config.orderSigner = json.readString(".orderSigner");
         config.placeholderPriceChecker = json.readString(".placeholderPriceChecker");
         config.requiredAppDataHash = json.readBytes32(".requiredAppDataHash");
         config.twapWindow = uint32(json.readUint(".twapWindow"));

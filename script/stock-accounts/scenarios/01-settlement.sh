@@ -51,13 +51,32 @@ VALID_TO=$(bn "$(now_ts) + 900")
 BAD_BUY=$(bn "$(expected_out "$OUT_OF_RANGE" "$USDC" "$NVDA") * 995 // 1000")
 BAD_ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT_A" "$OUT_OF_RANGE" "$BAD_BUY" "$VALID_TO")
 
+BAD_DIGEST=$(order_digest "$BAD_ORDER")
+BAD_SIG=$(sign_digest "$BAD_DIGEST")
+
 expect_call_revert "out-of-range order refused by EIP-1271" "$(selector 'SellLeavesTokenBelowRange(address)')" \
   "$DEPLOYER" "$ACCT_A" 'isValidSignature(bytes32,bytes)(bytes4)' \
-  "$(order_digest "$BAD_ORDER")" "$(order_encoded "$BAD_ORDER")"
+  "$BAD_DIGEST" "$(order_encoded "$BAD_ORDER" "$BAD_SIG")"
 
 expect_revert "out-of-range order refused at settlement" "$(selector 'SellLeavesTokenBelowRange(address)')" \
-  "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,uint256,uint256)" \
-  "$ACCT_A" "$BAD_ORDER" "$BAD_BUY" "$OUT_OF_RANGE"
+  "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
+  "$ACCT_A" "$BAD_ORDER" "$BAD_SIG" "$BAD_BUY" "$OUT_OF_RANGE"
+
+# The solver cannot author an order on its own: without the backend signature the account refuses it.
+VALID_TO=$(bn "$(now_ts) + 900")
+UNSIGNED_IN=100000000
+UNSIGNED_BUY=$(bn "$(expected_out "$UNSIGNED_IN" "$USDC" "$NVDA") * 995 // 1000")
+UNSIGNED_ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT_A" "$UNSIGNED_IN" "$UNSIGNED_BUY" "$VALID_TO")
+
+expect_call_revert "unsigned order refused by EIP-1271" "$(selector 'InvalidBackendSignature()')" \
+  "$DEPLOYER" "$ACCT_A" 'isValidSignature(bytes32,bytes)(bytes4)' \
+  "$(order_digest "$UNSIGNED_ORDER")" "$(order_encoded "$UNSIGNED_ORDER" 0x)"
+
+expect_revert "unsigned order refused at settlement" "$(selector 'InvalidBackendSignature()')" \
+  "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
+  "$ACCT_A" "$UNSIGNED_ORDER" 0x "$UNSIGNED_BUY" "$UNSIGNED_IN"
+
+assert_eq "the same order signed by the backend is accepted" "$(check_signature "$ACCT_A" "$UNSIGNED_ORDER")" "$MAGIC_VALUE"
 
 # B holds NVDAc and wants cash, A wants the reverse: one settle, no pool, no liquidity cost.
 USER_B=$(actor B)
@@ -79,8 +98,9 @@ A_NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT_A")
 B_NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT_B")
 B_USDC_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT_B")
 
-send "$DEPLOYER" "$HELPER" "settleBatch(address,$ORDER_T,address,$ORDER_T)" \
-  "$ACCT_A" "$ORDER_A" "$ACCT_B" "$ORDER_B" >/dev/null
+send "$DEPLOYER" "$HELPER" "settleBatch(address,$ORDER_T,bytes,address,$ORDER_T,bytes)" \
+  "$ACCT_A" "$ORDER_A" "$(sign_digest "$(order_digest "$ORDER_A")")" \
+  "$ACCT_B" "$ORDER_B" "$(sign_digest "$(order_digest "$ORDER_B")")" >/dev/null
 
 assert_eq "netted: A received the NVDAc B sold" \
   "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT_A") - $A_NVDA_BEFORE")" "$NET_NVDA"

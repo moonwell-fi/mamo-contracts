@@ -167,15 +167,20 @@ code runs on the node. USDC balances come from `tenderly_setErc20Balance` and ti
 
 `SettlementHelper` is registered as a CoW solver by impersonating the allow-list manager on the vnet.
 It builds the `tokens`/`clearingPrices`/`trades` arrays for `GPv2Settlement.settle`, signs each trade
-with the EIP-1271 scheme (the owner address followed by the encoded order), and either sources the buy
-token from the stocks pool in the intra-settlement interactions or nets two accounts against each
-other with no interaction at all.
+with the EIP-1271 scheme (the owner address followed by the encoded order and the backend signature
+over its digest), and either sources the buy token from the stocks pool in the intra-settlement
+interactions or nets two accounts against each other with no interaction at all.
+
+Every order an account accepts also carries a signature by `StockAccountRegistry.orderSigner`, so
+being an allow-listed solver is not enough to author one. `prepare.sh` points the registry at anvil
+account 0 (`0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`, a public test key that is fine on a vnet) and
+the harness signs every digest with it.
 
 ### What each scenario proves
 
 | Scenario | Proves |
 | --- | --- |
-| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; NAV and weights survive it; the same trade sized past the band is refused by the account and therefore by the settlement; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue. |
+| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; NAV and weights survive it; the same trade sized past the band is refused by the account and therefore by the settlement; a solver-authored order with no backend signature is refused both ways and accepted once signed; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue. |
 | `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
 | `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a Halted token leaves the NAV while remaining held and withdrawable in kind; a month of management fee accrues at the configured rate and collects to the fee recipient. |

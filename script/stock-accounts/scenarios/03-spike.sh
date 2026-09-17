@@ -69,9 +69,10 @@ record "$SCEN" "spiked reference, USDC per NVDAc" 1 "$REF"
 # same condition seen from either leg, so the sell-side rule is the one that fires first.
 BUY_NVDA=$(bn "$(expected_out "$SETTLE_VALUE" "$USDC" "$NVDA") * 995 // 1000")
 BUY_ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT" "$SETTLE_VALUE" "$BUY_NVDA" "$VALID_TO")
+BUY_DIGEST=$(order_digest "$BUY_ORDER")
 expect_call_revert "buying more NVDAc refused while overweight" "$(selector 'SellLeavesTokenBelowRange(address)')" \
   "$DEPLOYER" "$ACCT" 'isValidSignature(bytes32,bytes)(bytes4)' \
-  "$(order_digest "$BUY_ORDER")" "$(order_encoded "$BUY_ORDER")"
+  "$BUY_DIGEST" "$(order_encoded "$BUY_ORDER" "$(sign_digest "$BUY_DIGEST")")"
 
 USDC_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")
 settle_sell "$ACCT" "$SELL_ORDER" "$SELL_NVDA" "$SELL_USDC"

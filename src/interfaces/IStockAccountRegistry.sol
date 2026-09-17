@@ -61,6 +61,8 @@ interface IStockAccountRegistry {
 
     function maxWithdrawSlippageBps() external view returns (uint16);
 
+    function orderSigner() external view returns (address);
+
     function requiredAppDataHash() external view returns (bytes32);
 
     function aerodromeRouter() external view returns (ISwapRouter);

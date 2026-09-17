@@ -15,6 +15,15 @@ fund "$DEPLOYER" 100000000000000
 ensure_listed "$NVDA" "$NVDA_POOL"
 assert_eq "NVDAc listed as Active" "$(token_status "$NVDA")" 1
 
+# Orders carry a signature by the registry order signer; on the vnet that is a public test key.
+assert_eq "order signer is a plain EOA on this fork" "$(cast code "$ORDER_SIGNER" --rpc-url "$VNET" 2>>"$LOG")" 0x
+
+CURRENT_SIGNER=$(call "$STOCK_REGISTRY" 'orderSigner()(address)')
+if [ "$(echo "$CURRENT_SIGNER" | tr 'A-Z' 'a-z')" != "$(echo "$ORDER_SIGNER" | tr 'A-Z' 'a-z')" ]; then
+  send "$DEPLOYER" "$STOCK_REGISTRY" 'setOrderSigner(address)' "$ORDER_SIGNER" >/dev/null
+fi
+assert_eq "registry order signer is the harness key" "$(call "$STOCK_REGISTRY" 'orderSigner()(address)')" "$ORDER_SIGNER"
+
 deploy_helper() {
   forge create --rpc-url "$VNET" --unlocked --from "$DEPLOYER" --broadcast --json \
     "$SCEN_DIR/SettlementHelper.sol:SettlementHelper" \
