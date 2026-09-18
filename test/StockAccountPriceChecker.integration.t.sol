@@ -11,10 +11,23 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
 import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
+
+/// @dev The swap entry point of the live Slipstream pool, kept out of ICLPool because production
+///      code never swaps: the checker only reads prices.
+interface ICLPoolSwap {
+    function swap(
+        address recipient,
+        bool zeroForOne,
+        int256 amountSpecified,
+        uint160 sqrtPriceLimitX96,
+        bytes calldata data
+    ) external returns (int256 amount0, int256 amount1);
+}
 
 /// @notice Live NVDAc/USDC Aerodrome Slipstream pool and live Chainlink feeds on a PINNED Base fork.
 ///         Self-forks in setUp (no --fork-url on the CLI, see the lp-auto-balancer-v2 Makefile note).
@@ -31,6 +44,11 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     address internal constant CHAINLINK_BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
     address internal constant STRANGER = 0x000000000000000000000000000000000000dEaD;
+
+    /// @dev Swap inputs large enough to run the pool to the sqrt-price limit the helpers set; the
+    ///      limit, not the amount, is what decides how far the price moves.
+    uint256 internal constant PUMP_USDC_IN = 2_000_000e6;
+    uint256 internal constant DUMP_NVDAC_IN = 200_000e8;
 
     address internal admin = makeAddr("admin");
     StockAccountRegistry internal registry;
@@ -109,14 +127,10 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_BTC_USD,
-            reverse: false,
-            heartbeat: 3600
+            chainlinkFeed: CHAINLINK_BTC_USD, reverse: false, heartbeat: 3600
         });
         cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_USDC_USD,
-            reverse: true,
-            heartbeat: 86_400
+            chainlinkFeed: CHAINLINK_USDC_USD, reverse: true, heartbeat: 86_400
         });
         proxy.addTokenConfiguration(CBBTC, USDC, cfgs);
         proxy.setMaxTimePriceValid(CBBTC, CBBTC_MAX_TIME_PRICE_VALID);
@@ -220,5 +234,79 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         checker.getExpectedOut(1e8, STRANGER, CBBTC);
         vm.expectRevert(abi.encodeWithSelector(StockAccountPriceChecker.TokenNotListed.selector, STRANGER));
         checker.getExpectedOut(1e8, CBBTC, STRANGER);
+    }
+
+    // ==================== Live pool manipulation ====================
+
+    /// @dev Settles a swap this test initiated; NVDAc is the etched stand-in, USDC is the real token.
+    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata) external {
+        assertEq(msg.sender, NVDAC_USDC_POOL, "callback from an unexpected pool");
+        if (amount0Delta > 0) IERC20(USDC).transfer(msg.sender, uint256(amount0Delta));
+        if (amount1Delta > 0) MockERC20Decimals(NVDAC).transfer(msg.sender, uint256(amount1Delta));
+    }
+
+    /// @dev Buys NVDAc until the pool's sqrt price is 10% lower, i.e. NVDAc ~23% more expensive.
+    ///      The pool is minted the NVDAc it pays out: the real reserve lives in node-native state
+    ///      that the etch in `setUp` replaced.
+    function _pumpNvdac() internal {
+        (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        deal(USDC, address(this), PUMP_USDC_IN);
+        MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, DUMP_NVDAC_IN);
+        ICLPoolSwap(NVDAC_USDC_POOL)
+            .swap(address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * 90) / 100), "");
+    }
+
+    /// @dev Sells NVDAc until the pool's sqrt price is 10% higher, i.e. NVDAc ~17% cheaper.
+    function _dumpNvdac() internal {
+        (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        MockERC20Decimals(NVDAC).mint(address(this), DUMP_NVDAC_IN);
+        ICLPoolSwap(NVDAC_USDC_POOL)
+            .swap(address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * 110) / 100), "");
+    }
+
+    /// @notice A same-block manipulation moves the pool's live price and not the checker's quote.
+    function test_fork_twapIgnoresSameBlockPoolManipulation() public {
+        uint256 twapBefore = checker.getExpectedOut(1e8, NVDAC, USDC);
+        uint256 spotBefore = _spotUsdcPerNvdac();
+
+        _pumpNvdac();
+
+        assertGt(_spotUsdcPerNvdac(), (spotBefore * 110) / 100, "vacuous: spot moved less than 10%");
+        assertEq(checker.getExpectedOut(1e8, NVDAC, USDC), twapBefore, "twap moved within the same block");
+    }
+
+    /// @notice Non-vacuity control for the test above: holding the manipulated tick for the whole
+    ///         window does move the quote, so the window length is what bounds the attack.
+    function test_fork_manipulationHeldForTheWholeWindowMovesTheTwap() public {
+        uint256 twapBefore = checker.getExpectedOut(1e8, NVDAC, USDC);
+
+        _pumpNvdac();
+        uint256 spotAfter = _spotUsdcPerNvdac();
+        vm.warp(vm.getBlockTimestamp() + WINDOW + 1);
+
+        uint256 twapAfter = checker.getExpectedOut(1e8, NVDAC, USDC);
+        assertGt(twapAfter, (twapBefore * 110) / 100, "vacuous: twap did not follow the held tick");
+        assertApproxEqRel(twapAfter, spotAfter, 0.01e18, "held tick should price at the manipulated spot");
+    }
+
+    /// @notice A crashed spot cannot serve as the slippage floor: the TWAP still prices NVDAc high,
+    ///         so a sell quoted off the manipulated pool is rejected.
+    function test_fork_checkPriceRejectsFloorDerivedFromCrashedSpot() public {
+        uint256 spotBefore = _spotUsdcPerNvdac();
+        uint256 fairFloor = (checker.getExpectedOut(1e8, NVDAC, USDC) * 9_900) / 10_000;
+        assertTrue(checker.checkPrice(1e8, NVDAC, USDC, fairFloor, 100), "control: fair floor rejected");
+
+        _dumpNvdac();
+
+        uint256 crashedSpot = _spotUsdcPerNvdac();
+        assertLt(crashedSpot, (spotBefore * 90) / 100, "vacuous: spot did not crash 10%");
+        assertFalse(checker.checkPrice(1e8, NVDAC, USDC, crashedSpot, 100), "crashed-spot floor accepted");
+    }
+
+    /// @notice The Chainlink leg keeps exact parity with the existing checker across a pool attack.
+    function test_fork_chainlinkParitySurvivesPoolManipulation() public {
+        _pumpNvdac();
+        assertEq(checker.getExpectedOut(1e8, CBBTC, USDC), existingChecker.getExpectedOut(1e8, CBBTC, USDC));
+        assertEq(checker.getExpectedOut(100e8, CBBTC, USDC), existingChecker.getExpectedOut(100e8, CBBTC, USDC));
     }
 }
