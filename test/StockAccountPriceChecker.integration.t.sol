@@ -73,6 +73,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             StockAccountRegistry.Config({
                 admin: admin,
                 aerodromeRouter: ISwapRouter(AERODROME_CL_ROUTER),
+                asset: USDC,
                 guardian: admin,
                 managementFeeBps: 100,
                 maxBackendSlippageBps: 100,
