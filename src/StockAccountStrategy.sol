@@ -283,6 +283,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         address buyToken = address(order.buyToken);
         if (sellToken == buyToken) revert TokensMustDiffer();
         if (order.sellAmount == 0) revert ZeroAmount();
+        if (order.buyAmount == 0) revert ZeroAmount();
         if (stockRegistry.paused()) revert RegistryPaused();
 
         if (sellToken != address(asset)) {

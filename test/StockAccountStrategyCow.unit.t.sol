@@ -256,6 +256,15 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(_order(address(nvda), address(usdc), 0, 0));
     }
 
+    function testRevertsOnZeroBuyAmount() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 5000), 5000);
+        priceChecker.setRate(address(aapl), address(usdc), 1);
+
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
+        _check(_order(address(aapl), address(usdc), 1e18, 0));
+    }
+
     function testRevertsWhenTheRegistryIsPaused() public {
         stockRegistry.setPaused(true);
 
