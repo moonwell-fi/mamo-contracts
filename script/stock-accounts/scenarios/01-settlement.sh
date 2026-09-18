@@ -58,7 +58,7 @@ COLLECTOR_NVDA=$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")
 
 RECEIPT=$(settle_sell "$ACCT_A" "$ORDER" "$BUY_IN" "$BUY_AMT")
 
-ELAPSED=$(fees_paid_elapsed "$RECEIPT" "$ACCT_A")
+CREDITED=$(fees_paid_credited "$RECEIPT" "$ACCT_A")
 FEE_NVDA=$(fees_paid "$RECEIPT" "$ACCT_A" "$NVDA")
 
 assert_eq "the buy-in paid its fee in the token it bought" "$(fees_paid_token "$RECEIPT" "$ACCT_A")" "$NVDA"
@@ -69,7 +69,7 @@ assert_eq "collector USDC untouched by the hook" \
   "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")" "$COLLECTOR_USDC"
 assert_approx "the fee paid is feeDueIn(NVDAc) read before the settle" \
   "$FEE_NVDA" "$FEE_DUE_NVDA" "$FEE_TOL_BPS"
-record "$SCEN" "fee charged over, seconds" 1 "$ELAPSED"
+record "$SCEN" "fee credited, seconds" 1 "$CREDITED"
 record "$SCEN" "buy-in fee: paid vs feeDueIn(NVDAc)" 1 "$FEE_NVDA vs $FEE_DUE_NVDA"
 
 NVDA_HELD=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT_A")

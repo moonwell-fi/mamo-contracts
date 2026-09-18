@@ -86,6 +86,7 @@ contract StockAccountStrategyHandler is Test {
     uint256 public feeValueCollected;
     uint64 public lastFeePaidSeen;
     bool public feeClockWentBackwards;
+    bool public feeCreditedTooMuch;
 
     uint256 public maxSellValueDrift;
 
@@ -287,10 +288,31 @@ contract StockAccountStrategyHandler is Test {
 
         address token = _feeToken(seed);
         if (token != address(0)) {
-            try strategy.payFees(token) {} catch {}
+            uint256 elapsed = block.timestamp - strategy.lastFeePaid();
+            uint256 full = strategy.feeDueIn(token);
+            uint256 collectedBefore = IERC20(token).balanceOf(feeRecipient);
+            uint64 clockBefore = strategy.lastFeePaid();
+
+            try strategy.payFees(token) {
+                _checkFeeCredit(
+                    elapsed,
+                    full,
+                    IERC20(token).balanceOf(feeRecipient) - collectedBefore,
+                    strategy.lastFeePaid() - clockBefore
+                );
+            } catch {}
         }
 
         _observe();
+    }
+
+    function _checkFeeCredit(uint256 elapsed, uint256 full, uint256 amount, uint256 credited) internal {
+        uint256 allowed = amount >= full ? elapsed : (elapsed * amount) / full;
+
+        if (credited > allowed) {
+            feeCreditedTooMuch = true;
+            _latch("the fee clock advanced past the slice the payment covered");
+        }
     }
 
     function payFeesOnTheAsset() external {
@@ -378,7 +400,7 @@ contract StockAccountStrategyHandler is Test {
 
     function violation() external view returns (bool) {
         return rangeViolated || fillCapViolated || valueLossViolated || statusViolated || settlementFailed
-            || feeClockWentBackwards;
+            || feeClockWentBackwards || feeCreditedTooMuch;
     }
 
     function _settle(address sellToken, address buyToken, uint256 sellAmount, uint256 buyAmount)
@@ -709,14 +731,25 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
         assertLe(
             handler.feeValueCollected(),
-            ceiling + FEE_VALUE_TOLERANCE,
+            ceiling + FEE_VALUE_TOLERANCE + _flooringSlack(),
             "fee value collected exceeds feeBps x the largest account value ever seen x the elapsed time"
         );
+    }
+
+    /// @dev Credited seconds floor, so every payment can leave up to a second of the period chargeable again
+    function _flooringSlack() internal view returns (uint256) {
+        uint256 payments = handler.callsPayFees() + handler.callsWithdrawToken() + handler.callsWithdrawAllInKind();
+
+        return (payments * handler.maxNavSeen() * handler.maxRateSeen()) / (TOTAL_BPS * 365 days);
     }
 
     function invariant_theFeeClockOnlyEverMovesForward() public view {
         assertFalse(handler.feeClockWentBackwards(), handler.lastViolation());
         assertLe(strategy.lastFeePaid(), block.timestamp, "the fee clock is ahead of the current block");
+    }
+
+    function invariant_theFeeClockNeverOutrunsThePaymentThatMovedIt() public view {
+        assertFalse(handler.feeCreditedTooMuch(), handler.lastViolation());
     }
 
     function invariant_payFeesOnTheAssetNeverReverts() public {

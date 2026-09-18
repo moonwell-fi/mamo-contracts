@@ -291,15 +291,22 @@ event_word() { # event_word <receipt-json> <event-signature> <word-index>
   bn "0x${data:$((2 + $3 * 64)):64}"
 }
 
-# FeesPaid(elapsed, token, amount): one token per payment, so the event is three flat words.
+# Indexed topic of the first matching log, narrowed to one emitter when given.
+event_topic() { # event_topic <receipt-json> <event-signature> <topic-index> [emitter]
+  printf '%s' "$1" | jq -r --arg t "$(cast keccak "$2")" --arg a "$(echo "${4-}" | tr 'A-Z' 'a-z')" --argjson i "$3" \
+    '[.logs[] | select(.topics[0] == $t) | select($a == "" or (.address | ascii_downcase) == $a) | .topics[$i]] | first // empty'
+}
+
+# FeesPaid(credited, token, amount): the token is indexed, so the data is two flat words and the
+# credited seconds are the slice of the period the payment covered, not the whole elapsed time.
 FEES_PAID_SIG='FeesPaid(uint256,address,uint256)'
 
 # The token an account's fee payment was taken in, empty when it paid nothing in this transaction.
 fees_paid_token() { # fees_paid_token <receipt-json> <account>
-  local data
-  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
-  [ -n "$data" ] || return 0
-  printf '0x%s\n' "${data:90:40}"
+  local topic
+  topic=$(event_topic "$1" "$FEES_PAID_SIG" 1 "$2")
+  [ -n "$topic" ] || return 0
+  printf '0x%s\n' "${topic:26:40}"
 }
 
 # What an account's fee payment moved in one token; zero when it paid in another token or not at all.
@@ -307,11 +314,11 @@ fees_paid() { # fees_paid <receipt-json> <account> <token>
   local data
   data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
   [ -n "$data" ] || { echo 0; return 0; }
-  [ "$(lc "0x${data:90:40}")" = "$(lc "$3")" ] || { echo 0; return 0; }
-  bn "0x${data:130:64}"
+  [ "$(lc "$(fees_paid_token "$1" "$2")")" = "$(lc "$3")" ] || { echo 0; return 0; }
+  bn "0x${data:66:64}"
 }
 
-fees_paid_elapsed() { # fees_paid_elapsed <receipt-json> <account>
+fees_paid_credited() { # fees_paid_credited <receipt-json> <account>
   local data
   data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
   [ -n "$data" ] || { echo 0; return 0; }

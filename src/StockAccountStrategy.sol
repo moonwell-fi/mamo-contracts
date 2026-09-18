@@ -230,6 +230,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /**
      * @notice Pays the fee accrued since the last payment in one token, callable by anyone
+     * @dev A payment the balance cuts short credits only the slice of the period it covers
      * @param token The asset or a listed token that is neither unlisted nor halted
      */
     function payFees(address token) external override {
@@ -577,13 +578,17 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance == 0) revert NoBalanceForFee(token);
 
-        uint256 amount = _feeAmount(token, due);
-        if (amount > balance) amount = balance;
+        uint256 full = _feeAmount(token, due);
+        if (full == 0) revert FeeRoundsToZero(token);
+
+        uint256 amount = full > balance ? balance : full;
+        uint256 credited = amount == full ? elapsed : (elapsed * amount) / full;
+
+        lastFeePaid = uint64(lastFeePaid + credited);
 
         IERC20(token).safeTransfer(feeRecipient, amount);
-        lastFeePaid = uint64(block.timestamp);
 
-        emit FeesPaid(elapsed, token, amount);
+        emit FeesPaid(credited, token, amount);
     }
 
     function _isFeeToken(address token) internal view returns (bool) {
