@@ -127,10 +127,14 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_BTC_USD, reverse: false, heartbeat: 3600
+            chainlinkFeed: CHAINLINK_BTC_USD,
+            reverse: false,
+            heartbeat: 3600
         });
         cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_USDC_USD, reverse: true, heartbeat: 86_400
+            chainlinkFeed: CHAINLINK_USDC_USD,
+            reverse: true,
+            heartbeat: 86_400
         });
         proxy.addTokenConfiguration(CBBTC, USDC, cfgs);
         proxy.setMaxTimePriceValid(CBBTC, CBBTC_MAX_TIME_PRICE_VALID);
@@ -252,16 +256,18 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         deal(USDC, address(this), PUMP_USDC_IN);
         MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, DUMP_NVDAC_IN);
-        ICLPoolSwap(NVDAC_USDC_POOL)
-            .swap(address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * 90) / 100), "");
+        ICLPoolSwap(NVDAC_USDC_POOL).swap(
+            address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * 90) / 100), ""
+        );
     }
 
     /// @dev Sells NVDAc until the pool's sqrt price is 10% higher, i.e. NVDAc ~17% cheaper.
     function _dumpNvdac() internal {
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         MockERC20Decimals(NVDAC).mint(address(this), DUMP_NVDAC_IN);
-        ICLPoolSwap(NVDAC_USDC_POOL)
-            .swap(address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * 110) / 100), "");
+        ICLPoolSwap(NVDAC_USDC_POOL).swap(
+            address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * 110) / 100), ""
+        );
     }
 
     /// @notice A same-block manipulation moves the pool's live price and not the checker's quote.
