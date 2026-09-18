@@ -624,6 +624,21 @@ contract StockAccountRegistryUnitTest is Test {
             uint256(IStockAccountRegistry.TokenStatus.Halted),
             "status should be halted"
         );
+    }
+
+    function testRaisingToSellOnlyProbes() public {
+        listDefaultToken();
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
+
+        checker.setRate(token, asset, 0);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, token));
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
+
+        checker.setRate(token, asset, 1e18);
 
         vm.prank(admin);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
