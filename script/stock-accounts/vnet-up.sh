@@ -59,11 +59,39 @@ export TEST_USER
 export FOUNDRY_OUT=${FOUNDRY_OUT:-out}
 export FOUNDRY_CACHE_PATH=${FOUNDRY_CACHE_PATH:-cache}
 
+forge script script/StockAccountsPoolReadiness.s.sol:StockAccountsPoolReadiness \
+  --rpc-url "$RPC" --broadcast --unlocked --sender "$DEPLOYER" --slow -vv
+
 forge script script/DeployStockAccounts.s.sol:DeployStockAccounts \
   --rpc-url "$RPC" --broadcast --unlocked --sender "$DEPLOYER" --slow -vv
 
-forge script script/StockAccountsSmoke.s.sol:StockAccountsSmoke \
-  --rpc-url "$RPC" --broadcast --unlocked --sender "$TEST_USER" --slow -vv
+# The B20 stock tokens are node precompiles, which revm refuses to execute, so the deploy prints those
+# listings instead of sending them and they go straight to the node here. They go last: an account's
+# getNAV scans every listed token, so no forge script can touch an account once they are listed.
+REGISTRY=$(jq -r '.[] | select(.name == "STOCK_ACCOUNT_REGISTRY") | .addr' "$ADDRESSES_DIR/8453.json")
+ZERO=0x0000000000000000000000000000000000000000
+TOKEN_LIST=$(jq -r '.tokens[] | select(.source == "PoolTwap") | "\(.token) \(.pool)"' config/stock-accounts/8453.json)
+
+listed() {
+  STATUS=$(cast call "$REGISTRY" 'tokenConfig(address)(uint8,uint8,address,address)' "$1" --rpc-url "$RPC" | head -1)
+  [ "$STATUS" != "0" ]
+}
+
+FIRST_TOKEN=$(printf '%s\n' "$TOKEN_LIST" | head -1 | awk '{print $1}')
+
+if listed "$FIRST_TOKEN"; then
+  echo "smoke skipped: the stock tokens are already listed, so getNAV cannot run under revm"
+else
+  forge script script/StockAccountsSmoke.s.sol:StockAccountsSmoke \
+    --rpc-url "$RPC" --broadcast --unlocked --sender "$TEST_USER" --slow -vv
+fi
+
+while read -r TOKEN POOL; do
+  if listed "$TOKEN"; then continue; fi
+  cast send --rpc-url "$RPC" --unlocked --from "$DEPLOYER" --gas-limit 12000000 \
+    "$REGISTRY" 'listToken(address,(uint8,uint8,address,address))' "$TOKEN" "(1,0,$POOL,$ZERO)" >/dev/null
+  echo "listed $TOKEN"
+done <<<"$TOKEN_LIST"
 
 echo "vnet slug: $SLUG"
 echo "manifest: script/stock-accounts/vnet-manifest.json"
