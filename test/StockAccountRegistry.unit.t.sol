@@ -23,6 +23,7 @@ contract StockAccountRegistryUnitTest is Test {
     address internal admin = makeAddr("admin");
     address internal guardian = makeAddr("guardian");
     address internal stranger = makeAddr("stranger");
+    address internal orderSigner = makeAddr("orderSigner");
 
     address internal token;
     address internal pool;
@@ -54,6 +55,7 @@ contract StockAccountRegistryUnitTest is Test {
             maxWithdrawSlippageBps: 200,
             minStrategyDeposit: 100e6,
             minTargetBps: 250,
+            orderSigner: orderSigner,
             priceChecker: checker,
             requiredAppDataHash: keccak256("appData"),
             twapWindow: 1800
@@ -91,6 +93,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 1800, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 1_000_000e6, "max deposit mismatch");
+        assertEq(registry.orderSigner(), orderSigner, "order signer mismatch");
         assertEq(registry.requiredAppDataHash(), keccak256("appData"), "app data hash mismatch");
         assertEq(registry.allTokens().length, 0, "token list should start empty");
     }
@@ -148,6 +151,14 @@ contract StockAccountRegistryUnitTest is Test {
         config.priceChecker = ISlippagePriceChecker(eoaChecker);
 
         vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaChecker));
+        new StockAccountRegistry(config);
+    }
+
+    function testConstructorRevertsOnZeroOrderSigner() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.orderSigner = address(0);
+
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         new StockAccountRegistry(config);
     }
 
@@ -253,6 +264,11 @@ contract StockAccountRegistryUnitTest is Test {
         emit StockAccountRegistry.MaxStrategyDepositUpdated(1_000_000e6, 500e6);
         registry.setMaxStrategyDeposit(500e6);
 
+        address newSigner = makeAddr("newOrderSigner");
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit StockAccountRegistry.OrderSignerUpdated(orderSigner, newSigner);
+        registry.setOrderSigner(newSigner);
+
         vm.expectEmit(true, true, false, true, address(registry));
         emit StockAccountRegistry.RequiredAppDataHashUpdated(keccak256("appData"), keccak256("newAppData"));
         registry.setRequiredAppDataHash(keccak256("newAppData"));
@@ -269,6 +285,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 600, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 250e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 500e6, "max deposit mismatch");
+        assertEq(registry.orderSigner(), newSigner, "order signer mismatch");
         assertEq(registry.requiredAppDataHash(), keccak256("newAppData"), "app data hash mismatch");
     }
 
@@ -307,6 +324,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         expectNotAdmin(guardian);
         registry.setMaxStrategyDeposit(500e6);
+
+        expectNotAdmin(guardian);
+        registry.setOrderSigner(makeAddr("newOrderSigner"));
 
         expectNotAdmin(guardian);
         registry.setRequiredAppDataHash(keccak256("newAppData"));
@@ -354,6 +374,9 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(1_000_000e6);
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        registry.setOrderSigner(orderSigner);
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setRequiredAppDataHash(keccak256("appData"));
 
         vm.stopPrank();
@@ -396,6 +419,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
+
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        registry.setOrderSigner(address(0));
 
         vm.stopPrank();
     }
@@ -580,6 +606,10 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.listToken(otherToken, activeConfig());
 
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setRequiredAppDataHash(keccak256("other app data"));
+
         assertEq(registry.maxPositions(), 10, "max positions mismatch");
         assertEq(registry.allTokens().length, 1, "token list length mismatch");
         assertEq(
@@ -600,6 +630,33 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.setMaxPositions(7);
         assertEq(registry.maxPositions(), 7, "max positions mismatch");
+    }
+
+    function testSetOrderSignerWorksWhilePaused() public {
+        vm.prank(guardian);
+        registry.pause();
+
+        address rotated = makeAddr("rotatedSigner");
+        vm.prank(admin);
+        registry.setOrderSigner(rotated);
+
+        assertEq(registry.orderSigner(), rotated, "order signer mismatch");
+    }
+
+    function testSetTokenStatusWorksWhilePaused() public {
+        listDefaultToken();
+
+        vm.prank(guardian);
+        registry.pause();
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
+
+        assertEq(
+            uint256(registry.tokenConfig(token).status),
+            uint256(IStockAccountRegistry.TokenStatus.Halted),
+            "status mismatch"
+        );
     }
 
     function testOnlyGuardianCanPause() public {
@@ -669,6 +726,7 @@ contract StockAccountRegistryUnitTest is Test {
         mock.setTwapWindow(600);
         mock.setMaxBackendSlippageBps(50);
         mock.setMaxWithdrawSlippageBps(75);
+        mock.setOrderSigner(orderSigner);
         mock.setRequiredAppDataHash(keccak256("mockAppData"));
         mock.setAerodromeRouter(router);
         mock.setPriceChecker(checker);
@@ -681,6 +739,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(mock.twapWindow(), 600, "twap window mismatch");
         assertEq(mock.maxBackendSlippageBps(), 50, "backend slippage mismatch");
         assertEq(mock.maxWithdrawSlippageBps(), 75, "withdraw slippage mismatch");
+        assertEq(mock.orderSigner(), orderSigner, "order signer mismatch");
         assertEq(mock.requiredAppDataHash(), keccak256("mockAppData"), "app data hash mismatch");
         assertEq(address(mock.aerodromeRouter()), address(router), "router mismatch");
         assertEq(address(mock.priceChecker()), address(checker), "price checker mismatch");

@@ -27,6 +27,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         uint16 maxWithdrawSlippageBps;
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
+        address orderSigner;
         ISlippagePriceChecker priceChecker;
         bytes32 requiredAppDataHash;
         uint32 twapWindow;
@@ -41,6 +42,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
+    address public override orderSigner;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
     bytes32 public override requiredAppDataHash;
@@ -58,6 +60,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
+    event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event RequiredAppDataHashUpdated(bytes32 indexed oldHash, bytes32 indexed newHash);
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
@@ -80,6 +83,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setTwapWindow(config.twapWindow);
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
+        _setOrderSigner(config.orderSigner);
         _setRequiredAppDataHash(config.requiredAppDataHash);
     }
 
@@ -147,6 +151,13 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMaxStrategyDeposit(newMaxDeposit);
     }
 
+    /// @notice Sets the key the backend signs orders with, invalidating any order signed by the old one
+    /// @dev Stays available while paused: rotating the key is a remediation lever
+    function setOrderSigner(address newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newSigner == orderSigner) revert AlreadySet();
+        _setOrderSigner(newSigner);
+    }
+
     /// @notice Sets the CowSwap app data hash that orders must carry
     function setRequiredAppDataHash(bytes32 newHash) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newHash == requiredAppDataHash) revert AlreadySet();
@@ -155,7 +166,9 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
     /// @notice Lists a new token as tradeable by stock accounts
     /// @param token The token to list
-    /// @param cfg The pricing source and venue recorded for the token
+    /// @param cfg The pricing source and venue recorded for the token. cfg.chainlinkFeed is advisory
+    ///        bookkeeping only. A Chainlink token is priced through the audited SlippagePriceChecker,
+    ///        whose feeds its own owner configures; this field is not read.
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
         if (cfg.status != TokenStatus.Active) revert MustListAsActive();
@@ -178,7 +191,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
     /// @param status The new status; the guardian may only tighten it
-    function setTokenStatus(address token, TokenStatus status) external whenNotPaused {
+    /// @dev Stays available while paused: halting a token is a remediation lever
+    function setTokenStatus(address token, TokenStatus status) external {
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian();
 
@@ -193,12 +207,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit TokenStatusUpdated(token, oldStatus, status);
     }
 
-    /// @notice Pauses the configuration surface in case of emergency
+    /// @notice Stops order validation and ordinary configuration changes in an emergency
+    /// @dev Rotating the order signer and tightening a token status stay available while paused,
+    ///      so that the guardian's pause does not lock out the remediation levers it exists to enable
     function pause() external onlyRole(GUARDIAN_ROLE) {
         _pause();
     }
 
-    /// @notice Unpauses the configuration surface after an emergency is resolved
+    /// @notice Resumes order validation and ordinary configuration changes after an emergency is resolved
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
     }
@@ -212,6 +228,11 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Returns every token that has ever been configured
     function allTokens() external view override returns (address[] memory) {
         return _tokens;
+    }
+
+    /// @notice Returns whether stock accounts are barred from validating orders
+    function paused() public view override(IStockAccountRegistry, Pausable) returns (bool) {
+        return super.paused();
     }
 
     function _setAerodromeRouter(ISwapRouter newRouter) internal {
@@ -300,6 +321,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         maxStrategyDeposit = newMaxDeposit;
 
         emit MaxStrategyDepositUpdated(oldValue, newMaxDeposit);
+    }
+
+    function _setOrderSigner(address newSigner) internal {
+        if (newSigner == address(0)) revert ZeroAddress();
+
+        address oldSigner = orderSigner;
+        orderSigner = newSigner;
+
+        emit OrderSignerUpdated(oldSigner, newSigner);
     }
 
     function _setRequiredAppDataHash(bytes32 newHash) internal {

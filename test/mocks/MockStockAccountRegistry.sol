@@ -16,9 +16,11 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
+    address public override orderSigner;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
     bytes32 public override requiredAppDataHash;
+    bool public override paused;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     mapping(address => bool) internal _listed;
@@ -56,6 +58,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
         maxWithdrawSlippageBps = value;
     }
 
+    function setOrderSigner(address value) external {
+        orderSigner = value;
+    }
+
     function setRequiredAppDataHash(bytes32 value) external {
         requiredAppDataHash = value;
     }
@@ -66,6 +72,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setPriceChecker(ISlippagePriceChecker value) external {
         priceChecker = value;
+    }
+
+    function setPaused(bool value) external {
+        paused = value;
     }
 
     /// @notice Stores a token configuration, appending the token to the list the first time it is set

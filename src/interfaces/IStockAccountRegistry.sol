@@ -21,8 +21,6 @@ interface IStockAccountRegistry {
         TokenStatus status;
         PriceSource source;
         address pool;
-        /// @dev Advisory bookkeeping only. A Chainlink token is priced through the audited
-        ///      SlippagePriceChecker, whose feeds its own owner configures; this field is not read.
         address chainlinkFeed;
     }
 
@@ -47,6 +45,8 @@ interface IStockAccountRegistry {
 
     function allTokens() external view returns (address[] memory);
 
+    function paused() external view returns (bool);
+
     function maxPositions() external view returns (uint8);
 
     function minTargetBps() external view returns (uint16);
@@ -62,6 +62,8 @@ interface IStockAccountRegistry {
     function maxBackendSlippageBps() external view returns (uint16);
 
     function maxWithdrawSlippageBps() external view returns (uint16);
+
+    function orderSigner() external view returns (address);
 
     function requiredAppDataHash() external view returns (bytes32);
 

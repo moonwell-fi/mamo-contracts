@@ -14,6 +14,7 @@ import {GPv2Order} from "@libraries/GPv2Order.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 /**
  * @title StockAccountStrategy
@@ -256,14 +257,17 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /**
-     * @notice Accepts a CoW order that keeps the account inside the basket ranges and prices it fairly
+     * @notice Accepts a CoW order the backend co-signed that keeps the account in range and prices it fairly
      * @param orderDigest The EIP-712 signing digest derived from the order
-     * @param encodedOrder The abi encoded GPv2Order.Data the digest was derived from
+     * @param encodedOrder The abi encoded GPv2Order.Data the digest was derived from, and the backend signature over it
      */
     function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
-        GPv2Order.Data memory order = abi.decode(encodedOrder, (GPv2Order.Data));
+        (GPv2Order.Data memory order, bytes memory backendSig) = abi.decode(encodedOrder, (GPv2Order.Data, bytes));
 
         if (order.hash(cowDomainSeparator) != orderDigest) revert OrderHashMismatch();
+        if (!SignatureChecker.isValidSignatureNow(stockRegistry.orderSigner(), orderDigest, backendSig)) {
+            revert InvalidBackendSignature();
+        }
         if (order.kind != GPv2Order.KIND_SELL) revert OrderMustBeSell();
         if (order.partiallyFillable) revert OrderMustBeFillOrKill();
         if (order.sellTokenBalance != GPv2Order.BALANCE_ERC20 || order.buyTokenBalance != GPv2Order.BALANCE_ERC20) {
@@ -278,6 +282,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         address sellToken = address(order.sellToken);
         address buyToken = address(order.buyToken);
         if (sellToken == buyToken) revert TokensMustDiffer();
+        if (order.sellAmount == 0) revert ZeroAmount();
+        if (order.buyAmount == 0) revert ZeroAmount();
+        if (stockRegistry.paused()) revert RegistryPaused();
 
         if (sellToken != address(asset)) {
             IStockAccountRegistry.TokenStatus status = stockRegistry.tokenConfig(sellToken).status;
@@ -293,27 +300,33 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             }
         }
 
-        _checkRange(
-            sellToken,
-            buyToken,
-            _referenceValue(sellToken, order.sellAmount),
-            _referenceValue(buyToken, order.buyAmount)
-        );
+        if (order.sellAmount > _available(sellToken)) revert SellExceedsBalance();
 
-        ISlippagePriceChecker checker = stockRegistry.priceChecker();
+        uint256 expectedOut = stockRegistry.priceChecker().getExpectedOut(order.sellAmount, sellToken, buyToken);
+        if (expectedOut == 0) revert PriceCheckFailed();
 
-        if (!checker.checkPrice(order.sellAmount, sellToken, buyToken, order.buyAmount, getAccountSlippage())) {
-            revert PriceCheckFailed();
-        }
+        uint256 slip = getAccountSlippage();
+        if (slip > TOTAL_BPS) revert SlippageExceedsMaximum();
+        if (order.buyAmount < (expectedOut * (TOTAL_BPS - slip)) / TOTAL_BPS) revert PriceCheckFailed();
+
+        _checkRange(sellToken, buyToken, order.sellAmount, order.buyAmount, expectedOut);
 
         return MAGIC_VALUE;
     }
 
-    function _checkRange(address sellToken, address buyToken, uint256 sellValue, uint256 buyValue) internal view {
+    function _checkRange(
+        address sellToken,
+        address buyToken,
+        uint256 sellAmount,
+        uint256 buyAmount,
+        uint256 expectedOut
+    ) internal view {
         (address[] memory tokens, uint256[] memory values, uint256 nav) = _valuation();
 
         uint256 sellHeld = _heldValue(tokens, values, sellToken);
-        if (sellValue > sellHeld) revert SellExceedsBalance();
+        uint256 available = _available(sellToken);
+        uint256 sellValue = sellToken == address(asset) ? sellAmount : (sellHeld * sellAmount) / available;
+        uint256 buyValue = (sellValue * buyAmount) / expectedOut;
 
         uint256 navAfter = nav - sellValue + buyValue;
         uint256 dev = stockRegistry.maxDeviationBps();
@@ -364,14 +377,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
 
         return 0;
-    }
-
-    function _referenceValue(address token, uint256 amount) internal view returns (uint256) {
-        if (token == address(asset) || amount == 0) {
-            return amount;
-        }
-
-        return stockRegistry.priceChecker().getExpectedOut(amount, token, address(asset));
     }
 
     function _targetOf(address token) internal view returns (uint16) {

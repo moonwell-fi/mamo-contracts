@@ -37,6 +37,7 @@ interface IStockAccountStrategy {
     error InsufficientProceeds();
     error EmptyBalance();
     error OrderHashMismatch();
+    error InvalidBackendSignature();
     error OrderMustBeSell();
     error OrderMustBeFillOrKill();
     error OrderBalancesMustBeErc20();
@@ -52,6 +53,7 @@ interface IStockAccountStrategy {
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);
     error PriceCheckFailed();
+    error RegistryPaused();
 
     function deposit(uint256 amount) external;
 

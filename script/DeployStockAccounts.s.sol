@@ -101,6 +101,7 @@ contract DeployStockAccounts is Script {
             maxWithdrawSlippageBps: config.maxWithdrawSlippageBps,
             minStrategyDeposit: config.minStrategyDeposit,
             minTargetBps: config.minTargetBps,
+            orderSigner: addresses.getAddress(config.orderSigner),
             priceChecker: ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker)),
             requiredAppDataHash: config.requiredAppDataHash,
             twapWindow: config.twapWindow
