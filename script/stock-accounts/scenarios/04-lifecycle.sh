@@ -49,7 +49,8 @@ assert_eq "buy-in settled into the account" \
   "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") + $(fees_paid "$RECEIPT" "$ACCT" "$NVDA")")" "$BUY_AMT"
 
 send "$USER_C" "$ACCT" 'setBasket((address,uint16)[],uint16)' "[($NVDA,7000)]" 3000 >/dev/null
-assert_eq "new NVDAc target read back" "$(list_at "$(callline 3 "$ACCT" 'getWeights()(address[],uint256[],uint256[])')" 0)" 7000
+assert_eq "new NVDAc target read back" \
+  "$(list_at "$(callline 3 "$ACCT" 'getWeights()(address[],uint256[],uint256[])')" "$(weights_index "$ACCT" "$NVDA")")" 7000
 assert_eq "new cash target read back" "$(call "$ACCT" 'cashTargetBps()(uint16)')" 3000
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")

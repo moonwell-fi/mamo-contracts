@@ -41,7 +41,8 @@ RELAYER=$(book COWSWAP_VAULT_RELAYER)
 COW_AUTHENTICATOR=0x2c4c28DDBdAc9C5E7055b4C863b72eA0149D8aFE
 COW_AUTH_MANAGER=0xA03be496e67Ec29bC62F01a428683D7F9c204930
 
-# The one token the deploy config lists; its 0.05% Slipstream pool against USDC, tick spacing 10.
+# The stock token the scenarios trade, one of the four the deploy lists; its Slipstream pool against
+# USDC, tick spacing 10.
 NVDA=0xb20000000000000000000078ee7ce2fE4908108C
 NVDA_POOL=0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9
 
@@ -321,6 +322,14 @@ fees_paid_elapsed() { # fees_paid_elapsed <receipt-json> <account>
 quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
   call "$QUOTER" 'quoteExactInputSingle((address,address,uint256,int24,uint160))(uint256,uint160,uint32,uint256)' \
     "($1,$2,$4,$3,0)"
+}
+
+# getWeights covers every registry-listed token, in registry order, so a token's own row has to be
+# looked up by address rather than assumed to be the first one.
+weights_index() { # weights_index <account> <token>
+  callline 1 "$1" 'getWeights()(address[],uint256[],uint256[])' |
+    tr -d '[]' | tr ',' '\n' | awk '{print tolower($1)}' |
+    grep -n -x "$(lc "$2")" | cut -d: -f1 | awk '{print $1 - 1}'
 }
 
 expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint256)' "$1" "$2" "$3"; }

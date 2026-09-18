@@ -12,6 +12,19 @@ import {stdJson} from "@forge-std/StdJson.sol";
 contract StockAccountsConfig is Script {
     using stdJson for string;
 
+    /// @notice A token to list on the stock registry, fields alphabetized to match the JSON
+    /// @dev Every entry carries every key: vm.parseJson types a JSON value by its shape, so an entry
+    ///      missing one, or writing a feed as "" rather than the zero address, breaks the array decode.
+    ///      A PoolTwap entry uses the zero feed and a zero heartbeat
+    struct TokenListEntry {
+        address chainlinkFeed;
+        uint256 heartbeat;
+        address pool;
+        string source;
+        string symbol;
+        address token;
+    }
+
     /// @notice Deployment configuration, fields alphabetized to match the JSON
     struct DeploymentConfig {
         string admin;
@@ -70,5 +83,15 @@ contract StockAccountsConfig is Script {
     /// @notice The full deployment configuration
     function getConfig() public view returns (DeploymentConfig memory) {
         return config;
+    }
+
+    /// @notice The tokens to list on the stock registry, from config/stock-accounts/<chainId>.json
+    /// @dev Returns an empty array when the file is missing or its `.tokens` array is empty
+    function loadTokenList() public view returns (TokenListEntry[] memory) {
+        string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
+        if (!vm.isFile(path)) return new TokenListEntry[](0);
+
+        bytes memory raw = vm.parseJson(vm.readFile(path), ".tokens");
+        return raw.length == 0 ? new TokenListEntry[](0) : abi.decode(raw, (TokenListEntry[]));
     }
 }

@@ -21,4 +21,5 @@ interface ICLPool {
     function token1() external view returns (address);
     function tickSpacing() external view returns (int24);
     function liquidity() external view returns (uint128);
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }

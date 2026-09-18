@@ -16,6 +16,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {IERC5313} from "@openzeppelin/contracts/interfaces/IERC5313.sol";
 
 /**
  * @title DeployStockAccounts
@@ -32,16 +33,8 @@ contract DeployStockAccounts is Script {
     string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
     string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
-    /// @notice A token to list on the stock registry, as read from config/stock-accounts/<chainId>.json
-    struct TokenListEntry {
-        string chainlinkFeed;
-        string pool;
-        string source;
-        string symbol;
-        address token;
-    }
-
     Addresses internal addresses;
+    StockAccountsConfig internal configLoader;
     StockAccountsConfig.DeploymentConfig internal config;
     bool internal calldataMode;
 
@@ -56,7 +49,8 @@ contract DeployStockAccounts is Script {
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses(addressesPath, chainIds);
-        config = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json")).getConfig();
+        configLoader = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json"));
+        config = configLoader.getConfig();
 
         console.log("environment: %s", environment);
         console.log("admin mode: %s", adminMode);
@@ -241,17 +235,10 @@ contract DeployStockAccounts is Script {
     }
 
     /// @notice Lists every token of config/stock-accounts/<chainId>.json that the stock registry does not hold yet
+    /// @dev A Chainlink entry is configured on the existing price checker first: the listing is probed
+    ///      through it, so an unconfigured pair would be refused with TokenNotPriceable
     function _listTokens(address stockRegistry) internal {
-        string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
-
-        if (!vm.isFile(path)) {
-            console.log("step 8: no token config at %s, nothing to list", path);
-            return;
-        }
-
-        bytes memory raw = vm.parseJson(vm.readFile(path), ".tokens");
-        TokenListEntry[] memory entries =
-            raw.length == 0 ? new TokenListEntry[](0) : abi.decode(raw, (TokenListEntry[]));
+        StockAccountsConfig.TokenListEntry[] memory entries = configLoader.loadTokenList();
 
         if (entries.length == 0) {
             console.log("step 8: no tokens to list");
@@ -259,6 +246,8 @@ contract DeployStockAccounts is Script {
         }
 
         for (uint256 i = 0; i < entries.length; i++) {
+            bool isChainlink = keccak256(bytes(entries[i].source)) == keccak256(bytes("Chainlink"));
+
             IStockAccountRegistry.TokenStatus status =
                 IStockAccountRegistry(stockRegistry).tokenConfig(entries[i].token).status;
 
@@ -267,17 +256,73 @@ contract DeployStockAccounts is Script {
                 continue;
             }
 
+            if (isChainlink) _configureExistingChecker(entries[i]);
+
             IStockAccountRegistry.TokenConfig memory cfg = IStockAccountRegistry.TokenConfig({
                 status: IStockAccountRegistry.TokenStatus.Active,
-                source: keccak256(bytes(entries[i].source)) == keccak256(bytes("Chainlink"))
+                source: isChainlink
                     ? IStockAccountRegistry.PriceSource.Chainlink
                     : IStockAccountRegistry.PriceSource.PoolTwap,
-                pool: _parseOptionalAddress(entries[i].pool),
-                chainlinkFeed: _parseOptionalAddress(entries[i].chainlinkFeed)
+                pool: entries[i].pool,
+                chainlinkFeed: entries[i].chainlinkFeed
             });
 
             bytes memory data = abi.encodeCall(StockAccountRegistry.listToken, (entries[i].token, cfg));
-            _adminCall(stockRegistry, data, string.concat("listToken(", entries[i].symbol, ")"));
+            string memory label = string.concat("listToken(", entries[i].symbol, ")");
+
+            if (!calldataMode && _isNodePrecompile(entries[i].token)) {
+                console.log("step 8: %s is a node precompile, send this listing with cast", entries[i].symbol);
+                _printCall(stockRegistry, addresses.getAddress(config.admin), data, label);
+                continue;
+            }
+
+            _adminCall(stockRegistry, data, label);
+        }
+    }
+
+    /// @notice Configures a Chainlink entry's token -> asset pair on the existing price checker
+    /// @dev Two hops, feed -> USD -> asset, the shape every other Mamo config uses; the calls go to the
+    ///      checker's own owner, which is not the stock registry admin
+    function _configureExistingChecker(StockAccountsConfig.TokenListEntry memory entry) internal {
+        require(entry.heartbeat > 0, string.concat("Chainlink entry needs a heartbeat: ", entry.symbol));
+
+        ISlippagePriceChecker existing = ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker));
+        address owner = IERC5313(address(existing)).owner();
+        address asset = addresses.getAddress(config.asset);
+
+        if (existing.tokenPairOracleInformation(entry.token, asset).length == 0) {
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
+                new ISlippagePriceChecker.TokenFeedConfiguration[](2);
+            cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+                chainlinkFeed: entry.chainlinkFeed,
+                reverse: false,
+                heartbeat: entry.heartbeat
+            });
+            cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
+                chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"),
+                reverse: true,
+                heartbeat: 86_400
+            });
+
+            _adminCall(
+                address(existing),
+                owner,
+                abi.encodeCall(ISlippagePriceChecker.addTokenConfiguration, (entry.token, asset, cfgs)),
+                string.concat("addTokenConfiguration(", entry.symbol, ")")
+            );
+        } else {
+            console.log("step 8: %s already configured on the existing price checker", entry.symbol);
+        }
+
+        if (existing.maxTimePriceValid(entry.token) == 0) {
+            _adminCall(
+                address(existing),
+                owner,
+                abi.encodeCall(ISlippagePriceChecker.setMaxTimePriceValid, (entry.token, entry.heartbeat)),
+                string.concat("setMaxTimePriceValid(", entry.symbol, ")")
+            );
+        } else {
+            console.log("step 8: %s already has a max time price valid", entry.symbol);
         }
     }
 
@@ -293,11 +338,23 @@ contract DeployStockAccounts is Script {
             ? addresses.getAddress("MAMO_MULTISIG")
             : addresses.getAddress(config.admin);
 
+        return _adminCall(target, admin, data, label);
+    }
+
+    /**
+     * @notice Executes an admin call as a named holder, or prints it for the Safe
+     * @param target The contract the admin call is made on
+     * @param admin The account holding the rights the call needs
+     * @param data The calldata of the admin call
+     * @param label A short name of the call, used in the logs
+     * @return executed True when the call was executed, false when only its calldata was printed
+     */
+    function _adminCall(address target, address admin, bytes memory data, string memory label)
+        internal
+        returns (bool executed)
+    {
         if (calldataMode) {
-            console.log("admin call %s", label);
-            console.log("  from: %s", admin);
-            console.log("  to: %s", target);
-            console.log("  data: %s", vm.toString(data));
+            _printCall(target, admin, data, label);
             return false;
         }
 
@@ -310,8 +367,22 @@ contract DeployStockAccounts is Script {
         return true;
     }
 
-    /// @notice Parses an address written as a hex string, treating an empty string as the zero address
-    function _parseOptionalAddress(string memory value) internal pure returns (address) {
-        return bytes(value).length == 0 ? address(0) : vm.parseAddress(value);
+    /// @notice Prints an admin call for whoever executes it out of band
+    function _printCall(address target, address admin, bytes memory data, string memory label) internal pure {
+        console.log("admin call %s", label);
+        console.log("  from: %s", admin);
+        console.log("  to: %s", target);
+        console.log("  data: %s", vm.toString(data));
+    }
+
+    /**
+     * @notice Whether a token is a node-native precompile, whose code is the single reserved byte 0xEF
+     * @dev revm refuses to execute that byte, so any call into such a token reverts in a forge
+     *      simulation even when the script is broadcasting to a node that serves it. The listing probe
+     *      reads decimals(), so those listings have to be sent straight to the node with cast
+     */
+    function _isNodePrecompile(address token) internal view returns (bool) {
+        bytes memory code = token.code;
+        return code.length == 1 && code[0] == 0xEF;
     }
 }

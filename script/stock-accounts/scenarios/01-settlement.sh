@@ -79,8 +79,9 @@ assert_approx "NAV preserved by the settlement" "$(nav "$ACCT_A")" "$DEPOSIT" 10
 
 WEIGHTS=$(callline 2 "$ACCT_A" 'getWeights()(address[],uint256[],uint256[])')
 TARGETS=$(callline 3 "$ACCT_A" 'getWeights()(address[],uint256[],uint256[])')
-NVDA_W=$(list_at "$WEIGHTS" 0)
-NVDA_T=$(list_at "$TARGETS" 0)
+NVDA_I=$(weights_index "$ACCT_A" "$NVDA")
+NVDA_W=$(list_at "$WEIGHTS" "$NVDA_I")
+NVDA_T=$(list_at "$TARGETS" "$NVDA_I")
 assert_gte "NVDAc weight within maxDeviationBps of target" \
   "$(bn "$MAX_DEVIATION - abs($NVDA_W - $NVDA_T)")" 0
 
