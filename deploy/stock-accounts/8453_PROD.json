@@ -5,6 +5,7 @@
   "backend": "STRATEGY_MULTICALL",
   "chainId": 8453,
   "cowSettlement": "COWSWAP_SETTLEMENT",
+  "existingPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
   "feeRecipient": "MAMO_FEE_COLLECTOR",
   "guardian": "MAMO_MULTISIG",
   "managementFeeBps": 100,

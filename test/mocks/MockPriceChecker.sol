@@ -6,6 +6,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 /// @notice Price checker with freely settable fixed rates, for use in tests
 contract MockPriceChecker is ISlippagePriceChecker {
     mapping(address => mapping(address => uint256)) public rate;
+    mapping(address => uint256) internal _maxTimePriceValid;
 
     function setRate(address fromToken, address toToken, uint256 rate1e18) external {
         rate[fromToken][toToken] = rate1e18;
@@ -45,15 +46,17 @@ contract MockPriceChecker is ISlippagePriceChecker {
         return false;
     }
 
-    function maxTimePriceValid(address) external pure override returns (uint256) {
-        return 0;
+    function maxTimePriceValid(address token) external view override returns (uint256) {
+        return _maxTimePriceValid[token];
     }
 
     function addTokenConfiguration(address, address, TokenFeedConfiguration[] calldata) external override {}
 
     function removeTokenConfiguration(address, address) external override {}
 
-    function setMaxTimePriceValid(address, uint256) external override {}
+    function setMaxTimePriceValid(address token, uint256 value) external override {
+        _maxTimePriceValid[token] = value;
+    }
 
     function isTokenPairConfigured(address fromToken, address toToken) external view override returns (bool) {
         return rate[fromToken][toToken] != 0;
