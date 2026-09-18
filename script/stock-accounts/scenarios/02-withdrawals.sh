@@ -21,11 +21,11 @@ ACCT=$(create_account "$USER_D" "[($NVDA,5000)]" 5000)
 buy_and_deposit "$USER_D" "$ACCT" "$NVDA" 10 "$STOCK_LEG" >/dev/null
 deposit_usdc "$USER_D" "$ACCT" "$IDLE"
 
-# Idle cash covers it, so no position is touched.
+# Idle cash covers it, and `withdraw` pays its fee in USDC, so the position is not touched at all.
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 RECEIPT=$(send "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' "$SMALL_WITHDRAW" "$SLIPPAGE")
 
-assert_eq "cash-only withdrawal sells nothing" \
+assert_eq "cash-only withdrawal sells no NVDAc" \
   "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
 assert_eq "Withdraw event reports the cash paid" "$(event_word "$RECEIPT" 'Withdraw(uint256,uint256)' 0)" "$SMALL_WITHDRAW"
 assert_eq "Withdraw event reports zero sold" "$(event_word "$RECEIPT" 'Withdraw(uint256,uint256)' 1)" 0

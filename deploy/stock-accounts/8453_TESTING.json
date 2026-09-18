@@ -18,6 +18,5 @@
   "minTargetBps": 500,
   "orderSigner": "DEPLOYER_EOA",
   "placeholderPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
-  "requiredAppDataHash": "0x7cbb2322cf53b3a2b45d36850ed9678dd2ad87737e996de24646edbbed599382",
   "twapWindow": 180
 }

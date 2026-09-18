@@ -15,15 +15,11 @@ import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase
 contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     using GPv2Order for GPv2Order.Data;
 
-    bytes32 public constant APP_DATA = keccak256("appData");
     bytes4 public constant MAGIC_VALUE = 0x1626ba7e;
 
     function setUp() public override {
         super.setUp();
 
-        stockRegistry.setRequiredAppDataHash(APP_DATA);
-        priceChecker.setRate(address(usdc), address(nvda), 0.005e18);
-        priceChecker.setRate(address(usdc), address(aapl), 0.01e18);
         priceChecker.setRate(address(nvda), address(aapl), 2e18);
 
         nvda.mint(address(strategy), 10e18);
@@ -128,9 +124,42 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(order);
     }
 
+    function testAppDataDocumentCarriesTheHookThatPaysInTheFeeToken() public {
+        string memory document = strategy.appDataDocument(address(nvda));
+
+        assertEq(keccak256(bytes(document)), strategy.appDataHash(address(nvda)), "document hash");
+        assertTrue(
+            vm.contains(document, vm.toLowercase(vm.toString(address(strategy)))), "document carries the account"
+        );
+        assertTrue(
+            vm.contains(
+                document, vm.toString(abi.encodeWithSelector(IStockAccountStrategy.payFees.selector, address(nvda)))
+            ),
+            "document carries the payFees call for the fee token"
+        );
+        assertTrue(
+            vm.contains(document, string.concat('"gasLimit":"', vm.toString(strategy.HOOK_GAS_LIMIT()), '"')),
+            "document carries the hook gas limit"
+        );
+    }
+
+    function testAppDataDocumentDiffersPerFeeToken() public view {
+        assertTrue(
+            strategy.appDataHash(address(nvda)) != strategy.appDataHash(address(usdc)), "hashes differ per fee token"
+        );
+    }
+
     function testRevertsOnWrongAppData() public {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.appData = keccak256("other app data");
+
+        vm.expectRevert(IStockAccountStrategy.InvalidAppData.selector);
+        _check(order);
+    }
+
+    function testRevertsWhenAppDataPaysTheFeeInTheSellToken() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+        order.appData = strategy.appDataHash(address(nvda));
 
         vm.expectRevert(IStockAccountStrategy.InvalidAppData.selector);
         _check(order);
@@ -153,15 +182,19 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     }
 
     function testRevertsWhenTokensAreTheSame() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(nvda), 1e18, 1e18);
+
         vm.expectRevert(IStockAccountStrategy.TokensMustDiffer.selector);
-        _check(_order(address(nvda), address(nvda), 1e18, 1e18));
+        _check(order);
     }
 
     function testRevertsWhenSellTokenIsHalted() public {
         _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.Halted);
 
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellTokenNotSellable.selector, address(nvda)));
-        _check(_order(address(nvda), address(usdc), 1e18, 199e18));
+        _check(order);
     }
 
     function testSellOnlyTokenCanBeSold() public {
@@ -173,36 +206,46 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     function testRevertsWhenBuyTokenIsSellOnly() public {
         _setStatus(address(aapl), IStockAccountRegistry.TokenStatus.SellOnly);
 
+        GPv2Order.Data memory order = _order(address(nvda), address(aapl), 1e18, 2e18);
+
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyTokenNotActive.selector, address(aapl)));
-        _check(_order(address(nvda), address(aapl), 1e18, 2e18));
+        _check(order);
     }
 
     function testRevertsWhenBuyTokenIsNotListed() public {
         MockERC20 other = new MockERC20("Other Coin", "OTHERc");
 
+        GPv2Order.Data memory order = _order(address(nvda), address(other), 1e18, 2e18);
+
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyTokenNotActive.selector, address(other)));
-        _check(_order(address(nvda), address(other), 1e18, 2e18));
+        _check(order);
     }
 
     function testRevertsWhenSellAmountExceedsBalance() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 11e18, 2189e18);
+
         vm.expectRevert(IStockAccountStrategy.SellExceedsBalance.selector);
-        _check(_order(address(nvda), address(usdc), 11e18, 2189e18));
+        _check(order);
     }
 
     function testRevertsWhenSellLeavesTokenBelowRange() public {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 1000), 5000);
 
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 6e18, 1194e18);
+
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellLeavesTokenBelowRange.selector, address(nvda)));
-        _check(_order(address(nvda), address(usdc), 6e18, 1194e18));
+        _check(order);
     }
 
     function testRevertsWhenBuyLeavesTokenAboveRange() public {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 1000, address(aapl), 9000), 0);
 
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 3e18, 597e18);
+
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(usdc)));
-        _check(_order(address(nvda), address(usdc), 3e18, 597e18));
+        _check(order);
     }
 
     function testTokenWithZeroTargetCanBeSoldDown() public {
@@ -213,8 +256,10 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     }
 
     function testRevertsWhenPriceCheckFails() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 197e18);
+
         vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
-        _check(_order(address(nvda), address(usdc), 1e18, 197e18));
+        _check(order);
     }
 
     function testHaltedHoldingIsNotPricedByOrderCheck() public {
@@ -223,8 +268,10 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
 
         assertTrue(_check(_order(address(nvda), address(usdc), 1e18, 199e18)) == MAGIC_VALUE, "magic value");
 
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 2e18, 398e18);
+
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(usdc)));
-        _check(_order(address(nvda), address(usdc), 2e18, 398e18));
+        _check(order);
     }
 
     function testValidOrderQuotesEveryHoldingPlusTheOrderOnce() public {
@@ -240,20 +287,26 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
 
         assertTrue(_check(_order(address(nvda), address(usdc), 1e18, floor)) == MAGIC_VALUE, "magic value");
 
+        GPv2Order.Data memory under = _order(address(nvda), address(usdc), 1e18, floor - 1);
+
         vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
-        _check(_order(address(nvda), address(usdc), 1e18, floor - 1));
+        _check(under);
     }
 
     function testRevertsWhenTheQuoteRoundsToZero() public {
         usdc.mint(address(strategy), 1_000e18);
 
+        GPv2Order.Data memory order = _order(address(usdc), address(nvda), 1, 1);
+
         vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
-        _check(_order(address(usdc), address(nvda), 1, 1));
+        _check(order);
     }
 
     function testRevertsOnZeroSellAmount() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 0, 0);
+
         vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
-        _check(_order(address(nvda), address(usdc), 0, 0));
+        _check(order);
     }
 
     function _check(GPv2Order.Data memory order) internal view returns (bytes4) {
@@ -273,7 +326,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
             sellAmount: sellAmount,
             buyAmount: buyAmount,
             validTo: uint32(block.timestamp + 10 minutes),
-            appData: APP_DATA,
+            appData: strategy.appDataHash(buyToken),
             feeAmount: 0,
             kind: GPv2Order.KIND_SELL,
             partiallyFillable: false,

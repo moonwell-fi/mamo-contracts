@@ -16,10 +16,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Guardian role for emergency pause and for tightening token status
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
+    /// @notice Highest annual management fee the admin may set, in basis points
+    uint16 public constant override maxManagementFeeBps = 200;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
         address guardian;
+        uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
         uint16 maxDeviationBps;
         uint8 maxPositions;
@@ -29,7 +33,6 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         uint16 minTargetBps;
         address orderSigner;
         ISlippagePriceChecker priceChecker;
-        bytes32 requiredAppDataHash;
         uint32 twapWindow;
     }
 
@@ -41,11 +44,11 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public override maxDeviationBps;
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
+    uint16 public override managementFeeBps;
     uint32 public override twapWindow;
     address public override orderSigner;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
-    bytes32 public override requiredAppDataHash;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     address[] internal _tokens;
@@ -60,8 +63,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
+    event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
     event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
-    event RequiredAppDataHashUpdated(bytes32 indexed oldHash, bytes32 indexed newHash);
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
 
@@ -84,7 +87,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
         _setOrderSigner(config.orderSigner);
-        _setRequiredAppDataHash(config.requiredAppDataHash);
+        _setManagementFeeBps(config.managementFeeBps);
     }
 
     /// @notice Sets the Aerodrome router used by stock accounts
@@ -157,10 +160,10 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setOrderSigner(newSigner);
     }
 
-    /// @notice Sets the CowSwap app data hash that orders must carry
-    function setRequiredAppDataHash(bytes32 newHash) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        if (newHash == requiredAppDataHash) revert AlreadySet();
-        _setRequiredAppDataHash(newHash);
+    /// @notice Sets the annual management fee every stock account charges, in basis points
+    function setManagementFeeBps(uint16 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newFeeBps == managementFeeBps) revert AlreadySet();
+        _setManagementFeeBps(newFeeBps);
     }
 
     /// @notice Lists a new token as tradeable by stock accounts
@@ -323,10 +326,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit OrderSignerUpdated(oldSigner, newSigner);
     }
 
-    function _setRequiredAppDataHash(bytes32 newHash) internal {
-        bytes32 oldHash = requiredAppDataHash;
-        requiredAppDataHash = newHash;
+    function _setManagementFeeBps(uint16 newFeeBps) internal {
+        if (newFeeBps > maxManagementFeeBps) revert InvalidManagementFee();
 
-        emit RequiredAppDataHashUpdated(oldHash, newHash);
+        uint16 oldValue = managementFeeBps;
+        managementFeeBps = newFeeBps;
+
+        emit ManagementFeeBpsUpdated(oldValue, newFeeBps);
     }
 }

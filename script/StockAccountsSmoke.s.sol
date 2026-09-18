@@ -94,7 +94,14 @@ contract StockAccountsSmoke is Script {
         );
         vm.serializeUint(json, "strategyTypeId", factory.strategyTypeId());
         vm.serializeAddress(json, "testUser", user);
-        string memory out = vm.serializeAddress(json, "testUserAccount", account);
+        vm.serializeAddress(json, "testUserAccount", account);
+
+        // One document per (account, buy token); this is the cash leg, the one a first sell order needs
+        address asset = factory.asset();
+        vm.serializeBytes32(json, "appDataHashUsdc", StockAccountStrategy(payable(account)).appDataHash(asset));
+        string memory out = vm.serializeString(
+            json, "appDataDocumentUsdc", StockAccountStrategy(payable(account)).appDataDocument(asset)
+        );
 
         vm.writeJson(out, MANIFEST_PATH);
         console.log("manifest written to %s", MANIFEST_PATH);

@@ -67,6 +67,7 @@ SCEN=${SCEN:-lib}
 # Big integers past 2^63 (sqrt prices, wei) are beyond bash arithmetic.
 bn() { python3 -c "print(int($1))"; }
 bb() { python3 -c "print(1 if ($1) else 0)"; }
+lc() { printf '%s\n' "$1" | tr 'A-Z' 'a-z'; }
 
 # ---------------------------------------------------------------- rpc
 
@@ -130,6 +131,7 @@ estimate_gas() { # estimate_gas <from> <to> <sig> [args...]
 
 set_eth() { rpc tenderly_setBalance "[[\"$1\"],\"0x56BC75E2D63100000\"]" >/dev/null; }
 set_usdc() { rpc tenderly_setErc20Balance "[\"$USDC\",\"$1\",\"$(cast to-hex "$2")\"]" >/dev/null; }
+# Tenderly mines a block on evm_increaseTime, so reads and order deadlines see the new time at once.
 increase_time() { rpc evm_increaseTime "[\"$(cast to-hex "$1")\"]" >/dev/null; }
 now_ts() { cast block latest --field timestamp --rpc-url "$VNET" 2>>"$LOG"; }
 
@@ -276,12 +278,44 @@ swap() { # swap <from> <tokenIn> <tokenOut> <tick-spacing> <amount-in> <sqrt-lim
     "($2,$3,$4,$1,$(bn "$(now_ts) + 3600"),$5,0,$6)" >/dev/null
 }
 
+# Non-indexed data of the first matching log, narrowed to one emitter when given.
+event_data() { # event_data <receipt-json> <event-signature> [emitter]
+  printf '%s' "$1" | jq -r --arg t "$(cast keccak "$2")" --arg a "$(echo "${3-}" | tr 'A-Z' 'a-z')" \
+    '[.logs[] | select(.topics[0] == $t) | select($a == "" or (.address | ascii_downcase) == $a) | .data] | first // empty'
+}
+
 event_word() { # event_word <receipt-json> <event-signature> <word-index>
-  local topic data
-  topic=$(cast keccak "$2")
-  data=$(printf '%s' "$1" | jq -r --arg t "$topic" '[.logs[] | select(.topics[0] == $t) | .data] | first // empty')
+  local data
+  data=$(event_data "$1" "$2")
   [ -n "$data" ] || { echo "event $2 not in receipt" >&2; return 1; }
   bn "0x${data:$((2 + $3 * 64)):64}"
+}
+
+# FeesPaid(elapsed, token, amount): one token per payment, so the event is three flat words.
+FEES_PAID_SIG='FeesPaid(uint256,address,uint256)'
+
+# The token an account's fee payment was taken in, empty when it paid nothing in this transaction.
+fees_paid_token() { # fees_paid_token <receipt-json> <account>
+  local data
+  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
+  [ -n "$data" ] || return 0
+  printf '0x%s\n' "${data:90:40}"
+}
+
+# What an account's fee payment moved in one token; zero when it paid in another token or not at all.
+fees_paid() { # fees_paid <receipt-json> <account> <token>
+  local data
+  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
+  [ -n "$data" ] || { echo 0; return 0; }
+  [ "$(lc "0x${data:90:40}")" = "$(lc "$3")" ] || { echo 0; return 0; }
+  bn "0x${data:130:64}"
+}
+
+fees_paid_elapsed() { # fees_paid_elapsed <receipt-json> <account>
+  local data
+  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
+  [ -n "$data" ] || { echo 0; return 0; }
+  bn "0x${data:2:64}"
 }
 
 quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
@@ -290,14 +324,22 @@ quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
 }
 
 expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint256)' "$1" "$2" "$3"; }
+# The fee is valued on the whole account in USDC, then converted to whichever token settles it.
+fee_due() { call "$1" 'feeDue()(uint256)'; }
+fee_due_in() { call "$1" 'feeDueIn(address)(uint256)' "$2"; }
+fee_collector() { call "$1" 'feeRecipient()(address)'; }
+# One document, and one hash, per (account, fee token); the fee token is the token an order buys.
+app_data_hash() { call "$1" 'appDataHash(address)(bytes32)' "$2"; }
 nav() { call "$1" 'getNAV()(uint256)'; }
 sqrt_price() { calln 1 "$1" 'slot0()(uint160,int24,uint16,uint16,uint16,bool)'; }
 
 # ---------------------------------------------------------------- cow orders
 
-mk_order() { # mk_order <sellToken> <buyToken> <account> <sellAmount> <buyAmount> <validTo>
+# The appData an order must carry is the account's document for the token it buys, since that is the
+# token the post-hook takes the fee in.
+mk_order() { # mk_order <sellToken> <buyToken> <account> <sellAmount> <buyAmount> <validTo> [appData]
   printf '(%s,%s,%s,%s,%s,%s,%s,0,%s,false,%s,%s)' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$APP_DATA" "$KIND_SELL" "$BALANCE_ERC20" "$BALANCE_ERC20"
+    "$1" "$2" "$3" "$4" "$5" "$6" "${7:-$(app_data_hash "$3" "$2")}" "$KIND_SELL" "$BALANCE_ERC20" "$BALANCE_ERC20"
 }
 
 order_digest() { call "$HELPER" "digest($ORDER_T,bytes32)(bytes32)" "$1" "$DOMAIN_SEPARATOR"; }
@@ -317,7 +359,7 @@ check_signature() { # check_signature <account> <order>
 
 settle_sell() { # settle_sell <account> <order> <sellAmount> <buyAmount>
   send "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
-    "$1" "$2" "$(sign_digest "$(order_digest "$2")")" "$4" "$3" >/dev/null
+    "$1" "$2" "$(sign_digest "$(order_digest "$2")")" "$4" "$3"
 }
 
 # ---------------------------------------------------------------- scenario frame
@@ -336,6 +378,5 @@ load_helper() {
     exit 1
   fi
   DOMAIN_SEPARATOR=$(call "$SETTLEMENT" 'domainSeparator()(bytes32)')
-  APP_DATA=$(call "$STOCK_REGISTRY" 'requiredAppDataHash()(bytes32)')
   MAX_DEVIATION=$(call "$STOCK_REGISTRY" 'maxDeviationBps()(uint16)')
 }

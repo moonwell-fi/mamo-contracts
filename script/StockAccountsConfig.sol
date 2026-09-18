@@ -35,7 +35,6 @@ contract StockAccountsConfig is Script {
         string orderSigner;
         /// @dev Bootstrap only: satisfies the registry constructor, then setPriceChecker replaces it
         string placeholderPriceChecker;
-        bytes32 requiredAppDataHash;
         uint32 twapWindow;
     }
 
@@ -63,7 +62,6 @@ contract StockAccountsConfig is Script {
         config.minTargetBps = uint16(json.readUint(".minTargetBps"));
         config.orderSigner = json.readString(".orderSigner");
         config.placeholderPriceChecker = json.readString(".placeholderPriceChecker");
-        config.requiredAppDataHash = json.readBytes32(".requiredAppDataHash");
         config.twapWindow = uint32(json.readUint(".twapWindow"));
 
         require(config.chainId == block.chainid, "Config chain id does not match the current chain");

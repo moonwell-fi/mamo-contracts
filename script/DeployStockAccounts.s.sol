@@ -94,6 +94,7 @@ contract DeployStockAccounts is Script {
             admin: addresses.getAddress(config.admin),
             aerodromeRouter: ISwapRouter(addresses.getAddress(config.aerodromeRouter)),
             guardian: addresses.getAddress(config.guardian),
+            managementFeeBps: config.managementFeeBps,
             maxBackendSlippageBps: config.maxBackendSlippageBps,
             maxDeviationBps: config.maxDeviationBps,
             maxPositions: config.maxPositions,
@@ -103,7 +104,6 @@ contract DeployStockAccounts is Script {
             minTargetBps: config.minTargetBps,
             orderSigner: addresses.getAddress(config.orderSigner),
             priceChecker: ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker)),
-            requiredAppDataHash: config.requiredAppDataHash,
             twapWindow: config.twapWindow
         });
 
@@ -214,8 +214,7 @@ contract DeployStockAccounts is Script {
             addresses.getAddress(config.cowSettlement),
             implementation,
             strategyTypeId,
-            addresses.getAddress(config.feeRecipient),
-            config.managementFeeBps
+            addresses.getAddress(config.feeRecipient)
         );
         vm.stopBroadcast();
 

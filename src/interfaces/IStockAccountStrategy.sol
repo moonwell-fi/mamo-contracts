@@ -13,26 +13,23 @@ interface IStockAccountStrategy {
     event WithdrawToken(address indexed token, uint256 amount);
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
-    event FeesAccrued(uint256 elapsed);
-    event FeesCollected(address indexed token, uint256 amount);
+    event FeesPaid(uint256 elapsed, address token, uint256 amount);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
     error ZeroAddress();
     error StrategyTypeIdNotSet();
-    error FeeExceedsMaximum();
     error NotBackend();
     error ZeroAmount();
     error TokenNotActive(address token);
     error TokenNotListed(address token);
     error AccountBelowMinimum(uint256 nav);
     error DepositCapExceeded(uint256 nav);
-    error ExceedsAvailable(address token);
+    error ExceedsBalance(address token);
     error TooManyPositions();
     error WeightBelowMinimum(address token);
     error DuplicateToken(address token);
     error WeightsMustTotal(uint256 total);
     error SlippageExceedsMaximum();
-    error NothingToCollect();
     error InsufficientBalance();
     error InsufficientProceeds();
     error EmptyBalance();
@@ -53,6 +50,8 @@ interface IStockAccountStrategy {
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);
     error PriceCheckFailed();
+    error FeeTokenNotAllowed(address token);
+    error NoBalanceForFee(address token);
 
     function deposit(uint256 amount) external;
 
@@ -74,9 +73,7 @@ interface IStockAccountStrategy {
 
     function approveCowRelayer(address token) external;
 
-    function accrueManagementFee() external;
-
-    function collectFees(address token) external;
+    function payFees(address token) external;
 
     function getNAV() external view returns (uint256 valueUsdc);
 
@@ -96,5 +93,13 @@ interface IStockAccountStrategy {
 
     function getAccountSlippage() external view returns (uint16);
 
-    function feeOwed(address token) external view returns (uint256);
+    function feeDue() external view returns (uint256);
+
+    function feeDueIn(address token) external view returns (uint256);
+
+    function appDataDocument(address feeToken) external view returns (string memory);
+
+    function appDataHash(address feeToken) external view returns (bytes32);
+
+    function lastFeePaid() external view returns (uint64);
 }

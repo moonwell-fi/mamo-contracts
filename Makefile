@@ -58,10 +58,7 @@ tenderly-stock-accounts:
 tenderly-stock-accounts-scenarios:
 	./script/stock-accounts/scenarios/run.sh
 
-cow-appdata-hash:
-	cast keccak "$$(cat script/stock-accounts/appData.json)"
-
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker
 
-.PHONY: stock-price-checker deploy-stock-accounts tenderly-stock-accounts tenderly-stock-accounts-scenarios cow-appdata-hash test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+.PHONY: stock-price-checker deploy-stock-accounts tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
