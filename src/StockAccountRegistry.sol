@@ -165,7 +165,9 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
     /// @notice Lists a new token as tradeable by stock accounts
     /// @param token The token to list
-    /// @param cfg The pricing source and venue recorded for the token
+    /// @param cfg The pricing source and venue recorded for the token. cfg.chainlinkFeed is advisory
+    ///        bookkeeping only. A Chainlink token is priced through the audited SlippagePriceChecker,
+    ///        whose feeds its own owner configures; this field is not read.
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
         if (cfg.status != TokenStatus.Active) revert MustListAsActive();

@@ -126,8 +126,11 @@ contract DeployStockAccounts is Script {
         }
 
         vm.startBroadcast();
-        StockAccountPriceChecker priceChecker =
-            new StockAccountPriceChecker(IStockAccountRegistry(stockRegistry), addresses.getAddress(config.asset));
+        StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
+            IStockAccountRegistry(stockRegistry),
+            addresses.getAddress(config.asset),
+            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker))
+        );
         vm.stopBroadcast();
 
         addresses.addAddress(PRICE_CHECKER_NAME, address(priceChecker), true);
