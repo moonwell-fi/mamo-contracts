@@ -1,0 +1,384 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {Test} from "@forge-std/Test.sol";
+
+import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
+import {TickMath} from "@libraries/uniswap/TickMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
+import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
+import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
+import {MockPriceChecker} from "@test/mocks/MockPriceChecker.sol";
+import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol";
+
+contract StockAccountPriceCheckerUnitTest is Test {
+    uint32 internal constant WINDOW = 180;
+    uint256 internal constant MAX_BPS = 10_000;
+    uint256 internal constant FEED_MAX_TIME_PRICE_VALID = 3600;
+    uint256 internal constant EXPECTED_ALT_TICK_500000 = 5171760815372400971558161892130124037985;
+
+    MockStockAccountRegistry internal registry;
+    MockPriceChecker internal existingChecker;
+    StockAccountPriceChecker internal checker;
+
+    MockERC20Decimals internal usdc; // 6 dec
+    MockERC20Decimals internal stock; // 8 dec, pool token1 (USDC is token0) — same layout as live NVDAc/USDC
+    MockERC20Decimals internal alt; // 18 dec, pool token0 (USDC is token1)
+    MockERC20Decimals internal feedToken; // 8 dec, Chainlink-sourced at $250.50 per whole token
+    MockERC20Decimals internal feedAlt; // 18 dec, Chainlink-sourced at $2.00 per whole token
+    MockERC20Decimals internal unconfiguredFeed; // Chainlink-sourced, no pair on the existing checker
+    MockERC20Decimals internal orphan; // pool not against USDC
+
+    MockCLPoolObserve internal stockPool;
+    MockCLPoolObserve internal altPool;
+    MockCLPoolObserve internal orphanPool;
+
+    function setUp() public {
+        usdc = new MockERC20Decimals("USDC", 6);
+        stock = new MockERC20Decimals("STOCK", 8);
+        alt = new MockERC20Decimals("ALT", 18);
+        feedToken = new MockERC20Decimals("FEED", 8);
+        feedAlt = new MockERC20Decimals("FEEDALT", 18);
+        unconfiguredFeed = new MockERC20Decimals("NOFEED", 8);
+        orphan = new MockERC20Decimals("ORPHAN", 8);
+
+        stockPool = new MockCLPoolObserve(address(usdc), address(stock));
+        altPool = new MockCLPoolObserve(address(alt), address(usdc));
+        orphanPool = new MockCLPoolObserve(address(orphan), address(stock));
+
+        existingChecker = new MockPriceChecker();
+        registry = new MockStockAccountRegistry();
+        registry.setTwapWindow(WINDOW);
+        _list(address(stock), address(stockPool), IStockAccountRegistry.PriceSource.PoolTwap);
+        _list(address(alt), address(altPool), IStockAccountRegistry.PriceSource.PoolTwap);
+        _list(address(orphan), address(orphanPool), IStockAccountRegistry.PriceSource.PoolTwap);
+        _list(address(feedToken), address(stockPool), IStockAccountRegistry.PriceSource.Chainlink);
+        _list(address(feedAlt), address(stockPool), IStockAccountRegistry.PriceSource.Chainlink);
+        _list(address(unconfiguredFeed), address(stockPool), IStockAccountRegistry.PriceSource.Chainlink);
+
+        // rate is out-raw per in-raw scaled 1e18: 1e8 FEED -> 250_500_000 USDC, 1e18 FEEDALT -> 2e6 USDC
+        existingChecker.setRate(address(feedToken), address(usdc), 2.505e18);
+        existingChecker.setRate(address(feedAlt), address(usdc), 2e6);
+        existingChecker.setMaxTimePriceValid(address(feedToken), FEED_MAX_TIME_PRICE_VALID);
+
+        checker = new StockAccountPriceChecker(registry, address(usdc), existingChecker);
+
+        stockPool.setMeanTick(0, WINDOW);
+        altPool.setMeanTick(0, WINDOW);
+    }
+
+    function _list(address token, address pool, IStockAccountRegistry.PriceSource source) internal {
+        registry.setTokenConfig(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: IStockAccountRegistry.TokenStatus.Active,
+                source: source,
+                pool: pool,
+                chainlinkFeed: address(0)
+            })
+        );
+    }
+
+    /// @dev Independent reference: quote raw per `baseAmount` raw at `tick`, OracleLibrary-style.
+    function _quoteAtTick(int24 tick, uint256 baseAmount, bool baseIsToken0) internal pure returns (uint256) {
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(tick);
+        uint256 ratioX192 = uint256(sqrtP) * sqrtP;
+        return
+            baseIsToken0 ? Math.mulDiv(ratioX192, baseAmount, 1 << 192) : Math.mulDiv(1 << 192, baseAmount, ratioX192);
+    }
+
+    function test_constructor_setsRegistryAndQuoteAsset() public view {
+        assertEq(address(checker.registry()), address(registry));
+        assertEq(checker.quoteAsset(), address(usdc));
+    }
+
+    function test_constructor_revertsOnZeroAddresses() public {
+        vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
+        new StockAccountPriceChecker(IStockAccountRegistry(address(0)), address(usdc), existingChecker);
+        vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
+        new StockAccountPriceChecker(registry, address(0), existingChecker);
+        vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
+        new StockAccountPriceChecker(registry, address(usdc), ISlippagePriceChecker(address(0)));
+    }
+
+    // ==================== TWAP reference ====================
+
+    function test_getExpectedOut_tickZero_stockToUsdc() public view {
+        // tick 0: 1 raw stock == 1 raw USDC, so 1 whole stock (1e8) == 1e8 raw USDC ($100)
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    function test_getExpectedOut_tickZero_usdcToStock() public view {
+        assertEq(checker.getExpectedOut(1e8, address(usdc), address(stock)), 1e8);
+    }
+
+    function test_getExpectedOut_liveLikeTick_matchesOracleLibraryQuote() public {
+        // NVDAc/USDC pool layout (USDC token0, stock token1), live tick around -7880
+        int24 tick = -7880;
+        stockPool.setMeanTick(tick, WINDOW);
+        uint256 amountIn = 3e8;
+        uint256 expected = _quoteAtTick(tick, amountIn, false);
+        assertGt(expected, 0);
+        assertApproxEqRel(checker.getExpectedOut(amountIn, address(stock), address(usdc)), expected, 1e12);
+        // ~$219.9 per share at that tick
+        assertApproxEqRel(checker.getExpectedOut(1e8, address(stock), address(usdc)), 219.9e6, 1e15);
+    }
+
+    function test_getExpectedOut_tokenIsToken0_invertsCorrectly() public {
+        // alt is token0, USDC token1: raw USDC per raw alt = 1.0001^tick
+        int24 tick = 5000;
+        altPool.setMeanTick(tick, WINDOW);
+        uint256 expected = _quoteAtTick(tick, 1e18, true);
+        assertGt(expected, 0);
+        assertApproxEqRel(checker.getExpectedOut(1e18, address(alt), address(usdc)), expected, 1e12);
+    }
+
+    function test_getExpectedOut_negativeRemainderFloorsTowardNegativeInfinity() public {
+        // delta -1 over 180s: floor is tick -1, truncation would be tick 0
+        stockPool.setCumulatives(0, -1);
+        uint256 out = checker.getExpectedOut(1e8, address(stock), address(usdc));
+        uint256 atMinusOne = _quoteAtTick(-1, 1e8, false);
+        assertGt(out, 1e8);
+        assertApproxEqRel(out, atMinusOne, 1e12);
+    }
+
+    function test_getExpectedOut_negativeExactMultipleDoesNotOverFloor() public {
+        stockPool.setCumulatives(0, -int56(uint56(WINDOW)) * 3);
+        uint256 out = checker.getExpectedOut(1e8, address(stock), address(usdc));
+        assertApproxEqRel(out, _quoteAtTick(-3, 1e8, false), 1e12);
+    }
+
+    function test_getExpectedOut_windowReadLiveFromRegistry() public {
+        // cumulatives encode mean tick 100 over 180s; with a 300s window the same delta reads as tick 60
+        stockPool.setMeanTick(100, WINDOW);
+        uint256 at180 = checker.getExpectedOut(1e8, address(stock), address(usdc));
+        registry.setTwapWindow(300);
+        uint256 at300 = checker.getExpectedOut(1e8, address(stock), address(usdc));
+        assertApproxEqRel(at180, _quoteAtTick(100, 1e8, false), 1e12);
+        assertApproxEqRel(at300, _quoteAtTick(60, 1e8, false), 1e12);
+    }
+
+    // ==================== bidirectional / token-to-token ====================
+
+    function test_getExpectedOut_usdcToUsdcIsIdentity() public view {
+        assertEq(checker.getExpectedOut(123_456_789, address(usdc), address(usdc)), 123_456_789);
+    }
+
+    function test_getExpectedOut_tokenToToken_composesThroughUsdc() public {
+        stockPool.setMeanTick(-7880, WINDOW); // ~$219.9 per stock
+        altPool.setMeanTick(-276324, WINDOW); // 18-dec alt vs 6-dec USDC, ~$1 per whole alt
+        uint256 stockToUsdc = checker.getExpectedOut(1e8, address(stock), address(usdc));
+        uint256 usdcToAlt = checker.getExpectedOut(stockToUsdc, address(usdc), address(alt));
+        uint256 direct = checker.getExpectedOut(1e8, address(stock), address(alt));
+        assertGt(direct, 0);
+        assertApproxEqRel(direct, usdcToAlt, 1e12);
+        assertApproxEqRel(direct, 219.9e18, 1e14);
+    }
+
+    function test_getExpectedOut_roundTripsWithinRounding() public {
+        stockPool.setMeanTick(-7880, WINDOW);
+        altPool.setMeanTick(-276324, WINDOW);
+        uint256 forward = checker.getExpectedOut(5e8, address(stock), address(alt));
+        uint256 back = checker.getExpectedOut(forward, address(alt), address(stock));
+        assertApproxEqAbs(back, 5e8, 2);
+    }
+
+    function test_getExpectedOut_mixedDecimals_18to6And8to6() public {
+        altPool.setMeanTick(-276324, WINDOW);
+        assertApproxEqRel(checker.getExpectedOut(1e18, address(alt), address(usdc)), 1e6, 1e14);
+        stockPool.setMeanTick(0, WINDOW);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    // ==================== gates ====================
+
+    function test_getExpectedOut_revertsForUnlistedToken() public {
+        address stranger = address(new MockERC20Decimals("X", 8));
+        vm.expectRevert(abi.encodeWithSelector(StockAccountPriceChecker.TokenNotListed.selector, stranger));
+        checker.getExpectedOut(1e8, stranger, address(usdc));
+        vm.expectRevert(abi.encodeWithSelector(StockAccountPriceChecker.TokenNotListed.selector, stranger));
+        checker.getExpectedOut(1e8, address(usdc), stranger);
+    }
+
+    function test_getExpectedOut_pricesSellOnlyAndHaltedTokens() public {
+        IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(address(stock));
+        cfg.status = IStockAccountRegistry.TokenStatus.SellOnly;
+        registry.setTokenConfig(address(stock), cfg);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+        cfg.status = IStockAccountRegistry.TokenStatus.Halted;
+        registry.setTokenConfig(address(stock), cfg);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    function test_getExpectedOut_highTick_ratioX128Branch() public {
+        // sqrtP exceeds uint128 above tick ~443,614; 1.0001^500000 * 1e18 computed off-chain with 60-digit Decimal
+        altPool.setMeanTick(500_000, WINDOW);
+        uint256 out = checker.getExpectedOut(1e18, address(alt), address(usdc));
+        assertGt(out, 0);
+        assertApproxEqRel(out, EXPECTED_ALT_TICK_500000, 1e12);
+        // and the reverse direction lands back within rounding
+        assertApproxEqAbs(checker.getExpectedOut(out, address(usdc), address(alt)), 1e18, 1e6);
+    }
+
+    function test_getExpectedOut_singleFloor_liveLikeTrade() public {
+        // 3 NVDAc at tick -7880: exact value is 659,672,221.31 raw USDC; a pre-scale floor gives ...220
+        stockPool.setMeanTick(-7880, WINDOW);
+        assertEq(checker.getExpectedOut(3e8, address(stock), address(usdc)), 659_672_221);
+    }
+
+    // ==================== Chainlink source routing ====================
+
+    /// @notice Chainlink -> USDC is byte-for-byte the existing checker's own answer.
+    function test_getExpectedOut_chainlinkToUsdcIsExactParity() public view {
+        assertEq(checker.getExpectedOut(3e8, address(feedToken), address(usdc)), 751_500_000);
+        assertEq(
+            checker.getExpectedOut(3e8, address(feedToken), address(usdc)),
+            existingChecker.getExpectedOut(3e8, address(feedToken), address(usdc))
+        );
+        // 18-dec Chainlink token: 7 whole FEEDALT at $2.00
+        assertEq(checker.getExpectedOut(7e18, address(feedAlt), address(usdc)), 14e6);
+        assertEq(
+            checker.getExpectedOut(7e18, address(feedAlt), address(usdc)),
+            existingChecker.getExpectedOut(7e18, address(feedAlt), address(usdc))
+        );
+    }
+
+    /// @notice USDC -> Chainlink inverts the one-whole-token price: $250.50 buys exactly 1 FEED.
+    function test_getExpectedOut_usdcToChainlinkInvertsPerWholeTokenPrice() public view {
+        assertEq(checker.getExpectedOut(250_500_000, address(usdc), address(feedToken)), 1e8);
+        assertEq(checker.getExpectedOut(2e6, address(usdc), address(feedAlt)), 1e18);
+    }
+
+    function test_getExpectedOut_poolTwapToChainlink() public view {
+        // stock at tick 0 is $100 per whole token; 100 / 250.50 = 0.3992015968... FEED
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(feedToken)), 39_920_159);
+    }
+
+    function test_getExpectedOut_chainlinkToPoolTwap() public view {
+        // $250.50 / $100 = 2.505 whole stock
+        assertEq(checker.getExpectedOut(1e8, address(feedToken), address(stock)), 250_500_000);
+    }
+
+    function test_getExpectedOut_chainlinkToChainlink() public view {
+        // 250.50 / 2.00 = 125.25 whole FEEDALT
+        assertEq(checker.getExpectedOut(1e8, address(feedToken), address(feedAlt)), 125.25e18);
+        // 2.00 / 250.50 = 0.00798403... whole FEED
+        assertEq(checker.getExpectedOut(1e18, address(feedAlt), address(feedToken)), 798_403);
+    }
+
+    function test_getExpectedOut_pricesHaltedChainlinkToken() public {
+        IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(address(feedToken));
+        cfg.status = IStockAccountRegistry.TokenStatus.Halted;
+        registry.setTokenConfig(address(feedToken), cfg);
+        assertEq(checker.getExpectedOut(3e8, address(feedToken), address(usdc)), 751_500_000);
+    }
+
+    function test_checkPrice_mixedSourcePair() public view {
+        uint256 expected = 39_920_159; // 1 stock -> FEED, see test_getExpectedOut_poolTwapToChainlink
+        uint256 floor = (expected * (MAX_BPS - 100)) / MAX_BPS;
+        assertEq(floor, 39_520_957);
+        assertTrue(checker.checkPrice(1e8, address(stock), address(feedToken), floor, 100));
+        assertFalse(checker.checkPrice(1e8, address(stock), address(feedToken), floor - 1, 100));
+    }
+
+    function test_maxTimePriceValid_delegatesForChainlinkOnly() public {
+        assertEq(checker.maxTimePriceValid(address(feedToken)), FEED_MAX_TIME_PRICE_VALID);
+        assertEq(checker.maxTimePriceValid(address(stock)), WINDOW);
+        assertEq(checker.maxTimePriceValid(address(usdc)), WINDOW);
+        assertEq(checker.maxTimePriceValid(makeAddr("unlisted")), WINDOW);
+    }
+
+    function test_isTokenPairConfigured_followsExistingCheckerForChainlink() public {
+        assertTrue(checker.isTokenPairConfigured(address(feedToken), address(usdc)));
+        assertTrue(checker.isTokenPairConfigured(address(stock), address(feedToken)));
+        assertFalse(checker.isTokenPairConfigured(address(unconfiguredFeed), address(usdc)));
+        existingChecker.setRate(address(unconfiguredFeed), address(usdc), 1e18);
+        assertTrue(checker.isTokenPairConfigured(address(unconfiguredFeed), address(usdc)));
+    }
+
+    function test_getExpectedOut_revertsWhenPoolNotAgainstQuoteAsset() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(StockAccountPriceChecker.PoolNotAgainstQuoteAsset.selector, address(orphanPool))
+        );
+        checker.getExpectedOut(1e8, address(orphan), address(usdc));
+    }
+
+    function test_getExpectedOut_revertsOnInsufficientObservations() public {
+        stockPool.setRevertOld(true);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW
+            )
+        );
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW
+            )
+        );
+        checker.checkPrice(1e8, address(stock), address(usdc), 1, 100);
+    }
+
+    // ==================== checkPrice ====================
+
+    function test_checkPrice_exactToleranceBoundaryIsInclusive() public {
+        stockPool.setMeanTick(-7880, WINDOW);
+        uint256 expected = checker.getExpectedOut(7e8, address(stock), address(usdc));
+        uint256 floor = (expected * (MAX_BPS - 100)) / MAX_BPS;
+        assertTrue(checker.checkPrice(7e8, address(stock), address(usdc), floor, 100));
+        assertFalse(checker.checkPrice(7e8, address(stock), address(usdc), floor - 1, 100));
+        assertTrue(checker.checkPrice(7e8, address(stock), address(usdc), expected + 1, 100));
+    }
+
+    function test_checkPrice_zeroSlippageRequiresFullExpected() public view {
+        assertTrue(checker.checkPrice(1e8, address(stock), address(usdc), 1e8, 0));
+        assertFalse(checker.checkPrice(1e8, address(stock), address(usdc), 1e8 - 1, 0));
+    }
+
+    function test_checkPrice_zeroExpectedOutNeverPasses() public view {
+        assertEq(checker.getExpectedOut(0, address(stock), address(usdc)), 0);
+        assertFalse(checker.checkPrice(0, address(stock), address(usdc), 0, MAX_BPS));
+        assertFalse(checker.checkPrice(0, address(stock), address(usdc), 1, 100));
+    }
+
+    function test_checkPrice_revertsAboveMaxBps() public {
+        vm.expectRevert(abi.encodeWithSelector(StockAccountPriceChecker.InvalidSlippage.selector, MAX_BPS + 1));
+        checker.checkPrice(1e8, address(stock), address(usdc), 1, MAX_BPS + 1);
+    }
+
+    // ==================== legacy ISlippagePriceChecker surface ====================
+
+    function test_legacyMutators_revertNotSupported() public {
+        ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs;
+        vm.expectRevert(StockAccountPriceChecker.NotSupported.selector);
+        checker.addTokenConfiguration(address(stock), address(usdc), cfgs);
+        vm.expectRevert(StockAccountPriceChecker.NotSupported.selector);
+        checker.removeTokenConfiguration(address(stock), address(usdc));
+        vm.expectRevert(StockAccountPriceChecker.NotSupported.selector);
+        checker.setMaxTimePriceValid(address(stock), 1);
+    }
+
+    function test_legacyViews_answerFromRegistry() public {
+        assertEq(checker.tokenPairOracleInformation(address(stock), address(usdc)).length, 0);
+        assertFalse(checker.isRewardToken(address(stock)));
+        assertEq(checker.maxTimePriceValid(address(stock)), WINDOW);
+        assertTrue(checker.isTokenPairConfigured(address(stock), address(usdc)));
+        assertTrue(checker.isTokenPairConfigured(address(usdc), address(alt)));
+        assertTrue(checker.isTokenPairConfigured(address(stock), address(alt)));
+        assertFalse(checker.isTokenPairConfigured(address(unconfiguredFeed), address(usdc)));
+        assertFalse(checker.isTokenPairConfigured(address(stock), makeAddr("nobody")));
+    }
+
+    function test_isTokenPairConfigured_tracksNewListing() public {
+        MockERC20Decimals fresh = new MockERC20Decimals("FRESH", 8);
+        assertFalse(checker.isTokenPairConfigured(address(fresh), address(usdc)));
+        MockCLPoolObserve pool = new MockCLPoolObserve(address(usdc), address(fresh));
+        pool.setMeanTick(0, WINDOW);
+        _list(address(fresh), address(pool), IStockAccountRegistry.PriceSource.PoolTwap);
+        assertTrue(checker.isTokenPairConfigured(address(fresh), address(usdc)));
+        assertEq(checker.getExpectedOut(1e8, address(fresh), address(usdc)), 1e8);
+    }
+}
