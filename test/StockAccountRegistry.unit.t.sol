@@ -606,6 +606,10 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.listToken(otherToken, activeConfig());
 
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setRequiredAppDataHash(keccak256("other app data"));
+
         assertEq(registry.maxPositions(), 10, "max positions mismatch");
         assertEq(registry.allTokens().length, 1, "token list length mismatch");
         assertEq(
@@ -626,6 +630,33 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.setMaxPositions(7);
         assertEq(registry.maxPositions(), 7, "max positions mismatch");
+    }
+
+    function testSetOrderSignerWorksWhilePaused() public {
+        vm.prank(guardian);
+        registry.pause();
+
+        address rotated = makeAddr("rotatedSigner");
+        vm.prank(admin);
+        registry.setOrderSigner(rotated);
+
+        assertEq(registry.orderSigner(), rotated, "order signer mismatch");
+    }
+
+    function testSetTokenStatusWorksWhilePaused() public {
+        listDefaultToken();
+
+        vm.prank(guardian);
+        registry.pause();
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
+
+        assertEq(
+            uint256(registry.tokenConfig(token).status),
+            uint256(IStockAccountRegistry.TokenStatus.Halted),
+            "status mismatch"
+        );
     }
 
     function testOnlyGuardianCanPause() public {

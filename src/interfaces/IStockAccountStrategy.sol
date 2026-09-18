@@ -53,6 +53,7 @@ interface IStockAccountStrategy {
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);
     error PriceCheckFailed();
+    error RegistryPaused();
 
     function deposit(uint256 amount) external;
 

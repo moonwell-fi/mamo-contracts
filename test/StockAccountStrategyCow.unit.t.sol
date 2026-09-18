@@ -256,6 +256,20 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(_order(address(nvda), address(usdc), 0, 0));
     }
 
+    function testRevertsWhenTheRegistryIsPaused() public {
+        stockRegistry.setPaused(true);
+
+        vm.expectRevert(IStockAccountStrategy.RegistryPaused.selector);
+        _check(_order(address(nvda), address(usdc), 1e18, 199e18));
+    }
+
+    function testUnpausingTheRegistryRestoresOrderValidation() public {
+        stockRegistry.setPaused(true);
+        stockRegistry.setPaused(false);
+
+        assertTrue(_check(_order(address(nvda), address(usdc), 1e18, 199e18)) == MAGIC_VALUE, "magic value");
+    }
+
     function _check(GPv2Order.Data memory order) internal view returns (bytes4) {
         bytes32 digest = order.hash(SEPARATOR);
         return strategy.isValidSignature(digest, abi.encode(order, _sign(digest)));

@@ -45,6 +45,8 @@ interface IStockAccountRegistry {
 
     function allTokens() external view returns (address[] memory);
 
+    function paused() external view returns (bool);
+
     function maxPositions() external view returns (uint8);
 
     function minTargetBps() external view returns (uint16);
