@@ -37,7 +37,9 @@ In reuse mode the address book copy is kept, so every deploy step that already r
 
 1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
    deployed with the placeholder price checker (see Configuration)
-2. `StockAccountPriceChecker(registry, USDC)` — recorded as `STOCK_ACCOUNT_PRICE_CHECKER`
+2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker)` — recorded as
+   `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker` that
+   every `PriceSource.Chainlink` token is priced against (see Configuration)
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
 4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, 0)` — assigns the strategy type id
@@ -84,6 +86,10 @@ bootstrap detail, not a stopgap: the registry constructor needs a price checker 
 the real `StockAccountPriceChecker` needs the registry address, so the registry is born with the
 placeholder and step 3 immediately points it at the checker deployed in step 2. Any address with code
 works; nothing is ever priced through the placeholder.
+
+`existingPriceChecker` is also `CHAINLINK_SWAP_CHECKER_PROXY` in both environments, but it is load
+bearing: it is the audited checker the step 2 constructor keeps, and every token listed with
+`PriceSource.Chainlink` is routed to it. Tokens listed as `PoolTwap` never reach it.
 
 TESTING differs from PROD in one way: `admin`, `guardian` and `feeRecipient` are `DEPLOYER_EOA`, so a
 vnet run needs no impersonation for the stock registry itself — step 3 and step 8 run directly. The

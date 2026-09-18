@@ -20,6 +20,8 @@ contract StockAccountsConfig is Script {
         string backend;
         uint256 chainId;
         string cowSettlement;
+        /// @dev The audited SlippagePriceChecker every PriceSource.Chainlink token is priced against
+        string existingPriceChecker;
         string feeRecipient;
         string guardian;
         uint16 managementFeeBps;
@@ -31,6 +33,7 @@ contract StockAccountsConfig is Script {
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
         string orderSigner;
+        /// @dev Bootstrap only: satisfies the registry constructor, then setPriceChecker replaces it
         string placeholderPriceChecker;
         uint32 twapWindow;
     }
@@ -46,6 +49,7 @@ contract StockAccountsConfig is Script {
         config.backend = json.readString(".backend");
         config.chainId = json.readUint(".chainId");
         config.cowSettlement = json.readString(".cowSettlement");
+        config.existingPriceChecker = json.readString(".existingPriceChecker");
         config.feeRecipient = json.readString(".feeRecipient");
         config.guardian = json.readString(".guardian");
         config.managementFeeBps = uint16(json.readUint(".managementFeeBps"));
