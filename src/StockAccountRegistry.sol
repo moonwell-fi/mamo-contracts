@@ -204,7 +204,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
-    /// @param status The new status; the guardian may only tighten it
+    /// @param status The new status; the guardian may only tighten it, and any loosening re-probes the price
     function setTokenStatus(address token, TokenStatus status) external whenNotPaused {
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian();
@@ -217,7 +217,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
         _tokenConfig[token].status = status;
 
-        if (status == TokenStatus.Active) _requirePriceable(token);
+        if (status < oldStatus) _requirePriceable(token);
 
         emit TokenStatusUpdated(token, oldStatus, status);
     }
