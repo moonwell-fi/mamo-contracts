@@ -212,17 +212,24 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.feeDue(), _feeValue(strategy.getNAV(), 3_650 days), "ten years are still owed");
     }
 
-    function testWithdrawingInKindOnAWeiOfTheAssetForgivesNothing() public {
+    function testWithdrawingInKindOnAWeiOfTheAssetStillCollectsTheWholeFee() public {
         vm.prank(user);
         strategy.withdrawToken(address(usdc), 1_000e18 - 1);
 
         vm.warp(startTime + 365 days);
 
+        uint256 owed = strategy.feeDue();
+        uint256 owedInNvda = strategy.feeDueIn(address(nvda));
+
         vm.prank(user);
         strategy.withdrawAllInKind();
 
-        assertEq(usdc.balanceOf(feeRecipient), 1, "one wei is all that was paid");
-        assertEq(strategy.lastFeePaid(), startTime, "the clock never moved");
+        assertEq(usdc.balanceOf(feeRecipient), 1, "the wei of cash goes first");
+        assertEq(nvda.balanceOf(feeRecipient), owedInNvda, "the rest comes out of the first sellable stock");
+        assertEq(owedInNvda * 200, owed, "which is the whole fee in value");
+        assertEq(aapl.balanceOf(feeRecipient), 0, "and nothing more is taken");
+        assertEq(strategy.lastFeePaid(), startTime + 365 days, "the period is settled");
+        assertEq(nvda.balanceOf(user), 10e18 - owedInNvda, "the owner is out with the remainder");
     }
 
     function testACappedPaymentLeavesTheRemainderForALaterOne() public {
@@ -263,7 +270,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.feeDue(), 0, "nothing owed");
     }
 
-    function testFeeThatRoundsToZeroInTheChosenTokenReverts() public {
+    function testFeeThatRoundsToZeroInTheChosenTokenIsSkippedNotForgiven() public {
         priceChecker.setRate(address(usdc), address(msft), 1);
 
         _fundToken(msft, funder, 1e18);
@@ -275,10 +282,38 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertGt(strategy.feeDue(), 0, "the fee is owed");
         assertEq(strategy.feeDueIn(address(msft)), 0, "but it rounds to nothing in msft");
 
-        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.FeeRoundsToZero.selector, address(msft)));
         strategy.payFees(address(msft));
 
+        assertEq(msft.balanceOf(feeRecipient), 0, "nothing is taken");
         assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
+    }
+
+    function testAFeeThatRoundsToZeroInTheOnlyTokenHeldDoesNotBlockTheInKindExit() public {
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18);
+        strategy.withdrawToken(address(nvda), 10e18);
+        strategy.withdrawToken(address(aapl), 20e18);
+        vm.stopPrank();
+
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+
+        priceChecker.setRate(address(usdc), address(msft), 1);
+        vm.warp(startTime + 1);
+
+        assertGt(strategy.feeDue(), 0, "the fee is owed");
+        assertEq(strategy.feeDueIn(address(msft)), 0, "and rounds to nothing in the only token held");
+
+        vm.prank(user);
+        strategy.withdrawToken(address(msft), 1e18);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(msft.balanceOf(user), 100e18, "both exits went through");
+        assertEq(msft.balanceOf(feeRecipient), 0, "a second of fee is worth less than a wei of the token");
+        assertEq(strategy.lastFeePaid(), startTime, "and the period is not forgiven either");
     }
 
     function testWithdrawPaysTheFeeInTheAssetAfterSelling() public {
