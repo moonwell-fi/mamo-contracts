@@ -11,6 +11,7 @@ import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+import {TickMath} from "@libraries/uniswap/TickMath.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -29,6 +30,11 @@ interface ICLPoolSwap {
         uint160 sqrtPriceLimitX96,
         bytes calldata data
     ) external returns (int256 amount0, int256 amount1);
+}
+
+/// @dev The pool's fee tier, kept out of ICLPool for the same reason.
+interface ICLPoolFee {
+    function fee() external view returns (uint24);
 }
 
 /// @dev The permissionless observation-buffer grower, kept out of ICLPool for the same reason.
@@ -65,6 +71,10 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     /// @dev NVDAc handed to the pool before a pump so it can pay the buy out of the etched stand-in.
     uint256 internal constant PUMP_NVDAC_RESERVE = 200_000e8;
     uint256 internal constant CBBTC_POOL_SWAP_USDC_IN = 100e6;
+    /// @dev The largest pump the helpers take: sqrt price to 90% of where it started.
+    uint256 internal constant MAX_PUMP_SQRT_BPS = 9_000;
+    /// @dev Per-token weight of a ten-position basket, the widest `maxPositions` the registry allows.
+    uint256 internal constant DIVERSIFIED_TARGET_BPS = 1_000;
 
     address internal admin = makeAddr("admin");
     StockAccountRegistry internal registry;
@@ -352,60 +362,80 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         if (amount1Delta > 0) IERC20(ICLPool(msg.sender).token1()).transfer(msg.sender, uint256(amount1Delta));
     }
 
-    /// @dev Buys NVDAc until the pool's sqrt price is 10% lower, i.e. NVDAc ~23% more expensive.
-    ///      The pool is minted the NVDAc it pays out: the real reserve lives in node-native state
-    ///      that the etch in `setUp` replaced.
-    function _pumpNvdac() internal {
+    /// @dev Buys NVDAc until the pool's sqrt price is `sqrtFactorBps / 10_000` of where it started, so a
+    ///      smaller factor is a larger pump. The pool is minted the NVDAc it pays out: the real reserve
+    ///      lives in node-native state that the etch in `setUp` replaced.
+    function _pumpNvdacTo(uint256 sqrtFactorBps) internal {
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         deal(USDC, address(this), PUMP_USDC_IN);
         MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, PUMP_NVDAC_RESERVE);
         ICLPoolSwap(NVDAC_USDC_POOL).swap(
-            address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * 90) / 100), ""
+            address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * sqrtFactorBps) / 10_000), ""
         );
     }
 
-    /// @dev Sells NVDAc until the pool's sqrt price is 10% higher, i.e. NVDAc ~17% cheaper. That single
-    ///      swap takes ~98% of the pool's USDC at the pin, so the limit cannot be widened much further.
-    function _dumpNvdac() internal {
+    function _pumpNvdac() internal {
+        _pumpNvdacTo(MAX_PUMP_SQRT_BPS);
+    }
+
+    /// @dev Sells NVDAc until the pool's sqrt price is `sqrtFactorBps / 10_000` of where it started.
+    function _dumpNvdacTo(uint256 sqrtFactorBps) internal {
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         MockERC20Decimals(NVDAC).mint(address(this), DUMP_NVDAC_IN);
         ICLPoolSwap(NVDAC_USDC_POOL).swap(
-            address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * 110) / 100), ""
+            address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * sqrtFactorBps) / 10_000), ""
         );
     }
 
+    function _dumpNvdac() internal {
+        _dumpNvdacTo(11_000);
+    }
+
     /// @dev Drift of the NVDAc reference, in bps, `holdSeconds` after one pump that nothing trades back.
-    ///      Measured on a state snapshot so a caller can sweep hold times from one starting state.
-    function _driftBpsAfterHold(uint32 holdSeconds) internal returns (uint256) {
+    ///      Measured on a state snapshot so a caller can sweep pump sizes and hold times from one state.
+    function _driftBpsAfterHold(uint256 sqrtFactorBps, uint32 holdSeconds) internal returns (uint256) {
         uint256 baseline = checker.getExpectedOut(1e8, NVDAC, USDC);
         uint256 snap = vm.snapshotState();
-        _pumpNvdac();
+        _pumpNvdacTo(sqrtFactorBps);
         vm.warp(vm.getBlockTimestamp() + holdSeconds);
         uint256 drifted = checker.getExpectedOut(1e8, NVDAC, USDC);
         vm.revertToState(snap);
         return ((drifted - baseline) * 10_000) / baseline;
     }
 
-    /// @dev Smallest whole-second hold at which the pump's drift exceeds the backend's slippage budget,
-    ///      or 0 if a full-window hold never does. Drift rises with hold time, so a bisection is exact.
+    /// @dev Smallest whole-second hold at which a full-limit pump's drift exceeds the backend's slippage
+    ///      budget, or 0 if a full-window hold never does. Drift rises with hold time, so bisection is exact.
     function _holdToOpenBudget(uint32 window) internal returns (uint32) {
-        if (_driftBpsAfterHold(window) <= MAX_BACKEND_SLIPPAGE_BPS) return 0;
+        if (_driftBpsAfterHold(MAX_PUMP_SQRT_BPS, window) <= MAX_BACKEND_SLIPPAGE_BPS) return 0;
         uint32 lo = 1;
         uint32 hi = window;
         while (lo < hi) {
             uint32 mid = lo + (hi - lo) / 2;
-            if (_driftBpsAfterHold(mid) > MAX_BACKEND_SLIPPAGE_BPS) hi = mid;
+            if (_driftBpsAfterHold(MAX_PUMP_SQRT_BPS, mid) > MAX_BACKEND_SLIPPAGE_BPS) hi = mid;
             else lo = mid + 1;
         }
         return lo;
     }
 
-    /// @dev Pumps to the helper's limit and immediately sells the whole position back, returning the USDC
-    ///      the pump committed and the USDC the round trip destroyed. Runs on a snapshot: the pool is
-    ///      left exactly as it was found.
-    function _roundTripCost() internal returns (uint256 committed, uint256 lost) {
+    /// @dev Largest sqrt-price factor — that is, the cheapest pump — whose drift after `holdSeconds` still
+    ///      clears the backend budget, or 0 when even a full-limit pump cannot. Drift falls as the factor rises.
+    function _cheapestPumpToOpenBudget(uint32 holdSeconds) internal returns (uint256) {
+        if (_driftBpsAfterHold(MAX_PUMP_SQRT_BPS, holdSeconds) <= MAX_BACKEND_SLIPPAGE_BPS) return 0;
+        uint256 lo = MAX_PUMP_SQRT_BPS;
+        uint256 hi = 10_000;
+        while (lo < hi) {
+            uint256 mid = lo + (hi - lo + 1) / 2;
+            if (_driftBpsAfterHold(mid, holdSeconds) > MAX_BACKEND_SLIPPAGE_BPS) lo = mid;
+            else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    /// @dev Pumps to `sqrtFactorBps` and immediately sells the whole position back, returning the USDC the
+    ///      pump committed and the USDC the round trip destroyed. Runs on a snapshot: the pool is restored.
+    function _roundTripCost(uint256 sqrtFactorBps) internal returns (uint256 committed, uint256 lost) {
         uint256 snap = vm.snapshotState();
-        _pumpNvdac();
+        _pumpNvdacTo(sqrtFactorBps);
         uint256 usdcAfterPump = IERC20(USDC).balanceOf(address(this));
         committed = PUMP_USDC_IN - usdcAfterPump;
         uint256 held = MockERC20Decimals(NVDAC).balanceOf(address(this));
@@ -416,10 +446,127 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         vm.revertToState(snap);
     }
 
+    /// @dev The dump mirror of `_roundTripCost`, with both figures valued in USDC at the pre-attack
+    ///      reference so the two directions are directly comparable.
+    function _dumpRoundTripCost(uint256 sqrtFactorBps) internal returns (uint256 committed, uint256 lost) {
+        uint256 usdcPerNvdac = checker.getExpectedOut(1e8, NVDAC, USDC);
+        uint256 snap = vm.snapshotState();
+        deal(USDC, address(this), 0);
+        MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, PUMP_NVDAC_RESERVE);
+        uint256 before = MockERC20Decimals(NVDAC).balanceOf(address(this));
+        _dumpNvdacTo(sqrtFactorBps);
+        uint256 afterDump = MockERC20Decimals(NVDAC).balanceOf(address(this));
+        uint256 sold = before + DUMP_NVDAC_IN - afterDump;
+        uint256 usdcOut = IERC20(USDC).balanceOf(address(this));
+        (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        ICLPoolSwap(NVDAC_USDC_POOL).swap(
+            address(this), true, int256(usdcOut), uint160((uint256(sqrtP) * 30) / 100), ""
+        );
+        uint256 bought = MockERC20Decimals(NVDAC).balanceOf(address(this)) - afterDump;
+        committed = Math.mulDiv(sold, usdcPerNvdac, 1e8);
+        lost = Math.mulDiv(sold - bought, usdcPerNvdac, 1e8);
+        vm.revertToState(snap);
+    }
+
+    /// @dev Price ratio of a `tickDelta`-tick move, minus one, in bps: 1.0001^tickDelta - 1.
+    function _driftBpsForTickDelta(uint256 tickDelta) internal pure returns (uint256) {
+        uint160 sqrtRatio = TickMath.getSqrtRatioAtTick(int24(int256(tickDelta)));
+        return Math.mulDiv(uint256(sqrtRatio) * sqrtRatio, 10_000, 1 << 192) - 10_000;
+    }
+
+    /// @dev The tick move a measured drift corresponds to: the inverse of `_driftBpsForTickDelta`.
+    function _tickDeltaForDriftBps(uint256 driftBps) internal pure returns (uint256) {
+        uint256 lo;
+        uint256 hi = 10_000;
+        while (lo < hi) {
+            uint256 mid = lo + (hi - lo + 1) / 2;
+            if (_driftBpsForTickDelta(mid) <= driftBps) lo = mid;
+            else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    /// @dev Smallest whole-second hold whose mean tick — moved linearly by `tickDelta` over `window` —
+    ///      prices above the backend budget. The closed form h* = W ln(1 + budget) / ln(1 + drift), on
+    ///      the tick lattice the checker actually rounds to.
+    function _predictedHoldToOpenBudget(uint32 window, uint256 tickDelta) internal pure returns (uint32) {
+        for (uint32 h = 1; h <= window; h++) {
+            if (_driftBpsForTickDelta((tickDelta * h) / window) > MAX_BACKEND_SLIPPAGE_BPS) return h;
+        }
+        return 0;
+    }
+
+    /// @dev (1 + budget)^exponent - 1 in bps: the manipulation an attacker needs when the window is
+    ///      `exponent` times the hold they can sustain.
+    function _requiredDriftBps(uint256 exponent) internal pure returns (uint256) {
+        uint256 acc = 1e18;
+        for (uint256 i = 0; i < exponent; i++) {
+            acc = (acc * (10_000 + MAX_BACKEND_SLIPPAGE_BPS)) / 10_000;
+        }
+        return (acc - 1e18) / 1e14;
+    }
+
+    /// @dev Price drift a pump to `sqrtFactorBps` commands: the sqrt-price move, squared, minus one.
+    function _sqrtMoveDriftBps(uint256 sqrtFactorBps) internal pure returns (uint256) {
+        return (100_000_000 / ((sqrtFactorBps * sqrtFactorBps) / 10_000)) - 10_000;
+    }
+
+    /// @dev The attacker's edge on one filled order: the manipulated reference and the slippage budget
+    ///      compound, so it is 1 - (1 - drift)(1 - budget), not the smaller of the two.
+    function _edgeBps(uint256 driftBps) internal pure returns (uint256) {
+        uint256 kept = ((10_000 - driftBps) * (10_000 - MAX_BACKEND_SLIPPAGE_BPS)) / 10_000;
+        return 10_000 - kept;
+    }
+
     function _setWindow(uint32 window) internal {
         if (registry.twapWindow() == window) return;
         vm.prank(admin);
         registry.setTwapWindow(window);
+    }
+
+    function _bps(uint256 value, uint256 base) internal pure returns (uint256) {
+        return value > base ? ((value - base) * 10_000) / base : ((base - value) * 10_000) / base;
+    }
+
+    /// @notice The pool every manipulation number below is measured against, at the pinned block.
+    function test_fork_poolStateAtThePin() public {
+        (, int24 tickBefore,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        uint256 poolUsdc = IERC20(USDC).balanceOf(NVDAC_USDC_POOL);
+        uint128 liquidityBefore = ICLPool(NVDAC_USDC_POOL).liquidity();
+
+        uint256 snap = vm.snapshotState();
+        _pumpNvdac();
+        (, int24 tickAfter,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        uint128 liquidityAfter = ICLPool(NVDAC_USDC_POOL).liquidity();
+        uint256 committed = PUMP_USDC_IN - IERC20(USDC).balanceOf(address(this));
+        uint256 bought = MockERC20Decimals(NVDAC).balanceOf(address(this));
+        vm.revertToState(snap);
+
+        emit log_string(
+            string.concat(
+                "pool: ",
+                vm.toString(poolUsdc),
+                " raw USDC, tick ",
+                vm.toString(int256(tickBefore)),
+                ", liquidity ",
+                vm.toString(uint256(liquidityBefore)),
+                "; a maximal pump commits ",
+                vm.toString(committed),
+                " raw USDC for ",
+                vm.toString(bought),
+                " raw NVDAc, tick ",
+                vm.toString(int256(tickAfter)),
+                ", liquidity ",
+                vm.toString(uint256(liquidityAfter))
+            )
+        );
+        assertEq(ICLPool(NVDAC_USDC_POOL).token0(), USDC, "USDC is not token0");
+        assertEq(ICLPool(NVDAC_USDC_POOL).token1(), NVDAC, "NVDAc is not token1");
+        assertEq(ICLPool(NVDAC_USDC_POOL).tickSpacing(), 10, "tick spacing moved");
+        assertGt(poolUsdc, 0, "vacuous: the pool holds no USDC");
+        assertGt(committed, poolUsdc, "a maximal pump committed less than the pool's own float");
+        assertLt(tickAfter, tickBefore, "the pump did not move the tick");
+        assertLt(liquidityAfter, liquidityBefore, "the pump did not thin in-range liquidity");
     }
 
     /// @notice A same-block manipulation moves the pool's live price and not the checker's quote.
@@ -433,8 +580,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(checker.getExpectedOut(1e8, NVDAC, USDC), twapBefore, "twap moved within the same block");
     }
 
-    /// @notice Non-vacuity control for the test above: the TWAP converges on the held tick linearly in
-    ///         hold time, so a full-window hold is the upper bound on the attack, not its threshold.
+    /// @notice Non-vacuity control for the test above: the TWAP converges on the held tick, so a
+    ///         full-window hold is the upper bound on the attack, not its threshold.
     function test_fork_manipulationHeldForTheWholeWindowMovesTheTwap() public {
         uint256 twapBefore = checker.getExpectedOut(1e8, NVDAC, USDC);
 
@@ -468,37 +615,42 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(checker.getExpectedOut(100e8, CBBTC, USDC), existingChecker.getExpectedOut(100e8, CBBTC, USDC));
     }
 
-    /// @notice Holding a manipulated tick moves the reference in proportion to the fraction of the window
-    ///         it occupies: an attacker buys drift by the second, not by clearing a threshold.
-    function test_fork_twapDriftIsLinearInHoldTime() public {
-        uint32[6] memory holds = [uint32(12), 30, 60, 90, 150, 180];
-        uint256 full = _driftBpsAfterHold(WINDOW);
+    /// @notice Drift follows the closed form drift(h) = (1 + D)^(h/W) - 1 exactly: the mean tick is linear
+    ///         in hold time and price is exponential in tick. An attacker buys drift by the second.
+    function test_fork_twapDriftFollowsTheClosedForm() public {
+        uint32[7] memory holds = [uint32(3), 12, 30, 60, 90, 150, 180];
+        uint256 full = _driftBpsAfterHold(MAX_PUMP_SQRT_BPS, WINDOW);
+        uint256 fullTicks = _tickDeltaForDriftBps(full);
         assertGt(full, 2_000, "vacuous: a full-window hold barely moved the reference");
 
-        emit log_string("drift vs hold, window 180s");
+        emit log_string(string.concat("drift vs hold, window 180s, full-hold drift ", vm.toString(full), " bps"));
         for (uint256 i = 0; i < holds.length; i++) {
-            uint256 measured = _driftBpsAfterHold(holds[i]);
-            uint256 predicted = (full * holds[i]) / WINDOW;
+            uint256 measured = _driftBpsAfterHold(MAX_PUMP_SQRT_BPS, holds[i]);
+            uint256 predicted = _driftBpsForTickDelta((fullTicks * holds[i]) / WINDOW);
+            uint256 linear = (full * holds[i]) / WINDOW;
             emit log_string(
                 string.concat(
                     "  hold ",
                     vm.toString(holds[i]),
                     "s  drift ",
                     vm.toString(measured),
-                    " bps  linear ",
+                    " bps  closed form ",
                     vm.toString(predicted),
+                    " bps  linear ",
+                    vm.toString(linear),
                     " bps"
                 )
             );
-            assertApproxEqRel(measured, predicted, 0.1e18, "drift is not linear in hold time");
+            assertApproxEqAbs(measured, predicted, 3, "drift does not follow (1 + D)^(h/W) - 1");
         }
     }
 
-    /// @notice Moving the pool and putting it straight back costs the attacker only swap fees, so the
-    ///         manipulation is cheap relative to the float it moves.
+    /// @notice Moving the pool and putting it straight back costs the attacker two crossings of the fee
+    ///         tier and nothing else.
     function test_fork_manipulationRoundTripCostsOnlyFees() public {
-        (uint256 committed, uint256 lost) = _roundTripCost();
-        uint256 costBps = (lost * 10_000) / committed;
+        uint24 fee = ICLPoolFee(NVDAC_USDC_POOL).fee();
+        (uint256 committed, uint256 lost) = _roundTripCost(MAX_PUMP_SQRT_BPS);
+        uint256 costTenthBps = (lost * 100_000) / committed;
         emit log_string(
             string.concat(
                 "round trip: committed ",
@@ -506,94 +658,281 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 " raw USDC, lost ",
                 vm.toString(lost),
                 " raw USDC, ",
-                vm.toString(costBps),
-                " bps"
+                vm.toString(costTenthBps / 10),
+                ".",
+                vm.toString(costTenthBps % 10),
+                " bps at a fee tier of ",
+                vm.toString(uint256(fee))
             )
         );
+        assertEq(fee, 500, "fee tier moved");
         assertGt(lost, 0, "vacuous: the round trip was free");
-        assertLt(costBps, 25, "round trip cost more than swap fees");
+        assertLe(costTenthBps, (2 * uint256(fee)) / 10, "round trip cost more than two crossings of the fee");
+        assertGt(costTenthBps, (19 * uint256(fee)) / 100, "round trip cost less than two crossings of the fee");
     }
 
-    /// @notice How long the attacker has to hold the manipulated tick before the drift covers the whole
-    ///         backend slippage budget, per candidate window. The cash cost does not depend on the window.
+    /// @notice The attacker buys exactly the drift they can use, and a usable drift is far cheaper than a
+    ///         maximal one: cost against sqrt-price factor at the pinned block.
+    function test_fork_manipulationCostCurve() public {
+        uint256[6] memory factors = [uint256(9_995), 9_975, 9_950, 9_900, 9_800, MAX_PUMP_SQRT_BPS];
+        uint256 previousDrift;
+        uint256 previousLost;
+        uint256 budgetOpeningCost;
+
+        emit log_string("cost curve: pump, hold the full 180s window, unwind");
+        for (uint256 i = 0; i < factors.length; i++) {
+            uint256 drift = _driftBpsAfterHold(factors[i], WINDOW);
+            (uint256 committed, uint256 lost) = _roundTripCost(factors[i]);
+            emit log_string(
+                string.concat(
+                    "  sqrtP x0.",
+                    vm.toString(factors[i]),
+                    "  full-hold drift ",
+                    vm.toString(drift),
+                    " bps  committed ",
+                    vm.toString(committed),
+                    " raw USDC  round trip ",
+                    vm.toString(lost),
+                    " raw USDC"
+                )
+            );
+            assertGt(drift, previousDrift, "a larger pump did not drift further");
+            assertGt(lost, previousLost, "a larger pump did not cost more");
+            previousDrift = drift;
+            previousLost = lost;
+            if (drift > MAX_BACKEND_SLIPPAGE_BPS && budgetOpeningCost == 0) budgetOpeningCost = lost;
+        }
+
+        assertGt(budgetOpeningCost, 0, "no pump on the curve opened the budget");
+        assertLt(budgetOpeningCost * 4, previousLost, "opening the budget costs within 4x of a maximal pump");
+    }
+
+    /// @notice Attacker cost against attacker gain, sized per pump. The edge compounds the manipulated
+    ///         reference with the slippage budget, and exposure is what one order can move under
+    ///         `StockAccountStrategy._checkRange`, not automatically the whole deposit cap.
+    function test_fork_manipulationBreakEvenGrid() public {
+        uint256[6] memory factors = [uint256(9_995), 9_975, 9_950, 9_900, 9_800, MAX_PUMP_SQRT_BPS];
+        uint256 concentrated = MAX_STRATEGY_DEPOSIT;
+        uint256 diversified = (MAX_STRATEGY_DEPOSIT * (DIVERSIFIED_TARGET_BPS + registry.maxDeviationBps())) / 10_000;
+        uint256 minOrders = type(uint256).max;
+        uint256 maxOrders;
+
+        assertEq(registry.maxDeviationBps(), 1_000, "grid assumes the deployed deviation band");
+        emit log_string(
+            string.concat(
+                "break-even grid: window 180s, budget 100 bps, exposure ",
+                vm.toString(concentrated),
+                " raw USDC concentrated / ",
+                vm.toString(diversified),
+                " raw USDC diversified"
+            )
+        );
+        for (uint256 i = 0; i < factors.length; i++) {
+            uint256 drift = _driftBpsAfterHold(factors[i], WINDOW);
+            (, uint256 cost) = _roundTripCost(factors[i]);
+            uint256 edge = _edgeBps(drift);
+            uint256 gain = (concentrated * edge) / 10_000;
+            uint256 gainDiversified = (diversified * edge) / 10_000;
+            uint256 orders = (cost + gainDiversified - 1) / gainDiversified;
+            emit log_string(
+                string.concat(
+                    "  sqrtP x0.",
+                    vm.toString(factors[i]),
+                    "  drift ",
+                    vm.toString(drift),
+                    " bps  edge ",
+                    vm.toString(edge),
+                    " bps  cost ",
+                    vm.toString(cost),
+                    " raw USDC  gain/order ",
+                    vm.toString(gain),
+                    " concentrated / ",
+                    vm.toString(gainDiversified),
+                    " diversified raw USDC  orders to break even 1 concentrated / ",
+                    vm.toString(orders),
+                    " diversified"
+                )
+            );
+            assertGt(edge, drift, "edge did not compound the slippage budget");
+            assertGt(edge, MAX_BACKEND_SLIPPAGE_BPS, "edge fell below the slippage budget alone");
+            assertGt(gain, cost, "a concentrated basket did not pay for the manipulation on the first order");
+            assertApproxEqAbs(
+                drift, _sqrtMoveDriftBps(factors[i]), 2, "full-hold drift is not the commanded sqrt-price move"
+            );
+            assertEq(_driftBpsAfterHold(factors[i], 0), 0, "the manipulation paid off without being held");
+            assertApproxEqAbs(
+                _driftBpsAfterHold(factors[i], WINDOW / 2),
+                _driftBpsForTickDelta(_tickDeltaForDriftBps(drift) / 2),
+                2,
+                "a half-window hold does not price at (1 + D)^(1/2) - 1"
+            );
+            if (orders < minOrders) minOrders = orders;
+            if (orders > maxOrders) maxOrders = orders;
+        }
+        assertEq(minOrders, 1, "no pump on the grid paid for itself in one diversified order");
+        assertGt(maxOrders, minOrders, "the grid is flat in orders to break even");
+    }
+
+    /// @notice How long the attacker must hold before the drift covers the whole backend budget, per
+    ///         candidate window, against the closed form the linear mean tick implies.
     function test_fork_twapWindowSensitivity() public {
         uint32[3] memory windows = [uint32(60), 180, 300];
         emit log_string("window sensitivity (budget = 100 bps)");
         for (uint256 i = 0; i < windows.length; i++) {
             _setWindow(windows[i]);
-            uint256 full = _driftBpsAfterHold(windows[i]);
+            uint256 full = _driftBpsAfterHold(MAX_PUMP_SQRT_BPS, windows[i]);
+            uint256 fullTicks = _tickDeltaForDriftBps(full);
             uint32 openAt = _holdToOpenBudget(windows[i]);
-            (uint256 committed, uint256 lost) = _roundTripCost();
+            uint32 predicted = _predictedHoldToOpenBudget(windows[i], fullTicks);
             emit log_string(
                 string.concat(
                     "  window ",
                     vm.toString(windows[i]),
                     "s  full-hold drift ",
                     vm.toString(full),
-                    " bps  budget opens at ",
+                    " bps (",
+                    vm.toString(fullTicks),
+                    " ticks)  budget opens at ",
                     vm.toString(uint256(openAt)),
-                    "s  round trip ",
-                    vm.toString(lost),
-                    " of ",
-                    vm.toString(committed),
-                    " raw USDC"
+                    "s  closed form ",
+                    vm.toString(uint256(predicted)),
+                    "s"
                 )
             );
-            assertGt(openAt, 0, "budget never opens inside the window");
-            assertLt(openAt, windows[i], "budget only opens at a full-window hold");
-            assertGt(lost, 0, "vacuous: the round trip was free");
+            assertApproxEqAbs(full, 2_346, 5, "the pool's sqrt-price limit no longer bounds drift at ~2346 bps");
+            assertEq(openAt, predicted, "budget did not open when the closed form says it should");
         }
     }
 
-    /// @notice Attacker cost against attacker gain. Gain per filled order is the deposit cap times the
-    ///         mispricing the drift opens, capped at the backend's slippage budget because the checker
-    ///         refuses anything worse: gain = maxStrategyDeposit * min(drift, budget) / 10_000.
-    function test_fork_manipulationBreakEvenGrid() public {
+    /// @notice What the window actually buys: an attacker who can only hold the tick for `hold` seconds
+    ///         needs a manipulation of (1 + budget)^(W/hold) - 1, which the pool's sqrt-price limit
+    ///         eventually cannot reach.
+    function test_fork_windowRaisesTheCostOfAShortAttack() public {
+        uint32[2] memory holds = [uint32(30), 12];
         uint32[3] memory windows = [uint32(60), 180, 300];
-        uint32[3] memory holds = [uint32(30), 90, 180];
-        (, uint256 cost) = _roundTripCost();
+        uint256 thirtySecondCostAtSixty;
+        uint256 thirtySecondCostAtOneEighty;
 
-        emit log_string(
-            string.concat(
-                "break-even grid: cost ",
-                vm.toString(cost),
-                " raw USDC per round trip, deposit cap ",
-                vm.toString(MAX_STRATEGY_DEPOSIT),
-                " raw USDC, budget ",
-                vm.toString(uint256(MAX_BACKEND_SLIPPAGE_BPS)),
-                " bps"
-            )
-        );
-        for (uint256 i = 0; i < windows.length; i++) {
-            _setWindow(windows[i]);
-            for (uint256 j = 0; j < holds.length; j++) {
-                uint256 drift = _driftBpsAfterHold(holds[j]);
-                uint256 usable = drift > MAX_BACKEND_SLIPPAGE_BPS ? MAX_BACKEND_SLIPPAGE_BPS : drift;
-                uint256 gain = (MAX_STRATEGY_DEPOSIT * usable) / 10_000;
-                uint256 orders = gain == 0 ? 0 : (cost + gain - 1) / gain;
+        emit log_string("cheapest attack that opens a 100 bps budget within a bounded hold");
+        for (uint256 i = 0; i < holds.length; i++) {
+            for (uint256 j = 0; j < windows.length; j++) {
+                _setWindow(windows[j]);
+                uint256 required = _requiredDriftBps(windows[j] / holds[i]);
+                uint256 factor = _cheapestPumpToOpenBudget(holds[i]);
+                if (factor == 0) {
+                    emit log_string(
+                        string.concat(
+                            "  window ",
+                            vm.toString(windows[j]),
+                            "s hold ",
+                            vm.toString(holds[i]),
+                            "s  needs ",
+                            vm.toString(required),
+                            " bps  UNREACHABLE at this pool's sqrt-price limit"
+                        )
+                    );
+                    assertGt(required, 2_400, "an unreachable cell needed less drift than the pool can supply");
+                    continue;
+                }
+                uint256 achieved = _driftBpsAfterHold(factor, windows[j]);
+                (, uint256 cost) = _roundTripCost(factor);
                 emit log_string(
                     string.concat(
                         "  window ",
-                        vm.toString(windows[i]),
+                        vm.toString(windows[j]),
                         "s hold ",
-                        vm.toString(holds[j]),
-                        "s  drift ",
-                        vm.toString(drift),
-                        " bps  usable ",
-                        vm.toString(usable),
-                        " bps  gain/order ",
-                        vm.toString(gain),
-                        " raw USDC  orders to break even ",
-                        vm.toString(orders)
+                        vm.toString(holds[i]),
+                        "s  needs ",
+                        vm.toString(required),
+                        " bps  cheapest pump reaches ",
+                        vm.toString(achieved),
+                        " bps  costing ",
+                        vm.toString(cost),
+                        " raw USDC"
                     )
                 );
-                assertGt(gain, 0, "vacuous: no gain at all");
+                assertApproxEqRel(achieved, required, 0.02e18, "measured manipulation is off the exponent law");
+                if (holds[i] == 30 && windows[j] == 60) thirtySecondCostAtSixty = cost;
+                if (holds[i] == 30 && windows[j] == 180) thirtySecondCostAtOneEighty = cost;
             }
         }
+
+        assertGt(thirtySecondCostAtSixty, 0, "control: no 60s/30s measurement");
+        assertGt(
+            thirtySecondCostAtOneEighty, (thirtySecondCostAtSixty * 150) / 100, "tripling the window barely cost more"
+        );
     }
 
-    /// @dev A small USDC -> cbBTC swap on the shallow spacing-10 pool: enough to cross a tick, which is
-    ///      what makes the pool write an observation.
+    /// @notice The deflation direction is not bounded by the pool's USDC float: past the liquidity range
+    ///         the price moves almost for free.
+    function test_fork_dumpDirectionIsEffectivelyUnbounded() public {
+        uint256 snap = vm.snapshotState();
+        deal(USDC, address(this), 0);
+        MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, PUMP_NVDAC_RESERVE);
+        (, int24 tickBefore,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        uint256 poolUsdcBefore = IERC20(USDC).balanceOf(NVDAC_USDC_POOL);
+
+        _dumpNvdacTo(11_000);
+        uint256 nearSold = DUMP_NVDAC_IN - MockERC20Decimals(NVDAC).balanceOf(address(this));
+        (, int24 tickNear,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        uint256 drained = IERC20(USDC).balanceOf(address(this));
+        vm.revertToState(snap);
+
+        snap = vm.snapshotState();
+        deal(USDC, address(this), 0);
+        MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, PUMP_NVDAC_RESERVE);
+        _dumpNvdacTo(20_000);
+        uint256 farSold = DUMP_NVDAC_IN - MockERC20Decimals(NVDAC).balanceOf(address(this));
+        (, int24 tickFar,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
+        vm.revertToState(snap);
+
+        emit log_string(
+            string.concat(
+                "dump: sqrtP x1.1 moves ",
+                vm.toString(uint256(int256(tickNear - tickBefore))),
+                " ticks for ",
+                vm.toString(nearSold),
+                " raw NVDAc and drains ",
+                vm.toString((drained * 10_000) / poolUsdcBefore),
+                " bps of the pool's USDC; sqrtP x2.0 moves ",
+                vm.toString(uint256(int256(tickFar - tickBefore))),
+                " ticks for ",
+                vm.toString(farSold),
+                " raw NVDAc"
+            )
+        );
+        assertGt(drained * 10_000 / poolUsdcBefore, 9_000, "vacuous: the near dump left most of the USDC");
+        assertGt(tickFar - tickBefore, 13_000, "the x2.0 dump did not move the price far");
+        assertLt(farSold, (nearSold * 102) / 100, "the far dump cost materially more than the near one");
+    }
+
+    /// @notice The pump is not uniformly a conservative proxy for the dump: it understates the cost of an
+    ///         operative manipulation and overstates the cost of a maximal one.
+    function test_fork_pumpAndDumpCostsCross() public {
+        (, uint256 pumpOperative) = _roundTripCost(9_950);
+        (, uint256 dumpOperative) = _dumpRoundTripCost(10_050);
+        (, uint256 pumpMaximal) = _roundTripCost(MAX_PUMP_SQRT_BPS);
+        (, uint256 dumpMaximal) = _dumpRoundTripCost(11_000);
+
+        emit log_string(
+            string.concat(
+                "operative (sqrtP 0.5%): pump ",
+                vm.toString(pumpOperative),
+                " vs dump ",
+                vm.toString(dumpOperative),
+                " raw USDC; maximal (sqrtP 10%): pump ",
+                vm.toString(pumpMaximal),
+                " vs dump ",
+                vm.toString(dumpMaximal),
+                " raw USDC"
+            )
+        );
+        assertLt(pumpOperative, dumpOperative, "the pump no longer understates an operative dump");
+        assertGt(pumpMaximal, dumpMaximal, "the pump no longer overstates a maximal dump");
+    }
+
+    /// @dev A USDC -> cbBTC swap on the near-dead spacing-10 pool, run to a 10% sqrt-price limit. The
+    ///      amount is irrelevant: the pool is thin enough that the limit, not the size, decides the move.
     function _swapUsdcForCbbtc() internal {
         (uint160 sqrtP,,,,,) = ICLPool(CBBTC_USDC_POOL).slot0();
         deal(USDC, address(this), CBBTC_POOL_SWAP_USDC_IN);
@@ -602,9 +941,10 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         );
     }
 
-    /// @notice A live pool that keeps a single observation cannot be quoted at all until someone pays to
-    ///         grow its buffer and a window of history accumulates.
-    function test_fork_freshPoolHasNoUsableObservations() public {
+    /// @notice A pool that keeps a single observation cannot be quoted at all, and growing its buffer is
+    ///         necessary but not sufficient: until an observation lands inside the window the reference is
+    ///         spot, with no manipulation resistance at all.
+    function test_fork_freshPoolQuotesSpotUntilHistoryLandsInsideTheWindow() public {
         (,,, uint16 cardinality,,) = ICLPool(CBBTC_USDC_POOL).slot0();
         assertEq(cardinality, 1, "vacuous: the pool already keeps history");
 
@@ -614,6 +954,10 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         poolRegistry.setPriceChecker(poolChecker);
         poolRegistry.listToken(CBBTC, _poolTwapConfig(CBBTC_USDC_POOL));
         vm.stopPrank();
+
+        uint256 feedPrice = existingChecker.getExpectedOut(1e8, CBBTC, USDC);
+        uint256 spotBefore = _spotUsdcPerStock(CBBTC_USDC_POOL);
+        assertLt(_bps(spotBefore, feedPrice), 500, "control: the pool starts off the feed");
 
         _swapUsdcForCbbtc();
         vm.expectRevert(
@@ -628,6 +972,39 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
 
         (,,, uint16 grown,,) = ICLPool(CBBTC_USDC_POOL).slot0();
         assertEq(grown, 200, "buffer did not grow");
-        assertGt(poolChecker.getExpectedOut(1e8, CBBTC, USDC), 0, "pool still unquotable");
+
+        uint256 quoted = poolChecker.getExpectedOut(1e8, CBBTC, USDC);
+        uint256 manipulatedSpot = _spotUsdcPerStock(CBBTC_USDC_POOL);
+        emit log_string(
+            string.concat(
+                "fresh pool: feed ",
+                vm.toString(feedPrice),
+                " raw USDC, quote ",
+                vm.toString(quoted),
+                " raw USDC (",
+                vm.toString(_bps(quoted, feedPrice)),
+                " bps off the feed, ",
+                vm.toString(_bps(quoted, manipulatedSpot)),
+                " bps off the manipulated spot)"
+            )
+        );
+        assertEq(_bps(quoted, manipulatedSpot), 0, "the quote is not the manipulated spot");
+        assertGt(_bps(quoted, feedPrice), 5_000, "the quote is not far off the feed");
+
+        vm.warp(vm.getBlockTimestamp() + WINDOW - 20);
+        _swapUsdcForCbbtc();
+        vm.warp(vm.getBlockTimestamp() + 10);
+
+        uint256 mixed = poolChecker.getExpectedOut(1e8, CBBTC, USDC);
+        emit log_string(
+            string.concat(
+                "  with one observation inside the window: quote ",
+                vm.toString(mixed),
+                " raw USDC, ",
+                vm.toString(_bps(mixed, _spotUsdcPerStock(CBBTC_USDC_POOL))),
+                " bps off spot"
+            )
+        );
+        assertGt(_bps(mixed, _spotUsdcPerStock(CBBTC_USDC_POOL)), 100, "the quote is still exactly spot");
     }
 }
